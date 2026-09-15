@@ -150,10 +150,9 @@ W = 'DELL'
 # Fallback value (if you omit the key): mode.main.binding = {}
 [mode.main.binding]
 
-    # Workspace switcher popup: Hyper+S lives HERE now (caps_lock = Hyper via
-    # Karabiner; AeroSpace has no `hyper` keyword, so it's spelled out as
-    # alt-cmd-ctrl-shift). Hyper+J (jira) and Hyper+N (notes) are still bound
-    # via Karabiner (karabiner.json).
+    # Workspace switcher popup: Hyper+S (caps_lock = Hyper via Karabiner;
+    # AeroSpace has no `hyper` keyword, so it's spelled out as
+    # alt-cmd-ctrl-shift). This is the ONLY switcher hotkey.
     alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
 
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty

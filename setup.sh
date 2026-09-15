@@ -58,7 +58,9 @@ mkdir -p "$HOME/.cache/workspace-switcher/jira_json"
 # ------------------------------------------------------- 6. manual steps
 say "6/6 done"
 printf 'Manual steps (one-time, cannot be scripted):\n'
-printf '  1. karabiner: import %s/config/karabiner/karabiner.json\n' "$ROOT"
+printf '  1. karabiner-elements: allow the system extension (System Settings >\n'
+printf '     Privacy & Security), then confirm caps_lock = Hyper (config written\n'
+printf '     to ~/.config/karabiner/karabiner.json by the installer)\n'
 printf '  2. jira creds: create %s via: %s --init\n' \
     "$HOME/.config/jira/config" "$ROOT/jira/jira-api.sh"
 printf '  3. system settings: give aerospace + karabiner-elements Accessibility\n'
