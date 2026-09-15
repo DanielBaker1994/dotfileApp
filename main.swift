@@ -8,6 +8,17 @@ import Foundation
 applyAppConfigFromDisk()
 
 let cliArgs = CommandLine.arguments
+
+// probe-only ping (workspace_switcher.sh sets this): ask the RUNNING daemon
+// to open ANY command window (notes/jira/voice/health-checks/...). Exit 0
+// when the message was delivered, 1 when no daemon is listening — NEVER fall
+// through to app.run(), or the "ping" becomes a foreground daemon and the
+// launcher script blocks forever.
+if ProcessInfo.processInfo.environment["WS_PING_ONLY"] != nil {
+    let name = cliArgs.count > 1 ? cliArgs[1] : settings.switcherWindowName
+    exit(sendLaunchMessage(name) ? 0 : 1)
+}
+
 var openCommand: String? = nil
 if cliArgs.count > 1 {
     switch cliArgs[1] {
@@ -18,13 +29,6 @@ if cliArgs.count > 1 {
         // launch a daemon that starts straight into that window
         if sendLaunchMessage(cliArgs[1]) {
             exit(0)
-        }
-        // probe-only ping (workspace_switcher.sh sets this): never fall
-        // through to app.run() here or the "ping" becomes a FOREGROUND
-        // daemon and the launcher script blocks forever. The launcher
-        // cold-starts via LaunchServices instead.
-        if ProcessInfo.processInfo.environment["WS_PING_ONLY"] != nil {
-            exit(1)
         }
         openCommand = cliArgs[1]
     default:

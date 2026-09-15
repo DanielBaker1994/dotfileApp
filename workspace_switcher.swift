@@ -455,7 +455,11 @@ func loadCommands() -> [CommandSpec] {
             // already applied by applyAppConfigFromDisk() — nothing to do
             break
         default:
-            cmds.append(makeCommand(s.name, s.vars))
+            // enabled = true is required: no key, no command. Nothing shows
+            // unless the section says enabled = true explicitly.
+            if s.vars["enabled"] == "true" {
+                cmds.append(makeCommand(s.name, s.vars))
+            }
         }
         section = nil
     }
@@ -481,6 +485,10 @@ func loadCommands() -> [CommandSpec] {
         }
     }
     flushSection()
+    // health-checks runs jira-doctor.sh — no jira, no health checks.
+    if !cmds.contains(where: { $0.name == "jira" }) {
+        cmds.removeAll { $0.name == "health-checks" }
+    }
     return cmds
 }
 
@@ -2717,11 +2725,9 @@ let authDebugPath = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInP
 final class StatusBarTarget: NSObject {
     var onNotes: (() -> Void)?
     var onJira: (() -> Void)?
-    var onVoice: (() -> Void)?
     var onHealth: (() -> Void)?
     @objc func notes(_ sender: Any?) { onNotes?() }
     @objc func jira(_ sender: Any?) { onJira?() }
-    @objc func voice(_ sender: Any?) { onVoice?() }
     @objc func health(_ sender: Any?) { onHealth?() }
 }
 
@@ -2778,8 +2784,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // window, and new windows just add a menu item.
     private func installStatusItems(_ c: SwitcherController) {
         statusTarget.onNotes = { [weak c] in c?.toggleNotes() }
-        statusTarget.onJira = { [weak c] in c?.toggleCommand("jira") }
-        statusTarget.onVoice = { [weak c] in c?.toggleCommand("voice") }
+        // single source of truth: the [jira] section in commands.conf. No
+        // section = no command = no menu entry.
+        if c.commands.contains(where: { $0.name == "jira" }) {
+            statusTarget.onJira = { [weak c] in c?.toggleCommand("jira") }
+        }
         statusTarget.onHealth = { [weak c] in c?.toggleCommand("health-checks") }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = utilityMenuGlyph
@@ -2791,9 +2800,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mi.image = img
             menu.addItem(mi)
         }
+        // voice is merged into the notes window (commands.conf `voice = true`),
+        // so the dropdown only lists Notes — voice lives in the notes header.
         add("Notes", notesMenuGlyph, #selector(StatusBarTarget.notes(_:)))
-        add("Jira", jiraMenuGlyph, #selector(StatusBarTarget.jira(_:)))
-        add("Voice", micMenuGlyph, #selector(StatusBarTarget.voice(_:)))
+        if c.commands.contains(where: { $0.name == "jira" }) {
+            add("Jira", jiraMenuGlyph, #selector(StatusBarTarget.jira(_:)))
+        }
         add("Health checks", heartMenuGlyph, #selector(StatusBarTarget.health(_:)))
         item.menu = menu
         statusItems.append(item)

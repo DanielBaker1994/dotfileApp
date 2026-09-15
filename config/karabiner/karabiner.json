@@ -1,116 +1,92 @@
 {
-  "profiles": [
-    {
-      "complex_modifications": {
-        "parameters": {
-          "basic.to_if_held_down_threshold_milliseconds": 1000
-        },
-        "rules": [
-          {
-            "description": "Change caps_lock to Hyper (Cmd+Ctrl+Opt+Shift)",
-            "manipulators": [
-              {
-                "from": {
-                  "key_code": "caps_lock",
-                  "modifiers": {
-                    "optional": [
-                      "any"
-                    ]
-                  }
+    "profiles": [
+        {
+            "complex_modifications": {
+                "parameters": {
+                    "basic.to_if_held_down_threshold_milliseconds": 1000
                 },
-                "to": [
-                  {
-                    "key_code": "left_shift",
-                    "modifiers": [
-                      "left_control",
-                      "left_option",
-                      "left_command"
-                    ]
-                  }
-                ],
-                "type": "basic"
-              }
-            ]
-          },
-          {
-            "description": "Hyper+S -> workspace switcher",
-            "manipulators": [
-              {
-                "from": {
-                  "key_code": "s",
-                  "modifiers": {
-                    "mandatory": [
-                      "left_control",
-                      "left_option",
-                      "left_command",
-                      "left_shift"
-                    ]
-                  }
-                },
-                "to": [
-                  {
-                    "shell_command": "~/.config/workspace-switcher/bin/workspace_switcher.sh"
-                  }
-                ],
-                "type": "basic"
-              }
-            ]
-          },
-          {
-            "description": "Hyper+J -> jeera",
-            "manipulators": [
-              {
-                "from": {
-                  "key_code": "j",
-                  "modifiers": {
-                    "mandatory": [
-                      "left_control",
-                      "left_option",
-                      "left_command",
-                      "left_shift"
-                    ]
-                  }
-                },
-                "to": [
-                  {
-                    "shell_command": "~/.config/workspace-switcher/bin/workspace_switcher.sh jira"
-                  }
-                ],
-                "type": "basic"
-              }
-            ]
-          },
-          {
-            "description": "Hyper+N -> notes",
-            "manipulators": [
-              {
-                "from": {
-                  "key_code": "n",
-                  "modifiers": {
-                    "mandatory": [
-                      "left_control",
-                      "left_option",
-                      "left_command",
-                      "left_shift"
-                    ]
-                  }
-                },
-                "to": [
-                  {
-                    "shell_command": "~/.config/workspace-switcher/bin/workspace_switcher.sh notes"
-                  }
-                ],
-                "type": "basic"
-              }
-            ]
-          }
-        ]
-      },
-      "name": "Default profile",
-      "selected": true,
-      "virtual_hid_keyboard": {
-        "keyboard_type_v2": "ansi"
-      }
-    }
-  ]
+                "rules": [
+                    {
+                        "description": "Change caps_lock to Hyper (Cmd+Ctrl+Opt+Shift)",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "caps_lock",
+                                    "modifiers": {
+                                        "optional": [
+                                            "any"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "left_shift",
+                                        "modifiers": [
+                                            "left_control",
+                                            "left_option",
+                                            "left_command"
+                                        ]
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "Hyper+J -> jeera",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "j",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "left_control",
+                                            "left_option",
+                                            "left_command",
+                                            "left_shift"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "~/.config/workspace-switcher/bin/workspace_switcher.sh jira"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "Hyper+N -> notes",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "n",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "left_control",
+                                            "left_option",
+                                            "left_command",
+                                            "left_shift"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "~/.config/workspace-switcher/bin/workspace_switcher.sh notes"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "name": "Default profile",
+            "selected": true,
+            "virtual_hid_keyboard": {
+                "keyboard_type_v2": "ansi"
+            }
+        }
+    ]
 }

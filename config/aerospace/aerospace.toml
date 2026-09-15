@@ -150,9 +150,11 @@ W = 'DELL'
 # Fallback value (if you omit the key): mode.main.binding = {}
 [mode.main.binding]
 
-    # Workspace switcher popup is bound to Hyper+S via Karabiner
-    # (karabiner/karabiner.json -> aerospace/workspace_switcher.sh).
-    # Notes (Hyper+J) and jira (Hyper+N) are also bound via Karabiner.
+    # Workspace switcher popup: Hyper+S lives HERE now (caps_lock = Hyper via
+    # Karabiner; AeroSpace has no `hyper` keyword, so it's spelled out as
+    # alt-cmd-ctrl-shift). Hyper+J (jira) and Hyper+N (notes) are still bound
+    # via Karabiner (karabiner.json).
+    alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
 
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
     # window that closes itself after you pick one. Works from any app.
