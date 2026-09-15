@@ -16,15 +16,15 @@ SHADOW=on
 sketchybar --bar     height=34                                         \
                      color=$BAR_COLOR                                  \
                      shadow=$SHADOW                                    \
-                     position=bottom                                    \
+                     position=top                                       \
                      sticky=on                                         \
                      topmost=window                                        \
                      padding_right=12                                  \
                      padding_left=0                                    \
                       corner_radius=9                                   \
-                      y_offset=0                                        \
+                      y_offset=4                                        \
                       margin=10                                         \
-                     blur_radius=4                                     \
+                     blur_radius=0                                     \
                                                                        \
            --default updates=when_shown                                \
                      icon.font="$FONT:Bold:14.0"                       \
@@ -46,6 +46,28 @@ sketchybar --bar     height=34                                         \
 # Left
 source "$PLUGIN_DIR/aerospacer.sh"
 
+# Right
+source "$PLUGIN_DIR/status.sh"
+
+# Guard: a monitor plug/unplug or wake can make AeroSpace invent workspace "10";
+# this reverts it immediately (see the script header).
+sketchybar --add item stray_guard left \
+           --set stray_guard drawing=off updates=on \
+                 script="$HOME/.config/workspace-switcher/config/aerospace/no_stray_workspaces.sh" \
+           --subscribe stray_guard display_change system_woke
+
 sketchybar --update
+
+# Hide the bar while the auto-hidden native menu bar is revealed (hover at the
+# top edge). Rebuilt only when the source changes; restarted on every reload.
+MB_SRC="$CONFIG_DIR/helpers/menubar_watch.swift"
+MB_BIN="$HOME/.cache/sketchybar/menubar_watch"
+if [ ! -x "$MB_BIN" ] || [ "$MB_SRC" -nt "$MB_BIN" ]; then
+    mkdir -p "${MB_BIN%/*}"
+    swiftc -O "$MB_SRC" -o "$MB_BIN"
+fi
+pkill -x menubar_watch
+"$MB_BIN" >/dev/null 2>&1 &
+disown
 
 echo "sketchybar configuation loaded.."

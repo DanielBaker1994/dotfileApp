@@ -2,19 +2,65 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleExecutable</key>
+	<string>workspace-switcher</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.danielbaker.workspace-switcher</string>
 	<key>CFBundleName</key>
 	<string>workspace-switcher</string>
-	<key>CFBundleExecutable</key>
-	<string>workspace-switcher</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Record your voice so voice notes can be transcribed to text.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Transcribe voice notes to text using Apple speech recognition.</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record your voice so voice notes can be transcribed to text.</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Copy Path</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>copyFilePaths</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.file-url</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Open in Notes</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>openInNotes</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.file-url</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribe voice notes to text using Apple speech recognition.</string>
 </dict>
 </plist>

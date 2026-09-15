@@ -24,3 +24,13 @@ SPOTIFY_GREEN=$GREEN
 
 ITEM_BG_COLOR=0xff003547
 ACCENT_COLOR=0xff2cf9ed
+
+# Bordered group look, shared by the workspace group (aerospacer.sh) and the
+# right-side status group (status.sh).
+GROUP_BORDER_COLOR=0xccb8cfe0
+GROUP_BORDER_WIDTH=1
+GROUP_CORNER_RADIUS=8
+GROUP_HEIGHT=30
+GROUP_BG_COLOR=0x883f4a5a
+# Symmetric inset between the group border and the pills, on all four sides.
+GROUP_EDGE=2

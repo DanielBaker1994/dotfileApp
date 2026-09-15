@@ -8,25 +8,56 @@ import Foundation
 applyAppConfigFromDisk()
 
 let cliArgs = CommandLine.arguments
+
+// probe-only ping (workspace_switcher.sh sets this): ask the RUNNING daemon
+// to open ANY command window (notes/jira/voice/health-checks/...). Exit 0
+// when the message was delivered, 1 when no daemon is listening — NEVER fall
+// through to app.run(), or the "ping" becomes a foreground daemon and the
+// launcher script blocks forever.
+if ProcessInfo.processInfo.environment["WS_PING_ONLY"] != nil {
+    let name = cliArgs.count > 1 ? cliArgs[1] : settings.switcherWindowName
+    exit(sendLaunchMessage(name) ? 0 : 1)
+}
+
 var openCommand: String? = nil
 if cliArgs.count > 1 {
     switch cliArgs[1] {
     case "toggle":
         exit(sendToggle(name: settings.switcherWindowName) ? 0 : 1)
-    case "notes", "jira", "voice":
-        // a running daemon opens the window on a socket ping; otherwise
-        // launch a daemon that starts straight into that window
+    case "jira-poll":
+        // THE jira switch via the running daemon: on | off | toggle | setup,
+        // or open the Jira Config window: dashboard
+        let action = cliArgs.count > 2 ? cliArgs[2] : "toggle"
+        guard ["on", "off", "toggle", "setup", "dashboard"].contains(action) else {
+            FileHandle.standardError.write(Data("usage: workspace-switcher jira-poll on|off|toggle|setup|dashboard\n".utf8))
+            exit(2)
+        }
+        let msg = action == "setup" ? "jira-setup" : action == "dashboard" ? "jira-dashboard" : "jira-poll-" + action
+        if sendLaunchMessage(msg) { exit(0) }
+        FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+        exit(1)
+    case "notes", "jira", "voice", "files", "terminal", "confluence", "ai":
+        // THE hotkey path (aerospace runs this binary directly): a running
+        // daemon gets a socket ping and does the rest (~20 ms). No daemon ->
+        // hand off to the launcher script (build-if-stale + LaunchServices
+        // launch, so mic/speech TCC attribute to the bundle)
         if sendLaunchMessage(cliArgs[1]) {
             exit(0)
         }
-        // probe-only ping (workspace_switcher.sh sets this): never fall
-        // through to app.run() here or the "ping" becomes a FOREGROUND
-        // daemon and the launcher script blocks forever. The launcher
-        // cold-starts via LaunchServices instead.
-        if ProcessInfo.processInfo.environment["WS_PING_ONLY"] != nil {
-            exit(1)
+        // (a LaunchServices launch — the script's own `open -n -g`, INSTALL.sh
+        // — has launchd as parent: that IS the daemon starting, never re-exec)
+        if getppid() != 1 {
+            let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+            // <root>/<app>.app/Contents/MacOS/<bin> -> <root>/bin/workspace_switcher.sh
+            let root = exe.deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+            let script = root.appendingPathComponent("bin/workspace_switcher.sh").path
+            if FileManager.default.isExecutableFile(atPath: script) {
+                let argv: [UnsafeMutablePointer<CChar>?] = [strdup(script), strdup(cliArgs[1]), nil]
+                execv(script, argv)
+            }
         }
-        openCommand = cliArgs[1]
+        openCommand = cliArgs[1] == "terminal" ? "notes" : cliArgs[1]
     default:
         break
     }

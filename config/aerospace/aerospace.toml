@@ -10,7 +10,7 @@ after-startup-command = [
 # variables (sketchybar does not pass them positionally), and
 # sketchybar/plugins/aerospacer.sh reads $FOCUSED_WORKSPACE to move the highlight.
 exec-on-workspace-change = [
-  '/opt/homebrew/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE'
+  '/opt/homebrew/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE; ~/.config/workspace-switcher/config/aerospace/no_stray_workspaces.sh &'
 ]
 
 
@@ -79,7 +79,7 @@ automatically-unhide-macos-hidden-apps = true
 # even when they are invisible.
 # This config option is only available since 'config-version = 2'
 # Fallback value (if you omit the key): persistent-workspaces = []
-persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9" ]
+persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 # A callback that runs every time binding mode changes
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -100,12 +100,28 @@ key-mapping.preset = 'qwerty'
 # regular windows still tile by default.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
-  { if = 'test %{app-bundle-id} = com.microsoft.Word', run = ['layout floating'], check-further-callbacks = true },
+  #{ if = 'test %{app-bundle-id} = com.microsoft.Word', run = ['layout floating'], check-further-callbacks = true },
   # ALL workspace-switcher windows (popup, notes, jira) are overlays: one
   # app-name rule floats them; per-title rules went stale every time a
-  # window name changed in commands.conf.
-  { if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
-  { if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
+  # window name changed in commands.toml.
+  #{ if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
+  #{ if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
+#{ if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
+#{ if = 'test %{app-bundle-id} = com.apple.finder', run = ['move-node-to-workspace 1'] },
+#{ if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
+#{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
+{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
+{ if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
+{ if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
+{ if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 3'] },
+{ if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },
+{ if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 8'] },
+{ if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
+{ if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
+{ if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace M'] },
+{ if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace W'] },
+{ if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace W'] },
+{ if = 'test %{app-bundle-id} = com.spotify.client', run = ['move-node-to-workspace W'] }
 ]
 
 
@@ -124,25 +140,30 @@ inner.horizontal = [{ monitor.main = 10 }, 10]
 inner.vertical =   [{ monitor.main = 5 }, 10]
 outer.left =       [{ monitor.main = 10 }, 10]
 outer.right =      [{ monitor.main = 10 }, 10]
-outer.bottom =     [{ monitor.main = 40 }, 40]
-outer.top =        [{ monitor.main = 10 }, 10]
+outer.bottom =     [{ monitor.main = 10 }, 10]
+outer.top =        [{ monitor."built-in" = 15 }, 48]  # notch screen: visibleFrame already starts 33.5pt down
 
-# Pin workspaces to monitors so they don't jump around when the DisplayLink
-# monitor reconnects (its ID/order can change on KVM/sleep/wake).
-# Patterns are case-insensitive substrings of the monitor name.
+# Pin workspaces to monitors WITHOUT relying on the external's name.
+# Why: when a monitor connects, AeroSpace shows an invisible workspace already
+# assigned to it; if none exists it invents the first unused number that is not
+# in persistent-workspaces -> "10" (no keybinding). DisplayLink reports changing/
+# phantom names, so 'DELL' often failed to match and the external got "10".
+# '^(?!built-in)' = any monitor whose name doesn't start with "Built-in", i.e. the
+# external whatever it's called. The laptop screen ("Built-in Retina Display")
+# keeps 9. Laptop-only / clamshell: everything falls back to the one screen.
 [workspace-to-monitor-force-assignment]
-1 = 'DELL'
-2 = 'DELL'
-3 = 'DELL'
-4 = 'DELL'
-5 = 'DELL'
-6 = 'DELL'
-7 = 'DELL'
-8 = 'DELL'
-9 = 'DELL'
-M = 'DELL'
-Y = 'DELL'
-W = 'DELL'
+1 = ['^(?!built-in)', 'built-in', 'main']
+2 = ['^(?!built-in)', 'built-in', 'main']
+3 = ['^(?!built-in)', 'built-in', 'main']
+4 = ['^(?!built-in)', 'built-in', 'main']
+5 = ['^(?!built-in)', 'built-in', 'main']
+6 = ['^(?!built-in)', 'built-in', 'main']
+7 = ['^(?!built-in)', 'built-in', 'main']
+8 = ['^(?!built-in)', 'built-in', 'main']
+9 = ['built-in', 'main']
+M = ['^(?!built-in)', 'built-in', 'main']
+Y = ['^(?!built-in)', 'built-in', 'main']
+W = ['^(?!built-in)', 'built-in', 'main']
 
 # 'main' binding mode declaration
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -150,10 +171,23 @@ W = 'DELL'
 # Fallback value (if you omit the key): mode.main.binding = {}
 [mode.main.binding]
 
-    # Workspace switcher popup is bound to Hyper+S via Karabiner
-    # (karabiner/karabiner.json -> aerospace/workspace_switcher.sh).
-    # Notes (Hyper+J) and jira (Hyper+N) are also bound via Karabiner.
-
+    # Workspace switcher popup: Hyper+S (caps_lock = Hyper via Karabiner;
+    # AeroSpace has no `hyper` keyword, so it's spelled out as
+    # alt-cmd-ctrl-shift). Hyper+N/F/J/T run the app BINARY directly (a ~20ms
+    # socket ping; no bash) — the running daemon records the focused window
+    # and moves our window onto the current workspace itself. Notes window:
+    # Hyper+N — moves
+    # the notes window onto the CURRENT workspace if it is already open, then
+    # focuses it (never spawns a duplicate). Jira window: Hyper+J.
+    alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
+    alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher notes'
+    alt-cmd-ctrl-shift-f = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher files'
+    # Jira window: Hyper+J — opens/focuses the jira list (moved onto the current
+    # workspace like notes); a no-op when [jira] enabled = false.
+    alt-cmd-ctrl-shift-j = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher jira'
+    # Notes terminal: Hyper+T — notes + its terminal drawer, focused; in the
+    # terminal already -> close the drawer, focus the notes editor.
+    alt-cmd-ctrl-shift-t = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher terminal'
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
     # window that closes itself after you pick one. Works from any app.
     # NOTE: not alt-space -- Option+Space is macOS's non-breaking-space char
