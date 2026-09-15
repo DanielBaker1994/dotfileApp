@@ -72,6 +72,12 @@ if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRA
 fi
 
 
+# Build-only mode (installer): rebuild + re-grant TCC, then stop. The window
+# is launched by the user afterwards (installer Done screen).
+if [ "${WS_BUILD_ONLY:-}" = "1" ]; then
+    exit 0
+fi
+
 if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ]; then
     DEBUG_LOG="${TMP}/ws-launch.log"
     LOG(){ echo "$(date '+%H:%M:%S.%3N') $*" >>"$DEBUG_LOG"; }

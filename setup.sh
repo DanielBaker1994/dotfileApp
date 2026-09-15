@@ -53,7 +53,9 @@ launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null || true
 say "5/6 build + TCC grants"
 mkdir -p "$HOME/.cache/workspace-switcher/jira_json"
 "$ROOT/bin/voice-permissions.sh" >/dev/null 2>&1 || true
-"$ROOT/build.sh" || exit 1
+# --build-only: compile + grant, but never auto-launch the window — the
+# installer ends on its Done screen and the user launches explicitly.
+"$ROOT/build.sh" --build-only || exit 1
 
 # ------------------------------------------------------- 6. manual steps
 say "6/6 done"
