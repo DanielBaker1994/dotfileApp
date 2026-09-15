@@ -1,3 +1,19 @@
+# built artifacts
 workspace-switcher.app/
+.build/
+.agents/
+
+# generated docs
+README.html
+README.pdf
+
+# junk
 .DS_Store
 *.log
+__pycache__/
+create_a_file_here.txt
+testbackups/
+
+# commands.toml safety copies (last-known-good + parked invalid edits)
+commands.toml.bak
+commands.toml.broken-*

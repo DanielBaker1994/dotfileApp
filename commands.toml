@@ -1,0 +1,572 @@
+# Workspace switcher command palette (loaded ONCE at daemon start).
+#
+# Plain lines:   name = "shell command"      (run in persistent bash, output logged)
+# Sections:      [name] + key = value lines  (typed commands with behavior)
+#
+# TOML: text values are "quoted" (\" and \\ escape), true/false and numbers
+# are bare, keys with spaces or ':' are "quoted". Lists are ONE string of
+# comma-separated items ("a, b") — a one-line ["a", "b"] array works too.
+# Keep each entry on one line (no multi-line strings / arrays).
+#
+# Section keys:
+#   type       shell | note | list | output
+#                output = run `script` and show its output in a read-only
+#                floating window (re-invoking re-runs it; Esc dismisses)
+#   name       note/list: window name (title / identity); default = section
+#   title      note/list: drag-header label; default = `name`
+#   script     shell: command to run
+#   paths      note:  comma-separated note files, edited in-window (one tab
+#                     per file; a note deleted on disk is dropped from the tab
+#                     strip and this line instead of being recreated — the
+#                     active note's text parks itself in a default.md scratch
+#                     note next to it)
+#   sources    list:  comma-separated data files (one tab per file)
+#   primary    list:  field shown as the row title
+#   content    list:  field drawn next to the title (truncated)
+#   detail     list:  field drawn dim on line 2 (left); comma-separated
+#                     fields are joined with " · " (e.g. assignee,reporter)
+#   trailing   list:  field drawn dim on line 2 (right)
+#   body       list:  field drawn wrapped under line 2 (long/multi-line text,
+#                     capped at 2 visible lines with an ellipsis)
+#   filter     list:  comma-separated fields matched by the query (default: all)
+#   filters    list:  comma-separated fields shown as dropdown filter pills
+#                     (unique values, "All" first) — e.g. release,assignee
+#   width      list/note: popup width in points
+#   max-rows   list:  max rows shown (rows scroll beyond the height cap)
+#   content-cap list: max chars of `content` before truncation (0 = uncapped)
+#   page-size  list:  rows shown per page; a "load N more…" row reveals the
+#                     next page on Enter/click (0 = show all)
+#   copy-fields list: comma-separated row fields copied as TSV lines when rows
+#                     are ticked (checkbox per row) and "copy selected"/
+#                     "copy N" is pressed; empty/absent = no copy UI at all
+#   copy-format list: clipboard format for copy-fields (tsv)
+#   checkbox   list:  on/off for the copy checkbox column
+#                     (absent = on when copy-fields is set)
+#   resize     note/list: drag edges/corners to resize (true/false)
+#   drag       note/list: drag the window by its header (true/false)
+#   sticky     note/list: stay visible when another app takes focus (true/false)
+#   height     note/list/output: window height in points
+#   search-width list: search bar width as a fraction of the window (0-1)
+#   max-row-stretch list: cap (pts) on how far a row stretches when the window
+#                     is resized much bigger than its content
+#   font       note/list/output: font family for the window's text
+#   font-size  note: editor point size (default 13). The notes icon menu's
+#                     Font ▸ picker (and Settings ▸ Font in the menu bar)
+#                     writes `font` / `font-size`; Cmd+Opt+= / Cmd+Opt+-
+#                     step the size.
+#   header-color note/list: drag-header tint as hex RRGGBB (e.g. 454f5c);
+#                     overrides [theme] `header` for this window
+#   background-color note/files: window card fill (the notepad background for
+#                     notes) as hex RRGGBB or AARRGGBB; overrides [theme]
+#                     `background`. The alpha (AA) is the card's opacity.
+#   tint-alpha note/files: card opacity 0-1 (0.78 default) when the color
+#                     itself is opaque; the notepad picker writes both.
+#   browser-background note/files: explorer panel color as hex RRGGBB or
+#                     AARRGGBB; overrides [theme] `browser` for this window.
+#                     The alpha is the explorer's transparency.
+#   terminal-background note: embedded shell drawer background (hex RRGGBB or
+#                     AARRGGBB); overrides [theme] `terminal` for this window.
+#                     The terminal text color is derived automatically.
+#   text-color / dim-color / highlight-color note/files: the window's text,
+#                     secondary text and selection colors (hex); override the
+#                     [theme] text / dim / highlight for this window only
+#   terminal-foreground note: shell drawer text color (default = text-color)
+#   accent-color note/files/list: the signature hue — the solid active tab,
+#                     focus rings, pinned/on buttons, the card outline (hex);
+#                     Theme ▸ presets set it
+#   palette    note/files/list: the theme's secondary hues, 5 hex colors:
+#                     accent2, success, warning, danger, info — links / keys /
+#                     match highlights, jira status + priority cells, the ✕
+#                     hover, the shell drawer's ANSI colors and vim's syntax
+#                     roles. Theme ▸ presets write it.
+#   esc-close  note/files/list/output: rapid Esc presses (within 0.6s) that
+#              close the window; default = [app] esc-close (2). 1 = single
+#              Esc, 0 = never. Counts from every pane: editor, vim (must
+#              reach Normal mode), file browser, shell drawer (earlier
+#              presses still reach vim / the shell). `vim-esc-close` = alias.
+#   tabs-opaque any window: the tab / open-file pills strip stays solid when
+#              the window is made transparent (true/false, default true)
+#   label      any command: text the Hyper+S "/" palette shows (default =
+#              the section name)
+#   float      note/files/list/output: stay above other apps' windows
+#              (true/false); default = [app] float. Header icon menu ▸ Float
+#              Above Other Windows writes it.
+#   (The header icon menu's Theme ▸ presets and Transparency ▸ levels write
+#    THESE per-window keys: "Whole Window" sets every surface + the text
+#    colors, "<Surface> Only" just that surface. Theme ▸ Custom Color… keeps
+#    the free color picker; Reset to Defaults drops them all.)
+#
+# commands.toml is validated on every read. A file that is unusable (empty,
+# a broken [section] header, mostly unparseable lines) is NOT loaded — the
+# last good copy, commands.toml.bak (refreshed on every valid load), is used
+# instead and the menu-bar icon shows "⚠ Config Invalid — Using Backup…".
+# Bad single values (non-hex color, non-number width) are only warnings; the
+# default applies. Saving this file from the notes window shows problems in
+# its status strip.
+#
+# A missing/broken config is not fatal — the app just shows no commands.
+
+# [app] — app-level settings. Every key is optional (built-in defaults apply
+# otherwise); lists are comma-separated, paths may use "~". May sit anywhere
+# in the file — it is applied before anything else at startup.
+#   float               true/false (default false): popup windows sit above
+#                       every normal window (AeroSpace tiles included; below
+#                       menus, alerts and the Dock); false = ordinary windows
+#                       that tiles can cover.
+#                       Menu bar ▸ Settings ▸ Float Windows Above Others.
+#   terminal-app        app the file browser's `term` command opens when the
+#                       window has no shell drawer (default Ghostty if
+#                       installed, else Terminal)
+#   shared-window       true/false (default true): notes and jira live in ONE
+#                       window — Hyper+N / Hyper+J show it on that view,
+#                       switch views, or hide it when it already shows that
+#                       view; the header's notes | jira switches too. Jira's
+#                       ticket details, release view and Jira Config open IN
+#                       it (home / back in the header). Esc: jira = back
+#                       (clears a search first), at the list = hide; notes =
+#                       never (vim / the shell own Esc) — hide with the
+#                       hotkey, Cmd+W or ✕. Focus returns to what you were in
+#                       when you summoned it. false = separate windows.
+#   shared-width / shared-height   first size of the shared window (default
+#                       1100 x 640); after that it keeps the size you leave it
+#   esc-close           rapid Esc presses that close a notes / files / jira /
+#                       output window (default 2; 1 = single Esc, 0 = never).
+#                       The workspace switcher palette always uses one Esc.
+#                       (The shared window ignores it — see shared-window.)
+#   copy-toast          pill shown when Cmd+K copies a path in the file
+#                       browser; "{}" = the path (default "Copied {} to
+#                       clipboard"; empty = off)
+#   hide-on-focus-loss  true/false (default true); when false windows only
+#                       dismiss via Esc (useful for reference while working).
+#                       Per window: header icon menu ▸ Hide When Focus Is Lost
+#                       (writes that section's `sticky`)
+#   focus-loss-delay    seconds focus must stay in another app before a
+#                       window hides (default 0.3; 0 = at once). Blips while
+#                       views swap or aerospace re-focuses never hide it
+#   screenshot-apps     bundle ids of screenshot tools whose capture overlay is
+#                       a normal window (Flameshot…). While one is active the
+#                       popups drop behind it so the selection draws on top.
+#                       Default: org.flameshot, pl.maketheweb.cleanshotx,
+#                       cc.ffitch.shottr, com.skitch.skitch
+[app]
+# off: whichever window has focus is on top — alt-hjkl (AeroSpace) raises
+# the popup it focuses, and focusing another app puts that app in front
+float = false
+# shell used to run palette commands (persistent runner + output windows)
+shell = "/opt/homebrew/bin/bash"
+# args for the embedded terminal's shell (--login -i sources ~/.bash_profile
+# + ~/.bashrc so aliases/zoxide etc. work inside the drawer)
+shell-args = "--login -i"
+# font for the embedded terminal (Nerd Font for powerline glyphs) + its size
+terminal-font = "Courier New"
+terminal-font-size = 13
+# Font ▸ Install Font… catalog: "Label|brew cask|type" entries, type is
+# nerd | mono | sans | serif | display (picks the submenu group). Clicking one
+# runs `brew install --cask <cask>` in the background, then offers to use it.
+font-install-casks = "JetBrains Mono Nerd Font|font-jetbrains-mono-nerd-font|nerd, Fira Code Nerd Font|font-fira-code-nerd-font|nerd, Iosevka Term Nerd Font|font-iosevka-term-nerd-font|nerd, IBM Plex Mono|font-ibm-plex-mono|mono, Cascadia Code|font-cascadia-code|mono, Inter|font-inter|sans, Source Serif 4|font-source-serif-4|serif"
+# aerospace CLI search paths (used when the per-user socket is unavailable)
+aerospace-cli = "/opt/homebrew/bin/aerospace, /usr/local/bin/aerospace, aerospace"
+# sketchybar scripts the window colors are parsed from (searched in order)
+color-sources = "~/.config/sketchybar/colors.sh, ~/.config/sketchybar/plugins/aerospacer.sh"
+# directories searched for an app's .app bundle when its bundle id is unknown
+app-dirs = "/Applications, /Applications/Utilities, /System/Applications, /System/Applications/Utilities, /System/Library/CoreServices, ~/Applications"
+# icon assets (filenames resolved against the binary dir). app-icon = the
+# app's own mark (the kitchen sink): the top-left icon menu of every view in
+# the shared window. notes / files / jira / confluence icons = the view
+# switcher beside it
+# (files-icon empty = the system folder icon).
+app-icon = "app_icon.png"
+jira-icon = "jira_icon.png"
+confluence-icon = "confluence_icon.png"
+ai-icon = ""
+notes-icon = "notes_icon.png"
+files-icon = ""
+# machine-owned socket / focus-filename / window identities
+notes-socket = "ws-notes.sock"
+focus-file = "workspace-switcher-focus"
+focus-bridge = "ws-aerospace-focus"
+switcher-name = "workspace-switcher"
+detail-name = "jira-detail"
+aerospace-socket = "/tmp/bobko.aerospace-DANIELBAKER.sock"
+crash-log = "~/.cache/ws-crash.log"
+# debug artifacts
+debug-flag = "~/.cache/aero-debug"
+aero-log = "~/.cache/ws-aero.log"
+# Apple speech recognition locale for voice notes (BCP-47, e.g. en-US)
+voice-locale = "en-US"
+
+# [theme] — app-wide window colors as hex RRGGBB (every key optional; the
+# sketchybar `color-sources` + the built-in defaults fill any gaps). Edit
+# these by hand. The paint-brush header button instead edits PER-WINDOW
+# overrides in each section ([notes] / [files] below) so the notes and files
+# windows never affect each other.
+#   background / highlight / text / dim / accent : card, rows, chrome
+#   border  : card outline; unset = derived from the accent (recommended —
+#             every theme then gets an outline in its own hue)
+#   accent2 / success / warning / danger / info : the secondary hues (see the
+#             per-window `palette` key); unset = Catppuccin Macchiato's
+#   header  : default drag-header tint (per-window `header-color` overrides);
+#             keep it DEEPER than `background` — the themes' tmux-style layering
+#             is header (crust) < tab strip (mantle, derived) < card
+#   browser : file-explorer panel background (per-window `browser-background`
+#             overrides) — styled separately from the terminal
+#   terminal: embedded shell drawer background (per-window
+#             `terminal-background` overrides); the terminal's text color is
+#             derived automatically for contrast
+#   Colors may be 6-digit RRGGBB (opaque) or 8-digit AARRGGBB where the first
+#   two hex digits are the TRANSPARENCY (FF = opaque, 00 = fully see-through;
+#   same as the picker's alpha slider — drag it down to make it see-through).
+[theme]
+background = "24273A"
+highlight = "3F4A5A"
+text = "CAD3F5"
+dim = "939AB7"
+accent = "C6A0F6"
+header = 181926
+browser = "4F5A6E8C"
+terminal = "4F5A6EC7"
+
+# [themes] — extra Theme ▸ presets (a built-in with the same name is
+# replaced). Built-ins: Tokyo Night, Tokyo Night Storm, Catppuccin Mocha /
+# Macchiato / Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine,
+# Solarized Dark / Light, Graphite, Tokyo Night Day, Paper.
+#   Name = background, browser, terminal, header, text, dim, highlight[, accent[,
+#          accent2, success, warning, danger, info]]
+#   (7, 8 or 13 colors; without the last five a Catppuccin palette is used)
+#   Hovering a preset in Theme ▸ previews it live; it's saved only when picked.
+#   The menu swatch is a tiny window in the theme: header, active tab,
+#   selected row, and the accent2 / green / yellow / red dots.
+[themes]
+# Everforest = 2D353B, 272E33, 232A2E, 343F44, D3C6AA, 9DA9A0, 475258
+
+# /filefast — Hyper+S "/" palette, listed FIRST (file order = palette order).
+# A file-name field above a paste area; "save & copy path" / Cmd+S runs `script`
+# (bash; content on stdin, env FF_DIR = <save-dir>/YYYY_MM_DD, FF_NAME = the
+# typed name) which writes the file and pbcopy's its path. Handled in-process.
+[filefast]
+enabled = true
+type = "shell"
+label = "filefast"
+icon = "notes"
+save-dir = "/tmp/filefast"
+script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_DIR/$FF_NAME\" | pbcopy && printf %s \"$FF_DIR/$FF_NAME\""
+
+# Notes + voice in ONE window: every note tab (tabs, markdown images, paste)
+# plus the record/pause/stop meter bar when `voice = true`. Dictation lands
+# AT THE CURSOR of the active tab (vim pane: after the character under the
+# cursor in Normal mode, at the caret in Insert mode).
+#   voice-live          true/false (default true): the words appear at the
+#                       cursor AS YOU SPEAK; false = hold the whole speech
+#                       (live draft in the footer) and insert it at the
+#                       cursor when you press stop. Icon menu ▸ "Voice: Type
+#                       As You Speak" toggles it.
+#   vim-mode            true/false (default false); every text note is edited
+#                       in an embedded nvim pane that sits where the editor
+#                       is (tabs, file browser and shell drawer keep working).
+#                       Edits autosave; tab switches reuse the same editor.
+#                       `:q` just restarts the editor on the current note;
+#                       Cmd+W (or Hyper+N) closes the window. PDF/image tabs
+#                       keep the native preview.
+#   vim-bin             path or name of the editor binary (default "nvim";
+#                       plain vim works but has no RPC — tab switches are
+#                       typed as keystrokes).
+#   vim-init            init file for the vim pane (default: the bundled
+#                       vim/notes-init.vim — chrome-less, autosaving,
+#                       transparent; your plugins are skipped). Point it at
+#                       e.g. ~/.config/nvim/init.lua to use your own setup.
+#   start-drawer        browser | terminal | none — the drawer open at launch
+#                       (default none: the file browser starts closed; its
+#                       header button / icon menu ▸ Start With toggles it).
+[notes]
+terminal-background = "A611111B"
+enabled = true
+type = "note"
+name = "notes"
+title = ""
+voice = true
+# embedded shell drawer at the bottom of the notes window (header  toggles)
+terminal = true
+terminal-height = 240
+# starting directory for the embedded shell (default: /tmp/ when unset)
+terminal-dir = "/tmp/"
+# window 20% wider and taller; resize enabled so drag edges/corners works
+resize = true
+# vim mode: use nvim/vim instead of the native text editor
+vim-mode = true
+vim-bin = "/opt/homebrew/bin/nvim"
+# vim-init = ~/.config/nvim/init.lua
+start-drawer = "none"
+font-size = 13
+
+# a directory (or file) — every .md file inside is a note tab. Adding a file
+# to the folder shows up automatically, no config edit needed.
+paths = "~/notes, ~/.config/workspace-switcher/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/workspace-switcher/rules/grammar-check.md"
+# window 20% wider (640 -> 768) and the notepad ~30% taller; max-height lets
+# the taller window actually apply (the 60%-of-screen cap would clamp it)
+width = 768
+height = 585
+max-height = 730
+font = "Hack Nerd Font"
+background-color = "A61E1E2E"
+header-color = "A611111B"
+browser-background = "A6181825"
+text-color = "CDD6F4"
+dim-color = "A6ADC8"
+highlight-color = "45475A"
+accent-color = "CBA6F7"
+palette = "89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"
+sticky = true
+float = false
+
+# Read-only file browser: type to fuzzy-filter the current directory, Enter
+# on a file opens it in its default app, Enter on a directory (or "..")
+# navigates. `root` is the starting directory (default ~). Hyper+F opens it.
+# These browser keys also apply to the notes window's file drawer.
+# Filter bar:
+#   notes / *.md / .*        filter this folder (.* shows dotfiles)
+#   ~/notes/to  ../x  /etc/  list THAT folder filtered by the tail; Tab
+#                            completes the selected row, Enter opens it
+#   **/*.swift  ~/src/**/foo recursive search (ripgrep) below the folder; a
+#                            bare last word means "name contains"
+#   term | terminal | cmd    Enter opens a terminal here (the notes drawer's
+#                            shell cd's there; the files window opens
+#                            [app] terminal-app)
+#   sort          name | modified | created | size | kind (sort button writes it)
+#   sort-order    asc | desc
+#   search-limit  max recursive-search results (default 2000)
+#   search-exclude globs skipped by recursive search
+#                 (default /Library, node_modules, .Trash)
+#   terminal-words filter words that open a terminal (default term, terminal, cmd)
+[files]
+enabled = true
+type = "files"
+name = "files"
+title = ""
+root = "~/"
+width = 760
+height = 560
+font = "SF Mono"
+resize = true
+# quick-navigate favorites shown as pinned pills in the browser (tilde ok);
+# the browser's ☆ Pin adds more.
+favorites = "~/notes, ~/Desktop"
+# Recent + Arrived: pinned pills (first) listing files from ANYWHERE on this
+# Mac, newest first, with where they are and how long ago:
+#   Recent   everything created or changed (downloads, screenshots, scp /
+#            curl output, unzipped folders, tool output)
+#   Arrived  only files that came from OUTSIDE — browser downloads, AirDrop,
+#            Messages / Mail saves — wherever they were saved, with the app
+#            (and site) they came from (macOS's quarantine flag)
+# Tracked live from launch (one FSEvents stream on /; system folders, other
+# volumes, ~/Library, hidden paths, app libraries, node_modules, in-progress
+# downloads and swap files are skipped), seeded from Spotlight for what
+# happened before. Attachments inside Mail / Messages' own storage are NOT
+# seen (that needs Full Disk Access) — only once you save them somewhere.
+#   recent          true/false (default true)
+#   recent-scope    everywhere | home (default everywhere; home = ~ + /tmp)
+#   recent-days     how far back (default 7)
+#   recent-limit    max entries (default 200)
+#   recent-exclude  extra globs / path prefixes to skip, e.g. ~/work/build, *.log
+#   start           recent | root — what Hyper+F opens on (default recent)
+start = "recent"
+# one Esc closes the files window
+esc-close = 1
+
+# THE SWITCH: enabled = true shows the window, anything else hides it
+sort = "created"
+sort-order = "desc"
+background-color = "C71A1B26"
+header-color = 111219
+browser-background = "991A1B26"
+text-color = "C0CAF5"
+dim-color = "9AA5CE"
+highlight-color = 283457
+accent-color = "7AA2F7"
+palette = "BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"
+# (window, palette, menu entry). Every section must opt in explicitly.
+[jira]
+enabled = true
+type = "list"
+name = "jira"
+title = ""
+# Tokyo Night (Theme ▸ presets rewrite these)
+header-color = 111219
+background-color = "C71A1B26"
+text-color = "C0CAF5"
+dim-color = "9AA5CE"
+highlight-color = 283457
+accent-color = "7AA2F7"
+palette = "BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"
+# a directory — every .json/.tsv file inside becomes a tab
+sources = "~/.cache/workspace-switcher/jira_json"
+# table mode: spreadsheet rows under a sticky header. columns = one line of
+#   field:Title:width:align:flags, …  (jira: the header is the field's ONE
+#   label — Jira Config ▸ Definitions ▸ Fields — so Title may stay empty)
+# width = % of the row (0 = share the leftover), align = left|right|center,
+# flags = filter (searchable) and/or sort (click the title), e.g. filter+sort.
+# Drag a header divider to resize (saved back here); table-sort remembers the
+# last clicked header. The SAME list drives the poller's API fields= param
+# (jira/jira_config.py), so adding a column fetches that field (any raw Jira
+# field works too: created, duedate, customfield_10010…). table = false (or no
+# columns) -> the classic two-line preview rows below.
+# Per-job columns: each poll job in ~/.config/jira/config.json owns its tab's
+# columns (Jira Config window ▸ job ▸ Columns); the live search tab
+# (search.json) has its own (Jira Config ▸ Live Search). This line is only the
+# starter template for NEW jobs and the fallback for a tab no job owns.
+table = true
+columns = "key:Key:8:left:filter+sort, title:Title:33:left:filter+sort, status:Status:10:left:filter+sort, assignee:Assignee:12:left:filter+sort, priority:Priority:8:left:filter+sort, releaseLabel:Release:12:left:filter+sort, updated:Updated:10:right:sort, project:Project:7:left:filter+sort"
+primary = "key"
+content = "title"
+detail = "assignee,reporter,releaseLabel"
+trailing = "status,priority"
+body = "description"
+filter = "key,title,status,assignee,reporter,description,labels,priority"
+filters = "releaseStatus,release,assignee,reporter,status,priority,labels"
+copy-fields = "key,title,status,assignee,release,releaseDate,priority,labels"
+copy-format = "tsv"
+checkbox = true
+resize = true
+search-width = 0.9
+max-row-stretch = 26
+width = 1100
+height = 560
+font = "SF Mono"
+body-lines = 5
+page-size = 150
+# Jira Config window (menu bar ▸ Open Jira Config Window): size + how often
+# it re-reads status (seconds). Unset = 1080 x 720, every 5s.
+# dashboard-width = 1080
+# dashboard-height = 720
+# dashboard-refresh = 5
+# Live search (Cmd+F in the jira window): the "… within" date choices
+# (today | Nd | Nw | Nh) and the Max results presets.
+# search-date-ranges = today, 2d, 7d, 14d, 30d, 90d
+# search-max-choices = 25, 50, 100, 250, 500
+
+# [confluence] — Confluence search: a view of the shared window (Hyper+S
+# /confluence, menu bar ▸ Confluence Search, `workspace-switcher confluence`). Search with
+# All words / Phrase / Any word, Title only, prefix*; filter by space, type,
+# modified, mine; the page previews live with every match highlighted; ☆
+# favorites. Its own site + token (NOT Jira's) live in
+# ~/.config/confluence/config.json — the view's "setup" button writes it.
+# config = another config.json (bin/fake-confluence.sh start points this at
+# a local fake site; stop removes it). Colors: same keys as [jira]; none set
+# = the Jira window's palette.
+[confluence]
+enabled = true
+# the view's own frame (the shared window grows to it while it shows)
+width = 1400
+height = 900
+# results pane share of the width (drag the divider to change it)
+split = 0.42
+
+# [ai] — Apple's on-device model (the `fm` CLI) driven by rule files; open
+# from the Hyper+S palette (/ai). Every .md in rules-dir is a pill; its
+# frontmatter builds the `fm respond` command and its body is the
+# instructions. Your text goes in on stdin. Answers are Markdown; ⧉ Copy
+# writes rich text (HTML + RTF + Markdown) through pandoc.
+[ai]
+enabled = true
+fm-bin = "/usr/bin/fm"
+# Markdown -> HTML for the paste preview + rich copy (brew install pandoc)
+pandoc-bin = "/opt/homebrew/bin/pandoc"
+# fm's window: instructions + your text + the answer; longer text runs in parts
+context-tokens = 4096
+rules-dir = "~/.config/workspace-switcher/rules"
+# input share of the width (drag the divider to change it)
+split = 0.5
+# text size of both panes; font = "" is the system font
+font-size = 14
+font = ""
+# toast after ⧉ Copy
+copy-toast = "Copied to clipboard"
+
+# [icons] — app icons for the workspace switcher rows. Normal apps keep their
+# real macOS icons; ONLY apps listed here get overrides, matched by app name
+# plus window-title substrings. Line format:
+#   app-name = title-match:icon, other-title:icon, *:default-icon
+#   icon = app | jira | notes | <png filename or absolute path>
+# "*" is the fallback icon when the window title matches nothing (and the
+# whole override is skipped when no fallback is given and nothing matched).
+# The workspace-switcher app shows notes / files / jira in ONE shared window
+# whose title follows the view, so its row always wears the app's own icon
+# (the kitchen sink) — not whichever view happens to be active.
+config = "~/.config/confluence/fake.json"
+[icons]
+workspace-switcher = "*:app"
+
+# [shortcuts] — the kitchen sink menu's "Keyboard Shortcuts…" list (also
+# Cmd+/ in any view). One line per shortcut, shown in file order:
+#   view: keys = what it does
+# view = all (every view, listed under "Everywhere") | notes | files | jira | ai.
+# Several keys for one action: separate them with " / ". Write Cmd+Plus /
+# Cmd+Minus for Cmd+= / Cmd+- (the first "=" ends the key).
+[shortcuts]
+"all: Hyper+S" = "switcher palette: search windows + commands"
+"all: Hyper+N / Hyper+F / Hyper+J" = "notes / files / jira (again while in it = hide)"
+"all: Hyper+T" = "notes terminal drawer (open + focus / close)"
+"all: Cmd+W" = "hide the window"
+"all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (notes · AI · files · jira · confluence)"
+"all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
+"all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
+"all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
+"all: Cmd+/" = "this list"
+"notes: Ctrl+J / Ctrl+K" = "move focus: editor ↔ files ↔ terminal"
+"notes: Cmd+S" = "save the note"
+"notes: Cmd+F" = "search the note"
+"notes: Cmd+O" = "open a file by path as a tab"
+"notes: Cmd+C / Cmd+V / Ctrl+V" = "copy / paste (editor + terminal)"
+"files: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the list"
+"files: Return" = "open (folders: go in)"
+"files: Tab" = "complete the typed path"
+"files: Cmd+L" = "focus the filter / address bar"
+"files: Cmd+K" = "copy the selected file's path"
+"files: **" = "in the filter: search every folder below"
+"files: term" = "in the filter + Return: a shell in that folder"
+"files: Esc Esc" = "hide"
+"jira: Cmd+F" = "live search (from the search strip: close it)"
+"jira: Cmd+K" = "actions: copy, copy URL + title, open in browser"
+"jira: Return / double-click" = "ticket details"
+"jira: ↑ ↓ / Ctrl+N / Ctrl+P / Tab" = "move through the rows"
+"jira: Ctrl+Space" = "tick the row (Cmd+K acts on ticked rows)"
+"jira: Esc" = "back (details, releases, config) / close the search"
+"ai: Ctrl+Enter / Cmd+Enter" = "run the selected rule on your text"
+"ai: Cmd+L" = "focus your text"
+"ai: Esc" = "stop a running request (never closes)"
+
+# read-only window showing the stack health check (Hyper+S -> /health-checks).
+[health-checks]
+enabled = true
+type = "output"
+title = ""
+icon = "heart"
+script = "~/.config/workspace-switcher/jira/jira-doctor.sh"
+width = 800
+height = 640
+font = "SF Mono"
+
+# Paste-and-format window: paste raw JSON or XML into the popup and it
+# re-renders itself formatted (debounced as you paste); the "copy contents"
+# header button copies the result, "save file" writes it to `save-dir`
+# (default /tmp/) and copies the absolute path. Handled in-process — the type
+# is `shell` so the row appears in the palette, and the daemon intercepts it
+# by name.
+[prettyprint]
+enabled = true
+type = "shell"
+title = ""
+icon = "notes"
+# where "save file" writes the formatted output (absolute or ~-prefixed)
+save-dir = "/tmp/"
+
+# "/Jira Config Window" in the Hyper+S palette: opens the Jira Config window
+# (handled in-process, like prettyprint). Listed only while [jira] enabled.
+# `label` = the text the palette shows (default: the section name).
+[jira-config]
+enabled = true
+type = "shell"
+label = "Jira Config Window"
+
+# Notes-attached terminal: a plain-shell Ghostty window created once at daemon
+# startup, parked hidden. This entry shows it stacked ABOVE the notes window
+# (it follows notes as you drag it); the same entry again parks it. NEVER closed.

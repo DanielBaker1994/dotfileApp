@@ -27,20 +27,17 @@ source "$HOME/.config/sketchybar/colors.sh"
 RED=0xff8fc4e8
 BLUE=0xff9fc8e8
 SILVER_BLUE=0xffb8cfe0
-SPACE_BG_ACTIVE=0xff4a7180
-SPACE_BG_INACTIVE=0xcc1B2736
-SPACE_BORDER_COLOR=0xff9fc8e8
+# Inactive pills are transparent: they blend into the group backdrop like the
+# right-side status group. The active pill gets a purple hue.
+SPACE_BG_ACTIVE=0xcc9a7fd8
+SPACE_BG_INACTIVE=0x00000000
+SPACE_BORDER_COLOR=0xffc6a0f6
+SPACE_HIGHLIGHT_COLOR=0xffe4d4ff
 SPACE_BORDER_WIDTH=1
-GROUP_BORDER_COLOR=0xccb8cfe0
-GROUP_BORDER_WIDTH=1
-GROUP_CORNER_RADIUS=8
-GROUP_HEIGHT=30
-GROUP_BG_COLOR=0x883f4a5a
-# Symmetric inset between the group border and the pills, on all four sides.
-GROUP_EDGE=2
+# GROUP_* (the bordered group look) live in colors.sh, shared with status.sh.
 
 SPACE_CORNER_RADIUS=6
-SPACE_WIDTH=70
+SPACE_WIDTH=56
 SPACE_HEIGHT=24
 SPACE_GAP=4
 SPACE_ICON_PAD_L=4
@@ -157,7 +154,7 @@ build_all() {
             icon="$sid" \
             icon.font="$SPACE_NUMBER_FONT" \
             icon.color=$LABEL_COLOR \
-            icon.highlight_color=$BLUE \
+            icon.highlight_color=$SPACE_HIGHLIGHT_COLOR \
             icon.padding_left=$SPACE_ICON_PAD_L \
             icon.y_offset=$SPACE_ICON_Y \
             label.font="$APP_FONT" \
@@ -170,9 +167,7 @@ build_all() {
             background.height=$SPACE_HEIGHT \
             background.padding_left=$((SPACE_GAP / 2)) \
             background.padding_right=$((SPACE_GAP / 2)) \
-            background.shadow.drawing=on \
-            background.shadow.color=0x60000000 \
-            background.shadow.distance=2 \
+            background.shadow.drawing=off \
             background.drawing=on \
             click_script="aerospace workspace $sid"
     done
