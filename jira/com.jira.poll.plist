@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jira.poll</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__WS_CONFIG__/jira/jira-poll.sh</string>
+        <string>--quiet</string>
+        <string>--projects</string>
+        <string>all</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/jira-poll.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/jira-poll.err.log</string>
+</dict>
+</plist>

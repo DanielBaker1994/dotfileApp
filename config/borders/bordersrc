@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# JankyBorders (FelixKratz/formulae/borders) — window border highlighter.
+# Borders the focused window so you can see what's active under AeroSpace.
+# Colors match the sketchybar palette (colors.sh): white active / muted grey inactive.
+
+options=(
+  style=round
+  width=4.0
+  hidpi=on
+  active_color=0xffcad3f5
+  inactive_color=0xff494d64
+)
+
+borders "${options[@]}"

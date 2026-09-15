@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.danielbaker.workspace-switcher</string>
+	<key>CFBundleName</key>
+	<string>workspace-switcher</string>
+	<key>CFBundleExecutable</key>
+	<string>workspace-switcher</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record your voice so voice notes can be transcribed to text.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribe voice notes to text using Apple speech recognition.</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>
