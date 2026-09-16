@@ -133,10 +133,28 @@ ok "app linked at ~/.config/workspace-switcher"
 # ------------------------------------------------------------- 4. build
 STEP="building the app"
 step "4/7 building workspace-switcher.app (compiling the Swift sources)"
+# SwiftTerm (the embedded terminal) is precompiled once into a static lib
+# the daemon links against
+TERM_LIB="$ROOT/.build/SwiftTerm/libSwiftTerm.a"
+TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
+info "precompiling SwiftTerm (terminal engine)…"
+mkdir -p "$TERM_MOD_DIR"
+swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
+    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
+    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
+    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
+    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
+    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
+    "$ROOT"/Vendor/SwiftTerm/Generated/*.swift \
+    -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
+    -o "$TERM_LIB"
+ok "SwiftTerm compiled"
+
 mkdir -p "$ROOT/workspace-switcher.app/Contents/MacOS"
 BUILD_TMP="$(mktemp "${TMPDIR:-/tmp}/ws-install.XXXXXX")"
 swiftc -O -swift-version 5 \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
+    -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
     "$ROOT/PopupWindow.swift" "$ROOT/workspace_switcher.swift" "$ROOT/main.swift" \
     -o "$BUILD_TMP"
 mv "$BUILD_TMP" "$ROOT/workspace-switcher.app/Contents/MacOS/workspace-switcher"
