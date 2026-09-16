@@ -134,6 +134,8 @@ final class InstallModel: ObservableObject {
              { brewHas("karabiner-elements", cask: true) }),
             ("sketchybar-app-font", "app-glyph font", "brew install --cask font-sketchybar-app-font",
              { brewHas("font-sketchybar-app-font", cask: true) }),
+            ("Hack Nerd Font", "terminal glyphs", "brew install --cask font-hack-nerd-font",
+             { brewHas("font-hack-nerd-font", cask: true) }),
             ("Xcode Command Line Tools", "Swift compiler (swiftc)", nil, { shellExists("swiftc") }),
         ]
         deps = items.map { Dep(name: $0.0, detail: $0.1, install: $0.2, ok: $0.3()) }

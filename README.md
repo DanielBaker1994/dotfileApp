@@ -4,12 +4,29 @@ A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
 with sketchybar + borders menu-bar stack. Native AppKit (Swift), no runtime
 dependencies beyond what the installer brings.
 
-## Install (end user — one command)
+## Install (end user — pick one)
+
+### Option A — DMG (double-click)
 
 ```bash
-git clone https://github.com/danielbaker/workspace-switcher.git   # or wherever this repo lives
-cd workspace-switcher
-./INSTALL.sh
+./dmg.sh            # build it (repo maintainers)
+open workspace-switcher.dmg
+```
+
+In the DMG: **double-click Installer.app** (GUI wizard, click-through) — or
+open Terminal and run `./INSTALL.sh`. The DMG carries the whole repo, so it
+works from anywhere; INSTALL.sh clones a fresh copy to `~/workspace-switcher`
+and installs from there.
+
+### Option B — one script (self-cloning)
+
+Download just the script (or `curl -fsSL …/INSTALL.sh | bash`). If it is not
+running from a git checkout it asks where to put the app (default
+`~/workspace-switcher`), clones the repo, and continues the install from the
+clone:
+
+```bash
+bash INSTALL.sh
 ```
 
 `INSTALL.sh` prints every step as it runs (checks your Mac, installs
@@ -17,8 +34,7 @@ Homebrew/deps, installs configs, compiles the app, grants mic + speech
 permissions, starts sketchybar + borders, loads the jira poll agent, opens
 the app). Re-running it is safe. Uninstall: `./UNINSTALL.sh`.
 
-There is also a GUI click-through installer (`Installer.app`, source in
-`installer/`): `./installer/build.sh` then `open Installer.app`.
+Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 ### What you get
 

@@ -20,6 +20,27 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UID_="$(id -u)"
 
+# If this script is NOT running from a git checkout (e.g. you downloaded just
+# this file, or piped it through curl), clone the whole app first — that is
+# the retard-proof path: one script, it fetches everything itself.
+if [ ! -d "$ROOT/.git" ]; then
+    printf "\n${CYAN}This looks like a standalone copy — the full app is in a git repo.${RESET}\n"
+    printf "${CYAN}I'll clone it and continue the install from the fresh copy.${RESET}\n\n"
+    DEFAULT="$HOME/workspace-switcher"
+    read -r -p "Where should I install the app? [$DEFAULT]: " DEST
+    DEST="${DEST:-$DEFAULT}"
+    if [ -d "$DEST" ]; then
+        printf "${YELLOW}  ! $DEST already exists — installing from there${RESET}\n"
+    else
+        printf "${DIM}    git clone https://github.com/DanielBaker1994/dotfileApp.git $DEST${RESET}\n"
+        git clone https://github.com/DanielBaker1994/dotfileApp.git "$DEST" || {
+            printf "\n${RED}Clone failed — check your network and try again.${RESET}\n" >&2
+            exit 1
+        }
+    fi
+    exec bash "$DEST/INSTALL.sh"
+fi
+
 GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
 ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
 fail() { printf "${RED}  ✘ %s${RESET}\n" "$*"; }
