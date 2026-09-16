@@ -13,3 +13,5 @@ README.pdf
 __pycache__/
 create_a_file_here.txt
 testbackups/
+# release artifact (rebuild with dmg.sh)
+*.dmg
