@@ -6,16 +6,27 @@ dependencies beyond what the installer brings.
 
 ## Install (end user — pick one)
 
-### Option A — DMG (double-click)
+### Option A — .pkg installer (true macOS click-through) ← recommended
+
+```bash
+./pkg.sh            # build it (repo maintainers)
+open workspace-switcher.pkg
+```
+
+Double-clicking the package opens the **native macOS Installer wizard** —
+Continue → Install → your password → Done. The package carries the whole
+repo and runs the full install as your user.
+
+### Option B — DMG (GUI wizard)
 
 ```bash
 ./dmg.sh            # build it (repo maintainers)
 open workspace-switcher.dmg
 ```
 
-In the DMG: **double-click Installer.app** (GUI wizard, click-through) — or
-open Terminal and run `./INSTALL.sh`. The DMG carries the whole repo, so it
-works from anywhere; INSTALL.sh clones a fresh copy to `~/workspace-switcher`
+In the DMG: **double-click Installer.app** (a SwiftUI wizard, click-through)
+— or open Terminal and run `./INSTALL.sh`. The DMG carries the whole repo, so
+it works from anywhere; INSTALL.sh clones a fresh copy to `~/workspace-switcher`
 and installs from there.
 
 ### Option B — one script (self-cloning)
