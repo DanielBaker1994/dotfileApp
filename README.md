@@ -6,6 +6,18 @@ dependencies beyond what the installer brings.
 
 ## Install (end user — pick one)
 
+**There is ONE command.** From the repo root:
+
+```
+./INSTALL.sh             install everything (direct, verbose)
+./INSTALL.sh pkg         build + open the click-through .pkg installer
+./INSTALL.sh dmg         build + open the DMG (GUI wizard)
+./INSTALL.sh uninstall   remove everything
+./INSTALL.sh help        show this
+```
+
+Not sure what to run? `./INSTALL.sh` — that's it.
+
 ### Option A — .pkg installer (true macOS click-through) ← recommended
 
 ```bash
