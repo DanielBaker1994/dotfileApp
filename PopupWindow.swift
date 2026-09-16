@@ -1,4 +1,5 @@
 import AppKit
+import SwiftTerm
 import Foundation
 import Darwin
 
@@ -199,6 +200,20 @@ public struct PopupConfig {
     // starting window height in pts.
     public var editMode: Bool = false
     public var height: CGFloat = 420
+
+    // edit mode: an embedded terminal drawer at the bottom of the window
+    // (SwiftTerm's LocalProcessTerminalView — a real shell, session survives
+    // the drawer being hidden). Toggle via toggleTerminalDrawer().
+    public var terminal: Bool = false
+    public var terminalHeight: CGFloat = 240
+    // shell the terminal drawer (and the host's command runner) spawn
+    public var shell = "/opt/homebrew/bin/bash"
+    // font for the terminal drawer (a Nerd Font so glyphs/powerline render)
+    public var terminalFont = "Hack Nerd Font"
+    // args passed to that shell: --login -i makes it read the profile AND
+    // rc files (~/.bash_profile + ~/.bashrc), so aliases/functions/zoxide etc.
+    // defined there work in the embedded terminal
+    public var shellArgs: [String] = ["--login", "-i"]
 
     // visible search bar: the query field gets a rounded background and a
     // placeholder, so the window clearly reads as "type to filter"
@@ -2053,6 +2068,27 @@ var meterEnabled = false {
     }
 }
 
+// MARK: - Terminal auto-restart
+
+// SwiftTerm reports the shell exiting via LocalProcessTerminalViewDelegate;
+// this tiny adapter forwards it so the window can respawn the shell (the
+// drawer must never be left dead after `exit` / Ctrl-D).
+final class TerminalAutoRestart: NSObject,
+                                 @preconcurrency LocalProcessTerminalViewDelegate {
+    nonisolated(unsafe) var onTerminated: (() -> Void)?
+    nonisolated override init() { super.init() }
+    nonisolated func sizeChanged(source: LocalProcessTerminalView,
+                                 newCols: Int, newRows: Int) {}
+    nonisolated func setTerminalTitle(source: LocalProcessTerminalView,
+                                      title: String) {}
+    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView,
+                                                directory: String?) {}
+    nonisolated func processFailedToStart(source: TerminalView,
+                                          error: LocalProcessError) {}
+    nonisolated func processTerminated(source: TerminalView,
+                                       exitCode: Int32?) { onTerminated?() }
+}
+
 // MARK: - Popup window
 
 public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate {
@@ -2168,6 +2204,12 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private let field: NSTextField
     private let rowView: PopupRowView
     private var editorView: NSTextView?
+    private var terminalDrawer: LocalProcessTerminalView?
+    // polls the shell's health so a dead drawer ALWAYS comes back (the
+    // delegate's fast restart can land inside SwiftTerm's windingDown window,
+    // where startProcess is silently ignored)
+    private var terminalRestartTimer: Timer?
+    public private(set) var terminalShown = true
     private var editorScroll: NSScrollView?
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
@@ -2216,8 +2258,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // always visible when meterEnabled (host-driven: voice windows)
     public var meterEnabled = false {
         didSet {
+            guard oldValue != meterEnabled else { return }
             chrome?.meterEnabled = meterEnabled
             chrome?.needsDisplay = true
+            // the meter strip owns the bottom: re-layout the editor + the
+            // terminal drawer so neither hides content behind the bar
+            layoutEditorScroll()
+            layoutTerminal()
         }
     }
     public var recordingState: Int = 0 {   // 0 idle, 1 recording, 2 paused, 3 transcribing
@@ -2352,6 +2399,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                                    height: config.tabBarHeight * z)
             }
             layoutEditorScroll()
+            layoutTerminal()
         } else if config.scrollableRows {
             let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
             let fieldFrame = NSRect(x: config.padding + 10,
@@ -2558,6 +2606,43 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 bar.autoresizingMask = [.width]
                 backdrop.addSubview(bar)
                 tabsBar = bar
+            }
+            if config.terminal {
+                // embedded shell drawer at the bottom: the editor stops above
+                // it (layoutEditorScroll), the session survives hide/show
+                let term = LocalProcessTerminalView(frame: NSRect(
+                    x: 0, y: backdrop.bounds.height - config.terminalHeight,
+                    width: backdrop.bounds.width, height: config.terminalHeight))
+                term.autoresizingMask = [.width]
+                if let tf = NSFont(name: config.terminalFont, size: 13) {
+                    term.font = tf
+                }
+                backdrop.addSubview(term)
+                terminalDrawer = term
+                // auto-restart: if the shell exits (user typed exit/ctrl-d)
+                // spawn it again after a beat so the drawer is never dead
+                // (capture the shell locally — no self before super.init)
+                let shell = config.shell
+                let shellArgs = config.shellArgs
+                let restarter = TerminalAutoRestart()
+                restarter.onTerminated = { [weak term] in
+                    guard let term else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        term.startProcess(executable: shell, args: shellArgs)
+                    }
+                }
+                term.processDelegate = restarter
+                term.startProcess(executable: shell, args: shellArgs)
+                // safety net: poll the shell's state; restart once the old
+                // session is fully wound down (running==false && windingDown==false)
+                let poll = Timer(timeInterval: 1.5, repeats: true) { [weak term] _ in
+                    guard let term, let p = term.process else { return }
+                    if !p.running, !p.windingDown {
+                        term.startProcess(executable: shell, args: shellArgs)
+                    }
+                }
+                RunLoop.main.add(poll, forMode: .common)
+                terminalRestartTimer = poll
             }
         } else {
             // search list: chrome (drag header, search field, filter bar, tab
@@ -3163,15 +3248,21 @@ private func scrollSelectionIntoView() {
     // Scroll the editor so its newest text is visible. With ifAtBottom, only
     // follow when the user is already reading near the bottom (live streaming
     // shouldn't yank the scroll position away from a user reading above).
+    // scrollRangeToVisible alone can no-op right after a string replacement
+    // (layout hasn't caught up), so pin the clip view to the document end.
     public func scrollEditorToEnd(ifAtBottom: Bool = false) {
-        guard let tv = editorView, let scroll = editorScroll else { return }
+        guard let tv = editorView, let scroll = editorScroll,
+              let doc = scroll.documentView else { return }
         if ifAtBottom {
             let visible = scroll.documentVisibleRect
-            let docH = scroll.documentView?.frame.height ?? 0
+            let docH = doc.frame.height
             guard docH - visible.maxY < 80 else { return }
         }
-        let end = NSRange(location: (tv.string as NSString).length, length: 0)
-        tv.scrollRangeToVisible(end)
+        tv.layoutManager?.ensureLayout(for: tv.textContainer!)
+        let docH = doc.frame.height
+        let y = max(0, docH - scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     // ANSI SGR-escaped text (e.g. the doctor's colored PASS/FAIL/WARN output)
@@ -3335,6 +3426,11 @@ private func scrollSelectionIntoView() {
             // text editor: only Esc (dismiss; host saves on close) and Cmd+S
             // (explicit save) are consumed — everything else goes to the text
             // view (typing, arrows, etc.)
+            if let term = terminalDrawer, terminalShown, terminalFocused(term) {
+                // the embedded terminal has keyboard focus: let SwiftTerm see
+                // EVERYTHING (including Esc — the shell's, not the window's)
+                return false
+            }
             if code == 53 {
                 handleEscape()
                 return true
@@ -3450,6 +3546,7 @@ private func scrollSelectionIntoView() {
         relayoutTabs()
         layoutEditorScroll()
         layoutSearchField()
+        layoutTerminal()
         rowView.needsDisplay = true
         chrome?.needsDisplay = true
     }
@@ -3518,6 +3615,68 @@ private func scrollSelectionIntoView() {
 
     // Pin the note editor's scroll view below the drag header + (wrapped) tab
     // strip — autoresizing alone overshoots the window bottom.
+    // Embedded terminal drawer: grows/shrinks with it, and the editor stops
+    // above it while shown.
+    public func toggleTerminalDrawer() {
+        guard let drawer = terminalDrawer else { return }
+        // manual recreate: if the drawer is coming back up with a dead shell
+        // (exit/ctrl-d left it hung), respawn it so the user never gets stuck
+        if !terminalShown, let p = drawer.process, !p.running, !p.windingDown {
+            drawer.startProcess(executable: config.shell, args: config.shellArgs)
+        }
+        terminalShown.toggle()
+        // the drawer's height is proportional to the window — use the LIVE
+        // height for the grow/shrink delta, not the fixed config value
+        let delta = terminalShown ? terminalDrawerHeight() : -terminalDrawerHeight()
+        let f = panel.frame
+        panel.setFrame(NSRect(x: f.origin.x, y: f.origin.y,
+                              width: f.width, height: f.height + delta), display: true)
+        layoutEditorScroll()
+        layoutTerminal()
+    }
+
+    // does the embedded terminal hold keyboard focus? (keyboard routing: let
+    // SwiftTerm see everything while the shell is focused)
+    private func terminalFocused(_ term: LocalProcessTerminalView) -> Bool {
+        let fr = panel.firstResponder
+        if fr === term { return true }
+        if let v = fr as? NSView { return v.isDescendant(of: term) }
+        return false
+    }
+
+    // space available to the editor + terminal drawer (below chrome/meter)
+    private func availableContentHeight() -> CGFloat {
+        guard let backdrop = panel.contentView else { return 40 }
+        let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
+        let topY = config.headerHeight * zoom + tabH + 2
+        let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight + 4 : 0
+        return max(40, backdrop.bounds.height - topY - meter)
+    }
+
+    // The drawer scales WITH the window: it keeps its configured base height
+    // and takes half of any space beyond a ~180pt editor minimum, so resizing
+    // the window grows the terminal too instead of dumping everything into
+    // the editor.
+    private func terminalDrawerHeight() -> CGFloat {
+        guard terminalShown else { return 0 }
+        let base = config.terminalHeight
+        let extra = max(0, availableContentHeight() - base - 180)
+        return base + extra * 0.5
+    }
+
+    private func layoutTerminal() {
+        guard let drawer = terminalDrawer, let backdrop = panel.contentView else { return }
+        let h = terminalDrawerHeight()
+        // the voice meter/record strip overlays the bottom of the window:
+        // stop the terminal ABOVE it so the cursor/typed line is never hidden
+        // behind the record button
+        let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight : 0
+        let y = max(0, backdrop.bounds.height - meter - h)
+        // bottom-anchored drawer: the editor (and its scroll bar) stop above
+        // it, so content can never scroll behind the terminal
+        drawer.frame = NSRect(x: 0, y: y, width: backdrop.bounds.width, height: h)
+    }
+
     private func layoutEditorScroll() {
         guard config.editMode, let scroll = editorScroll,
               let backdrop = panel.contentView else { return }
@@ -3527,8 +3686,11 @@ private func scrollSelectionIntoView() {
         // editor above it so the caret (and the last dictated line) is never
         // hidden behind the record button
         let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight + 4 : 0
+        // the embedded terminal drawer owns the bottom: stop the editor above
+        // it while it is shown
+        let drawer = terminalDrawerHeight() + 4
         scroll.frame.origin.y = topY
-        scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter)
+        scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter - drawer)
         if config.markdownImages {
             // keep text wrapping at the (possibly resized) window width while
             // wide photos overflow into the horizontal scroller

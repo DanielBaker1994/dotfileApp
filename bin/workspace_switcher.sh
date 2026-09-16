@@ -15,6 +15,24 @@ BIN="$APP/Contents/MacOS/workspace-switcher"
 MAIN="$ROOT/main.swift"
 SRC="$ROOT/workspace_switcher.swift"
 FRAMEWORK="$ROOT/PopupWindow.swift"
+# SwiftTerm is precompiled ONCE into a static library + module (it is ~230
+# files); the daemon links it. Rebuilt only when a SwiftTerm source changes.
+TERM_LIB="$ROOT/.build/SwiftTerm/libSwiftTerm.a"
+TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
+build_term_lib() {
+    [ -f "$TERM_LIB" ] && [ -z "$(find "$ROOT"/Vendor/SwiftTerm/Sources \
+        -name '*.swift' -newer "$TERM_LIB" 2>/dev/null | head -1)" ] && return 0
+    mkdir -p "$TERM_MOD_DIR"
+    swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
+        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
+        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
+        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
+        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
+        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
+        "$ROOT"/Vendor/SwiftTerm/Generated/*.swift \
+        -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
+        -o "$TERM_LIB" >/dev/null 2>&1
+}
 TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/workspace-switcher-focus"
 MODE="${1:-}"
@@ -51,15 +69,19 @@ fi
 # as a real .app bundle: TCC (mic/speech permissions) keys grants by the
 # BUNDLE ID, which is stable across rebuilds — a bare binary loses its grant
 # every time the ad-hoc signature changes.
-if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRAMEWORK" -nt "$BIN" ]; then
+if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRAMEWORK" -nt "$BIN" ] \
+    || [ ! -f "$TERM_LIB" ]; then
+    build_term_lib
     # a REBUILD means any RUNNING daemon is the OLD binary — kill it or the
     # socket ping keeps talking to the stale, grant-less process
     pkill -f "workspace-switcher" 2>/dev/null || true
     mkdir -p "$(dirname "$BIN")"
     BUILD_TMP="$(mktemp "$TMP/ws-build.XXXXXX")" || exit 1
     if swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
+        -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
         "$FRAMEWORK" "$SRC" "$MAIN" -o "$BUILD_TMP" >/dev/null 2>&1 ||
        swiftc -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
+        -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
         "$FRAMEWORK" "$SRC" "$MAIN" -o "$BUILD_TMP"; then
         mv "$BUILD_TMP" "$BIN"
         codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
@@ -76,6 +98,12 @@ fi
 # is launched by the user afterwards (installer Done screen).
 if [ "${WS_BUILD_ONLY:-}" = "1" ]; then
     exit 0
+fi
+
+# Oil terminal: launches/toggles the Ghostty+nvim+Oil window (bin/oil.sh).
+# Created parked-hidden at daemon startup; this toggles show/hide. Never closed.
+if [ "$MODE" = "oil" ]; then
+    exec "$DIR/oil.sh"
 fi
 
 if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ]; then
@@ -117,8 +145,11 @@ if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ]; then
         # shell as its responsible process, so the bundle's mic grant never
         # applies and voice stays dead for the whole session.
         LOG "daemon ping: FAILED -> launching fresh daemon via LaunchServices ($MODE)"
+        # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
+        # Karabiner attribution and would answer future pings forever)
+        pkill -f "workspace-switcher.app/Contents/MacOS" 2>/dev/null || true
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
-            nohup "$BIN" "$MODE" >/dev/null 2>&1 &
+            LOG "LaunchServices launch FAILED — voice permissions will be broken"
         fi
     fi
     exit 0
@@ -128,7 +159,8 @@ fi
 # popup appears immediately (no retry loop needed). Same LaunchServices rule
 # as above so a cold start from Hyper+S still gets the mic grant.
 if ! "$BIN" toggle >/dev/null 2>&1; then
+    pkill -f "workspace-switcher.app/Contents/MacOS" 2>/dev/null || true
     if ! open -n -g "$APP" --args show >/dev/null 2>&1; then
-        nohup "$BIN" show >/dev/null 2>&1 &
+        LOG "LaunchServices launch FAILED — voice permissions will be broken"
     fi
 fi

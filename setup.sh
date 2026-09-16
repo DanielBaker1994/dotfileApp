@@ -18,6 +18,12 @@ for c in karabiner-elements font-sketchybar-app-font font-hack-nerd-font; do
     brew list --cask "$c" >/dev/null 2>&1 || brew install --cask "$c"
 done
 
+# start the menu-bar stack so sketchybar + borders actually RUN (previously
+# installed but never started)
+say "starting brew services (sketchybar, borders)"
+brew services start sketchybar >/dev/null 2>&1 || true
+brew services start borders >/dev/null 2>&1 || true
+
 # ------------------------------------------------- 2. configs (with backup)
 say "2/6 install configs (backing up anything that exists)"
 install_config() {

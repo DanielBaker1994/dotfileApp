@@ -1,4 +1,15 @@
+# built artifacts
 workspace-switcher.app/
 Installer.app/
+.build/
+
+# generated docs
+README.html
+README.pdf
+
+# junk
 .DS_Store
 *.log
+__pycache__/
+create_a_file_here.txt
+testbackups/

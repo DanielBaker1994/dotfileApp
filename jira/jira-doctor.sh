@@ -162,7 +162,23 @@ if [ -x "$WS_BIN" ]; then
     done
     if [ "$STALE" = 1 ]; then
         if [ "$FIX" = 1 ]; then
-            if (mkdir -p "$WS_APP/Contents/MacOS" && cd "$WS_DIR" && swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist PopupWindow.swift workspace_switcher.swift main.swift -o "$WS_BIN" >/dev/null 2>&1); then
+            # SwiftTerm is precompiled once (like bin/workspace_switcher.sh does) — build
+# it here too if a repair is the first build on this machine.
+if [ ! -f "$WS_DIR/.build/SwiftTerm/libSwiftTerm.a" ]; then
+    mkdir -p "$WS_DIR/.build/SwiftTerm"
+    (cd "$WS_DIR" && swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
+        Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
+        Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
+        Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
+        Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
+        Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
+        Vendor/SwiftTerm/Generated/*.swift \
+        -emit-module -emit-module-path .build/SwiftTerm/SwiftTerm.swiftmodule \
+        -o .build/SwiftTerm/libSwiftTerm.a >/dev/null 2>&1)
+fi
+if (mkdir -p "$WS_APP/Contents/MacOS" && cd "$WS_DIR" && swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
+                -I .build/SwiftTerm -Xlinker .build/SwiftTerm/libSwiftTerm.a \
+                PopupWindow.swift workspace_switcher.swift main.swift -o "$WS_BIN" >/dev/null 2>&1); then
                 codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$WS_APP" >/dev/null 2>&1
                 ok "binary rebuilt (--fix): $WS_BIN"
                 # a rebuilt daemon loses its TCC grants — re-grant mic + speech

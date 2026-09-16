@@ -41,7 +41,11 @@ let commandsConfName = "commands.conf"
 // Defaults live here so the app works with no config; parseAppConfig() applies
 // the [app] section overrides when commands.conf is loaded at startup.
 struct AppSettings {
-    var shell = "/bin/bash"
+    var shell = "/opt/homebrew/bin/bash"
+    // args for the embedded terminal's shell: --login -i sources the profile
+    // AND rc files so aliases/functions (zoxide, etc.) work there
+    var shellArgs: [String] = ["--login", "-i"]
+    var terminalFont = "Hack Nerd Font"
     var aerospaceCLI = ["/opt/homebrew/bin/aerospace",
                         "/usr/local/bin/aerospace", "aerospace"]
     var colorSources = [NSString(string: "~/.config/sketchybar/colors.sh").expandingTildeInPath,
@@ -293,7 +297,7 @@ func aerospaceCall(_ args: [String]) -> String {
     let r = aerospaceSocket(args) ?? aerospaceFallback(args)
     let ms = Double(DispatchTime.now().rawValue - t0) / 1_000_000
     if FileManager.default.fileExists(atPath: settings.aeroDebugFlag) {
-        let line = String(format: "%.1fms %@\n", ms, args.joined(separator: " "))
+        let line = String(format: "%.1fms %@ -> [%@]\n", ms, args.joined(separator: " "), r)
         if let fh = FileHandle(forWritingAtPath: settings.aeroLog) {
             fh.seekToEndOfFile()
             fh.write(Data(line.utf8))
@@ -386,6 +390,8 @@ struct CommandSpec {
     let font: String?         // font family for this window's text
     let headerColor: NSColor? // drag-header tint (nil = window background)
     let voice: Bool           // note: record + transcribe button in the header
+    let terminal: Bool        // note: embedded shell drawer at the bottom
+    let terminalHeight: CGFloat
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
 
     init(name: String, kind: Kind = .shell, windowName: String? = nil,
@@ -399,6 +405,7 @@ struct CommandSpec {
          drag: Bool = true, sticky: Bool = true, searchWidth: CGFloat = 0,
          maxStretch: CGFloat = 0, height: CGFloat = 0, font: String? = nil,
          headerColor: NSColor? = nil, voice: Bool = false,
+         terminal: Bool = false, terminalHeight: CGFloat = 240,
          icon: NSImage? = nil) {
         self.name = name
         self.kind = kind
@@ -431,6 +438,8 @@ struct CommandSpec {
         self.font = font
         self.headerColor = headerColor
         self.voice = voice
+        self.terminal = terminal
+        self.terminalHeight = terminalHeight
         self.icon = icon
     }
 }
@@ -535,6 +544,8 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         font: vars["font"],
         headerColor: hexColor(vars["header-color"]),
         voice: tri(vars["voice"]) ?? false,
+        terminal: tri(vars["terminal"]) ?? false,
+        terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
         icon: vars["icon"].flatMap(resolveIconName))
 }
 
@@ -592,6 +603,11 @@ private func parseAppConfig(_ vars: [String: String]) {
         csv(vars[k]).map { $0.hasPrefix("~") ? ($0 as NSString).expandingTildeInPath : $0 }
     }
     if let v = str("shell"), !v.isEmpty { settings.shell = v }
+    if let v = str("terminal-font"), !v.isEmpty { settings.terminalFont = v }
+    let sa = (vars["shell-args"] ?? "")
+        .split(whereSeparator: { $0 == " " || $0 == "\t" })
+        .map(String.init)
+    if !sa.isEmpty { settings.shellArgs = sa }
     let cli = list("aerospace-cli")
     if !cli.isEmpty { settings.aerospaceCLI = cli }
     let colors = list("color-sources")
@@ -1957,6 +1973,7 @@ final class SwitcherController: NSObject {
     // `paths`, each note pad is a tab.
     private func openNoteWindow(_ cmd: CommandSpec,
                                 restoreWID: String?, restorePID: pid_t?) {
+        log("openNoteWindow: '\(cmd.name)' terminal=\(cmd.terminal) paths=\(cmd.paths.count)")
         guard !cmd.paths.isEmpty else {
             log("note '\(cmd.name)': no path configured")
             return
@@ -1988,7 +2005,13 @@ final class SwitcherController: NSObject {
         cfg.tabs = true
         cfg.tabsAddButton = true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
-        cfg.height = cmd.height > 0 ? cmd.height : defaultNoteSize.height
+        cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
+            + (cmd.terminal ? cmd.terminalHeight : 0)
+        cfg.terminal = cmd.terminal
+        cfg.terminalHeight = cmd.terminalHeight
+        cfg.shell = settings.shell
+        cfg.shellArgs = settings.shellArgs
+        cfg.terminalFont = settings.terminalFont
         // slim header (same height as the jira detail window): no title pill,
         // bluey-silver strip, app glyph far left with the last-write line
         cfg.headerHeight = 30
@@ -1999,6 +2022,13 @@ final class SwitcherController: NSObject {
         cfg.fontName = cmd.font
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
+        if cmd.terminal {
+            // header ">_" button toggles the embedded shell drawer
+            w.headerButtons = [(">_", 10)]
+            w.onHeaderButton = { [weak w] id in
+                if id == 10 { w?.toggleTerminalDrawer() }
+            }
+        }
         func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
         w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
         w.imageBaseDir = noteDir(currentPath)
@@ -2198,6 +2228,9 @@ final class SwitcherController: NSObject {
                 guard let w, !text.isEmpty else { return }
                 draft = text
                 w.replaceTail(from: immLen() + committedLen(), with: regionText())
+                // follow the draft: the dictated text lives at the end of the
+                // note, so pin the view to the bottom as it streams in
+                w.scrollEditorToEnd()
             }
             // finalized batch: grow committedStr, persist, drop the draft
             voice.onBatch = { [weak self, weak w] text in
@@ -2765,6 +2798,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = c
         c.start()
         installStatusItems(c)
+        // oil terminal: create the Ghostty+nvim+Oil window ONCE (if it isn't
+        // there), parked hidden on the "oil" workspace. The palette entry
+        // (commands.conf [oil]) toggles show/hide — the window is never closed.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let script = NSString(string: "~/.config/workspace-switcher/bin/oil.sh").expandingTildeInPath
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
+            p.arguments = ["-lc", "\"\(script)\" park >/dev/null 2>&1"]
+            try? p.run()
+        }
         if showOnLaunch {
             c.show()
         }

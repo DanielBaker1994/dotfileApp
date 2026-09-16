@@ -1,0 +1,95 @@
+# workspace-switcher
+
+A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
+with sketchybar + borders menu-bar stack. Native AppKit (Swift), no runtime
+dependencies beyond what the installer brings.
+
+## Install (end user — one command)
+
+```bash
+git clone https://github.com/danielbaker/workspace-switcher.git   # or wherever this repo lives
+cd workspace-switcher
+./INSTALL.sh
+```
+
+`INSTALL.sh` prints every step as it runs (checks your Mac, installs
+Homebrew/deps, installs configs, compiles the app, grants mic + speech
+permissions, starts sketchybar + borders, loads the jira poll agent, opens
+the app). Re-running it is safe. Uninstall: `./UNINSTALL.sh`.
+
+There is also a GUI click-through installer (`Installer.app`, source in
+`installer/`): `./installer/build.sh` then `open Installer.app`.
+
+### What you get
+
+| Thing | Where |
+| --- | --- |
+| Switcher popup | Hyper+S (Karabiner) |
+| Notes / Jira / Voice / Health windows | menu-bar **wrench** icon |
+| Voice notes | red record button → dictation → text, pause/resume, live draft |
+| Menu-bar stack | sketchybar + borders (brew services) |
+| Jira poll agent | launchd `com.jira.poll` |
+
+## Development
+
+```bash
+./build.sh               # compile workspace-switcher.app + TCC re-grant
+./build.sh --build-only  # compile + grant, do NOT launch
+```
+
+- `PopupWindow.swift` — reusable AppKit popup framework (windows, chrome,
+  rows, filters, editor, embedded terminal, record meter)
+- `workspace_switcher.swift` — host app: commands.conf parsing, aerospace IPC,
+  icons, voice recorder (AVAudioEngine → SFSpeechRecognizer)
+- `main.swift` — entry point
+- `commands.conf` — every user-facing string + window definition (the app is
+  config-driven; new windows need no code)
+- `bin/workspace_switcher.sh` — hotkey launcher (pings the daemon, launches via
+  LaunchServices so mic/speech TCC grants attach to the app bundle)
+- `bin/voice-permissions.sh` — writes the mic + speech TCC grants
+- `jira/` — jira-api.sh (cache/sync), jira-poll.sh (publish window JSON),
+  jira-doctor.sh (health checks, `/health-checks` window)
+
+### Vendored SwiftTerm (one-time pull for the embedded terminal)
+
+The embedded terminal drawer (`config.terminal` in commands.conf) uses
+[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). The tested copy
+is vendored at `Vendor/SwiftTerm` — the one-time pull:
+
+```bash
+git clone https://github.com/migueldeicaza/SwiftTerm.git Vendor/SwiftTerm
+# pin to the commit the vendored copy was tested with (see git log there if
+# re-vendoring), or keep the checked-in copy — it builds as-is via:
+./build.sh
+```
+
+`PopupWindow.swift` imports SwiftTerm; the build script compiles
+`Vendor/SwiftTerm/Sources` implicitly through the `@_spi`/module import
+(see `bin/workspace_switcher.sh` for the exact swiftc invocation).
+
+### Nerd font
+
+The terminal renders with **Hack Nerd Font** (installed by the installer via
+`font-hack-nerd-font` cask). Override in `commands.conf`:
+
+```conf
+[app]
+terminal-font = Hack Nerd Font
+```
+
+### Shell in the terminal drawer
+
+```conf
+[app]
+shell = /opt/homebrew/bin/bash
+shell-args = --login -i      # login + interactive: sources profile AND rc
+```
+
+The shell auto-restarts if you `exit` it (poll + delegate), and the drawer
+grows with the window.
+
+## Uninstall
+
+```bash
+./UNINSTALL.sh
+```
