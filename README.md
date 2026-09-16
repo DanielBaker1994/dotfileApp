@@ -9,24 +9,22 @@ dependencies beyond what the installer brings.
 ### Option A — .pkg installer (true macOS click-through) ← recommended
 
 ```bash
-./pkg.sh            # build it (repo maintainers)
-open workspace-switcher.pkg
+./INSTALL.sh pkg
 ```
 
-Double-clicking the package opens the **native macOS Installer wizard** —
-Continue → Install → your password → Done. The package carries the whole
-repo and runs the full install as your user.
+Builds and opens the package → **native macOS Installer wizard** (Continue →
+Install → your password → Done). The package carries the whole repo and runs
+the full install as your user.
 
 ### Option B — DMG (GUI wizard)
 
 ```bash
-./dmg.sh            # build it (repo maintainers)
-open workspace-switcher.dmg
+./INSTALL.sh dmg
 ```
 
-In the DMG: **double-click Installer.app** (a SwiftUI wizard, click-through)
-— or open Terminal and run `./INSTALL.sh`. The DMG carries the whole repo, so
-it works from anywhere; INSTALL.sh clones a fresh copy to `~/workspace-switcher`
+Builds and opens the DMG → **double-click Installer.app** (SwiftUI wizard)
+or run `./INSTALL.sh` in a terminal. The DMG carries the whole repo, so it
+works from anywhere; INSTALL.sh clones a fresh copy to `~/workspace-switcher`
 and installs from there.
 
 ### Option B — one script (self-cloning)
@@ -60,8 +58,9 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 ## Development
 
 ```bash
-./build.sh               # compile workspace-switcher.app + TCC re-grant
-./build.sh --build-only  # compile + grant, do NOT launch
+./INSTALL.sh help       # the one command (install / pkg / dmg / uninstall)
+./build.sh              # dev: compile workspace-switcher.app + TCC re-grant
+./build.sh --build-only # dev: compile + grant, do NOT launch
 ```
 
 - `PopupWindow.swift` — reusable AppKit popup framework (windows, chrome,

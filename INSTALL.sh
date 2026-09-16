@@ -1,24 +1,64 @@
 #!/usr/bin/env bash
-# INSTALL.sh — ONE command installs the whole workspace switcher app.
+# INSTALL.sh — THE one command for this app.
 #
-#   ./INSTALL.sh
+#   ./INSTALL.sh             install everything (direct, verbose)
+#   ./INSTALL.sh pkg         build + open the click-through .pkg installer
+#   ./INSTALL.sh dmg         build + open the DMG (has a GUI wizard)
+#   ./INSTALL.sh uninstall   remove everything (same as UNINSTALL.sh)
+#   ./INSTALL.sh help        show this
 #
-# It prints EVERY step as it runs and stops with a loud error if anything
-# fails. Safe to run again (idempotent). Uninstall: ./UNINSTALL.sh
-#
-# What this installs:
-#   1. Homebrew (if missing) + all dependencies (aerospace, sketchybar,
-#      borders, jq, karabiner, nerd fonts)
-#   2. Configs (aerospace / sketchybar / borders) — existing ones backed up
-#   3. The app itself (compiled from source into workspace-switcher.app)
-#   4. Microphone + speech-recognition permissions (needed for voice notes)
-#   5. Menu-bar services (sketchybar, borders) via brew
-#   6. The jira poll agent (launchd) — keeps the jeera window fresh
-#   7. Opens the app so you can see it working
+# That's it. If you are not sure what to run:  ./INSTALL.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UID_="$(id -u)"
+
+GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
+ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
+fail() { printf "${RED}  ✘ %s${RESET}\n" "$*"; }
+warn() { printf "${YELLOW}  ! %s${RESET}\n" "$*"; }
+step() { printf "\n${CYAN}== %s ==${RESET}\n" "$*"; }
+info() { printf "${DIM}    %s${RESET}\n" "$*"; }
+
+usage() {
+    printf '%s\n' \
+        'INSTALL.sh — THE one command for this app.' \
+        '' \
+        '  ./INSTALL.sh             install everything (direct, verbose)' \
+        '  ./INSTALL.sh pkg         build + open the click-through .pkg installer' \
+        '  ./INSTALL.sh dmg         build + open the DMG (has a GUI wizard)' \
+        '  ./INSTALL.sh uninstall   remove everything (same as UNINSTALL.sh)' \
+        '  ./INSTALL.sh help        show this' \
+        '' \
+        "That's it. If you are not sure what to run:  ./INSTALL.sh"
+}
+
+# --------------------------------------------------------------- commands
+case "${1:-}" in
+    help|-h|--help)
+        usage
+        exit 0
+        ;;
+    pkg|--pkg)
+        "$ROOT/scripts/pkg.sh" && open "$ROOT/workspace-switcher.pkg"
+        exit 0
+        ;;
+    dmg|--dmg)
+        "$ROOT/scripts/dmg.sh" && open "$ROOT/workspace-switcher.dmg"
+        exit 0
+        ;;
+    uninstall|--uninstall)
+        "$ROOT/UNINSTALL.sh"
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        printf "${RED}Unknown option: %s${RESET}\n" "$1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
 
 # If this script is NOT running from a git checkout (e.g. you downloaded just
 # this file, or piped it through curl), clone the whole app first — that is
@@ -40,13 +80,6 @@ if [ ! -d "$ROOT/.git" ]; then
     fi
     exec bash "$DEST/INSTALL.sh"
 fi
-
-GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
-ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
-fail() { printf "${RED}  ✘ %s${RESET}\n" "$*"; }
-warn() { printf "${YELLOW}  ! %s${RESET}\n" "$*"; }
-step() { printf "\n${CYAN}== %s ==${RESET}\n" "$*"; }
-info() { printf "${DIM}    %s${RESET}\n" "$*"; }
 
 STEP="starting"
 die() {

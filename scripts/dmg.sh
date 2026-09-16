@@ -8,7 +8,7 @@
 # inside it. Everything the installer needs ships IN the DMG.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root (this script lives in scripts/)
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/ws-dmg.XXXXXX")"
 DMG="$ROOT/workspace-switcher.dmg"
 VOLNAME="Workspace Switcher Installer"

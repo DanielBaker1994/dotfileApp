@@ -9,7 +9,7 @@
 # logged-in user (Homebrew refuses to run as root).
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # repo root (this script lives in scripts/)
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ws-pkg.XXXXXX")"
 PAYLOAD_ROOT="$WORK/root"
 SCRIPTS="$WORK/scripts"
