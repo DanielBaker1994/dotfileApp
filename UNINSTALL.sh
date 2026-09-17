@@ -9,6 +9,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UID_="$(id -u)"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 BACKUP="$HOME/.config/workspace-switcher-uninstall-$(date +%s)"
 
 GREEN='\033[32m'; RED='\033[31m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'

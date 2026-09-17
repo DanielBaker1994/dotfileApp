@@ -152,8 +152,12 @@ W = 'DELL'
 
     # Workspace switcher popup: Hyper+S (caps_lock = Hyper via Karabiner;
     # AeroSpace has no `hyper` keyword, so it's spelled out as
-    # alt-cmd-ctrl-shift). This is the ONLY switcher hotkey.
+    # alt-cmd-ctrl-shift). Notes window: Hyper+N — workspace_switcher.sh moves
+    # the notes window onto the CURRENT workspace if it is already open, then
+    # focuses it (never spawns a duplicate).
     alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
+    alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh notes'
+    alt-cmd-ctrl-shift-f = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh files'
 
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
     # window that closes itself after you pick one. Works from any app.

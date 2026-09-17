@@ -84,6 +84,10 @@ if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRA
         -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
         "$FRAMEWORK" "$SRC" "$MAIN" -o "$BUILD_TMP"; then
         mv "$BUILD_TMP" "$BIN"
+        # the bundle's on-disk Info.plist is what LaunchServices reads for
+        # Finder right-click services (NSServices) — keep it in sync or the
+        # "Copy Path" / "Open in Notes" context items never register
+        cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
         codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
         # fresh build = fresh signature — re-grant mic + speech silently so
         # voice notes keep working (bundle-id grants persist across rebuilds)
@@ -100,13 +104,7 @@ if [ "${WS_BUILD_ONLY:-}" = "1" ]; then
     exit 0
 fi
 
-# Oil terminal: launches/toggles the Ghostty+nvim+Oil window (bin/oil.sh).
-# Created parked-hidden at daemon startup; this toggles show/hide. Never closed.
-if [ "$MODE" = "oil" ]; then
-    exec "$DIR/oil.sh"
-fi
-
-if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ]; then
+if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ] || [ "$MODE" = "files" ]; then
     DEBUG_LOG="${TMP}/ws-launch.log"
     LOG(){ echo "$(date '+%H:%M:%S.%3N') $*" >>"$DEBUG_LOG"; }
     LOG "== invoke MODE=$MODE =="

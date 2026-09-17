@@ -131,7 +131,7 @@ public struct PopupColors {
                 text: NSColor = NSColor(srgbRed: 202/255, green: 211/255, blue: 245/255, alpha: 1),
                 dim: NSColor = NSColor(srgbRed: 147/255, green: 154/255, blue: 183/255, alpha: 1),
                 highlight: NSColor = NSColor(srgbRed: 63/255, green: 74/255, blue: 90/255, alpha: 1),
-                accent: NSColor = NSColor(srgbRed: 80/255, green: 70/255, blue: 228/255, alpha: 1)) {
+                accent: NSColor = NSColor(srgbRed: 85/255, green: 104/255, blue: 130/255, alpha: 1)) {
         self.background = background
         self.border = border
         self.text = text
@@ -206,6 +206,17 @@ public struct PopupConfig {
     // the drawer being hidden). Toggle via toggleTerminalDrawer().
     public var terminal: Bool = false
     public var terminalHeight: CGFloat = 240
+    // starting directory for the embedded shell (commands.conf `terminal-dir`)
+    public var terminalDir = "/tmp/"
+    // embedded file-browser drawer (notes etc.): toggled like the terminal;
+    // both drawers can be open at once (they stack, window grows)
+    public var fileBrowserHeight: CGFloat = 300
+    // deep-sea blue panel background (distinct from the gray notes window);
+    // commands.conf `browser-background` overrides it
+    public var fileBrowserBackground = NSColor(srgbRed: 0.06, green: 0.22, blue: 0.39, alpha: 1)
+    // when a file-browser drawer is installed, open it (and close the
+    // terminal) from the start instead of the terminal being the default
+    public var fileBrowserDefault = false
     // shell the terminal drawer (and the host's command runner) spawn
     public var shell = "/opt/homebrew/bin/bash"
     // font for the terminal drawer (a Nerd Font so glyphs/powerline render)
@@ -1524,19 +1535,31 @@ final class PopupTextView: NSTextView {
 
     // right-click on a rendered photo: copy its ABSOLUTE file path
     override func menu(for event: NSEvent) -> NSMenu? {
+        let m = NSMenu()
         let pt = convert(event.locationInWindow, from: nil)
         let idx = characterIndexForInsertion(at: pt)
         if let path = absolutePathAt?(idx) {
-            let m = NSMenu()
             let item = NSMenuItem(title: "copy image path",
                                   action: #selector(copyImagePath(_:)),
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = path
             m.addItem(item)
-            return m
+            m.addItem(.separator())
         }
-        return super.menu(for: event)
+        // "open a file at an exact path" — prompts for a path and opens it
+        // in this note window as a tab
+        let open = NSMenuItem(title: "Open file at path…",
+                              action: #selector(openFileAtPath(_:)),
+                              keyEquivalent: "")
+        open.target = self
+        m.addItem(open)
+        return m
+    }
+
+    var onOpenFileAtPath: (() -> Void)?
+    @objc private func openFileAtPath(_ sender: NSMenuItem) {
+        onOpenFileAtPath?()
     }
 
     @objc private func copyImagePath(_ sender: NSMenuItem) {
@@ -1578,6 +1601,860 @@ final class PopupTextView: NSTextView {
             return true
         }
         return super.performDragOperation(sender)
+    }
+}
+
+// MARK: - Embedded file browser
+
+// A small theme-aware push button (pills, star, parent) drawn with the
+// window colors so it fits the dark chrome instead of the system accent.
+final class ThemeButton: NSView {
+    private let config: PopupConfig
+    var title: String { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+    private var down = false
+
+    init(config: PopupConfig, title: String) {
+        self.config = config
+        self.title = title
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirty: NSRect) {
+        let bg = down ? config.colors.highlight : config.colors.highlight.withAlphaComponent(0.55)
+        let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        bg.setFill()
+        r.fill()
+        config.colors.text.withAlphaComponent(0.15).setStroke()
+        r.lineWidth = 1
+        r.stroke()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: config.colors.text,
+        ]
+        let s = title as NSString
+        let sz = s.size(withAttributes: attrs)
+        s.draw(at: NSPoint(x: bounds.midX - sz.width / 2,
+                           y: bounds.midY - sz.height / 2), withAttributes: attrs)
+    }
+    override func mouseDown(with e: NSEvent) { down = true; needsDisplay = true }
+    override func mouseUp(with e: NSEvent) {
+        if bounds.contains(convert(e.locationInWindow, from: nil)) { onClick?() }
+        down = false
+        needsDisplay = true
+    }
+}
+
+// The browser's file list: custom-drawn rows (icon + name + size), click to
+// select (preview), double-click/Return to open, arrows to move. Printable
+// keys hand focus to the search field.
+final class FileListPane: NSView {
+    private let config: PopupConfig
+    var rows: [PopupFileBrowser.Entry] = [] {
+        didSet {
+            if let h = hover, !rows.indices.contains(h) { hover = nil }
+            needsDisplay = true
+        }
+    }
+    var selection = 0 { didSet { needsDisplay = true } }
+    private(set) var hover: Int?
+    var onSelect: ((Int) -> Void)?
+    var onOpen: ((Int) -> Void)?
+    var onParent: (() -> Void)?
+    var onFocusSearch: ((String) -> Void)?
+    var onHover: ((Int?) -> Void)?
+    var onCopyPath: ((Int) -> Void)?
+    var onOpenInNotes: ((Int) -> Void)?
+
+    private let rowH: CGFloat = 22
+    private static let iconSize: CGFloat = 16
+    private var trackingArea: NSTrackingArea?
+
+    init(config: PopupConfig) {
+        self.config = config
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(t)
+        trackingArea = t
+    }
+
+    override func mouseEntered(with event: NSEvent) {}
+    override func mouseExited(with event: NSEvent) {
+        hover = nil
+        onHover?(nil)
+    }
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let idx = Int(p.y / rowH)
+        let newHover = rows.indices.contains(idx) ? idx : nil
+        if newHover != hover {
+            hover = newHover
+            onHover?(newHover)
+            needsDisplay = true
+        }
+    }
+
+    func rowRect(_ i: Int) -> NSRect {
+        NSRect(x: 0, y: CGFloat(i) * rowH, width: bounds.width, height: rowH)
+    }
+
+    override func draw(_ dirty: NSRect) {
+        let w = bounds.width
+        for (i, e) in rows.enumerated() {
+            let r = rowRect(i)
+            if i == selection {
+                config.colors.highlight.setFill()
+                r.fill()
+            } else if let h = hover, h == i {
+                config.colors.highlight.withAlphaComponent(0.4).setFill()
+                r.fill()
+            }
+            let icon = e.icon ?? NSWorkspace.shared.icon(forFile: e.path)
+            var ir = r
+            ir.origin.x += 6
+            ir.size.width = Self.iconSize
+            let img = icon
+            NSGraphicsContext.saveGraphicsState()
+            let clip = NSBezierPath(roundedRect: ir.insetBy(dx: 1, dy: (rowH - Self.iconSize) / 2),
+                                    xRadius: 2, yRadius: 2)
+            clip.addClip()
+            img.draw(in: ir.insetBy(dx: 1, dy: (rowH - Self.iconSize) / 2))
+            NSGraphicsContext.restoreGraphicsState()
+
+            let nameAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: i == selection ? config.colors.text : config.colors.text.withAlphaComponent(0.85),
+            ]
+            var tx = ir.maxX + 6
+            if e.isDir && e.name != ".." { tx += 4 }   // folder emoji leading space kept small
+            let name = e.name as NSString
+            let avail = w - tx - 8 - (e.trailingWidth > 0 ? e.trailingWidth + 10 : 0)
+            name.draw(with: NSRect(x: tx, y: r.minY + (rowH - 15) / 2, width: max(20, avail), height: 15),
+                      options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
+                      attributes: nameAttrs)
+            if e.isDir && e.name != ".." {
+                // small folder glyph after the name (dim)
+                let dirAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+                    .foregroundColor: config.colors.dim,
+                ]
+                let d = (e.name as NSString).size(withAttributes: nameAttrs)
+                let g = "/" as NSString
+                g.draw(at: NSPoint(x: tx + d.width + 2, y: r.minY + (rowH - 12) / 2), withAttributes: dirAttrs)
+            }
+            if e.trailingWidth > 0 {
+                let szAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+                    .foregroundColor: config.colors.dim,
+                ]
+                let s = e.trailingText as NSString
+                s.draw(at: NSPoint(x: w - e.trailingWidth - 8, y: r.minY + (rowH - 12) / 2),
+                       withAttributes: szAttrs)
+            }
+        }
+    }
+
+    override func mouseDown(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        let idx = Int(p.y / rowH)
+        guard rows.indices.contains(idx) else { return }
+        selection = idx
+        onSelect?(idx)
+        if e.clickCount >= 2 { onOpen?(idx) }
+    }
+
+    // right-click a row -> context menu: open in the notes window / copy the
+    // absolute path / open in the default app / reveal in Finder
+    override func rightMouseDown(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        let idx = Int(p.y / rowH)
+        guard rows.indices.contains(idx) else { return }
+        selection = idx
+        onSelect?(idx)
+        let menu = NSMenu()
+        menu.addItem(menuItem("Open in Notes", #selector(rowOpenInNotes(_:)), idx))
+        menu.addItem(menuItem("Copy Path", #selector(rowCopyPath(_:)), idx))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(menuItem("Open", #selector(rowOpen(_:)), idx))
+        menu.addItem(menuItem("Reveal in Finder", #selector(rowRevealInFinder(_:)), idx))
+        NSMenu.popUpContextMenu(menu, with: e, for: self)
+    }
+
+    private func menuItem(_ title: String, _ sel: Selector, _ idx: Int) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        i.target = self
+        i.representedObject = idx
+        return i
+    }
+
+    @objc private func rowOpenInNotes(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int else { return }
+        onOpenInNotes?(idx)
+    }
+
+    @objc private func rowCopyPath(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int else { return }
+        onCopyPath?(idx)
+    }
+
+    @objc private func rowOpen(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int else { return }
+        onOpen?(idx)
+    }
+
+    @objc private func rowRevealInFinder(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int, rows.indices.contains(idx) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: rows[idx].path)])
+    }
+
+    override func keyDown(with e: NSEvent) {
+        let mods = e.modifierFlags
+        if !mods.intersection([.command, .control]).isEmpty {
+            super.keyDown(with: e)
+            return
+        }
+        switch e.keyCode {
+        case 126:   // up
+            selection = max(0, selection - 1)
+            onSelect?(selection)
+        case 125:   // down
+            selection = min(max(0, rows.count - 1), selection + 1)
+            onSelect?(selection)
+        case 36:    // return
+            onOpen?(selection)
+        case 123:   // left — parent dir
+            onParent?()
+        case 124:   // right — open selection
+            onOpen?(selection)
+        case 53:    // escape — let the window handle it
+            super.keyDown(with: e)
+        default:
+            if let chars = e.charactersIgnoringModifiers, !chars.isEmpty {
+                onFocusSearch?(chars)
+            } else {
+                super.keyDown(with: e)
+            }
+        }
+    }
+
+    // move the selection from the filter bar (which doesn't own it)
+    func moveSelection(_ delta: Int) {
+        guard !rows.isEmpty else { return }
+        selection = min(max(0, rows.count - 1), max(0, selection + delta))
+        onSelect?(selection)
+    }
+}
+
+// Search field inside the browser. Return/Up/Down are handled by the browser
+// via the field's NSControlTextEditingDelegate (control(_:textView:doCommandBy:))
+// — a plain keyDown override never fires while the field editor is active.
+final class BrowserSearchField: NSTextField {}
+
+// A read-only, keyboard-driven file browser panel: toolbar (search + pin +
+// up), a favorites pill row, a directory listing with a right-hand preview
+// split. Reused by the floating "files" window (fills the content) and the
+// notes window (bottom drawer, toggled like the terminal).
+final class PopupFileBrowser: NSView, NSTextFieldDelegate {
+    let config: PopupConfig
+    var onOpen: ((String) -> Void)?          // open a FILE in its default app
+    var onDirChange: ((String) -> Void)?     // cwd changed (host labels)
+    var onCopyDir: ((String) -> Void)?       // copy current dir path
+    var onCopyPath: ((String) -> Void)?      // copy an arbitrary path (hover/right-click)
+    var onOpenInNotes: ((String) -> Void)?   // right-click "Open in Notes"
+    var onStatus: ((String) -> Void)?        // transient feedback line
+
+    struct Entry {
+        let name: String
+        let path: String
+        let isDir: Bool
+        let size: Int
+        var icon: NSImage?
+        var trailingText: String = ""
+        var trailingWidth: CGFloat = 0
+    }
+
+    private static var iconCache: [String: NSImage] = [:]
+
+    private let favURL: URL
+    // starred dirs (persisted to favURL) — the other two sources come from
+    // commands.conf ([files] favorites + zoxide top-N)
+    private var pinnedFavorites: [String] = []
+    private let staticFavorites: [String]
+    private let zoxideFavorites: [String]
+    private var shownFavorites: [String] = []
+    private(set) var cwd: String
+    private var all: [Entry] = []
+    private var rows: [Entry] = []
+    private var selection = 0
+    private var query = ""
+
+    private let searchField = BrowserSearchField()
+    private let parentButton: ThemeButton
+    private let starButton: ThemeButton
+    private let listPane: FileListPane
+    private let listScroll = NSScrollView()
+    private let divider = NSView()
+    private let previewScroll = NSScrollView()
+    private let previewText = NSTextView()
+    private let previewImage = NSImageView()
+    private let previewHint = NSTextField(labelWithString: "")
+    private var favPills: [ThemeButton] = []
+    private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"])
+    private static let textLimit = 262144
+
+    // listPane needs to be focusable from the window (drawer toggle)
+    var listView: FileListPane { listPane }
+    // the search field is exposed so the window can route Cmd+V/C/A etc. to
+    // the filter bar (otherwise they land in the notes editor / hidden field)
+    var searchView: NSTextField { searchField }
+
+    init(config: PopupConfig, startDir: String, favoritesURL: URL? = nil,
+         staticFavorites: [String] = [], zoxideFavorites: [String] = []) {
+        self.config = config
+        self.cwd = (startDir as NSString).standardizingPath
+        self.staticFavorites = staticFavorites
+        self.zoxideFavorites = zoxideFavorites
+        let home = NSHomeDirectory()
+        self.favURL = favoritesURL ?? URL(fileURLWithPath: home + "/.cache/workspace-switcher/files-favorites.json")
+        self.parentButton = ThemeButton(config: config, title: "← up")
+        self.starButton = ThemeButton(config: config, title: "★ pin")
+        self.listPane = FileListPane(config: config)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = config.fileBrowserBackground.cgColor
+
+        listPane.onSelect = { [weak self] i in
+            self?.selection = i
+            self?.previewSelection()
+            self?.scrollSelectionVisible()
+        }
+        listPane.onOpen = { [weak self] i in
+            self?.openIndex(i)
+        }
+        listPane.onParent = { [weak self] in
+            self?.cdParent()
+        }
+        listPane.onCopyPath = { [weak self] i in
+            guard let self, self.rows.indices.contains(i) else { return }
+            let p = self.rows[i].path
+            self.onCopyPath?(p)
+            self.onStatus?("copied \(p)")
+        }
+        listPane.onOpenInNotes = { [weak self] i in
+            guard let self, self.rows.indices.contains(i) else { return }
+            self.onOpenInNotes?(self.rows[i].path)
+        }
+        listPane.onFocusSearch = { [weak self] chars in
+            guard let self else { return }
+            if !self.window!.makeFirstResponder(self.searchField) { return }
+            if let ed = self.searchField.currentEditor() {
+                let range = ed.selectedRange
+                let ns = self.searchField.stringValue as NSString
+                self.searchField.stringValue = ns.replacingCharacters(in: range, with: chars)
+                self.query = self.searchField.stringValue
+                self.refilter()
+                ed.selectedRange = NSRange(location: range.location + (chars as NSString).length, length: 0)
+            } else {
+                self.searchField.stringValue += chars
+                self.query = self.searchField.stringValue
+                self.refilter()
+            }
+        }
+
+        searchField.delegate = self
+        searchField.isBezeled = false
+        searchField.drawsBackground = false
+        searchField.focusRingType = .none
+        searchField.font = NSFont.systemFont(ofSize: 11)
+        searchField.textColor = config.colors.text
+        searchField.placeholderAttributedString = NSAttributedString(
+            string: "filter…",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: config.colors.dim])
+        searchField.wantsLayer = true
+        searchField.layer?.backgroundColor = config.colors.highlight.withAlphaComponent(0.4).cgColor
+        searchField.layer?.cornerRadius = 6
+        searchField.layer?.borderWidth = 1
+        searchField.layer?.borderColor = config.colors.border.withAlphaComponent(0.45).cgColor
+
+        parentButton.onClick = { [weak self] in self?.cdParent() }
+        starButton.onClick = { [weak self] in self?.toggleStar() }
+
+        previewText.isEditable = false
+        previewText.isSelectable = true
+        previewText.drawsBackground = false
+        previewText.textContainerInset = NSSize(width: 8, height: 8)
+        previewText.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        previewText.textColor = config.colors.text
+        previewScroll.documentView = previewText
+        previewScroll.hasVerticalScroller = true
+        previewScroll.autohidesScrollers = true
+        previewScroll.drawsBackground = false
+        previewScroll.borderType = .noBorder
+
+        previewImage.imageScaling = .scaleProportionallyUpOrDown
+        previewImage.imageAlignment = .alignCenter
+        previewImage.wantsLayer = true
+        previewImage.layer?.backgroundColor = NSColor.clear.cgColor
+
+        previewHint.font = NSFont.systemFont(ofSize: 12)
+        previewHint.textColor = config.colors.dim
+        previewHint.alignment = .center
+        previewHint.isEditable = false
+        previewHint.isSelectable = false
+
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = config.colors.border.withAlphaComponent(0.35).cgColor
+
+        // the file list lives in a scroll view so rows longer than the pane
+        // scroll INSIDE it — they can never bleed off the window's edge
+        listScroll.hasVerticalScroller = true
+        listScroll.autohidesScrollers = true
+        listScroll.drawsBackground = false
+        listScroll.borderType = .noBorder
+        listScroll.documentView = listPane
+
+        addSubview(parentButton)
+        addSubview(searchField)
+        addSubview(starButton)
+        addSubview(listScroll)
+        addSubview(divider)
+        addSubview(previewScroll)
+        addSubview(previewImage)
+        addSubview(previewHint)
+
+        loadFavorites()
+        rebuildPills()
+        reload()
+        showCwdInFilter()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+    override var isFlipped: Bool { true }
+
+    // window resizes (drawer toggle, drag) must re-run the pane layout
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    // MARK: layout
+
+    override func layout() {
+        super.layout()
+        layoutPanes()
+    }
+    private func layoutPanes() {
+        let w = bounds.width
+        let toolbarY: CGFloat = 4
+        let toolbarH: CGFloat = 24
+        // pin first (left), then parent, then the filter bar fills the rest
+        starButton.frame = NSRect(x: 6, y: toolbarY, width: 74, height: toolbarH)
+        parentButton.frame = NSRect(x: starButton.frame.maxX + 4, y: toolbarY,
+                                    width: 44, height: toolbarH)
+        searchField.frame = NSRect(x: parentButton.frame.maxX + 6, y: toolbarY,
+                                   width: max(60, w - parentButton.frame.maxX - 12),
+                                   height: toolbarH)
+        // favorites wrap to as many lines as their paths need
+        let favY = toolbarY + toolbarH + 5
+        let favH = layoutFavorites(from: favY)
+        let listY = favY + favH + 4
+        let bottomH: CGFloat = 0
+        let split = w * 0.56
+        let contentH = max(0, bounds.height - listY - bottomH)
+        listScroll.frame = NSRect(x: 0, y: listY, width: split, height: contentH)
+        divider.frame = NSRect(x: split, y: listY, width: 1, height: contentH)
+        previewScroll.frame = NSRect(x: split + 1, y: listY, width: max(0, w - split - 1), height: contentH)
+        previewImage.frame = NSRect(x: split + 1, y: listY, width: max(0, w - split - 1), height: contentH)
+        previewHint.frame = NSRect(x: split + 1, y: listY, width: max(0, w - split - 1), height: contentH)
+        layoutListDocument()
+    }
+    // the list's document (the row pane) grows to fit every row; the scroll
+    // view clips it at the pane height so long lists scroll in place
+    private func layoutListDocument() {
+        let clipH = max(0, listScroll.bounds.height)
+        let docH = max(clipH, CGFloat(listPane.rows.count) * 22)
+        listPane.frame = NSRect(x: 0, y: 0, width: max(0, listScroll.bounds.width), height: docH)
+        listPane.needsDisplay = true
+    }
+    // keep the keyboard/cursor selection inside the visible area (never let
+    // the selection scroll off-screen)
+    private func scrollSelectionVisible() {
+        guard listPane.rows.indices.contains(listPane.selection) else { return }
+        let clip = listScroll.contentView
+        let visible = clip.bounds
+        let r = listPane.rowRect(listPane.selection)
+        var target = visible.origin.y
+        if r.maxY > visible.maxY {
+            target = r.maxY - visible.height
+        } else if r.minY < visible.minY {
+            target = r.minY
+        }
+        if target != visible.origin.y {
+            clip.scroll(to: NSPoint(x: 0, y: target))
+            listScroll.reflectScrolledClipView(clip)
+        }
+    }
+    // wrap the favorite pills to multiple lines when the paths are long;
+    // returns the total height consumed (0 when there are no favorites)
+    private func layoutFavorites(from y0: CGFloat) -> CGFloat {
+        guard !favPills.isEmpty else { return 0 }
+        let pillH: CGFloat = 18
+        let gap: CGFloat = 4
+        var x: CGFloat = 6
+        var y = y0
+        for p in favPills {
+            let pw = pillWidth(p.title)
+            if x + pw > bounds.width - 6, x > 6 {
+                x = 6
+                y += pillH + gap
+            }
+            p.frame = NSRect(x: x, y: y, width: pw, height: pillH)
+            x += pw + gap
+        }
+        return (y - y0) + pillH
+    }
+    private func pillWidth(_ t: String) -> CGFloat {
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]
+        return (t as NSString).size(withAttributes: attrs).width + 16
+    }
+    // ~/notes instead of /Users/me/notes for pinned/config paths under home
+    private func displayPath(_ p: String) -> String {
+        let home = NSHomeDirectory()
+        if p.hasPrefix(home + "/") { return "~" + p.dropFirst(home.count) }
+        return p
+    }
+
+    // MARK: data
+
+    private func listDir(_ dir: String) -> [Entry] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        var out: [Entry] = []
+        if (dir as NSString).pathComponents.count > 1 {
+            let parent = (dir as NSString).deletingLastPathComponent
+            var up = Entry(name: "..", path: parent, isDir: true, size: 0)
+            up.icon = Self.iconCache[parent] ?? NSWorkspace.shared.icon(forFile: parent)
+            out.append(up)
+        }
+        for n in names where !n.hasPrefix(".") {
+            let p = (dir as NSString).appendingPathComponent(n)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: p, isDirectory: &isDir) else { continue }
+            let d = isDir.boolValue
+            var e = Entry(name: n, path: p, isDir: d,
+                          size: d ? 0 : (((try? fm.attributesOfItem(atPath: p))?[.size] as? NSNumber)?.intValue ?? 0))
+            if let cached = Self.iconCache[p] {
+                e.icon = cached
+            } else {
+                let img = NSWorkspace.shared.icon(forFile: p)
+                e.icon = img
+                Self.iconCache[p] = img
+            }
+            if !d {
+                e.trailingText = Self.humanSize(e.size)
+                e.trailingWidth = (e.trailingText as NSString)
+                    .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
+            }
+            out.append(e)
+        }
+        out.sort {
+            if $0.isDir != $1.isDir { return $0.isDir }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        return out
+    }
+    static func humanSize(_ bytes: Int) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var v = Double(bytes)
+        var i = 0
+        while v >= 1024, i < units.count - 1 { v /= 1024; i += 1 }
+        return i == 0 ? "\(bytes) B" : String(format: "%.1f %@", v, units[i])
+    }
+
+    func reload() {
+        all = listDir(cwd)
+        refilter()
+    }
+    private func refilter() {
+        let q = query
+        if q.isEmpty {
+            rows = all
+        } else if q.contains("*") || q.contains("?") {
+            // glob matching (case-insensitive): * = any run, ? = one char
+            let re = Self.globRegex(q)
+            rows = all.filter { e in
+                re.firstMatch(in: e.name, options: [],
+                              range: NSRange(0..<(e.name as NSString).length)) != nil
+            }
+        } else {
+            rows = all.filter { $0.name.lowercased().contains(q.lowercased()) }
+        }
+        if selection >= rows.count { selection = max(0, rows.count - 1) }
+        listPane.rows = rows
+        listPane.selection = selection
+        layoutListDocument()
+        scrollListToTop()
+        previewSelection()
+    }
+    // "*.md", "note*", "?og*" -> anchored, case-insensitive regex
+    private static func globRegex(_ glob: String) -> NSRegularExpression {
+        var out = "^"
+        for ch in glob.lowercased() {
+            switch ch {
+            case "*": out += ".*"
+            case "?": out += "."
+            case ".", "(", ")", "[", "]", "{", "}", "+", "^", "$", "|", "\\":
+                out += "\\\(ch)"
+            default: out += String(ch)
+            }
+        }
+        out += "$"
+        return try! NSRegularExpression(pattern: out, options: [.caseInsensitive])
+    }
+    private func scrollListToTop() {
+        let clip = listScroll.contentView
+        if clip.bounds.origin.y != 0 {
+            clip.scroll(to: NSPoint(x: 0, y: 0))
+            listScroll.reflectScrolledClipView(clip)
+        }
+    }
+    func cd(_ dir: String) {
+        cwd = (dir as NSString).standardizingPath
+        query = ""
+        reload()
+        updateStarTitle()
+        onDirChange?(cwd)
+        rebuildPills()
+        showCwdInFilter()
+        needsLayout = true
+    }
+    func cdParent() {
+        let parent = (cwd as NSString).deletingLastPathComponent
+        if parent != cwd { cd(parent) }
+    }
+    // the filter bar doubles as the address bar: at rest it shows the current
+    // directory; clicking it (select-all) lets you type a filter or a path
+    func showCwdInFilter() {
+        guard searchField.currentEditor() == nil else { return }
+        searchField.stringValue = cwd
+        searchField.placeholderString = nil
+    }
+    func copyDir() {
+        onCopyDir?(cwd)
+    }
+    // copy a list row's path (Cmd+C while the list is focused)
+    func copyRowPath(_ i: Int) {
+        guard rows.indices.contains(i) else { return }
+        let p = rows[i].path
+        onCopyPath?(p)
+        onStatus?("copied \(p)")
+    }
+    private func openIndex(_ i: Int) {
+        guard rows.indices.contains(i) else { return }
+        let e = rows[i]
+        if e.isDir {
+            cd(e.path)
+        } else {
+            onOpen?(e.path)
+        }
+    }
+
+    // Windows-explorer style: when the filter bar holds something that looks
+    // like a path (~/…, /…, …/…, or an existing entry) and the user hits
+    // Enter, jump straight to it (cd into a dir / open a file). Returns true
+    // when a jump happened, so the Enter is consumed and not treated as a
+    // list selection.
+    @discardableResult
+    private func jumpToQueryPath() -> Bool {
+        let q = searchField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return false }
+        // only a real path: absolute/~/or a slash-bearing entry (a bare name
+        // like "notes" keeps filtering the current dir instead)
+        guard q.contains("/") || q.hasPrefix("~") else { return false }
+        let p = (q as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir) else {
+            onStatus?("no such path: \(q)")
+            return true
+        }
+        if isDir.boolValue {
+            cd(p)
+            if let w = window { w.makeFirstResponder(listPane) }
+        } else {
+            onOpen?(p)
+            onStatus?("opened \(p)")
+        }
+        return true
+    }
+
+    // MARK: preview
+
+    private func previewSelection() {
+        guard rows.indices.contains(selection) else { return showHint(""); }
+        let e = rows[selection]
+        if e.isDir {
+            // the user knows it's a directory — show what's inside instead
+            let count = (try? FileManager.default.contentsOfDirectory(atPath: e.path))?.count ?? 0
+            showHint(count == 0 ? "empty" : "\(count) item\(count == 1 ? "" : "s")")
+        } else if Self.imageExts.contains((e.path as NSString).pathExtension.lowercased()) {
+            if let img = NSImage(contentsOfFile: e.path) {
+                previewImage.image = img
+                showImage()
+            } else {
+                showHint("unable to preview")
+            }
+        } else if let text = textPreview(e.path) {
+            previewText.string = text
+            previewText.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            showText()
+        } else {
+            showHint("no preview")
+        }
+    }
+    private func showHint(_ s: String) {
+        previewScroll.isHidden = true
+        previewImage.isHidden = true
+        previewHint.isHidden = s.isEmpty
+        previewHint.stringValue = s
+    }
+    private func showText() {
+        previewHint.isHidden = true
+        previewImage.isHidden = true
+        previewScroll.isHidden = false
+    }
+    private func showImage() {
+        previewHint.isHidden = true
+        previewScroll.isHidden = true
+        previewImage.isHidden = false
+    }
+    private func textPreview(_ path: String) -> String? {
+        guard let sz = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.intValue else { return nil }
+        if sz > Self.textLimit {
+            guard let h = FileHandle(forReadingAtPath: path) else { return nil }
+            defer { try? h.close() }
+            let data = h.readData(ofLength: Self.textLimit)
+            return String(data: data, encoding: .utf8)
+        }
+        guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    // MARK: favorites
+
+    private func loadFavorites() {
+        guard let data = try? Data(contentsOf: favURL) else { return }
+        if let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+            pinnedFavorites = arr
+        }
+    }
+    private func saveFavorites() {
+        try? FileManager.default.createDirectory(
+            atPath: favURL.deletingLastPathComponent().path, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: pinnedFavorites) {
+            try? data.write(to: favURL)
+        }
+    }
+    // config favorites + zoxide top-N + starred, deduped, order-preserving
+    private func mergedFavorites() -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for raw in staticFavorites + zoxideFavorites + pinnedFavorites {
+            let p = (raw as NSString).expandingTildeInPath
+            if seen.insert(p).inserted { out.append(p) }
+        }
+        return out
+    }
+    private func toggleStar() {
+        if shownFavorites.contains(cwd) {
+            // it's already a favorite somewhere — pull it out of the pinned
+            // set only if it wasn't config/zoxide-supplied (those are fixed)
+            if pinnedFavorites.contains(cwd) {
+                pinnedFavorites.removeAll { $0 == cwd }
+            } else {
+                pinnedFavorites.append(cwd)
+            }
+        } else {
+            pinnedFavorites.append(cwd)
+        }
+        saveFavorites()
+        rebuildPills()
+        updateStarTitle()
+        onStatus?(shownFavorites.contains(cwd) ? "★ pinned \(displayPath(cwd))" : "unpinned \(displayPath(cwd))")
+    }
+    private func updateStarTitle() {
+        starButton.title = shownFavorites.contains(cwd) ? "★ pinned" : "★ pin"
+    }
+    private func rebuildPills() {
+        for p in favPills { p.removeFromSuperview() }
+        favPills = []
+        shownFavorites = mergedFavorites()
+        for fav in shownFavorites {
+            let p = ThemeButton(config: config, title: displayPath(fav))
+            p.onClick = { [weak self] in
+                guard let self, FileManager.default.fileExists(atPath: fav) else { return }
+                self.cd(fav)
+            }
+            addSubview(p)
+            favPills.append(p)
+        }
+        updateStarTitle()
+        needsLayout = true
+    }
+
+    // MARK: search
+
+    // clicking the filter bar selects the whole path so typing replaces it
+    // (address-bar behavior) instead of inserting into the middle
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard (obj.object as AnyObject?) === searchField else { return }
+        searchField.currentEditor()?.selectAll(nil)
+    }
+    // leaving the filter bar with no query restores the directory display
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard (obj.object as AnyObject?) === searchField else { return }
+        if query.isEmpty { showCwdInFilter() }
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard (obj.object as AnyObject?) === searchField else { return }
+        query = searchField.stringValue
+        refilter()
+        onStatus?(query.isEmpty ? "" : "\(rows.count) match\(rows.count == 1 ? "" : "es")")
+    }
+
+    // Field-editor commands for the filter bar: the field editor owns
+    // Return/Up/Down while editing, so this delegate hook (the only reliable
+    // interception) routes them — Return jumps to a typed path or opens the
+    // list selection; Up/Down move the list selection.
+    func control(_ control: NSControl, textView: NSTextView,
+                 doCommandBy commandSelector: Selector) -> Bool {
+        guard control === searchField else { return false }
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            if jumpToQueryPath() { return true }
+            if let w = window { w.makeFirstResponder(listPane) }
+            openIndex(listPane.selection)
+            return true
+        case #selector(NSResponder.moveUp(_:)):
+            if let w = window { w.makeFirstResponder(listPane) }
+            listPane.moveSelection(-1)
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            if let w = window { w.makeFirstResponder(listPane) }
+            listPane.moveSelection(1)
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -1627,6 +2504,9 @@ var meterEnabled = false {
     // through PopupWindow.onHeaderButton with the button's id
     var extraButtons: [(label: String, id: Int)] = []
     var extraButtonRects: [Int: NSRect] = [:]
+    // extra buttons whose feature is currently ON (e.g. the terminal / file
+    // browser drawer is open) — drawn darker than the idle state
+    var activeButtonIDs: Set<Int> = []
     // header button hit rects (flipped coords, set during draw) — the window
     // uses these to route header clicks to the right action
     var copyButtonRect: NSRect = .zero
@@ -1912,14 +2792,25 @@ var meterEnabled = false {
             if active {
                 config.colors.accent.setFill()
                 segRect.fill()
+            } else if seg.fb >= 10, activeButtonIDs.contains(seg.fb) {
+                // persistent "on" state (drawer open): SOLID accent fill + a
+                // bright outline — unmistakable against the dark idle bar
+                config.colors.accent.setFill()
+                segRect.fill()
+                config.colors.text.withAlphaComponent(0.6).setStroke()
+                let ring = NSBezierPath(roundedRect: segRect.insetBy(dx: 1, dy: 1),
+                                        xRadius: 4, yRadius: 4)
+                ring.lineWidth = 1.5
+                ring.stroke()
             }
             if seg.fb == 1 { copyButtonRect = segRect }
             if seg.fb == 2 { configButtonRect = segRect }
             if seg.fb == 3 { copyRowsButtonRect = segRect }
             if seg.fb >= 10 { extraButtonRects[seg.fb] = segRect }
+            let lit = active || (seg.fb >= 10 && activeButtonIDs.contains(seg.fb))
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                .foregroundColor: active
+                .foregroundColor: lit
                     ? config.colors.text : config.colors.text.withAlphaComponent(0.72),
             ]
             let s = seg.text as NSString
@@ -2089,6 +2980,16 @@ final class TerminalAutoRestart: NSObject,
                                        exitCode: Int32?) { onTerminated?() }
 }
 
+// Right-click menu actions for the embedded terminal drawer: "Copy" reads the
+// current selection safely and writes it to the clipboard; "Open in Notes"
+// forwards the selected text (a path) to the host's onTerminalOpenInNotes hook.
+final class TerminalMenuTarget: NSObject {
+    var copy: (() -> Void)?
+    var openInNotes: (() -> Void)?
+    @objc func copySelection(_ sender: Any?) { copy?() }
+    @objc func openSelectionInNotes(_ sender: Any?) { openInNotes?() }
+}
+
 // MARK: - Popup window
 
 public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate {
@@ -2152,6 +3053,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
     public var onHeaderButton: ((Int) -> Void)?
 
+    // mark an extra header button as ON (its feature/drawer is open) so it
+    // renders darker — the host flips this when toggling the terminal / file
+    // browser drawer
+    private var headerButtonOn: Set<Int> = []
+    public func setHeaderButtonOn(_ id: Int, _ on: Bool) {
+        if on { headerButtonOn.insert(id) } else { headerButtonOn.remove(id) }
+        chrome?.activeButtonIDs = headerButtonOn
+        chrome?.needsDisplay = true
+    }
+
     // edit mode: present the text view read-only (detail viewers)
     public var editorReadOnly = false
 
@@ -2205,11 +3116,28 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private let rowView: PopupRowView
     private var editorView: NSTextView?
     private var terminalDrawer: LocalProcessTerminalView?
+    // tiny side padding for the embedded terminal so its first/last columns
+    // never sit flush against the window edges
+    private let terminalInset: CGFloat = 4
+    // in-note find (Ctrl/Cmd+F): a small field above the editor + its match
+    // counter. Query finds in the note's plain text, Enter/Shift+Enter cycle.
+    private var findField: NSTextField?
+    private var findCountLabel: NSTextField?
+    private var findMatches: [NSRange] = []
+    private var findIndex = 0
     // polls the shell's health so a dead drawer ALWAYS comes back (the
     // delegate's fast restart can land inside SwiftTerm's windingDown window,
     // where startProcess is silently ignored)
     private var terminalRestartTimer: Timer?
     public private(set) var terminalShown = true
+    // embedded file-browser drawer (notes): host installs a PopupFileBrowser;
+    // toggled like the terminal, only one drawer is open at a time
+    private(set) var fileBrowser: PopupFileBrowser?
+    public private(set) var fileBrowserShown = false
+    private var fileBrowserDrawerMode = false
+    // total drawer height currently folded into the window frame (baseline =
+    // no drawers); the terminal is on at init when config.terminal is set
+    private var drawerInsetNow: CGFloat = 0
     private var editorScroll: NSScrollView?
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
@@ -2327,6 +3255,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public var onTabClick: ((Int) -> Void)?
     // "+" pill on the tab strip (config.tabsAddButton) — e.g. create a note
     public var onAddTab: (() -> Void)?
+    // host hook to open a specific file in this window (e.g. the Finder
+    // "Open in Notes" service): the host adds it as a tab / makes it active
+    public var onOpenExternalPath: ((String) -> Void)?
+    // host prompt for the editor's "Open file at path…" context-menu item
+    public var onOpenPathPrompt: (() -> Void)?
+    // terminal drawer right-click "Open in Notes": the host receives the
+    // terminal's current selection (a path) and opens it as a note tab
+    public var onTerminalOpenInNotes: ((String) -> Void)?
+    // file-browser right-click "Open in Notes": the host receives the row's
+    // absolute path and opens it as a note tab
+    public var onFileBrowserOpenInNotes: ((String) -> Void)?
 
     // filters (config.filters): labels + unique values per dimension (value
     // index 0 = "All"); changing a selection fires onFilterChange
@@ -2400,6 +3339,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             }
             layoutEditorScroll()
             layoutTerminal()
+            layoutFileBrowser()
         } else if config.scrollableRows {
             let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
             let fieldFrame = NSRect(x: config.padding + 10,
@@ -2446,6 +3386,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     public init(config: PopupConfig) {
         self.config = config
+
+        // terminal drawer context menu: built in the terminal block below
+        // (before super.init, so it can't capture self), then wired after
+        // super.init where [weak self] is legal
+        var terminalMenuView: LocalProcessTerminalView? = nil
+        var terminalMenuTarget: TerminalMenuTarget? = nil
+        var terminalMenu: NSMenu? = nil
 
         // Note/list windows get a (visually transparent) titlebar: AeroSpace's
         // isWindowHeuristic treats accessory apps without an AX close button
@@ -2494,6 +3441,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         backdrop.layer?.borderWidth = 1
         backdrop.layer?.borderColor = config.colors.border.cgColor
 
+        // allow mouse-moved for hover feedback (file-browser rows, resize
+        // cursor feedback) — cheap, and the tracking areas scope the events
+        panel.acceptsMouseMovedEvents = true
         if config.enableResize {
             // borderless: resize handled by dragging edges/corners on the
             // backdrop; just allow mouse-moved for cursor feedback
@@ -2579,6 +3529,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             tv.allowsUndo = true
             tv.font = editorFont(config.fontName, zoom)
             tv.textColor = config.colors.text
+            // Force the selection highlight colors (Ctrl+A select-all, the
+            // find bar's match jump). The system default follows the OS
+            // appearance/accent, so the SAME binary renders differently per
+            // machine — e.g. white text on a light-mode selection is
+            // unreadable. Pin selection to the configured highlight + text
+            // colors so it always contrasts, regardless of the machine.
+            tv.selectedTextAttributes = [
+                .backgroundColor: config.colors.highlight,
+                .foregroundColor: config.colors.text,
+            ]
             tv.backgroundColor = .clear
             tv.drawsBackground = false
             tv.textContainerInset = NSSize(width: 10, height: 10)
@@ -2607,16 +3567,50 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 backdrop.addSubview(bar)
                 tabsBar = bar
             }
+            // in-note find bar (Ctrl/Cmd+F): hidden until toggled; the query
+            // field matches the search-field styling
+            let ff = NSTextField()
+            ff.cell = PopupSearchFieldCell()
+            ff.isEditable = true
+            ff.isSelectable = true
+            ff.focusRingType = .none
+            ff.wantsLayer = true
+            ff.layer?.backgroundColor = config.colors.highlight.withAlphaComponent(0.4).cgColor
+            ff.layer?.cornerRadius = 6
+            ff.layer?.borderWidth = 1
+            ff.layer?.borderColor = config.colors.border.withAlphaComponent(0.45).cgColor
+            ff.font = config.rowFont(config.inputFontSize * zoom)
+            ff.textColor = config.colors.text
+            ff.placeholderAttributedString = NSAttributedString(
+                string: "find in note…",
+                attributes: [.font: config.rowFont(config.inputFontSize * zoom),
+                             .foregroundColor: config.colors.dim])
+            ff.isHidden = true
+            backdrop.addSubview(ff)
+            findField = ff
+            let fc = NSTextField(labelWithString: "")
+            fc.font = config.rowFont(config.inputFontSize * zoom)
+            fc.textColor = config.colors.dim
+            fc.isHidden = true
+            backdrop.addSubview(fc)
+            findCountLabel = fc
             if config.terminal {
+                drawerInsetNow = config.terminalHeight
                 // embedded shell drawer at the bottom: the editor stops above
                 // it (layoutEditorScroll), the session survives hide/show
                 let term = LocalProcessTerminalView(frame: NSRect(
-                    x: 0, y: backdrop.bounds.height - config.terminalHeight,
-                    width: backdrop.bounds.width, height: config.terminalHeight))
+                    x: terminalInset,
+                    y: backdrop.bounds.height - config.terminalHeight,
+                    width: max(0, backdrop.bounds.width - 2 * terminalInset),
+                    height: config.terminalHeight))
                 term.autoresizingMask = [.width]
                 if let tf = NSFont(name: config.terminalFont, size: 13) {
                     term.font = tf
                 }
+                // softly rounded drawer corners (sits inset in the backdrop)
+                term.wantsLayer = true
+                term.layer?.cornerRadius = 8
+                term.layer?.masksToBounds = true
                 backdrop.addSubview(term)
                 terminalDrawer = term
                 // auto-restart: if the shell exits (user typed exit/ctrl-d)
@@ -2624,21 +3618,54 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 // (capture the shell locally — no self before super.init)
                 let shell = config.shell
                 let shellArgs = config.shellArgs
+                let terminalDir = config.terminalDir
                 let restarter = TerminalAutoRestart()
                 restarter.onTerminated = { [weak term] in
                     guard let term else { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        term.startProcess(executable: shell, args: shellArgs)
+                        term.startProcess(executable: shell, args: shellArgs,
+                                          currentDirectory: terminalDir)
                     }
                 }
                 term.processDelegate = restarter
-                term.startProcess(executable: shell, args: shellArgs)
+                term.startProcess(executable: shell, args: shellArgs,
+                                  currentDirectory: terminalDir)
+                // right-click menu: paste / copy / select-all straight to the
+                // shell (SwiftTerm owns the clipboard read/write), plus
+                // "Open in Notes" — the current selection (a path) becomes a
+                // note tab via the host hook. The closures that capture self
+                // are wired after super.init (see below).
+                let tmenu = NSMenu(title: "Terminal")
+                func titem(_ t: String, _ sel: Selector, _ key: String) -> NSMenuItem {
+                    let i = NSMenuItem(title: t, action: sel, keyEquivalent: key)
+                    i.target = term
+                    return i
+                }
+                let menuTarget = TerminalMenuTarget()
+                let copyItem = NSMenuItem(title: "Copy",
+                                          action: #selector(TerminalMenuTarget.copySelection(_:)),
+                                          keyEquivalent: "c")
+                copyItem.target = menuTarget
+                let openItem = NSMenuItem(title: "Open in Notes",
+                                          action: #selector(TerminalMenuTarget.openSelectionInNotes(_:)),
+                                          keyEquivalent: "")
+                openItem.target = menuTarget
+                tmenu.addItem(titem("Paste", #selector(LocalProcessTerminalView.paste(_:)), "v"))
+                tmenu.addItem(copyItem)
+                tmenu.addItem(NSMenuItem.separator())
+                tmenu.addItem(openItem)
+                tmenu.addItem(NSMenuItem.separator())
+                tmenu.addItem(titem("Select All", #selector(LocalProcessTerminalView.selectAll(_:)), "a"))
+                terminalMenuView = term
+                terminalMenuTarget = menuTarget
+                terminalMenu = tmenu
                 // safety net: poll the shell's state; restart once the old
                 // session is fully wound down (running==false && windingDown==false)
                 let poll = Timer(timeInterval: 1.5, repeats: true) { [weak term] _ in
                     guard let term, let p = term.process else { return }
                     if !p.running, !p.windingDown {
-                        term.startProcess(executable: shell, args: shellArgs)
+                        term.startProcess(executable: shell, args: shellArgs,
+                                          currentDirectory: terminalDir)
                     }
                 }
                 RunLoop.main.add(poll, forMode: .common)
@@ -2764,6 +3791,32 @@ scroll.documentView = rowView
         panel.contentView = backdrop
 
         super.init()
+        // "Open file at path…" editor context-menu item -> host prompt
+        (editorView as? PopupTextView)?.onOpenFileAtPath = { [weak self] in
+            self?.onOpenPathPrompt?()
+        }
+        // terminal drawer right-click actions (self-safe only after super.init):
+        // "Copy" copies the selection; "Open in Notes" forwards the selected
+        // text (a path) to the host hook.
+        if let term = terminalMenuView, let menuTarget = terminalMenuTarget {
+            menuTarget.copy = { [weak term] in
+                term?.copy(NSNull())
+            }
+            menuTarget.openInNotes = { [weak term, weak self] in
+                guard let term else { return }
+                // a real selection (length > 0) is required — never clobber
+                // the clipboard on an empty right-click
+                guard term.selectedRange().length > 0 else { return }
+                term.copy(NSNull())   // public API: puts the selection on the general pasteboard
+                let text = NSPasteboard.general.string(forType: .string)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !text.isEmpty else { return }
+                self?.onTerminalOpenInNotes?(text)
+            }
+        }
+        if let term = terminalMenuView, let tmenu = terminalMenu {
+            term.menu = tmenu
+        }
         if let bar = tabsBar {
             bar.onSelect = { [weak self] index in
                 self?.selectedTab = index
@@ -2825,6 +3878,8 @@ scroll.documentView = rowView
         if !config.editMode {
             field.delegate = self
         }
+        // find bar delegate (edit mode only) — set after super.init like field
+        findField?.delegate = self
         // header clicks never reach the chrome (the invisible titlebar eats
         // them) — intercept them at the window level instead; the click
         // position decides which header button was hit
@@ -2887,6 +3942,11 @@ scroll.documentView = rowView
             let origin = centeredOrigin(width: config.width, height: h)
             panel.setContentSize(NSSize(width: config.width, height: h))
             panel.setFrameOrigin(origin)
+            // the window was just resized to its real height — re-frame the
+            // editor, terminal and file-browser drawers to that final size
+            // (otherwise the browser stretches to fill the window on first
+            // paint and the editor is left at its tiny init frame)
+            layoutForZoom()
             isShown = true
             installMonitors()
             focusRetries = 0
@@ -2943,6 +4003,23 @@ scroll.documentView = rowView
         }
         onHideVoiceStop?()
         onHide?(restore)
+    }
+
+    // Re-show a persistent (hidden-but-alive) window. The panel was orderOut'd
+    // on hide but the PopupWindow itself survived (the host keeps the notes
+    // window as a singleton), so we only re-assert visibility and re-install
+    // the monitors — editor text, scroll position and the embedded terminal
+    // session are untouched.
+    public func showPersistent() {
+        guard !isShown else { return }
+        onShow?()
+        isShown = true
+        installMonitors()
+        focusRetries = 0
+        relayoutTabs()
+        layoutEditorScroll()
+        panel.makeKeyAndOrderFront(nil)
+        takeFocus()
     }
 
     // Break the host-hook retain cycles so a hidden sub-window (and whatever
@@ -3058,6 +4135,7 @@ private func scrollSelectionIntoView() {
 
     public func clearInput() {
         field.stringValue = ""
+        rowView.highlightQuery = ""
     }
 
     // editor text accessors (edit mode)
@@ -3311,6 +4389,12 @@ private func scrollSelectionIntoView() {
                 queue: .main) { [weak self] _ in
                 guard let self, self.isShown else { return }
                 self.panel.makeKeyAndOrderFront(nil)
+                // don't steal focus from the embedded terminal: if the shell
+                // has it, leave it there (else focus the notes editor)
+                if let term = self.terminalDrawer, self.terminalShown,
+                   self.terminalFocused(term) {
+                    return
+                }
                 if let tv = self.editorView {
                     self.panel.makeFirstResponder(tv)
                 } else {
@@ -3364,6 +4448,15 @@ private func scrollSelectionIntoView() {
 
     // MARK: Keys
 
+    // the NSTextView field editor actively editing inside the sheet / panel
+    private func activeTextEditor() -> NSTextView? {
+        if let sheet = panel.attachedSheet, let tv = sheet.firstResponder as? NSTextView {
+            return tv
+        }
+        if let tv = panel.firstResponder as? NSTextView { return tv }
+        return nil
+    }
+
     private func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         // Cmd + plus/minus (main "="/"+" and "-", plus the keypad): grow or
         // shrink the window; rows stretch to fill from then on
@@ -3380,8 +4473,103 @@ private func scrollSelectionIntoView() {
         // Editing shortcuts (select-all / copy / paste / cut / undo) must be
         // intercepted explicitly: system key equivalents don't fire reliably
         // for nonactivating accessory-app windows (Cmd/Ctrl + A/C/V/X/Z).
+        // Terminal policy: when the shell holds focus it owns EVERY shortcut
+        // except copy (Cmd+C) and paste (Cmd+V / Ctrl+V) — Ctrl+C must reach
+        // the shell as SIGINT, Ctrl+A/Z/X stay readline/suspend, etc.
         let ctrl = mods.contains(.control)
         if cmd || ctrl {
+            // When a sheet is up (e.g. the New Note / Open Existing dialog),
+            // its own text field must own the edit shortcuts — don't hijack
+            // Cmd+V/C/X/A into the editor behind the sheet. Paste (Cmd+V AND
+            // Ctrl+V, the Linux-style shortcut the terminal also honors) is
+            // routed straight to the sheet's field editor so it ALWAYS works,
+            // even though the app has no Edit menu / key equivalents.
+            if panel.attachedSheet != nil {
+                if code == 9, cmd || ctrl, let ed = activeTextEditor() {
+                    ed.paste(nil)
+                    return true
+                }
+                return false
+            }
+            // Ctrl+J / Ctrl+K: move keyboard focus up/down across the panes
+            // (notes editor -> file browser drawer -> terminal drawer), only
+            // over the ones that are open. J = down, K = up. Handled BEFORE
+            // the terminal branch so it works from any pane.
+            if ctrl && (code == 38 || code == 40), config.editMode {
+                var panes: [NSResponder] = []
+                if let ed = editorView { panes.append(ed) }
+                if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView) }
+                if terminalShown, let term = terminalDrawer { panes.append(term) }
+                if panes.count > 1 {
+                    let current = panel.firstResponder
+                    let curIdx = panes.firstIndex { p in
+                        if let current, current === p { return true }
+                        if let v = current as? NSView, let pv = p as? NSView {
+                            return v.isDescendant(of: pv)
+                        }
+                        return false
+                    }
+                    if let curIdx {
+                        let target = code == 38
+                            ? min(curIdx + 1, panes.count - 1)
+                            : max(curIdx - 1, 0)
+                        if target != curIdx { panel.makeFirstResponder(panes[target]) }
+                    } else {
+                        panel.makeFirstResponder(code == 38 ? panes[0] : panes[panes.count - 1])
+                    }
+                    return true
+                }
+                // single pane (editor only) — fall through so the emacs
+                // bindings (Ctrl+J newline, Ctrl+K kill-line) reach the text view
+            }
+            if let term = focusedTerm() {
+                switch code {
+                case 8 where cmd: term.copy(self); return true    // Cmd+C copy
+                case 9 where cmd || ctrl: term.paste(self); return true  // Cmd+V / Ctrl+V paste
+                default: return false   // every other Cmd/Ctrl key goes to the shell
+                }
+            }
+            // Cmd+L: focus the browser's filter bar (address-bar shortcut),
+            // selecting the current path so typing replaces it
+            if cmd && code == 37, let fb = fileBrowser, browserActive() {
+                panel.makeFirstResponder(fb.searchView)
+                fb.searchView.currentEditor()?.selectAll(nil)
+                return true
+            }
+            // The file browser's search field owns the standard editing
+            // shortcuts while it (or its list) has focus — otherwise Cmd+V
+            // pastes into the notes editor / hidden window field instead of
+            // the filter bar.
+            if let fb = fileBrowser, browserActive(), browserHasFocus(fb) {
+                switch code {
+                case 0:   // A — select all in the filter bar
+                    fb.searchView.selectText(nil)
+                    return true
+                case 8:   // C — copy the search selection / the list row path
+                    if let ed = fb.searchView.currentEditor() {
+                        ed.copy(nil)
+                    } else {
+                        fb.copyRowPath(fb.listView.selection)
+                    }
+                    return true
+                case 9:   // V — paste into the filter bar
+                    if let ed = fb.searchView.currentEditor() {
+                        ed.paste(nil)
+                    } else if panel.makeFirstResponder(fb.searchView),
+                              let ed = fb.searchView.currentEditor() {
+                        ed.paste(nil)
+                    }
+                    return true
+                case 7:   // X — cut from the filter bar
+                    fb.searchView.currentEditor()?.cut(nil)
+                    return true
+                case 6:   // Z — undo in the filter bar
+                    fb.searchView.currentEditor()?.undoManager?.undo()
+                    return true
+                default:
+                    break
+                }
+            }
             switch code {
             case 0:   // A — select all
                 if let tv = editorView {
@@ -3418,6 +4606,12 @@ private func scrollSelectionIntoView() {
                     ed.undoManager?.undo()
                 }
                 return true
+            case 3:   // F — find in the note (Cmd+F or Ctrl+F)
+                if config.editMode {
+                    toggleFindBar()
+                    return true
+                }
+                return false
             default:
                 break
             }
@@ -3431,12 +4625,30 @@ private func scrollSelectionIntoView() {
                 // EVERYTHING (including Esc — the shell's, not the window's)
                 return false
             }
+            if findBarShown {
+                // find bar owns Esc (close) and Return/Shift+Return (cycle)
+                if code == 53 {
+                    closeFindBar()
+                    return true
+                }
+                if code == 36 {
+                    findStep(mods.contains(.shift) ? -1 : 1)
+                    return true
+                }
+                return false
+            }
             if code == 53 {
                 handleEscape()
                 return true
             }
             if code == 1, mods.contains(.command), editorView != nil {
                 onEditorCommit?(currentEditorText)
+                return true
+            }
+            // Cmd+O: open a file at an exact path (same prompt as the editor's
+            // "Open file at path…" context menu)
+            if code == 31, mods.contains(.command) {
+                onOpenPathPrompt?()
                 return true
             }
             return false
@@ -3513,9 +4725,14 @@ private func scrollSelectionIntoView() {
         // the shared field editor draws its own system focus ring; the search
         // bar carries a themed hairline border instead
         field.currentEditor()?.focusRingType = .none
+        findField?.currentEditor()?.focusRingType = .none
     }
 
     public func controlTextDidChange(_ obj: Notification) {
+        if let ff = findField, obj.object as AnyObject? === ff {
+            applyFindQuery()
+            return
+        }
         guard config.enableSearch else { return }
         let q = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         rowView.highlightQuery = field.stringValue
@@ -3546,6 +4763,7 @@ private func scrollSelectionIntoView() {
         relayoutTabs()
         layoutEditorScroll()
         layoutSearchField()
+        layoutFindBar()
         layoutTerminal()
         rowView.needsDisplay = true
         chrome?.needsDisplay = true
@@ -3625,14 +4843,92 @@ private func scrollSelectionIntoView() {
             drawer.startProcess(executable: config.shell, args: config.shellArgs)
         }
         terminalShown.toggle()
-        // the drawer's height is proportional to the window — use the LIVE
-        // height for the grow/shrink delta, not the fixed config value
-        let delta = terminalShown ? terminalDrawerHeight() : -terminalDrawerHeight()
-        let f = panel.frame
-        panel.setFrame(NSRect(x: f.origin.x, y: f.origin.y,
-                              width: f.width, height: f.height + delta), display: true)
-        layoutEditorScroll()
+        syncDrawerLayout()
+    }
+
+    // Host installs a file browser. `drawer` = true makes it a bottom drawer
+    // toggled like the terminal (notes); false makes it fill the content area
+    // below the chrome (the standalone "files" window).
+    func installFileBrowser(_ fb: PopupFileBrowser, drawer: Bool) {
+        fileBrowser = fb
+        fileBrowserDrawerMode = drawer
+        guard let backdrop = panel.contentView else { return }
+        fb.autoresizingMask = [.width, .height]
+        // right-click "Open in Notes" -> host hook
+        fb.onOpenInNotes = { [weak self] p in
+            self?.onFileBrowserOpenInNotes?(p)
+        }
+        if let chrome = self.chrome {
+            backdrop.addSubview(fb, positioned: .below, relativeTo: chrome)
+        } else {
+            backdrop.addSubview(fb)
+        }
+        if drawer && config.fileBrowserDefault {
+            // the file browser is the default pane: start open, terminal closed
+            fileBrowserShown = true
+            terminalShown = false
+            drawerInsetNow = config.fileBrowserHeight
+        }
+        // drawer mode starts hidden unless it's the default; content mode is
+        // always visible
+        fb.isHidden = drawer ? !fileBrowserShown : false
+        layoutFileBrowser()
         layoutTerminal()
+        layoutEditorScroll()
+    }
+
+    public func toggleFileBrowser() {
+        guard fileBrowser != nil, fileBrowserDrawerMode else { return }
+        fileBrowserShown.toggle()
+        fileBrowser?.isHidden = !fileBrowserShown
+        syncDrawerLayout()
+        if fileBrowserShown, let lp = fileBrowser?.listView {
+            panel.makeFirstResponder(lp)
+        }
+    }
+
+    // Both drawers can be open at once (terminal + file browser stacked); the
+    // window grows so the editor never overlaps them. The total drawer height
+    // is folded into the window frame and the panes laid out accordingly.
+    private func drawerInsetTotal() -> CGFloat {
+        (terminalShown ? config.terminalHeight : 0)
+            + (fileBrowserShown ? config.fileBrowserHeight : 0)
+    }
+    private func syncDrawerLayout() {
+        let want = drawerInsetTotal()
+        if abs(want - drawerInsetNow) > 0.5 {
+            let f = panel.frame
+            panel.setFrame(NSRect(x: f.origin.x, y: f.origin.y,
+                                  width: f.width, height: f.height + (want - drawerInsetNow)),
+                           display: true)
+            drawerInsetNow = want
+        }
+        layoutTerminal()
+        layoutFileBrowser()
+        layoutEditorScroll()
+    }
+
+    private func layoutFileBrowser() {
+        guard let fb = fileBrowser, let backdrop = panel.contentView else { return }
+        if fileBrowserDrawerMode {
+            let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight : 0
+            let h = fileBrowserShown ? config.fileBrowserHeight : 0
+            // stack the browser ABOVE the terminal drawer (terminal keeps the
+            // very bottom), so both can be visible at once
+            let termH = terminalShown ? config.terminalHeight : 0
+            let y = max(0, backdrop.bounds.height - meter - termH - h)
+            fb.frame = NSRect(x: terminalInset, y: y,
+                              width: max(0, backdrop.bounds.width - 2 * terminalInset),
+                              height: h)
+        } else {
+            // fill the content area below the drag header / tabs
+            let tabH = (tabsBar?.frame.height ?? 0)
+            let topY = config.headerHeight * zoom + tabH + 2
+            fb.frame = NSRect(x: 0, y: topY, width: backdrop.bounds.width,
+                              height: max(40, backdrop.bounds.height - topY))
+        }
+        fb.needsLayout = true
+        fb.layoutSubtreeIfNeeded()
     }
 
     // does the embedded terminal hold keyboard focus? (keyboard routing: let
@@ -3644,24 +4940,142 @@ private func scrollSelectionIntoView() {
         return false
     }
 
-    // space available to the editor + terminal drawer (below chrome/meter)
-    private func availableContentHeight() -> CGFloat {
-        guard let backdrop = panel.contentView else { return 40 }
-        let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
-        let topY = config.headerHeight * zoom + tabH + 2
-        let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight + 4 : 0
-        return max(40, backdrop.bounds.height - topY - meter)
+    // the terminal view, but only when the drawer is shown AND it has focus —
+    // edit shortcuts (copy/paste/select-all) route to it instead of the editor
+    private func focusedTerm() -> LocalProcessTerminalView? {
+        guard let term = terminalDrawer, terminalShown, terminalFocused(term) else { return nil }
+        return term
     }
 
-    // The drawer scales WITH the window: it keeps its configured base height
-    // and takes half of any space beyond a ~180pt editor minimum, so resizing
-    // the window grows the terminal too instead of dumping everything into
-    // the editor.
+    // does the file browser own keyboard focus? (search field editing, or the
+    // first responder is inside the browser — list, pills, etc.)
+    private func browserHasFocus(_ fb: PopupFileBrowser) -> Bool {
+        if fb.searchView.currentEditor() != nil { return true }
+        let fr = panel.firstResponder
+        if let v = fr as? NSView { return v.isDescendant(of: fb) }
+        return false
+    }
+    // is the browser on screen at all? drawer mode = shown; content mode =
+    // (floating files window) always visible
+    private func browserActive() -> Bool {
+        guard let fb = fileBrowser else { return false }
+        _ = fb
+        return fileBrowserDrawerMode ? fileBrowserShown : true
+    }
+
+    // MARK: Find in note
+
+    private var findBarShown: Bool {
+        guard let ff = findField else { return false }
+        return !ff.isHidden
+    }
+
+    // Ctrl/Cmd+F: show the find bar (prefilled with the current selection),
+    // or close it if it is already open
+    public func toggleFindBar() {
+        if findBarShown { closeFindBar() } else { showFindBar() }
+    }
+
+    public func showFindBar() {
+        guard let ff = findField, ff.isHidden else { return }
+        ff.isHidden = false
+        findCountLabel?.isHidden = false
+        layoutFindBar()
+        layoutEditorScroll()
+        panel.makeFirstResponder(ff)
+        if let tv = editorView, tv.selectedRange().length > 0 {
+            let sel = (tv.string as NSString).substring(with: tv.selectedRange())
+            ff.stringValue = sel
+            ff.currentEditor()?.selectedRange =
+                NSRange(location: 0, length: (sel as NSString).length)
+        }
+        applyFindQuery()
+    }
+
+    public func closeFindBar() {
+        guard let ff = findField, !ff.isHidden else { return }
+        ff.isHidden = true
+        findCountLabel?.isHidden = true
+        findMatches = []
+        findIndex = 0
+        layoutFindBar()
+        layoutEditorScroll()
+        if let tv = editorView { tv.window?.makeFirstResponder(tv) }
+    }
+
+    // re-run the find across the note's plain text, jump to the first match
+    private func applyFindQuery() {
+        guard let ff = findField, let tv = editorView else { return }
+        let q = ff.stringValue
+        let text = tv.string
+        var ranges: [NSRange] = []
+        if !q.isEmpty {
+            let ns = text as NSString
+            var loc = 0
+            while loc < ns.length {
+                let r = ns.range(of: q, options: .caseInsensitive,
+                                 range: NSRange(location: loc, length: ns.length - loc))
+                if r.location == NSNotFound { break }
+                ranges.append(r)
+                loc = r.location + r.length
+            }
+        }
+        findMatches = ranges
+        findIndex = 0
+        if !ranges.isEmpty { jumpToFind(0) }
+        updateFindCount()
+    }
+
+    private func jumpToFind(_ i: Int) {
+        guard findMatches.indices.contains(i), let tv = editorView else { return }
+        findIndex = i
+        tv.setSelectedRange(findMatches[i])
+        tv.scrollRangeToVisible(findMatches[i])
+        updateFindCount()
+    }
+
+    private func findStep(_ dir: Int) {
+        guard !findMatches.isEmpty else { return }
+        jumpToFind(((findIndex + dir) % findMatches.count + findMatches.count) % findMatches.count)
+    }
+
+    private func updateFindCount() {
+        guard let fc = findCountLabel else { return }
+        if findMatches.isEmpty {
+            fc.stringValue = findField?.stringValue.isEmpty ?? true ? "" : "0/0"
+        } else {
+            fc.stringValue = "\(findIndex + 1)/\(findMatches.count)"
+        }
+    }
+
+    private func layoutFindBar() {
+        guard let ff = findField, let backdrop = panel.contentView else { return }
+        let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
+        let y = config.headerHeight * zoom + tabH + 4
+        let h: CGFloat = 24
+        if ff.isHidden {
+            ff.frame = .zero
+            findCountLabel?.frame = .zero
+            return
+        }
+        ff.frame = NSRect(x: 12, y: y,
+                          width: max(120, backdrop.bounds.width - 24 - 56),
+                          height: h)
+        findCountLabel?.frame = NSRect(x: backdrop.bounds.width - 50, y: y,
+                                       width: 42, height: h)
+    }
+
+    private func findBarHeight() -> CGFloat {
+        findBarShown ? 24 + 6 : 0
+    }
+
+    // The drawer's height is FIXED (config.terminalHeight) — the window is
+    // created with exactly that much extra, and toggling adds/removes the same
+    // amount, so show/hide never changes the window's proportions (a
+    // proportional height recomputed from the window height caused the toggle
+    // to ratchet the size smaller each time).
     private func terminalDrawerHeight() -> CGFloat {
-        guard terminalShown else { return 0 }
-        let base = config.terminalHeight
-        let extra = max(0, availableContentHeight() - base - 180)
-        return base + extra * 0.5
+        terminalShown ? config.terminalHeight : 0
     }
 
     private func layoutTerminal() {
@@ -3673,22 +5087,25 @@ private func scrollSelectionIntoView() {
         let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight : 0
         let y = max(0, backdrop.bounds.height - meter - h)
         // bottom-anchored drawer: the editor (and its scroll bar) stop above
-        // it, so content can never scroll behind the terminal
-        drawer.frame = NSRect(x: 0, y: y, width: backdrop.bounds.width, height: h)
+        // it, so content can never scroll behind the terminal. A tiny side
+        // inset keeps the shell's first/last columns off the window edges.
+        drawer.frame = NSRect(x: terminalInset, y: y,
+                              width: max(0, backdrop.bounds.width - 2 * terminalInset),
+                              height: h)
     }
 
     private func layoutEditorScroll() {
         guard config.editMode, let scroll = editorScroll,
               let backdrop = panel.contentView else { return }
         let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
-        let topY = config.headerHeight * zoom + tabH + 2
+        let topY = config.headerHeight * zoom + tabH + 2 + findBarHeight()
         // the voice meter/record strip owns the bottom of the window: stop the
         // editor above it so the caret (and the last dictated line) is never
         // hidden behind the record button
         let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight + 4 : 0
-        // the embedded terminal drawer owns the bottom: stop the editor above
-        // it while it is shown
-        let drawer = terminalDrawerHeight() + 4
+        // the drawer (terminal or file browser) owns the bottom: stop the editor
+        // above it while one is shown
+        let drawer = drawerInsetNow + 4
         scroll.frame.origin.y = topY
         scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter - drawer)
         if config.markdownImages {

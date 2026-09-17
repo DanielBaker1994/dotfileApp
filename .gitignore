@@ -1,6 +1,5 @@
 # built artifacts
 workspace-switcher.app/
-Installer.app/
 .build/
 
 # generated docs
@@ -13,6 +12,3 @@ README.pdf
 __pycache__/
 create_a_file_here.txt
 testbackups/
-# release artifact (rebuild with dmg.sh)
-*.dmg
-*.pkg

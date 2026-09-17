@@ -2,8 +2,6 @@
 # INSTALL.sh — THE one command for this app.
 #
 #   ./INSTALL.sh             install everything (direct, verbose)
-#   ./INSTALL.sh pkg         build + open the click-through .pkg installer
-#   ./INSTALL.sh dmg         build + open the DMG (has a GUI wizard)
 #   ./INSTALL.sh uninstall   remove everything (same as UNINSTALL.sh)
 #   ./INSTALL.sh help        show this
 #
@@ -12,6 +10,11 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UID_="$(id -u)"
+
+# This script can run from stripped environments (curl|bash, cron) where
+# /opt/homebrew/bin is NOT on PATH — make sure brew and friends are always
+# reachable.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 GREEN='\033[32m'; RED='\033[31m'; YELLOW='\033[33m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
 ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
@@ -25,8 +28,6 @@ usage() {
         'INSTALL.sh — THE one command for this app.' \
         '' \
         '  ./INSTALL.sh             install everything (direct, verbose)' \
-        '  ./INSTALL.sh pkg         build + open the click-through .pkg installer' \
-        '  ./INSTALL.sh dmg         build + open the DMG (has a GUI wizard)' \
         '  ./INSTALL.sh uninstall   remove everything (same as UNINSTALL.sh)' \
         '  ./INSTALL.sh help        show this' \
         '' \
@@ -37,14 +38,6 @@ usage() {
 case "${1:-}" in
     help|-h|--help)
         usage
-        exit 0
-        ;;
-    pkg|--pkg)
-        "$ROOT/scripts/pkg.sh" && open "$ROOT/workspace-switcher.pkg"
-        exit 0
-        ;;
-    dmg|--dmg)
-        "$ROOT/scripts/dmg.sh" && open "$ROOT/workspace-switcher.dmg"
         exit 0
         ;;
     uninstall|--uninstall)
@@ -157,11 +150,18 @@ install_config "$ROOT/config/sketchybar" "$HOME/.config/sketchybar"
 install_config "$ROOT/config/borders"    "$HOME/.config/borders"
 ok "configs installed (aerospace / sketchybar / borders)"
 
-if [ -e "$HOME/.config/workspace-switcher" ] && [ ! -L "$HOME/.config/workspace-switcher" ]; then
-    mv "$HOME/.config/workspace-switcher" "$HOME/.config/workspace-switcher.bak.$(date +%s)"
+# The repo may ALREADY live at ~/.config/workspace-switcher — in that case
+# there is nothing to link and moving it away would self-symlink. Only create
+# the symlink when the repo lives somewhere else.
+if [ "$ROOT" != "$HOME/.config/workspace-switcher" ]; then
+    if [ -e "$HOME/.config/workspace-switcher" ] && [ ! -L "$HOME/.config/workspace-switcher" ]; then
+        mv "$HOME/.config/workspace-switcher" "$HOME/.config/workspace-switcher.bak.$(date +%s)"
+    fi
+    ln -sfn "$ROOT" "$HOME/.config/workspace-switcher"
+    ok "app linked at ~/.config/workspace-switcher"
+else
+    ok "app already lives at ~/.config/workspace-switcher — no symlink needed"
 fi
-ln -sfn "$ROOT" "$HOME/.config/workspace-switcher"
-ok "app linked at ~/.config/workspace-switcher"
 
 # ------------------------------------------------------------- 4. build
 STEP="building the app"

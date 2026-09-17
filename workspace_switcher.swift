@@ -37,7 +37,7 @@ let commandsConfName = "commands.conf"
 // MARK: - App settings (commands.conf [app] section)
 
 // Single source of truth for every machine-owned string: shell, CLI paths,
-// socket/focus filenames, icon assets, search dirs, and the jira poll wiring.
+// socket/focus filenames, icon assets, search dirs, and launchd service wiring.
 // Defaults live here so the app works with no config; parseAppConfig() applies
 // the [app] section overrides when commands.conf is loaded at startup.
 struct AppSettings {
@@ -63,9 +63,6 @@ struct AppSettings {
     var detailWindowName = "jira-detail"
     var aerospaceSocketPath = "/tmp/bobko.aerospace-\(NSUserName()).sock"
     var crashLogPath = NSString(string: "~/.cache/ws-crash.log").expandingTildeInPath
-    var jiraJsonDir = NSString(string: "~/.cache/workspace-switcher/jira_json").expandingTildeInPath
-    var pollScript = NSString(string: "~/.config/workspace-switcher/jira/jira-poll.sh").expandingTildeInPath
-    var pollWindow = "30m"
     var aeroDebugFlag = NSString(string: "~/.cache/aero-debug").expandingTildeInPath
     var aeroLog = NSString(string: "~/.cache/ws-aero.log").expandingTildeInPath
     var authDebugFlag = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInPath
@@ -355,7 +352,7 @@ func gatherWorkspaces() -> [WorkspaceInfo] {
 // Typed command specs. Plain `name = script` lines become .shell commands;
 // INI-style sections configure note/list behavior (see commands.conf).
 struct CommandSpec {
-    enum Kind { case shell, note, list, output }
+    enum Kind { case shell, note, list, output, files }
 
     let name: String
     let kind: Kind
@@ -364,6 +361,10 @@ struct CommandSpec {
     let script: String?    // shell: command to run
     let paths: [String]    // note: files edited in-window (tabs when > 1)
     let sources: [String]  // list: JSON array (or TSV) data files (tabs when > 1)
+    let root: String?     // files: starting directory for the file browser
+    let favorites: [String]  // files: static favorite dirs (commands.conf, tilde ok)
+    let zoxideTop: Int       // files: include the top-N dirs from zoxide as favorites
+    let browserBackground: NSColor?  // files: panel background (default deep sea blue)
     let primary: String?   // list: field shown as the row title
     let content: String?   // list: field drawn next to the title (truncated)
     let detail: String?    // list: field drawn dim on line 2 (left)
@@ -392,11 +393,15 @@ struct CommandSpec {
     let voice: Bool           // note: record + transcribe button in the header
     let terminal: Bool        // note: embedded shell drawer at the bottom
     let terminalHeight: CGFloat
+    let terminalDir: String?  // note: starting directory for the embedded shell
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
 
     init(name: String, kind: Kind = .shell, windowName: String? = nil,
          chromeTitle: String? = nil, script: String? = nil, paths: [String] = [],
-         sources: [String] = [], primary: String? = nil,
+         sources: [String] = [], root: String? = nil,
+         favorites: [String] = [], zoxideTop: Int = 0,
+         browserBackground: NSColor? = nil,
+         primary: String? = nil,
          content: String? = nil, detail: String? = nil, trailing: String? = nil,
          body: String? = nil, filter: [String] = [], filters: [String] = [],
          width: CGFloat = 0, maxRows: Int = 0, contentCap: Int = 0,
@@ -406,6 +411,7 @@ struct CommandSpec {
          maxStretch: CGFloat = 0, height: CGFloat = 0, font: String? = nil,
          headerColor: NSColor? = nil, voice: Bool = false,
          terminal: Bool = false, terminalHeight: CGFloat = 240,
+         terminalDir: String? = nil,
          icon: NSImage? = nil) {
         self.name = name
         self.kind = kind
@@ -414,6 +420,10 @@ struct CommandSpec {
         self.script = script
         self.paths = paths
         self.sources = sources
+        self.root = root
+        self.favorites = favorites
+        self.zoxideTop = zoxideTop
+        self.browserBackground = browserBackground
         self.primary = primary
         self.content = content
         self.detail = detail
@@ -440,6 +450,7 @@ struct CommandSpec {
         self.voice = voice
         self.terminal = terminal
         self.terminalHeight = terminalHeight
+        self.terminalDir = terminalDir
         self.icon = icon
     }
 }
@@ -494,10 +505,6 @@ func loadCommands() -> [CommandSpec] {
         }
     }
     flushSection()
-    // health-checks runs jira-doctor.sh — no jira, no health checks.
-    if !cmds.contains(where: { $0.name == "jira" }) {
-        cmds.removeAll { $0.name == "health-checks" }
-    }
     return cmds
 }
 
@@ -507,6 +514,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     case "note": kind = .note
     case "list": kind = .list
     case "output": kind = .output
+    case "files": kind = .files
     default: kind = .shell
     }
     let filter = (vars["filter"] ?? "")
@@ -525,6 +533,10 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         script: vars["script"],
         paths: csv(vars["paths"] ?? vars["path"]),
         sources: csv(vars["sources"] ?? vars["source"]),
+        root: vars["root"],
+        favorites: csv(vars["favorites"]),
+        zoxideTop: Int(vars["zoxide-top"] ?? "") ?? 0,
+        browserBackground: hexColor(vars["browser-background"]),
         primary: vars["primary"],
         content: vars["content"], detail: vars["detail"], trailing: vars["trailing"],
         body: vars["body"], filter: filter, filters: filters, width: width,
@@ -546,6 +558,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         voice: tri(vars["voice"]) ?? false,
         terminal: tri(vars["terminal"]) ?? false,
         terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
+        terminalDir: vars["terminal-dir"],
         icon: vars["icon"].flatMap(resolveIconName))
 }
 
@@ -625,13 +638,6 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("crash-log"), !v.isEmpty {
         settings.crashLogPath = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
     }
-    if let v = str("jira-json-dir"), !v.isEmpty {
-        settings.jiraJsonDir = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
-    }
-    if let v = str("poll-script"), !v.isEmpty {
-        settings.pollScript = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
-    }
-    if let v = str("poll-window"), !v.isEmpty { settings.pollWindow = v }
     if let v = str("debug-flag"), !v.isEmpty {
         settings.aeroDebugFlag = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
     }
@@ -698,8 +704,10 @@ private let lastWriteFormatter: DateFormatter = {
 }()
 
 private func lastWriteLabel(_ path: String) -> String {
-    guard let d = mtime(of: path) else { return "" }
-    return "Last File Write: " + lastWriteFormatter.string(from: d)
+    // "Last File Write: …" was removed from the header per request — the
+    // footer slot stays for transient messages (e.g. voice errors), so this
+    // label is intentionally empty.
+    ""
 }
 
 private func mtime(of path: String) -> Date? {
@@ -1487,6 +1495,32 @@ final class SwitcherController: NSObject {
         openNoteWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
     }
 
+    // Finder "Open in Notes" service: focus (or open) the notes window and
+    // make the given file the active tab.
+    func openNoteFile(_ path: String) {
+        let p = (path as NSString).standardizingPath
+        guard FileManager.default.fileExists(atPath: p) else {
+            log("openNoteFile: \(p) does not exist")
+            return
+        }
+        if popup.isShown {
+            popup.hide(restore: false)
+        }
+        (savedWID, savedPID) = readFocusFile()
+        guard let cmd = commands.first(where: { $0.kind == .note }) else {
+            log("openNoteFile: no note command configured in \(commandsConfName)")
+            return
+        }
+        if let w = subWindows.first(where: { $0.config.name == cmd.windowName }) {
+            focusSubWindow(w)
+        } else {
+            openNoteWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
+        }
+        if let w = subWindows.first(where: { $0.config.name == cmd.windowName }) {
+            w.onOpenExternalPath?(p)
+        }
+    }
+
     // Open a command's window directly (no switcher popup) by its
     // commands.conf section name — e.g. hyper+J -> notes, hyper+N -> jira.
     // Re-invoking focuses the existing window of that type.
@@ -1516,6 +1550,14 @@ final class SwitcherController: NSObject {
             focusExistingOrOpen(editMode: false) {
                 openListWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
             }
+        case .files:
+            // single instance, matched by NAME (jira is also editMode=false,
+            // so a generic editMode guard could focus the wrong window)
+            if let existing = subWindows.first(where: { $0.config.name == cmd.windowName }) {
+                focusSubWindow(existing)
+                return
+            }
+            openFilesWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
         case .output:
             openOutputWindow(cmd)
         case .shell:
@@ -1545,9 +1587,15 @@ final class SwitcherController: NSObject {
     // (workspace_switcher.sh notes|jira) via aerospace BEFORE pinging us — so
     // the daemon never blocks its main thread on aerospace IPC while focusing.
     private func focusSubWindow(_ w: PopupWindow) {
-        let win = w.nativeWindow
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if !w.isShown {
+            // persistent window hidden by Esc: re-show the SAME instance —
+            // its editor text and embedded terminal session are still alive
+            w.showPersistent()
+        } else {
+            let win = w.nativeWindow
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         log("focused existing '\(w.config.name)' window")
     }
 
@@ -1708,6 +1756,17 @@ final class SwitcherController: NSObject {
             case .output:
                 popup.hide(restore: true)
                 openOutputWindow(cr.command)
+            case .files:
+                popup.hide(restore: false)
+                let wid = savedWID
+                let pid = savedPID
+                if let existing = subWindows.first(where: {
+                    $0.config.name == cr.command.windowName
+                }) {
+                    focusSubWindow(existing)
+                } else {
+                    openFilesWindow(cr.command, restoreWID: wid, restorePID: pid)
+                }
             }
             return
         }
@@ -1891,9 +1950,6 @@ final class SwitcherController: NSObject {
             self.unregisterSubWindow(w, restore: restore,
                                      restoreWID: nil, restorePID: nil)
         }
-        if cmd.name == "health-checks" {
-            attachPollButtons(w)
-        }
         subWindows.append(w)
         w.show()
         runOutput(cmd, into: w)
@@ -1903,7 +1959,7 @@ final class SwitcherController: NSObject {
         runScript(cmd.script ?? "", label: cmd.name, into: w)
     }
 
-    // run any shell line into an output window (doctor's poll buttons reuse it)
+    // run any shell line into an output window
     private func runScript(_ script: String, label: String, into w: PopupWindow) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak w] in
             let p = Process()
@@ -1938,36 +1994,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // poll targets for the doctor window's header buttons: "all" plus one per
-    // project json the poll publishes (KAN, SAM1, …)
-    private func pollTargets() -> [String] {
-        let dir = settings.jiraJsonDir
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir))?
-            .filter { $0.hasSuffix(".json") && $0 != "all.json" }
-            .map { ($0 as NSString).deletingPathExtension }
-            .sorted() ?? []
-        return ["all"] + names
-    }
-
-    private func pollScript(for target: String) -> String {
-        settings.pollScript + " --window \(settings.pollWindow) --projects \(target)"
-    }
-
-    // doctor window grows a poll button per target; clicking one re-runs the
-    // poll for just that json and refreshes the button list afterwards
-    private func attachPollButtons(_ w: PopupWindow) {
-        let targets = pollTargets()
-        w.headerButtons = targets.enumerated().map { ("poll \($1)", 10 + $0) }
-        w.onHeaderButton = { [weak self, weak w] id in
-            guard let self, let w, id >= 10,
-                  targets.indices.contains(id - 10) else { return }
-            let target = targets[id - 10]
-            self.runScript(self.pollScript(for: target),
-                           label: "poll \(target)", into: w)
-            self.attachPollButtons(w)
-        }
-    }
-
     // note: edit the file(s) in-window (no external editor). Files are created
     // if missing, saved on Cmd+S and whenever the window closes. With multiple
     // `paths`, each note pad is a tab.
@@ -1981,20 +2007,35 @@ final class SwitcherController: NSObject {
         // expand ~, and expand any directory entry to its matching files (sorted).
     // A `paths`/`sources` value may be a single file OR a directory — pointing
     // at a folder means new files show up automatically without editing
-    // commands.conf.
-    var paths = expandPaths(cmd.paths, extensions: ["md"])
-        .map { (raw: String) -> String in
-            let path = (raw as NSString).expandingTildeInPath
-            let dir = (path as NSString).deletingLastPathComponent
-            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: path) {
-                FileManager.default.createFile(atPath: path, contents: nil)
-            }
-            return path
+    // commands.conf. Deleted notes are NOT resurrected: a listed file that no
+    // longer exists is dropped (and removed from commands.conf) instead of
+    // being recreated empty.
+    var paths: [String] = []
+    for p in expandPaths(cmd.paths, extensions: ["md"]) {
+        if FileManager.default.fileExists(atPath: p) {
+            paths.append(p)
+        } else {
+            log("note '\(cmd.name)': \(p) deleted — dropping it and removing from config")
+            removeNotePathFromConfig(p, section: cmd.name)
         }
-        var titles = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
-        var currentPath = paths[0]
-        let content = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+    }
+    if paths.isEmpty {
+        // every listed note is gone — open a fresh default.md scratch note
+        let first = (cmd.paths[0] as NSString).expandingTildeInPath
+        let fallback = (first as NSString).deletingLastPathComponent + "/default.md"
+        try? FileManager.default.createDirectory(
+            atPath: (fallback as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: fallback) {
+            FileManager.default.createFile(atPath: fallback, contents: nil)
+        }
+        paths = [fallback]
+        addNotePathToConfig(fallback, section: cmd.name)
+        log("note '\(cmd.name)': all listed notes deleted — opened fresh \(fallback)")
+    }
+    var titles = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+    var currentPath = paths[0]
+    let content = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
 
         var cfg = PopupConfig(name: cmd.windowName)
         cfg.enableToggle = false
@@ -2005,10 +2046,16 @@ final class SwitcherController: NSObject {
         cfg.tabs = true
         cfg.tabsAddButton = true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
+        // the file browser is the default pane (open on launch); the terminal
+        // starts closed — the initial height folds in whichever drawer opens
+        cfg.fileBrowserDefault = true
         cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
-            + (cmd.terminal ? cmd.terminalHeight : 0)
+            + (cfg.fileBrowserDefault ? cfg.fileBrowserHeight
+                                      : (cmd.terminal ? cfg.terminalHeight : 0))
         cfg.terminal = cmd.terminal
         cfg.terminalHeight = cmd.terminalHeight
+        if let td = cmd.terminalDir { cfg.terminalDir = td }
+        if let bb = cmd.browserBackground { cfg.fileBrowserBackground = bb }
         cfg.shell = settings.shell
         cfg.shellArgs = settings.shellArgs
         cfg.terminalFont = settings.terminalFont
@@ -2022,13 +2069,29 @@ final class SwitcherController: NSObject {
         cfg.fontName = cmd.font
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
-        if cmd.terminal {
-            // header ">_" button toggles the embedded shell drawer
-            w.headerButtons = [(">_", 10)]
-            w.onHeaderButton = { [weak w] id in
-                if id == 10 { w?.toggleTerminalDrawer() }
+        // header buttons: ">_" toggles the embedded shell drawer, "▤" toggles
+        // the embedded file browser (both can be open at once), "open…" opens
+        // a file at an exact path
+        var hb: [(String, Int)] = []
+        if cmd.terminal { hb.append((">_", 10)) }
+        hb.append(("▤", 20))
+        hb.append(("open…", 30))
+        w.headerButtons = hb
+        w.onHeaderButton = { [weak w] id in
+            if id == 10 {
+                w?.toggleTerminalDrawer()
+                if let w { w.setHeaderButtonOn(10, w.terminalShown) }
+            } else if id == 20 {
+                w?.toggleFileBrowser()
+                if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
+            } else if id == 30 {
+                w?.onOpenPathPrompt?()
             }
         }
+        // initial drawer state: terminal starts on, browser starts off — the
+        // header buttons mirror that
+        if cmd.terminal { w.setHeaderButtonOn(10, false) }
+        w.setHeaderButtonOn(20, false)
         func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
         w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
         w.imageBaseDir = noteDir(currentPath)
@@ -2055,8 +2118,8 @@ final class SwitcherController: NSObject {
         w.headerIcon = cmd.icon ?? notesAppIcon
         // empty `title` in commands.conf = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
-        w.copyConfigButtonLabel = "copy config path"
         w.copyPathButtonLabel = "copy \(titles[0]) path"
+        w.copyConfigButtonLabel = "copy config path"
         w.tabTitles = titles
         w.tabFooterText = lastWriteLabel(currentPath)
         // generic label in the drag header — the tab strip already shows the
@@ -2067,11 +2130,36 @@ final class SwitcherController: NSObject {
         var lastSynced = content
         var lastMtime = mtime(of: currentPath)
         var watcher: Timer?
-        // switching tabs: save the current note, load the new one
+        // switching tabs: save the current note, load the new one. A tab whose
+        // note was deleted on disk becomes default.md instead (never recreate)
         w.onTabChange = { [weak self] index in
             guard let self, index < paths.count else { return }
-            self.saveNote(w.currentEditorText, to: currentPath, cmd: cmd)
-            currentPath = paths[index]
+            let outgoing = currentPath
+            // save the outgoing note BEFORE the editor is swapped to the new
+            // tab — after setEditorMarkdown, currentEditorText would already
+            // hold the NEW note's content and overwrite (wipe) the outgoing
+            // file. Never resurrect a deleted file: a missing outgoing is
+            // skipped (its text was already parked by the watcher/commit).
+            if FileManager.default.fileExists(atPath: outgoing) {
+                self.saveNote(w.currentEditorText, to: outgoing, cmd: cmd)
+            }
+            var target = paths[index]
+            if !FileManager.default.fileExists(atPath: target) {
+                let fallback = noteDir(target) + "/default.md"
+                try? FileManager.default.createDirectory(atPath: noteDir(fallback),
+                                                         withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: fallback) {
+                    FileManager.default.createFile(atPath: fallback, contents: nil)
+                }
+                self.log("note '\(cmd.name)': \(target) deleted — tab now default.md")
+                paths[index] = fallback
+                titles[index] = URL(fileURLWithPath: fallback).lastPathComponent
+                w.tabTitles = titles
+                self.removeNotePathFromConfig(target, section: cmd.name)
+                self.addNotePathToConfig(fallback, section: cmd.name)
+                target = fallback
+            }
+            currentPath = target
             let loaded = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
             w.setEditorMarkdown(loaded, baseDir: noteDir(currentPath))
             w.imageBaseDir = noteDir(currentPath)
@@ -2083,40 +2171,67 @@ final class SwitcherController: NSObject {
                 self.copy(currentPath, "note path: \(currentPath)")
             }
         }
-        // "+" pill: create a new note in the default dir (next to the first note),
-        // add it as a tab and switch to it. Presented as a SHEET on the note
-        // window so it always appears in front.
+        // "+" pill: choose to open an EXISTING file as a tab (open panel) or
+        // create a NEW note in the default dir (next to the first note). Both
+        // are presented as SHEETs on the note window so they always appear in
+        // front.
         w.onAddTab = { [weak self] in
             guard let self else { return }
-            let alert = NSAlert()
-            alert.messageText = "New note"
-            alert.informativeText = "Name for the new note:"
-            let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-            alert.accessoryView = nameField
-            alert.addButton(withTitle: "Create")
-            alert.addButton(withTitle: "Cancel")
-            alert.window.initialFirstResponder = nameField
             let panel = w.nativeWindow
             panel.makeKeyAndOrderFront(nil)
-            alert.beginSheetModal(for: panel) { [weak self] response in
-                guard let self, response == .alertFirstButtonReturn else { return }
-                var name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !name.isEmpty else {
-                    self.log("note '\(cmd.name)': empty name, not creating")
-                    return
+            let chooser = NSAlert()
+            chooser.messageText = "Add a note"
+            chooser.informativeText = "Open an existing file, or create a new note:"
+            chooser.addButton(withTitle: "Open Existing…")
+            chooser.addButton(withTitle: "New Note")
+            chooser.addButton(withTitle: "Cancel")
+            chooser.beginSheetModal(for: panel) { [weak self] response in
+                guard let self else { return }
+                switch response {
+                case .alertFirstButtonReturn:
+                    // "Open Existing…": no Finder picker — the integrated file
+                    // browser below is the picker. Just ask for a path and
+                    // trust it; if it isn't a real file the note doesn't open.
+                    w.onOpenPathPrompt?()
+                case .alertSecondButtonReturn:
+                    // "New Note": prompt for a name, create in the default dir
+                    let alert = NSAlert()
+                    alert.messageText = "New note"
+                    alert.informativeText = "Name for the new note:"
+                    let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+                    alert.accessoryView = nameField
+                    alert.addButton(withTitle: "Create")
+                    alert.addButton(withTitle: "Cancel")
+                    alert.window.initialFirstResponder = nameField
+                    alert.beginSheetModal(for: panel) { [weak self] response in
+                        guard let self, response == .alertFirstButtonReturn else { return }
+                        var name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !name.isEmpty else {
+                            self.log("note '\(cmd.name)': empty name, not creating")
+                            return
+                        }
+                        if !name.hasSuffix(".md") { name += ".md" }
+                        let baseDir = (paths[0] as NSString).deletingLastPathComponent
+                        let newPath = baseDir + "/" + name
+                        // already open (in memory)? just switch to that tab — never
+                        // duplicate a note that already exists
+                        if let idx = paths.firstIndex(of: newPath) {
+                            w.selectedTab = idx
+                            return
+                        }
+                        if !FileManager.default.fileExists(atPath: newPath) {
+                            FileManager.default.createFile(atPath: newPath, contents: nil)
+                        }
+                        paths.append(newPath)
+                        titles.append(URL(fileURLWithPath: newPath).lastPathComponent)
+                        w.tabTitles = titles
+                        w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
+                        self.addNotePathToConfig(newPath, section: cmd.name)
+                        self.log("note '\(cmd.name)': created \(newPath)")
+                    }
+                default:
+                    break
                 }
-                if !name.hasSuffix(".md") { name += ".md" }
-                let baseDir = (paths[0] as NSString).deletingLastPathComponent
-                let newPath = baseDir + "/" + name
-                if !FileManager.default.fileExists(atPath: newPath) {
-                    FileManager.default.createFile(atPath: newPath, contents: nil)
-                }
-                paths.append(newPath)
-                titles.append(URL(fileURLWithPath: newPath).lastPathComponent)
-                w.tabTitles = titles
-                w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
-                self.addNotePathToConfig(newPath, section: cmd.name)
-                self.log("note '\(cmd.name)': created \(newPath)")
             }
         }
         // clicking the ACTIVE note tab copies that note's absolute path
@@ -2124,21 +2239,82 @@ final class SwitcherController: NSObject {
             guard let self, index == w.selectedTab, index < paths.count else { return }
             self.copy(paths[index], "note path: \(paths[index])")
         }
+        // Finder "Open in Notes" service: open an arbitrary file as a tab and
+        // switch to it (the file already exists on disk — never create it)
+        w.onOpenExternalPath = { [weak self, weak w] path in
+            guard let self, let w else { return }
+            let p = (path as NSString).standardizingPath
+            if let idx = paths.firstIndex(of: p) {
+                w.selectedTab = idx
+                return
+            }
+            guard FileManager.default.fileExists(atPath: p) else {
+                self.log("note '\(cmd.name)': cannot open \(p) — missing")
+                return
+            }
+            paths.append(p)
+            titles.append(URL(fileURLWithPath: p).lastPathComponent)
+            w.tabTitles = titles
+            w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
+            self.addNotePathToConfig(p, section: cmd.name)
+            self.log("note '\(cmd.name)': opened \(p)")
+        }
+        // editor context menu -> "Open file at path…": prompt for an exact
+        // path and open it as a tab
+        w.onOpenPathPrompt = { [weak self, weak w] in
+            guard let self, let w else { return }
+            let alert = NSAlert()
+            alert.messageText = "Open file at path"
+            alert.informativeText = "Absolute path (or ~/…) to open as a note:"
+            let pathField = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+            pathField.stringValue = ""
+            alert.accessoryView = pathField
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = pathField
+            let panel = w.nativeWindow
+            panel.makeKeyAndOrderFront(nil)
+            alert.beginSheetModal(for: panel) { [weak self, weak w] response in
+                guard let self, let w, response == .alertFirstButtonReturn else { return }
+                let raw = pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty else { return }
+                let p = ((raw as NSString).expandingTildeInPath as NSString).standardizingPath
+                if FileManager.default.fileExists(atPath: p) {
+                    w.onOpenExternalPath?(p)
+                } else {
+                    self.log("note '\(cmd.name)': no such path \(p)")
+                }
+            }
+        }
+        // terminal drawer right-click "Open in Notes": the selected text is a
+        // path — open it as a note tab (openNoteFile checks it exists)
+        w.onTerminalOpenInNotes = { [weak self] path in
+            self?.openNoteFile(path)
+        }
         w.onChromeHeaderClick = { [weak self] in
             self?.copy(currentPath, "note path: \(currentPath)")
         }
         // header "config" button: copy the commands.conf path
         w.onChromeConfigClick = { [weak self] in
-            self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
+            guard let self else { return }
+            // copy the CANONICAL user-facing config path
+            // (~/.config/workspace-switcher/commands.conf, the INSTALL.sh
+            // symlink target) so the copied path is always paste-able; fall
+            // back to the binary-relative one if the symlink is absent
+            let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
+            let p = FileManager.default.fileExists(atPath: canonical)
+                ? canonical
+                : settings.commandsConfPath
+            self.copy(p, "config path: \(p)")
         }
         // voice notes (commands.conf `voice = true`): the window's bottom bar
         // becomes a record control — big record/stop button, pause/resume and
         // live level bars; stopping transcribes with Apple's speech
-        // recognizer and appends a dated block to the current note. No header
-        // buttons, no config button — it's a plain voice control.
+        // recognizer and appends a dated block to the current note. The
+        // header keeps its copy-path / copy-config buttons (notes + voice
+        // share this window).
         if cmd.voice {
             self.log("voice '\(cmd.name)': voice controls enabled")
-            w.copyConfigButtonLabel = ""
             let voice = VoiceRecorder()
             w.meterEnabled = true
             // Bulletproof session model: while recording, the editor and the
@@ -2280,44 +2456,163 @@ final class SwitcherController: NSObject {
                 voice.stop()
             }
         }
-        w.onEditorCommit = { [weak self] text in
-            self?.saveNote(text, to: currentPath, cmd: cmd)
+        // save current text — but NEVER resurrect a deleted note: if the file
+        // vanished, park the text in a fresh default.md next to it and swap
+        // the tab (Cmd+S / close / tab-change all go through here)
+        let commitSave: (String) -> Void = { [weak self] text in
+            guard let self else { return }
+            if FileManager.default.fileExists(atPath: currentPath) {
+                self.saveNote(text, to: currentPath, cmd: cmd)
+                lastSynced = text
+                lastMtime = mtime(of: currentPath)
+                w.tabFooterText = lastWriteLabel(currentPath)
+                return
+            }
+            let deadPath = currentPath
+            let fallback = noteDir(deadPath) + "/default.md"
+            try? FileManager.default.createDirectory(atPath: noteDir(fallback),
+                                                     withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: fallback) {
+                FileManager.default.createFile(atPath: fallback, contents: nil)
+            }
+            self.log("note '\(cmd.name)': \(deadPath) deleted — text parked in \(fallback)")
+            self.saveNote(text, to: fallback, cmd: cmd)
+            if let idx = paths.firstIndex(of: deadPath) {
+                paths[idx] = fallback
+                titles[idx] = URL(fileURLWithPath: fallback).lastPathComponent
+            } else {
+                paths.append(fallback)
+                titles.append(URL(fileURLWithPath: fallback).lastPathComponent)
+            }
+            w.tabTitles = titles
+            self.removeNotePathFromConfig(deadPath, section: cmd.name)
+            self.addNotePathToConfig(fallback, section: cmd.name)
+            currentPath = fallback
             lastSynced = text
-            lastMtime = mtime(of: currentPath)
-            w.tabFooterText = lastWriteLabel(currentPath)
+            lastMtime = mtime(of: fallback)
+            w.tabFooterText = lastWriteLabel(fallback)
         }
-        w.onEditorClose = { [weak self] text in
-            self?.saveNote(text, to: currentPath, cmd: cmd)
-        }
+        w.onEditorCommit = commitSave
+        w.onEditorClose = commitSave
         w.onHide = { [weak self] restore in
             guard let self else { return }
-            watcher?.invalidate()
-            watcher = nil
-            self.unregisterSubWindow(w, restore: restore,
-                                     restoreWID: restoreWID, restorePID: restorePID)
+            // Persistent singleton note window: keep the PopupWindow (and its
+            // embedded terminal session) alive — just hide the panel. The next
+            // Hyper+N re-shows the SAME instance instead of spawning a fresh
+            // terminal. Focus is still handed back to the window we came from.
+            // The note watcher keeps running; its closure self-guards on
+            // w.isShown while hidden, so nothing needs restarting on re-show.
+            self.restoreFocus(restore)
         }
-        // poll the current note for external writes (1s); reload when it
-        // changes on disk unless the editor has unsaved local edits
+        // poll EVERY tab's note for external writes (1s): reload the active note
+        // when it changes on disk (unless there are unsaved edits) and watch
+        // for notes being DELETED. A deleted note is never resurrected — its
+        // tab becomes default.md in the same directory, and the active note's
+        // on-screen text is parked into that default.md so nothing is lost.
         let t = Timer(timeInterval: noteWatchInterval, repeats: true) { [weak self, weak w] _ in
-            guard let self, let w, w.isShown,
-                  let mt = mtime(of: currentPath) else { return }
-            if let last = lastMtime, mt != last {
-                if w.currentEditorText == lastSynced {
-                    let newText = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
-                    if newText != lastSynced {
-                        w.setEditorMarkdown(newText, baseDir: noteDir(currentPath))
-                        lastSynced = newText
-                        w.tabFooterText = lastWriteLabel(currentPath)
-                        self.log("note '\(cmd.name)': reloaded \(currentPath) after external write")
-                    }
+            guard let self, let w, w.isShown else { return }
+            var dirty = false
+            var i = 0
+            while i < paths.count {
+                let p = paths[i]
+                if FileManager.default.fileExists(atPath: p) { i += 1; continue }
+                // note deleted on disk
+                let fallback = noteDir(p) + "/default.md"
+                try? FileManager.default.createDirectory(atPath: noteDir(fallback),
+                                                         withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: fallback) {
+                    FileManager.default.createFile(atPath: fallback, contents: nil)
+                }
+                if p == currentPath {
+                    let text = w.currentEditorText
+                    self.log("note '\(cmd.name)': \(p) deleted on disk — text parked in \(fallback)")
+                    self.saveNote(text, to: fallback, cmd: cmd)
+                    currentPath = fallback
+                    lastSynced = text
+                    lastMtime = mtime(of: fallback)
+                    w.tabFooterText = lastWriteLabel(fallback)
+                    w.setEditorMarkdown(text, baseDir: noteDir(fallback))
+                    w.imageBaseDir = noteDir(fallback)
                 } else {
-                    self.log("note '\(cmd.name)': external change to \(currentPath) ignored (unsaved edits)")
+                    self.log("note '\(cmd.name)': \(p) deleted on disk — tab now default.md")
+                }
+                self.removeNotePathFromConfig(p, section: cmd.name)
+                if let existing = paths.firstIndex(of: fallback), existing != i {
+                    // default.md already a tab — drop the dead entry instead
+                    paths.remove(at: i)
+                    titles.remove(at: i)
+                } else {
+                    paths[i] = fallback
+                    titles[i] = URL(fileURLWithPath: fallback).lastPathComponent
+                    self.addNotePathToConfig(fallback, section: cmd.name)
+                    i += 1
+                }
+                dirty = true
+            }
+            // NEW notes in a configured directory show up as tabs on their
+            // own — no config edit needed (directory entries cover them)
+            for p in expandPaths(cmd.paths, extensions: ["md"])
+            where FileManager.default.fileExists(atPath: p) && !paths.contains(p) {
+                paths.append(p)
+                titles.append(URL(fileURLWithPath: p).lastPathComponent)
+                self.log("note '\(cmd.name)': new note detected — added tab \(p)")
+                dirty = true
+            }
+            if dirty {
+                w.tabTitles = titles
+                // keep the strip highlight on the active note
+                if let active = paths.firstIndex(of: currentPath), active != w.selectedTab {
+                    w.selectedTab = active
                 }
             }
-            lastMtime = mt
+            // active-note external-write reload
+            if let mt = mtime(of: currentPath) {
+                if let last = lastMtime, mt != last {
+                    if w.currentEditorText == lastSynced {
+                        let newText = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+                        if newText != lastSynced {
+                            w.setEditorMarkdown(newText, baseDir: noteDir(currentPath))
+                            lastSynced = newText
+                            w.tabFooterText = lastWriteLabel(currentPath)
+                            self.log("note '\(cmd.name)': reloaded \(currentPath) after external write")
+                        }
+                    } else {
+                        self.log("note '\(cmd.name)': external change to \(currentPath) ignored (unsaved edits)")
+                    }
+                }
+                lastMtime = mt
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         watcher = t
+        // embedded file browser drawer (header "▤" toggles it): starts in the
+        // note directory, favorites shared with the floating "files" window
+        let favs = fileBrowserFavoritesConfig()
+        let fb = PopupFileBrowser(config: cfg, startDir: noteDir(currentPath),
+                                  staticFavorites: favs.staticFavs,
+                                  zoxideFavorites: zoxideTopDirs(favs.zoxideTop))
+        fb.onOpen = { [weak self] path in
+            self?.log("note '\(cmd.name)': browser opened \(path)")
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
+        fb.onCopyPath = { [weak self] p in
+            self?.copy(p, "path: \(p)")
+        }
+        fb.onCopyDir = { [weak self] dir in
+            self?.copy(dir, "directory path: \(dir)")
+        }
+        fb.onStatus = { [weak self] s in
+            if !s.isEmpty { self?.log("note '\(cmd.name)': \(s)") }
+        }
+        // file-browser right-click "Open in Notes": open the row as a note tab
+        w.onFileBrowserOpenInNotes = { [weak self] p in
+            self?.openNoteFile(p)
+        }
+        w.installFileBrowser(fb, drawer: true)
+        // mirror the post-install drawer state onto the header buttons
+        // (browser is the default pane, so it's on and the terminal is off)
+        w.setHeaderButtonOn(10, w.terminalShown)
+        w.setHeaderButtonOn(20, w.fileBrowserShown)
         subWindows.append(w)
         w.show()
     }
@@ -2344,6 +2639,14 @@ final class SwitcherController: NSObject {
             : path
         var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let target = "[" + section + "]"
+        // is this note already listed? (e.g. + re-created with an existing name)
+        // — compare EXPANDED forms so ~/notes/x.md == /Users/me/notes/x.md
+        let isListed = { (value: String) -> Bool in
+            value.split(separator: ",").contains { entry in
+                let e = entry.trimmingCharacters(in: .whitespaces)
+                return (e as NSString).expandingTildeInPath == path
+            }
+        }
         var inSection = false
         for (i, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -2354,10 +2657,20 @@ final class SwitcherController: NSObject {
             guard inSection, let eq = trimmed.firstIndex(of: "=") else { continue }
             let key = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
             if key == "paths" {
+                let value = String(trimmed[trimmed.index(after: eq)...])
+                    .trimmingCharacters(in: .whitespaces)
+                if isListed(value) {
+                    log("commands.conf: \(display) already listed — no change")
+                    return
+                }
                 lines[i] = line + ", " + display
             } else if key == "path" {
                 let value = String(trimmed[trimmed.index(after: eq)...])
                     .trimmingCharacters(in: .whitespaces)
+                if isListed(value) {
+                    log("commands.conf: \(display) already listed — no change")
+                    return
+                }
                 lines[i] = "paths = " + value + ", " + display
             } else {
                 continue
@@ -2365,6 +2678,50 @@ final class SwitcherController: NSObject {
             try? (lines.joined(separator: "\n"))
                 .write(toFile: confPath, atomically: true, encoding: .utf8)
             log("commands.conf: added note \(display)")
+            return
+        }
+        log("commands.conf: no [\(section)] section to update")
+    }
+
+    // drop a deleted note from commands.conf so it never gets listed again
+    // (paths= entries that no longer exist on disk are removed)
+    private func removeNotePathFromConfig(_ path: String, section: String) {
+        let confPath = settings.commandsConfPath
+        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+            log("commands.conf: cannot read \(confPath)")
+            return
+        }
+        let home = NSHomeDirectory()
+        let display = path.hasPrefix(home + "/")
+            ? "~" + path.dropFirst(home.count)
+            : path
+        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let target = "[" + section + "]"
+        var inSection = false
+        for (i, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                inSection = trimmed == target
+                continue
+            }
+            guard inSection, let eq = trimmed.firstIndex(of: "=") else { continue }
+            let key = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+            guard key == "paths" || key == "path" else { continue }
+            let value = String(trimmed[trimmed.index(after: eq)...])
+                .trimmingCharacters(in: .whitespaces)
+            let kept = value.split(separator: ",").compactMap { entry -> String? in
+                let e = String(entry).trimmingCharacters(in: .whitespaces)
+                return (e as NSString).expandingTildeInPath == path ? nil : e
+            }
+            guard kept.count != value.split(separator: ",").count else { continue }
+            if kept.isEmpty {
+                lines.remove(at: i)
+            } else {
+                lines[i] = "paths = " + kept.joined(separator: ", ")
+            }
+            try? (lines.joined(separator: "\n"))
+                .write(toFile: confPath, atomically: true, encoding: .utf8)
+            log("commands.conf: removed \(display) from [\(section)]")
             return
         }
         log("commands.conf: no [\(section)] section to update")
@@ -2643,6 +3000,132 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         w.show()
     }
 
+    // Static favorite dirs + zoxide top-N for the file browser, taken from the
+    // [files] command section so the notes drawer and the floating window share
+    // the same config. Zoxide top-N requires `zoxide` on PATH.
+    private func fileBrowserFavoritesConfig() -> (staticFavs: [String], zoxideTop: Int) {
+        let cmd = commands.first(where: { $0.kind == .files })
+        return (cmd?.favorites ?? [], cmd?.zoxideTop ?? 0)
+    }
+
+    // zoxide query -l lists every directory ranked by frecency; take the top N
+    // that still exist. Silent if zoxide is not installed.
+    private func zoxideTopDirs(_ n: Int) -> [String] {
+        guard n > 0 else { return [] }
+        var bin: String? = nil
+        for cand in ["/opt/homebrew/bin/zoxide", "/usr/local/bin/zoxide"] {
+            if FileManager.default.isExecutableFile(atPath: cand) { bin = cand; break }
+        }
+        guard let bin else { return [] }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = ["query", "-l"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return [] }
+        p.waitUntilExit()
+        let data = (try? out.fileHandleForReading.readToEnd()) ?? Data()
+        return String(data: data, encoding: .utf8)?
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { FileManager.default.fileExists(atPath: $0) }
+            .prefix(n)
+            .map { $0 } ?? []
+    }
+
+    // Read-only file browser ("files" commands): a keyboard-driven directory
+    // listing in the searchable list window. Type to fuzzy-filter the current
+    // directory; Enter on a file opens it with its default app; Enter on a
+    // directory (or the ".." row) navigates into it. No rename/delete/create.
+    private func openFilesWindow(_ cmd: CommandSpec,
+                                 restoreWID: String?, restorePID: pid_t?) {
+        let root = ((cmd.root ?? "~") as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: root) else {
+            log("files '\(cmd.name)': root \(root) does not exist")
+            return
+        }
+        var cfg = PopupConfig(name: cmd.windowName)
+        cfg.enableToggle = false
+        cfg.enableResize = cmd.resize
+        cfg.enableDrag = cmd.drag
+        cfg.sticky = cmd.sticky
+        cfg.enableNavigation = false   // the browser owns up/down/return
+        cfg.enableSearch = false       // the browser has its own search field
+        cfg.showSearchBar = false
+        cfg.dragHeader = true
+        cfg.scrollableRows = true
+        if let bb = cmd.browserBackground { cfg.fileBrowserBackground = bb }
+        cfg.width = cmd.width > 0 ? cmd.width : 780
+        cfg.height = cmd.height > 0 ? cmd.height : 560
+        cfg.headerHeight = 30
+        cfg.headerColor = cmd.headerColor ?? headerBlueSilver
+        cfg.colors = PopupColors(background: BAR, border: BORDER,
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+        cfg.fontName = cmd.font
+        let w = PopupWindow(config: cfg)
+        w.headerIcon = NSWorkspace.shared.icon(forFile: root)
+        w.chromeHeaderTitle = root
+
+        let favs = fileBrowserFavoritesConfig()
+        let fb = PopupFileBrowser(config: cfg, startDir: root,
+                                  staticFavorites: favs.staticFavs,
+                                  zoxideFavorites: zoxideTopDirs(favs.zoxideTop))
+        fb.onOpen = { [weak self] path in
+            self?.log("files '\(cmd.name)': opened \(path)")
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
+        fb.onCopyPath = { [weak self] p in
+            self?.copy(p, "path: \(p)")
+        }
+        // keep the window title + copy button following the browser's cwd
+        fb.onDirChange = { [weak self, weak w] dir in
+            guard let self, let w else { return }
+            w.chromeHeaderTitle = dir
+            w.copyPathButtonLabel = "copy \(URL(fileURLWithPath: dir).lastPathComponent) path"
+            w.headerIcon = NSWorkspace.shared.icon(forFile: dir)
+            w.growWidthToContent()
+        }
+        fb.onCopyDir = { [weak self] dir in
+            self?.copy(dir, "directory path: \(dir)")
+        }
+        fb.onStatus = { [weak self] s in
+            if !s.isEmpty { self?.log("files '\(cmd.name)': \(s)") }
+        }
+        // file-browser right-click "Open in Notes": open the row in the notes window
+        w.onFileBrowserOpenInNotes = { [weak self] p in
+            self?.openNoteFile(p)
+        }
+        w.installFileBrowser(fb, drawer: false)
+
+        w.copyPathButtonLabel = "copy \(URL(fileURLWithPath: root).lastPathComponent) path"
+        w.copyConfigButtonLabel = "copy config path"
+        // clicking the drag header copies the current directory's absolute path
+        w.onChromeHeaderClick = { [weak fb] in
+            fb?.copyDir()
+        }
+        // header "config" button: copy the commands.conf path
+        w.onChromeConfigClick = { [weak self] in
+            let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
+            let p = FileManager.default.fileExists(atPath: canonical)
+                ? canonical : settings.commandsConfPath
+            self?.copy(p, "config path: \(p)")
+        }
+        w.onEscape = { w.hide(restore: true) }
+        w.onHide = { [weak self] restore in
+            guard let self else { return }
+            self.unregisterSubWindow(w, restore: restore,
+                                     restoreWID: restoreWID, restorePID: restorePID)
+        }
+        subWindows.append(w)
+        w.show()
+        // give the browser's list keyboard focus (the window's own hidden
+        // search field would otherwise take it)
+        DispatchQueue.main.async { [weak w, weak fb] in
+            if let w, let fb { w.nativeWindow.makeFirstResponder(fb.listView) }
+        }
+    }
+
     // Read one list data file. JSON array of objects preferred (fields looked up
     // by name); TSV lines (key<TAB>title<TAB>status) as fallback when the file
     // has no JSON.
@@ -2764,12 +3247,48 @@ final class StatusBarTarget: NSObject {
     @objc func health(_ sender: Any?) { onHealth?() }
 }
 
+// Finder services (right-click a file -> Quick Actions): "Copy Path" copies
+// the absolute path(s) to the clipboard; "Open in Notes" opens the file in
+// the notes window. Registered as NSApp.servicesProvider; the NSServices in
+// Info.plist make Finder's context menu offer them for any file.
+final class ServicesHandler: NSObject {
+    private weak var controller: SwitcherController?
+    init(_ controller: SwitcherController) {
+        self.controller = controller
+    }
+    private func filePaths(from pboard: NSPasteboard) -> [String] {
+        if let urls = pboard.readObjects(forClasses: [NSURL.self],
+                                         options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            let paths = urls.map { $0.path }
+            if !paths.isEmpty { return paths }
+        }
+        // fallback: the legacy Finder pasteboard type is a list of path strings
+        if let files = pboard.propertyList(
+            forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String] {
+            return files
+        }
+        return []
+    }
+    @objc func copyFilePaths(_ pboard: NSPasteboard, userData: String, error: NSErrorPointer) {
+        let paths = filePaths(from: pboard)
+        guard !paths.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(paths.joined(separator: "\n"), forType: .string)
+    }
+    @objc func openInNotes(_ pboard: NSPasteboard, userData: String, error: NSErrorPointer) {
+        guard let first = filePaths(from: pboard).first else { return }
+        controller?.openNoteFile(first)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: SwitcherController?
     let showOnLaunch: Bool
     let openCommand: String?
     private var statusItems: [NSStatusItem] = []
     private let statusTarget = StatusBarTarget()
+    private var servicesHandler: ServicesHandler?
 
     init(showOnLaunch: Bool, openCommand: String? = nil) {
         self.showOnLaunch = showOnLaunch
@@ -2797,17 +3316,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = SwitcherController()
         controller = c
         c.start()
+        // Finder right-click services ("Copy Path" / "Open in Notes")
+        let sh = ServicesHandler(c)
+        servicesHandler = sh
+        NSApp.servicesProvider = sh
+        NSUpdateDynamicServices()
         installStatusItems(c)
-        // oil terminal: create the Ghostty+nvim+Oil window ONCE (if it isn't
-        // there), parked hidden on the "oil" workspace. The palette entry
-        // (commands.conf [oil]) toggles show/hide — the window is never closed.
-        DispatchQueue.global(qos: .userInitiated).async {
-            let script = NSString(string: "~/.config/workspace-switcher/bin/oil.sh").expandingTildeInPath
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/bash")
-            p.arguments = ["-lc", "\"\(script)\" park >/dev/null 2>&1"]
-            try? p.run()
-        }
         if showOnLaunch {
             c.show()
         }

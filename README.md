@@ -10,36 +10,13 @@ dependencies beyond what the installer brings.
 
 ```
 ./INSTALL.sh             install everything (direct, verbose)
-./INSTALL.sh pkg         build + open the click-through .pkg installer
-./INSTALL.sh dmg         build + open the DMG (GUI wizard)
 ./INSTALL.sh uninstall   remove everything
 ./INSTALL.sh help        show this
 ```
 
 Not sure what to run? `./INSTALL.sh` — that's it.
 
-### Option A — .pkg installer (true macOS click-through) ← recommended
-
-```bash
-./INSTALL.sh pkg
-```
-
-Builds and opens the package → **native macOS Installer wizard** (Continue →
-Install → your password → Done). The package carries the whole repo and runs
-the full install as your user.
-
-### Option B — DMG (GUI wizard)
-
-```bash
-./INSTALL.sh dmg
-```
-
-Builds and opens the DMG → **double-click Installer.app** (SwiftUI wizard)
-or run `./INSTALL.sh` in a terminal. The DMG carries the whole repo, so it
-works from anywhere; INSTALL.sh clones a fresh copy to `~/workspace-switcher`
-and installs from there.
-
-### Option B — one script (self-cloning)
+### One script (self-cloning)
 
 Download just the script (or `curl -fsSL …/INSTALL.sh | bash`). If it is not
 running from a git checkout it asks where to put the app (default
@@ -70,7 +47,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 ## Development
 
 ```bash
-./INSTALL.sh help       # the one command (install / pkg / dmg / uninstall)
+./INSTALL.sh help       # the one command (install / uninstall)
 ./build.sh              # dev: compile workspace-switcher.app + TCC re-grant
 ./build.sh --build-only # dev: compile + grant, do NOT launch
 ```

@@ -24,7 +24,7 @@ if cliArgs.count > 1 {
     switch cliArgs[1] {
     case "toggle":
         exit(sendToggle(name: settings.switcherWindowName) ? 0 : 1)
-    case "notes", "jira", "voice":
+    case "notes", "jira", "voice", "files":
         // a running daemon opens the window on a socket ping; otherwise
         // launch a daemon that starts straight into that window
         if sendLaunchMessage(cliArgs[1]) {
