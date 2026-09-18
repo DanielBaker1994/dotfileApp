@@ -674,9 +674,11 @@ private func hexColor(_ s: String?) -> NSColor? {
     guard Scanner(string: hex).scanHexInt64(&v) else { return nil }
     let hasAlpha = hex.count == 8
     let a = hasAlpha ? Double((v >> 24) & 0xFF) / 255.0 : 1.0
+    // never let a parsed surface color be fully invisible — floor the
+    // transparency at 8% so a hand-edited "00…" can't blank a window
     return NSColor(srgbRed: Double((v >> 16) & 0xFF) / 255,
                    green: Double((v >> 8) & 0xFF) / 255,
-                   blue: Double(v & 0xFF) / 255, alpha: a)
+                   blue: Double(v & 0xFF) / 255, alpha: max(a, 0.08))
 }
 
 // "true/yes/1/on" | "false/no/0/off" | anything else = nil (unset)
@@ -1633,8 +1635,9 @@ final class SwitcherController: NSObject {
     // the picked hue (always opaque — the color wheel never changes
     // transparency) and the surface's opacity (0-1, from the dedicated slider)
     private var pickerHue: NSColor = .clear
-    private var pickerOpacity: CGFloat = 1.0
+    private var pickerTransparency: CGFloat = 0.0    // 0 = opaque, 1 = transparent
     private var pickerHexLabel: NSTextField?
+    private var pickerTransparencyLabel: NSTextField?
     private var pickerOriginal: NSColor?   // color when the picker opened
     private var pickerCommitted = false    // "Apply" clicked before closing
     private var pickerSawVisible = false   // the panel appeared at least once
@@ -2057,6 +2060,14 @@ final class SwitcherController: NSObject {
 
     private func log(_ s: String) {
         FileHandle.standardError.write(Data("ws: \(s)\n".utf8))
+        let p = "/tmp/ws-debug.log"
+        if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: p)) {
+            fh.seekToEndOfFile()
+            fh.write(Data("ws: \(s)\n".utf8))
+            try? fh.close()
+        } else {
+            try? "ws: \(s)\n".write(to: URL(fileURLWithPath: p), atomically: true, encoding: .utf8)
+        }
     }
 
     // one pasteboard write + log line behind every "copy …" affordance
@@ -3353,12 +3364,34 @@ private func trimmed(_ s: String) -> String? {
                                       section: String) {
         let menu = NSMenu(title: "Pick a color for…")
         for role in roles {
-            let item = NSMenuItem(title: role.label,
-                                  action: #selector(pickThemeRole(_:)),
-                                  keyEquivalent: "")
+            var enabled = true
+            switch role {
+            case .terminal:
+                enabled = w.terminalShown
+            case .browser:
+                enabled = w.fileBrowserShown
+            case .notepad, .header:
+                break
+            }
+            let item: NSMenuItem
+            if enabled {
+                item = NSMenuItem(title: role.label, action: #selector(pickThemeRole(_:)), keyEquivalent: "")
+            } else {
+                // dim the label so it reads as disabled
+                let attr = NSAttributedString(
+                    string: role.label,
+                    attributes: [
+                        .foregroundColor: NSColor.systemGray,
+                        .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                    ])
+                item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                item.attributedTitle = attr
+            }
             item.target = self
             item.representedObject = role
+            item.isEnabled = enabled
             menu.addItem(item)
+            log("menu role=\(role.rawValue) enabled=\(enabled) terminalShown=\(w.terminalShown) fileBrowserShown=\(w.fileBrowserShown)")
         }
         menu.addItem(.separator())
         let reset = NSMenuItem(title: "Reset to system defaults",
@@ -3409,55 +3442,49 @@ private func trimmed(_ s: String) -> String? {
         pickerCommitted = false
         pickerSawVisible = false
         let seed = (pickerOriginal ?? .clear).usingColorSpace(.sRGB) ?? .clear
-        // the wheel edits hue only. Start OPAQUE (100%) so the color you pick
-        // is exactly the color you see — never inherited at the surface's old
-        // translucency (that's what made picks come back washed-out). Drag the
-        // Transparency slider down only if you want see-through.
+        // seed the picker from the ACTUAL current surface: hue + transparency
         pickerHue = seed.withAlphaComponent(1)
-        pickerOpacity = 1.0
+        pickerTransparency = 1.0 - seed.alphaComponent
         let panel = NSColorPanel.shared
-        // FORCE the color wheel — the shared panel can sit in CMYK / RGB-slider
-        // / gray mode from a previous session, which turns a "red" pick into a
-        // muddy dark color.
         panel.mode = .wheel
-        // seed the wheel BRIGHT (white): if it inherits the surface's dark
-        // color, the brightness slider starts low and "red" lands as dark
-        // maroon. White = full brightness, so what you click is what you get.
-        // pickerHue/pickerOpacity still track the real current color, so not
-        // touching the wheel (transparency-only edits) stays correct.
-        panel.color = .white
-        // no alpha slider on the wheel — that coupling is what made picks
-        // come out as a different, washed-out color than what was chosen
+        panel.color = pickerHue
         panel.showsAlpha = false
         panel.isContinuous = true
         panel.setTarget(self)
         panel.setAction(#selector(panelColorChanged(_:)))
-        // accessory: a dedicated Transparency slider + Apply / Cancel
-        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 76))
-        let lab = NSTextField(labelWithString: "Transparency")
-        lab.font = NSFont.systemFont(ofSize: 11)
-        lab.textColor = .secondaryLabelColor
-        lab.frame = NSRect(x: 0, y: 54, width: 220, height: 14)
-        let slider = NSSlider(value: Double(pickerOpacity * 100), minValue: 8,
-                              maxValue: 100, target: self,
-                              action: #selector(pickerOpacityChanged(_:)))
+        // accessory: hex readout, transparency slider, Apply / Cancel
+        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 120))
+        let hexLabel = NSTextField(labelWithString: "")
+        hexLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        hexLabel.alignment = .center
+        hexLabel.frame = NSRect(x: 0, y: 98, width: 260, height: 16)
+        pickerHexLabel = hexLabel
+        let tLab = NSTextField(labelWithString: "")
+        tLab.font = NSFont.systemFont(ofSize: 11)
+        tLab.textColor = .secondaryLabelColor
+        tLab.alignment = .center
+        tLab.frame = NSRect(x: 0, y: 78, width: 260, height: 16)
+        pickerTransparencyLabel = tLab
+        let slider = NSSlider(value: Double(pickerTransparency * 100), minValue: 0, maxValue: 100,
+                              target: self,
+                              action: #selector(pickerTransparencyChanged(_:)))
         slider.isContinuous = true
-        slider.frame = NSRect(x: 0, y: 34, width: 220, height: 18)
+        slider.frame = NSRect(x: 12, y: 56, width: 236, height: 18)
         let applyButton = NSButton(title: "Apply", target: self,
                                    action: #selector(applyPickerColor(_:)))
         applyButton.keyEquivalent = "\r"
         applyButton.bezelStyle = .rounded
-        applyButton.frame = NSRect(x: 0, y: 2, width: 104, height: 26)
+        applyButton.frame = NSRect(x: 0, y: 2, width: 124, height: 26)
         let cancelButton = NSButton(title: "Cancel", target: self,
                                     action: #selector(cancelPickerColor(_:)))
         cancelButton.bezelStyle = .rounded
-        cancelButton.frame = NSRect(x: 116, y: 2, width: 104, height: 26)
-        acc.addSubview(lab)
+        cancelButton.frame = NSRect(x: 136, y: 2, width: 124, height: 26)
+        acc.addSubview(hexLabel)
+        acc.addSubview(tLab)
         acc.addSubview(slider)
         acc.addSubview(applyButton)
         acc.addSubview(cancelButton)
         panel.accessoryView = acc
-        // backup cancel path (in case the watchdog hasn't ticked yet)
         if let o = pickerPanelObserver {
             NotificationCenter.default.removeObserver(o)
         }
@@ -3466,9 +3493,6 @@ private func trimmed(_ s: String) -> String? {
         ) { [weak self] _ in
             self?.revertPickerIfCancelled()
         }
-        // the color panel dismisses with orderOut (not close) on "x"/Esc, so
-        // willClose alone can't catch a cancel — watch for the panel going
-        // invisible without Apply having been pressed.
         pickerWatchdog?.invalidate()
         let watchdog = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -3491,29 +3515,35 @@ private func trimmed(_ s: String) -> String? {
         RunLoop.main.add(watchdog, forMode: .common)
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        log("color picker opened for [\(pickerSection)] \(role.rawValue)")
+        applyPickerPreview()
+        let hex = hexString(seed)
+        log("color picker opened for [\(pickerSection)] \(role.rawValue) seed=#\(hex) trans=\(Int(pickerTransparency*100))% terminalShown=\(w.terminalShown) browserShown=\(w.fileBrowserShown)")
     }
 
     @objc private func panelColorChanged(_ sender: Any?) {
-        // color wheel drag: capture the SOLID hue only — transparency is a
-        // separate slider and must never leak in from the wheel
         guard pickerWindow != nil, pickerRole != nil else { return }
         let raw = NSColorPanel.shared.color
         pickerHue = (raw.usingColorSpace(.sRGB) ?? raw).withAlphaComponent(1)
         applyPickerPreview()
     }
 
-    @objc private func pickerOpacityChanged(_ sender: NSSlider) {
-        pickerOpacity = CGFloat(sender.doubleValue) / 100.0
+    @objc private func pickerTransparencyChanged(_ sender: NSSlider) {
+        pickerTransparency = CGFloat(sender.doubleValue) / 100.0
         applyPickerPreview()
     }
 
-    // preview hue @ opacity on the window (nothing is written until Apply).
-    // The 0.08 floor keeps a surface from ever becoming fully invisible.
+    // preview hue @ transparency on the window (nothing is written until
+    // Apply). The 0.08 floor keeps a surface from ever becoming fully
+    // invisible.
     private func applyPickerPreview() {
         guard let w = pickerWindow, let role = pickerRole else { return }
-        w.setThemeColor(pickerHue.withAlphaComponent(max(pickerOpacity, 0.08)),
-                        for: role)
+        let alpha = max(1.0 - pickerTransparency, 0.08)
+        let color = pickerHue.withAlphaComponent(alpha)
+        w.setThemeColor(color, for: role)
+        let hex = hexString(color)
+        let pct = Int((pickerTransparency * 100).rounded())
+        pickerHexLabel?.stringValue = "#\(hex)"
+        pickerTransparencyLabel?.stringValue = "Transparency: \(pct)%"
     }
 
     @objc private func applyPickerColor(_ sender: Any?) {
@@ -3561,7 +3591,8 @@ private func trimmed(_ s: String) -> String? {
 
     private func persistPickerColor() {
         guard pickerWindow != nil, pickerRole != nil else { return }
-        let color = pickerHue.withAlphaComponent(max(pickerOpacity, 0.08))
+        let alpha = max(1.0 - pickerTransparency, 0.08)
+        let color = pickerHue.withAlphaComponent(alpha)
         let hex = hexString(color)
         guard !hex.isEmpty, !pickerSection.isEmpty else { return }
         // per-window override keys — the pick only affects THIS window
