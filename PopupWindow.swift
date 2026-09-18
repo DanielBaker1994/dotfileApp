@@ -1959,10 +1959,11 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.listPane = FileListPane(config: config)
         super.init(frame: .zero)
         wantsLayer = true
-        // translucent at the notepad's tint alpha so the blue drawer is
-        // see-through over the blur like the grey editor, not an opaque slab
+        // translucent blue drawer, MORE see-through than the grey notepad (a
+        // strong blue reads nearly opaque even at the notes' tint alpha, so
+        // drop to a clearly transparent 0.55) — rows stay readable over the blur
         layer?.backgroundColor =
-            config.fileBrowserBackground.withAlphaComponent(config.tintAlpha).cgColor
+            config.fileBrowserBackground.withAlphaComponent(0.55).cgColor
 
         listPane.onSelect = { [weak self] i in
             self?.selection = i
