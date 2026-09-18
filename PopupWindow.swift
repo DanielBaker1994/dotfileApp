@@ -1870,11 +1870,19 @@ final class PaneSplitter: NSView {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .resizeLeftRight)
     }
+    // Consume mouseDown so drag-anywhere (which moves the WINDOW) never gets
+    // the event — a drag that starts on the splitter only rebalances the panes.
+    override func mouseDown(with e: NSEvent) {
+        NSCursor.closedHand.push()
+    }
     override func mouseDragged(with e: NSEvent) {
         guard let sv = superview else { return }
         let x = sv.convert(e.locationInWindow, from: nil).x
         let frac = min(0.8, max(0.2, x / max(1, sv.bounds.width)))
         onFractionChange?(frac)
+    }
+    override func mouseUp(with e: NSEvent) {
+        NSCursor.pop()
     }
 }
 

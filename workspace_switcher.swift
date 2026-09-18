@@ -388,6 +388,7 @@ struct CommandSpec {
     let searchWidth: CGFloat  // list: search bar as a fraction of window width
     let maxStretch: CGFloat   // list: cap on per-row stretch when resized big
     let height: CGFloat       // window height in points
+    let maxHeight: CGFloat    // cap on the window height (0 = 60% of screen)
     let font: String?         // font family for this window's text
     let headerColor: NSColor? // drag-header tint (nil = window background)
     let voice: Bool           // note: record + transcribe button in the header
@@ -412,6 +413,7 @@ struct CommandSpec {
          headerColor: NSColor? = nil, voice: Bool = false,
          terminal: Bool = false, terminalHeight: CGFloat = 240,
          terminalDir: String? = nil,
+         maxHeight: CGFloat = 0,
          icon: NSImage? = nil) {
         self.name = name
         self.kind = kind
@@ -445,6 +447,7 @@ struct CommandSpec {
         self.searchWidth = searchWidth
         self.maxStretch = maxStretch
         self.height = height
+        self.maxHeight = maxHeight
         self.font = font
         self.headerColor = headerColor
         self.voice = voice
@@ -559,6 +562,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         terminal: tri(vars["terminal"]) ?? false,
         terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
         terminalDir: vars["terminal-dir"],
+        maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName))
 }
 
@@ -2052,6 +2056,7 @@ final class SwitcherController: NSObject {
         cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
             + (cfg.fileBrowserDefault ? cfg.fileBrowserHeight
                                       : (cmd.terminal ? cfg.terminalHeight : 0))
+        if cmd.maxHeight > 0 { cfg.maxHeight = cmd.maxHeight }
         cfg.terminal = cmd.terminal
         cfg.terminalHeight = cmd.terminalHeight
         if let td = cmd.terminalDir { cfg.terminalDir = td }
@@ -2070,12 +2075,10 @@ final class SwitcherController: NSObject {
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
         // header buttons: ">_" toggles the embedded shell drawer, "▤" toggles
-        // the embedded file browser (both can be open at once), "open…" opens
-        // a file at an exact path
+        // the embedded file browser (both can be open at once)
         var hb: [(String, Int)] = []
         if cmd.terminal { hb.append((">_", 10)) }
         hb.append(("▤", 20))
-        hb.append(("open…", 30))
         w.headerButtons = hb
         w.onHeaderButton = { [weak w] id in
             if id == 10 {
@@ -2084,8 +2087,6 @@ final class SwitcherController: NSObject {
             } else if id == 20 {
                 w?.toggleFileBrowser()
                 if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
-            } else if id == 30 {
-                w?.onOpenPathPrompt?()
             }
         }
         // initial drawer state: terminal starts on, browser starts off — the
