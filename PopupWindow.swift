@@ -1860,6 +1860,24 @@ final class FileListPane: NSView {
 // — a plain keyDown override never fires while the field editor is active.
 final class BrowserSearchField: NSTextField {}
 
+// Drag handle between the file list and the preview pane in the browser.
+// Dragging it left/right rebalances the split; the fraction is clamped so
+// neither pane can be collapsed entirely.
+final class PaneSplitter: NSView {
+    var onFractionChange: ((CGFloat) -> Void)?
+    override var isFlipped: Bool { true }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let sv = superview else { return }
+        let x = sv.convert(e.locationInWindow, from: nil).x
+        let frac = min(0.8, max(0.2, x / max(1, sv.bounds.width)))
+        onFractionChange?(frac)
+    }
+}
+
 // A read-only, keyboard-driven file browser panel: toolbar (search + pin +
 // up), a favorites pill row, a directory listing with a right-hand preview
 // split. Reused by the floating "files" window (fills the content) and the
@@ -1903,7 +1921,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private let starButton: ThemeButton
     private let listPane: FileListPane
     private let listScroll = NSScrollView()
-    private let divider = NSView()
+    private let splitter = PaneSplitter()
+    // list-pane share of the browser width (0.2-0.8); the splitter drags it
+    private var splitFraction: CGFloat = 0.56
     private let previewScroll = NSScrollView()
     private let previewText = NSTextView()
     private let previewImage = NSImageView()
@@ -2012,8 +2032,13 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         previewHint.isEditable = false
         previewHint.isSelectable = false
 
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = config.colors.border.withAlphaComponent(0.35).cgColor
+        splitter.wantsLayer = true
+        splitter.layer?.backgroundColor = config.colors.border.withAlphaComponent(0.35).cgColor
+        splitter.onFractionChange = { [weak self] frac in
+            guard let self else { return }
+            self.splitFraction = frac
+            self.layoutPanes()
+        }
 
         // the file list lives in a scroll view so rows longer than the pane
         // scroll INSIDE it — they can never bleed off the window's edge
@@ -2027,7 +2052,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         addSubview(searchField)
         addSubview(starButton)
         addSubview(listScroll)
-        addSubview(divider)
+        addSubview(splitter)
         addSubview(previewScroll)
         addSubview(previewImage)
         addSubview(previewHint)
@@ -2068,13 +2093,17 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let favH = layoutFavorites(from: favY)
         let listY = favY + favH + 4
         let bottomH: CGFloat = 0
-        let split = w * 0.56
+        let splitW: CGFloat = 6
+        // the split is draggable; clamp so neither pane gets tiny
+        let splitX = min(max(splitFraction * w, 200), max(200, w - 200))
         let contentH = max(0, bounds.height - listY - bottomH)
-        listScroll.frame = NSRect(x: 0, y: listY, width: split, height: contentH)
-        divider.frame = NSRect(x: split, y: listY, width: 1, height: contentH)
-        previewScroll.frame = NSRect(x: split + 1, y: listY, width: max(0, w - split - 1), height: contentH)
-        previewImage.frame = NSRect(x: split + 1, y: listY, width: max(0, w - split - 1), height: contentH)
-        previewHint.frame = NSRect(x: split + 1, y: listY, width: max(0, w - split - 1), height: contentH)
+        listScroll.frame = NSRect(x: 0, y: listY, width: splitX, height: contentH)
+        splitter.frame = NSRect(x: splitX, y: listY, width: splitW, height: contentH)
+        let previewX = splitX + splitW
+        let previewW = max(0, w - previewX)
+        previewScroll.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
+        previewImage.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
+        previewHint.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
         layoutListDocument()
     }
     // the list's document (the row pane) grows to fit every row; the scroll
