@@ -2103,6 +2103,10 @@ final class SwitcherController: NSObject {
         var hb: [(String, Int)] = []
         if cmd.terminal { hb.append(("\u{F120}", 10)) }
         hb.append(("\u{F07C}", 20))
+        // voice windows get a mic toggle (id 40) that shows/hides the record
+        // bar — clustered with the terminal + folder toggles. The bar starts
+        // OFF (slashed mic), so recording never starts silently at launch.
+        if cmd.voice { hb.append(("\u{F131}", 40)) }
         hb.append(("open file", 30))
         w.headerButtons = hb
         w.onHeaderButton = { [weak w] id in
@@ -2114,12 +2118,25 @@ final class SwitcherController: NSObject {
                 if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
             } else if id == 30 {
                 w?.onOpenPathPrompt?()
+            } else if id == 40 {
+                guard let w else { return }
+                let shown = !w.meterEnabled
+                w.meterEnabled = shown
+                w.setHeaderButtonOn(40, shown)
+                // swap the mic glyph: solid mic when the bar is shown,
+                // slashed mic when hidden, so the state reads at a glance
+                var arr = w.headerButtons
+                if let i = arr.firstIndex(where: { $0.1 == 40 }) {
+                    arr[i].0 = shown ? "\u{F130}" : "\u{F131}"
+                    w.headerButtons = arr
+                }
             }
         }
         // initial drawer state: terminal starts on, browser starts off — the
-        // header buttons mirror that
+        // header buttons mirror that; the record bar starts hidden for voice
         if cmd.terminal { w.setHeaderButtonOn(10, false) }
         w.setHeaderButtonOn(20, false)
+        if cmd.voice { w.setHeaderButtonOn(40, false) }
         func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
         w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
         w.imageBaseDir = noteDir(currentPath)
@@ -2319,6 +2336,16 @@ final class SwitcherController: NSObject {
         w.onTerminalOpenInNotes = { [weak self] path in
             self?.openNoteFile(path)
         }
+        // terminal right-click "Open in Default App" / "Reveal in Finder":
+        // act on the selected path (existence-checked before acting)
+        w.onTerminalOpenDefault = { path in
+            guard FileManager.default.fileExists(atPath: path) else { return }
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
+        w.onTerminalRevealInFinder = { path in
+            guard FileManager.default.fileExists(atPath: path) else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        }
         w.onChromeHeaderClick = { [weak self] in
             self?.copy(currentPath, "note path: \(currentPath)")
         }
@@ -2344,7 +2371,8 @@ final class SwitcherController: NSObject {
         if cmd.voice {
             self.log("voice '\(cmd.name)': voice controls enabled")
             let voice = VoiceRecorder()
-            w.meterEnabled = true
+            // record bar starts OFF (meterEnabled stays false) — the user
+            // toggles it on via the header mic button when they want it
             // Bulletproof session model: while recording, the editor and the
             // file are ALWAYS rebuilt as
             //     immutable + committedStr + liveDraft

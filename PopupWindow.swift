@@ -1937,7 +1937,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private let previewImage = NSImageView()
     private let previewHint = NSTextField(labelWithString: "")
     private var favPills: [ThemeButton] = []
-    private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"])
+    private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "pdf"])
     private static let textLimit = 262144
 
     // listPane needs to be focusable from the window (drawer toggle)
@@ -1959,7 +1959,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.listPane = FileListPane(config: config)
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = config.fileBrowserBackground.cgColor
+        // translucent at the notepad's tint alpha so the blue drawer is
+        // see-through over the blur like the grey editor, not an opaque slab
+        layer?.backgroundColor =
+            config.fileBrowserBackground.withAlphaComponent(config.tintAlpha).cgColor
 
         listPane.onSelect = { [weak self] i in
             self?.selection = i
@@ -3035,8 +3038,12 @@ final class TerminalAutoRestart: NSObject,
 final class TerminalMenuTarget: NSObject {
     var copy: (() -> Void)?
     var openInNotes: (() -> Void)?
+    var openInDefault: (() -> Void)?
+    var revealInFinder: (() -> Void)?
     @objc func copySelection(_ sender: Any?) { copy?() }
     @objc func openSelectionInNotes(_ sender: Any?) { openInNotes?() }
+    @objc func openSelectionInDefaultApp(_ sender: Any?) { openInDefault?() }
+    @objc func revealSelectionInFinder(_ sender: Any?) { revealInFinder?() }
 }
 
 // MARK: - Popup window
@@ -3232,16 +3239,35 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
 
     // live mic level 0-1 for the recording control bar; the bar itself is
-    // always visible when meterEnabled (host-driven: voice windows)
+    // only drawn while meterEnabled (host-driven: voice windows). Toggling it
+    // also GROWS/SHRINKS the window by the bar height — the top edge stays
+    // put so the editor keeps its size and the space is reclaimed instead of
+    // left as a dead strip.
     public var meterEnabled = false {
         didSet {
             guard oldValue != meterEnabled else { return }
             chrome?.meterEnabled = meterEnabled
             chrome?.needsDisplay = true
-            // the meter strip owns the bottom: re-layout the editor + the
-            // terminal drawer so neither hides content behind the bar
+            if panel.frame.height > 0, let barH = chrome?.meterBarHeight {
+                var f = panel.frame
+                if meterEnabled {
+                    f.origin.y -= barH
+                    f.size.height += barH
+                } else {
+                    f.origin.y += barH
+                    f.size.height -= barH
+                }
+                if f.size.height >= 120 {
+                    panel.setFrame(clampToScreen(f), display: true)
+                }
+            }
+            // the meter strip owns the bottom: re-layout the editor, the
+            // terminal drawer and the file browser so none of them hides
+            // behind the bar (and the browser's [.width, .height] autoresize
+            // can't stretch it into the bar's space)
             layoutEditorScroll()
             layoutTerminal()
+            layoutFileBrowser()
         }
     }
     public var recordingState: Int = 0 {   // 0 idle, 1 recording, 2 paused, 3 transcribing
@@ -3312,6 +3338,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // terminal drawer right-click "Open in Notes": the host receives the
     // terminal's current selection (a path) and opens it as a note tab
     public var onTerminalOpenInNotes: ((String) -> Void)?
+    // terminal drawer right-click "Open in Default App" / "Reveal in Finder":
+    // the host acts on the terminal's current selection (a path)
+    public var onTerminalOpenDefault: ((String) -> Void)?
+    public var onTerminalRevealInFinder: ((String) -> Void)?
     // file-browser right-click "Open in Notes": the host receives the row's
     // absolute path and opens it as a note tab
     public var onFileBrowserOpenInNotes: ((String) -> Void)?
@@ -3660,6 +3690,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 term.wantsLayer = true
                 term.layer?.cornerRadius = 8
                 term.layer?.masksToBounds = true
+                // translucent default background, matching the notepad: the
+                // same grey tint over the blur so the drawer is see-through
+                // like the editor instead of an opaque slab
+                term.nativeBackgroundColor =
+                    config.colors.background.withAlphaComponent(config.tintAlpha)
                 backdrop.addSubview(term)
                 terminalDrawer = term
                 // auto-restart: if the shell exits (user typed exit/ctrl-d)
@@ -3699,10 +3734,20 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                                           action: #selector(TerminalMenuTarget.openSelectionInNotes(_:)),
                                           keyEquivalent: "")
                 openItem.target = menuTarget
+                let openDefaultItem = NSMenuItem(title: "Open in Default App",
+                                                 action: #selector(TerminalMenuTarget.openSelectionInDefaultApp(_:)),
+                                                 keyEquivalent: "")
+                openDefaultItem.target = menuTarget
+                let revealItem = NSMenuItem(title: "Reveal in Finder",
+                                            action: #selector(TerminalMenuTarget.revealSelectionInFinder(_:)),
+                                            keyEquivalent: "")
+                revealItem.target = menuTarget
                 tmenu.addItem(titem("Paste", #selector(LocalProcessTerminalView.paste(_:)), "v"))
                 tmenu.addItem(copyItem)
                 tmenu.addItem(NSMenuItem.separator())
                 tmenu.addItem(openItem)
+                tmenu.addItem(openDefaultItem)
+                tmenu.addItem(revealItem)
                 tmenu.addItem(NSMenuItem.separator())
                 tmenu.addItem(titem("Select All", #selector(LocalProcessTerminalView.selectAll(_:)), "a"))
                 terminalMenuView = term
@@ -3845,22 +3890,33 @@ scroll.documentView = rowView
             self?.onOpenPathPrompt?()
         }
         // terminal drawer right-click actions (self-safe only after super.init):
-        // "Copy" copies the selection; "Open in Notes" forwards the selected
-        // text (a path) to the host hook.
+        // "Copy" copies the selection; "Open in Notes" / "Open in Default
+        // App" / "Reveal in Finder" forward the selected text (a path) to the
+        // host hooks.
         if let term = terminalMenuView, let menuTarget = terminalMenuTarget {
             menuTarget.copy = { [weak term] in
                 term?.copy(NSNull())
             }
-            menuTarget.openInNotes = { [weak term, weak self] in
-                guard let term else { return }
-                // a real selection (length > 0) is required — never clobber
-                // the clipboard on an empty right-click
-                guard term.selectedRange().length > 0 else { return }
-                term.copy(NSNull())   // public API: puts the selection on the general pasteboard
-                let text = NSPasteboard.general.string(forType: .string)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard !text.isEmpty else { return }
+            // the selection must become a real path before acting on it —
+            // copy to the general pasteboard, then read it back (never
+            // clobber the clipboard on an empty right-click)
+            let copySelectionToPasteboard: () -> String? = { [weak term] in
+                guard let term, term.selectedRange().length > 0 else { return nil }
+                term.copy(NSNull())
+                return NSPasteboard.general.string(forType: .string)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            menuTarget.openInNotes = { [weak self] in
+                guard let text = copySelectionToPasteboard(), !text.isEmpty else { return }
                 self?.onTerminalOpenInNotes?(text)
+            }
+            menuTarget.openInDefault = { [weak self] in
+                guard let text = copySelectionToPasteboard(), !text.isEmpty else { return }
+                self?.onTerminalOpenDefault?(text)
+            }
+            menuTarget.revealInFinder = { [weak self] in
+                guard let text = copySelectionToPasteboard(), !text.isEmpty else { return }
+                self?.onTerminalRevealInFinder?(text)
             }
         }
         if let term = terminalMenuView, let tmenu = terminalMenu {
