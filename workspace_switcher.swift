@@ -396,6 +396,7 @@ struct CommandSpec {
     let terminalHeight: CGFloat
     let terminalDir: String?  // note: starting directory for the embedded shell
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
+    let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
 
     init(name: String, kind: Kind = .shell, windowName: String? = nil,
          chromeTitle: String? = nil, script: String? = nil, paths: [String] = [],
@@ -414,7 +415,8 @@ struct CommandSpec {
          terminal: Bool = false, terminalHeight: CGFloat = 240,
          terminalDir: String? = nil,
          maxHeight: CGFloat = 0,
-         icon: NSImage? = nil) {
+         icon: NSImage? = nil,
+         saveDir: String = "/tmp/") {
         self.name = name
         self.kind = kind
         self.windowName = windowName ?? name
@@ -455,6 +457,7 @@ struct CommandSpec {
         self.terminalHeight = terminalHeight
         self.terminalDir = terminalDir
         self.icon = icon
+        self.saveDir = saveDir
     }
 }
 
@@ -563,7 +566,8 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
         terminalDir: vars["terminal-dir"],
         maxHeight: num(vars["max-height"]),
-        icon: vars["icon"].flatMap(resolveIconName))
+        icon: vars["icon"].flatMap(resolveIconName),
+        saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
 }
 
 // hex color from commands.conf ("7d8fa6", "0x7d8fa6" or "#7d8fa6") -> NSColor
@@ -832,7 +836,6 @@ let appIconSize: CGFloat = 22
 // framework knows nothing about them (rows are drawn via popup.onDrawRow).
 let rowPillW: CGFloat = 240
 let rowPillH: CGFloat = 24
-let rowPillRadius: CGFloat = 6
 let rowPillBorder: CGFloat = 2
 let rowTextX: CGFloat = 18
 let rowIconSize: CGFloat = 22
@@ -1398,6 +1401,9 @@ final class SwitcherController: NSObject {
     // Suppress self-activation right after a click outside our windows.
     private var lastOtherAppClick: Date?
     private var globalClickMonitor: Any?
+    // debounced auto-format for the /prettyprint window (cancelled/re-armed on
+    // every keystroke so paste + brief pause renders once)
+    private var prettyFormatWorkItem: DispatchWorkItem?
 
     override init() {
         var config = PopupConfig(name: settings.switcherWindowName)
@@ -1689,9 +1695,9 @@ final class SwitcherController: NSObject {
         if selected {
             let pill = NSRect(x: (rect.width - rowPillW * z) / 2, y: cy - rowPillH * z / 2,
                               width: rowPillW * z, height: rowPillH * z)
-            let p = NSBezierPath(roundedRect: pill, xRadius: rowPillRadius * z,
-                                 yRadius: rowPillRadius * z)
-            GROUP_BG.setFill()
+            let p = NSBezierPath(roundedRect: pill, xRadius: popup.config.buttonRadius * z,
+                                 yRadius: popup.config.buttonRadius * z)
+            popup.config.colors.accent.withAlphaComponent(0.5).setFill()
             p.fill()
             BORDER.setStroke()
             p.lineWidth = rowPillBorder * z
@@ -1761,6 +1767,12 @@ final class SwitcherController: NSObject {
             case .shell:
                 popup.hide(restore: true)
                 let cmd = cr.command
+                // /prettyprint is a custom command handled in-process (a tiny
+                // paste-and-format window), not a shell script
+                if cmd.name == "prettyprint" {
+                    openPrettyPrintWindow(cmd)
+                    break
+                }
                 commandRunner?.run(cmd.script ?? "") { out in
                     self.log("cmd '\(cmd.name)' -> \(out)")
                 }
@@ -1985,6 +1997,213 @@ final class SwitcherController: NSObject {
     private func runOutput(_ cmd: CommandSpec, into w: PopupWindow) {
         runScript(cmd.script ?? "", label: cmd.name, into: w)
     }
+
+    // /prettyprint: a tiny paste-and-format window. Paste raw JSON/XML into
+    // the editor and it re-renders itself formatted (debounced as you paste);
+    // the "copy contents" header button copies the contents, "save file" writes
+    // it out (to the command's `save-dir`) and copies the absolute path.
+    private func openPrettyPrintWindow(_ cmd: CommandSpec) {
+        let windowName = "prettyprint"
+        if let existing = subWindows.first(where: { $0.config.name == windowName }) {
+            focusSubWindow(existing)
+            return
+        }
+        var cfg = PopupConfig(name: windowName)
+        cfg.enableToggle = false
+        cfg.editMode = true
+        cfg.enableDrag = true
+        cfg.sticky = true
+        cfg.width = 1000
+        cfg.height = 600
+        cfg.headerHeight = 30
+        cfg.titlePill = false
+        cfg.headerColor = headerBlueSilver
+        cfg.colors = PopupColors(background: BAR, border: BORDER,
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+        let w = PopupWindow(config: cfg)
+        w.editorReadOnly = false
+        w.editorText = ""
+        w.chromeHeaderTitle = nil
+        w.headerIcon = notesAppIcon
+        w.itemCount = "paste JSON or XML below — auto-formats"
+        // hide the framework's copy config; keep our own two buttons
+        w.copyConfigButtonLabel = ""
+        w.copyPathButtonLabel = ""
+        w.headerButtons = [("save file", 11), ("copy contents", 10)]
+        w.onEditorTextChange = { [weak self, weak w] in
+            guard let self, let w else { return }
+            self.prettyFormatWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self, weak w] in
+                guard let self, let w else { return }
+                let raw = w.currentEditorText
+                // formatting shells out to jq/xmllint — keep it off the main
+                // thread so a big document never stalls the UI
+                DispatchQueue.global(qos: .userInitiated).async { [weak self, weak w] in
+                    let result = self?.prettyFormat(raw)
+                    DispatchQueue.main.async { [weak w] in
+                        guard let result, let w else { return }
+                        if let formatted = result.formatted {
+                            // render the formatted text with JSON/XML token
+                            // colors (idempotent — re-applied even when the
+                            // text is unchanged so colors never go stale)
+                            w.setEditorSyntaxHighlighted(formatted)
+                            w.setStatus(nil, isError: false)
+                        } else if let err = result.error {
+                            w.setStatus(err, isError: true)
+                        } else {
+                            w.setStatus(nil, isError: false)
+                        }
+                    }
+                }
+            }
+            self.prettyFormatWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+        }
+        w.onHeaderButton = { [weak self, weak w] id in
+            guard let self, let w else { return }
+            if id == 10 {
+                // copy contents
+                let contents = w.currentEditorText
+                guard !contents.isEmpty else { return }
+                self.copy(contents, "prettyprint contents")
+            } else if id == 11 {
+                // save to a file + copy the absolute path
+                self.savePrettyPrint(w, dir: cmd.saveDir)
+            }
+        }
+        w.onHide = { [weak self] restore in
+            guard let self else { return }
+            self.prettyFormatWorkItem?.cancel()
+            self.unregisterSubWindow(w, restore: restore,
+                                     restoreWID: nil, restorePID: nil)
+        }
+        subWindows.append(w)
+        w.show()
+        log("prettyprint window opened")
+    }
+
+    // Timestamp for prettyprint filenames: prettyprint-20260918-173045.json
+    private let prettySaveStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f
+    }()
+
+// "save file": write the current editor contents to a timestamped file in the
+// command's configured save directory (default /tmp/; commands.conf `save-dir`
+// overrides), then copy the ABSOLUTE path to the clipboard (pbcopy equivalent).
+// Feedback lands in the status strip — the saved path on success, a red error
+// on failure.
+private func savePrettyPrint(_ w: PopupWindow, dir: String) {
+    let contents = w.currentEditorText
+    guard !contents.isEmpty else { return }
+    let t = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+    let ext: String
+    if let f = t.first {
+        if f == "<" { ext = "xml" }
+        else if f == "{" || f == "[" { ext = "json" }
+        else { ext = "txt" }
+    } else {
+        ext = "txt"
+    }
+    // expand any `~`/relative path into an absolute directory
+    let absDir = (dir as NSString).expandingTildeInPath
+    let path = (absDir as NSString)
+        .appendingPathComponent("prettyprint-\(prettySaveStamp.string(from: Date())).\(ext)")
+    do {
+        try contents.write(toFile: path, atomically: true, encoding: .utf8)
+    } catch {
+        w.setStatus("save failed: \(error.localizedDescription)", isError: true)
+        return
+    }
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    pb.setString(path, forType: .string)
+    w.setStatus("saved: \(path)", isError: false)
+    log("prettyprint saved to \(path)")
+}
+
+// Sniff + reformat JSON/XML via the real formatter bins (jq / xmllint — the
+// same tools the shell `prettyprint` util uses), so the output AND the parse
+// errors match exactly. `.formatted` = pretty text (content was JSON/XML);
+// `.error` = the formatter's stderr (content LOOKED like JSON/XML but didn't
+// parse); nil/nil = plain text (nothing to do).
+private struct FormatResult {
+    let formatted: String?
+    let error: String?
+}
+
+private func prettyFormat(_ raw: String) -> FormatResult {
+    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let first = t.first else { return FormatResult(formatted: nil, error: nil) }
+    if first == "{" || first == "[" {
+        let (out, err) = runFormatter(tool: "jq", paths: ["/opt/homebrew/bin/jq",
+                                                           "/usr/local/bin/jq"],
+                                      args: ["."], input: raw)
+        if let e = trimmed(err) {
+            return FormatResult(formatted: nil, error: e)
+        }
+        return FormatResult(formatted: out.isEmpty ? raw : out, error: nil)
+    }
+    if first == "<" {
+        let (out, err) = runFormatter(tool: "xmllint",
+                                      paths: ["/usr/bin/xmllint", "/opt/homebrew/bin/xmllint"],
+                                      args: ["--format", "-"], input: raw)
+        if let e = trimmed(err) {
+            return FormatResult(formatted: nil, error: e)
+        }
+        return FormatResult(formatted: out.isEmpty ? raw : out, error: nil)
+    }
+    return FormatResult(formatted: nil, error: nil)
+}
+
+// Run a formatter tool with `input` on stdin; returns (stdout, stderr). Pipes
+// are drained on a background queue so large output can't deadlock the read.
+// Falls back to PATH lookup (/usr/bin/env) when none of the absolute paths
+// exist, so the tool is found however the daemon was launched.
+private func runFormatter(tool: String, paths: [String], args: [String],
+                          input: String) -> (String, String) {
+    var executable = URL(fileURLWithPath: "/usr/bin/env")
+    var argv = [tool] + args
+    if let p = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+        executable = URL(fileURLWithPath: p)
+        argv = args
+    }
+    let p = Process()
+    p.executableURL = executable
+    p.arguments = argv
+    let inp = Pipe()
+    let out = Pipe()
+    let err = Pipe()
+    p.standardInput = inp
+    p.standardOutput = out
+    p.standardError = err
+    do { try p.run() } catch { return ("", "\(tool): \(error.localizedDescription)") }
+    var outData = Data()
+    var errData = Data()
+    let group = DispatchGroup()
+    group.enter()
+    DispatchQueue.global(qos: .userInitiated).async {
+        outData = out.fileHandleForReading.readDataToEndOfFile()
+        group.leave()
+    }
+    group.enter()
+    DispatchQueue.global(qos: .userInitiated).async {
+        errData = err.fileHandleForReading.readDataToEndOfFile()
+        group.leave()
+    }
+    inp.fileHandleForWriting.write(input.data(using: .utf8) ?? Data())
+    try? inp.fileHandleForWriting.close()
+    p.waitUntilExit()
+    group.wait()
+    return (String(data: outData, encoding: .utf8) ?? "",
+            String(data: errData, encoding: .utf8) ?? "")
+}
+
+private func trimmed(_ s: String) -> String? {
+    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    return t.isEmpty ? nil : t
+}
 
     // run any shell line into an output window
     private func runScript(_ script: String, label: String, into w: PopupWindow) {

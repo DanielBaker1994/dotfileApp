@@ -82,6 +82,228 @@ func parseANSI(_ s: String, baseFont: NSFont, defaultColor: NSColor) -> NSAttrib
     return out
 }
 
+// MARK: - Syntax highlighting (JSON / XML)
+
+// Syntax-highlight prettyprinted JSON/XML with the window colors: keys/tags in
+// blue, string values green, numbers amber, booleans/null + attribute names
+// purple, punctuation dim. Plain text renders in the base color untouched.
+// The highlight lives entirely in the framework so every editor window can opt
+// in (the prettyprint window does via setEditorSyntaxHighlighted).
+public func popupHighlightSyntax(_ text: String, font: NSFont,
+                                 colors: PopupColors) -> NSAttributedString {
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let f = t.first {
+        if f == "<" { return popupHighlightXML(text, font: font, colors: colors) }
+        if f == "{" || f == "[" { return popupHighlightJSON(text, font: font, colors: colors) }
+    }
+    return NSAttributedString(string: text, attributes: [
+        .font: font, .foregroundColor: colors.text,
+    ])
+}
+
+// palette shared by the JSON/XML highlighters (hues borrowed from the app's
+// existing accents so a colored value reads consistently across windows)
+private let popupKeyColor = NSColor(srgbRed: 0.48, green: 0.70, blue: 1.00, alpha: 1)   // keys / tag names
+private let popupStrColor = NSColor(srgbRed: 0.55, green: 0.80, blue: 0.52, alpha: 1)   // string values
+private let popupNumColor = NSColor(srgbRed: 0.95, green: 0.66, blue: 0.30, alpha: 1)   // numbers
+private let popupKwColor  = NSColor(srgbRed: 0.73, green: 0.62, blue: 0.95, alpha: 1)   // true/false/null + attr names
+
+private func popupAttr(_ s: String, _ font: NSFont, _ color: NSColor,
+                       italic: Bool = false) -> NSAttributedString {
+    var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+    if italic { attrs[.obliqueness] = 0.15 }
+    return NSAttributedString(string: s, attributes: attrs)
+}
+
+// JSON: one regex finds strings / numbers / keywords; a string followed by
+// `:` (ignoring whitespace) is a key, everything else is a value. Unmatched
+// runs get base color with punctuation (`{ } [ ] , :`) dimmed.
+private let popupJSONRegex = try! NSRegularExpression(
+    pattern: #"("(?:[^"\\]|\\.)*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b|\bnull\b)"#)
+
+private func popupHighlightJSON(_ text: String, font: NSFont,
+                                colors: PopupColors) -> NSAttributedString {
+    let out = NSMutableAttributedString()
+    let ns = text as NSString
+    let len = ns.length
+    var pos = 0
+    var run = ""
+    var runColor = colors.text
+    func flush() {
+        if !run.isEmpty { out.append(popupAttr(run, font, runColor)); run = "" }
+    }
+    func pushSegment(_ seg: String) {
+        for u in seg.unicodeScalars {
+            let isPunct = u == "{" || u == "}" || u == "[" || u == "]"
+                || u == "," || u == ":"
+            let c = isPunct ? colors.dim : colors.text
+            if c != runColor { flush(); runColor = c }
+            run += String(u)
+        }
+    }
+    for m in popupJSONRegex.matches(in: text, range: NSRange(location: 0, length: len)) {
+        if m.range.location > pos {
+            pushSegment(ns.substring(with: NSRange(location: pos,
+                                                  length: m.range.location - pos)))
+        }
+        flush()
+        let r = m.range
+        let s = ns.substring(with: r)
+        if m.range(at: 1).location != NSNotFound {
+            // string: a key when the next non-whitespace char is a colon
+            var after = NSMaxRange(r)
+            while after < len {
+                let c = ns.character(at: after)
+                if c == 32 || c == 9 { after += 1; continue }
+                break
+            }
+            let isKey = after < len && ns.character(at: after) == 58 // ':'
+            out.append(popupAttr(s, font, isKey ? popupKeyColor : popupStrColor))
+        } else if m.range(at: 2).location != NSNotFound {
+            out.append(popupAttr(s, font, popupNumColor))
+        } else {
+            out.append(popupAttr(s, font, popupKwColor))
+        }
+        pos = NSMaxRange(r)
+    }
+    if pos < len {
+        pushSegment(ns.substring(from: pos))
+    }
+    flush()
+    return out
+}
+
+// XML: scan for tags (`<…>`), coloring the tag name, attributes and their
+// values; comments are dimmed italic; the text between tags stays base color.
+private func popupHighlightXML(_ text: String, font: NSFont,
+                               colors: PopupColors) -> NSAttributedString {
+    let out = NSMutableAttributedString()
+    let ns = text as NSString
+    let len = ns.length
+    var i = 0
+    while i < len {
+        if ns.character(at: i) == 60 { // '<'
+            // comment
+            if ns.substring(with: NSRange(location: i, length: min(4, len - i))) == "<!--" {
+                let close = ns.range(of: "-->", options: [],
+                                     range: NSRange(location: i, length: len - i))
+                if close.location != NSNotFound {
+                    let seg = NSRange(location: i, length: NSMaxRange(close) - i)
+                    out.append(popupAttr(ns.substring(with: seg), font, colors.dim, italic: true))
+                    i = NSMaxRange(seg)
+                    continue
+                }
+            }
+            // find the `>` closing the tag (ignore `>` inside quoted values)
+            var gt = i + 1
+            var quote: unichar = 0
+            while gt < len {
+                let c = ns.character(at: gt)
+                if quote != 0 {
+                    if c == quote { quote = 0 }
+                } else if c == 34 || c == 39 { // " or '
+                    quote = c
+                } else if c == 62 { break }    // >
+                gt += 1
+            }
+            if gt >= len { gt = len - 1 }
+            let tagRange = NSRange(location: i, length: gt - i + 1)
+            out.append(popupAttributedTag(ns.substring(with: tagRange), font: font,
+                                          colors: colors))
+            i = gt + 1
+        } else {
+            // text content up to the next '<'
+            let rest = NSRange(location: i, length: len - i)
+            let n = ns.range(of: "<", options: [], range: rest)
+            if n.location != NSNotFound {
+                out.append(popupAttr(ns.substring(with: NSRange(location: i, length: n.location - i)),
+                                     font, colors.text))
+                i = n.location
+            } else {
+                out.append(popupAttr(ns.substring(from: i), font, colors.text))
+                break
+            }
+        }
+    }
+    return out
+}
+
+// One tag's internals: < / name / attr="val" … / >  with each part colored.
+private func popupAttributedTag(_ tag: String, font: NSFont,
+                                colors: PopupColors) -> NSAttributedString {
+    let out = NSMutableAttributedString()
+    let ns = tag as NSString
+    let len = ns.length
+    var k = 0
+    // opening: `<`, `</`, `<?`, `<!`
+    if len >= 2 {
+        let p2 = ns.substring(with: NSRange(location: 0, length: 2))
+        if p2 == "</" || p2 == "<?" || p2 == "<!" {
+            out.append(popupAttr(p2, font, colors.dim))
+            k = 2
+        } else {
+            out.append(popupAttr("<", font, colors.dim))
+            k = 1
+        }
+    }
+    // tag name (up to whitespace / `>` / `/` / `?`)
+    var j = k
+    while j < len {
+        let c = ns.character(at: j)
+        if c == 32 || c == 9 || c == 62 || c == 47 || c == 63 { break }
+        j += 1
+    }
+    if j > k {
+        out.append(popupAttr(ns.substring(with: NSRange(location: k, length: j - k)),
+                             font, popupKeyColor))
+        k = j
+    }
+    // attributes
+    while k < len {
+        let c = ns.character(at: k)
+        // end / self-close, or a `?` closing a processing instruction (`<?xml …?>`)
+        if c == 62 || c == 47 || c == 63 { break }
+        if c == 32 || c == 9 {            // whitespace run
+            var w = k
+            while w < len && (ns.character(at: w) == 32 || ns.character(at: w) == 9) { w += 1 }
+            out.append(popupAttr(ns.substring(with: NSRange(location: k, length: w - k)),
+                                 font, colors.dim))
+            k = w
+            continue
+        }
+        var nameEnd = k
+        while nameEnd < len && ns.character(at: nameEnd) != 61 { nameEnd += 1 } // '='
+        out.append(popupAttr(ns.substring(with: NSRange(location: k, length: nameEnd - k)),
+                             font, popupKwColor))
+        k = nameEnd
+        if k < len && ns.character(at: k) == 61 {
+            out.append(popupAttr("=", font, colors.dim))
+            k += 1
+            let v = ns.character(at: k)
+            if v == 34 || v == 39 {       // quoted value
+                var e = k + 1
+                while e < len && ns.character(at: e) != v { e += 1 }
+                if e < len { e += 1 }
+                out.append(popupAttr(ns.substring(with: NSRange(location: k, length: e - k)),
+                                     font, popupStrColor))
+                k = e
+            } else {                      // unquoted value
+                var e = k
+                while e < len, ns.character(at: e) != 32,
+                      ns.character(at: e) != 9, ns.character(at: e) != 62 { e += 1 }
+                out.append(popupAttr(ns.substring(with: NSRange(location: k, length: e - k)),
+                                     font, popupStrColor))
+                k = e
+            }
+        }
+    }
+    // trailing `>` / `/>` / `?>`
+    if k < len {
+        out.append(popupAttr(ns.substring(from: k), font, colors.dim))
+    }
+    return out
+}
+
 // ============================================================================
 // PopupWindow — a reusable AppKit popup framework.
 //
@@ -157,6 +379,15 @@ public struct PopupConfig {
     // fonts (used by the framework's own input field + default row drawing)
     public var inputFontSize: CGFloat = 12
     public var rowFontSize: CGFloat = 11
+
+    // standardized button theme (pills, tabs, header segments, filter chips)
+    // — one look across every window: accent action fill, border stroke,
+    // consistent radius, hover/pressed feedback driven by the same colors
+    public var buttonRadius: CGFloat = 6
+    public var buttonFontSize: CGFloat = 10.5
+    // hover/pressed shading applied over the normal fill (0 = none)
+    public var buttonHoverAlpha: CGFloat = 0.18
+    public var buttonPressedAlpha: CGFloat = 0.32
 
     // UI zoom: scales fonts, row heights and chrome sizes proportionally
     // (Ctrl/Cmd+± drives it alongside the window resize)
@@ -719,7 +950,7 @@ final class PopupTabsBar: NSView {
 
     private func tabWidth(_ title: String) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10.5 * zoom),
+            .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom, weight: .semibold),
         ]
         return (title as NSString).size(withAttributes: attrs).width + 24 * zoom
     }
@@ -768,24 +999,25 @@ final class PopupTabsBar: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         for (rect, title) in pillRects() {
-            let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+            let path = NSBezierPath(roundedRect: rect, xRadius: config.buttonRadius,
+                                    yRadius: config.buttonRadius)
+            let isSelectedTab = title != "+" && titles.firstIndex(of: title) == selected
             if title == "+" {
-                config.colors.highlight.withAlphaComponent(0.4).setFill()
+                config.colors.accent.withAlphaComponent(0.5).setFill()
                 path.fill()
-            } else if let i = titles.firstIndex(of: title), i == selected {
-                config.colors.highlight.setFill()
+            } else if isSelectedTab {
+                config.colors.accent.withAlphaComponent(0.7).setFill()
                 path.fill()
-                config.colors.border.setStroke()
+                config.colors.border.withAlphaComponent(0.8).setStroke()
                 path.lineWidth = 1
                 path.stroke()
             } else {
-                config.colors.highlight.withAlphaComponent(0.25).setFill()
+                config.colors.highlight.withAlphaComponent(0.3).setFill()
                 path.fill()
             }
-            let isSelectedTab = title != "+" && titles.firstIndex(of: title) == selected
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: (title == "+" ? 13 : 10.5) * zoom,
-                                         weight: title == "+" ? .medium : .regular),
+                .font: NSFont.systemFont(ofSize: (title == "+" ? 13 : config.buttonFontSize) * zoom,
+                                         weight: title == "+" ? .medium : .semibold),
                 .foregroundColor: isSelectedTab ? config.colors.text : config.colors.dim,
             ]
             let s = title as NSString
@@ -845,7 +1077,7 @@ final class PopupFilterBar: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
     private var fontAttrs: [NSAttributedString.Key: Any] {
-        [.font: NSFont.systemFont(ofSize: 10.5 * zoom)]
+        [.font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom, weight: .semibold)]
     }
 
     // display text for a dropdown option (labeled when valueLabels provides one)
@@ -902,10 +1134,11 @@ final class PopupFilterBar: NSView {
         // one long bar across all the dropdown segments
         let bar = NSRect(x: first.0.minX, y: first.0.minY,
                          width: last.0.maxX - first.0.minX, height: pillH)
-        let bp = NSBezierPath(roundedRect: bar, xRadius: 6, yRadius: 6)
-        config.colors.highlight.withAlphaComponent(0.55).setFill()
+        let bp = NSBezierPath(roundedRect: bar, xRadius: config.buttonRadius,
+                              yRadius: config.buttonRadius)
+        config.colors.accent.withAlphaComponent(0.45).setFill()
         bp.fill()
-        config.colors.text.withAlphaComponent(0.15).setStroke()
+        config.colors.border.withAlphaComponent(0.5).setStroke()
         bp.lineWidth = 1
         bp.stroke()
         for (i, (rect, dim, title)) in rects.enumerated() {
@@ -919,7 +1152,7 @@ final class PopupFilterBar: NSView {
                     && selections[prev.1] > 0
                 let prevFlash = flashDim == prev.1
                 if !prevActive && !active && !prevFlash && !flashing {
-                    config.colors.text.withAlphaComponent(0.2).setStroke()
+                    config.colors.border.withAlphaComponent(0.35).setStroke()
                     let d = NSBezierPath()
                     d.lineWidth = 1
                     d.move(to: NSPoint(x: rect.minX, y: bar.minY + 5))
@@ -928,18 +1161,20 @@ final class PopupFilterBar: NSView {
                 }
             }
             if flashing || active {
-                // quiet selected chip: tinted fill + accent hairline. A solid
-                // slab of accent dominated the bar and read as an error state
+                // selected chip: accent fill + border hairline — clearly the
+                // active segment of the bar (brighter than the idle accent)
                 let chip = NSBezierPath(roundedRect: rect.insetBy(dx: 2, dy: 3),
-                                        xRadius: 5, yRadius: 5)
-                config.colors.accent.withAlphaComponent(flashing ? 0.5 : 0.22).setFill()
+                                        xRadius: config.buttonRadius - 1,
+                                        yRadius: config.buttonRadius - 1)
+                config.colors.accent.withAlphaComponent(flashing ? 0.6 : 0.35).setFill()
                 chip.fill()
-                config.colors.accent.withAlphaComponent(0.85).setStroke()
+                config.colors.border.withAlphaComponent(0.85).setStroke()
                 chip.lineWidth = 1
                 chip.stroke()
             }
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10.5 * zoom),
+                .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom,
+                                         weight: .semibold),
                 .foregroundColor: (active || flashing)
                     ? config.colors.text : config.colors.dim,
             ]
@@ -1350,7 +1585,8 @@ final class PopupRowView: NSView {
             let pill = NSRect(x: 8, y: top + 5,
                               width: rect.width - 16,
                               height: bandH - 10)
-            let p = NSBezierPath(roundedRect: pill, xRadius: 8, yRadius: 8)
+            let p = NSBezierPath(roundedRect: pill, xRadius: config.buttonRadius,
+                                 yRadius: config.buttonRadius)
             config.colors.highlight.setFill()
             p.fill()
             config.colors.border.withAlphaComponent(0.8).setStroke()
@@ -1529,9 +1765,17 @@ public func popupDrawImage(_ img: NSImage, in rect: NSRect) {
 // images) and Finder-copied image files both arrive as a clean NSImage.
 final class PopupTextView: NSTextView {
     var onPasteImage: ((NSImage) -> Void)?
+    // fired after any user-initiated text change (typing / paste / delete) —
+    // lets the host react live (e.g. prettyprint auto-format)
+    var onTextChange: (() -> Void)?
     // character index -> absolute path of the image under it (nil = no image)
     var absolutePathAt: ((Int) -> String?)?
     private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"])
+
+    override func didChangeText() {
+        super.didChangeText()
+        onTextChange?()
+    }
 
     // right-click on a rendered photo: copy its ABSOLUTE file path
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -1611,8 +1855,13 @@ final class PopupTextView: NSTextView {
 final class ThemeButton: NSView {
     private let config: PopupConfig
     var title: String { didSet { needsDisplay = true } }
+    // "on" state (e.g. ★ pinned): rendered with the solid highlight fill so
+    // an active toggle reads clearly against the idle accent buttons
+    var isOn = false { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
     private var down = false
+    private var hover = false
+    private var trackingArea: NSTrackingArea?
 
     init(config: PopupConfig, title: String) {
         self.config = config
@@ -1622,17 +1871,48 @@ final class ThemeButton: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
     override var isFlipped: Bool { true }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds,
+                               options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        trackingArea = t
+    }
+    override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
+
     override func draw(_ dirty: NSRect) {
-        let bg = down ? config.colors.highlight : config.colors.highlight.withAlphaComponent(0.55)
-        let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
-        bg.setFill()
+        let c = config.colors
+        // accent fill, shaded by hover/pressed; selected-style "on" buttons
+        // (★ pinned) use the highlight fill instead so state reads clearly
+        let fill: NSColor
+        if down {
+            fill = c.highlight.withAlphaComponent(config.buttonPressedAlpha)
+        } else if isOn {
+            fill = c.highlight.withAlphaComponent(0.9)
+        } else if hover {
+            fill = c.accent.blended(withFraction: 0.25, of: c.text)
+                ?? c.accent.withAlphaComponent(0.75)
+        } else {
+            fill = c.accent.withAlphaComponent(0.55)
+        }
+        let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                             xRadius: config.buttonRadius, yRadius: config.buttonRadius)
+        fill.setFill()
         r.fill()
-        config.colors.text.withAlphaComponent(0.15).setStroke()
-        r.lineWidth = 1
+        if isOn {
+            c.border.withAlphaComponent(0.9).setStroke()
+            r.lineWidth = 1.5
+        } else {
+            c.border.withAlphaComponent(0.5).setStroke()
+            r.lineWidth = 1
+        }
         r.stroke()
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: config.colors.text,
+            .font: NSFont.systemFont(ofSize: config.buttonFontSize, weight: .semibold),
+            .foregroundColor: c.text,
         ]
         let s = title as NSString
         let sz = s.size(withAttributes: attrs)
@@ -1676,6 +1956,7 @@ final class FileListPane: NSView {
         self.config = config
         super.init(frame: .zero)
     }
+
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -2148,7 +2429,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // returns the total height consumed (0 when there are no favorites)
     private func layoutFavorites(from y0: CGFloat) -> CGFloat {
         guard !favPills.isEmpty else { return 0 }
-        let pillH: CGFloat = 18
+        let pillH: CGFloat = 20
         let gap: CGFloat = 4
         var x: CGFloat = 6
         var y = y0
@@ -2164,8 +2445,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         return (y - y0) + pillH
     }
     private func pillWidth(_ t: String) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]
-        return (t as NSString).size(withAttributes: attrs).width + 16
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: config.buttonFontSize, weight: .semibold)]
+        return (t as NSString).size(withAttributes: attrs).width + 18
     }
     // ~/notes instead of /Users/me/notes for pinned/config paths under home
     private func displayPath(_ p: String) -> String {
@@ -2432,7 +2713,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         onStatus?(shownFavorites.contains(cwd) ? "★ pinned \(displayPath(cwd))" : "unpinned \(displayPath(cwd))")
     }
     private func updateStarTitle() {
-        starButton.title = shownFavorites.contains(cwd) ? "★ pinned" : "★ pin"
+        let on = shownFavorites.contains(cwd)
+        starButton.isOn = on
+        starButton.title = on ? "★ pinned" : "★ pin"
     }
     private func rebuildPills() {
         for p in favPills { p.removeFromSuperview() }
@@ -2499,6 +2782,54 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
 }
 
+// MARK: - Status bar (bottom strip)
+
+// Rounded strip pinned to the bottom of an editor window for transient
+// feedback (e.g. prettyprint parse errors). Error state = red tint + hairline
+// + red monospace text; normal state = subtle highlight matching the pill
+// theme. Hidden when there's nothing to say.
+final class PopupStatusBar: NSView {
+    let config: PopupConfig
+    var text: String = "" { didSet { needsDisplay = true } }
+    var isError = false { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+
+    init(config: PopupConfig) {
+        self.config = config
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func draw(_ dirty: NSRect) {
+        let r = NSRect(x: 1, y: 1, width: bounds.width - 2, height: bounds.height - 2)
+        let p = NSBezierPath(roundedRect: r, xRadius: config.buttonRadius,
+                             yRadius: config.buttonRadius)
+        (isError ? NSColor.systemRed.withAlphaComponent(0.2)
+                 : config.colors.highlight.withAlphaComponent(0.5)).setFill()
+        p.fill()
+        (isError ? NSColor.systemRed.withAlphaComponent(0.8)
+                 : config.colors.border.withAlphaComponent(0.4)).setStroke()
+        p.lineWidth = 1
+        p.stroke()
+        guard !text.isEmpty else { return }
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
+            .foregroundColor: isError
+                ? NSColor.systemRed.withAlphaComponent(0.95)
+                : config.colors.text,
+            .paragraphStyle: para,
+        ]
+        let s = text as NSString
+        let lineH = s.size(withAttributes: attrs).height
+        s.draw(with: NSRect(x: r.minX + 10, y: r.midY - lineH / 2,
+                            width: max(20, r.width - 20), height: lineH),
+               options: [.usesLineFragmentOrigin], attributes: attrs)
+    }
+}
+
 // MARK: - Chrome (drag + resize overlay)
 
 // Transparent overlay above the content that owns the window chrome: resize
@@ -2562,6 +2893,11 @@ var meterEnabled = false {
     // header button feedback: flips to "✓ …" for a moment after a copy
     private var feedback: Int = 0          // 0 none, 1 copy, 2 config
     private var feedbackTimer: DispatchWorkItem?
+    // header button hover feedback: the id of the segment under the cursor
+    private var hoveredSegment: Int?
+    // segment rects (fb id -> rect) set during draw, used for hover hit-testing
+    private var headerSegRects: [(Int, NSRect)] = []
+    private var trackingArea: NSTrackingArea?
 
     private let minW: CGFloat = 160
     private let minH: CGFloat = 100
@@ -2590,6 +2926,42 @@ var meterEnabled = false {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    // mouse-move tracking for the header-button hover highlight (and the
+    // record bar): the chrome owns the header strip, so the tracking area
+    // lives here, not on the subviews
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds,
+                               options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        trackingArea = t
+    }
+
+    override func mouseEntered(with event: NSEvent) {}
+    override func mouseExited(with event: NSEvent) {
+        if hoveredSegment != nil {
+            hoveredSegment = nil
+            needsDisplay = true
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        var hovered: Int?
+        if dragHeaderHeight > 0, p.y <= dragHeaderHeight {
+            for (fb, rect) in headerSegRects where rect.contains(p) {
+                hovered = fb
+                break
+            }
+        }
+        if hovered != hoveredSegment {
+            hoveredSegment = hovered
+            needsDisplay = true
+        }
+    }
 
     private func edges(at p: NSPoint) -> PopupBackdrop.Edge {
         var e: PopupBackdrop.Edge = []
@@ -2702,10 +3074,10 @@ var meterEnabled = false {
         let needsNerd = label.unicodeScalars.contains {
             (0xE000...0xF8FF).contains($0.value)
         }
-        if needsNerd, let f = NSFont(name: config.terminalFont, size: 10) {
+        if needsNerd, let f = NSFont(name: config.terminalFont, size: config.buttonFontSize) {
             return f
         }
-        return NSFont.systemFont(ofSize: 10, weight: .semibold)
+        return NSFont.systemFont(ofSize: config.buttonFontSize, weight: .semibold)
     }
 
     // header button segments at their FULL label width (the "✓ " feedback
@@ -2817,24 +3189,28 @@ var meterEnabled = false {
                              y: (dragHeaderHeight - barH) / 2,
                              width: barW, height: barH)
         if !segs.isEmpty {
-            let bp = NSBezierPath(roundedRect: barRect, xRadius: 5, yRadius: 5)
-            config.colors.highlight.withAlphaComponent(0.55).setFill()
+            let bp = NSBezierPath(roundedRect: barRect, xRadius: config.buttonRadius,
+                                  yRadius: config.buttonRadius)
+            config.colors.accent.withAlphaComponent(0.45).setFill()
             bp.fill()
-            config.colors.text.withAlphaComponent(0.15).setStroke()
+            config.colors.border.withAlphaComponent(0.5).setStroke()
             bp.lineWidth = 1
             bp.stroke()
         }
+        headerSegRects = []
         var sx = barRect.minX
         for (i, seg) in segs.enumerated() {
             let segRect = NSRect(x: sx, y: barRect.minY, width: seg.w, height: barH)
             let active = feedback == seg.fb
+            let persistentOn = seg.fb >= 10 && activeButtonIDs.contains(seg.fb)
+            headerSegRects.append((seg.fb, segRect))
             if i > 0 {
                 // thin | divider between the segments — hidden when either
                 // neighbor is active so the accent fill reads as one solid
                 // selected segment
                 let prevActive = feedback == segs[i - 1].fb
                 if !prevActive && !active {
-                    config.colors.text.withAlphaComponent(0.2).setStroke()
+                    config.colors.border.withAlphaComponent(0.35).setStroke()
                     let d = NSBezierPath()
                     d.lineWidth = 1
                     d.move(to: NSPoint(x: segRect.minX, y: barRect.minY + 5))
@@ -2845,22 +3221,38 @@ var meterEnabled = false {
             if active {
                 config.colors.accent.setFill()
                 segRect.fill()
-            } else if seg.fb >= 10, activeButtonIDs.contains(seg.fb) {
+                config.colors.border.withAlphaComponent(0.9).setStroke()
+                let ring = NSBezierPath(roundedRect: segRect.insetBy(dx: 1, dy: 1),
+                                        xRadius: config.buttonRadius - 1,
+                                        yRadius: config.buttonRadius - 1)
+                ring.lineWidth = 1.5
+                ring.stroke()
+            } else if persistentOn {
                 // persistent "on" state (drawer open): SOLID accent fill + a
                 // bright outline — unmistakable against the dark idle bar
                 config.colors.accent.setFill()
                 segRect.fill()
-                config.colors.text.withAlphaComponent(0.6).setStroke()
+                config.colors.border.withAlphaComponent(0.9).setStroke()
                 let ring = NSBezierPath(roundedRect: segRect.insetBy(dx: 1, dy: 1),
-                                        xRadius: 4, yRadius: 4)
+                                        xRadius: config.buttonRadius - 1,
+                                        yRadius: config.buttonRadius - 1)
                 ring.lineWidth = 1.5
                 ring.stroke()
+            } else if hoveredSegment == seg.fb {
+                // hover feedback: lift the segment off the bar with a brighter
+                // accent fill
+                let hovered = config.colors.accent.blended(withFraction: 0.25, of: config.colors.text)
+                    ?? config.colors.accent.withAlphaComponent(0.7)
+                hovered.setFill()
+                NSBezierPath(roundedRect: segRect.insetBy(dx: 1.5, dy: 2.5),
+                             xRadius: config.buttonRadius - 1.5,
+                             yRadius: config.buttonRadius - 1.5).fill()
             }
             if seg.fb == 1 { copyButtonRect = segRect }
             if seg.fb == 2 { configButtonRect = segRect }
             if seg.fb == 3 { copyRowsButtonRect = segRect }
             if seg.fb >= 10 { extraButtonRects[seg.fb] = segRect }
-            let lit = active || (seg.fb >= 10 && activeButtonIDs.contains(seg.fb))
+            let lit = active || persistentOn || hoveredSegment == seg.fb
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: headerButtonFont(seg.text),
                 .foregroundColor: lit
@@ -2953,7 +3345,9 @@ var meterEnabled = false {
                 if active {
                     meterPauseRect = NSRect(x: 46, y: strip.midY - 11, width: 30, height: 22)
                     NSColor.systemRed.withAlphaComponent(0.35).setFill()
-                    NSBezierPath(roundedRect: meterPauseRect, xRadius: 5, yRadius: 5).fill()
+                    NSBezierPath(roundedRect: meterPauseRect,
+                                 xRadius: config.buttonRadius - 1,
+                                 yRadius: config.buttonRadius - 1).fill()
                     if meterState == 1 {
                         // pause: two bars
                         NSColor.white.withAlphaComponent(0.9).setFill()
@@ -3069,6 +3463,21 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public var editorText: String = ""
     public var onEditorCommit: ((String) -> Void)?
     public var onEditorClose: ((String) -> Void)?
+    // fired after each user-initiated editor change (typing / paste / delete);
+    // hosts use it for live reactions (prettyprint auto-format, live preview)
+    public var onEditorTextChange: (() -> Void)? {
+        didSet { wireEditorTextChange() }
+    }
+    // transient status strip at the bottom of an editor window (e.g. the
+    // prettyprint parse error). Call setStatus(nil) to clear.
+    public func setStatus(_ text: String?, isError: Bool) {
+        guard let bar = statusBar else { return }
+        let visible = !(text?.isEmpty ?? true)
+        bar.text = text ?? ""
+        bar.isError = isError
+        bar.isHidden = !visible
+        layoutEditorScroll()
+    }
     // row rendering: if set, the app draws each row rect itself (pill, icons,
     // etc.); otherwise the framework draws a minimal generic default.
     public var onDrawRow: ((NSRect, PopupRow, Bool) -> Void)? {
@@ -3200,6 +3609,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var filterBar: PopupFilterBar?
     private var rowScroll: NSScrollView?
     private var chrome: PopupChrome?
+    // transient status strip (prettyprint errors etc.); nil until an editMode
+    // window opts into it via setStatus
+    private var statusBar: PopupStatusBar?
+    private let statusBarHeight: CGFloat = 26
     // top chrome height (search field + filter bar + tab bar) — the scroll
     // view must span from here to the window's bottom
     private var chromeBottom: CGFloat = 0
@@ -3674,6 +4087,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             fc.isHidden = true
             backdrop.addSubview(fc)
             findCountLabel = fc
+            // bottom status strip (lazy: hidden until the host calls setStatus)
+            let sb = PopupStatusBar(config: config)
+            sb.frame = NSRect(x: 6, y: backdrop.bounds.height - statusBarHeight - 4,
+                              width: max(0, backdrop.bounds.width - 12),
+                              height: statusBarHeight)
+            sb.autoresizingMask = [.width]
+            sb.isHidden = true
+            backdrop.addSubview(sb)
+            statusBar = sb
             if config.terminal {
                 drawerInsetNow = config.terminalHeight
                 // embedded shell drawer at the bottom: the editor stops above
@@ -4044,6 +4466,7 @@ scroll.documentView = rowView
                 editorView?.string = editorText
             }
             editorView?.isEditable = !editorReadOnly
+            wireEditorTextChange()
             let h = min(config.height, maxPanelHeight())
             let origin = centeredOrigin(width: config.width, height: h)
             panel.setContentSize(NSSize(width: config.width, height: h))
@@ -4270,6 +4693,12 @@ private func scrollSelectionIntoView() {
         restyleEditor()
     }
 
+    // route the editor view's textDidChange into the public hook (programmatic
+    // setEditorText calls do NOT post textDidChange, so no feedback loop)
+    private func wireEditorTextChange() {
+        (editorView as? PopupTextView)?.onTextChange = onEditorTextChange
+    }
+
     // assigning tv.string (or inserting plain strings) resets every run to the
     // DEFAULT typing attributes — black system font — which is what made
     // dictated text render black. Re-apply the editor's font/color everywhere
@@ -4454,6 +4883,20 @@ private func scrollSelectionIntoView() {
     public func setEditorANSI(_ s: String) {
         let font = editorFont(config.fontName, config.zoom)
         setEditorAttributedText(parseANSI(s, baseFont: font, defaultColor: config.colors.text))
+    }
+
+    // prettyprint-style syntax highlighting: re-render `text` with JSON/XML
+    // token colors using the editor's own font. Fixes the typing attributes so
+    // edits after highlighting keep the theme instead of snapping to black.
+    public func setEditorSyntaxHighlighted(_ text: String) {
+        let font = editorFont(config.fontName, zoom)
+        setEditorAttributedText(popupHighlightSyntax(text, font: font,
+                                                     colors: config.colors))
+        if let tv = editorView {
+            tv.typingAttributes = [
+                .font: font, .foregroundColor: config.colors.text,
+            ]
+        }
     }
 
     // MARK: Focus
@@ -5212,8 +5655,17 @@ private func scrollSelectionIntoView() {
         // the drawer (terminal or file browser) owns the bottom: stop the editor
         // above it while one is shown
         let drawer = drawerInsetNow + 4
+        // the transient status strip (prettyprint errors) reserves its band
+        // above the meter; the editor shrinks to make room
+        let statusVisible = !(statusBar?.isHidden ?? true)
+        let status = statusVisible ? statusBarHeight + 4 : 0
         scroll.frame.origin.y = topY
-        scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter - drawer)
+        scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter - drawer - status)
+        if statusVisible, let sb = statusBar {
+            sb.frame = NSRect(x: 6, y: backdrop.bounds.height - statusBarHeight - 4 - meter,
+                              width: max(0, backdrop.bounds.width - 12),
+                              height: statusBarHeight)
+        }
         if config.markdownImages {
             // keep text wrapping at the (possibly resized) window width while
             // wide photos overflow into the horizontal scroller
