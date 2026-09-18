@@ -1392,6 +1392,12 @@ final class SwitcherController: NSObject {
     // All open sub-windows (note editor / jira list). Several can coexist
     // (notes + jira at the same time); each hides on Esc and removes itself.
     var subWindows: [PopupWindow] = []
+    // When the user clicks another app, aerospace's on-focus-changed can fire
+    // with a lag and write a STALE bridge entry naming one of our windows;
+    // the poller would then yank focus back off the app the user just clicked.
+    // Suppress self-activation right after a click outside our windows.
+    private var lastOtherAppClick: Date?
+    private var globalClickMonitor: Any?
 
     override init() {
         var config = PopupConfig(name: settings.switcherWindowName)
@@ -1457,9 +1463,26 @@ final class SwitcherController: NSObject {
     private var bridgeMtime: (Int, Int)?
     private func startFocusPoller() {
         let path = popupTmpDir() + settings.focusBridgeName
+        // Record clicks in OTHER apps so the poller never steals focus back
+        // right after the user clicked away (see lastOtherAppClick above).
+        if globalClickMonitor == nil,
+           let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] event in
+            guard let self else { return }
+            let p = NSEvent.mouseLocation
+            let inOurWindow = self.subWindows.contains {
+                $0.isShown && $0.nativeWindow.frame.contains(p)
+            }
+            if !inOurWindow {
+                self.lastOtherAppClick = Date()
+            }
+        }) {
+            globalClickMonitor = m
+        }
         let t = Timer(timeInterval: focusPollInterval, repeats: true) { [weak self] _ in
             guard let self, !NSApp.isActive,
                   self.subWindows.contains(where: { $0.isShown }) else { return }
+            if let last = self.lastOtherAppClick,
+               Date().timeIntervalSince(last) < 1.0 { return }
             var st = stat()
             guard stat(path, &st) == 0 else { return }
             let mt = (Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec))
@@ -2074,11 +2097,13 @@ final class SwitcherController: NSObject {
         cfg.fontName = cmd.font
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
-        // header buttons: ">_" toggles the embedded shell drawer, "▤" toggles
-        // the embedded file browser (both can be open at once)
+        // header buttons: "\u{F120}" (terminal icon) toggles the embedded shell
+        // drawer, "\u{F07C}" (folder) toggles the embedded file browser (both
+        // can be open at once), "open file" opens a file at an exact path
         var hb: [(String, Int)] = []
-        if cmd.terminal { hb.append((">_", 10)) }
-        hb.append(("▤", 20))
+        if cmd.terminal { hb.append(("\u{F120}", 10)) }
+        hb.append(("\u{F07C}", 20))
+        hb.append(("open file", 30))
         w.headerButtons = hb
         w.onHeaderButton = { [weak w] id in
             if id == 10 {
@@ -2087,6 +2112,8 @@ final class SwitcherController: NSObject {
             } else if id == 20 {
                 w?.toggleFileBrowser()
                 if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
+            } else if id == 30 {
+                w?.onOpenPathPrompt?()
             }
         }
         // initial drawer state: terminal starts on, browser starts off — the

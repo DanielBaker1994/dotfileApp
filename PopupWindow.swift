@@ -2690,6 +2690,20 @@ var meterEnabled = false {
         super.mouseUp(with: event)
     }
 
+    // Nerd-font glyphs (BMP PUA codepoints, e.g. the terminal icons) only
+    // measure and render correctly in a Nerd Font — a label carrying one gets
+    // the terminal's font so the segment sizes to the real glyph instead of a
+    // missing-glyph box (which both under-measures and draws a tofu square).
+    private func headerButtonFont(_ label: String) -> NSFont {
+        let needsNerd = label.unicodeScalars.contains {
+            (0xE000...0xF8FF).contains($0.value)
+        }
+        if needsNerd, let f = NSFont(name: config.terminalFont, size: 10) {
+            return f
+        }
+        return NSFont.systemFont(ofSize: 10, weight: .semibold)
+    }
+
     // header button segments at their FULL label width (the "✓ " feedback
     // prefix widens the active one): shared by draw and neededWidth so the
     // window-growth math and the render can never disagree
@@ -2703,13 +2717,11 @@ var meterEnabled = false {
         for b in extraButtons {
             labels.append((b.label, b.id))
         }
-        let btnAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-        ]
         var segs: [(text: String, fb: Int, w: CGFloat)] = []
         for (label, fb) in labels {
             let text = (feedback == fb ? "✓ " : "") + label
-            let w = (text as NSString).size(withAttributes: btnAttrs).width + 18
+            let attrs: [NSAttributedString.Key: Any] = [.font: headerButtonFont(text)]
+            let w = (text as NSString).size(withAttributes: attrs).width + 30
             segs.append((text, fb, w))
         }
         return segs
@@ -2846,7 +2858,7 @@ var meterEnabled = false {
             if seg.fb >= 10 { extraButtonRects[seg.fb] = segRect }
             let lit = active || (seg.fb >= 10 && activeButtonIDs.contains(seg.fb))
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .font: headerButtonFont(seg.text),
                 .foregroundColor: lit
                     ? config.colors.text : config.colors.text.withAlphaComponent(0.72),
             ]
