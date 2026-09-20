@@ -723,11 +723,135 @@ private func mtime(of path: String) -> Date? {
     return attrs[.modificationDate] as? Date
 }
 
+// non-editable files opened as notes (PDFs, images) are shown as a read-only
+// preview instead of markdown — and never saved back to
+private func noteIsPreview(_ path: String) -> Bool {
+    let ext = (path as NSString).pathExtension.lowercased()
+    if ext == "pdf" { return true }
+    return ["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"].contains(ext)
+}
+
+// A plain text-field sheet. NSAlert's accessory NSTextField REFUSES to take
+// first responder, so Cmd+V / Cmd+A / Ctrl+V never reach it — this window is
+// fully ours, so the field is focused and every editing shortcut just works.
+final class TextFieldSheet: NSObject {
+    static var live: [TextFieldSheet] = []   // buttons hold targets weakly — retain
+    private let field: NSTextField
+    private let panel: NSWindow
+    private let sheet: NSWindow
+    private let onResult: (String?) -> Void
+    init(panel: NSWindow, field: NSTextField, sheet: NSWindow,
+         onResult: @escaping (String?) -> Void) {
+        self.field = field
+        self.panel = panel
+        self.sheet = sheet
+        self.onResult = onResult
+    }
+    @objc func ok(_ sender: Any?) { dismiss(field.stringValue) }
+    @objc func cancel(_ sender: Any?) { dismiss(nil) }
+    private func dismiss(_ value: String?) {
+        TextFieldSheet.live.removeAll { $0 === self }
+        panel.endSheet(sheet)
+        onResult(value)
+    }
+}
+
+// Present a single-line text prompt sheet. onResult receives the entered text
+// (nil when cancelled).
+func presentPathSheet(on panel: NSWindow,
+                      title: String,
+                      message: String,
+                      okTitle: String,
+                      onResult: @escaping (String?) -> Void) {
+    let field = NSTextField(frame: NSRect(x: 16, y: 60, width: 428, height: 24))
+    field.usesSingleLineMode = true
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.font = NSFont.systemFont(ofSize: 13)
+
+    let ok = NSButton(title: okTitle, target: nil, action: nil)
+    ok.bezelStyle = .rounded
+    ok.keyEquivalent = "\r"
+    let cancel = NSButton(title: "Cancel", target: nil, action: nil)
+    cancel.bezelStyle = .rounded
+    cancel.keyEquivalent = "\u{1b}"
+
+    let label = NSTextField(labelWithString: message)
+    label.font = NSFont.systemFont(ofSize: 12)
+    label.textColor = .secondaryLabelColor
+
+    let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 128),
+                         styleMask: [.titled], backing: .buffered, defer: false)
+    sheet.title = title
+    let content = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 128))
+    label.frame = NSRect(x: 16, y: 98, width: 428, height: 18)
+    field.frame = NSRect(x: 16, y: 62, width: 428, height: 24)
+    ok.frame = NSRect(x: 460 - 16 - 88, y: 18, width: 88, height: 30)
+    cancel.frame = NSRect(x: ok.frame.minX - 88 - 8, y: 18, width: 88, height: 30)
+    content.addSubview(label)
+    content.addSubview(field)
+    content.addSubview(ok)
+    content.addSubview(cancel)
+    sheet.contentView = content
+    sheet.initialFirstResponder = field
+
+    let target = TextFieldSheet(panel: panel, field: field, sheet: sheet, onResult: onResult)
+    TextFieldSheet.live.append(target)
+    ok.target = target
+    ok.action = #selector(TextFieldSheet.ok(_:))
+    cancel.target = target
+    cancel.action = #selector(TextFieldSheet.cancel(_:))
+
+    panel.makeKeyAndOrderFront(nil)
+    // async so it's safe when called right as a previous sheet dismisses
+    // (e.g. the "Add a note" chooser -> "New Note" second prompt)
+    DispatchQueue.main.async {
+        panel.beginSheet(sheet)
+        sheet.makeFirstResponder(field)
+    }
+}
+
 // Expand note/list path entries: each may be a single file OR a directory.
 // Directories expand to their matching files (sorted, non-hidden), so a
 // `paths`/`sources` value can point at a folder and new files appear
 // automatically without editing commands.conf. `extensions` limits directory
 // listings to those file extensions (lowercased); nil = all files.
+// Dismissed notes: a persistent map of absolute note paths the user closed
+// with the tab ✕. They stay OUT of the note list even when a `paths = ~/notes`
+// directory entry would re-expand them on every launch — without this, a
+// closed note keeps getting resynced back as a tab. Explicitly re-opening a
+// note (via + / Finder "Open in Notes") removes it from the map again.
+enum DismissedNotes {
+    private static let store = NSHomeDirectory() + "/.cache/workspace-switcher/dismissed-notes.json"
+    private static var map: Set<String> = {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: store)),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else {
+            return []
+        }
+        return Set(arr)
+    }()
+    private static func norm(_ path: String) -> String {
+        (path as NSString).standardizingPath
+    }
+    static func contains(_ path: String) -> Bool { map.contains(norm(path)) }
+    static func add(_ path: String) {
+        map.insert(norm(path))
+        persist()
+    }
+    static func remove(_ path: String) {
+        guard map.remove(norm(path)) != nil else { return }
+        persist()
+    }
+    private static func persist() {
+        try? FileManager.default.createDirectory(
+            atPath: (store as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: Array(map)) {
+            try? data.write(to: URL(fileURLWithPath: store))
+        }
+    }
+}
+
 private func expandPaths(_ entries: [String], extensions: [String]? = nil) -> [String] {
     var out: [String] = []
     for raw in entries {
@@ -2258,11 +2382,15 @@ private func trimmed(_ s: String) -> String? {
     // being recreated empty.
     var paths: [String] = []
     for p in expandPaths(cmd.paths, extensions: ["md"]) {
-        if FileManager.default.fileExists(atPath: p) {
-            paths.append(p)
-        } else {
+        if !FileManager.default.fileExists(atPath: p) {
             log("note '\(cmd.name)': \(p) deleted — dropping it and removing from config")
             removeNotePathFromConfig(p, section: cmd.name)
+        } else if DismissedNotes.contains(p) {
+            // closed with the tab ✕ — keep it out even if a directory entry
+            // (e.g. paths = ~/notes) would otherwise re-expand it here
+            log("note '\(cmd.name)': \(p) dismissed — skipping")
+        } else {
+            paths.append(p)
         }
     }
     if paths.isEmpty {
@@ -2310,6 +2438,9 @@ private func trimmed(_ s: String) -> String? {
         // bluey-silver strip, app glyph far left with the last-write line
         cfg.headerHeight = 30
         cfg.titlePill = false
+        // the header buttons fill the whole top strip (right rounded edge back
+        // to the app glyph / last-write line) instead of a compact right cluster
+        cfg.stretchHeaderButtons = true
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
                                  text: TEXT, dim: DIM, highlight: GROUP_BG)
@@ -2318,7 +2449,7 @@ private func trimmed(_ s: String) -> String? {
         let w = PopupWindow(config: cfg)
         // header buttons: "\u{F120}" (terminal icon) toggles the embedded shell
         // drawer, "\u{F07C}" (folder) toggles the embedded file browser (both
-        // can be open at once), "open file" opens a file at an exact path
+        // can be open at once). Opening files happens via the "+" tab button.
         var hb: [(String, Int)] = []
         if cmd.terminal { hb.append(("\u{F120}", 10)) }
         hb.append(("\u{F07C}", 20))
@@ -2326,39 +2457,21 @@ private func trimmed(_ s: String) -> String? {
         // bar — clustered with the terminal + folder toggles. The bar starts
         // OFF (slashed mic), so recording never starts silently at launch.
         if cmd.voice { hb.append(("\u{F131}", 40)) }
-        hb.append(("open file", 30))
         w.headerButtons = hb
-        w.onHeaderButton = { [weak w] id in
-            if id == 10 {
-                w?.toggleTerminalDrawer()
-                if let w { w.setHeaderButtonOn(10, w.terminalShown) }
-            } else if id == 20 {
-                w?.toggleFileBrowser()
-                if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
-            } else if id == 30 {
-                w?.onOpenPathPrompt?()
-            } else if id == 40 {
-                guard let w else { return }
-                let shown = !w.meterEnabled
-                w.meterEnabled = shown
-                w.setHeaderButtonOn(40, shown)
-                // swap the mic glyph: solid mic when the bar is shown,
-                // slashed mic when hidden, so the state reads at a glance
-                var arr = w.headerButtons
-                if let i = arr.firstIndex(where: { $0.1 == 40 }) {
-                    arr[i].0 = shown ? "\u{F130}" : "\u{F131}"
-                    w.headerButtons = arr
-                }
-            }
-        }
+        w.headerOrder = [1, 2]
         // initial drawer state: terminal starts on, browser starts off — the
         // header buttons mirror that; the record bar starts hidden for voice
         if cmd.terminal { w.setHeaderButtonOn(10, false) }
         w.setHeaderButtonOn(20, false)
         if cmd.voice { w.setHeaderButtonOn(40, false) }
         func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
-        w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
         w.imageBaseDir = noteDir(currentPath)
+        if noteIsPreview(currentPath) {
+            w.setEditorFilePreview(currentPath)   // PDF / image: read-only preview
+        } else {
+            w.editorReadOnly = false
+            w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
+        }
         // pasted/dropped photos land in <note dir>/assets and render inline
         w.imageSaver = { [weak self] img in
             guard let self else { return nil }
@@ -2382,8 +2495,8 @@ private func trimmed(_ s: String) -> String? {
         w.headerIcon = cmd.icon ?? notesAppIcon
         // empty `title` in commands.conf = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
-        w.copyPathButtonLabel = "copy \(titles[0]) path"
-        w.copyConfigButtonLabel = "copy config path"
+        w.copyPathButtonLabel = ""          // copy path moved to right-click (tab/editor)
+        w.copyConfigButtonLabel = ""        // config is opened via the icon click
         w.tabTitles = titles
         w.tabFooterText = lastWriteLabel(currentPath)
         // generic label in the drag header — the tab strip already shows the
@@ -2396,7 +2509,7 @@ private func trimmed(_ s: String) -> String? {
         var watcher: Timer?
         // switching tabs: save the current note, load the new one. A tab whose
         // note was deleted on disk becomes default.md instead (never recreate)
-        w.onTabChange = { [weak self] index in
+        let loadTab: (Int) -> Void = { [weak self] index in
             guard let self, index < paths.count else { return }
             let outgoing = currentPath
             // save the outgoing note BEFORE the editor is swapped to the new
@@ -2404,7 +2517,7 @@ private func trimmed(_ s: String) -> String? {
             // hold the NEW note's content and overwrite (wipe) the outgoing
             // file. Never resurrect a deleted file: a missing outgoing is
             // skipped (its text was already parked by the watcher/commit).
-            if FileManager.default.fileExists(atPath: outgoing) {
+            if FileManager.default.fileExists(atPath: outgoing), !noteIsPreview(outgoing) {
                 self.saveNote(w.currentEditorText, to: outgoing, cmd: cmd)
             }
             var target = paths[index]
@@ -2424,15 +2537,99 @@ private func trimmed(_ s: String) -> String? {
                 target = fallback
             }
             currentPath = target
-            let loaded = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
-            w.setEditorMarkdown(loaded, baseDir: noteDir(currentPath))
             w.imageBaseDir = noteDir(currentPath)
-            lastSynced = loaded
+            if noteIsPreview(currentPath) {
+                // PDF / image: read-only preview, never editable text
+                w.setEditorFilePreview(currentPath)
+                lastSynced = ""
+            } else {
+                w.editorReadOnly = false
+                let loaded = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+                w.setEditorMarkdown(loaded, baseDir: noteDir(currentPath))
+                lastSynced = loaded
+            }
             lastMtime = mtime(of: currentPath)
             w.tabFooterText = lastWriteLabel(currentPath)
-            w.copyPathButtonLabel = "copy \(titles[index]) path"
+            w.copyPathButtonLabel = ""          // path lives on the right-click
             w.onChromeHeaderClick = {
                 self.copy(currentPath, "note path: \(currentPath)")
+            }
+        }
+        w.onTabChange = { [weak self] index in
+            guard let self else { return }
+            loadTab(index)
+        }
+        // tab "✕": close the note at `index`. It is dropped from the tab list
+        // and from commands.conf so it never shows up as a note again — the
+        // file itself stays on disk untouched. Closing the last note opens a
+        // fresh default.md scratch pad next to it.
+        let closeNote: (Int) -> Void = { [weak self, weak w] index in
+            guard let self, let w else { return }
+            guard paths.indices.contains(index) else { return }
+            let closing = paths[index]
+            let wasCurrent = index == w.selectedTab
+            // only save when closing the ACTIVE tab — otherwise the editor
+            // holds a different note's text and must not touch this file
+            // (preview files like PDFs are never written back)
+            if wasCurrent, FileManager.default.fileExists(atPath: closing),
+               !noteIsPreview(closing) {
+                self.saveNote(w.currentEditorText, to: closing, cmd: cmd)
+            }
+            self.log("note '\(cmd.name)': closed \(closing)")
+            DismissedNotes.add(closing)
+            self.removeNotePathFromConfig(closing, section: cmd.name)
+            paths.remove(at: index)
+            titles.remove(at: index)
+            if paths.isEmpty {
+                let fallback = noteDir(closing) + "/default.md"
+                try? FileManager.default.createDirectory(
+                    atPath: noteDir(fallback), withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: fallback) {
+                    FileManager.default.createFile(atPath: fallback, contents: nil)
+                }
+                paths = [fallback]
+                titles = [URL(fileURLWithPath: fallback).lastPathComponent]
+                self.addNotePathToConfig(fallback, section: cmd.name)
+            }
+            w.tabTitles = titles
+            if wasCurrent {
+                // switch to the tab that slid into this slot (or the last one)
+                let next = min(index, paths.count - 1)
+                if w.selectedTab == next {
+                    loadTab(next)          // same slot value — reload manually
+                } else {
+                    w.selectedTab = next   // fires onTabChange -> loadTab
+                }
+            } else if index < w.selectedTab {
+                // the closed tab was before the selection — it slid down one
+                w.selectedTab -= 1         // fires onTabChange (same note)
+            }
+        }
+        // "✕" on a tab pill closes that note (removes it from the list)
+        w.onCloseTab = { [weak self] index in
+            guard let self else { return }
+            closeNote(index)
+        }
+        // header button routing (terminal / folder / mic)
+        w.onHeaderButton = { [weak w] id in
+            if id == 10 {
+                w?.toggleTerminalDrawer()
+                if let w { w.setHeaderButtonOn(10, w.terminalShown) }
+            } else if id == 20 {
+                w?.toggleFileBrowser()
+                if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
+            } else if id == 40 {
+                guard let w else { return }
+                let shown = !w.meterEnabled
+                w.meterEnabled = shown
+                w.setHeaderButtonOn(40, shown)
+                // swap the mic glyph: solid mic when the bar is shown,
+                // slashed mic when hidden, so the state reads at a glance
+                var arr = w.headerButtons
+                if let i = arr.firstIndex(where: { $0.1 == 40 }) {
+                    arr[i].0 = shown ? "\u{F130}" : "\u{F131}"
+                    w.headerButtons = arr
+                }
             }
         }
         // "+" pill: choose to open an EXISTING file as a tab (open panel) or
@@ -2459,17 +2656,12 @@ private func trimmed(_ s: String) -> String? {
                     w.onOpenPathPrompt?()
                 case .alertSecondButtonReturn:
                     // "New Note": prompt for a name, create in the default dir
-                    let alert = NSAlert()
-                    alert.messageText = "New note"
-                    alert.informativeText = "Name for the new note:"
-                    let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-                    alert.accessoryView = nameField
-                    alert.addButton(withTitle: "Create")
-                    alert.addButton(withTitle: "Cancel")
-                    alert.window.initialFirstResponder = nameField
-                    alert.beginSheetModal(for: panel) { [weak self] response in
-                        guard let self, response == .alertFirstButtonReturn else { return }
-                        var name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    presentPathSheet(on: panel,
+                                     title: "New note",
+                                     message: "Name for the new note:",
+                                     okTitle: "Create") { [weak self] value in
+                        guard let self, let value else { return }
+                        var name = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !name.isEmpty else {
                             self.log("note '\(cmd.name)': empty name, not creating")
                             return
@@ -2490,6 +2682,7 @@ private func trimmed(_ s: String) -> String? {
                         titles.append(URL(fileURLWithPath: newPath).lastPathComponent)
                         w.tabTitles = titles
                         w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
+                        DismissedNotes.remove(newPath)
                         self.addNotePathToConfig(newPath, section: cmd.name)
                         self.log("note '\(cmd.name)': created \(newPath)")
                     }
@@ -2502,6 +2695,16 @@ private func trimmed(_ s: String) -> String? {
         w.onTabClick = { [weak self] index in
             guard let self, index == w.selectedTab, index < paths.count else { return }
             self.copy(paths[index], "note path: \(paths[index])")
+        }
+        // right-click a note TAB -> copy that note's absolute path
+        w.onTabCopyPath = { [weak self] index in
+            guard let self, index < paths.count else { return }
+            self.copy(paths[index], "note path: \(paths[index])")
+        }
+        // right-click the editor -> "Copy File Path" copies the open note
+        w.onCopyFilePath = { [weak self] in
+            guard let self else { return }
+            self.copy(currentPath, "note path: \(currentPath)")
         }
         // Finder "Open in Notes" service: open an arbitrary file as a tab and
         // switch to it (the file already exists on disk — never create it)
@@ -2520,6 +2723,7 @@ private func trimmed(_ s: String) -> String? {
             titles.append(URL(fileURLWithPath: p).lastPathComponent)
             w.tabTitles = titles
             w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
+            DismissedNotes.remove(p)          // explicit re-open beats the ✕
             self.addNotePathToConfig(p, section: cmd.name)
             self.log("note '\(cmd.name)': opened \(p)")
         }
@@ -2527,20 +2731,13 @@ private func trimmed(_ s: String) -> String? {
         // path and open it as a tab
         w.onOpenPathPrompt = { [weak self, weak w] in
             guard let self, let w else { return }
-            let alert = NSAlert()
-            alert.messageText = "Open file at path"
-            alert.informativeText = "Absolute path (or ~/…) to open as a note:"
-            let pathField = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-            pathField.stringValue = ""
-            alert.accessoryView = pathField
-            alert.addButton(withTitle: "Open")
-            alert.addButton(withTitle: "Cancel")
-            alert.window.initialFirstResponder = pathField
             let panel = w.nativeWindow
-            panel.makeKeyAndOrderFront(nil)
-            alert.beginSheetModal(for: panel) { [weak self, weak w] response in
-                guard let self, let w, response == .alertFirstButtonReturn else { return }
-                let raw = pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            presentPathSheet(on: panel,
+                             title: "Open file at path",
+                             message: "Absolute path (or ~/…) to open as a note:",
+                             okTitle: "Open") { [weak self, weak w] value in
+                guard let self, let w, let value else { return }
+                let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !raw.isEmpty else { return }
                 let p = ((raw as NSString).expandingTildeInPath as NSString).standardizingPath
                 if FileManager.default.fileExists(atPath: p) {
@@ -2568,18 +2765,22 @@ private func trimmed(_ s: String) -> String? {
         w.onChromeHeaderClick = { [weak self] in
             self?.copy(currentPath, "note path: \(currentPath)")
         }
-        // header "config" button: copy the commands.conf path
-        w.onChromeConfigClick = { [weak self] in
-            guard let self else { return }
-            // copy the CANONICAL user-facing config path
-            // (~/.config/workspace-switcher/commands.conf, the INSTALL.sh
-            // symlink target) so the copied path is always paste-able; fall
-            // back to the binary-relative one if the symlink is absent
+        // clicking the top-left notes glyph opens commands.conf as a note tab
+        // (the dedicated "copy config path" button was dropped for this)
+        w.onChromeIconClick = { [weak self, weak w] in
+            guard let self, let w else { return }
+            // the CANONICAL user-facing config path (~/.config/workspace-switcher/
+            // commands.conf, the INSTALL.sh symlink target); fall back to the
+            // binary-relative one if the symlink is absent
             let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
             let p = FileManager.default.fileExists(atPath: canonical)
                 ? canonical
                 : settings.commandsConfPath
-            self.copy(p, "config path: \(p)")
+            if FileManager.default.fileExists(atPath: p) {
+                w.onOpenExternalPath?(p)
+            } else {
+                self.log("note '\(cmd.name)': config not found at \(p)")
+            }
         }
         // voice notes (commands.conf `voice = true`): the window's bottom bar
         // becomes a record control — big record/stop button, pause/resume and
@@ -2736,6 +2937,8 @@ private func trimmed(_ s: String) -> String? {
         // the tab (Cmd+S / close / tab-change all go through here)
         let commitSave: (String) -> Void = { [weak self] text in
             guard let self else { return }
+            // previews (PDF/image) are read-only — never write text back
+            guard !noteIsPreview(currentPath) else { return }
             if FileManager.default.fileExists(atPath: currentPath) {
                 self.saveNote(text, to: currentPath, cmd: cmd)
                 lastSynced = text
@@ -2799,7 +3002,7 @@ private func trimmed(_ s: String) -> String? {
                     FileManager.default.createFile(atPath: fallback, contents: nil)
                 }
                 if p == currentPath {
-                    let text = w.currentEditorText
+                    let text = noteIsPreview(p) ? "" : w.currentEditorText
                     self.log("note '\(cmd.name)': \(p) deleted on disk — text parked in \(fallback)")
                     self.saveNote(text, to: fallback, cmd: cmd)
                     currentPath = fallback
@@ -2825,9 +3028,11 @@ private func trimmed(_ s: String) -> String? {
                 dirty = true
             }
             // NEW notes in a configured directory show up as tabs on their
-            // own — no config edit needed (directory entries cover them)
+            // own — no config edit needed (directory entries cover them).
+            // Dismissed notes (✕) are never re-added by the sync.
             for p in expandPaths(cmd.paths, extensions: ["md"])
-            where FileManager.default.fileExists(atPath: p) && !paths.contains(p) {
+            where FileManager.default.fileExists(atPath: p) && !paths.contains(p)
+                && !DismissedNotes.contains(p) {
                 paths.append(p)
                 titles.append(URL(fileURLWithPath: p).lastPathComponent)
                 self.log("note '\(cmd.name)': new note detected — added tab \(p)")
@@ -2840,8 +3045,8 @@ private func trimmed(_ s: String) -> String? {
                     w.selectedTab = active
                 }
             }
-            // active-note external-write reload
-            if let mt = mtime(of: currentPath) {
+            // active-note external-write reload (skipped for read-only previews)
+            if let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
                 if let last = lastMtime, mt != last {
                     if w.currentEditorText == lastSynced {
                         let newText = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""

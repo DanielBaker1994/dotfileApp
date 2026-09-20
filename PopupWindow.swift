@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import SwiftTerm
 import Foundation
 import Darwin
@@ -402,6 +403,10 @@ public struct PopupConfig {
     // background); titlePill draws the gray pill behind the centered title
     public var headerColor: NSColor? = nil
     public var titlePill: Bool = true
+    // stretch the right-side header buttons to fill the whole header strip
+    // (from the right edge back to the icon/meta) instead of a compact
+    // cluster hugging the right edge — cleaner for title-less editor windows
+    public var stretchHeaderButtons: Bool = false
 
     // optional behaviors (turn on/off at construction time)
     public var enableSearch: Bool = true            // input field + filtering
@@ -935,9 +940,16 @@ final class PopupTabsBar: NSView {
     var onClick: ((Int) -> Void)?       // fired for EVERY tab click (host uses
                                         // this for click-the-active-tab = copy)
     var onAddTab: (() -> Void)?         // fired when the "+" pill is clicked
+    var onCloseTab: ((Int) -> Void)?    // fired when a tab's ✕ badge is clicked
+    var onCopyPath: ((Int) -> Void)?    // right-click a tab -> copy its path
     private var tabH: CGFloat { 22 * zoom }
     private let gap: CGFloat = 6
     private var addW: CGFloat { 30 * zoom }
+    // small ✕ badge drawn at each tab pill's top-left corner (hover only)
+    private var closeSize: CGFloat { 12 * zoom }
+    // index (into pillRects) of the tab whose ✕ is under the cursor
+    private var hoverCloseIndex: Int?
+    private var trackingArea: NSTrackingArea?
 
     override var isFlipped: Bool { true }
 
@@ -948,11 +960,46 @@ final class PopupTabsBar: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
+    // hover tracking so the ✕ only pops in when the cursor sits over a pill's
+    // top-left corner (it stays hidden otherwise, keeping tabs clean)
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds,
+                               options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        trackingArea = t
+    }
+    override func mouseEntered(with event: NSEvent) {}
+    override func mouseExited(with event: NSEvent) {
+        if hoverCloseIndex != nil {
+            hoverCloseIndex = nil
+            needsDisplay = true
+        }
+    }
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        var hover: Int?
+        for (i, (_, title, close)) in pillRects().enumerated() {
+            if title != "+", let close,
+               close.insetBy(dx: -3, dy: -3).contains(p) {
+                hover = i
+                break
+            }
+        }
+        if hover != hoverCloseIndex {
+            hoverCloseIndex = hover
+            needsDisplay = true
+        }
+    }
+
     private func tabWidth(_ title: String) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom, weight: .semibold),
         ]
-        return (title as NSString).size(withAttributes: attrs).width + 24 * zoom
+        // extra padding on the left so the centered title clears the ✕ badge
+        return (title as NSString).size(withAttributes: attrs).width + 32 * zoom
     }
 
     // Number of wrapped rows the pills occupy at `width` (the "+" first).
@@ -976,13 +1023,14 @@ final class PopupTabsBar: NSView {
         CGFloat(rowCount(forWidth: width)) * (tabH + gap) - gap
     }
 
-    // Wrapped layout of every pill; the "+" add button is first.
-    private func pillRects() -> [(NSRect, String)] {
-        var out: [(NSRect, String)] = []
+    // Wrapped layout of every pill; the "+" add button is first. Each tab pill
+    // carries its ✕ badge rect (top-left corner), nil for the "+" button.
+    private func pillRects() -> [(rect: NSRect, title: String, close: NSRect?)] {
+        var out: [(NSRect, String, NSRect?)] = []
         var x: CGFloat = config.padding + 4
         var y: CGFloat = 0
         if config.tabsAddButton {
-            out.append((NSRect(x: x, y: y, width: addW, height: tabH), "+"))
+            out.append((NSRect(x: x, y: y, width: addW, height: tabH), "+", nil))
             x += addW + gap
         }
         for t in titles {
@@ -991,14 +1039,16 @@ final class PopupTabsBar: NSView {
                 y += tabH + gap
                 x = config.padding + 4
             }
-            out.append((NSRect(x: x, y: y, width: tw, height: tabH), t))
+            let rect = NSRect(x: x, y: y, width: tw, height: tabH)
+            let close = NSRect(x: x + 2, y: y + 2, width: closeSize, height: closeSize)
+            out.append((rect, t, close))
             x += tw + gap
         }
         return out
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        for (rect, title) in pillRects() {
+        for (i, (rect, title, close)) in pillRects().enumerated() {
             let path = NSBezierPath(roundedRect: rect, xRadius: config.buttonRadius,
                                     yRadius: config.buttonRadius)
             let isSelectedTab = title != "+" && titles.firstIndex(of: title) == selected
@@ -1024,14 +1074,36 @@ final class PopupTabsBar: NSView {
             let sz = s.size(withAttributes: attrs)
             s.draw(at: NSPoint(x: rect.midX - sz.width / 2, y: rect.midY - sz.height / 2),
                    withAttributes: attrs)
+            // ✕ close badge — only pops in over the pill's top-left corner
+            if i == hoverCloseIndex, let close {
+                let badge = NSBezierPath(roundedRect: close, xRadius: 3, yRadius: 3)
+                (isSelectedTab ? config.colors.highlight
+                               : config.colors.background).withAlphaComponent(0.85).setFill()
+                badge.fill()
+                config.colors.dim.withAlphaComponent(0.6).setStroke()
+                badge.lineWidth = 0.8
+                badge.stroke()
+                let xAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 7.5 * zoom, weight: .semibold),
+                    .foregroundColor: config.colors.text.withAlphaComponent(0.75),
+                ]
+                let xmark = "✕" as NSString
+                let xsz = xmark.size(withAttributes: xAttrs)
+                xmark.draw(at: NSPoint(x: close.midX - xsz.width / 2,
+                                       y: close.midY - xsz.height / 2),
+                           withAttributes: xAttrs)
+            }
         }
     }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        for (rect, title) in pillRects() where rect.contains(p) {
+        // the ✕ badge has priority over selecting the tab
+        for (rect, title, close) in pillRects() where rect.contains(p) {
             if title == "+" {
                 onAddTab?()
+            } else if let close, close.contains(p), let i = titles.firstIndex(of: title) {
+                onCloseTab?(i)
             } else if let i = titles.firstIndex(of: title) {
                 onClick?(i)
                 if i != selected {
@@ -1042,6 +1114,29 @@ final class PopupTabsBar: NSView {
             return
         }
         super.mouseDown(with: event)
+    }
+
+    // right-click a note tab -> "Copy Path" (the host dropped the dedicated
+    // copy-path header button in favor of this)
+    override func rightMouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        for (rect, title, _) in pillRects() where rect.contains(p) {
+            guard title != "+", let i = titles.firstIndex(of: title) else { break }
+            let item = NSMenuItem(title: "Copy Path",
+                                  action: #selector(copyPath(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = i
+            let menu = NSMenu()
+            menu.addItem(item)
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+    @objc private func copyPath(_ sender: NSMenuItem) {
+        guard let i = sender.representedObject as? Int else { return }
+        onCopyPath?(i)
     }
 }
 
@@ -1791,6 +1886,15 @@ final class PopupTextView: NSTextView {
             m.addItem(item)
             m.addItem(.separator())
         }
+        // right-click the note itself -> copy the note file's absolute path
+        // (the host drops the dedicated header button in favor of this)
+        if onCopyFilePath != nil {
+            let fpath = NSMenuItem(title: "Copy File Path",
+                                   action: #selector(copyFilePath(_:)),
+                                   keyEquivalent: "")
+            fpath.target = self
+            m.addItem(fpath)
+        }
         // "open a file at an exact path" — prompts for a path and opens it
         // in this note window as a tab
         let open = NSMenuItem(title: "Open file at path…",
@@ -1799,6 +1903,11 @@ final class PopupTextView: NSTextView {
         open.target = self
         m.addItem(open)
         return m
+    }
+
+    var onCopyFilePath: (() -> Void)?
+    @objc private func copyFilePath(_ sender: NSMenuItem) {
+        onCopyFilePath?()
     }
 
     var onOpenFileAtPath: (() -> Void)?
@@ -2511,12 +2620,18 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         if q.isEmpty {
             rows = all
         } else if q.contains("*") || q.contains("?") {
-            // glob matching (case-insensitive): * = any run, ? = one char
-            let re = Self.globRegex(q)
+            // glob matching (case-insensitive): * = any run, ? = one char.
+            // A path-like glob (~/… or /…) also matches the FULL path, so
+            // "/Users/me/notes/assets/img*" filters this listing like Finder.
+            let nameRE = Self.globRegex(q)
+            let pathRE = Self.globRegex(Self.expandTilde(q))
             rows = all.filter { e in
-                re.firstMatch(in: e.name, options: [],
-                              range: NSRange(0..<(e.name as NSString).length)) != nil
+                Self.globMatch(nameRE, e.name) || Self.globMatch(pathRE, e.path)
             }
+        } else if q.contains("/") || q.hasPrefix("~") {
+            // address-bar filter: match the full path, not just the bare name
+            let target = Self.expandTilde(q).lowercased()
+            rows = all.filter { $0.path.lowercased().contains(target) }
         } else {
             rows = all.filter { $0.name.lowercased().contains(q.lowercased()) }
         }
@@ -2541,6 +2656,13 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         }
         out += "$"
         return try! NSRegularExpression(pattern: out, options: [.caseInsensitive])
+    }
+    private static func globMatch(_ re: NSRegularExpression, _ s: String) -> Bool {
+        re.firstMatch(in: s, options: [],
+                      range: NSRange(0..<(s as NSString).length)) != nil
+    }
+    private static func expandTilde(_ s: String) -> String {
+        s.hasPrefix("~") ? (s as NSString).expandingTildeInPath : s
     }
     private func scrollListToTop() {
         let clip = listScroll.contentView
@@ -2603,6 +2725,39 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         // like "notes" keeps filtering the current dir instead)
         guard q.contains("/") || q.hasPrefix("~") else { return false }
         let p = (q as NSString).expandingTildeInPath
+
+        // Wildcard path (~/notes/assets/img*): switch to the longest existing
+        // directory prefix, keep the glob as the active filter so the listing
+        // shows every match, then open the top one (like Enter on a bare-name
+        // filter opens the selection).
+        if q.contains("*") || q.contains("?") {
+            var dir = "/"
+            var found = false
+            for comp in (p as NSString).pathComponents {
+                if comp == "/" { continue }
+                let cand = (dir as NSString).appendingPathComponent(comp)
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: cand, isDirectory: &isDir),
+                   isDir.boolValue {
+                    dir = cand
+                    found = true
+                } else {
+                    break
+                }
+            }
+            if found, dir != cwd {
+                cd(dir)
+                query = q
+                searchField.stringValue = q
+                refilter()
+            }
+            if let w = window { w.makeFirstResponder(listPane) }
+            if let target = rows.firstIndex(where: { $0.name != ".." }) {
+                openIndex(target)
+            }
+            return true
+        }
+
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir) else {
             onStatus?("no such path: \(q)")
@@ -2752,7 +2907,20 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         guard (obj.object as AnyObject?) === searchField else { return }
         query = searchField.stringValue
         refilter()
-        onStatus?(query.isEmpty ? "" : "\(rows.count) match\(rows.count == 1 ? "" : "es")")
+        onStatus?(statusText())
+    }
+    // transient feedback for the filter bar: an exact existing path shows
+    // "↵ open …" / "↵ cd …" (Enter will jump there) instead of "0 matches"
+    private func statusText() -> String {
+        let q = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !q.isEmpty {
+            var isDir: ObjCBool = false
+            let p = (q as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: p, isDirectory: &isDir) {
+                return isDir.boolValue ? "↵ cd \(displayPath(p))" : "↵ open \(displayPath(p))"
+            }
+        }
+        return query.isEmpty ? "" : "\(rows.count) match\(rows.count == 1 ? "" : "es")"
     }
 
     // Field-editor commands for the filter bar: the field editor owns
@@ -2875,6 +3043,10 @@ var meterEnabled = false {
     // extra host-defined buttons (ids >= 10), drawn leftmost; clicks route
     // through PopupWindow.onHeaderButton with the button's id
     var extraButtons: [(label: String, id: Int)] = []
+    // left-to-right segment order by button id (copy path=1, copy config=2,
+    // copy rows=3, host buttons = their id). nil = default (copy buttons
+    // first, then host buttons); unlisted ids trail in that default order.
+    var headerOrder: [Int]?
     var extraButtonRects: [Int: NSRect] = [:]
     // extra buttons whose feature is currently ON (e.g. the terminal / file
     // browser drawer is open) — drawn darker than the idle state
@@ -3093,6 +3265,13 @@ var meterEnabled = false {
         for b in extraButtons {
             labels.append((b.label, b.id))
         }
+        if let order = headerOrder {
+            labels.sort { a, b in
+                let ia = order.firstIndex(of: a.1) ?? Int.max
+                let ib = order.firstIndex(of: b.1) ?? Int.max
+                return ia < ib
+            }
+        }
         var segs: [(text: String, fb: Int, w: CGFloat)] = []
         for (label, fb) in labels {
             let text = (feedback == fb ? "✓ " : "") + label
@@ -3138,10 +3317,31 @@ var meterEnabled = false {
         // button cluster first: the centered title must avoid it when a window
         // carries many header buttons (e.g. the doctor's poll targets)
         let segs = headerSegs()
-        var buttonsWidth: CGFloat = 10
-        for seg in segs { buttonsWidth += seg.w }
+        // dim metadata line (live item count, last file write) — measured here
+        // so a stretched button bar can stop just past it instead of hiding it
+        var meta = ""
+        for t in [itemCount, footerText].compactMap({ $0 }) {
+            meta += meta.isEmpty ? t : "   " + t
+        }
+        let metaAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9),
+            .foregroundColor: config.colors.dim,
+        ]
+        let metaWidth = (meta as NSString).size(withAttributes: metaAttrs).width
+        // stretchHeaderButtons: the joined bar fills the whole header strip
+        // from the right edge back to just past the icon/meta, instead of a
+        // compact cluster hugging the right edge
+        let stretch = config.stretchHeaderButtons && !segs.isEmpty
+        let leftContent: CGFloat = stretch
+            ? (headerIcon != nil ? 34 : 10) + (meta.isEmpty ? 0 : metaWidth + 8)
+            : 0
         // the joined bar's | dividers (one less than the segment count)
-        buttonsWidth += segs.isEmpty ? 0 : CGFloat(segs.count - 1)
+        let naturalBarW = segs.map { $0.w }.reduce(0, +)
+            + CGFloat(max(0, segs.count - 1))
+        var buttonsWidth: CGFloat = 10 + naturalBarW
+        if stretch {
+            buttonsWidth = max(naturalBarW, bounds.width - 10 - leftContent)
+        }
         if let title = headerTitle {
             // centered app-title: bold + full-strength text on a subtle pill
             // so the window's identity reads at a glance from across the desk
@@ -3183,9 +3383,9 @@ var meterEnabled = false {
         // via selectableRows) sits leftmost of the three. All segments join
         // into ONE bar with thin | dividers between them.
         let barH: CGFloat = 20
-        let barW = segs.map { $0.w }.reduce(0, +)
-            + CGFloat(max(0, segs.count - 1))
-        let barRect = NSRect(x: bounds.width - 10 - barW,
+        let barW = stretch ? max(naturalBarW, bounds.width - 10 - leftContent)
+                           : naturalBarW
+        let barRect = NSRect(x: stretch ? leftContent : bounds.width - 10 - barW,
                              y: (dragHeaderHeight - barH) / 2,
                              width: barW, height: barH)
         if !segs.isEmpty {
@@ -3197,10 +3397,13 @@ var meterEnabled = false {
             bp.lineWidth = 1
             bp.stroke()
         }
+        // stretch mode shares the leftover width evenly across the segments
+        let perSegExtra = stretch ? max(0, barW - naturalBarW) / CGFloat(segs.count) : 0
         headerSegRects = []
         var sx = barRect.minX
         for (i, seg) in segs.enumerated() {
-            let segRect = NSRect(x: sx, y: barRect.minY, width: seg.w, height: barH)
+            let segRect = NSRect(x: sx, y: barRect.minY,
+                                 width: seg.w + perSegExtra, height: barH)
             let active = feedback == seg.fb
             let persistentOn = seg.fb >= 10 && activeButtonIDs.contains(seg.fb)
             headerSegRects.append((seg.fb, segRect))
@@ -3263,32 +3466,24 @@ var meterEnabled = false {
             s.draw(at: NSPoint(x: segRect.midX - sz.width / 2,
                                y: segRect.midY - sz.height / 2),
                    withAttributes: attrs)
-            sx += seg.w + 1
+            sx += segRect.width + 1
         }
         // dim metadata line (live item count, last file write) on the SAME row as
         // the far-left icon — truncated so it never runs into the right-side
-        // header buttons
-        var meta = ""
-        for t in [itemCount, footerText].compactMap({ $0 }) {
-            meta += meta.isEmpty ? t : "   " + t
-        }
+        // header buttons (measured above for the stretched-bar layout)
         if !meta.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9),
-                .foregroundColor: config.colors.dim,
-            ]
             let x0: CGFloat = headerIcon != nil ? 34 : 10
             let maxW = max(60, bounds.width - buttonsWidth - x0 - 10)
             var text = meta
-            if (text as NSString).size(withAttributes: attrs).width > maxW {
-                while (text as NSString).size(withAttributes: attrs).width > maxW {
+            if (text as NSString).size(withAttributes: metaAttrs).width > maxW {
+                while (text as NSString).size(withAttributes: metaAttrs).width > maxW {
                     text.removeLast()
                 }
                 text += "…"
             }
-            let sz = (text as NSString).size(withAttributes: attrs)
+            let sz = (text as NSString).size(withAttributes: metaAttrs)
             (text as NSString).draw(at: NSPoint(x: x0, y: (dragHeaderHeight - sz.height) / 2),
-                                    withAttributes: attrs)
+                                    withAttributes: metaAttrs)
         }
         // live recording control bar (bottom): big record/stop button, pause/
         // resume, real-time level bars and elapsed — a permanent, unmistakable
@@ -3517,6 +3712,14 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             chrome?.needsDisplay = true
         }
     }
+    // left-to-right segment order by button id (see PopupChrome.headerOrder);
+    // e.g. [30, 1, 2] puts the host "open file" button before the copy buttons
+    public var headerOrder: [Int]? {
+        didSet {
+            chrome?.headerOrder = headerOrder
+            chrome?.needsDisplay = true
+        }
+    }
     public var onHeaderButton: ((Int) -> Void)?
 
     // mark an extra header button as ON (its feature/drawer is open) so it
@@ -3712,6 +3915,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public var onChromeHeaderClick: (() -> Void)?
     // click on the header's "config" button — e.g. copy the config file path
     public var onChromeConfigClick: (() -> Void)?
+    // click on the top-left header app glyph — e.g. open the config file
+    public var onChromeIconClick: (() -> Void)?
 
     // tabs (config.tabs): titles + selection; changing the selection fires
     // onTabChange so the host can swap the content
@@ -3744,11 +3949,19 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public var onTabClick: ((Int) -> Void)?
     // "+" pill on the tab strip (config.tabsAddButton) — e.g. create a note
     public var onAddTab: (() -> Void)?
+    // the small "✕" badge on a tab pill — host closes/removes that tab
+    public var onCloseTab: ((Int) -> Void)?
+    // right-click a note tab -> "Copy Path" (replaces the copy-path header
+    // button); the host copies that tab's absolute path
+    public var onTabCopyPath: ((Int) -> Void)?
     // host hook to open a specific file in this window (e.g. the Finder
     // "Open in Notes" service): the host adds it as a tab / makes it active
     public var onOpenExternalPath: ((String) -> Void)?
     // host prompt for the editor's "Open file at path…" context-menu item
     public var onOpenPathPrompt: (() -> Void)?
+    // editor right-click "Copy File Path": copies the open note's absolute
+    // path (replaces the dedicated "copy <name> path" header button)
+    public var onCopyFilePath: (() -> Void)?
     // terminal drawer right-click "Open in Notes": the host receives the
     // terminal's current selection (a path) and opens it as a note tab
     public var onTerminalOpenInNotes: ((String) -> Void)?
@@ -4312,6 +4525,9 @@ scroll.documentView = rowView
         (editorView as? PopupTextView)?.onOpenFileAtPath = { [weak self] in
             self?.onOpenPathPrompt?()
         }
+        (editorView as? PopupTextView)?.onCopyFilePath = { [weak self] in
+            self?.onCopyFilePath?()
+        }
         // terminal drawer right-click actions (self-safe only after super.init):
         // "Copy" copies the selection; "Open in Notes" / "Open in Default
         // App" / "Reveal in Finder" forward the selected text (a path) to the
@@ -4354,6 +4570,12 @@ scroll.documentView = rowView
             }
             bar.onAddTab = { [weak self] in
                 self?.onAddTab?()
+            }
+            bar.onCloseTab = { [weak self] index in
+                self?.onCloseTab?(index)
+            }
+            bar.onCopyPath = { [weak self] index in
+                self?.onTabCopyPath?(index)
             }
         }
         if let bar = filterBar {
@@ -4436,6 +4658,11 @@ scroll.documentView = rowView
                     // button — empty header space must not trigger anything
                     self.onChromeHeaderClick?()
                     chrome.showCopiedFeedback(1)
+                } else if let chrome = self.chrome,
+                   chrome.headerIcon != nil, p.x <= 36 {
+                    // click on the top-left app glyph (drawn at x=10..26) —
+                    // the host e.g. opens the config file in the viewer
+                    self.onChromeIconClick?()
                 }
             }
         }
@@ -4815,6 +5042,46 @@ private func scrollSelectionIntoView() {
         syncEditorDocWidth()
     }
 
+    // MARK: Binary file preview (PDF / image)
+
+    // render a non-editable file (PDF or image) as a READ-ONLY preview in the
+    // editor: every PDF page is drawn inline (scaled to the editor width), so
+    // the whole document is visible instead of a blank/garble. The host must
+    // NOT save the editor text back to such a file (see the note host's save
+    // guards). Returns true when the editor switched to a preview.
+    @discardableResult
+    public func setEditorFilePreview(_ path: String) -> Bool {
+        guard let tv = editorView else { return false }
+        let plainAttrs: [NSAttributedString.Key: Any] = [
+            .font: editorFont(config.fontName, zoom),
+            .foregroundColor: config.colors.text,
+        ]
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        let storage = NSMutableAttributedString()
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ext == "pdf", let doc = PDFDocument(url: URL(fileURLWithPath: path)) {
+            guard doc.pageCount > 0 else { return false }
+            for i in 0..<doc.pageCount {
+                guard let page = doc.page(at: i) else { continue }
+                let thumb = page.thumbnail(of: NSSize(width: 1400, height: 1400), for: .mediaBox)
+                storage.append(NSAttributedString(attachment: makeAttachment(thumb, rel: "\(name)#\(i)")))
+                storage.append(NSAttributedString(string: "\n", attributes: plainAttrs))
+            }
+        } else if let img = NSImage(contentsOfFile: path) {
+            storage.append(NSAttributedString(attachment: makeAttachment(img, rel: name)))
+            storage.append(NSAttributedString(string: "\n", attributes: plainAttrs))
+        } else {
+            return false
+        }
+        editorAttributed = storage
+        editorText = storage.string
+        tv.textStorage?.setAttributedString(storage)
+        restyleEditor()
+        syncEditorDocWidth()
+        editorReadOnly = true
+        return true
+    }
+
     // serialize the editor back to markdown (attachments -> `![](rel)`)
     public var editorMarkdown: String {
         guard config.markdownImages, let tv = editorView,
@@ -4956,7 +5223,10 @@ private func scrollSelectionIntoView() {
             // local monitors see EVERY key event in the app — only act when
             // THIS window is the key window, so two open popups (notes +
             // jira) never steal each other's shortcuts
-            guard let self, self.isShown, self.panel.isKeyWindow else { return event }
+            guard let self, self.isShown, self.panel.isKeyWindow
+                // a sheet steals the key-window flag from the panel, but its
+                // text field still needs our Ctrl+V / Cmd+V routing
+                || self.panel.attachedSheet != nil else { return event }
             if self.handleKey(event.keyCode, event.modifierFlags) {
                 return nil  // consumed
             }
@@ -4997,20 +5267,28 @@ private func scrollSelectionIntoView() {
 
     // MARK: Keys
 
-    // the NSTextView field editor actively editing inside the sheet / panel
+    // the NSTextView / NSTextField field editor actively editing inside the
+    // sheet / panel — an NSTextField's first responder is the FIELD itself,
+    // so its editing shortcut routing must go through currentEditor()
     private func activeTextEditor() -> NSTextView? {
-        if let sheet = panel.attachedSheet, let tv = sheet.firstResponder as? NSTextView {
-            return tv
+        func editor(_ responder: NSResponder?) -> NSTextView? {
+            if let tv = responder as? NSTextView { return tv }
+            if let f = responder as? NSTextField, let ed = f.currentEditor() as? NSTextView { return ed }
+            return nil
         }
-        if let tv = panel.firstResponder as? NSTextView { return tv }
-        return nil
+        if let sheet = panel.attachedSheet {
+            if let ed = editor(sheet.firstResponder) { return ed }
+        }
+        return editor(panel.firstResponder)
     }
 
     private func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         // Cmd + plus/minus (main "="/"+" and "-", plus the keypad): grow or
         // shrink the window; rows stretch to fill from then on
         let cmd = mods.contains(.command)
-        if cmd {
+        // resize shortcuts never fire while a sheet's text field is up —
+        // Cmd+= / Cmd+- are typing/editing context, not window chrome
+        if cmd, panel.attachedSheet == nil {
             switch code {
             case 24: resizeBy(80); return true          // = / + (Cmd+Shift+=)
             case 27: resizeBy(-80); return true         // -
@@ -5034,9 +5312,19 @@ private func scrollSelectionIntoView() {
             // routed straight to the sheet's field editor so it ALWAYS works,
             // even though the app has no Edit menu / key equivalents.
             if panel.attachedSheet != nil {
-                if code == 9, cmd || ctrl, let ed = activeTextEditor() {
-                    ed.paste(nil)
-                    return true
+                // The sheet's text field owns the standard edit shortcuts —
+                // routed straight to its field editor so they ALWAYS work,
+                // even though the app has no Edit menu / key equivalents.
+                // (Cmd+V AND Ctrl+V paste; Cmd+A/C/X/Z select/copy/cut/undo.)
+                if let ed = activeTextEditor() {
+                    switch code {
+                    case 9 where cmd || ctrl: ed.paste(nil); return true
+                    case 0 where cmd: ed.selectAll(nil); return true
+                    case 8 where cmd: ed.copy(nil); return true
+                    case 7 where cmd: ed.cut(nil); return true
+                    case 6 where cmd: ed.undoManager?.undo(); return true
+                    default: return false
+                    }
                 }
                 return false
             }
