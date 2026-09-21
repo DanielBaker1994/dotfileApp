@@ -397,6 +397,7 @@ struct CommandSpec {
     let zoxideTop: Int       // files: include the top-N dirs from zoxide as favorites
     let browserBackground: NSColor?  // files: panel background (default silvery blue)
     let backgroundColor: NSColor?  // note/files: window card fill (the notepad)
+    let tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
     let primary: String?   // list: field shown as the row title
     let content: String?   // list: field drawn next to the title (truncated)
     let detail: String?    // list: field drawn dim on line 2 (left)
@@ -437,6 +438,7 @@ struct CommandSpec {
          favorites: [String] = [], zoxideTop: Int = 0,
          browserBackground: NSColor? = nil,
          backgroundColor: NSColor? = nil,
+         tintAlpha: CGFloat? = nil,
          primary: String? = nil,
          content: String? = nil, detail: String? = nil, trailing: String? = nil,
          body: String? = nil, filter: [String] = [], filters: [String] = [],
@@ -464,6 +466,7 @@ struct CommandSpec {
         self.zoxideTop = zoxideTop
         self.browserBackground = browserBackground
         self.backgroundColor = backgroundColor
+        self.tintAlpha = tintAlpha
         self.primary = primary
         self.content = content
         self.detail = detail
@@ -581,6 +584,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         zoxideTop: Int(vars["zoxide-top"] ?? "") ?? 0,
         browserBackground: hexColor(vars["browser-background"]),
         backgroundColor: hexColor(vars["background-color"]),
+        tintAlpha: num(vars["tint-alpha"]) > 0 ? min(num(vars["tint-alpha"]), 1) : nil,
         primary: vars["primary"],
         content: vars["content"], detail: vars["detail"], trailing: vars["trailing"],
         body: vars["body"], filter: filter, filters: filters, width: width,
@@ -609,18 +613,22 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
 }
 
-// hex color from commands.conf ("7d8fa6", "0x7d8fa6" or "#7d8fa6") -> NSColor
+// hex color from commands.conf: "7d8fa6", "0x7d8fa6" or "#7d8fa6" (opaque),
+// or 8-digit "aa7d8fa6" / "0xaa7d8fa6" where the leading AA is the ALPHA
+// (0x00-0xFF) — the picker's opacity slider is stored that way
 private func hexColor(_ s: String?) -> NSColor? {
     guard let s, !s.isEmpty else { return nil }
     var hex = s
     if hex.hasPrefix("0x") { hex = String(hex.dropFirst(2)) }
     if hex.hasPrefix("#") { hex = String(hex.dropFirst(1)) }
-    guard hex.count == 6 else { return nil }
+    guard hex.count == 6 || hex.count == 8 else { return nil }
     var v: UInt64 = 0
     guard Scanner(string: hex).scanHexInt64(&v) else { return nil }
+    let hasAlpha = hex.count == 8
+    let a = hasAlpha ? Double((v >> 24) & 0xFF) / 255.0 : 1.0
     return NSColor(srgbRed: Double((v >> 16) & 0xFF) / 255,
                    green: Double((v >> 8) & 0xFF) / 255,
-                   blue: Double(v & 0xFF) / 255, alpha: 1)
+                   blue: Double(v & 0xFF) / 255, alpha: a)
 }
 
 // "true/yes/1/on" | "false/no/0/off" | anything else = nil (unset)
@@ -2499,7 +2507,14 @@ private func trimmed(_ s: String) -> String? {
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
                                  text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
-        if let bg = cmd.backgroundColor { cfg.colors.background = bg }
+        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
+        if let bg = cmd.backgroundColor {
+            let cc = bg.usingColorSpace(.sRGB) ?? bg
+            // the card hue stays opaque; the color's alpha becomes the card
+            // opacity (tintAlpha) so the picker's opacity slider survives
+            cfg.colors.background = cc.withAlphaComponent(1)
+            cfg.tintAlpha = cc.alphaComponent
+        }
         cfg.fontName = cmd.font
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
@@ -3039,6 +3054,9 @@ private func trimmed(_ s: String) -> String? {
         w.onEditorClose = commitSave
         w.onHide = { [weak self] restore in
             guard let self else { return }
+            // if the color panel is open on this window, don't leave it
+            // floating once the notes window hides
+            self.dismissPickerIfOpen(for: w)
             // Persistent singleton note window: keep the PopupWindow (and its
             // embedded terminal session) alive — just hide the panel. The next
             // Hyper+N re-shows the SAME instance instead of spawning a fresh
@@ -3290,6 +3308,12 @@ private func trimmed(_ s: String) -> String? {
             item.representedObject = role
             menu.addItem(item)
         }
+        menu.addItem(.separator())
+        let reset = NSMenuItem(title: "Reset to system defaults",
+                               action: #selector(resetThemeColors(_:)),
+                               keyEquivalent: "")
+        reset.target = self
+        menu.addItem(reset)
         pickerWindow = w
         pickerSection = section
         // pop under the paint-brush button (fall back to the mouse position)
@@ -3306,6 +3330,26 @@ private func trimmed(_ s: String) -> String? {
         startColorPicker(for: w, role: role)
     }
 
+    // "Reset to system defaults": drop every color override this window
+    // carries in commands.conf and live-restore the app-wide ([theme])
+    // defaults — browser, terminal, notepad and header all go back.
+    @objc private func resetThemeColors(_ sender: Any?) {
+        guard let w = pickerWindow else { return }
+        let section = pickerSection
+        removeColorKeysFromConfig(section: section)
+        // the [theme] app-wide defaults (or the built-in fallbacks)
+        let base = PopupConfig(name: "")
+        let browserDefault = THEME_BROWSER ?? base.fileBrowserBackground
+        let terminalDefault = THEME_TERMINAL ?? base.terminalBackground
+        let notepadDefault = BAR.withAlphaComponent(base.tintAlpha)
+        w.setThemeColor(browserDefault, for: .browser)
+        w.setThemeColor(terminalDefault, for: .terminal)
+        w.setThemeColor(notepadDefault, for: .notepad)
+        w.setThemeColor(headerBlueSilver, for: .header)
+        NSColorPanel.shared.orderOut(nil)
+        log("theme reset for [\(section)] — back to system defaults")
+    }
+
     private func startColorPicker(for w: PopupWindow, role: PopupWindow.ThemeRole) {
         pickerWindow = w
         pickerRole = role
@@ -3315,7 +3359,8 @@ private func trimmed(_ s: String) -> String? {
         pickerSawVisible = false
         let panel = NSColorPanel.shared
         panel.color = pickerOriginal ?? .clear
-        panel.showsAlpha = false
+        // opacity slider ON — the alpha you pick is the surface's opacity
+        panel.showsAlpha = true
         panel.isContinuous = true
         panel.setTarget(self)
         panel.setAction(#selector(panelColorChanged(_:)))
@@ -3402,6 +3447,26 @@ private func trimmed(_ s: String) -> String? {
         log("color picker cancelled for [\(pickerSection)] — reverted")
     }
 
+    // The color panel must never linger once the window it edits is hidden —
+    // close it and revert any un-committed preview.
+    private func dismissPickerIfOpen(for w: PopupWindow) {
+        guard pickerWindow === w else { return }
+        pickerWatchdog?.invalidate()
+        pickerWatchdog = nil
+        if let o = pickerPanelObserver {
+            NotificationCenter.default.removeObserver(o)
+            pickerPanelObserver = nil
+        }
+        if !pickerCommitted {
+            revertPicker()
+        }
+        pickerWindow = nil
+        pickerRole = nil
+        pickerOriginal = nil
+        NSColorPanel.shared.orderOut(nil)
+        log("color picker dismissed — window hidden")
+    }
+
     private func persistPickerColor() {
         guard let w = pickerWindow, let role = pickerRole else { return }
         let hex = pickerHex.isEmpty ? hexString(w.themeColor(role)) : pickerHex
@@ -3423,7 +3488,12 @@ private func trimmed(_ s: String) -> String? {
         let r = Int(round(cc.redComponent * 255))
         let g = Int(round(cc.greenComponent * 255))
         let b = Int(round(cc.blueComponent * 255))
-        return String(format: "%02X%02X%02X", r, g, b)
+        let a = Int(round(cc.alphaComponent * 255))
+        // an explicit non-opaque alpha is stored as AARRGGBB so the opacity
+        // slider's pick survives a restart
+        return a < 255
+            ? String(format: "%02X%02X%02X%02X", a, r, g, b)
+            : String(format: "%02X%02X%02X", r, g, b)
     }
 
     // rewrite (or insert) a KEY = VALUE line in a [section] of commands.conf,
@@ -3468,6 +3538,44 @@ private func trimmed(_ s: String) -> String? {
         lines.insert(key + " = " + value, at: insertion)
         try? (lines.joined(separator: "\n"))
             .write(toFile: confPath, atomically: true, encoding: .utf8)
+    }
+
+    // drop every color-override key from a [section] so the [theme] defaults
+    // apply again ("Reset to system defaults" in the picker menu)
+    private func removeColorKeysFromConfig(section: String) {
+        let confPath = settings.commandsConfPath
+        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+            log("commands.conf: cannot read \(confPath)")
+            return
+        }
+        let keys: Set<String> = ["header-color", "background-color",
+                                 "browser-background", "terminal-background",
+                                 "tint-alpha"]
+        let target = "[" + section + "]"
+        var inSection = false
+        var changed = false
+        var out: [String] = []
+        out.reserveCapacity(64)
+        for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                inSection = trimmed == target
+            } else if inSection, let eq = trimmed.firstIndex(of: "=") {
+                let k = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+                if keys.contains(k) {
+                    changed = true
+                    continue
+                }
+            }
+            out.append(String(line))
+        }
+        guard changed else {
+            log("commands.conf [\(section)]: no color overrides to reset")
+            return
+        }
+        try? out.joined(separator: "\n")
+            .write(toFile: confPath, atomically: true, encoding: .utf8)
+        log("commands.conf [\(section)]: reset color overrides to defaults")
     }
 
     private func openListWindow(_ cmd: CommandSpec,
@@ -3805,7 +3913,14 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
                                  text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
-        if let bg = cmd.backgroundColor { cfg.colors.background = bg }
+        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
+        if let bg = cmd.backgroundColor {
+            let cc = bg.usingColorSpace(.sRGB) ?? bg
+            // the card hue stays opaque; the color's alpha becomes the card
+            // opacity (tintAlpha) so the picker's opacity slider survives
+            cfg.colors.background = cc.withAlphaComponent(1)
+            cfg.tintAlpha = cc.alphaComponent
+        }
         cfg.fontName = cmd.font
         let w = PopupWindow(config: cfg)
         w.headerIcon = NSWorkspace.shared.icon(forFile: root)
@@ -3865,6 +3980,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         w.onEscape = { w.hide(restore: true) }
         w.onHide = { [weak self] restore in
             guard let self else { return }
+            self.dismissPickerIfOpen(for: w)
             self.unregisterSubWindow(w, restore: restore,
                                      restoreWID: restoreWID, restorePID: restorePID)
         }

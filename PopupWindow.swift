@@ -452,11 +452,11 @@ public struct PopupConfig {
     // `terminal-background` override it. The interactive color picker (the
     // paint-brush header button) edits this live and persists the hex back
     // to commands.conf so the pick survives a restart.
-    public var fileBrowserBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 1)
+    public var fileBrowserBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 0.55)
     // the embedded terminal's own background (same silvery blue by default so
     // terminal + file explorer share one "panel" look); the terminal's text
     // color is derived from it automatically for contrast
-    public var terminalBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 1)
+    public var terminalBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 0.78)
     // when a file-browser drawer is installed, open it (and close the
     // terminal) from the start instead of the terminal being the default
     public var fileBrowserDefault = false
@@ -2377,9 +2377,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     var searchView: NSTextField { searchField }
 
     // live restyle from the color picker: swap the panel background without
-    // rebuilding the browser (same see-through 0.55 alpha as init)
+    // rebuilding the browser (the color's own alpha sets the translucency)
     func setBackground(_ c: NSColor) {
-        layer?.backgroundColor = c.withAlphaComponent(0.55).cgColor
+        layer?.backgroundColor = c.cgColor
         needsDisplay = true
     }
 
@@ -2416,11 +2416,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.previewList = FileListPane(config: config)
         super.init(frame: .zero)
         wantsLayer = true
-        // translucent blue drawer, MORE see-through than the grey notepad (a
-        // strong blue reads nearly opaque even at the notes' tint alpha, so
-        // drop to a clearly transparent 0.55) — rows stay readable over the blur
-        layer?.backgroundColor =
-            config.fileBrowserBackground.withAlphaComponent(0.55).cgColor
+        // translucent drawer background — the alpha rides IN the color
+        // (config file / color picker opacity slider), so the explorer can
+        // be anywhere from see-through to opaque without a code change
+        layer?.backgroundColor = config.fileBrowserBackground.cgColor
 
         listPane.onSelect = { [weak self] i in
             self?.selection = i
@@ -4566,12 +4565,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 term.layer?.cornerRadius = 8
                 term.layer?.masksToBounds = true
                 // translucent default background, matching the notepad: the
-                // same grey tint over the blur so the drawer is see-through
-                // like the editor instead of an opaque slab. The silvery-blue
-                // panel color (config.terminalBackground) is what the color
-                // picker edits; text color is derived for contrast.
-                term.nativeBackgroundColor =
-                    config.terminalBackground.withAlphaComponent(config.tintAlpha)
+                // silvery-blue panel color (config.terminalBackground) carries
+                // its own alpha — the color picker's opacity slider sets it
+                term.nativeBackgroundColor = config.terminalBackground
                 term.nativeForegroundColor = config.colors.text
                 backdrop.addSubview(term)
                 terminalDrawer = term
@@ -5954,14 +5950,15 @@ public enum ThemeRole: String, CaseIterable {
         switch role {
         case .browser: return config.fileBrowserBackground
         case .terminal: return config.terminalBackground
-        case .notepad: return config.colors.background
+        case .notepad: return config.colors.background.withAlphaComponent(config.tintAlpha)
         case .header: return config.headerColor ?? config.colors.background
         }
     }
 
     // Apply a picked color to ONE role in THIS window only. Each role touches
     // only its own surfaces — updating the terminal never restyles the
-    // notepad or the file explorer, and text colors are never touched.
+    // notepad or the file explorer, and text colors are never touched. The
+    // color's ALPHA is the surface's opacity (the picker's opacity slider).
     public func setThemeColor(_ c: NSColor, for role: ThemeRole) {
         switch role {
         case .browser:
@@ -5970,18 +5967,23 @@ public enum ThemeRole: String, CaseIterable {
         case .terminal:
             config.terminalBackground = c
             if let term = terminalDrawer {
-                term.nativeBackgroundColor = c.withAlphaComponent(config.tintAlpha)
+                term.nativeBackgroundColor = c
                 // terminal text color stays the theme's fixed color
                 term.nativeForegroundColor = config.colors.text
             }
         case .notepad:
             // the card fill only — the editor's text/selection colors are
-            // never re-applied by the picker
-            config.colors.background = c
-            tintView?.layer?.backgroundColor = c.withAlphaComponent(config.tintAlpha).cgColor
+            // never re-applied by the picker. The picked alpha becomes the
+            // card's opacity (tintAlpha); the hue stays opaque so it never
+            // fights the translucency.
+            let cc = c.usingColorSpace(.sRGB) ?? c
+            config.colors.background = cc.withAlphaComponent(1)
+            config.tintAlpha = cc.alphaComponent
+            tintView?.layer?.backgroundColor =
+                config.colors.background.withAlphaComponent(config.tintAlpha).cgColor
             // keep the drag-header fill consistent when it falls back to the
             // card background
-            chrome?.headerColorOverride = config.headerColor ?? c
+            chrome?.headerColorOverride = config.headerColor ?? config.colors.background
         case .header:
             config.headerColor = c
             chrome?.headerColorOverride = c
