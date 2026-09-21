@@ -1634,6 +1634,7 @@ final class SwitcherController: NSObject {
     // transparency) and the surface's opacity (0-1, from the dedicated slider)
     private var pickerHue: NSColor = .clear
     private var pickerOpacity: CGFloat = 1.0
+    private var pickerHexLabel: NSTextField?
     private var pickerOriginal: NSColor?   // color when the picker opened
     private var pickerCommitted = false    // "Apply" clicked before closing
     private var pickerSawVisible = false   // the panel appeared at least once
@@ -3408,12 +3409,23 @@ private func trimmed(_ s: String) -> String? {
         pickerCommitted = false
         pickerSawVisible = false
         let seed = (pickerOriginal ?? .clear).usingColorSpace(.sRGB) ?? .clear
-        // split the current surface color into a SOLID hue + its opacity — the
-        // color wheel edits hue only, the Transparency slider edits opacity
+        // the wheel edits hue only. Start OPAQUE (100%) so the color you pick
+        // is exactly the color you see — never inherited at the surface's old
+        // translucency (that's what made picks come back washed-out). Drag the
+        // Transparency slider down only if you want see-through.
         pickerHue = seed.withAlphaComponent(1)
-        pickerOpacity = seed.alphaComponent
+        pickerOpacity = 1.0
         let panel = NSColorPanel.shared
-        panel.color = pickerHue
+        // FORCE the color wheel — the shared panel can sit in CMYK / RGB-slider
+        // / gray mode from a previous session, which turns a "red" pick into a
+        // muddy dark color.
+        panel.mode = .wheel
+        // seed the wheel BRIGHT (white): if it inherits the surface's dark
+        // color, the brightness slider starts low and "red" lands as dark
+        // maroon. White = full brightness, so what you click is what you get.
+        // pickerHue/pickerOpacity still track the real current color, so not
+        // touching the wheel (transparency-only edits) stays correct.
+        panel.color = .white
         // no alpha slider on the wheel — that coupling is what made picks
         // come out as a different, washed-out color than what was chosen
         panel.showsAlpha = false
