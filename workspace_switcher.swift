@@ -551,7 +551,55 @@ func loadCommands() -> [CommandSpec] {
         }
     }
     flushSection()
+    // keep the launchd jira-poll agent in lock-step with commands.conf — it
+    // must never run unless the [jira] section says enabled = true
+    syncJiraLaunchAgent()
     return cmds
+}
+
+// launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
+// when [jira] enabled = true, booted out otherwise. Runs at daemon start, so
+// the poll literally cannot run in the background when jira is disabled.
+private func syncJiraLaunchAgent() {
+    let confPath = settings.commandsConfPath
+    var enabled = false
+    if let content = try? String(contentsOfFile: confPath, encoding: .utf8) {
+        var inJira = false
+        for line in content.split(separator: "\n") {
+            let s = line.trimmingCharacters(in: .whitespaces)
+            if s.hasPrefix("[") && s.hasSuffix("]") {
+                inJira = s == "[jira]"
+                continue
+            }
+            guard inJira, let eq = s.firstIndex(of: "=") else { continue }
+            let key = s[..<eq].trimmingCharacters(in: .whitespaces)
+            let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if key == "enabled" {
+                enabled = ["true", "yes", "1", "on"].contains(val.lowercased())
+                break
+            }
+        }
+    }
+    let home = NSHomeDirectory()
+    let plist = home + "/Library/LaunchAgents/com.jira.poll.plist"
+    guard FileManager.default.fileExists(atPath: plist) else { return }
+    let gui = "gui/\(getuid())"
+    if enabled {
+        runLaunchctl(["bootout", gui, plist])
+        runLaunchctl(["bootstrap", gui, plist])
+    } else {
+        runLaunchctl(["bootout", gui, plist])
+    }
+}
+
+private func runLaunchctl(_ args: [String]) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    p.arguments = args
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    try? p.run()
+    p.waitUntilExit()
 }
 
 private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpec {
@@ -1582,7 +1630,10 @@ final class SwitcherController: NSObject {
     private weak var pickerWindow: PopupWindow?
     private var pickerRole: PopupWindow.ThemeRole?
     private var pickerSection = ""
-    private var pickerHex = ""
+    // the picked hue (always opaque — the color wheel never changes
+    // transparency) and the surface's opacity (0-1, from the dedicated slider)
+    private var pickerHue: NSColor = .clear
+    private var pickerOpacity: CGFloat = 1.0
     private var pickerOriginal: NSColor?   // color when the picker opened
     private var pickerCommitted = false    // "Apply" clicked before closing
     private var pickerSawVisible = false   // the panel appeared at least once
@@ -3353,29 +3404,44 @@ private func trimmed(_ s: String) -> String? {
     private func startColorPicker(for w: PopupWindow, role: PopupWindow.ThemeRole) {
         pickerWindow = w
         pickerRole = role
-        pickerHex = ""
         pickerOriginal = w.themeColor(role)
         pickerCommitted = false
         pickerSawVisible = false
+        let seed = (pickerOriginal ?? .clear).usingColorSpace(.sRGB) ?? .clear
+        // split the current surface color into a SOLID hue + its opacity — the
+        // color wheel edits hue only, the Transparency slider edits opacity
+        pickerHue = seed.withAlphaComponent(1)
+        pickerOpacity = seed.alphaComponent
         let panel = NSColorPanel.shared
-        panel.color = pickerOriginal ?? .clear
-        // opacity slider ON — the alpha you pick is the surface's opacity
-        panel.showsAlpha = true
+        panel.color = pickerHue
+        // no alpha slider on the wheel — that coupling is what made picks
+        // come out as a different, washed-out color than what was chosen
+        panel.showsAlpha = false
         panel.isContinuous = true
         panel.setTarget(self)
         panel.setAction(#selector(panelColorChanged(_:)))
-        // accessory row: Apply commits + saves, Cancel reverts + closes. The
-        // panel's own close "x" / Esc are cancel too (see watchdog below).
+        // accessory: a dedicated Transparency slider + Apply / Cancel
+        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 76))
+        let lab = NSTextField(labelWithString: "Transparency")
+        lab.font = NSFont.systemFont(ofSize: 11)
+        lab.textColor = .secondaryLabelColor
+        lab.frame = NSRect(x: 0, y: 54, width: 220, height: 14)
+        let slider = NSSlider(value: Double(pickerOpacity * 100), minValue: 8,
+                              maxValue: 100, target: self,
+                              action: #selector(pickerOpacityChanged(_:)))
+        slider.isContinuous = true
+        slider.frame = NSRect(x: 0, y: 34, width: 220, height: 18)
         let applyButton = NSButton(title: "Apply", target: self,
                                    action: #selector(applyPickerColor(_:)))
         applyButton.keyEquivalent = "\r"
         applyButton.bezelStyle = .rounded
+        applyButton.frame = NSRect(x: 0, y: 2, width: 104, height: 26)
         let cancelButton = NSButton(title: "Cancel", target: self,
                                     action: #selector(cancelPickerColor(_:)))
         cancelButton.bezelStyle = .rounded
-        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 180, height: 32))
-        applyButton.frame = NSRect(x: 0, y: 2, width: 82, height: 26)
-        cancelButton.frame = NSRect(x: 92, y: 2, width: 82, height: 26)
+        cancelButton.frame = NSRect(x: 116, y: 2, width: 104, height: 26)
+        acc.addSubview(lab)
+        acc.addSubview(slider)
         acc.addSubview(applyButton)
         acc.addSubview(cancelButton)
         panel.accessoryView = acc
@@ -3417,11 +3483,25 @@ private func trimmed(_ s: String) -> String? {
     }
 
     @objc private func panelColorChanged(_ sender: Any?) {
+        // color wheel drag: capture the SOLID hue only — transparency is a
+        // separate slider and must never leak in from the wheel
+        guard pickerWindow != nil, pickerRole != nil else { return }
+        let raw = NSColorPanel.shared.color
+        pickerHue = (raw.usingColorSpace(.sRGB) ?? raw).withAlphaComponent(1)
+        applyPickerPreview()
+    }
+
+    @objc private func pickerOpacityChanged(_ sender: NSSlider) {
+        pickerOpacity = CGFloat(sender.doubleValue) / 100.0
+        applyPickerPreview()
+    }
+
+    // preview hue @ opacity on the window (nothing is written until Apply).
+    // The 0.08 floor keeps a surface from ever becoming fully invisible.
+    private func applyPickerPreview() {
         guard let w = pickerWindow, let role = pickerRole else { return }
-        // live preview ONLY — nothing is written until Apply
-        let c = NSColorPanel.shared.color
-        w.setThemeColor(c, for: role)
-        pickerHex = hexString(c)
+        w.setThemeColor(pickerHue.withAlphaComponent(max(pickerOpacity, 0.08)),
+                        for: role)
     }
 
     @objc private func applyPickerColor(_ sender: Any?) {
@@ -3468,12 +3548,13 @@ private func trimmed(_ s: String) -> String? {
     }
 
     private func persistPickerColor() {
-        guard let w = pickerWindow, let role = pickerRole else { return }
-        let hex = pickerHex.isEmpty ? hexString(w.themeColor(role)) : pickerHex
+        guard pickerWindow != nil, pickerRole != nil else { return }
+        let color = pickerHue.withAlphaComponent(max(pickerOpacity, 0.08))
+        let hex = hexString(color)
         guard !hex.isEmpty, !pickerSection.isEmpty else { return }
         // per-window override keys — the pick only affects THIS window
         let key: String
-        switch role {
+        switch pickerRole! {
         case .browser: key = "browser-background"
         case .terminal: key = "terminal-background"
         case .notepad: key = "background-color"

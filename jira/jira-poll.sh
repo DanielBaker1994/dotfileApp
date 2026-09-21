@@ -41,6 +41,25 @@
 
 set -o pipefail
 
+# Honor the [jira] `enabled` flag in commands.conf: when it's not true/yes/1/on
+# the poll is a NO-OP. launchd still wakes us (RunAtLoad + StartInterval), but
+# we exit immediately — no cache refresh, no network, no publish — so the
+# agent only ever does work when the jira window is actually enabled.
+WS_CONF="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/commands.conf"
+JIRA_ENABLED=""
+if [[ -f "$WS_CONF" ]]; then
+    JIRA_ENABLED="$(awk -F= '
+        /^\[[^]]+\]/ { sec = $0; next }
+        sec == "[jira]" && $1 ~ /enabled/ {
+            gsub(/[ \t]/, "", $2); print $2; exit
+        }
+    ' "$WS_CONF")"
+fi
+case "${JIRA_ENABLED,,}" in
+    true|yes|1|on) ;;
+    *) exit 0 ;;
+esac
+
 CONFIG_FILE="${JIRA_CONFIG_FILE:-$HOME/.config/jira/config}"
 JIRA_API_SH="${JIRA_API_SH:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/jira-api.sh}"
 CACHE_FILE="$HOME/.cache/jira/jiras.json"
