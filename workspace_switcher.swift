@@ -147,16 +147,47 @@ func parseColors() -> [String: NSColor] {
     return out
 }
 
+// [theme] section in commands.conf: friendly hex colors that override the
+// sketchybar-derived window colors app-wide. Keys map 1:1 to the popup's
+// color roles (background border text dim highlight accent header panel).
+// The interactive color picker edits this section live.
+func parseTheme() -> [String: NSColor] {
+    var out: [String: NSColor] = [:]
+    guard let content = try? String(contentsOfFile: settings.commandsConfPath,
+                                    encoding: .utf8) else { return out }
+    var inTheme = false
+    for line in content.split(separator: "\n") {
+        let s = line.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("[") && s.hasSuffix("]") {
+            inTheme = s == "[theme]"
+            continue
+        }
+        guard inTheme, let eq = s.firstIndex(of: "=") else { continue }
+        let key = s[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+        let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        if let c = hexColor(val) { out[key] = c }
+    }
+    return out
+}
+
 let C = parseColors()
-let BAR = C["BAR_COLOR"] ?? NSColor.black
-let GROUP_BG = C["GROUP_BG_COLOR"] ?? NSColor.gray
-let TEXT = C["WHITE"] ?? NSColor.white
-let DIM = C["GREY"] ?? NSColor.gray
-let BORDER = C["SPACE_BORDER_COLOR"] ?? NSColor.white
+let THEME = parseTheme()
+let BAR = THEME["background"] ?? C["BAR_COLOR"] ?? NSColor.black
+let GROUP_BG = THEME["highlight"] ?? C["GROUP_BG_COLOR"] ?? NSColor.gray
+let TEXT = THEME["text"] ?? C["WHITE"] ?? NSColor.white
+let DIM = THEME["dim"] ?? C["GREY"] ?? NSColor.gray
+let BORDER = THEME["border"] ?? C["SPACE_BORDER_COLOR"] ?? NSColor.white
+let ACCENT = THEME["accent"] ?? NSColor(srgbRed: 85/255, green: 104/255, blue: 130/255, alpha: 1)
+// app-wide default drag-header tint + the two drawer backgrounds ([theme]
+// header / browser / terminal); per-window `header-color` /
+// `browser-background` / `terminal-background` in commands.conf override them
+let THEME_HEADER = THEME["header"]
+let THEME_BROWSER = THEME["browser"]
+let THEME_TERMINAL = THEME["terminal"]
 
 // default drag-header tint for the notes/jira windows (dark bluey silver);
-// a commands.conf `header-color` overrides it per window
-let headerBlueSilver = NSColor(srgbRed: 0.27, green: 0.31, blue: 0.36, alpha: 1)
+// a commands.conf `header-color` or [theme] `header` overrides it per scope
+let headerBlueSilver = THEME_HEADER ?? NSColor(srgbRed: 0.27, green: 0.31, blue: 0.36, alpha: 1)
 
 // MARK: - Focus file (captured by the launcher at keypress time)
 
@@ -364,7 +395,8 @@ struct CommandSpec {
     let root: String?     // files: starting directory for the file browser
     let favorites: [String]  // files: static favorite dirs (commands.conf, tilde ok)
     let zoxideTop: Int       // files: include the top-N dirs from zoxide as favorites
-    let browserBackground: NSColor?  // files: panel background (default deep sea blue)
+    let browserBackground: NSColor?  // files: panel background (default silvery blue)
+    let backgroundColor: NSColor?  // note/files: window card fill (the notepad)
     let primary: String?   // list: field shown as the row title
     let content: String?   // list: field drawn next to the title (truncated)
     let detail: String?    // list: field drawn dim on line 2 (left)
@@ -395,6 +427,7 @@ struct CommandSpec {
     let terminal: Bool        // note: embedded shell drawer at the bottom
     let terminalHeight: CGFloat
     let terminalDir: String?  // note: starting directory for the embedded shell
+    let terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
     let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
 
@@ -403,6 +436,7 @@ struct CommandSpec {
          sources: [String] = [], root: String? = nil,
          favorites: [String] = [], zoxideTop: Int = 0,
          browserBackground: NSColor? = nil,
+         backgroundColor: NSColor? = nil,
          primary: String? = nil,
          content: String? = nil, detail: String? = nil, trailing: String? = nil,
          body: String? = nil, filter: [String] = [], filters: [String] = [],
@@ -414,6 +448,7 @@ struct CommandSpec {
          headerColor: NSColor? = nil, voice: Bool = false,
          terminal: Bool = false, terminalHeight: CGFloat = 240,
          terminalDir: String? = nil,
+         terminalBackground: NSColor? = nil,
          maxHeight: CGFloat = 0,
          icon: NSImage? = nil,
          saveDir: String = "/tmp/") {
@@ -428,6 +463,7 @@ struct CommandSpec {
         self.favorites = favorites
         self.zoxideTop = zoxideTop
         self.browserBackground = browserBackground
+        self.backgroundColor = backgroundColor
         self.primary = primary
         self.content = content
         self.detail = detail
@@ -456,6 +492,7 @@ struct CommandSpec {
         self.terminal = terminal
         self.terminalHeight = terminalHeight
         self.terminalDir = terminalDir
+        self.terminalBackground = terminalBackground
         self.icon = icon
         self.saveDir = saveDir
     }
@@ -543,6 +580,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         favorites: csv(vars["favorites"]),
         zoxideTop: Int(vars["zoxide-top"] ?? "") ?? 0,
         browserBackground: hexColor(vars["browser-background"]),
+        backgroundColor: hexColor(vars["background-color"]),
         primary: vars["primary"],
         content: vars["content"], detail: vars["detail"], trailing: vars["trailing"],
         body: vars["body"], filter: filter, filters: filters, width: width,
@@ -565,6 +603,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         terminal: tri(vars["terminal"]) ?? false,
         terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
         terminalDir: vars["terminal-dir"],
+        terminalBackground: hexColor(vars["terminal-background"]),
         maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName),
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
@@ -723,11 +762,11 @@ private func mtime(of path: String) -> Date? {
     return attrs[.modificationDate] as? Date
 }
 
-// non-editable files opened as notes (PDFs, images) are shown as a read-only
-// preview instead of markdown — and never saved back to
+// non-editable files opened as notes (PDFs, images, RTF) are shown as a
+// read-only preview instead of markdown — and never saved back to
 private func noteIsPreview(_ path: String) -> Bool {
     let ext = (path as NSString).pathExtension.lowercased()
-    if ext == "pdf" { return true }
+    if ext == "pdf" || ext == "rtf" { return true }
     return ["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"].contains(ext)
 }
 
@@ -1030,6 +1069,7 @@ func glyphIcon(_ symbol: String, fallback: String, tint: NSColor,
     img.isTemplate = template
     return img
 }
+
 
 // flat colorful notepad: warm paper, teal binding with rings, slate lines and
 // an amber fold — reads in color next to the blue Jira mark in the picker,
@@ -1528,11 +1568,23 @@ final class SwitcherController: NSObject {
     // debounced auto-format for the /prettyprint window (cancelled/re-armed on
     // every keystroke so paste + brief pause renders once)
     private var prettyFormatWorkItem: DispatchWorkItem?
+    // interactive color picker state: the shared NSColorPanel previews live while
+    // dragging but only PERSISTS on "Apply". Cancelling (panel "x", Esc, or
+    // the Cancel button) reverts the window to the color it had on open.
+    private weak var pickerWindow: PopupWindow?
+    private var pickerRole: PopupWindow.ThemeRole?
+    private var pickerSection = ""
+    private var pickerHex = ""
+    private var pickerOriginal: NSColor?   // color when the picker opened
+    private var pickerCommitted = false    // "Apply" clicked before closing
+    private var pickerSawVisible = false   // the panel appeared at least once
+    private var pickerWatchdog: Timer?
+    private var pickerPanelObserver: Any?
 
     override init() {
         var config = PopupConfig(name: settings.switcherWindowName)
         config.colors = PopupColors(background: BAR, border: BORDER,
-                                    text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                    text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
         config.enableResize = true
         // shrink/grow the window to fit the current row count while typing
         // (e.g. "/" with 3 commands gets a compact window, not a tall one)
@@ -2020,7 +2072,7 @@ final class SwitcherController: NSObject {
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
         w.editorText = text
@@ -2094,7 +2146,7 @@ final class SwitcherController: NSObject {
         cfg.titlePill = false
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
         cfg.fontName = cmd.font
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
@@ -2143,7 +2195,7 @@ final class SwitcherController: NSObject {
         cfg.titlePill = false
         cfg.headerColor = headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = false
         w.editorText = ""
@@ -2430,10 +2482,13 @@ private func trimmed(_ s: String) -> String? {
         cfg.terminal = cmd.terminal
         cfg.terminalHeight = cmd.terminalHeight
         if let td = cmd.terminalDir { cfg.terminalDir = td }
-        if let bb = cmd.browserBackground { cfg.fileBrowserBackground = bb }
+        cfg.fileBrowserBackground = cmd.browserBackground
+            ?? THEME_BROWSER ?? cfg.fileBrowserBackground
         cfg.shell = settings.shell
         cfg.shellArgs = settings.shellArgs
         cfg.terminalFont = settings.terminalFont
+        cfg.terminalBackground = cmd.terminalBackground
+            ?? THEME_TERMINAL ?? cfg.terminalBackground
         // slim header (same height as the jira detail window): no title pill,
         // bluey-silver strip, app glyph far left with the last-write line
         cfg.headerHeight = 30
@@ -2443,20 +2498,25 @@ private func trimmed(_ s: String) -> String? {
         cfg.stretchHeaderButtons = true
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        if let bg = cmd.backgroundColor { cfg.colors.background = bg }
         cfg.fontName = cmd.font
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
         // header buttons: "\u{F120}" (terminal icon) toggles the embedded shell
-        // drawer, "\u{F07C}" (folder) toggles the embedded file browser (both
-        // can be open at once). Opening files happens via the "+" tab button.
+        // drawer; "\u{F0036}" (Nerd Fonts "fa-blackberry", matches the
+        // installed 3.5.1 font) toggles the file browser. Opening files
+        // happens via the "+" tab button.
         var hb: [(String, Int)] = []
         if cmd.terminal { hb.append(("\u{F120}", 10)) }
-        hb.append(("\u{F07C}", 20))
+        hb.append(("\u{F0036}", 20))
         // voice windows get a mic toggle (id 40) that shows/hides the record
         // bar — clustered with the terminal + folder toggles. The bar starts
         // OFF (slashed mic), so recording never starts silently at launch.
         if cmd.voice { hb.append(("\u{F131}", 40)) }
+        // paint-brush (id 60): opens the interactive color picker that edits
+        // the silvery-blue panel background (terminal + file browser) live
+        hb.append(("\u{F1FC}", 60))
         w.headerButtons = hb
         w.headerOrder = [1, 2]
         // initial drawer state: terminal starts on, browser starts off — the
@@ -2610,8 +2670,8 @@ private func trimmed(_ s: String) -> String? {
             guard let self else { return }
             closeNote(index)
         }
-        // header button routing (terminal / folder / mic)
-        w.onHeaderButton = { [weak w] id in
+        // header button routing (terminal / folder / mic / color picker)
+        w.onHeaderButton = { [weak self, weak w] id in
             if id == 10 {
                 w?.toggleTerminalDrawer()
                 if let w { w.setHeaderButtonOn(10, w.terminalShown) }
@@ -2630,6 +2690,11 @@ private func trimmed(_ s: String) -> String? {
                     arr[i].0 = shown ? "\u{F130}" : "\u{F131}"
                     w.headerButtons = arr
                 }
+            } else if id == 60 {
+                guard let w else { return }
+                self?.presentThemeRoleMenu(for: w,
+                                           roles: [.terminal, .browser, .notepad, .header],
+                                           section: cmd.name)
             }
         }
         // "+" pill: choose to open an EXISTING file as a tab (open panel) or
@@ -3207,9 +3272,204 @@ private func trimmed(_ s: String) -> String? {
         log("commands.conf: no [\(section)] section to update")
     }
 
-    // list: load the data file(s) into FieldRows and open a fresh popup with its
-    // own search field; Esc/Enter dismiss it (restoring the original focus).
-    // Multiple `sources` become tabs; rows scroll when they overflow.
+    // MARK: Interactive color picker (header paint-brush button)
+
+    // The paint-brush header button: a SHORT menu of the window's background
+    // roles; picking one opens the shared NSColorPanel for that role. Dragging
+    // PREVIEWS live in this window only; nothing is written until "Apply".
+    // Pressing the panel's close "x" (or Esc) reverts to the original color.
+    private func presentThemeRoleMenu(for w: PopupWindow,
+                                      roles: [PopupWindow.ThemeRole],
+                                      section: String) {
+        let menu = NSMenu(title: "Pick a color for…")
+        for role in roles {
+            let item = NSMenuItem(title: role.label,
+                                  action: #selector(pickThemeRole(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = role
+            menu.addItem(item)
+        }
+        pickerWindow = w
+        pickerSection = section
+        // pop under the paint-brush button (fall back to the mouse position)
+        if let cv = w.nativeWindow.contentView, let r = w.headerButtonRect(60) {
+            menu.popUp(positioning: nil, at: NSPoint(x: r.midX, y: r.minY), in: cv)
+        } else if let cv = w.nativeWindow.contentView {
+            menu.popUp(positioning: nil, at: cv.convert(NSEvent.mouseLocation, from: nil), in: cv)
+        }
+    }
+
+    @objc private func pickThemeRole(_ sender: NSMenuItem) {
+        guard let role = sender.representedObject as? PopupWindow.ThemeRole,
+              let w = pickerWindow else { return }
+        startColorPicker(for: w, role: role)
+    }
+
+    private func startColorPicker(for w: PopupWindow, role: PopupWindow.ThemeRole) {
+        pickerWindow = w
+        pickerRole = role
+        pickerHex = ""
+        pickerOriginal = w.themeColor(role)
+        pickerCommitted = false
+        pickerSawVisible = false
+        let panel = NSColorPanel.shared
+        panel.color = pickerOriginal ?? .clear
+        panel.showsAlpha = false
+        panel.isContinuous = true
+        panel.setTarget(self)
+        panel.setAction(#selector(panelColorChanged(_:)))
+        // accessory row: Apply commits + saves, Cancel reverts + closes. The
+        // panel's own close "x" / Esc are cancel too (see watchdog below).
+        let applyButton = NSButton(title: "Apply", target: self,
+                                   action: #selector(applyPickerColor(_:)))
+        applyButton.keyEquivalent = "\r"
+        applyButton.bezelStyle = .rounded
+        let cancelButton = NSButton(title: "Cancel", target: self,
+                                    action: #selector(cancelPickerColor(_:)))
+        cancelButton.bezelStyle = .rounded
+        let acc = NSView(frame: NSRect(x: 0, y: 0, width: 180, height: 32))
+        applyButton.frame = NSRect(x: 0, y: 2, width: 82, height: 26)
+        cancelButton.frame = NSRect(x: 92, y: 2, width: 82, height: 26)
+        acc.addSubview(applyButton)
+        acc.addSubview(cancelButton)
+        panel.accessoryView = acc
+        // backup cancel path (in case the watchdog hasn't ticked yet)
+        if let o = pickerPanelObserver {
+            NotificationCenter.default.removeObserver(o)
+        }
+        pickerPanelObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            self?.revertPickerIfCancelled()
+        }
+        // the color panel dismisses with orderOut (not close) on "x"/Esc, so
+        // willClose alone can't catch a cancel — watch for the panel going
+        // invisible without Apply having been pressed.
+        pickerWatchdog?.invalidate()
+        let watchdog = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let p = NSColorPanel.shared
+            if p.isVisible {
+                self.pickerSawVisible = true
+            } else if self.pickerSawVisible {
+                self.pickerWatchdog?.invalidate()
+                self.pickerWatchdog = nil
+                if let o = self.pickerPanelObserver {
+                    NotificationCenter.default.removeObserver(o)
+                    self.pickerPanelObserver = nil
+                }
+                if !self.pickerCommitted {
+                    self.revertPicker()
+                }
+            }
+        }
+        pickerWatchdog = watchdog
+        RunLoop.main.add(watchdog, forMode: .common)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        log("color picker opened for [\(pickerSection)] \(role.rawValue)")
+    }
+
+    @objc private func panelColorChanged(_ sender: Any?) {
+        guard let w = pickerWindow, let role = pickerRole else { return }
+        // live preview ONLY — nothing is written until Apply
+        let c = NSColorPanel.shared.color
+        w.setThemeColor(c, for: role)
+        pickerHex = hexString(c)
+    }
+
+    @objc private func applyPickerColor(_ sender: Any?) {
+        pickerCommitted = true
+        persistPickerColor()
+        NSColorPanel.shared.close()
+    }
+
+    @objc private func cancelPickerColor(_ sender: Any?) {
+        revertPicker()
+        NSColorPanel.shared.close()
+    }
+
+    private func revertPickerIfCancelled() {
+        guard !pickerCommitted else { return }
+        revertPicker()
+    }
+
+    private func revertPicker() {
+        guard let w = pickerWindow, let role = pickerRole,
+              let original = pickerOriginal else { return }
+        w.setThemeColor(original, for: role)
+        log("color picker cancelled for [\(pickerSection)] — reverted")
+    }
+
+    private func persistPickerColor() {
+        guard let w = pickerWindow, let role = pickerRole else { return }
+        let hex = pickerHex.isEmpty ? hexString(w.themeColor(role)) : pickerHex
+        guard !hex.isEmpty, !pickerSection.isEmpty else { return }
+        // per-window override keys — the pick only affects THIS window
+        let key: String
+        switch role {
+        case .browser: key = "browser-background"
+        case .terminal: key = "terminal-background"
+        case .notepad: key = "background-color"
+        case .header: key = "header-color"
+        }
+        updateColorKeyInConfig(hex, key: key, section: pickerSection)
+        log("commands.conf [\(pickerSection)]: \(key) -> #\(hex)")
+    }
+
+    private func hexString(_ c: NSColor) -> String {
+        let cc = c.usingColorSpace(.sRGB) ?? c
+        let r = Int(round(cc.redComponent * 255))
+        let g = Int(round(cc.greenComponent * 255))
+        let b = Int(round(cc.blueComponent * 255))
+        return String(format: "%02X%02X%02X", r, g, b)
+    }
+
+    // rewrite (or insert) a KEY = VALUE line in a [section] of commands.conf,
+    // preserving comments/order; the app reads colors at startup so a restart
+    // picks up the persisted pick
+    private func updateColorKeyInConfig(_ value: String, key: String, section: String) {
+        let confPath = settings.commandsConfPath
+        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+            log("commands.conf: cannot read \(confPath)")
+            return
+        }
+        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let target = "[" + section + "]"
+        var inSection = false
+        for (i, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                inSection = trimmed == target
+                continue
+            }
+            guard inSection, let eq = trimmed.firstIndex(of: "=") else { continue }
+            let k = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+            if k == key {
+                lines[i] = key + " = " + value
+                try? (lines.joined(separator: "\n"))
+                    .write(toFile: confPath, atomically: true, encoding: .utf8)
+                return
+            }
+        }
+        // no existing key: insert right after the section header (or append a
+        // fresh section when the section doesn't exist yet)
+        var insertion: Int
+        if let idx = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == target
+        }) {
+            insertion = idx + 1
+        } else {
+            lines.append("")
+            lines.append(target)
+            insertion = lines.count
+        }
+        lines.insert(key + " = " + value, at: insertion)
+        try? (lines.joined(separator: "\n"))
+            .write(toFile: confPath, atomically: true, encoding: .utf8)
+    }
+
     private func openListWindow(_ cmd: CommandSpec,
                                 restoreWID: String?, restorePID: pid_t?) {
         guard !cmd.sources.isEmpty else {
@@ -3303,7 +3563,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.titlePill = false
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
         if cmd.searchWidth > 0 { cfg.searchWidthFraction = cmd.searchWidth }
         if cmd.maxStretch > 0 { cfg.maxRowStretch = cmd.maxStretch }
         cfg.fontName = cmd.font
@@ -3535,17 +3795,28 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.showSearchBar = false
         cfg.dragHeader = true
         cfg.scrollableRows = true
-        if let bb = cmd.browserBackground { cfg.fileBrowserBackground = bb }
+        cfg.fileBrowserBackground = cmd.browserBackground
+            ?? THEME_BROWSER ?? cfg.fileBrowserBackground
+        cfg.terminalBackground = cmd.terminalBackground
+            ?? THEME_TERMINAL ?? cfg.terminalBackground
         cfg.width = cmd.width > 0 ? cmd.width : 780
         cfg.height = cmd.height > 0 ? cmd.height : 560
         cfg.headerHeight = 30
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG)
+                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        if let bg = cmd.backgroundColor { cfg.colors.background = bg }
         cfg.fontName = cmd.font
         let w = PopupWindow(config: cfg)
         w.headerIcon = NSWorkspace.shared.icon(forFile: root)
         w.chromeHeaderTitle = root
+        // paint-brush (id 60): interactive color picker for the explorer
+        // panel background (persists to commands.conf on close)
+        w.headerButtons = [("\u{F1FC}", 60)]
+        w.onHeaderButton = { [weak self, weak w] id in
+            guard id == 60, let self, let w else { return }
+            self.presentThemeRoleMenu(for: w, roles: [.browser, .header], section: cmd.name)
+        }
 
         let favs = fileBrowserFavoritesConfig()
         let fb = PopupFileBrowser(config: cfg, startDir: root,

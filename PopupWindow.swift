@@ -447,9 +447,16 @@ public struct PopupConfig {
     // embedded file-browser drawer (notes etc.): toggled like the terminal;
     // both drawers can be open at once (they stack, window grows)
     public var fileBrowserHeight: CGFloat = 300
-    // deep-sea blue panel background (distinct from the gray notes window);
-    // commands.conf `browser-background` overrides it
-    public var fileBrowserBackground = NSColor(srgbRed: 0.06, green: 0.22, blue: 0.39, alpha: 1)
+    // silvery-blue "panel" background shared by the file browser and the
+    // embedded terminal drawer; commands.conf `browser-background` /
+    // `terminal-background` override it. The interactive color picker (the
+    // paint-brush header button) edits this live and persists the hex back
+    // to commands.conf so the pick survives a restart.
+    public var fileBrowserBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 1)
+    // the embedded terminal's own background (same silvery blue by default so
+    // terminal + file explorer share one "panel" look); the terminal's text
+    // color is derived from it automatically for contrast
+    public var terminalBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 1)
     // when a file-browser drawer is installed, open it (and close the
     // terminal) from the start instead of the terminal being the default
     public var fileBrowserDefault = false
@@ -1867,6 +1874,11 @@ final class PopupTextView: NSTextView {
     var absolutePathAt: ((Int) -> String?)?
     private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"])
 
+    // The system color panel can deliver `changeColor:` up the responder
+    // chain to the first responder. The notes editor must never be restyled
+    // by the color picker — its text color is theme-driven only.
+    override func changeColor(_ sender: Any?) { }
+
     override func didChangeText() {
         super.didChangeText()
         onTextChange?()
@@ -2280,6 +2292,30 @@ final class PaneSplitter: NSView {
 // up), a favorites pill row, a directory listing with a right-hand preview
 // split. Reused by the floating "files" window (fills the content) and the
 // notes window (bottom drawer, toggled like the terminal).
+
+// SAX collector for DOCX word/document.xml: keeps <w:t> text and turns each
+// <w:p> paragraph into a line break
+final class DocxTextExtractor: NSObject, XMLParserDelegate {
+    private(set) var text = ""
+    private var inText = false
+    func parser(_ parser: XMLParser, didStartElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?,
+                attributes attributeDict: [String: String] = [:]) {
+        switch elementName {
+        case "w:p": text += "\n"
+        case "w:t": inText = true
+        default: break
+        }
+    }
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if inText { text += string }
+    }
+    func parser(_ parser: XMLParser, didEndElement elementName: String,
+                namespaceURI: String?, qualifiedName qName: String?) {
+        if elementName == "w:t" { inText = false }
+    }
+}
+
 final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     let config: PopupConfig
     var onOpen: ((String) -> Void)?          // open a FILE in its default app
@@ -2326,6 +2362,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private let previewText = NSTextView()
     private let previewImage = NSImageView()
     private let previewHint = NSTextField(labelWithString: "")
+    // folder preview: selecting a directory shows its contents as a REAL file
+    // list (icons, hover, right-click Open in Notes / Copy Path) on the right
+    private let previewList: FileListPane
+    private let previewListScroll = NSScrollView()
     private var favPills: [ThemeButton] = []
     private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "pdf"])
     private static let textLimit = 262144
@@ -2335,6 +2375,32 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // the search field is exposed so the window can route Cmd+V/C/A etc. to
     // the filter bar (otherwise they land in the notes editor / hidden field)
     var searchView: NSTextField { searchField }
+
+    // live restyle from the color picker: swap the panel background without
+    // rebuilding the browser (same see-through 0.55 alpha as init)
+    func setBackground(_ c: NSColor) {
+        layer?.backgroundColor = c.withAlphaComponent(0.55).cgColor
+        needsDisplay = true
+    }
+
+    // re-apply every cached color after a live theme change (the picker edits
+    // config.colors on the window; the browser's fields cache colors at init)
+    func retheme() {
+        let c = config.colors
+        searchField.textColor = c.text
+        searchField.placeholderAttributedString = NSAttributedString(
+            string: "filter…",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: c.dim])
+        searchField.layer?.backgroundColor = c.highlight.withAlphaComponent(0.4).cgColor
+        searchField.layer?.borderColor = c.border.withAlphaComponent(0.45).cgColor
+        previewText.textColor = c.text
+        previewHint.textColor = c.dim
+        splitter.layer?.backgroundColor = c.border.withAlphaComponent(0.35).cgColor
+        setBackground(config.fileBrowserBackground)
+        listPane.needsDisplay = true
+        previewList.needsDisplay = true
+        needsDisplay = true
+    }
 
     init(config: PopupConfig, startDir: String, favoritesURL: URL? = nil,
          staticFavorites: [String] = [], zoxideFavorites: [String] = []) {
@@ -2347,6 +2413,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.parentButton = ThemeButton(config: config, title: "← up")
         self.starButton = ThemeButton(config: config, title: "★ pin")
         self.listPane = FileListPane(config: config)
+        self.previewList = FileListPane(config: config)
         super.init(frame: .zero)
         wantsLayer = true
         // translucent blue drawer, MORE see-through than the grey notepad (a
@@ -2450,6 +2517,26 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         listScroll.borderType = .noBorder
         listScroll.documentView = listPane
 
+        // folder preview list: same file rows as the left pane, with the same
+        // right-click actions (Open in Notes / Copy Path / Open / Reveal)
+        previewListScroll.hasVerticalScroller = true
+        previewListScroll.autohidesScrollers = true
+        previewListScroll.drawsBackground = false
+        previewListScroll.borderType = .noBorder
+        previewListScroll.documentView = previewList
+        previewList.onOpen = { [weak self] i in self?.previewOpen(i) }
+        previewList.onParent = { [weak self] in self?.cdParent() }
+        previewList.onCopyPath = { [weak self] i in
+            guard let self, self.previewList.rows.indices.contains(i) else { return }
+            let p = self.previewList.rows[i].path
+            self.onCopyPath?(p)
+            self.onStatus?("copied \(p)")
+        }
+        previewList.onOpenInNotes = { [weak self] i in
+            guard let self, self.previewList.rows.indices.contains(i) else { return }
+            self.onOpenInNotes?(self.previewList.rows[i].path)
+        }
+
         addSubview(parentButton)
         addSubview(searchField)
         addSubview(starButton)
@@ -2458,6 +2545,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         addSubview(previewScroll)
         addSubview(previewImage)
         addSubview(previewHint)
+        addSubview(previewListScroll)
 
         loadFavorites()
         rebuildPills()
@@ -2506,7 +2594,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         previewScroll.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
         previewImage.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
         previewHint.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
+        previewListScroll.frame = NSRect(x: previewX, y: listY, width: previewW, height: contentH)
         layoutListDocument()
+        layoutPreviewListDocument()
     }
     // the list's document (the row pane) grows to fit every row; the scroll
     // view clips it at the pane height so long lists scroll in place
@@ -2515,6 +2605,12 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let docH = max(clipH, CGFloat(listPane.rows.count) * 22)
         listPane.frame = NSRect(x: 0, y: 0, width: max(0, listScroll.bounds.width), height: docH)
         listPane.needsDisplay = true
+    }
+    private func layoutPreviewListDocument() {
+        let clipH = max(0, previewListScroll.bounds.height)
+        let docH = max(clipH, CGFloat(previewList.rows.count) * 22)
+        previewList.frame = NSRect(x: 0, y: 0, width: max(0, previewListScroll.bounds.width), height: docH)
+        previewList.needsDisplay = true
     }
     // keep the keyboard/cursor selection inside the visible area (never let
     // the selection scroll off-screen)
@@ -2778,17 +2874,38 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private func previewSelection() {
         guard rows.indices.contains(selection) else { return showHint(""); }
         let e = rows[selection]
+        let ext = (e.path as NSString).pathExtension.lowercased()
         if e.isDir {
-            // the user knows it's a directory — show what's inside instead
-            let count = (try? FileManager.default.contentsOfDirectory(atPath: e.path))?.count ?? 0
-            showHint(count == 0 ? "empty" : "\(count) item\(count == 1 ? "" : "s")")
-        } else if Self.imageExts.contains((e.path as NSString).pathExtension.lowercased()) {
-            if let img = NSImage(contentsOfFile: e.path) {
+            // show the folder's CONTENTS as a real file list on the right
+            // (icons, sizes, hover, right-click Open in Notes / Copy Path)
+            previewList.rows = listDir(e.path).filter { $0.name != ".." }
+            previewList.selection = 0
+            layoutPreviewListDocument()
+            showFolderList()
+        } else if Self.imageExts.contains(ext) {
+            let img: NSImage?
+            if ext == "pdf" {
+                // NSImage renders PDFs transparent — composite onto white so
+                // the blue drawer doesn't show through the page
+                img = Self.pdfPreviewImage(e.path)
+            } else {
+                img = NSImage(contentsOfFile: e.path)
+            }
+            if let img {
                 previewImage.image = img
                 showImage()
             } else {
                 showHint("unable to preview")
             }
+        } else if ext == "rtf", let img = Self.rtfPreviewImage(e.path) {
+            // render the rich text onto white (same white-backed treatment)
+            previewImage.image = img
+            showImage()
+        } else if ext == "docx", let text = Self.docxText(e.path), !text.isEmpty {
+            // extract the text out of the zip's document.xml
+            previewText.string = text
+            previewText.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            showText()
         } else if let text = textPreview(e.path) {
             previewText.string = text
             previewText.scrollRangeToVisible(NSRange(location: 0, length: 0))
@@ -2800,18 +2917,33 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private func showHint(_ s: String) {
         previewScroll.isHidden = true
         previewImage.isHidden = true
+        previewListScroll.isHidden = true
         previewHint.isHidden = s.isEmpty
         previewHint.stringValue = s
     }
     private func showText() {
         previewHint.isHidden = true
         previewImage.isHidden = true
+        previewListScroll.isHidden = true
         previewScroll.isHidden = false
     }
     private func showImage() {
         previewHint.isHidden = true
         previewScroll.isHidden = true
+        previewListScroll.isHidden = true
         previewImage.isHidden = false
+    }
+    private func showFolderList() {
+        previewHint.isHidden = true
+        previewScroll.isHidden = true
+        previewImage.isHidden = true
+        previewListScroll.isHidden = false
+    }
+    // double-click / Enter on a row in the folder preview: drill in or open
+    private func previewOpen(_ i: Int) {
+        guard previewList.rows.indices.contains(i) else { return }
+        let e = previewList.rows[i]
+        if e.isDir { cd(e.path) } else { onOpen?(e.path) }
     }
     private func textPreview(_ path: String) -> String? {
         guard let sz = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.intValue else { return nil }
@@ -2823,6 +2955,92 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         }
         guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    // render a PDF's first page onto an OPAQUE white background: NSImage
+    // loads a PDF with a transparent background, which bleeds the blue drawer
+    // through the page. 2x resolution so it reads crisp when scaled up.
+    private static func pdfPreviewImage(_ path: String) -> NSImage? {
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)),
+              let page = doc.page(at: 0) else { return nil }
+        let bounds = page.bounds(for: .mediaBox)
+        let scale: CGFloat = 2
+        let w = max(1, bounds.width * scale)
+        let h = max(1, bounds.height * scale)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(w),
+                                         pixelsHigh: Int(h), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = NSSize(width: w, height: h)
+        NSGraphicsContext.saveGraphicsState()
+        let ctx = NSGraphicsContext(bitmapImageRep: rep)!
+        NSGraphicsContext.current = ctx
+        ctx.cgContext.scaleBy(x: scale, y: scale)
+        ctx.cgContext.translateBy(x: -bounds.origin.x, y: -bounds.origin.y)
+        ctx.cgContext.setFillColor(NSColor.white.cgColor)
+        ctx.cgContext.fill(bounds)
+        page.draw(with: .mediaBox, to: ctx.cgContext)
+        NSGraphicsContext.restoreGraphicsState()
+        let img = NSImage(size: NSSize(width: bounds.width, height: bounds.height))
+        img.addRepresentation(rep)
+        return img
+    }
+
+    // render an RTF file's rich text onto an OPAQUE white background (2x), so
+    // it previews like a document instead of raw RTF markup or blue bleed
+    static func rtfPreviewImage(_ path: String) -> NSImage? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let attrs = try? NSAttributedString(data: data,
+                                                  options: [.documentType: NSAttributedString.DocumentType.rtf],
+                                                  documentAttributes: nil) else { return nil }
+        let width: CGFloat = 640
+        let drawOpts: NSString.DrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
+        let pad: CGFloat = 16
+        let bounds = attrs.boundingRect(with: NSSize(width: width - pad, height: .greatestFiniteMagnitude),
+                                        options: drawOpts, context: nil)
+        let h = min(max(bounds.height + pad, 80), 3200)
+        let scale: CGFloat = 2
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: Int(width * scale),
+                                         pixelsHigh: Int(h * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        rep.size = NSSize(width: width, height: h)
+        NSGraphicsContext.saveGraphicsState()
+        let ctx = NSGraphicsContext(bitmapImageRep: rep)!
+        NSGraphicsContext.current = ctx
+        ctx.cgContext.scaleBy(x: scale, y: scale)
+        ctx.cgContext.setFillColor(NSColor.white.cgColor)
+        ctx.cgContext.fill(CGRect(x: 0, y: 0, width: width, height: h))
+        attrs.draw(with: NSRect(x: pad / 2, y: pad / 2, width: width - pad, height: h - pad),
+                   options: drawOpts)
+        NSGraphicsContext.restoreGraphicsState()
+        let img = NSImage(size: NSSize(width: width, height: h))
+        img.addRepresentation(rep)
+        return img
+    }
+
+    // DOCX is a zip — pull word/document.xml out via `unzip -p` and collect
+    // the paragraph text
+    private static func docxText(_ path: String) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        p.arguments = ["-p", path, "word/document.xml"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = Pipe()
+        do { try p.run() } catch { return nil }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        let xmlData = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let xml = String(data: xmlData, encoding: .utf8) else { return nil }
+        let parser = XMLParser(data: Data(xml.utf8))
+        let ex = DocxTextExtractor()
+        parser.delegate = ex
+        parser.parse()
+        return ex.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: favorites
@@ -3006,6 +3224,12 @@ final class PopupStatusBar: NSView {
 // hitTest so the content below keeps its own events (text selection, typing).
 final class PopupChrome: NSView {
     let config: PopupConfig
+    // live header fill pushed by the color picker — the chrome holds its own
+    // copy of the config struct, so the window re-pushes the picked color
+    // here for the drag-header strip to restyle without a rebuild
+    var headerColorOverride: NSColor? {
+        didSet { needsDisplay = true }
+    }
     var zoom: CGFloat = 1.0
     var dragHeaderHeight: CGFloat = 0      // top strip that drags the window
     var dragAnywhere: Bool = false         // drag on any non-reserved area
@@ -3238,15 +3462,26 @@ var meterEnabled = false {
         super.mouseUp(with: event)
     }
 
-    // Nerd-font glyphs (BMP PUA codepoints, e.g. the terminal icons) only
-    // measure and render correctly in a Nerd Font — a label carrying one gets
-    // the terminal's font so the segment sizes to the real glyph instead of a
-    // missing-glyph box (which both under-measures and draws a tofu square).
-    private func headerButtonFont(_ label: String) -> NSFont {
-        let needsNerd = label.unicodeScalars.contains {
-            (0xE000...0xF8FF).contains($0.value)
+    // Nerd-font glyphs (BMP PUA + Supplementary PUA-A codepoints, e.g. the
+// terminal / file-browser icons) only measure and render correctly in a Nerd
+// Font — a label carrying one gets the terminal's font so the segment sizes
+// to the real glyph instead of a missing-glyph box (which both under-measures
+// and draws a tofu square). Nerd Fonts v3 moved MDI icons to U+F0000-U+F2FDF.
+private func headerButtonFont(_ label: String) -> NSFont {
+        let scalars = label.unicodeScalars
+        let pua = { (v: UInt32) in
+            (0xE000...0xF8FF).contains(v)
+                || (0xF0000...0xFFFFD).contains(v)
+                || (0x100000...0x10FFFD).contains(v)
         }
+        let needsNerd = scalars.contains { pua($0.value) }
         if needsNerd, let f = NSFont(name: config.terminalFont, size: config.buttonFontSize) {
+            // pure icon glyphs (a single PUA character — terminal / finder /
+            // mic toggles) render BIGGER than text labels so the icons read
+            // clearly; labels that mix in text keep the normal size
+            if scalars.allSatisfy({ pua($0.value) }) {
+                return NSFont(name: config.terminalFont, size: config.buttonFontSize + 3.5) ?? f
+            }
             return f
         }
         return NSFont.systemFont(ofSize: config.buttonFontSize, weight: .semibold)
@@ -3306,7 +3541,7 @@ var meterEnabled = false {
     override func draw(_ dirtyRect: NSRect) {
         guard dragHeaderHeight > 0 else { return }
         let header = NSRect(x: 0, y: 0, width: bounds.width, height: dragHeaderHeight)
-        (config.headerColor ?? config.colors.background).setFill()
+        (headerColorOverride ?? config.headerColor ?? config.colors.background).setFill()
         header.fill()
         config.colors.dim.withAlphaComponent(0.4).setStroke()
         let line = NSBezierPath()
@@ -3784,6 +4019,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private let field: NSTextField
     private let rowView: PopupRowView
     private var editorView: NSTextView?
+    // the card-fill tint view over the blur; cached so the color picker can
+    // restyle it live (applyThemeColors)
+    private var tintView: NSView?
     private var terminalDrawer: LocalProcessTerminalView?
     // tiny side padding for the embedded terminal so its first/last columns
     // never sit flush against the window edges
@@ -4171,6 +4409,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             config.colors.background.withAlphaComponent(config.tintAlpha).cgColor
         tint.autoresizingMask = [.width, .height]
         backdrop.addSubview(tint)
+        tintView = tint
 
         rowView = PopupRowView(config: config)
         rowView.frame = backdrop.bounds
@@ -4328,9 +4567,12 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 term.layer?.masksToBounds = true
                 // translucent default background, matching the notepad: the
                 // same grey tint over the blur so the drawer is see-through
-                // like the editor instead of an opaque slab
+                // like the editor instead of an opaque slab. The silvery-blue
+                // panel color (config.terminalBackground) is what the color
+                // picker edits; text color is derived for contrast.
                 term.nativeBackgroundColor =
-                    config.colors.background.withAlphaComponent(config.tintAlpha)
+                    config.terminalBackground.withAlphaComponent(config.tintAlpha)
+                term.nativeForegroundColor = config.colors.text
                 backdrop.addSubview(term)
                 terminalDrawer = term
                 // auto-restart: if the shell exits (user typed exit/ctrl-d)
@@ -5067,6 +5309,11 @@ private func scrollSelectionIntoView() {
                 storage.append(NSAttributedString(attachment: makeAttachment(thumb, rel: "\(name)#\(i)")))
                 storage.append(NSAttributedString(string: "\n", attributes: plainAttrs))
             }
+        } else if ext == "rtf", let img = PopupFileBrowser.rtfPreviewImage(path) {
+            // RTF is rich text — render it like the finder preview (white
+            // background, formatted) instead of dumping raw escape chars
+            storage.append(NSAttributedString(attachment: makeAttachment(img, rel: name)))
+            storage.append(NSAttributedString(string: "\n", attributes: plainAttrs))
         } else if let img = NSImage(contentsOfFile: path) {
             storage.append(NSAttributedString(attachment: makeAttachment(img, rel: name)))
             storage.append(NSAttributedString(string: "\n", attributes: plainAttrs))
@@ -5681,6 +5928,71 @@ private func scrollSelectionIntoView() {
         }
         terminalShown.toggle()
         syncDrawerLayout()
+    }
+
+    // themed color roles the paint-brush picker can style. Only the per-window
+// BACKGROUNDS are interactive (card colors stay in [theme] in commands.conf):
+// `browser` = the file-explorer panel, `terminal` = the shell drawer,
+// `notepad` = the editor / window card fill, `header` = the drag-header tint.
+public enum ThemeRole: String, CaseIterable {
+    case browser
+    case terminal
+    case notepad
+    case header
+
+    public var label: String {
+        switch self {
+        case .browser: return "File explorer"
+        case .terminal: return "Terminal"
+        case .notepad: return "Notepad"
+        case .header: return "Header"
+        }
+    }
+}
+
+    public func themeColor(_ role: ThemeRole) -> NSColor {
+        switch role {
+        case .browser: return config.fileBrowserBackground
+        case .terminal: return config.terminalBackground
+        case .notepad: return config.colors.background
+        case .header: return config.headerColor ?? config.colors.background
+        }
+    }
+
+    // Apply a picked color to ONE role in THIS window only. Each role touches
+    // only its own surfaces — updating the terminal never restyles the
+    // notepad or the file explorer, and text colors are never touched.
+    public func setThemeColor(_ c: NSColor, for role: ThemeRole) {
+        switch role {
+        case .browser:
+            config.fileBrowserBackground = c
+            fileBrowser?.setBackground(c)
+        case .terminal:
+            config.terminalBackground = c
+            if let term = terminalDrawer {
+                term.nativeBackgroundColor = c.withAlphaComponent(config.tintAlpha)
+                // terminal text color stays the theme's fixed color
+                term.nativeForegroundColor = config.colors.text
+            }
+        case .notepad:
+            // the card fill only — the editor's text/selection colors are
+            // never re-applied by the picker
+            config.colors.background = c
+            tintView?.layer?.backgroundColor = c.withAlphaComponent(config.tintAlpha).cgColor
+            // keep the drag-header fill consistent when it falls back to the
+            // card background
+            chrome?.headerColorOverride = config.headerColor ?? c
+        case .header:
+            config.headerColor = c
+            chrome?.headerColorOverride = c
+        }
+        panel.contentView?.needsDisplay = true
+    }
+
+    // the current window's drag-header rect (for popping the theme menu under
+    // the paint-brush button)
+    public func headerButtonRect(_ id: Int) -> NSRect? {
+        chrome?.extraButtonRects[id]
     }
 
     // Host installs a file browser. `drawer` = true makes it a bottom drawer
