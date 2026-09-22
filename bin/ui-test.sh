@@ -59,7 +59,7 @@ windows_named() {
     " 2>/dev/null || echo 0
 }
 
-# Get the window frame (x y w h) of a workspace-switcher window
+# Get the window frame (x,y,w,h) of a workspace-switcher window
 window_frame() {
     local idx="${1:-1}"
     osascript -e "
@@ -67,10 +67,10 @@ window_frame() {
             tell process \"workspace-switcher\"
                 set f to position of window $idx
                 set s to size of window $idx
-                return (item 1 of f) & \",\" & (item 2 of f) & \",\" & (item 1 of s) & \",\" & (item 2 of s)
+                return (item 1 of f as text) & \",\" & (item 2 of f as text) & \",\" & (item 1 of s as text) & \",\" & (item 2 of s as text)
             end tell
         end tell
-    " 2>/dev/null
+    " 2>/dev/null | tr -d ' '
 }
 
 # Check if a window with a given title exists
@@ -410,10 +410,65 @@ else
 fi
 
 # ============================================================================
+# WINDOW DRAG SHAKE REGRESSION TEST
+# ============================================================================
+
+echo "== 11. Drag shake regression: position stability on open =="
+
+# Kill and restart fresh for a clean test
+pkill -f "workspace-switcher.app" 2>/dev/null || true
+sleep 0.5
+
+"$BIN" notes >/dev/null 2>&1 &
+sleep 0.5  # Open during the takeFocus retry window (1.5s total)
+
+POS_BEFORE="$(window_frame 1)"
+if [[ -n "$POS_BEFORE" ]]; then
+    IFS=',' read -r bx by bw bh <<< "$POS_BEFORE"
+    vlog "window at open: pos=(${bx},${by}) size=(${bw}x${bh})"
+
+    # Sample position 5x over 0.5s — any jitter means the window is
+    # being repositioned by takeFocus retries / activation handler
+    JITTER_PASS=true
+    PREV_POS="$POS_BEFORE"
+    for i in 1 2 3 4; do
+        sleep 0.1
+        CUR_POS="$(window_frame 1)"
+        if [[ -n "$CUR_POS" && "$CUR_POS" != "$PREV_POS" ]]; then
+            IFS=',' read -r cx cy cw ch <<< "$CUR_POS"
+            dx=$(( cx - bx )); dx=${dx#-}
+            dy=$(( cy - by )); dy=${dy#-}
+            if (( dx > 5 || dy > 5 )); then
+                JITTER_PASS=false
+                vlog "position jumped at sample $i: ${bx},${by} → ${cx},${cy} (dx=$dx, dy=$dy)"
+            fi
+        fi
+        PREV_POS="$CUR_POS"
+    done
+
+    if $JITTER_PASS; then
+        pass "position stable during takeFocus window (${bx},${by})"
+    else
+        fail "window repositioned itself during open — shake detected"
+    fi
+
+    # Also verify no oscillation after settling
+    sleep 1
+    POS_STABLE="$(window_frame 1)"
+    if [[ "$POS_BEFORE" == "$POS_STABLE" ]]; then
+        pass "position stable after settling (no late reposition)"
+    else
+        fail "window moved after settling: $POS_BEFORE -> $POS_STABLE"
+    fi
+else
+    fail "could not read window frame for drag test"
+fi
+
+# ============================================================================
 # EDGE CASES
 # ============================================================================
 
-echo "== 10. Edge cases =="
+echo "== 12. Edge cases =="
 
 # Multiple rapid toggles should not create duplicates
 for i in 1 2 3 4 5; do
