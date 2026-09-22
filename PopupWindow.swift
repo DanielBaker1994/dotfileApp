@@ -5235,6 +5235,21 @@ scroll.documentView = rowView
         }
     }
 
+    // Reset all theme colors back to their defaults (browser panel, terminal
+    // drawer, notepad background, header tint). Called from the app menu.
+    public func resetToDefaultColors() {
+        let base = PopupConfig(name: "")
+        setThemeColor(base.fileBrowserBackground, for: .browser)
+        setThemeColor(base.terminalBackground, for: .terminal)
+        // notepad: default background with default tintAlpha
+        let notepadDefault = base.colors.background.withAlphaComponent(base.tintAlpha)
+        setThemeColor(notepadDefault, for: .notepad)
+        // header: nil = use window background (no custom tint)
+        config.headerColor = nil
+        chrome?.headerColorOverride = config.colors.background
+        panel.contentView?.needsDisplay = true
+    }
+
     public func setRows(_ newRows: [PopupRow], resetScroll: Bool = true) {
         rows = newRows
         if selection >= rows.count {
@@ -5836,7 +5851,7 @@ private func scrollSelectionIntoView() {
             // Ctrl+Shift+HJKL: resize window like tmux pane resize
             // H = shrink width, L = grow width, J = shrink height, K = grow height
             if ctrl && mods.contains(.shift), panel.attachedSheet == nil {
-                let step: CGFloat = 5
+                let step: CGFloat = 20
                 switch code {
                 case 4:  // H — shrink width
                     var f = panel.frame
@@ -6114,6 +6129,11 @@ private func scrollSelectionIntoView() {
     // MARK: NSWindowDelegate
 
     public func windowDidResignKey(_ notification: Notification) {
+        // hide the focus border when another app takes focus so it's obvious
+        // this window no longer owns the keyboard
+        editorFocusBorder?.isHidden = true
+        browserFocusBorder?.isHidden = true
+        terminalFocusBorder?.isHidden = true
         // sticky windows stay visible when another app takes focus (the user
         // dismisses them with Esc); everything else hides on focus loss
         if isShown && !config.sticky {

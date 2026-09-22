@@ -4227,17 +4227,6 @@ let authDebugPath = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInP
 
 // MARK: - App
 
-// Menu-bar glyph targets: NSStatusItem actions need an @objc selector, so the
-// two toggles live on a tiny target object owned by the delegate.
-final class StatusBarTarget: NSObject {
-    var onNotes: (() -> Void)?
-    var onJira: (() -> Void)?
-    var onHealth: (() -> Void)?
-    @objc func notes(_ sender: Any?) { onNotes?() }
-    @objc func jira(_ sender: Any?) { onJira?() }
-    @objc func health(_ sender: Any?) { onHealth?() }
-}
-
 // Finder services (right-click a file -> Quick Actions): "Copy Path" copies
 // the absolute path(s) to the clipboard; "Open in Notes" opens the file in
 // the notes window. Registered as NSApp.servicesProvider; the NSServices in
@@ -4277,8 +4266,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: SwitcherController?
     let showOnLaunch: Bool
     let openCommand: String?
-    private var statusItems: [NSStatusItem] = []
-    private let statusTarget = StatusBarTarget()
     private var servicesHandler: ServicesHandler?
 
     init(showOnLaunch: Bool, openCommand: String? = nil) {
@@ -4313,7 +4300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         servicesHandler = sh
         NSApp.servicesProvider = sh
         NSUpdateDynamicServices()
-        installStatusItems(c)
+        MenuTarget.controller = c
+        installStatusMenus(c)
         if showOnLaunch {
             c.show()
         }
@@ -4326,38 +4314,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // One glyph per popup app in the macOS menu bar: ticket = jira,
-    // notepad = notes. Click toggles that window (same path as the hotkeys).
-    // One utility glyph in the menu bar whose menu toggles every connected
-    // window (notes / jira / voice / health checks) — cleaner than a glyph per
-    // window, and new windows just add a menu item.
-    private func installStatusItems(_ c: SwitcherController) {
-        statusTarget.onNotes = { [weak c] in c?.toggleNotes() }
-        // single source of truth: the [jira] section in commands.conf. No
-        // section = no command = no menu entry.
-        if c.commands.contains(where: { $0.name == "jira" }) {
-            statusTarget.onJira = { [weak c] in c?.toggleCommand("jira") }
-        }
-        statusTarget.onHealth = { [weak c] in c?.toggleCommand("health-checks") }
+    // One unified menu bar icon with a comprehensive dropdown — replaces the
+    // old per-window glyphs. All toggles, resets, and window opens live here.
+    private func installStatusMenus(_ c: SwitcherController) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = utilityMenuGlyph
-        item.button?.toolTip = "workspace-switcher windows"
+        item.button?.toolTip = "workspace-switcher"
         let menu = NSMenu()
-        func add(_ title: String, _ img: NSImage?, _ selector: Selector) {
-            let mi = NSMenuItem(title: title, action: selector, keyEquivalent: "")
-            mi.target = statusTarget
-            mi.image = img
-            menu.addItem(mi)
-        }
-        // voice is merged into the notes window (commands.conf `voice = true`),
-        // so the dropdown only lists Notes — voice lives in the notes header.
-        add("Notes", notesMenuGlyph, #selector(StatusBarTarget.notes(_:)))
+        menu.delegate = MenuTarget.shared  // for checkmark updates
+        menu.addItem(.separator())
+
+        // File-like section: resets and close
+        addMenuItem(menu, "Reset Default Size", #selector(MenuTarget.resetWindowSize(_:)), key: "0", modifiers: .command)
+        addMenuItem(menu, "Reset Default Colors", #selector(MenuTarget.resetWindowColors(_:)), key: "")
+        menu.addItem(.separator())
+        addMenuItem(menu, "Close Window", #selector(MenuTarget.closeWindow(_:)), key: "w", modifiers: .command)
+        addMenuItem(menu, "Quit", #selector(MenuTarget.quitApp(_:)), key: "q", modifiers: .command)
+        menu.addItem(.separator())
+
+        // Drawer toggles (affect the key/focused window)
+        addMenuItem(menu, "Toggle Terminal", #selector(MenuTarget.toggleTerminal(_:)), key: "t", modifiers: [.command, .option])
+        addMenuItem(menu, "Toggle File Browser", #selector(MenuTarget.toggleFileBrowser(_:)), key: "b", modifiers: [.command, .option])
+        menu.addItem(.separator())
+
+        // Window toggles
+        addMenuItem(menu, "Toggle Notes", #selector(MenuTarget.toggleNotes(_:)), key: "n", modifiers: .command)
         if c.commands.contains(where: { $0.name == "jira" }) {
-            add("Jira", jiraMenuGlyph, #selector(StatusBarTarget.jira(_:)))
+            addMenuItem(menu, "Toggle Jira", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         }
-        add("Health checks", heartMenuGlyph, #selector(StatusBarTarget.health(_:)))
+        addMenuItem(menu, "Toggle Health Checks", #selector(MenuTarget.toggleHealthChecks(_:)), key: "h", modifiers: .command)
+
         item.menu = menu
-        statusItems.append(item)
+    }
+
+    private func addMenuItem(_ menu: NSMenu, _ title: String, _ action: Selector, key: String = "", modifiers: NSEvent.ModifierFlags = []) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = MenuTarget.shared
+        item.keyEquivalentModifierMask = modifiers
+        menu.addItem(item)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -4422,16 +4416,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// Shared target for app menu actions that need to reach all open windows
-final class MenuTarget: NSObject {
+// Shared target for app menu / status menu actions. Holds a weak reference to
+// the running controller so every menu item can reach the app's windows and
+// toggle logic. Also serves as NSMenuDelegate to update checkmarks before the
+// menu opens (terminal / file browser state of the key window).
+final class MenuTarget: NSObject, NSMenuDelegate {
     static let shared = MenuTarget()
+    static weak var controller: SwitcherController?
+
+    // MARK: NSMenuDelegate — update checkmarks before the menu opens
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let controller = MenuTarget.controller else { return }
+        // Find the key PopupWindow (the one currently focused)
+        let keyWindow = NSApp.keyWindow
+        var keyPopup: PopupWindow?
+        if let pw = keyWindow?.delegate as? PopupWindow {
+            keyPopup = pw
+        } else {
+            // Fallback: find the first visible PopupWindow
+            keyPopup = controller.subWindows.first(where: { $0.isShown })
+        }
+
+        for item in menu.items {
+            switch item.action {
+            case #selector(toggleTerminal(_:)):
+                item.state = (keyPopup?.terminalShown ?? false) ? .on : .off
+            case #selector(toggleFileBrowser(_:)):
+                item.state = (keyPopup?.fileBrowserShown ?? false) ? .on : .off
+            case #selector(toggleNotes(_:)):
+                item.state = windowState(for: "notes", controller: controller)
+            case #selector(toggleJira(_:)):
+                item.state = windowState(for: "jira", controller: controller)
+            case #selector(toggleHealthChecks(_:)):
+                item.state = windowState(for: "health-checks", controller: controller)
+            default:
+                break
+            }
+        }
+    }
+
+    // Returns .on if a named window is currently shown, .off otherwise
+    private func windowState(for name: String, controller: SwitcherController) -> NSControl.StateValue {
+        if let w = controller.subWindows.first(where: { $0.config.name == name }) {
+            return w.isShown ? .on : .off
+        }
+        return .off
+    }
+
+    // MARK: File actions
 
     @objc func resetWindowSize(_ sender: Any?) {
-        // Reset every open PopupWindow to its default size
         NSApp.windows.forEach { w in
             if let pw = w.delegate as? PopupWindow {
                 pw.resetToDefaultSize()
             }
         }
+    }
+
+    @objc func resetWindowColors(_ sender: Any?) {
+        NSApp.windows.forEach { w in
+            if let pw = w.delegate as? PopupWindow {
+                pw.resetToDefaultColors()
+            }
+        }
+    }
+
+    @objc func closeWindow(_ sender: Any?) {
+        if let keyWindow = NSApp.keyWindow {
+            keyWindow.performClose(sender)
+        }
+    }
+
+    @objc func quitApp(_ sender: Any?) {
+        NSApp.terminate(sender)
+    }
+
+    // MARK: Drawer toggles (affect the key/focused window)
+
+    @objc func toggleTerminal(_ sender: Any?) {
+        if let pw = keyPopupWindow() {
+            pw.toggleTerminalDrawer()
+            // Update the header button state to match
+            // (header button id 10 = terminal toggle)
+            pw.setHeaderButtonOn(10, pw.terminalShown)
+        }
+    }
+
+    @objc func toggleFileBrowser(_ sender: Any?) {
+        if let pw = keyPopupWindow() {
+            pw.toggleFileBrowser()
+            // Update the header button state to match
+            // (header button id 20 = file browser toggle)
+            pw.setHeaderButtonOn(20, pw.fileBrowserShown)
+        }
+    }
+
+    // MARK: Window toggles
+
+    @objc func toggleNotes(_ sender: Any?) {
+        MenuTarget.controller?.toggleNotes()
+    }
+
+    @objc func toggleJira(_ sender: Any?) {
+        MenuTarget.controller?.toggleCommand("jira")
+    }
+
+    @objc func toggleHealthChecks(_ sender: Any?) {
+        MenuTarget.controller?.toggleCommand("health-checks")
+    }
+
+    // Helper: find the key PopupWindow (the one currently focused)
+    private func keyPopupWindow() -> PopupWindow? {
+        if let pw = NSApp.keyWindow?.delegate as? PopupWindow {
+            return pw
+        }
+        // Fallback: find the first shown PopupWindow
+        return MenuTarget.controller?.subWindows.first(where: { $0.isShown })
     }
 }
