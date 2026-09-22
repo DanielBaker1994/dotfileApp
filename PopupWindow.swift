@@ -5562,6 +5562,18 @@ private func scrollSelectionIntoView() {
             queue: .main) { [weak self] _ in
             self?.updateFocusedPane()
         }
+        // Also track mouse clicks within the window — didBecomeKey only fires
+        // when the window becomes key, not when clicking between panes inside
+        // an already-key window.
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown, handler: {
+            [weak self] event in
+            guard let self, self.isShown, self.panel.isKeyWindow else { return event }
+            // short delay so first responder has updated
+            DispatchQueue.main.async { self.updateFocusedPane() }
+            return event
+        }) {
+            monitors.append(m)
+        }
     }
 
     // Re-evaluate which pane currently has first responder and update the
