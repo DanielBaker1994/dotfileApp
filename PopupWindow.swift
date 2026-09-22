@@ -5832,6 +5832,34 @@ private func scrollSelectionIntoView() {
                 // single pane (editor only) — fall through so the emacs
                 // bindings (Ctrl+J newline, Ctrl+K kill-line) reach the text view
             }
+            // Ctrl+Shift+HJKL: resize window like tmux pane resize
+            // H = shrink width, L = grow width, J = shrink height, K = grow height
+            if ctrl && mods.contains(.shift), panel.attachedSheet == nil {
+                let step: CGFloat = 10
+                switch code {
+                case 4:  // H — shrink width
+                    var f = panel.frame
+                    f.size.width = max(240, f.width - step)
+                    panel.setFrame(clampToScreen(f), display: true)
+                    return true
+                case 37: // L — grow width
+                    var f = panel.frame
+                    f.size.width = min(maxPanelWidth(), f.width + step)
+                    panel.setFrame(clampToScreen(f), display: true)
+                    return true
+                case 40: // K — grow height
+                    var f = panel.frame
+                    f.size.height = min(maxPanelHeight(), f.height + step)
+                    panel.setFrame(clampToScreen(f), display: true)
+                    return true
+                case 38: // J — shrink height
+                    var f = panel.frame
+                    f.size.height = max(140, f.height - step)
+                    panel.setFrame(clampToScreen(f), display: true)
+                    return true
+                default: break
+                }
+            }
             if let term = focusedTerm() {
                 switch code {
                 case 8 where cmd: term.copy(self); return true    // Cmd+C copy
