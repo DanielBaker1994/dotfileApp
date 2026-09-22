@@ -5800,7 +5800,8 @@ private func scrollSelectionIntoView() {
             // (notes editor -> file browser drawer -> terminal drawer), only
             // over the ones that are open. J = down, K = up. Handled BEFORE
             // the terminal branch so it works from any pane.
-            if ctrl && (code == 38 || code == 40), config.editMode {
+            // Ctrl+Shift+J/K is reserved for pane resize — don't intercept it.
+            if ctrl && !mods.contains(.shift) && (code == 38 || code == 40), config.editMode {
                 var panes: [NSResponder] = []
                 var paneTypes: [FocusedPane] = []
                 if let ed = editorView { panes.append(ed); paneTypes.append(.editor) }
