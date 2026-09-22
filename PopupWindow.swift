@@ -5985,6 +5985,7 @@ private func scrollSelectionIntoView() {
             currentBrowserHeight = config.fileBrowserHeight
         }
         lastResizeHeight = newH
+        drawerInsetNow = (terminalShown ? currentTerminalHeight : 0) + (fileBrowserShown ? currentBrowserHeight : 0)
         rowView.sizingRowCount = rows.count
         layoutScrollDocument()
         relayoutTabs()
@@ -6459,8 +6460,10 @@ public enum ThemeRole: String, CaseIterable {
         // hidden behind the record button
         let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight + 4 : 0
         // the drawer (terminal or file browser) owns the bottom: stop the editor
-        // above it while one is shown
-        let drawer = drawerInsetNow + 4
+        // above it while one is shown — use actual current heights, not cached
+        let drawerH = (terminalShown ? currentTerminalHeight : 0)
+                    + (fileBrowserShown ? currentBrowserHeight : 0)
+        let drawer = drawerH + 4
         // the transient status strip (prettyprint errors) reserves its band
         // above the meter; the editor shrinks to make room
         let statusVisible = !(statusBar?.isHidden ?? true)
