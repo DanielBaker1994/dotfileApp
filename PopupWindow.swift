@@ -5847,15 +5847,35 @@ private func scrollSelectionIntoView() {
                     f.size.width = min(maxPanelWidth(), f.width + step)
                     panel.setFrame(clampToScreen(f), display: true)
                     return true
-                case 40: // K — grow height
-                    var f = panel.frame
-                    f.size.height = min(maxPanelHeight(), f.height + step)
-                    panel.setFrame(clampToScreen(f), display: true)
+                case 40: // K — grow focused pane height
+                    if terminalShown && focusedPane == .terminal {
+                        currentTerminalHeight = min(600, currentTerminalHeight + step)
+                    } else if fileBrowserShown && focusedPane == .browser {
+                        currentBrowserHeight = min(600, currentBrowserHeight + step)
+                    } else {
+                        // editor: grow window height
+                        var f = panel.frame
+                        f.size.height = min(maxPanelHeight(), f.height + step)
+                        panel.setFrame(clampToScreen(f), display: true)
+                        return true
+                    }
+                    syncDrawerLayout()
+                    updateFocusIndicator()
                     return true
-                case 38: // J — shrink height
-                    var f = panel.frame
-                    f.size.height = max(140, f.height - step)
-                    panel.setFrame(clampToScreen(f), display: true)
+                case 38: // J — shrink focused pane height
+                    if terminalShown && focusedPane == .terminal {
+                        currentTerminalHeight = max(minTerminalH, currentTerminalHeight - step)
+                    } else if fileBrowserShown && focusedPane == .browser {
+                        currentBrowserHeight = max(minBrowserH, currentBrowserHeight - step)
+                    } else {
+                        // editor: shrink window height
+                        var f = panel.frame
+                        f.size.height = max(140, f.height - step)
+                        panel.setFrame(clampToScreen(f), display: true)
+                        return true
+                    }
+                    syncDrawerLayout()
+                    updateFocusIndicator()
                     return true
                 default: break
                 }
