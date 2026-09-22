@@ -4058,6 +4058,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // total drawer height currently folded into the window frame (baseline =
     // no drawers); the terminal is on at init when config.terminal is set
     private var drawerInsetNow: CGFloat = 0
+    // track window height during resize so we know if it shrank/grew
+    private var lastResizeHeight: CGFloat?
     private var editorScroll: NSScrollView?
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
@@ -5921,10 +5923,36 @@ private func scrollSelectionIntoView() {
     // the current space, so remember the row count this size was chosen for.
     // Also clamp the frame to the screen so drag-resizing can never push the
     // bottom (scrollbar + last pill) off-screen.
+    // Smart resize: when shrinking, terminal/browser drawers shrink first
+    // (down to a minimum) before the editor is touched. When growing, the
+    // editor expands while drawers stay at their configured height.
     public func windowDidResize(_ notification: Notification) {
         if isShown {
             panel.setFrame(clampToScreen(panel.frame), display: true)
         }
+        // smart drawer resize: if the window shrank, reduce drawers before
+        // touching the editor
+        let newH = panel.frame.height
+        if let prevH = lastResizeHeight {
+            let delta = newH - prevH
+            if delta < 0 {
+                // shrinking: take space from drawers first
+                let minTerminalH: CGFloat = 80
+                let minBrowserH: CGFloat = 100
+                if terminalShown && config.terminalHeight > minTerminalH {
+                    let take = min(-delta, config.terminalHeight - minTerminalH)
+                    config.terminalHeight -= take
+                }
+                if fileBrowserShown && config.fileBrowserHeight > minBrowserH {
+                    let remaining = delta + (terminalShown ? 0 : -(config.terminalHeight - minTerminalH))
+                    if remaining < 0 {
+                        let take = min(-remaining, config.fileBrowserHeight - minBrowserH)
+                        config.fileBrowserHeight -= take
+                    }
+                }
+            }
+        }
+        lastResizeHeight = newH
         rowView.sizingRowCount = rows.count
         layoutScrollDocument()
         relayoutTabs()
@@ -5932,6 +5960,8 @@ private func scrollSelectionIntoView() {
         layoutSearchField()
         layoutFindBar()
         layoutTerminal()
+        layoutFileBrowser()
+        updateFocusIndicator()
         rowView.needsDisplay = true
         chrome?.needsDisplay = true
     }
