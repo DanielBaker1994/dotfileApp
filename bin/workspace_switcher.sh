@@ -19,9 +19,12 @@ FRAMEWORK="$ROOT/PopupWindow.swift"
 # files); the daemon links it. Rebuilt only when a SwiftTerm source changes.
 TERM_LIB="$ROOT/.build/SwiftTerm/libSwiftTerm.a"
 TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
+TERM_SENTINEL="$ROOT/.build/.termbuilt"
 build_term_lib() {
-    [ -f "$TERM_LIB" ] && [ -z "$(find "$ROOT"/Vendor/SwiftTerm/Sources \
-        -name '*.swift' -newer "$TERM_LIB" 2>/dev/null | head -1)" ] && return 0
+    # skip if already built AND no SwiftTerm source changed since
+    [ -f "$TERM_LIB" ] && [ -f "$TERM_SENTINEL" ] && \
+        [ -z "$(find "$ROOT"/Vendor/SwiftTerm/Sources "$ROOT"/Vendor/SwiftTerm/Generated \
+            -name '*.swift' -newer "$TERM_SENTINEL" 2>/dev/null | head -1)" ] && return 0
     mkdir -p "$TERM_MOD_DIR"
     swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
         "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
@@ -32,6 +35,7 @@ build_term_lib() {
         "$ROOT"/Vendor/SwiftTerm/Generated/*.swift \
         -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
         -o "$TERM_LIB" >/dev/null 2>&1
+    touch "$TERM_SENTINEL"
 }
 TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/workspace-switcher-focus"
