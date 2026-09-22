@@ -79,7 +79,7 @@ automatically-unhide-macos-hidden-apps = true
 # even when they are invisible.
 # This config option is only available since 'config-version = 2'
 # Fallback value (if you omit the key): persistent-workspaces = []
-persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8"]
+persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 # A callback that runs every time binding mode changes
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -106,6 +106,7 @@ on-window-detected = [
   # window name changed in commands.conf.
   { if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
   { if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
+  { if = 'test %{app-bundle-id} = WebEx-PT.webexAppLauncher', run = ['move-node-to-workspace 9'] },
 ]
 
 
@@ -131,18 +132,18 @@ outer.top =        [{ monitor.main = 10 }, 10]
 # monitor reconnects (its ID/order can change on KVM/sleep/wake).
 # Patterns are case-insensitive substrings of the monitor name.
 [workspace-to-monitor-force-assignment]
-1 = 'DELL'
-2 = 'DELL'
-3 = 'DELL'
-4 = 'DELL'
-5 = 'DELL'
-6 = 'DELL'
-7 = 'DELL'
-8 = 'DELL'
-9 = 'DELL'
-M = 'DELL'
-Y = 'DELL'
-W = 'DELL'
+1 = ['DELL', 'main']
+2 = ['DELL', 'main']
+3 = ['DELL', 'main']
+4 = ['DELL', 'main']
+5 = ['DELL', 'main']
+6 = ['DELL', 'main']
+7 = ['DELL', 'main']
+8 = ['DELL', 'main']
+9 = 'main'
+M = ['DELL', 'main']
+Y = ['DELL', 'main']
+W = ['DELL', 'main']
 
 # 'main' binding mode declaration
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes

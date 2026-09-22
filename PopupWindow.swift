@@ -468,6 +468,15 @@ public struct PopupConfig {
     // rc files (~/.bash_profile + ~/.bashrc), so aliases/functions/zoxide etc.
     // defined there work in the embedded terminal
     public var shellArgs: [String] = ["--login", "-i"]
+    // optional override: use a different executable than the shell (e.g. nvim
+    // for vim mode). When set, the terminal launches this instead of shell.
+    public var terminalExecutable: String?
+    // optional args for the terminal executable (default: [])
+    public var terminalExecArgs: [String] = []
+    // show the standard window close button (red traffic light). By default
+    // it's hidden on titled windows (Esc closes instead); set true to show it
+    // and wire it to onCloseWindow.
+    public var showCloseButton: Bool = false
 
     // visible search bar: the query field gets a rounded background and a
     // placeholder, so the window clearly reads as "type to filter"
@@ -3856,6 +3865,14 @@ final class TerminalAutoRestart: NSObject,
                                        exitCode: Int32?) { onTerminated?() }
 }
 
+// Close button target for windows with showCloseButton = true (e.g. vim mode).
+// The button's action calls onClose, which the host sets to handle the close
+// (e.g. send :wq to Vim before closing).
+final class WindowCloseTarget: NSObject {
+    var onClose: (() -> Void)?
+    @objc func close(_ sender: Any?) { onClose?() }
+}
+
 // Right-click menu actions for the embedded terminal drawer: "Copy" reads the
 // current selection safely and writes it to the clipboard; "Open in Notes"
 // forwards the selected text (a path) to the host's onTerminalOpenInNotes hook.
@@ -3933,6 +3950,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // host hook fired when the window hides (e.g. stop a voice recording
     // session owned by the host before the window disappears)
     public var onHideVoiceStop: (() -> Void)?
+    // fired when the terminal process exits (e.g. Vim quits). The exit code
+    // is passed along; hosts use this to close the window or relaunch.
+    public var onTerminalExit: ((Int32?) -> Void)?
+    // host hook called when the window close button (X) is clicked. If the
+    // hook returns true, it handled the close (e.g. sent :wq to Vim); if
+    // false or nil, the default close behavior applies.
+    public var onCloseWindow: (() -> Void)?
     // edit-mode hooks: editorText is the initial content (set before show);
     // onEditorCommit fires on Cmd+S (window stays open); onEditorClose fires
     // with the final text whenever the window hides.
@@ -4119,6 +4143,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var editorScroll: NSScrollView?
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
+    // close button target (retained so it survives menu/window dismiss)
+    private var windowCloseTarget: WindowCloseTarget?
+    // retained restarter so we can wire onTerminated after super.init
+    private var terminalRestarter: TerminalAutoRestart?
+    // whether a custom terminal executable is set (captured before super.init,
+    // used to skip auto-restart and fire onTerminalExit instead)
+    private var isCustomExecForExit = false
     private var rowScroll: NSScrollView?
     private var chrome: PopupChrome?
     // transparent resize edge views that sit ON TOP of all content so drag
@@ -4432,8 +4463,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             panel.titleVisibility = .hidden
             // traffic lights hidden — the close button exists only so the
             // AeroSpace heuristic accepts the window; Esc closes it, not the X
-            for type: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            // (unless showCloseButton is set, e.g. for vim mode)
+            let hideClose = !config.showCloseButton
+            for type: NSWindow.ButtonType in [.miniaturizeButton, .zoomButton] {
                 panel.standardWindowButton(type)?.isHidden = true
+            }
+            if hideClose {
+                panel.standardWindowButton(.closeButton)?.isHidden = true
             }
         } else {
             panel = PopupPanel(
@@ -4448,6 +4484,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         panel.title = config.name
+
+        // Wire the close button when shown (e.g. vim mode): onClick calls
+        // onCloseWindow if set, otherwise falls back to hide(restore: true).
+        // The target is created here (before super.init) but the closure is
+        // wired AFTER super.init.
+        if config.showCloseButton, let closeBtn = panel.standardWindowButton(.closeButton) {
+            let closeTarget = WindowCloseTarget()
+            closeBtn.target = closeTarget
+            closeBtn.action = #selector(WindowCloseTarget.close)
+            windowCloseTarget = closeTarget
+        }
 
         // Backdrop: rounded container that clips a blurred material + tint,
         // for a sleek translucent look with real see-through corners.
@@ -4671,19 +4718,19 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 // auto-restart: if the shell exits (user typed exit/ctrl-d)
                 // spawn it again after a beat so the drawer is never dead
                 // (capture the shell locally — no self before super.init)
-                let shell = config.shell
-                let shellArgs = config.shellArgs
+                // When a custom terminalExecutable is set (e.g. nvim for vim
+                // mode), skip auto-restart and fire onTerminalExit instead.
+                let exec = config.terminalExecutable ?? config.shell
+                let execArgs = config.terminalExecArgs.isEmpty ? config.shellArgs : config.terminalExecArgs
                 let terminalDir = config.terminalDir
+                isCustomExecForExit = config.terminalExecutable != nil
                 let restarter = TerminalAutoRestart()
-                restarter.onTerminated = { [weak term] in
-                    guard let term else { return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                        term.startProcess(executable: shell, args: shellArgs,
-                                          currentDirectory: terminalDir)
-                    }
-                }
+                // onTerminated is wired AFTER super.init (see below) to avoid
+                // capturing self before initialization completes
                 term.processDelegate = restarter
-                term.startProcess(executable: shell, args: shellArgs,
+                terminalRestarter = restarter
+                term.processDelegate = restarter
+                term.startProcess(executable: exec, args: execArgs,
                                   currentDirectory: terminalDir)
                 // right-click menu: paste / copy / select-all straight to the
                 // shell (SwiftTerm owns the clipboard read/write), plus
@@ -4726,11 +4773,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 terminalMenu = tmenu
                 // safety net: poll the shell's state; restart once the old
                 // session is fully wound down (running==false && windingDown==false)
+                // Skip auto-restart for custom executables (e.g. Vim) — those
+                // are managed by the host via onTerminalExit.
+                let customExec = isCustomExecForExit  // capture before super.init
+                let cfgShell = config.shell
+                let cfgShellArgs = config.shellArgs
+                let cfgTerminalDir = config.terminalDir
                 let poll = Timer(timeInterval: 1.5, repeats: true) { [weak term] _ in
                     guard let term, let p = term.process else { return }
-                    if !p.running, !p.windingDown {
-                        term.startProcess(executable: shell, args: shellArgs,
-                                          currentDirectory: terminalDir)
+                    if !p.running, !p.windingDown, !customExec {
+                        term.startProcess(executable: cfgShell, args: cfgShellArgs,
+                                          currentDirectory: cfgTerminalDir)
                     }
                 }
                 RunLoop.main.add(poll, forMode: .common)
@@ -4856,6 +4909,34 @@ scroll.documentView = rowView
         panel.contentView = backdrop
 
         super.init()
+
+        // Wire the terminal restarter (self-safe now): fire onTerminalExit for
+        // custom executables (Vim), auto-restart for the shell.
+        if let restarter = terminalRestarter {
+            let terminalDir = config.terminalDir
+            restarter.onTerminated = { [weak self] in
+                guard let self else { return }
+                if isCustomExecForExit {
+                    onTerminalExit?(nil)
+                } else {
+                    terminalDrawer?.startProcess(executable: config.shell, args: config.shellArgs,
+                                                 currentDirectory: terminalDir)
+                }
+            }
+        }
+
+        // Wire the close button (self-safe now)
+        if config.showCloseButton, let _ = panel.standardWindowButton(.closeButton),
+           let closeTarget = windowCloseTarget {
+            closeTarget.onClose = { [weak self] in
+                if let onCloseWindow = self?.onCloseWindow {
+                    onCloseWindow()
+                } else {
+                    self?.hide(restore: true)
+                }
+            }
+        }
+
         // "Open file at path…" editor context-menu item -> host prompt
         (editorView as? PopupTextView)?.onOpenFileAtPath = { [weak self] in
             self?.onOpenPathPrompt?()
@@ -6155,8 +6236,10 @@ private func scrollSelectionIntoView() {
         browserFocusBorder?.isHidden = true
         terminalFocusBorder?.isHidden = true
         // sticky windows stay visible when another app takes focus (the user
-        // dismisses them with Esc); everything else hides on focus loss
-        if isShown && !config.sticky {
+        // dismisses them with Esc); everything else hides on focus loss —
+        // unless the global hide-on-focus-loss setting is disabled, in which
+        // case no window hides on focus loss (only Esc dismisses)
+        if isShown && !config.sticky && settings.hideOnFocusLoss {
             hide(restore: false)
         }
     }
@@ -6306,6 +6389,32 @@ private func scrollSelectionIntoView() {
             focusedPane = .editor
         }
         updateFocusIndicator()
+    }
+
+    // Send raw text to the terminal's stdin (e.g. ":wq\r" to save and quit Vim).
+    // Returns true if the terminal is available and the text was sent.
+    public func sendToTerminal(_ text: String) -> Bool {
+        guard let drawer = terminalDrawer, terminalShown,
+              let process = drawer.process, process.running else { return false }
+        drawer.send(txt: text)
+        return true
+    }
+
+    // Whether this window is running a custom terminal executable (e.g. Vim).
+    public var isCustomTerminal: Bool { config.terminalExecutable != nil }
+
+    // Relaunch the terminal process with the current config executable/args.
+    // Used when switching notes in vim mode — the Vim process exited, and we
+    // need to start a fresh one with a different file argument.
+    public func relaunchTerminal() {
+        guard let drawer = terminalDrawer else { return }
+        let exec = config.terminalExecutable ?? config.shell
+        let args = config.terminalExecArgs.isEmpty ? config.shellArgs : config.terminalExecArgs
+        drawer.startProcess(executable: exec, args: args,
+                            currentDirectory: config.terminalDir)
+        if terminalShown {
+            panel.makeFirstResponder(drawer)
+        }
     }
 
     // themed color roles the paint-brush picker can style. Only the per-window

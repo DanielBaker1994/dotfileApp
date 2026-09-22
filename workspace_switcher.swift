@@ -80,6 +80,9 @@ struct AppSettings {
     var aeroLog = NSString(string: "~/.cache/ws-aero.log").expandingTildeInPath
     var authDebugFlag = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInPath
     var voiceLocale = "en-US"
+    // global hide behavior: when false, windows only dismiss via Esc (regardless
+    // of per-window sticky); when true (default), non-sticky windows hide on focus loss
+    var hideOnFocusLoss = true
     // derived (recomputed whenever the settings change)
     var commandsConfPath: String { binDir + "/" + commandsConfName }
     var focusFilePath: String { popupTmpDir() + focusFileName }
@@ -442,6 +445,8 @@ struct CommandSpec {
     let terminalHeight: CGFloat
     let terminalDir: String?  // note: starting directory for the embedded shell
     let terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
+    let vimMode: Bool          // note: open note in Vim in the terminal
+    let vimBin: String         // note: vim binary path or name (default "nvim")
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
     let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
 
@@ -464,6 +469,7 @@ struct CommandSpec {
          terminal: Bool = false, terminalHeight: CGFloat = 240,
          terminalDir: String? = nil,
          terminalBackground: NSColor? = nil,
+         vimMode: Bool = false, vimBin: String = "nvim",
          maxHeight: CGFloat = 0,
          icon: NSImage? = nil,
          saveDir: String = "/tmp/") {
@@ -509,6 +515,8 @@ struct CommandSpec {
         self.terminalHeight = terminalHeight
         self.terminalDir = terminalDir
         self.terminalBackground = terminalBackground
+        self.vimMode = vimMode
+        self.vimBin = vimBin
         self.icon = icon
         self.saveDir = saveDir
     }
@@ -669,6 +677,8 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
         terminalDir: vars["terminal-dir"],
         terminalBackground: hexColor(vars["terminal-background"]),
+        vimMode: tri(vars["vim-mode"]) ?? false,
+        vimBin: vars["vim-bin"]?.trimmingCharacters(in: .whitespaces) ?? "nvim",
         maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName),
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
@@ -763,6 +773,85 @@ private func parseAppConfig(_ vars: [String: String]) {
         settings.aeroLog = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
     }
     if let v = str("voice-locale"), !v.isEmpty { settings.voiceLocale = v }
+    if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
+}
+
+// Persist a config value back to commands.conf. Finds the target section,
+// updates the key if it exists, or appends it after the section header.
+// Preserves all comments, formatting, and other sections untouched.
+func saveConfigValue(section: String, key: String, value: String) {
+    let path = settings.commandsConfPath
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+    var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    var inTarget = false
+    var keyFound = false
+    var insertAfter = -1
+
+    for i in 0..<lines.count {
+        let s = lines[i].trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("[") && s.hasSuffix("]") {
+            let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            inTarget = name == section
+            if inTarget { insertAfter = i }
+            continue
+        }
+        guard inTarget, let eq = s.firstIndex(of: "=") else { continue }
+        let k = s[..<eq].trimmingCharacters(in: .whitespaces)
+        if k == key {
+            lines[i] = "\(key) = \(value)"
+            keyFound = true
+            break
+        }
+        insertAfter = i
+    }
+
+    if !keyFound, insertAfter >= 0 {
+        lines.insert("\(key) = \(value)", at: insertAfter + 1)
+    } else if !keyFound {
+        // section not found — append it at the end
+        lines.append("")
+        lines.append("[\(section)]")
+        lines.append("\(key) = \(value)")
+    }
+
+    let newContent = lines.joined(separator: "\n")
+    try? newContent.write(toFile: path, atomically: true, encoding: .utf8)
+}
+
+// Remove a config key from commands.conf (for reset-to-default).
+func removeConfigValue(section: String, key: String) {
+    let path = settings.commandsConfPath
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+    var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    var inTarget = false
+    var toRemove: [Int] = []
+
+    for i in 0..<lines.count {
+        let s = lines[i].trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("[") && s.hasSuffix("]") {
+            let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            inTarget = name == section
+            continue
+        }
+        guard inTarget, let eq = s.firstIndex(of: "=") else { continue }
+        let k = s[..<eq].trimmingCharacters(in: .whitespaces)
+        if k == key {
+            toRemove.append(i)
+            break
+        }
+    }
+
+    for idx in toRemove.sorted(by: >) {
+        lines.remove(at: idx)
+    }
+
+    // also remove any trailing empty lines we may have created
+    while lines.last?.isEmpty ?? false, lines.count > 1 {
+        lines.removeLast()
+    }
+
+    let newContent = lines.joined(separator: "\n")
+    try? newContent.write(toFile: path, atomically: true, encoding: .utf8)
 }
 
 // [icons] section -> IconRule list. Line format per app:
@@ -804,6 +893,24 @@ private func resolveIconName(_ name: String) -> NSImage? {
 
 private func num(_ s: String?) -> CGFloat {
     CGFloat(Double(s ?? "") ?? 0)
+}
+
+// Resolve a binary by name: checks the PATH, returns the absolute path
+// or nil if not found. If the input is already an absolute path, returns
+// it directly if it exists.
+private func resolveBinary(_ name: String) -> String? {
+    if name.hasPrefix("/") {
+        return FileManager.default.isExecutableFile(atPath: name) ? name : nil
+    }
+    let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
+        .split(separator: ":").map(String.init)
+    for dir in paths {
+        let fullPath = dir + "/" + name
+        if FileManager.default.isExecutableFile(atPath: fullPath) {
+            return fullPath
+        }
+    }
+    return nil
 }
 
 // comma-separated config value -> trimmed non-empty list
@@ -2963,6 +3070,98 @@ private func trimmed(_ s: String) -> String? {
         w.onChromeHeaderClick = { [weak self] in
             self?.copy(currentPath, "note path: \(currentPath)")
         }
+
+        // MARK: - Vim mode: terminal fills the window, launches nvim/vim
+        var vimTabSwitchPending = false
+        var vimNextTabPath: String?
+        if cmd.vimMode {
+            // Terminal is the editor: no text editor view, terminal fills
+            // the full content area. Height = window height minus header.
+            // File browser is off by default; terminal is open.
+            cfg.editMode = false        // no NSTextView editor
+            cfg.enableDrag = true       // need titlebar for close button
+            cfg.showCloseButton = true  // show the red X button
+            cfg.terminal = true
+            cfg.fileBrowserDefault = false
+            // terminal height = full window height minus header + tab strip
+            let fullContentH = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
+                - 30                    // header height
+                - (paths.count > 1 ? 26 : 0)  // tab strip (if multi-tab)
+            cfg.terminalHeight = max(fullContentH, 300)
+            cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
+                + (cfg.terminalHeight - (cmd.terminal ? cmd.terminalHeight : 0))
+
+            // Resolve vim binary: name or absolute path
+            let vimBin = cmd.vimBin
+            if vimBin.hasPrefix("/") {
+                cfg.terminalExecutable = vimBin
+            } else if let found = resolveBinary(vimBin) {
+                cfg.terminalExecutable = found
+            } else {
+                cfg.terminalExecutable = vimBin  // let the shell try to resolve it
+            }
+            cfg.terminalExecArgs = [currentPath]
+
+            // When Vim exits, close the notes window — unless we're in the
+            // middle of a tab switch, in which case relaunch Vim with the new note.
+            w.onTerminalExit = { [weak w, weak self] exitCode in
+                guard let self else { return }
+                self.log("note '\(cmd.name)': vim exited with code \(exitCode.map { "\($0)" } ?? "nil")")
+                if vimTabSwitchPending, let nextPath = vimNextTabPath {
+                    vimTabSwitchPending = false
+                    vimNextTabPath = nil
+                    // Relaunch Vim with the new note
+                    cfg.terminalExecArgs = [nextPath]
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        w?.relaunchTerminal()
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        w?.hide(restore: true)
+                    }
+                }
+            }
+
+            // X button: send :wq to Vim (save and quit), which triggers onTerminalExit
+            w.onCloseWindow = { [weak w] in
+                guard let w else { return }
+                // Try :wq first (save and quit); if terminal isn't available, just close
+                if !w.sendToTerminal(":wq\r") {
+                    w.hide(restore: true)
+                }
+            }
+
+            // Override tab switching: in vim mode, send :wq to current Vim,
+            // wait for it to exit, then relaunch with the new note.
+            w.onTabChange = { [weak w, weak self] index in
+                guard let self, let w else { return }
+                guard index < paths.count else { return }
+                let targetPath = paths[index]
+                // Save current note if it exists
+                if FileManager.default.fileExists(atPath: currentPath) {
+                    self.saveNote(w.currentEditorText, to: currentPath, cmd: cmd)
+                }
+                currentPath = targetPath
+                w.tabFooterText = lastWriteLabel(currentPath)
+                w.copyPathButtonLabel = ""
+                w.onChromeHeaderClick = {
+                    self.copy(currentPath, "note path: \(currentPath)")
+                }
+                // Send :wq to Vim to save and exit
+                if !w.sendToTerminal(":wq\r") {
+                    // Terminal not available — just update tab UI and relaunch
+                    w.selectedTab = index
+                    cfg.terminalExecArgs = [currentPath]
+                    w.relaunchTerminal()
+                } else {
+                    // Vim is exiting — flag a tab switch so onTerminalExit
+                    // relaunches instead of closing the window
+                    vimTabSwitchPending = true
+                    vimNextTabPath = currentPath
+                    w.selectedTab = index
+                }
+            }
+        }
         // voice notes (commands.conf `voice = true`): the window's bottom bar
         // becomes a record control — big record/stop button, pause/resume and
         // live level bars; stopping transcribes with Apple's speech
@@ -4425,6 +4624,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             addMenuItem(menu, "Toggle Jira", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         }
         addMenuItem(menu, "Toggle Health Checks", #selector(MenuTarget.toggleHealthChecks(_:)), key: "h", modifiers: .command)
+        menu.addItem(.separator())
+
+        // Settings submenu with toggleable config options
+        let settingsMenu = NSMenu(title: "Settings")
+        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        settingsItem.submenu = settingsMenu
+        menu.addItem(settingsItem)
+
+        addMenuItem(settingsMenu, "Hide on Focus Loss", #selector(MenuTarget.toggleHideOnFocusLoss(_:)), key: "")
+        addMenuItem(settingsMenu, "Vim Mode (Notes)", #selector(MenuTarget.toggleVimMode(_:)), key: "")
+        settingsMenu.addItem(.separator())
+        addMenuItem(settingsMenu, "Reset Settings to Defaults", #selector(MenuTarget.resetSettings(_:)), key: "")
 
         item.menu = menu
     }
@@ -4531,8 +4742,27 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 item.state = windowState(for: "jira", controller: controller)
             case #selector(toggleHealthChecks(_:)):
                 item.state = windowState(for: "health-checks", controller: controller)
+            case #selector(toggleHideOnFocusLoss(_:)):
+                item.state = settings.hideOnFocusLoss ? .on : .off
+            case #selector(toggleVimMode(_:)):
+                item.state = vimModeEnabled ? .on : .off
             default:
                 break
+            }
+        }
+        // Also update submenu items (Settings submenu)
+        for item in menu.items {
+            if let submenu = item.submenu {
+                for subItem in submenu.items {
+                    switch subItem.action {
+                    case #selector(toggleHideOnFocusLoss(_:)):
+                        subItem.state = settings.hideOnFocusLoss ? .on : .off
+                    case #selector(toggleVimMode(_:)):
+                        subItem.state = vimModeEnabled ? .on : .off
+                    default:
+                        break
+                    }
+                }
             }
         }
     }
@@ -4614,5 +4844,54 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         }
         // Fallback: find the first shown PopupWindow
         return MenuTarget.controller?.subWindows.first(where: { $0.isShown })
+    }
+
+    // Whether vim mode is enabled for the notes command
+    private var vimModeEnabled: Bool {
+        guard let controller = MenuTarget.controller else { return false }
+        return controller.commands.first(where: { $0.name == "notes" })?.vimMode ?? false
+    }
+
+    // MARK: Settings toggles
+
+    @objc func toggleHideOnFocusLoss(_ sender: Any?) {
+        settings.hideOnFocusLoss.toggle()
+        saveConfigValue(section: "app", key: "hide-on-focus-loss", value: settings.hideOnFocusLoss ? "true" : "false")
+    }
+
+    @objc func toggleVimMode(_ sender: Any?) {
+        guard let controller = MenuTarget.controller,
+              let idx = controller.commands.firstIndex(where: { $0.name == "notes" }) else { return }
+        let cmd = controller.commands[idx]
+        let newValue = !cmd.vimMode
+        // Update the command spec in place
+        controller.commands[idx] = CommandSpec(
+            name: cmd.name, kind: cmd.kind, windowName: cmd.windowName,
+            chromeTitle: cmd.chromeTitle, script: cmd.script, paths: cmd.paths,
+            sources: cmd.sources, root: cmd.root, favorites: cmd.favorites,
+            zoxideTop: cmd.zoxideTop, browserBackground: cmd.browserBackground,
+            backgroundColor: cmd.backgroundColor, tintAlpha: cmd.tintAlpha,
+            primary: cmd.primary, content: cmd.content, detail: cmd.detail,
+            trailing: cmd.trailing, body: cmd.body, filter: cmd.filter,
+            filters: cmd.filters, width: cmd.width, maxRows: cmd.maxRows,
+            contentCap: cmd.contentCap, bodyLines: cmd.bodyLines,
+            pageSize: cmd.pageSize, copyFields: cmd.copyFields,
+            copyFormat: cmd.copyFormat, checkbox: cmd.checkbox, resize: cmd.resize,
+            drag: cmd.drag, sticky: cmd.sticky, searchWidth: cmd.searchWidth,
+            maxStretch: cmd.maxStretch, height: cmd.height, font: cmd.font,
+            headerColor: cmd.headerColor, voice: cmd.voice, terminal: cmd.terminal,
+            terminalHeight: cmd.terminalHeight, terminalDir: cmd.terminalDir,
+            terminalBackground: cmd.terminalBackground,
+            vimMode: newValue, vimBin: cmd.vimBin,
+            maxHeight: cmd.maxHeight, icon: cmd.icon, saveDir: cmd.saveDir)
+        saveConfigValue(section: "notes", key: "vim-mode", value: newValue ? "true" : "false")
+    }
+
+    @objc func resetSettings(_ sender: Any?) {
+        // Reset to defaults: remove custom values from commands.conf
+        settings.hideOnFocusLoss = true
+        removeConfigValue(section: "app", key: "hide-on-focus-loss")
+        removeConfigValue(section: "notes", key: "vim-mode")
+        removeConfigValue(section: "notes", key: "vim-bin")
     }
 }
