@@ -3877,6 +3877,7 @@ final class ResizeEdgeView: NSView {
     let edges: PopupBackdrop.Edge
     var onResize: ((NSRect, NSPoint) -> Void)?
     var onResizeDrag: (() -> Void)?
+    var resizeMonitor: Any?
 
     init(frame: NSRect, cursor: NSCursor, edges: PopupBackdrop.Edge) {
         self.cursor = cursor
@@ -3895,8 +3896,25 @@ final class ResizeEdgeView: NSView {
     override func mouseMoved(with event: NSEvent) { cursor.set() }
     override func mouseDown(with event: NSEvent) {
         onResize?(window?.frame ?? .zero, NSEvent.mouseLocation)
+        // capture ALL mouse events globally until mouse up so drag works
+        // even when the cursor leaves the narrow edge strip
+        resizeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp], handler: { [weak self] ev in
+            guard let self else { return ev }
+            if ev.type == .leftMouseDragged {
+                self.onResizeDrag?()
+                return nil  // consume
+            }
+            // mouse up: remove the monitor
+            if let m = self.resizeMonitor { NSEvent.removeMonitor(m) }
+            self.resizeMonitor = nil
+            return ev
+        })
     }
     override func mouseDragged(with event: NSEvent) { onResizeDrag?() }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let m = resizeMonitor { NSEvent.removeMonitor(m) }
+        resizeMonitor = nil
+    }
 }
 
 // MARK: - Popup window
