@@ -833,27 +833,7 @@ final class PopupBackdrop: NSView {
         super.updateTrackingAreas()
         if let t = trackingArea { removeTrackingArea(t) }
         let ta = NSTrackingArea(rect: bounds,
-                                options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
-                                owner: self, userInfo: nil)
-        addTrackingArea(ta)
-        trackingArea = ta
-    }
-
-    private func cursor(for e: Edge) -> NSCursor {
-        switch e {
-        case [.left, .right]: return .resizeLeftRight
-        case [.top, .bottom]: return .resizeUpDown
-        case [.top, .left], [.bottom, .right]: return .resizeLeftRight  // diagonal-ish
-        case [.top, .right], [.bottom, .left]: return .resizeLeftRight
-        default: return .arrow
-        }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let t = trackingArea { removeTrackingArea(t) }
-        let ta = NSTrackingArea(rect: bounds,
-                                options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
+                                options: [.activeAlways, .mouseMoved, .inVisibleRect],
                                 owner: self, userInfo: nil)
         addTrackingArea(ta)
         trackingArea = ta
@@ -3911,7 +3891,7 @@ final class ResizeEdgeView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseMoved], owner: self))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeAlways, .mouseMoved], owner: self))
     }
     override func mouseMoved(with event: NSEvent) { cursor.set() }
     override func mouseDown(with event: NSEvent) {
@@ -4075,6 +4055,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
 
     public private(set) var isShown = false
+    // When the header icon menu is being shown, suppress the active observer
+    // so the app's deactivate/reactivate cycle during the menu doesn't trigger
+    // makeKeyAndOrderFront and mess up the window's size/position/zoom.
+    private var isShowingMenu = false
 
 
     // the underlying NSWindow (e.g. for attaching a sheet like the new-note
@@ -5248,10 +5232,16 @@ scroll.documentView = rowView
     // builds the menu (with checkmarks, actions, submenus) and calls this from
     // onChromeIconClick — the menu appears right under the app glyph.
     public func showHeaderMenu(_ menu: NSMenu) {
+        // Suppress the active observer while the menu is open: when the menu
+        // pops up the app briefly deactivates/reactivates, and the observer's
+        // makeKeyAndOrderFront + makeFirstResponder would fight the menu,
+        // causing the window to jump in size/position and mess up zoom.
+        isShowingMenu = true
         // icon sits at x=10, y=top of window; pop down 4pts below the header
         let pt = NSPoint(x: 10, y: panel.frame.height - config.headerHeight * zoom - 4)
         let screenPt = panel.convertPoint(toScreen: pt)
         menu.popUp(positioning: nil, at: screenPt, in: nil)
+        isShowingMenu = false
     }
 
     // Reset the window back to its configured default size and re-layout
@@ -5674,7 +5664,7 @@ private func scrollSelectionIntoView() {
             activeObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.didBecomeActiveNotification, object: nil,
                 queue: .main) { [weak self] _ in
-                guard let self, self.isShown else { return }
+                guard let self, self.isShown, !self.isShowingMenu else { return }
                 self.panel.makeKeyAndOrderFront(nil)
                 // don't steal focus from the embedded terminal: if the shell
                 // has it, leave it there (else focus the notes editor)

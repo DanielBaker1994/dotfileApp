@@ -2797,8 +2797,7 @@ private func trimmed(_ s: String) -> String? {
             menu.addItem(.separator())
 
             // — reset actions —
-            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "0")
-            resetSizeItem.keyEquivalentModifierMask = .command
+            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "")
             let rsTarget = MenuActionTarget { w.resetToDefaultSize() }
             resetSizeItem.target = rsTarget
             resetSizeItem.action = #selector(MenuActionTarget.run)
@@ -4106,8 +4105,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             menu.addItem(.separator())
 
             // reset actions
-            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "0")
-            resetSizeItem.keyEquivalentModifierMask = .command
+            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "")
             let rsTarget = MenuActionTarget { w.resetToDefaultSize() }
             resetSizeItem.target = rsTarget
             resetSizeItem.action = #selector(MenuActionTarget.run)
