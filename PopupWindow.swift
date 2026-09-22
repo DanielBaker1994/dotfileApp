@@ -3870,6 +3870,35 @@ final class TerminalMenuTarget: NSObject {
     @objc func revealSelectionInFinder(_ sender: Any?) { revealInFinder?() }
 }
 
+// Transparent view that captures resize drags on window edges/corners.
+// Sits on top of all content so resize works regardless of what fills the window.
+final class ResizeEdgeView: NSView {
+    let cursor: NSCursor
+    let edges: PopupBackdrop.Edge
+    var onResize: ((NSRect, NSPoint) -> Void)?
+    var onResizeDrag: (() -> Void)?
+
+    init(frame: NSRect, cursor: NSCursor, edges: PopupBackdrop.Edge) {
+        self.cursor = cursor
+        self.edges = edges
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseMoved], owner: self))
+    }
+    override func mouseMoved(with event: NSEvent) { cursor.set() }
+    override func mouseDown(with event: NSEvent) {
+        onResize?(window?.frame ?? .zero, NSEvent.mouseLocation)
+    }
+    override func mouseDragged(with event: NSEvent) { onResizeDrag?() }
+}
+
 // MARK: - Popup window
 
 public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate {
@@ -4070,6 +4099,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var filterBar: PopupFilterBar?
     private var rowScroll: NSScrollView?
     private var chrome: PopupChrome?
+    // transparent resize edge views that sit ON TOP of all content so drag
+    // resize works even when the editor/terminal/browser fills the window
+    private var resizeEdgeViews: [NSView] = []
     // transient status strip (prettyprint errors etc.); nil until an editMode
     // window opts into it via setStatus
     private var statusBar: PopupStatusBar?
@@ -4399,6 +4431,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         // for a sleek translucent look with real see-through corners.
         let backdrop = PopupBackdrop(config: config,
                                      frame: NSRect(x: 0, y: 0, width: config.width, height: initialHeight))
+        backdrop.autoresizingMask = [.width, .height]
         backdrop.wantsLayer = true
         backdrop.layer?.cornerRadius = config.cornerRadius
         backdrop.layer?.masksToBounds = true
@@ -4946,9 +4979,81 @@ scroll.documentView = rowView
                 }
             }
         }
+        // transparent resize edge views: sit on top of ALL content so drag
+        // resize works even when editor/terminal/browser fills the window
+        if config.enableResize {
+            installResizeEdges()
+        }
         panel.orderOut(nil)
     }
 
+    // Create transparent edge/corner views that capture resize drags.
+    // These sit on top of all content (editor, terminal, browser) so the
+    // user can grab the window border regardless of what's underneath.
+    private let resizeHitSize: CGFloat = 8
+    private var resizeDragEdges: PopupBackdrop.Edge = []
+    private var resizeStartFrame: NSRect = .zero
+    private var resizeStartPoint: NSPoint = .zero
+
+    private func installResizeEdges() {
+        guard let backdrop = panel.contentView else { return }
+        for edgeView in resizeEdgeViews { edgeView.removeFromSuperview() }
+        resizeEdgeViews = []
+
+        let hit = resizeHitSize
+        let w = backdrop.bounds.width
+        let h = backdrop.bounds.height
+
+        // top edge
+        addResizeEdge(NSRect(x: hit, y: h - hit, width: w - 2 * hit, height: hit), cursor: .resizeUpDown, edges: [.top])
+        // bottom edge
+        addResizeEdge(NSRect(x: hit, y: 0, width: w - 2 * hit, height: hit), cursor: .resizeUpDown, edges: [.bottom])
+        // left edge
+        addResizeEdge(NSRect(x: 0, y: hit, width: hit, height: h - 2 * hit), cursor: .resizeLeftRight, edges: [.left])
+        // right edge
+        addResizeEdge(NSRect(x: w - hit, y: hit, width: hit, height: h - 2 * hit), cursor: .resizeLeftRight, edges: [.right])
+        // corners
+        addResizeEdge(NSRect(x: 0, y: h - hit, width: hit, height: hit), cursor: .resizeLeftRight, edges: [.top, .left])
+        addResizeEdge(NSRect(x: w - hit, y: h - hit, width: hit, height: hit), cursor: .resizeLeftRight, edges: [.top, .right])
+        addResizeEdge(NSRect(x: 0, y: 0, width: hit, height: hit), cursor: .resizeLeftRight, edges: [.bottom, .left])
+        addResizeEdge(NSRect(x: w - hit, y: 0, width: hit, height: hit), cursor: .resizeLeftRight, edges: [.bottom, .right])
+    }
+
+    private func addResizeEdge(_ frame: NSRect, cursor: NSCursor, edges: PopupBackdrop.Edge) {
+        let v = ResizeEdgeView(frame: frame, cursor: cursor, edges: edges)
+        v.onResize = { [weak self] startFrame, startPoint in
+            guard let self else { return }
+            self.resizeDragEdges = edges
+            self.resizeStartFrame = startFrame
+            self.resizeStartPoint = startPoint
+        }
+        v.onResizeDrag = { [weak self] in
+            self?.performResizeDrag()
+        }
+        if let backdrop = panel.contentView {
+            backdrop.addSubview(v)
+        }
+        resizeEdgeViews.append(v)
+    }
+
+    private func performResizeDrag() {
+        let m = NSEvent.mouseLocation
+        let dx = m.x - resizeStartPoint.x
+        let dy = m.y - resizeStartPoint.y
+        var f = resizeStartFrame
+        var w = f.width
+        var h = f.height
+        if resizeDragEdges.contains(.right) { w += dx }
+        if resizeDragEdges.contains(.left) { w -= dx; f.origin.x += dx }
+        if resizeDragEdges.contains(.top) { h += dy; f.origin.y -= dy }
+        if resizeDragEdges.contains(.bottom) { h -= dy }
+        w = max(240, w)
+        h = max(140, h)
+        f.size.width = w
+        f.size.height = h
+        panel.setFrame(clampToScreen(f), display: true)
+        zoom = min(3, max(0.6, w / config.width))
+    }
 
     // MARK: Lifecycle
 
