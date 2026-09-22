@@ -4110,8 +4110,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // current drawer heights (may differ from config during resize)
     private var currentTerminalHeight: CGFloat = 0
     private var currentBrowserHeight: CGFloat = 0
-    private let minTerminalH: CGFloat = 80
-    private let minBrowserH: CGFloat = 100
+    private let minTerminalH: CGFloat = 40
+    private let minBrowserH: CGFloat = 50
     private var editorScroll: NSScrollView?
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
@@ -5836,7 +5836,7 @@ private func scrollSelectionIntoView() {
             // Ctrl+Shift+HJKL: resize window like tmux pane resize
             // H = shrink width, L = grow width, J = shrink height, K = grow height
             if ctrl && mods.contains(.shift), panel.attachedSheet == nil {
-                let step: CGFloat = 10
+                let step: CGFloat = 5
                 switch code {
                 case 4:  // H — shrink width
                     var f = panel.frame
