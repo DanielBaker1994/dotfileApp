@@ -4990,7 +4990,7 @@ scroll.documentView = rowView
     // Create transparent edge/corner views that capture resize drags.
     // These sit on top of all content (editor, terminal, browser) so the
     // user can grab the window border regardless of what's underneath.
-    private let resizeHitSize: CGFloat = 8
+    private let resizeHitSize: CGFloat = 16
     private var resizeDragEdges: PopupBackdrop.Edge = []
     private var resizeStartFrame: NSRect = .zero
     private var resizeStartPoint: NSPoint = .zero
@@ -5864,35 +5864,47 @@ private func scrollSelectionIntoView() {
             }
             switch code {
             case 0:   // A — select all
-                if let tv = editorView {
+                // find bar first if it's visible and focused
+                if let ff = findField, !ff.isHidden, panel.firstResponder === ff || ff.currentEditor() != nil {
+                    ff.selectText(nil)
+                    ff.currentEditor()?.selectAll(nil)
+                } else if let tv = editorView {
                     tv.selectAll(nil)
                 } else {
                     field.selectText(nil)
                 }
                 return true
             case 8:   // C — copy
-                if let tv = editorView {
+                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                    ed.copy(nil)
+                } else if let tv = editorView {
                     tv.copy(nil)
                 } else if let ed = field.currentEditor() {
                     ed.copy(nil)
                 }
                 return true
             case 9:   // V — paste
-                if let tv = editorView {
+                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                    ed.paste(nil)
+                } else if let tv = editorView {
                     tv.paste(nil)
                 } else if let ed = field.currentEditor() {
                     ed.paste(nil)
                 }
                 return true
             case 7:   // X — cut
-                if let tv = editorView {
+                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                    ed.cut(nil)
+                } else if let tv = editorView {
                     tv.cut(nil)
                 } else if let ed = field.currentEditor() {
                     ed.cut(nil)
                 }
                 return true
             case 6:   // Z — undo
-                if let tv = editorView {
+                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                    ed.undoManager?.undo()
+                } else if let tv = editorView {
                     tv.undoManager?.undo()
                 } else if let ed = field.currentEditor() {
                     ed.undoManager?.undo()
