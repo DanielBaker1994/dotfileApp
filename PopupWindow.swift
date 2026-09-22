@@ -5224,6 +5224,16 @@ scroll.documentView = rowView
         }
     }
 
+    // Pop up a menu anchored at the top-left header icon position. The host
+    // builds the menu (with checkmarks, actions, submenus) and calls this from
+    // onChromeIconClick — the menu appears right under the app glyph.
+    public func showHeaderMenu(_ menu: NSMenu) {
+        // icon sits at x=10, y=top of window; pop down 4pts below the header
+        let pt = NSPoint(x: 10, y: panel.frame.height - config.headerHeight * zoom - 4)
+        let screenPt = panel.convertPoint(toScreen: pt)
+        menu.popUp(positioning: nil, at: screenPt, in: nil)
+    }
+
     // Reset the window back to its configured default size and re-layout
     // all sub-panes (editor, terminal, browser). Called from the app menu.
     public func resetToDefaultSize() {

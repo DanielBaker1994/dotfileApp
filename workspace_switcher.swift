@@ -4,6 +4,19 @@ import Darwin
 import AVFoundation
 import Speech
 
+// Tiny target object that holds a closure so NSMenuItem actions can use
+// Swift closures instead of @objc selectors. The host retains these in
+// `menuActionTargets` while the menu is alive.
+final class MenuActionTarget: NSObject {
+    private let action: () -> Void
+    init(action: @escaping () -> Void) { self.action = action }
+    @objc func run() { action() }
+}
+
+// Retains MenuActionTarget instances while menus are open so closures survive
+// past the popUp() call.
+var menuActionTargets: [MenuActionTarget] = []
+
 // ============================================================================
 // Workspace switcher — host app built on the PopupWindow framework.
 // This file only contains app-specific logic: workspace/command data, the
@@ -2581,36 +2594,19 @@ private func trimmed(_ s: String) -> String? {
         cfg.fontName = cmd.font
         cfg.markdownImages = true
         let w = PopupWindow(config: cfg)
-        // header buttons: "\u{F120}" (terminal icon) toggles the embedded shell
-        // drawer; "\u{F0036}" (Nerd Fonts "fa-blackberry", matches the
-        // installed 3.5.1 font) toggles the file browser. Opening files
-        // happens via the "+" tab button.
-        var hb: [(String, Int)] = []
-        if cmd.terminal { hb.append(("\u{F120}", 10)) }
-        hb.append(("\u{F0036}", 20))
-        // voice windows get a mic toggle (id 40) that shows/hides the record
-        // bar — clustered with the terminal + folder toggles. The bar starts
-        // OFF (slashed mic), so recording never starts silently at launch.
-        if cmd.voice { hb.append(("\u{F131}", 40)) }
-        // paint-brush (id 60): opens the interactive color picker that edits
-        // the silvery-blue panel background (terminal + file browser) live
-        hb.append(("\u{F1FC}", 60))
-        w.headerButtons = hb
-        w.headerOrder = [1, 2]
-        // initial drawer state: terminal starts on, browser starts off — the
-        // header buttons mirror that; the record bar starts hidden for voice
-        if cmd.terminal { w.setHeaderButtonOn(10, false) }
-        w.setHeaderButtonOn(20, false)
-        if cmd.voice { w.setHeaderButtonOn(40, false) }
+        // All window actions now live in the top-left icon dropdown menu —
+        // no scattered header buttons. The menu shows toggle state via
+        // checkmarks (terminal, browser, mic) and groups actions logically.
+
+        // image saving for pasted/dropped photos
         func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
         w.imageBaseDir = noteDir(currentPath)
         if noteIsPreview(currentPath) {
-            w.setEditorFilePreview(currentPath)   // PDF / image: read-only preview
+            w.setEditorFilePreview(currentPath)
         } else {
             w.editorReadOnly = false
             w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
         }
-        // pasted/dropped photos land in <note dir>/assets and render inline
         w.imageSaver = { [weak self] img in
             guard let self else { return nil }
             let dir = noteDir(currentPath) + "/assets"
@@ -2629,7 +2625,7 @@ private func trimmed(_ s: String) -> String? {
                 return nil
             }
         }
-        // per-command header glyph (commands.conf `icon`); notepad by default
+
         w.headerIcon = cmd.icon ?? notesAppIcon
         // empty `title` in commands.conf = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
@@ -2644,7 +2640,6 @@ private func trimmed(_ s: String) -> String? {
         // changes on disk, unless the editor holds unsaved local edits
         var lastSynced = content
         var lastMtime = mtime(of: currentPath)
-        var watcher: Timer?
         // switching tabs: save the current note, load the new one. A tab whose
         // note was deleted on disk becomes default.md instead (never recreate)
         let loadTab: (Int) -> Void = { [weak self] index in
@@ -2748,32 +2743,93 @@ private func trimmed(_ s: String) -> String? {
             guard let self else { return }
             closeNote(index)
         }
-        // header button routing (terminal / folder / mic / color picker)
-        w.onHeaderButton = { [weak self, weak w] id in
-            if id == 10 {
-                w?.toggleTerminalDrawer()
-                if let w { w.setHeaderButtonOn(10, w.terminalShown) }
-            } else if id == 20 {
-                w?.toggleFileBrowser()
-                if let w { w.setHeaderButtonOn(20, w.fileBrowserShown) }
-            } else if id == 40 {
-                guard let w else { return }
-                let shown = !w.meterEnabled
-                w.meterEnabled = shown
-                w.setHeaderButtonOn(40, shown)
-                // swap the mic glyph: solid mic when the bar is shown,
-                // slashed mic when hidden, so the state reads at a glance
-                var arr = w.headerButtons
-                if let i = arr.firstIndex(where: { $0.1 == 40 }) {
-                    arr[i].0 = shown ? "\u{F130}" : "\u{F131}"
-                    w.headerButtons = arr
-                }
-            } else if id == 60 {
-                guard let w else { return }
-                self?.presentThemeRoleMenu(for: w,
-                                           roles: [.terminal, .browser, .notepad, .header],
-                                           section: cmd.name)
+        // Top-left icon opens a dropdown menu with all window actions —
+        // replaces the scattered header buttons (terminal, browser, mic, color).
+        w.onChromeIconClick = { [weak self, weak w] in
+            guard let self, let w else { return }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            // — toggles (checkmark shows state) —
+            func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.state = state ? .on : .off
+                item.target = nil
+                item.action = nil
+                // Use a closure-based approach: NSMenuItem can't hold closures
+                // directly, so we use a target/action pair
+                let t = MenuActionTarget(action: action)
+                item.target = t
+                item.action = #selector(MenuActionTarget.run)
+                // Retain the target so it survives the menu dismiss
+                menuActionTargets.append(t)
+                menu.addItem(item)
             }
+
+            if cmd.terminal {
+                toggleItem("Toggle Terminal", w.terminalShown) {
+                    w.toggleTerminalDrawer()
+                }
+            }
+            toggleItem("Toggle File Browser", w.fileBrowserShown) {
+                w.toggleFileBrowser()
+            }
+            if cmd.voice {
+                let micShown = w.meterEnabled
+                toggleItem(micShown ? "Mute Microphone" : "Enable Microphone", micShown) {
+                    let shown = !w.meterEnabled
+                    w.meterEnabled = shown
+                }
+            }
+            menu.addItem(.separator())
+
+            // — color picker —
+            let colorItem = NSMenuItem(title: "Pick Color…", action: nil, keyEquivalent: "")
+            let colorTarget = MenuActionTarget {
+                self.presentThemeRoleMenu(for: w,
+                                          roles: [.terminal, .browser, .notepad, .header],
+                                          section: cmd.name)
+            }
+            colorItem.target = colorTarget
+            colorItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(colorTarget)
+            menu.addItem(colorItem)
+            menu.addItem(.separator())
+
+            // — reset actions —
+            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "0")
+            resetSizeItem.keyEquivalentModifierMask = .command
+            let rsTarget = MenuActionTarget { w.resetToDefaultSize() }
+            resetSizeItem.target = rsTarget
+            resetSizeItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(rsTarget)
+            menu.addItem(resetSizeItem)
+
+            let resetColorItem = NSMenuItem(title: "Reset Default Colors", action: nil, keyEquivalent: "")
+            let rcTarget = MenuActionTarget { w.resetToDefaultColors() }
+            resetColorItem.target = rcTarget
+            resetColorItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(rcTarget)
+            menu.addItem(resetColorItem)
+            menu.addItem(.separator())
+
+            // — open config —
+            let configItem = NSMenuItem(title: "Open Config", action: nil, keyEquivalent: "")
+            let cfgTarget = MenuActionTarget {
+                let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
+                let p = FileManager.default.fileExists(atPath: canonical)
+                    ? canonical
+                    : settings.commandsConfPath
+                if FileManager.default.fileExists(atPath: p) {
+                    w.onOpenExternalPath?(p)
+                }
+            }
+            configItem.target = cfgTarget
+            configItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(cfgTarget)
+            menu.addItem(configItem)
+
+            w.showHeaderMenu(menu)
         }
         // "+" pill: choose to open an EXISTING file as a tab (open panel) or
         // create a NEW note in the default dir (next to the first note). Both
@@ -2907,23 +2963,6 @@ private func trimmed(_ s: String) -> String? {
         }
         w.onChromeHeaderClick = { [weak self] in
             self?.copy(currentPath, "note path: \(currentPath)")
-        }
-        // clicking the top-left notes glyph opens commands.conf as a note tab
-        // (the dedicated "copy config path" button was dropped for this)
-        w.onChromeIconClick = { [weak self, weak w] in
-            guard let self, let w else { return }
-            // the CANONICAL user-facing config path (~/.config/workspace-switcher/
-            // commands.conf, the INSTALL.sh symlink target); fall back to the
-            // binary-relative one if the symlink is absent
-            let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
-            let p = FileManager.default.fileExists(atPath: canonical)
-                ? canonical
-                : settings.commandsConfPath
-            if FileManager.default.fileExists(atPath: p) {
-                w.onOpenExternalPath?(p)
-            } else {
-                self.log("note '\(cmd.name)': config not found at \(p)")
-            }
         }
         // voice notes (commands.conf `voice = true`): the window's bottom bar
         // becomes a record control — big record/stop button, pause/resume and
@@ -3210,7 +3249,6 @@ private func trimmed(_ s: String) -> String? {
             }
         }
         RunLoop.main.add(t, forMode: .common)
-        watcher = t
         // embedded file browser drawer (header "▤" toggles it): starts in the
         // note directory, favorites shared with the floating "files" window
         let favs = fileBrowserFavoritesConfig()
@@ -4049,12 +4087,58 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         let w = PopupWindow(config: cfg)
         w.headerIcon = NSWorkspace.shared.icon(forFile: root)
         w.chromeHeaderTitle = root
-        // paint-brush (id 60): interactive color picker for the explorer
-        // panel background (persists to commands.conf on close)
-        w.headerButtons = [("\u{F1FC}", 60)]
-        w.onHeaderButton = { [weak self, weak w] id in
-            guard id == 60, let self, let w else { return }
-            self.presentThemeRoleMenu(for: w, roles: [.browser, .header], section: cmd.name)
+        // Top-left icon opens a dropdown menu (color picker, reset, config)
+        // — no scattered header buttons.
+        w.onChromeIconClick = { [weak self, weak w] in
+            guard let self, let w else { return }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            // color picker
+            let colorItem = NSMenuItem(title: "Pick Color…", action: nil, keyEquivalent: "")
+            let colorTarget = MenuActionTarget {
+                self.presentThemeRoleMenu(for: w, roles: [.browser, .header], section: cmd.name)
+            }
+            colorItem.target = colorTarget
+            colorItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(colorTarget)
+            menu.addItem(colorItem)
+            menu.addItem(.separator())
+
+            // reset actions
+            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "0")
+            resetSizeItem.keyEquivalentModifierMask = .command
+            let rsTarget = MenuActionTarget { w.resetToDefaultSize() }
+            resetSizeItem.target = rsTarget
+            resetSizeItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(rsTarget)
+            menu.addItem(resetSizeItem)
+
+            let resetColorItem = NSMenuItem(title: "Reset Default Colors", action: nil, keyEquivalent: "")
+            let rcTarget = MenuActionTarget { w.resetToDefaultColors() }
+            resetColorItem.target = rcTarget
+            resetColorItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(rcTarget)
+            menu.addItem(resetColorItem)
+            menu.addItem(.separator())
+
+            // open config
+            let configItem = NSMenuItem(title: "Open Config", action: nil, keyEquivalent: "")
+            let cfgTarget = MenuActionTarget {
+                let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
+                let p = FileManager.default.fileExists(atPath: canonical)
+                    ? canonical : settings.commandsConfPath
+                if FileManager.default.fileExists(atPath: p) {
+                    // open config in the notes window
+                    self.openNoteFile(p)
+                }
+            }
+            configItem.target = cfgTarget
+            configItem.action = #selector(MenuActionTarget.run)
+            menuActionTargets.append(cfgTarget)
+            menu.addItem(configItem)
+
+            w.showHeaderMenu(menu)
         }
 
         let favs = fileBrowserFavoritesConfig()
