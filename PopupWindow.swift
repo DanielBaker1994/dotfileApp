@@ -4041,6 +4041,20 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private(set) var fileBrowser: PopupFileBrowser?
     public private(set) var fileBrowserShown = false
     private var fileBrowserDrawerMode = false
+
+    // Pane focus tracking + visual indicators: when the user cycles between
+    // editor / file-browser / terminal with Ctrl+J/K (or clicks into one),
+    // the active pane gets a bright colored border so it is immediately
+    // obvious which surface owns the keyboard.
+    enum FocusedPane { case editor, browser, terminal }
+    private var focusedPane: FocusedPane?
+    private var editorFocusBorder: NSView?
+    private var browserFocusBorder: NSView?
+    private var terminalFocusBorder: NSView?
+    // Bright blue focus indicator — thick border + subtle glow
+    private let focusBorderColor = NSColor(srgbRed: 100/255, green: 180/255, blue: 255/255, alpha: 1.0)
+    private let focusBorderWidth: CGFloat = 3
+
     // total drawer height currently folded into the window frame (baseline =
     // no drawers); the terminal is on at init when config.terminal is set
     private var drawerInsetNow: CGFloat = 0
@@ -4503,6 +4517,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             backdrop.addSubview(scroll)
             editorView = tv
             editorScroll = scroll
+            // focus indicator: bright 4-sided border around the editor scroll
+            let efb = NSView(frame: scroll.frame)
+            efb.autoresizingMask = [.width, .height]
+            efb.wantsLayer = true
+            efb.layer?.borderWidth = focusBorderWidth
+            efb.layer?.borderColor = focusBorderColor.cgColor
+            efb.layer?.cornerRadius = 6
+            efb.isHidden = true
+            backdrop.addSubview(efb)
+            editorFocusBorder = efb
             if config.tabs {
                 let bar = PopupTabsBar(config: config)
                 bar.frame = NSRect(x: 0, y: config.headerHeight * zoom + 2,
@@ -4571,6 +4595,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 term.nativeForegroundColor = config.colors.text
                 backdrop.addSubview(term)
                 terminalDrawer = term
+                // focus indicator: bright 4-sided border around the terminal
+                let tfb = NSView(frame: term.frame)
+                tfb.autoresizingMask = [.width]
+                tfb.wantsLayer = true
+                tfb.layer?.borderWidth = focusBorderWidth
+                tfb.layer?.borderColor = focusBorderColor.cgColor
+                tfb.layer?.cornerRadius = 8
+                tfb.isHidden = true
+                backdrop.addSubview(tfb)
+                terminalFocusBorder = tfb
                 // auto-restart: if the shell exits (user typed exit/ctrl-d)
                 // spawn it again after a beat so the drawer is never dead
                 // (capture the shell locally — no self before super.init)
@@ -4944,6 +4978,12 @@ scroll.documentView = rowView
             isShown = true
             installMonitors()
             focusRetries = 0
+            // initial focus: editor gets the highlight by default
+            if let ed = editorView {
+                panel.makeFirstResponder(ed)
+                focusedPane = .editor
+            }
+            updateFocusIndicator()
             takeFocus()
             return
         }
@@ -5050,6 +5090,17 @@ scroll.documentView = rowView
             hide(restore: true)
         } else {
             show()
+        }
+    }
+
+    // Reset the window back to its configured default size and re-layout
+    // all sub-panes (editor, terminal, browser). Called from the app menu.
+    public func resetToDefaultSize() {
+        let h = min(config.height, maxPanelHeight())
+        panel.setContentSize(NSSize(width: config.width, height: h))
+        panel.setFrameOrigin(centeredOrigin(width: config.width, height: h))
+        if config.editMode {
+            layoutForZoom()
         }
     }
 
@@ -5437,6 +5488,7 @@ private func scrollSelectionIntoView() {
     // MARK: Event monitors
 
     private var activeObserver: NSObjectProtocol?
+    private var responderObserver: NSObjectProtocol?
 
     private func installMonitors() {
         // AeroSpace focuses these windows by activating the app + AX-raising
@@ -5495,6 +5547,32 @@ private func scrollSelectionIntoView() {
         }) {
             monitors.append(m)
         }
+        // Track first-responder changes so the focus border follows the
+        // user's mouse clicks between panes (editor / browser / terminal).
+        responderObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: panel,
+            queue: .main) { [weak self] _ in
+            self?.updateFocusedPane()
+        }
+    }
+
+    // Re-evaluate which pane currently has first responder and update the
+    // bright focus border accordingly. Called on key-window activation and
+    // after Ctrl+J/K cycles.
+    private func updateFocusedPane() {
+        let fr = panel.firstResponder
+        if let ed = editorView, fr === ed || (fr as? NSTextView)?.isDescendant(of: ed) == true {
+            focusedPane = .editor
+        } else if fileBrowserShown, let fb = fileBrowser {
+            let lv = fb.listView
+            if fr === lv || (fr as? NSView)?.isDescendant(of: lv) == true {
+                focusedPane = .browser
+            }
+        } else if terminalShown, let term = terminalDrawer,
+                  (fr === term || (fr as? NSView)?.isDescendant(of: term) == true) {
+            focusedPane = .terminal
+        }
+        updateFocusIndicator()
     }
 
     private func removeMonitors() {
@@ -5505,6 +5583,10 @@ private func scrollSelectionIntoView() {
         if let o = activeObserver {
             NotificationCenter.default.removeObserver(o)
             activeObserver = nil
+        }
+        if let o = responderObserver {
+            NotificationCenter.default.removeObserver(o)
+            responderObserver = nil
         }
     }
 
@@ -5577,9 +5659,10 @@ private func scrollSelectionIntoView() {
             // the terminal branch so it works from any pane.
             if ctrl && (code == 38 || code == 40), config.editMode {
                 var panes: [NSResponder] = []
-                if let ed = editorView { panes.append(ed) }
-                if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView) }
-                if terminalShown, let term = terminalDrawer { panes.append(term) }
+                var paneTypes: [FocusedPane] = []
+                if let ed = editorView { panes.append(ed); paneTypes.append(.editor) }
+                if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView); paneTypes.append(.browser) }
+                if terminalShown, let term = terminalDrawer { panes.append(term); paneTypes.append(.terminal) }
                 if panes.count > 1 {
                     let current = panel.firstResponder
                     let curIdx = panes.firstIndex { p in
@@ -5594,9 +5677,13 @@ private func scrollSelectionIntoView() {
                             ? min(curIdx + 1, panes.count - 1)
                             : max(curIdx - 1, 0)
                         if target != curIdx { panel.makeFirstResponder(panes[target]) }
+                        focusedPane = paneTypes[target]
                     } else {
-                        panel.makeFirstResponder(code == 38 ? panes[0] : panes[panes.count - 1])
+                        let target = code == 38 ? panes[0] : panes[panes.count - 1]
+                        panel.makeFirstResponder(target)
+                        focusedPane = code == 38 ? paneTypes[0] : paneTypes[panes.count - 1]
                     }
+                    updateFocusIndicator()
                     return true
                 }
                 // single pane (editor only) — fall through so the emacs
@@ -5924,6 +6011,14 @@ private func scrollSelectionIntoView() {
         }
         terminalShown.toggle()
         syncDrawerLayout()
+        if terminalShown {
+            panel.makeFirstResponder(drawer)
+            focusedPane = .terminal
+        } else if let ed = editorView {
+            panel.makeFirstResponder(ed)
+            focusedPane = .editor
+        }
+        updateFocusIndicator()
     }
 
     // themed color roles the paint-brush picker can style. Only the per-window
@@ -6023,6 +6118,16 @@ public enum ThemeRole: String, CaseIterable {
         // drawer mode starts hidden unless it's the default; content mode is
         // always visible
         fb.isHidden = drawer ? !fileBrowserShown : false
+        // focus indicator: bright 4-sided border around the browser
+        let bfb = NSView(frame: fb.frame)
+        bfb.autoresizingMask = [.width, .height]
+        bfb.wantsLayer = true
+        bfb.layer?.borderWidth = focusBorderWidth
+        bfb.layer?.borderColor = focusBorderColor.cgColor
+        bfb.layer?.cornerRadius = 6
+        bfb.isHidden = true
+        backdrop.addSubview(bfb)
+        browserFocusBorder = bfb
         layoutFileBrowser()
         layoutTerminal()
         layoutEditorScroll()
@@ -6035,7 +6140,12 @@ public enum ThemeRole: String, CaseIterable {
         syncDrawerLayout()
         if fileBrowserShown, let lp = fileBrowser?.listView {
             panel.makeFirstResponder(lp)
+            focusedPane = .browser
+        } else if let ed = editorView {
+            panel.makeFirstResponder(ed)
+            focusedPane = .editor
         }
+        updateFocusIndicator()
     }
 
     // Both drawers can be open at once (terminal + file browser stacked); the
@@ -6057,6 +6167,7 @@ public enum ThemeRole: String, CaseIterable {
         layoutTerminal()
         layoutFileBrowser()
         layoutEditorScroll()
+        updateFocusIndicator()
     }
 
     private func layoutFileBrowser() {
@@ -6080,6 +6191,33 @@ public enum ThemeRole: String, CaseIterable {
         }
         fb.needsLayout = true
         fb.layoutSubtreeIfNeeded()
+    }
+
+    // Update the bright focus border so it highlights whichever pane (editor /
+    // browser / terminal) currently owns first responder.
+    private func updateFocusIndicator() {
+        editorFocusBorder?.isHidden = true
+        browserFocusBorder?.isHidden = true
+        terminalFocusBorder?.isHidden = true
+        switch focusedPane {
+        case .editor:
+            if let scroll = editorScroll, let eb = editorFocusBorder {
+                eb.frame = scroll.frame
+                eb.isHidden = false
+            }
+        case .browser:
+            if let fb = fileBrowser, let bb = browserFocusBorder, fileBrowserShown {
+                bb.frame = fb.frame
+                bb.isHidden = false
+            }
+        case .terminal:
+            if let term = terminalDrawer, let tb = terminalFocusBorder, terminalShown {
+                tb.frame = term.frame
+                tb.isHidden = false
+            }
+        case nil:
+            break
+        }
     }
 
     // does the embedded terminal hold keyboard focus? (keyboard routing: let

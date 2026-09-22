@@ -4288,6 +4288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        installMainMenu()
         installCrashHandler()
         // diag: log the TCC state the process actually sees + how it was
         // launched (touch ~/.cache/ws-auth-debug to enable)
@@ -4361,5 +4362,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    // Build a real macOS app menu (top-left click) so the user has obvious
+    // window commands: reset size, close, quit. The accessory policy still
+    // hides the menu bar until the app icon is clicked.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        // App menu (appears under "workspace-switcher" when clicked)
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About workspace-switcher", action: nil, keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Hide", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        // File menu
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenu.addItem(NSMenuItem.separator())
+        let resetItem = NSMenuItem(title: "Reset Window Size", action: #selector(MenuTarget.resetWindowSize(_:)), keyEquivalent: "0")
+        resetItem.target = MenuTarget.shared
+        resetItem.toolTip = "Reset all windows to their default size"
+        fileMenu.addItem(resetItem)
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        // Edit menu (standard shortcuts)
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: #selector(UndoManager.redo), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        // Window menu
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        let resetWinItem = NSMenuItem(title: "Reset Window Size", action: #selector(MenuTarget.resetWindowSize(_:)), keyEquivalent: "0")
+        resetWinItem.target = MenuTarget.shared
+        windowMenu.addItem(resetWinItem)
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+}
+
+// Shared target for app menu actions that need to reach all open windows
+final class MenuTarget: NSObject {
+    static let shared = MenuTarget()
+
+    @objc func resetWindowSize(_ sender: Any?) {
+        // Reset every open PopupWindow to its default size
+        NSApp.windows.forEach { w in
+            if let pw = w.delegate as? PopupWindow {
+                pw.resetToDefaultSize()
+            }
+        }
     }
 }

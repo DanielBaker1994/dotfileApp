@@ -29,3 +29,20 @@ open in default app, reveal in Finder.
 
 User-facing strings, window sizes, and paths live in `commands.conf` — prefer
 changing the config over hard-coding.
+
+## 4. NEVER make git changes in a backup workspace
+
+When working on this repo, ALWAYS verify you are in the real repo directory
+(`/Users/danielbaker/.config/dotfileApp`) before running any git command
+(`git add`, `git commit`, `git push`, `git checkout`, etc.).
+
+- NEVER stage, commit, or modify `.git/` in a `.bak` copy, backup directory,
+  or duplicate of this repo.
+- ALWAYS run `git status` and check `git rev-parse --show-toplevel` before
+  committing to confirm you are in the correct repo.
+- If a backup copy exists (e.g. `dotfileApp.bak/`, `dotfileApp.old/`), it
+  MUST NOT be touched by any git operation. Changes belong ONLY in the real
+  repo at `/Users/danielbaker/.config/dotfileApp`.
+- Running `./INSTALL.sh` or any install script must NEVER make git changes
+  in a different repo or workspace. The install script is for installing the
+  app — not for modifying git history anywhere.

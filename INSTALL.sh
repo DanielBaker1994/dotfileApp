@@ -65,8 +65,8 @@ if [ ! -d "$ROOT/.git" ]; then
     if [ -d "$DEST" ]; then
         printf "${YELLOW}  ! $DEST already exists — installing from there${RESET}\n"
     else
-        printf "${DIM}    git clone https://github.com/DanielBaker1994/dotfileApp.git $DEST${RESET}\n"
-        git clone https://github.com/DanielBaker1994/dotfileApp.git "$DEST" || {
+        printf "${DIM}    git clone https://github.com/DanielBaker1994/workspace-switcher.git $DEST${RESET}\n"
+        git clone https://github.com/DanielBaker1994/workspace-switcher.git "$DEST" || {
             printf "\n${RED}Clone failed — check your network and try again.${RESET}\n" >&2
             exit 1
         }
@@ -137,8 +137,10 @@ step "3/7 configs (backed up if they already exist)"
 install_config() {
     local src="$1" dst="$2"
     if [ -e "$dst" ] && [ ! -L "$dst" ]; then
-        mv "$dst" "$dst.bak.$(date +%s)"
-        warn "backed up existing $dst"
+        local BACKUP="/tmp/ws-backup-$(date +%s)"
+        mkdir -p "$BACKUP"
+        mv "$dst" "$BACKUP/"
+        warn "backed up existing $dst -> $BACKUP/"
     elif [ -L "$dst" ]; then
         rm "$dst"
     fi
@@ -149,19 +151,6 @@ install_config "$ROOT/config/aerospace"  "$HOME/.config/aerospace"
 install_config "$ROOT/config/sketchybar" "$HOME/.config/sketchybar"
 install_config "$ROOT/config/borders"    "$HOME/.config/borders"
 ok "configs installed (aerospace / sketchybar / borders)"
-
-# The repo may ALREADY live at ~/.config/workspace-switcher — in that case
-# there is nothing to link and moving it away would self-symlink. Only create
-# the symlink when the repo lives somewhere else.
-if [ "$ROOT" != "$HOME/.config/workspace-switcher" ]; then
-    if [ -e "$HOME/.config/workspace-switcher" ] && [ ! -L "$HOME/.config/workspace-switcher" ]; then
-        mv "$HOME/.config/workspace-switcher" "$HOME/.config/workspace-switcher.bak.$(date +%s)"
-    fi
-    ln -sfn "$ROOT" "$HOME/.config/workspace-switcher"
-    ok "app linked at ~/.config/workspace-switcher"
-else
-    ok "app already lives at ~/.config/workspace-switcher — no symlink needed"
-fi
 
 # ------------------------------------------------------------- 4. build
 STEP="building the app"
@@ -209,13 +198,42 @@ brew services start sketchybar >/dev/null 2>&1 || true
 brew services start borders >/dev/null 2>&1 || true
 ok "sketchybar + borders running"
 
-step "6b/7 jira poll agent (launchd)"
-PLIST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
-sed "s|__WS_CONFIG__|$HOME/.config/workspace-switcher|g" \
-    "$ROOT/jira/com.jira.poll.plist" >"$PLIST"
-launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null || true
-ok "poll agent loaded"
+# jira poll agent: only load when [jira] enabled = true in commands.conf
+JIRA_ENABLED=""
+if [ -f "$ROOT/commands.conf" ]; then
+    in_jira=0
+    while IFS= read -r line; do
+        s="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        case "$s" in
+            "["*"]") [ "$s" = "[jira]" ] && in_jira=1 || in_jira=0 ;;
+            *=*)
+                if [ "$in_jira" = "1" ]; then
+                    key="$(echo "$s" | cut -d= -f1 | sed 's/[[:space:]]//g')"
+                    val="$(echo "$s" | cut -d= -f2- | sed 's/^[[:space:]]*//')"
+                    [ "$key" = "enabled" ] && JIRA_ENABLED="$val"
+                fi
+                ;;
+        esac
+    done < "$ROOT/commands.conf"
+fi
+case "${JIRA_ENABLED,,}" in
+    true|yes|1|on)
+        step "6b/7 jira poll agent (launchd)"
+        PLIST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
+        sed "s|__WS_CONFIG__|$HOME/.config/workspace-switcher|g" \
+            "$ROOT/jira/com.jira.poll.plist" >"$PLIST"
+        launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
+        launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null || true
+        ok "poll agent loaded"
+        ;;
+    *)
+        step "6b/7 jira poll agent (disabled — [jira] enabled != true)"
+        # make sure any previously loaded agent is stopped
+        PLIST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
+        launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
+        ok "poll agent not loaded (jira disabled)"
+        ;;
+esac
 
 # ------------------------------------------------------------- 7. launch
 STEP="opening the app"

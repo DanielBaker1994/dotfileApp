@@ -10,7 +10,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UID_="$(id -u)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-BACKUP="$HOME/.config/workspace-switcher-uninstall-$(date +%s)"
+BACKUP="/tmp/ws-uninstall-$(date +%s)"
 
 GREEN='\033[32m'; RED='\033[31m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
 ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
@@ -39,10 +39,9 @@ mkdir -p "$BACKUP"
 for d in \
     "$HOME/.config/aerospace" \
     "$HOME/.config/sketchybar" \
-    "$HOME/.config/borders" \
-    "$HOME/.config/workspace-switcher"; do
+    "$HOME/.config/borders"; do
     if [ -e "$d" ]; then
-        if [ -L "$d" ]; then rm "$d"; else mv "$d" "$BACKUP/"; fi
+        mv "$d" "$BACKUP/"
     fi
 done
 ok "configs removed"
