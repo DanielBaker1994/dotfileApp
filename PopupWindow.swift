@@ -4060,6 +4060,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var drawerInsetNow: CGFloat = 0
     // track window height during resize so we know if it shrank/grew
     private var lastResizeHeight: CGFloat?
+    // current drawer heights (may differ from config during resize)
+    private var currentTerminalHeight: CGFloat = 0
+    private var currentBrowserHeight: CGFloat = 0
+    private let minTerminalH: CGFloat = 80
+    private let minBrowserH: CGFloat = 100
     private var editorScroll: NSScrollView?
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
@@ -4597,6 +4602,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 term.nativeForegroundColor = config.colors.text
                 backdrop.addSubview(term)
                 terminalDrawer = term
+                currentTerminalHeight = config.terminalHeight
                 // focus indicator: bright 4-sided border around the terminal
                 let tfb = NSView(frame: term.frame)
                 tfb.autoresizingMask = [.width]
@@ -5937,20 +5943,34 @@ private func scrollSelectionIntoView() {
             let delta = newH - prevH
             if delta < 0 {
                 // shrinking: take space from drawers first
-                let minTerminalH: CGFloat = 80
-                let minBrowserH: CGFloat = 100
-                if terminalShown && config.terminalHeight > minTerminalH {
-                    let take = min(-delta, config.terminalHeight - minTerminalH)
-                    config.terminalHeight -= take
+                if terminalShown && currentTerminalHeight > minTerminalH {
+                    let take = min(-delta, currentTerminalHeight - minTerminalH)
+                    currentTerminalHeight -= take
                 }
-                if fileBrowserShown && config.fileBrowserHeight > minBrowserH {
-                    let remaining = delta + (terminalShown ? 0 : -(config.terminalHeight - minTerminalH))
-                    if remaining < 0 {
-                        let take = min(-remaining, config.fileBrowserHeight - minBrowserH)
-                        config.fileBrowserHeight -= take
+                let used = min(-delta, terminalShown ? currentTerminalHeight - minTerminalH + (currentTerminalHeight > minTerminalH ? 0 : 0) : 0)
+                let remaining = -delta - used
+                if remaining > 0 && fileBrowserShown && currentBrowserHeight > minBrowserH {
+                    let take = min(remaining, currentBrowserHeight - minBrowserH)
+                    currentBrowserHeight -= take
+                }
+            } else if delta > 0 {
+                // growing: restore drawers toward config height
+                if terminalShown && currentTerminalHeight < config.terminalHeight {
+                    let give = min(delta, config.terminalHeight - currentTerminalHeight)
+                    currentTerminalHeight += give
+                }
+                if fileBrowserShown && currentBrowserHeight < config.fileBrowserHeight {
+                    let remaining = delta - (terminalShown ? min(delta, config.terminalHeight - currentTerminalHeight) : 0)
+                    if remaining > 0 {
+                        let give = min(remaining, config.fileBrowserHeight - currentBrowserHeight)
+                        currentBrowserHeight += give
                     }
                 }
             }
+        } else {
+            // first resize event: initialize from config
+            currentTerminalHeight = config.terminalHeight
+            currentBrowserHeight = config.fileBrowserHeight
         }
         lastResizeHeight = newH
         rowView.sizingRowCount = rows.count
@@ -6130,6 +6150,7 @@ public enum ThemeRole: String, CaseIterable {
         fileBrowserDrawerMode = drawer
         guard let backdrop = panel.contentView else { return }
         fb.autoresizingMask = [.width, .height]
+        currentBrowserHeight = config.fileBrowserHeight
         // right-click "Open in Notes" -> host hook
         fb.onOpenInNotes = { [weak self] p in
             self?.onFileBrowserOpenInNotes?(p)
@@ -6167,6 +6188,9 @@ public enum ThemeRole: String, CaseIterable {
         guard fileBrowser != nil, fileBrowserDrawerMode else { return }
         fileBrowserShown.toggle()
         fileBrowser?.isHidden = !fileBrowserShown
+        if fileBrowserShown {
+            currentBrowserHeight = config.fileBrowserHeight
+        }
         syncDrawerLayout()
         if fileBrowserShown, let lp = fileBrowser?.listView {
             panel.makeFirstResponder(lp)
@@ -6182,8 +6206,8 @@ public enum ThemeRole: String, CaseIterable {
     // window grows so the editor never overlaps them. The total drawer height
     // is folded into the window frame and the panes laid out accordingly.
     private func drawerInsetTotal() -> CGFloat {
-        (terminalShown ? config.terminalHeight : 0)
-            + (fileBrowserShown ? config.fileBrowserHeight : 0)
+        (terminalShown ? currentTerminalHeight : 0)
+            + (fileBrowserShown ? currentBrowserHeight : 0)
     }
     private func syncDrawerLayout() {
         let want = drawerInsetTotal()
@@ -6204,10 +6228,10 @@ public enum ThemeRole: String, CaseIterable {
         guard let fb = fileBrowser, let backdrop = panel.contentView else { return }
         if fileBrowserDrawerMode {
             let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight : 0
-            let h = fileBrowserShown ? config.fileBrowserHeight : 0
+            let h = fileBrowserShown ? currentBrowserHeight : 0
             // stack the browser ABOVE the terminal drawer (terminal keeps the
             // very bottom), so both can be visible at once
-            let termH = terminalShown ? config.terminalHeight : 0
+            let termH = terminalShown ? currentTerminalHeight : 0
             let y = max(0, backdrop.bounds.height - meter - termH - h)
             fb.frame = NSRect(x: terminalInset, y: y,
                               width: max(0, backdrop.bounds.width - 2 * terminalInset),
@@ -6394,7 +6418,7 @@ public enum ThemeRole: String, CaseIterable {
     // proportional height recomputed from the window height caused the toggle
     // to ratchet the size smaller each time).
     private func terminalDrawerHeight() -> CGFloat {
-        terminalShown ? config.terminalHeight : 0
+        terminalShown ? currentTerminalHeight : 0
     }
 
     private func layoutTerminal() {
