@@ -797,7 +797,7 @@ final class PopupBackdrop: NSView {
     private var dragEdges: Edge = []
     private var draggingWindow = false
 
-    private let minW: CGFloat = 160
+    private let minW: CGFloat = 120
     private let minH: CGFloat = 100
     private let hit: CGFloat = 8  // resize hit zone around edges/corners
 
@@ -817,6 +817,26 @@ final class PopupBackdrop: NSView {
         if p.y <= hit { e.insert(.top) }
         if p.y >= bounds.height - hit { e.insert(.bottom) }
         return e
+    }
+
+    private func cursor(for e: Edge) -> NSCursor {
+        switch e {
+        case [.left, .right]: return .resizeLeftRight
+        case [.top, .bottom]: return .resizeUpDown
+        case [.top, .left], [.bottom, .right]: return .resizeLeftRight  // diagonal-ish
+        case [.top, .right], [.bottom, .left]: return .resizeLeftRight
+        default: return .arrow
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingArea { removeTrackingArea(t) }
+        let ta = NSTrackingArea(rect: bounds,
+                                options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
+                                owner: self, userInfo: nil)
+        addTrackingArea(ta)
+        trackingArea = ta
     }
 
     private func cursor(for e: Edge) -> NSCursor {
@@ -3294,7 +3314,7 @@ var meterEnabled = false {
     private var headerSegRects: [(Int, NSRect)] = []
     private var trackingArea: NSTrackingArea?
 
-    private let minW: CGFloat = 160
+    private let minW: CGFloat = 120
     private let minH: CGFloat = 100
     private let hit: CGFloat = 8
 
@@ -5065,7 +5085,7 @@ scroll.documentView = rowView
         if resizeDragEdges.contains(.left) { w -= dx; f.origin.x += dx }
         if resizeDragEdges.contains(.top) { h += dy; f.origin.y -= dy }
         if resizeDragEdges.contains(.bottom) { h -= dy }
-        w = max(240, w)
+        w = max(120, w)
         h = max(140, h)
         f.size.width = w
         f.size.height = h
@@ -5865,7 +5885,7 @@ private func scrollSelectionIntoView() {
                 switch code {
                 case 4:  // H — shrink width
                     var f = panel.frame
-                    f.size.width = max(240, f.width - step)
+                    f.size.width = max(120, f.width - step)
                     panel.setFrame(clampToScreen(f), display: true)
                     return true
                 case 37: // L — grow width
@@ -6088,7 +6108,7 @@ private func scrollSelectionIntoView() {
     private func resizeBy(_ delta: CGFloat) {
         rowView.stretchToFill = true
         var f = panel.frame
-        f.size.width = max(240, f.width + delta)
+        f.size.width = max(120, f.width + delta)
         f.size.height = max(140, f.height + delta)
         panel.setFrame(clampToScreen(f), display: true)
         // scale the UI proportionally with the resize: zoom tracks the
@@ -6724,7 +6744,7 @@ public enum ThemeRole: String, CaseIterable {
         guard !config.editMode, let backdrop = panel.contentView else { return }
         let w = backdrop.bounds.width
         let inset = config.padding + 10
-        let fieldW = max(120, (w - 2 * inset) * config.searchWidthFraction)
+        let fieldW = max(50, (w - 2 * inset) * config.searchWidthFraction)
         let x = inset
         let headerOffset = (config.dragHeader) ? config.headerHeight * zoom + 4 : 0
         let y = headerOffset + config.padding + 2
