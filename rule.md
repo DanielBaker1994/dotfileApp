@@ -44,5 +44,16 @@ When working on this repo, ALWAYS verify you are in the real repo directory
   MUST NOT be touched by any git operation. Changes belong ONLY in the real
   repo at `/Users/danielbaker/.config/dotfileApp`.
 - Running `./INSTALL.sh` or any install script must NEVER make git changes
-  in a different repo or workspace. The install script is for installing the
-  app — not for modifying git history anywhere.
+in a different repo or workspace. The install script is for installing the
+app — not for modifying git history anywhere.
+
+## 5. NEVER rebuild SwiftTerm (Vendor/SwiftTerm/) unless explicitly told to
+
+SwiftTerm in `Vendor/SwiftTerm/` is a third-party embedded terminal library.
+It is precompiled once into a static lib (`.build/SwiftTerm/libSwiftTerm.a`).
+
+- NEVER modify, edit, or refactor any code under `Vendor/SwiftTerm/`.
+- NEVER rebuild it (`build_term_lib`) unless the user explicitly requests it.
+- The build script auto-rebuilds it only when a SwiftTerm source file changes —
+  do not touch those files, and it won't trigger.
+- If SwiftTerm is missing or broken, ask the user before rebuilding.

@@ -28,9 +28,9 @@ func clampToScreen(_ f: NSRect) -> NSRect {
 // the popup editor. Text without escapes gets the base style; unhandled codes
 // are dropped. fg: 30-37 / 90-97 basic + bright, 39 reset; 1 bold, 22 normal.
 // editor font for the given family + zoom (13pt base, scales with zoom)
-func editorFont(_ name: String?, _ zoom: CGFloat) -> NSFont {
-    name.flatMap { NSFont(name: $0, size: 13 * zoom) }
-        ?? NSFont.monospacedSystemFont(ofSize: 13 * zoom, weight: .regular)
+func editorFont(_ name: String?, _ zoom: CGFloat, size: CGFloat = 13) -> NSFont {
+    name.flatMap { NSFont(name: $0, size: size * zoom) }
+        ?? NSFont.monospacedSystemFont(ofSize: size * zoom, weight: .regular)
 }
 
 func parseANSI(_ s: String, baseFont: NSFont, defaultColor: NSColor) -> NSAttributedString {
@@ -460,6 +460,9 @@ public struct PopupConfig {
     // when a file-browser drawer is installed, open it (and close the
     // terminal) from the start instead of the terminal being the default
     public var fileBrowserDefault = false
+    // the terminal drawer is open at launch (when no file browser takes the
+    // default slot); false = start with the drawer closed
+    public var terminalStartsOpen = true
     // shell the terminal drawer (and the host's command runner) spawn
     public var shell = "/opt/homebrew/bin/bash"
     // font for the terminal drawer (a Nerd Font so glyphs/powerline render)
@@ -468,11 +471,20 @@ public struct PopupConfig {
     // rc files (~/.bash_profile + ~/.bashrc), so aliases/functions/zoxide etc.
     // defined there work in the embedded terminal
     public var shellArgs: [String] = ["--login", "-i"]
-    // optional override: use a different executable than the shell (e.g. nvim
-    // for vim mode). When set, the terminal launches this instead of shell.
-    public var terminalExecutable: String?
-    // optional args for the terminal executable (default: [])
-    public var terminalExecArgs: [String] = []
+    // point size of the terminal drawer font (commands.conf `terminal-font-size`)
+    public var terminalFontSize: CGFloat = 13
+    // point size of the note editor font (commands.conf `font-size`)
+    public var editorFontSize: CGFloat = 13
+    // vim mode (edit windows): a long-lived editor process (nvim) runs in a
+    // chrome-less terminal pane that takes the text editor's place. Tabs,
+    // drawers and chrome keep working; the host swaps files over the RPC
+    // socket instead of quitting/relaunching. nil = plain text editor.
+    public var vimEditorExecutable: String?
+    // launch args (the host's vimLaunchArgs closure overrides these on every
+    // (re)launch so a restarted editor opens the CURRENT note)
+    public var vimEditorArgs: [String] = []
+    // nvim --listen socket path (RPC for tab switches / saves / queries)
+    public var vimEditorSocket: String?
     // show the standard window close button (red traffic light). By default
     // it's hidden on titled windows (Esc closes instead); set true to show it
     // and wire it to onCloseWindow.
@@ -3950,9 +3962,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // host hook fired when the window hides (e.g. stop a voice recording
     // session owned by the host before the window disappears)
     public var onHideVoiceStop: (() -> Void)?
-    // fired when the terminal process exits (e.g. Vim quits). The exit code
-    // is passed along; hosts use this to close the window or relaunch.
-    public var onTerminalExit: ((Int32?) -> Void)?
+    // vim mode: fired (main thread) when the embedded editor process exits
+    // (e.g. `:q`). The pane relaunches itself on the current note right
+    // after, so the editor is never left dead — hosts only log/observe.
+    public var onVimExit: (() -> Void)?
+    // vim mode: args for every (re)launch of the editor — hosts return the
+    // CURRENT note so `:q` + relaunch reopens what the tab strip shows.
+    // nil = config.vimEditorArgs.
+    public var vimLaunchArgs: (() -> [String])?
+    // Cmd+Opt+= / Cmd+Opt+- : font size step (+1 / -1); the host persists it
+    public var onFontSizeStep: ((Int) -> Void)?
     // host hook called when the window close button (X) is clicked. If the
     // hook returns true, it handled the close (e.g. sent :wq to Vim); if
     // false or nil, the default close behavior applies.
@@ -4147,9 +4166,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var windowCloseTarget: WindowCloseTarget?
     // retained restarter so we can wire onTerminated after super.init
     private var terminalRestarter: TerminalAutoRestart?
-    // whether a custom terminal executable is set (captured before super.init,
-    // used to skip auto-restart and fire onTerminalExit instead)
-    private var isCustomExecForExit = false
+    // vim mode: the chrome-less editor terminal that replaces the text view
+    private var vimView: LocalProcessTerminalView?
+    private var vimRestarter: TerminalAutoRestart?
+    // set while the window is being torn down so an exiting editor is NOT
+    // relaunched
+    private var vimShuttingDown = false
+    // false while the active tab is a read-only preview (PDF/image): the
+    // native editor shows it instead of the vim pane
+    private var vimPaneActive = true
     private var rowScroll: NSScrollView?
     private var chrome: PopupChrome?
     // transparent resize edge views that sit ON TOP of all content so drag
@@ -4357,8 +4382,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             filterBar?.zoom = zoom
             field.font = config.rowFont(config.inputFontSize * zoom)
             if let tv = editorView {
-                tv.font = editorFont(config.fontName, zoom)
+                tv.font = editorFont(config.fontName, zoom, size: config.editorFontSize)
             }
+            vimView?.font = PopupWindow.vimFont(config)
             if let chrome {
                 chrome.dragHeaderHeight = config.headerHeight * zoom
                 chrome.needsDisplay = true
@@ -4389,45 +4415,47 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             layoutEditorScroll()
             layoutTerminal()
             layoutFileBrowser()
-        } else if config.scrollableRows {
-            let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
-            let fieldFrame = NSRect(x: config.padding + 10,
-                                    y: headerOffset + config.padding + 2,
-                                    width: config.width - 2 * (config.padding + 10),
-                                    height: 24 * z)
-            field.frame = fieldFrame
-            var cb = fieldFrame.maxY + 4
-            if let bar = filterBar {
-                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                   height: config.filterBarHeight * z)
-                cb += config.filterBarHeight * z + 2
-            }
-            if let bar = tabsBar {
-                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                   height: config.tabBarHeight * z)
-                cb += config.tabBarHeight * z + 2
-            }
-            chromeBottom = cb
-            layoutScrollDocument()
         } else {
-            let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
-            let fieldFrame = NSRect(x: config.padding + 10,
-                                    y: headerOffset + config.padding + 2,
-                                    width: config.width - 2 * (config.padding + 10),
-                                    height: 24 * z)
-            field.frame = fieldFrame
-            var cb = fieldFrame.maxY + 4
-            if let bar = filterBar {
-                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                   height: config.filterBarHeight * z)
-                cb += config.filterBarHeight * z + 2
+            if config.scrollableRows {
+                let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
+                let fieldFrame = NSRect(x: config.padding + 10,
+                                        y: headerOffset + config.padding + 2,
+                                        width: config.width - 2 * (config.padding + 10),
+                                        height: 24 * z)
+                field.frame = fieldFrame
+                var cb = fieldFrame.maxY + 4
+                if let bar = filterBar {
+                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                                       height: config.filterBarHeight * z)
+                    cb += config.filterBarHeight * z + 2
+                }
+                if let bar = tabsBar {
+                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                                       height: config.tabBarHeight * z)
+                    cb += config.tabBarHeight * z + 2
+                }
+                chromeBottom = cb
+                layoutScrollDocument()
+            } else {
+                let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
+                let fieldFrame = NSRect(x: config.padding + 10,
+                                        y: headerOffset + config.padding + 2,
+                                        width: config.width - 2 * (config.padding + 10),
+                                        height: 24 * z)
+                field.frame = fieldFrame
+                var cb = fieldFrame.maxY + 4
+                if let bar = filterBar {
+                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                                       height: config.filterBarHeight * z)
+                    cb += config.filterBarHeight * z + 2
+                }
+                if let bar = tabsBar {
+                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                                       height: config.tabBarHeight * z)
+                    cb += config.tabBarHeight * z + 2
+                }
+                rowView.topInset = cb
             }
-            if let bar = tabsBar {
-                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                   height: config.tabBarHeight * z)
-                cb += config.tabBarHeight * z + 2
-            }
-            rowView.topInset = cb
         }
         relayoutTabs()
     }
@@ -4594,7 +4622,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             tv.isEditable = true
             tv.isSelectable = true
             tv.allowsUndo = true
-            tv.font = editorFont(config.fontName, zoom)
+            tv.font = editorFont(config.fontName, zoom, size: config.editorFontSize)
             tv.textColor = config.colors.text
             // Force the selection highlight colors (Ctrl+A select-all, the
             // find bar's match jump). The system default follows the OS
@@ -4636,6 +4664,26 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             efb.isHidden = true
             backdrop.addSubview(efb)
             editorFocusBorder = efb
+            // vim mode: a chrome-less terminal running the editor sits exactly
+            // over the text view (layoutEditorScroll keeps them in sync) and
+            // blends into the notepad — no border, the card color shows
+            // through. The process starts on first show, once the pane has
+            // its real size.
+            if config.vimEditorExecutable != nil {
+                let vv = LocalProcessTerminalView(frame: scroll.frame)
+                vv.font = PopupWindow.vimFont(config)
+                vv.nativeBackgroundColor = .clear
+                vv.nativeForegroundColor = config.colors.text
+                vv.wantsLayer = true
+                vv.layer?.backgroundColor = NSColor.clear.cgColor
+                let vr = TerminalAutoRestart()
+                vv.processDelegate = vr
+                vimRestarter = vr
+                // sits below the focus border so the ring stays visible
+                backdrop.addSubview(vv, positioned: .below, relativeTo: efb)
+                vimView = vv
+                scroll.isHidden = true
+            }
             if config.tabs {
                 let bar = PopupTabsBar(config: config)
                 bar.frame = NSRect(x: 0, y: config.headerHeight * zoom + 2,
@@ -4690,7 +4738,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                     width: max(0, backdrop.bounds.width - 2 * terminalInset),
                     height: config.terminalHeight))
                 term.autoresizingMask = [.width]
-                if let tf = NSFont(name: config.terminalFont, size: 13) {
+                if let tf = NSFont(name: config.terminalFont, size: config.terminalFontSize) {
                     term.font = tf
                 }
                 // softly rounded drawer corners (sits inset in the backdrop)
@@ -4718,12 +4766,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 // auto-restart: if the shell exits (user typed exit/ctrl-d)
                 // spawn it again after a beat so the drawer is never dead
                 // (capture the shell locally — no self before super.init)
-                // When a custom terminalExecutable is set (e.g. nvim for vim
-                // mode), skip auto-restart and fire onTerminalExit instead.
-                let exec = config.terminalExecutable ?? config.shell
-                let execArgs = config.terminalExecArgs.isEmpty ? config.shellArgs : config.terminalExecArgs
+                let exec = config.shell
+                let execArgs = config.shellArgs
                 let terminalDir = config.terminalDir
-                isCustomExecForExit = config.terminalExecutable != nil
                 let restarter = TerminalAutoRestart()
                 // onTerminated is wired AFTER super.init (see below) to avoid
                 // capturing self before initialization completes
@@ -4773,28 +4818,32 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 terminalMenu = tmenu
                 // safety net: poll the shell's state; restart once the old
                 // session is fully wound down (running==false && windingDown==false)
-                // Skip auto-restart for custom executables (e.g. Vim) — those
-                // are managed by the host via onTerminalExit.
-                let customExec = isCustomExecForExit  // capture before super.init
                 let cfgShell = config.shell
                 let cfgShellArgs = config.shellArgs
                 let cfgTerminalDir = config.terminalDir
                 let poll = Timer(timeInterval: 1.5, repeats: true) { [weak term] _ in
                     guard let term, let p = term.process else { return }
-                    if !p.running, !p.windingDown, !customExec {
+                    if !p.running, !p.windingDown {
                         term.startProcess(executable: cfgShell, args: cfgShellArgs,
                                           currentDirectory: cfgTerminalDir)
                     }
                 }
                 RunLoop.main.add(poll, forMode: .common)
                 terminalRestartTimer = poll
+                if !config.terminalStartsOpen {
+                    // session still spawns (ready on toggle), drawer closed
+                    terminalShown = false
+                    drawerInsetNow = 0
+                }
             }
-        } else {
-            // search list: chrome (drag header, search field, filter bar, tab
-            // strip) fixed on top; rows below — directly (default) or in a
-            // scroll view. Non-scroll keeps chrome as rowView subviews so
-            // clicks reach them; scroll puts them on the backdrop above the
-            // scroll view.
+        }
+
+        // search list: chrome (drag header, search field, filter bar, tab
+        // strip) fixed on top; rows below — directly (default) or in a
+        // scroll view. Non-scroll keeps chrome as rowView subviews so
+        // clicks reach them; scroll puts them on the backdrop above the
+        // scroll view.
+        if !config.editMode {
             let fieldH: CGFloat = 24 * zoom
             let headerOffset = (config.editMode || config.dragHeader)
                 ? config.headerHeight * zoom + 4 : 0
@@ -4910,17 +4959,32 @@ scroll.documentView = rowView
 
         super.init()
 
-        // Wire the terminal restarter (self-safe now): fire onTerminalExit for
-        // custom executables (Vim), auto-restart for the shell.
+        // Wire the terminal restarter (self-safe now): auto-restart the shell.
         if let restarter = terminalRestarter {
             let terminalDir = config.terminalDir
             restarter.onTerminated = { [weak self] in
                 guard let self else { return }
-                if isCustomExecForExit {
-                    onTerminalExit?(nil)
-                } else {
-                    terminalDrawer?.startProcess(executable: config.shell, args: config.shellArgs,
-                                                 currentDirectory: terminalDir)
+                terminalDrawer?.startProcess(executable: config.shell, args: config.shellArgs,
+                                             currentDirectory: terminalDir)
+            }
+        }
+        // vim pane: an exiting editor (`:q`) fires onVimExit and is relaunched
+        // on the current note — the pane is never left dead. The delegate
+        // callback may arrive off the main thread.
+        if let vr = vimRestarter {
+            vr.onTerminated = { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, !self.vimShuttingDown else { return }
+                    self.onVimExit?()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                        guard let self, !self.vimShuttingDown else { return }
+                        self.startVimIfNeeded()
+                        if self.isShown, self.vimPaneActive, let vv = self.vimView {
+                            self.panel.makeFirstResponder(vv)
+                            self.focusedPane = .editor
+                            self.updateFocusIndicator()
+                        }
+                    }
                 }
             }
         }
@@ -5194,8 +5258,10 @@ scroll.documentView = rowView
             isShown = true
             installMonitors()
             focusRetries = 0
-            // initial focus: editor gets the highlight by default
-            if let ed = editorView {
+            // vim pane: start the editor NOW that it has its final size
+            startVimIfNeeded()
+            // initial focus: editor (or the vim pane) gets the highlight
+            if let ed = primaryEditor {
                 panel.makeFirstResponder(ed)
                 focusedPane = .editor
             }
@@ -5268,6 +5334,8 @@ scroll.documentView = rowView
         focusRetries = 0
         relayoutTabs()
         layoutEditorScroll()
+        // an editor that died while hidden comes back on the current note
+        startVimIfNeeded()
         panel.makeKeyAndOrderFront(nil)
         takeFocus()
     }
@@ -5468,7 +5536,7 @@ private func scrollSelectionIntoView() {
     // (attachments keep their own run) and fix future typing attributes.
     private func restyleEditor() {
         guard let tv = editorView, let storage = tv.textStorage else { return }
-        let font = editorFont(config.fontName, zoom)
+        let font = editorFont(config.fontName, zoom, size: config.editorFontSize)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font, .foregroundColor: config.colors.text,
         ]
@@ -5589,7 +5657,7 @@ private func scrollSelectionIntoView() {
     public func setEditorFilePreview(_ path: String) -> Bool {
         guard let tv = editorView else { return false }
         let plainAttrs: [NSAttributedString.Key: Any] = [
-            .font: editorFont(config.fontName, zoom),
+            .font: editorFont(config.fontName, zoom, size: config.editorFontSize),
             .foregroundColor: config.colors.text,
         ]
         let name = URL(fileURLWithPath: path).lastPathComponent
@@ -5689,7 +5757,7 @@ private func scrollSelectionIntoView() {
     // ANSI SGR-escaped text (e.g. the doctor's colored PASS/FAIL/WARN output)
     // rendered as an attributed string on the editor's theme + font.
     public func setEditorANSI(_ s: String) {
-        let font = editorFont(config.fontName, config.zoom)
+        let font = editorFont(config.fontName, config.zoom, size: config.editorFontSize)
         setEditorAttributedText(parseANSI(s, baseFont: font, defaultColor: config.colors.text))
     }
 
@@ -5697,7 +5765,7 @@ private func scrollSelectionIntoView() {
     // token colors using the editor's own font. Fixes the typing attributes so
     // edits after highlighting keep the theme instead of snapping to black.
     public func setEditorSyntaxHighlighted(_ text: String) {
-        let font = editorFont(config.fontName, zoom)
+        let font = editorFont(config.fontName, zoom, size: config.editorFontSize)
         setEditorAttributedText(popupHighlightSyntax(text, font: font,
                                                      colors: config.colors))
         if let tv = editorView {
@@ -5719,10 +5787,15 @@ private func scrollSelectionIntoView() {
             // so we only activate when the key attempt actually failed.
             NSApp.activate(ignoringOtherApps: true)
         }
-        if let tv = editorView {
-            panel.makeFirstResponder(tv)
-        } else {
-            panel.makeFirstResponder(field)
+        // keep focus on whichever pane already owns it (a drawer the user
+        // moved to) — only claim it when nothing inside this window has it
+        if !paneHoldsFocus() {
+            if let ed = primaryEditor {
+                panel.makeFirstResponder(ed)
+                focusedPane = .editor
+            } else {
+                panel.makeFirstResponder(field)
+            }
         }
         if !panel.isKeyWindow, focusRetries < 10 {
             focusRetries += 1
@@ -5753,13 +5826,16 @@ private func scrollSelectionIntoView() {
                    self.terminalFocused(term) {
                     return
                 }
-                if let tv = self.editorView {
+                if self.paneHoldsFocus() { return }
+                if let tv = self.primaryEditor {
                     self.panel.makeFirstResponder(tv)
                 } else {
                     self.panel.makeFirstResponder(self.field)
                 }
             }
         }
+        // (the vim pane is routed inside handleKey: everything but the app's
+        // chrome/edit shortcuts passes straight through to the editor)
         if let m = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: {
             [weak self] event in
             // local monitors see EVERY key event in the app — only act when
@@ -5820,7 +5896,9 @@ private func scrollSelectionIntoView() {
     // after Ctrl+J/K cycles.
     private func updateFocusedPane() {
         let fr = panel.firstResponder
-        if let ed = editorView, fr === ed || (fr as? NSTextView)?.isDescendant(of: ed) == true {
+        if let vv = vimView, vimPaneActive, fr === vv || (fr as? NSView)?.isDescendant(of: vv) == true {
+            focusedPane = .editor
+        } else if let ed = editorView, fr === ed || (fr as? NSTextView)?.isDescendant(of: ed) == true {
             focusedPane = .editor
         } else if fileBrowserShown, let fb = fileBrowser {
             let lv = fb.listView
@@ -5870,6 +5948,15 @@ private func scrollSelectionIntoView() {
         // Cmd + plus/minus (main "="/"+" and "-", plus the keypad): grow or
         // shrink the window; rows stretch to fill from then on
         let cmd = mods.contains(.command)
+        // Cmd+Opt+= / Cmd+Opt+- : editor + terminal font size step
+        if cmd, mods.contains(.option), panel.attachedSheet == nil,
+           let step = onFontSizeStep {
+            switch code {
+            case 24, 69: step(1); return true
+            case 27, 78: step(-1); return true
+            default: break
+            }
+        }
         // resize shortcuts never fire while a sheet's text field is up —
         // Cmd+= / Cmd+- are typing/editing context, not window chrome
         if cmd, panel.attachedSheet == nil {
@@ -5920,7 +6007,7 @@ private func scrollSelectionIntoView() {
             if ctrl && !mods.contains(.shift) && (code == 38 || code == 40), config.editMode {
                 var panes: [NSResponder] = []
                 var paneTypes: [FocusedPane] = []
-                if let ed = editorView { panes.append(ed); paneTypes.append(.editor) }
+                if let ed = primaryEditor { panes.append(ed); paneTypes.append(.editor) }
                 if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView); paneTypes.append(.browser) }
                 if terminalShown, let term = terminalDrawer { panes.append(term); paneTypes.append(.terminal) }
                 if panes.count > 1 {
@@ -5995,6 +6082,38 @@ private func scrollSelectionIntoView() {
                     updateFocusIndicator()
                     return true
                 default: break
+                }
+            }
+            // vim pane: every Cmd/Ctrl key belongs to the editor except the
+            // app's edit shortcuts (rule 1), mapped onto vim actions.
+            // Ctrl+C / Cmd+C only copy while a Visual selection exists —
+            // otherwise Ctrl+C stays vim's own (cancel) key.
+            if let vv = focusedVim() {
+                switch code {
+                case 8 where cmd || ctrl:           // C — copy
+                    if vimCopySelection(cut: false) { return true }
+                    if cmd, vv.selectedRange().length > 0 { vv.copy(self); return true }
+                    return cmd
+                case 9 where cmd || ctrl:           // V — paste
+                    vimPaste(); return true
+                case 7 where cmd:                   // X — cut the selection
+                    _ = vimCopySelection(cut: true); return true
+                case 0 where cmd:                   // A — select all
+                    vimRemote("<C-\\><C-N>ggVG"); return true
+                case 6 where cmd:                   // Z — undo
+                    vimRemote("<C-\\><C-N>u"); return true
+                case 1 where cmd:                   // S — save
+                    vimCommand("silent! wall")
+                    onEditorCommit?(currentEditorText)
+                    return true
+                case 3 where cmd:                   // F — vim search
+                    vimRemote("<C-\\><C-N>/"); return true
+                case 13 where cmd:                  // W — close the window
+                    handleEscape(); return true
+                case 31 where cmd:                  // O — open file at path
+                    onOpenPathPrompt?(); return true
+                default:
+                    return false                    // Ctrl+* etc. -> vim
                 }
             }
             if let term = focusedTerm() {
@@ -6110,6 +6229,17 @@ private func scrollSelectionIntoView() {
             if let term = terminalDrawer, terminalShown, terminalFocused(term) {
                 // the embedded terminal has keyboard focus: let SwiftTerm see
                 // EVERYTHING (including Esc — the shell's, not the window's)
+                return false
+            }
+            if let vv = focusedVim() {
+                // the vim pane owns Esc (normal mode) and every plain key.
+                // Esc is written to the pty directly: a stray modifier flag
+                // (e.g. .function left over from an arrow key event) makes
+                // the terminal view drop it, stranding vim in Insert mode.
+                if code == 53, mods.intersection([.command, .control, .option]).isEmpty {
+                    vv.send(txt: "\u{1b}")
+                    return true
+                }
                 return false
             }
             if findBarShown {
@@ -6384,37 +6514,264 @@ private func scrollSelectionIntoView() {
         if terminalShown {
             panel.makeFirstResponder(drawer)
             focusedPane = .terminal
-        } else if let ed = editorView {
+        } else if let ed = primaryEditor {
             panel.makeFirstResponder(ed)
             focusedPane = .editor
         }
         updateFocusIndicator()
     }
 
-    // Send raw text to the terminal's stdin (e.g. ":wq\r" to save and quit Vim).
-    // Returns true if the terminal is available and the text was sent.
-    public func sendToTerminal(_ text: String) -> Bool {
-        guard let drawer = terminalDrawer, terminalShown,
-              let process = drawer.process, process.running else { return false }
-        drawer.send(txt: text)
+    // MARK: Vim pane
+
+    // the pane that owns "editing" right now: the vim terminal while it is
+    // active, else the native text view
+    private var primaryEditor: NSView? {
+        if let vv = vimView, vimPaneActive { return vv }
+        return editorView
+    }
+
+    // the vim pane, but only while it is active AND holds keyboard focus
+    private func focusedVim() -> LocalProcessTerminalView? {
+        guard let vv = vimView, vimPaneActive else { return nil }
+        let fr = panel.firstResponder
+        if fr === vv { return vv }
+        if let v = fr as? NSView, v.isDescendant(of: vv) { return vv }
+        return nil
+    }
+
+    // does a real pane (editor / vim / browser / terminal / find bar) hold
+    // focus? takeFocus leaves such a choice alone instead of stealing it
+    private func paneHoldsFocus() -> Bool {
+        guard let v = panel.firstResponder as? NSView else { return false }
+        if let vv = vimView, vimPaneActive, v === vv || v.isDescendant(of: vv) { return true }
+        if let ed = editorView, !(editorScroll?.isHidden ?? true),
+           v === ed || v.isDescendant(of: ed) { return true }
+        if let term = terminalDrawer, terminalShown, v === term || v.isDescendant(of: term) { return true }
+        if let fb = fileBrowser, fileBrowserShown, v.isDescendant(of: fb) { return true }
+        if let ff = findField, !ff.isHidden, v === ff || ff.currentEditor() === v { return true }
+        return false
+    }
+
+    // monospace font for the vim pane: the window font when it is fixed
+    // pitch (a proportional font would garble the terminal grid), else the
+    // terminal font, else the system mono
+    static func vimFont(_ c: PopupConfig) -> NSFont {
+        let size = c.editorFontSize * c.zoom
+        if let n = c.fontName, let f = NSFont(name: n, size: size), f.isFixedPitch { return f }
+        if let f = NSFont(name: c.terminalFont, size: size) { return f }
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    // Environment for the editor process. The terminal's default env has no
+    // PATH, so nvim could not find pbcopy/pbpaste — every yank/delete with
+    // clipboard=unnamedplus raised a blocking "Press ENTER" error. Inherit
+    // the app's env, guarantee the system + Homebrew dirs, and advertise a
+    // truecolor UTF-8 terminal.
+    static func vimEnvironment() -> [String] {
+        var env = ProcessInfo.processInfo.environment
+        let need = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+                    "/usr/sbin", "/sbin"]
+        var path = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        for d in need where !path.contains(d) { path.append(d) }
+        env["PATH"] = path.joined(separator: ":")
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
+        if (env["LANG"] ?? "").isEmpty { env["LANG"] = "en_US.UTF-8" }
+        // never inherit a parent nvim's server address (would redirect RPC)
+        env.removeValue(forKey: "NVIM")
+        env.removeValue(forKey: "NVIM_LISTEN_ADDRESS")
+        return env.map { "\($0.key)=\($0.value)" }
+    }
+
+    // whether this window edits through the embedded vim pane
+    public var isVimEditor: Bool { vimView != nil }
+
+    // PID-free liveness check of the editor process
+    public var vimRunning: Bool { vimView?.process?.running ?? false }
+
+    // Show the vim pane (text notes) or the native read-only preview
+    // (PDF/image tabs, which a terminal editor can't display).
+    public func setVimPaneActive(_ active: Bool) {
+        guard let vv = vimView else { return }
+        vimPaneActive = active
+        vv.isHidden = !active
+        editorScroll?.isHidden = active
+        if isShown, panel.firstResponder === vv || !active {
+            if let ed = primaryEditor { panel.makeFirstResponder(ed) }
+        }
+        updateFocusedPane()
+    }
+
+    // Start the editor unless it is already running. Stale sockets from a
+    // previous (crashed) editor are removed first so --listen can bind.
+    func startVimIfNeeded() {
+        guard let vv = vimView, let exec = config.vimEditorExecutable,
+              !vimShuttingDown else { return }
+        if let p = vv.process, p.running { return }
+        if let sock = config.vimEditorSocket {
+            try? FileManager.default.removeItem(atPath: sock)
+            try? FileManager.default.createDirectory(
+                atPath: (sock as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true)
+        }
+        let args = vimLaunchArgs?() ?? config.vimEditorArgs
+        vv.startProcess(executable: exec, args: args,
+                        environment: PopupWindow.vimEnvironment(),
+                        currentDirectory: config.terminalDir)
+    }
+
+    // Stop the editor for good (window teardown): save every buffer, quit,
+    // and never relaunch.
+    public func shutdownVim() {
+        guard vimView != nil else { return }
+        vimShuttingDown = true
+        if vimEval("execute('silent! wall')") == nil {
+            vimRemote("<C-\\><C-N>:silent! wall<CR>")
+        }
+        vimRemote("<C-\\><C-N>:qa!<CR>")
+    }
+
+    // Run `nvim --server <socket> <flag> <arg>` (short timeout). Returns the
+    // client's stdout, or nil when the socket/editor is unavailable.
+    @discardableResult
+    private func vimClient(_ flag: String, _ arg: String) -> String? {
+        guard let exec = config.vimEditorExecutable,
+              let sock = config.vimEditorSocket,
+              FileManager.default.fileExists(atPath: sock),
+              vimRunning else { return nil }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exec)
+        p.arguments = ["--headless", "--clean", "--server", sock, flag, arg]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(1.5)
+        while p.isRunning && Date() < deadline { usleep(5_000) }
+        if p.isRunning { p.terminate(); return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        guard p.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    // Send keys to the editor as if typed (vim key notation: <CR>, <Esc>…).
+    // Falls back to writing raw keystrokes to the terminal when no RPC
+    // socket is available (plain vim).
+    public func vimRemote(_ keys: String) {
+        if vimClient("--remote-send", keys) != nil { return }
+        guard let vv = vimView, vimRunning else { return }
+        let raw = keys
+            .replacingOccurrences(of: "<C-\\><C-N>", with: "\u{1c}\u{0e}")
+            .replacingOccurrences(of: "<CR>", with: "\r")
+            .replacingOccurrences(of: "<Esc>", with: "\u{1b}")
+        vv.send(txt: raw)
+    }
+
+    // Evaluate a Vimscript expression in the editor (nvim only). Returns the
+    // result as text, or nil when it could not be evaluated.
+    public func vimEval(_ expr: String) -> String? {
+        vimClient("--remote-expr", expr)
+    }
+
+    // Run an Ex command immediately (works in any mode, no keystrokes).
+    // Falls back to typed keys when RPC is unavailable.
+    public func vimCommand(_ ex: String) {
+        let quoted = "'" + ex.replacingOccurrences(of: "'", with: "''") + "'"
+        if vimEval("execute(\(quoted))") != nil { return }
+        vimRemote("<C-\\><C-N>:\(ex)<CR>")
+    }
+
+    // Vim single-quoted string literal for arbitrary text
+    public static func vimString(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+    }
+
+    // Save the editor's buffers to disk (tab switch / hide / host writes).
+    public func vimFlush() {
+        vimCommand("silent! wall")
+    }
+
+    // Switch the editor to `path` (saving first). Leaves insert mode so the
+    // new note opens in Normal mode like a fresh editor.
+    public func vimOpen(_ path: String) {
+        let lit = PopupWindow.vimString(path)
+        // redraw! clears the previous buffer's leftover message line
+        let ex = "silent! wall | stopinsert | execute 'edit ' .. fnameescape(\(lit)) | redraw!"
+        if vimEval("execute(\(PopupWindow.vimString(ex)))") != nil { return }
+        // no RPC: typed fallback (path escaped for the command line)
+        let esc = path.replacingOccurrences(of: " ", with: "\\ ")
+        vimRemote("<C-\\><C-N>:silent! wall | edit \(esc)<CR>")
+    }
+
+    // Append lines to the end of `path`'s buffer and save (voice dictation):
+    // edits happen IN the editor, so nothing races the user's typing.
+    @discardableResult
+    public func vimAppend(_ text: String, to path: String) -> Bool {
+        let lines = text.components(separatedBy: "\n").map { PopupWindow.vimString($0) }
+        let list = "[" + lines.joined(separator: ",") + "]"
+        let buf = "bufnr(\(PopupWindow.vimString(path)))"
+        let expr = "\(buf) > 0 ? [appendbufline(\(buf), '$', \(list)), execute('silent! wall')][0] : -1"
+        guard let r = vimEval(expr) else { return false }
+        return r.trimmingCharacters(in: .whitespacesAndNewlines) == "0"
+    }
+
+    // Visual-mode copy/cut into the system clipboard. Returns false when no
+    // Visual selection exists (nothing to copy).
+    private func vimCopySelection(cut: Bool) -> Bool {
+        guard let m = vimEval("mode()")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              ["v", "V", "\u{16}"].contains(m) else { return false }
+        vimRemote(cut ? "\"+d" : "\"+y")
         return true
     }
 
-    // Whether this window is running a custom terminal executable (e.g. Vim).
-    public var isCustomTerminal: Bool { config.terminalExecutable != nil }
+    // right-click menu for the vim pane (the host builds it: it knows the
+    // current note path for Copy File Path / Reveal in Finder)
+    public var vimMenu: NSMenu? {
+        get { vimView?.menu }
+        set { vimView?.menu = newValue }
+    }
 
-    // Relaunch the terminal process with the current config executable/args.
-    // Used when switching notes in vim mode — the Vim process exited, and we
-    // need to start a fresh one with a different file argument.
-    public func relaunchTerminal() {
-        guard let drawer = terminalDrawer else { return }
-        let exec = config.terminalExecutable ?? config.shell
-        let args = config.terminalExecArgs.isEmpty ? config.shellArgs : config.terminalExecArgs
-        drawer.startProcess(executable: exec, args: args,
-                            currentDirectory: config.terminalDir)
-        if terminalShown {
-            panel.makeFirstResponder(drawer)
+    // right-click Copy: the Visual selection, else the terminal selection
+    public func vimCopy() {
+        if vimCopySelection(cut: false) { return }
+        if let vv = vimView, vv.selectedRange().length > 0 { vv.copy(self) }
+    }
+
+    // Paste the clipboard into the editor through nvim's own paste API
+    // (mode-correct: inserts in Insert mode, puts in Normal, types into the
+    // command line). NOT SwiftTerm's paste(): that leaves the view's text
+    // input state such that every later Esc is swallowed — vim would be
+    // stuck in Insert mode after the first Cmd+V.
+    public func vimPaste() {
+        guard let vv = vimView,
+              let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty else { return }
+        let lines = text.components(separatedBy: "\n")
+            .map { PopupWindow.vimString($0.replacingOccurrences(of: "\r", with: "")) }
+        let expr = "nvim_paste(join([\(lines.joined(separator: ","))], \"\\n\"), v:true, -1)"
+        if vimEval(expr) != nil { return }
+        // no RPC (plain vim): bracketed paste written straight to the pty
+        vv.send(txt: "\u{1b}[200~" + text + "\u{1b}[201~")
+    }
+
+    // Live font change (Font menu): editor text view, terminal drawer and
+    // vim pane. nil leaves that part unchanged.
+    public func applyFonts(editor: String?? = nil, editorSize: CGFloat? = nil,
+                           terminal: String? = nil, terminalSize: CGFloat? = nil) {
+        if let e = editor { config.fontName = e }
+        if let s = editorSize { config.editorFontSize = s }
+        if let t = terminal { config.terminalFont = t }
+        if let s = terminalSize { config.terminalFontSize = s }
+        if let tv = editorView {
+            tv.font = editorFont(config.fontName, zoom, size: config.editorFontSize)
         }
+        if let term = terminalDrawer,
+           let f = NSFont(name: config.terminalFont, size: config.terminalFontSize) {
+            term.font = f
+        }
+        if let vv = vimView { vv.font = PopupWindow.vimFont(config) }
+        layoutForZoom()
     }
 
     // themed color roles the paint-brush picker can style. Only the per-window
@@ -6541,7 +6898,7 @@ public enum ThemeRole: String, CaseIterable {
         if fileBrowserShown, let lp = fileBrowser?.listView {
             panel.makeFirstResponder(lp)
             focusedPane = .browser
-        } else if let ed = editorView {
+        } else if let ed = primaryEditor {
             panel.makeFirstResponder(ed)
             focusedPane = .editor
         }
@@ -6803,6 +7160,10 @@ public enum ThemeRole: String, CaseIterable {
         let status = statusVisible ? statusBarHeight + 4 : 0
         scroll.frame.origin.y = topY
         scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter - drawer - status)
+        // the vim pane mirrors the text view's frame (inset like its text)
+        if let vv = vimView {
+            vv.frame = scroll.frame.insetBy(dx: 8, dy: 4)
+        }
         if statusVisible, let sb = statusBar {
             sb.frame = NSRect(x: 6, y: backdrop.bounds.height - statusBarHeight - 4 - meter,
                               width: max(0, backdrop.bounds.width - 12),

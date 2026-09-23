@@ -59,6 +59,18 @@ struct AppSettings {
     // AND rc files so aliases/functions (zoxide, etc.) work there
     var shellArgs: [String] = ["--login", "-i"]
     var terminalFont = "Hack Nerd Font"
+    var terminalFontSize: CGFloat = 13
+    // Font menu "Install font…" catalog: (label, brew cask, type). Type is
+    // one of nerd | mono | sans | serif and picks the submenu group.
+    var fontInstallCasks: [(label: String, cask: String, type: String)] = [
+        ("JetBrains Mono Nerd Font", "font-jetbrains-mono-nerd-font", "nerd"),
+        ("Fira Code Nerd Font", "font-fira-code-nerd-font", "nerd"),
+        ("Iosevka Term Nerd Font", "font-iosevka-term-nerd-font", "nerd"),
+        ("IBM Plex Mono", "font-ibm-plex-mono", "mono"),
+        ("Cascadia Code", "font-cascadia-code", "mono"),
+        ("Inter", "font-inter", "sans"),
+        ("Source Serif 4", "font-source-serif-4", "serif"),
+    ]
     var aerospaceCLI = ["/opt/homebrew/bin/aerospace",
                         "/usr/local/bin/aerospace", "aerospace"]
     var colorSources = [NSString(string: "~/.config/sketchybar/colors.sh").expandingTildeInPath,
@@ -433,20 +445,23 @@ struct CommandSpec {
                               //       (nil = on when copy-fields is set)
     let resize: Bool          // drag edges/corners to resize
     let drag: Bool            // drag the window by its header
-    let sticky: Bool          // stay visible when another app takes focus
+    var sticky: Bool          // stay visible when another app takes focus
     let searchWidth: CGFloat  // list: search bar as a fraction of window width
     let maxStretch: CGFloat   // list: cap on per-row stretch when resized big
     let height: CGFloat       // window height in points
     let maxHeight: CGFloat    // cap on the window height (0 = 60% of screen)
-    let font: String?         // font family for this window's text
+    var font: String?         // font family for this window's text
+    var fontSize: CGFloat     // note: editor point size (0 = default 13)
     let headerColor: NSColor? // drag-header tint (nil = window background)
-    let voice: Bool           // note: record + transcribe button in the header
+    var voice: Bool           // note: record + transcribe button in the header
     let terminal: Bool        // note: embedded shell drawer at the bottom
     let terminalHeight: CGFloat
     let terminalDir: String?  // note: starting directory for the embedded shell
     let terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
-    let vimMode: Bool          // note: open note in Vim in the terminal
-    let vimBin: String         // note: vim binary path or name (default "nvim")
+    var vimMode: Bool          // note: edit notes in an embedded nvim pane
+    var vimBin: String         // note: vim binary path or name (default "nvim")
+    var vimInit: String?       // note: init file for the vim pane (nil = bundled)
+    var startDrawer: String    // note: drawer open at launch: browser|terminal|none
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
     let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
 
@@ -470,6 +485,8 @@ struct CommandSpec {
          terminalDir: String? = nil,
          terminalBackground: NSColor? = nil,
          vimMode: Bool = false, vimBin: String = "nvim",
+         vimInit: String? = nil, startDrawer: String = "browser",
+         fontSize: CGFloat = 0,
          maxHeight: CGFloat = 0,
          icon: NSImage? = nil,
          saveDir: String = "/tmp/") {
@@ -517,6 +534,9 @@ struct CommandSpec {
         self.terminalBackground = terminalBackground
         self.vimMode = vimMode
         self.vimBin = vimBin
+        self.vimInit = vimInit
+        self.startDrawer = startDrawer
+        self.fontSize = fontSize
         self.icon = icon
         self.saveDir = saveDir
     }
@@ -679,6 +699,10 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         terminalBackground: hexColor(vars["terminal-background"]),
         vimMode: tri(vars["vim-mode"]) ?? false,
         vimBin: vars["vim-bin"]?.trimmingCharacters(in: .whitespaces) ?? "nvim",
+        vimInit: (vars["vim-init"] ?? "").isEmpty ? nil : vars["vim-init"],
+        startDrawer: (vars["start-drawer"] ?? "").isEmpty ? "browser"
+            : vars["start-drawer"]!.lowercased(),
+        fontSize: num(vars["font-size"]),
         maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName),
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
@@ -745,6 +769,14 @@ private func parseAppConfig(_ vars: [String: String]) {
     }
     if let v = str("shell"), !v.isEmpty { settings.shell = v }
     if let v = str("terminal-font"), !v.isEmpty { settings.terminalFont = v }
+    if let v = str("terminal-font-size"), let n = Double(v), n >= 6 { settings.terminalFontSize = CGFloat(n) }
+    // font-install-casks = Label|cask|type, Label|cask|type, …
+    let casks = csv(vars["font-install-casks"]).compactMap { entry -> (label: String, cask: String, type: String)? in
+        let parts = entry.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+        return (parts[0], parts[1], parts.count > 2 ? parts[2].lowercased() : "mono")
+    }
+    if !casks.isEmpty { settings.fontInstallCasks = casks }
     let sa = (vars["shell-args"] ?? "")
         .split(whereSeparator: { $0 == " " || $0 == "\t" })
         .map(String.init)
@@ -2017,14 +2049,19 @@ final class SwitcherController: NSObject {
                 var tv = timeval(tv_sec: Int(serverRecvTimeout), tv_usec: 0)
                 setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv,
                            socklen_t(MemoryLayout<timeval>.size))
-                var buf = [UInt8](repeating: 0, count: 128)
+                var buf = [UInt8](repeating: 0, count: 2048)
                 let n = read(cfd, &buf, buf.count)
                 close(cfd)
                 if n > 0 {
                     let msg = String(bytes: buf[..<n], encoding: .utf8) ?? ""
                     let name = msg.trimmingCharacters(in: .whitespacesAndNewlines)
                     DispatchQueue.main.async { [weak self] in
-                        if name == "notes" {
+                        if name.hasPrefix("open:") {
+                            // "open:<absolute path>" opens that file as a
+                            // notes tab (same as Finder's "Open in Notes")
+                            let path = String(name.dropFirst(5))
+                            self?.openNoteFile((path as NSString).expandingTildeInPath)
+                        } else if name == "notes" {
                             self?.showNotes()
                         } else {
                             self?.showCommand(name)
@@ -2219,6 +2256,58 @@ final class SwitcherController: NSObject {
             return
         }
         showCommand(name)
+    }
+
+    // Toggle vim mode for the notes window: updates the command spec, persists
+    // to commands.conf, and relaunches the notes window if one is open so the
+    // change takes effect immediately.
+    func toggleVimModeForNotes() {
+        guard let idx = commands.firstIndex(where: { $0.name == "notes" }) else { return }
+        let cmd = commands[idx]
+        let newValue = !cmd.vimMode
+        log("vim mode: \(newValue ? "enabled" : "disabled") for notes")
+
+        // Update the command spec in the in-memory array
+        commands[idx].vimMode = newValue
+
+        // Persist to commands.conf
+        saveConfigValue(section: "notes", key: "vim-mode", value: newValue ? "true" : "false")
+
+        // rebuild the open notes window in the new mode (the note is
+        // flushed first, so nothing typed is lost)
+        rebuildNoteWindow()
+    }
+
+    // Launch args for the notes vim pane. The bundled vim/notes-init.vim
+    // (chrome-less, autosaving, transparent) is used unless commands.conf
+    // `vim-init` names another file; with the bundled init, personal plugins
+    // are skipped so a broken plugin can never block the pane with a
+    // "Press ENTER" prompt. Theme colors are handed in as g:ws_* variables.
+    func vimArgs(for cmd: CommandSpec, socket: String, file: String?) -> [String] {
+        var a: [String] = []
+        let isNvim = (cmd.vimBin as NSString).lastPathComponent.hasPrefix("nvim")
+        if isNvim { a += ["--listen", socket] }
+        let custom = cmd.vimInit.map { ($0 as NSString).expandingTildeInPath }
+        if let custom, FileManager.default.fileExists(atPath: custom) {
+            a += ["-u", custom]
+        } else {
+            let bundled = binDir + "/vim/notes-init.vim"
+            if FileManager.default.fileExists(atPath: bundled) {
+                a += ["--noplugin", "-u", bundled]
+            }
+        }
+        func rgb(_ c: NSColor) -> String {
+            let cc = c.usingColorSpace(.sRGB) ?? c
+            return String(format: "#%02X%02X%02X",
+                          Int(round(cc.redComponent * 255)),
+                          Int(round(cc.greenComponent * 255)),
+                          Int(round(cc.blueComponent * 255)))
+        }
+        a += ["--cmd", "let g:ws_fg='\(rgb(TEXT))'",
+              "--cmd", "let g:ws_dim='\(rgb(DIM))'",
+              "--cmd", "let g:ws_sel='\(rgb(GROUP_BG))'"]
+        if let file { a.append(file) }
+        return a
     }
 
     // Esc/close on a sub-window: drop it from the registry and hand focus back
@@ -2663,12 +2752,14 @@ private func trimmed(_ s: String) -> String? {
         cfg.tabs = true
         cfg.tabsAddButton = true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
-        // the file browser is the default pane (open on launch); the terminal
-        // starts closed — the initial height folds in whichever drawer opens
-        cfg.fileBrowserDefault = true
+        // `start-drawer` (browser | terminal | none) picks the pane open on
+        // launch; the initial height folds in whichever drawer opens
+        cfg.fileBrowserDefault = cmd.startDrawer == "browser"
+        cfg.terminalStartsOpen = cmd.startDrawer == "terminal"
         cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
             + (cfg.fileBrowserDefault ? cfg.fileBrowserHeight
-                                      : (cmd.terminal ? cfg.terminalHeight : 0))
+                                      : (cmd.terminal && cfg.terminalStartsOpen
+                                         ? cmd.terminalHeight : 0))
         if cmd.maxHeight > 0 { cfg.maxHeight = cmd.maxHeight }
         cfg.terminal = cmd.terminal
         cfg.terminalHeight = cmd.terminalHeight
@@ -2678,6 +2769,8 @@ private func trimmed(_ s: String) -> String? {
         cfg.shell = settings.shell
         cfg.shellArgs = settings.shellArgs
         cfg.terminalFont = settings.terminalFont
+        cfg.terminalFontSize = settings.terminalFontSize
+        if cmd.fontSize > 0 { cfg.editorFontSize = cmd.fontSize }
         cfg.terminalBackground = cmd.terminalBackground
             ?? THEME_TERMINAL ?? cfg.terminalBackground
         // slim header (same height as the jira detail window): no title pill,
@@ -2700,6 +2793,21 @@ private func trimmed(_ s: String) -> String? {
         }
         cfg.fontName = cmd.font
         cfg.markdownImages = true
+
+        // vim mode: an embedded nvim pane replaces the text view (tabs,
+        // drawers and chrome stay). One long-lived editor; tab switches go
+        // over its --listen socket, so nothing quits or relaunches.
+        let vimSocket = NSHomeDirectory()
+            + "/.cache/workspace-switcher/nvim-\(cmd.name)-\(getpid()).sock"
+        if cmd.vimMode {
+            let exe = resolveBinary(cmd.vimBin) ?? cmd.vimBin
+            cfg.vimEditorExecutable = exe
+            cfg.vimEditorSocket = vimSocket
+            cfg.vimEditorArgs = vimArgs(for: cmd, socket: vimSocket,
+                                        file: noteIsPreview(currentPath) ? nil : currentPath)
+            log("note '\(cmd.name)': vim pane \(exe) socket \(vimSocket)")
+        }
+
         let w = PopupWindow(config: cfg)
         // All window actions now live in the top-left icon dropdown menu —
         // no scattered header buttons. The menu shows toggle state via
@@ -2714,6 +2822,36 @@ private func trimmed(_ s: String) -> String? {
             w.editorReadOnly = false
             w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
         }
+        // vim pane: text notes edit in vim; PDF/image tabs keep the native
+        // preview. A relaunched editor (after `:q`) reopens the current note.
+        if cmd.vimMode {
+            w.setVimPaneActive(!noteIsPreview(currentPath))
+            w.vimLaunchArgs = { [weak self] in
+                self?.vimArgs(for: cmd, socket: vimSocket,
+                              file: noteIsPreview(currentPath) ? nil : currentPath) ?? []
+            }
+            w.onVimExit = { [weak self] in
+                self?.log("note '\(cmd.name)': vim exited — relaunching on \(currentPath)")
+            }
+            // right-click in the vim pane: the obvious actions (rule 2)
+            let vm = NSMenu(title: "Vim")
+            vm.autoenablesItems = false
+            vm.addItem(menuItem("Copy") { [weak w] in w?.vimCopy() })
+            vm.addItem(menuItem("Paste") { [weak w] in w?.vimPaste() })
+            vm.addItem(.separator())
+            vm.addItem(menuItem("Copy File Path") { [weak self] in
+                self?.copy(currentPath, "note path: \(currentPath)")
+            })
+            vm.addItem(menuItem("Open in Default App") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: currentPath))
+            })
+            vm.addItem(menuItem("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentPath)])
+            })
+            vm.addItem(menuItem("Open file at path…") { [weak w] in w?.onOpenPathPrompt?() })
+            w.vimMenu = vm
+        }
+        w.onFontSizeStep = { [weak self] delta in self?.stepFontSizes(delta) }
         w.imageSaver = { [weak self] img in
             guard let self else { return nil }
             let dir = noteDir(currentPath) + "/assets"
@@ -2757,7 +2895,11 @@ private func trimmed(_ s: String) -> String? {
             // hold the NEW note's content and overwrite (wipe) the outgoing
             // file. Never resurrect a deleted file: a missing outgoing is
             // skipped (its text was already parked by the watcher/commit).
-            if FileManager.default.fileExists(atPath: outgoing), !noteIsPreview(outgoing) {
+            // Vim mode: the editor owns the file — flush it, never write the
+            // (hidden, stale) text view over it.
+            if cmd.vimMode {
+                w.vimFlush()
+            } else if FileManager.default.fileExists(atPath: outgoing), !noteIsPreview(outgoing) {
                 self.saveNote(w.currentEditorText, to: outgoing, cmd: cmd)
             }
             var target = paths[index]
@@ -2778,7 +2920,14 @@ private func trimmed(_ s: String) -> String? {
             }
             currentPath = target
             w.imageBaseDir = noteDir(currentPath)
-            if noteIsPreview(currentPath) {
+            if cmd.vimMode {
+                // vim pane follows the tab; previews fall back to the native
+                // read-only view
+                let preview = noteIsPreview(currentPath)
+                if preview { w.setEditorFilePreview(currentPath) } else { w.vimOpen(currentPath) }
+                w.setVimPaneActive(!preview)
+                lastSynced = ""
+            } else if noteIsPreview(currentPath) {
                 // PDF / image: read-only preview, never editable text
                 w.setEditorFilePreview(currentPath)
                 lastSynced = ""
@@ -2811,7 +2960,9 @@ private func trimmed(_ s: String) -> String? {
             // only save when closing the ACTIVE tab — otherwise the editor
             // holds a different note's text and must not touch this file
             // (preview files like PDFs are never written back)
-            if wasCurrent, FileManager.default.fileExists(atPath: closing),
+            if cmd.vimMode {
+                w.vimFlush()
+            } else if wasCurrent, FileManager.default.fileExists(atPath: closing),
                !noteIsPreview(closing) {
                 self.saveNote(w.currentEditorText, to: closing, cmd: cmd)
             }
@@ -2888,6 +3039,27 @@ private func trimmed(_ s: String) -> String? {
                     w.meterEnabled = shown
                 }
             }
+            // Vim mode toggle — reads the LIVE spec (cmd is this window's
+            // launch snapshot)
+            if cmd.kind == .note {
+                let vimOn = self.noteCommandIndex.map { self.commands[$0].vimMode } ?? cmd.vimMode
+                toggleItem("Vim Mode", vimOn) {
+                    self.toggleVimModeForNotes()
+                }
+            }
+            menu.addItem(.separator())
+            // Font ▸ (editor / terminal family by type, size, install)
+            let fontMenu = NSMenu(title: "Font")
+            self.buildFontMenu(into: fontMenu)
+            let fontItem = NSMenuItem(title: "Font", action: nil, keyEquivalent: "")
+            fontItem.submenu = fontMenu
+            menu.addItem(fontItem)
+            // Notes Settings ▸ (vim binary, start drawer, voice, sticky, …)
+            let notesMenu = NSMenu(title: "Notes Settings")
+            self.buildNotesSettingsMenu(into: notesMenu)
+            let notesItem = NSMenuItem(title: "Notes Settings", action: nil, keyEquivalent: "")
+            notesItem.submenu = notesMenu
+            menu.addItem(notesItem)
             menu.addItem(.separator())
 
             // — color picker —
@@ -3071,97 +3243,6 @@ private func trimmed(_ s: String) -> String? {
             self?.copy(currentPath, "note path: \(currentPath)")
         }
 
-        // MARK: - Vim mode: terminal fills the window, launches nvim/vim
-        var vimTabSwitchPending = false
-        var vimNextTabPath: String?
-        if cmd.vimMode {
-            // Terminal is the editor: no text editor view, terminal fills
-            // the full content area. Height = window height minus header.
-            // File browser is off by default; terminal is open.
-            cfg.editMode = false        // no NSTextView editor
-            cfg.enableDrag = true       // need titlebar for close button
-            cfg.showCloseButton = true  // show the red X button
-            cfg.terminal = true
-            cfg.fileBrowserDefault = false
-            // terminal height = full window height minus header + tab strip
-            let fullContentH = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
-                - 30                    // header height
-                - (paths.count > 1 ? 26 : 0)  // tab strip (if multi-tab)
-            cfg.terminalHeight = max(fullContentH, 300)
-            cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
-                + (cfg.terminalHeight - (cmd.terminal ? cmd.terminalHeight : 0))
-
-            // Resolve vim binary: name or absolute path
-            let vimBin = cmd.vimBin
-            if vimBin.hasPrefix("/") {
-                cfg.terminalExecutable = vimBin
-            } else if let found = resolveBinary(vimBin) {
-                cfg.terminalExecutable = found
-            } else {
-                cfg.terminalExecutable = vimBin  // let the shell try to resolve it
-            }
-            cfg.terminalExecArgs = [currentPath]
-
-            // When Vim exits, close the notes window — unless we're in the
-            // middle of a tab switch, in which case relaunch Vim with the new note.
-            w.onTerminalExit = { [weak w, weak self] exitCode in
-                guard let self else { return }
-                self.log("note '\(cmd.name)': vim exited with code \(exitCode.map { "\($0)" } ?? "nil")")
-                if vimTabSwitchPending, let nextPath = vimNextTabPath {
-                    vimTabSwitchPending = false
-                    vimNextTabPath = nil
-                    // Relaunch Vim with the new note
-                    cfg.terminalExecArgs = [nextPath]
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        w?.relaunchTerminal()
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        w?.hide(restore: true)
-                    }
-                }
-            }
-
-            // X button: send :wq to Vim (save and quit), which triggers onTerminalExit
-            w.onCloseWindow = { [weak w] in
-                guard let w else { return }
-                // Try :wq first (save and quit); if terminal isn't available, just close
-                if !w.sendToTerminal(":wq\r") {
-                    w.hide(restore: true)
-                }
-            }
-
-            // Override tab switching: in vim mode, send :wq to current Vim,
-            // wait for it to exit, then relaunch with the new note.
-            w.onTabChange = { [weak w, weak self] index in
-                guard let self, let w else { return }
-                guard index < paths.count else { return }
-                let targetPath = paths[index]
-                // Save current note if it exists
-                if FileManager.default.fileExists(atPath: currentPath) {
-                    self.saveNote(w.currentEditorText, to: currentPath, cmd: cmd)
-                }
-                currentPath = targetPath
-                w.tabFooterText = lastWriteLabel(currentPath)
-                w.copyPathButtonLabel = ""
-                w.onChromeHeaderClick = {
-                    self.copy(currentPath, "note path: \(currentPath)")
-                }
-                // Send :wq to Vim to save and exit
-                if !w.sendToTerminal(":wq\r") {
-                    // Terminal not available — just update tab UI and relaunch
-                    w.selectedTab = index
-                    cfg.terminalExecArgs = [currentPath]
-                    w.relaunchTerminal()
-                } else {
-                    // Vim is exiting — flag a tab switch so onTerminalExit
-                    // relaunches instead of closing the window
-                    vimTabSwitchPending = true
-                    vimNextTabPath = currentPath
-                    w.selectedTab = index
-                }
-            }
-        }
         // voice notes (commands.conf `voice = true`): the window's bottom bar
         // becomes a record control — big record/stop button, pause/resume and
         // live level bars; stopping transcribes with Apple's speech
@@ -3217,6 +3298,11 @@ private func trimmed(_ s: String) -> String? {
             }
             w.onMeterRecord = {
                 switch voice.state {
+                case .idle where cmd.vimMode:
+                    // vim mode: batches append straight into the editor's
+                    // buffer (vimAppend) — no text-view tail math needed
+                    draft = ""
+                    voice.start()
                 case .idle:
                     // anchor on the EDITOR's DISPLAY string so the tail math
                     // (immLen + committedLen) matches the text storage exactly
@@ -3258,6 +3344,13 @@ private func trimmed(_ s: String) -> String? {
             // live draft: rebuild ONLY the region after the immutable prefix
             voice.onPartial = { [weak w] text in
                 guard let w, !text.isEmpty else { return }
+                if cmd.vimMode {
+                    // the live draft shows in the footer; only finalized
+                    // batches touch the note
+                    draft = text
+                    w.tabFooterText = "🎙 " + String(text.suffix(80))
+                    return
+                }
                 draft = text
                 w.replaceTail(from: immLen() + committedLen(), with: regionText())
                 // follow the draft: the dictated text lives at the end of the
@@ -3268,6 +3361,29 @@ private func trimmed(_ s: String) -> String? {
             voice.onBatch = { [weak self, weak w] text in
                 guard let self, let w else { return }
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if cmd.vimMode {
+                    if !trimmed.isEmpty {
+                        // blank separator line + the batch, appended IN the
+                        // editor (then :wall) so it never races typing
+                        if !w.vimAppend("\n" + trimmed, to: currentPath) {
+                            // no RPC (plain vim): append on disk, reload
+                            let old = (try? String(contentsOfFile: currentPath,
+                                                   encoding: .utf8)) ?? ""
+                            var new = old
+                            if !new.isEmpty && !new.hasSuffix("\n") { new += "\n" }
+                            new += "\n" + trimmed + "\n"
+                            try? new.write(toFile: currentPath, atomically: true, encoding: .utf8)
+                            w.vimCommand("silent! checktime")
+                        }
+                        dbg("vim batch +\(trimmed.count)")
+                    } else if voice.state == .transcribing {
+                        self.log("voice '\(cmd.name)': no speech detected")
+                    }
+                    draft = ""
+                    w.tabFooterText = lastWriteLabel(currentPath)
+                    if voice.state == .transcribing { voice.resetSession() }
+                    return
+                }
                 if !trimmed.isEmpty {
                     committedStr += (committedStr.isEmpty ? sep0() : "\n\n") + trimmed
                     draft = ""
@@ -3319,6 +3435,14 @@ private func trimmed(_ s: String) -> String? {
             guard let self else { return }
             // previews (PDF/image) are read-only — never write text back
             guard !noteIsPreview(currentPath) else { return }
+            // vim mode: the editor owns the file; `text` is the hidden text
+            // view's stale copy — flush the editor instead of writing it
+            if cmd.vimMode {
+                w.vimFlush()
+                lastMtime = mtime(of: currentPath)
+                w.tabFooterText = lastWriteLabel(currentPath)
+                return
+            }
             if FileManager.default.fileExists(atPath: currentPath) {
                 self.saveNote(text, to: currentPath, cmd: cmd)
                 lastSynced = text
@@ -3385,7 +3509,10 @@ private func trimmed(_ s: String) -> String? {
                     FileManager.default.createFile(atPath: fallback, contents: nil)
                 }
                 if p == currentPath {
-                    let text = noteIsPreview(p) ? "" : w.currentEditorText
+                    // vim mode: the live text is the editor's buffer
+                    let vimText = cmd.vimMode && !noteIsPreview(p)
+                        ? w.vimEval("join(getline(1, '$'), \"\\n\")") : nil
+                    let text = noteIsPreview(p) ? "" : (vimText ?? w.currentEditorText)
                     self.log("note '\(cmd.name)': \(p) deleted on disk — text parked in \(fallback)")
                     self.saveNote(text, to: fallback, cmd: cmd)
                     currentPath = fallback
@@ -3394,6 +3521,13 @@ private func trimmed(_ s: String) -> String? {
                     w.tabFooterText = lastWriteLabel(fallback)
                     w.setEditorMarkdown(text, baseDir: noteDir(fallback))
                     w.imageBaseDir = noteDir(fallback)
+                    if cmd.vimMode {
+                        // drop the dead buffer (never rewrite the deleted
+                        // file) and edit the parked copy
+                        w.vimCommand("silent! bwipeout! " + p.replacingOccurrences(of: " ", with: "\\ "))
+                        w.vimOpen(fallback)
+                        w.setVimPaneActive(true)
+                    }
                 } else {
                     self.log("note '\(cmd.name)': \(p) deleted on disk — tab now default.md")
                 }
@@ -3429,7 +3563,15 @@ private func trimmed(_ s: String) -> String? {
                 }
             }
             // active-note external-write reload (skipped for read-only previews)
-            if let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
+            if cmd.vimMode, let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
+                // vim reloads external writes itself (autoread + checktime);
+                // an unmodified buffer reloads silently
+                if let last = lastMtime, mt != last {
+                    w.vimCommand("silent! checktime")
+                    w.tabFooterText = lastWriteLabel(currentPath)
+                }
+                lastMtime = mt
+            } else if let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
                 if let last = lastMtime, mt != last {
                     if w.currentEditorText == lastSynced {
                         let newText = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
@@ -4633,7 +4775,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(settingsItem)
 
         addMenuItem(settingsMenu, "Hide on Focus Loss", #selector(MenuTarget.toggleHideOnFocusLoss(_:)), key: "")
-        addMenuItem(settingsMenu, "Vim Mode (Notes)", #selector(MenuTarget.toggleVimMode(_:)), key: "")
+        // Vim Mode toggle — only when a note command is configured
+        if c.commands.contains(where: { $0.kind == .note }) {
+            addMenuItem(settingsMenu, "Vim Mode (Notes)", #selector(MenuTarget.toggleVimMode(_:)), key: "")
+            // Font ▸ / Notes ▸ rebuild on every open (current checkmarks,
+            // freshly installed fonts)
+            for (title, build) in [
+                ("Font", { [weak c] (m: NSMenu) in c?.buildFontMenu(into: m) }),
+                ("Notes", { [weak c] (m: NSMenu) in c?.buildNotesSettingsMenu(into: m) }),
+            ] as [(String, (NSMenu) -> Void)] {
+                let sub = NSMenu(title: title)
+                let d = DynamicMenuDelegate(build)
+                dynamicMenuDelegates.append(d)
+                sub.delegate = d
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.submenu = sub
+                settingsMenu.addItem(item)
+            }
+        }
         settingsMenu.addItem(.separator())
         addMenuItem(settingsMenu, "Reset Settings to Defaults", #selector(MenuTarget.resetSettings(_:)), key: "")
 
@@ -4860,31 +5019,7 @@ final class MenuTarget: NSObject, NSMenuDelegate {
     }
 
     @objc func toggleVimMode(_ sender: Any?) {
-        guard let controller = MenuTarget.controller,
-              let idx = controller.commands.firstIndex(where: { $0.name == "notes" }) else { return }
-        let cmd = controller.commands[idx]
-        let newValue = !cmd.vimMode
-        // Update the command spec in place
-        controller.commands[idx] = CommandSpec(
-            name: cmd.name, kind: cmd.kind, windowName: cmd.windowName,
-            chromeTitle: cmd.chromeTitle, script: cmd.script, paths: cmd.paths,
-            sources: cmd.sources, root: cmd.root, favorites: cmd.favorites,
-            zoxideTop: cmd.zoxideTop, browserBackground: cmd.browserBackground,
-            backgroundColor: cmd.backgroundColor, tintAlpha: cmd.tintAlpha,
-            primary: cmd.primary, content: cmd.content, detail: cmd.detail,
-            trailing: cmd.trailing, body: cmd.body, filter: cmd.filter,
-            filters: cmd.filters, width: cmd.width, maxRows: cmd.maxRows,
-            contentCap: cmd.contentCap, bodyLines: cmd.bodyLines,
-            pageSize: cmd.pageSize, copyFields: cmd.copyFields,
-            copyFormat: cmd.copyFormat, checkbox: cmd.checkbox, resize: cmd.resize,
-            drag: cmd.drag, sticky: cmd.sticky, searchWidth: cmd.searchWidth,
-            maxStretch: cmd.maxStretch, height: cmd.height, font: cmd.font,
-            headerColor: cmd.headerColor, voice: cmd.voice, terminal: cmd.terminal,
-            terminalHeight: cmd.terminalHeight, terminalDir: cmd.terminalDir,
-            terminalBackground: cmd.terminalBackground,
-            vimMode: newValue, vimBin: cmd.vimBin,
-            maxHeight: cmd.maxHeight, icon: cmd.icon, saveDir: cmd.saveDir)
-        saveConfigValue(section: "notes", key: "vim-mode", value: newValue ? "true" : "false")
+        MenuTarget.controller?.toggleVimModeForNotes()
     }
 
     @objc func resetSettings(_ sender: Any?) {
@@ -4893,5 +5028,452 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         removeConfigValue(section: "app", key: "hide-on-focus-loss")
         removeConfigValue(section: "notes", key: "vim-mode")
         removeConfigValue(section: "notes", key: "vim-bin")
+    }
+}
+
+// MARK: - Font + notes settings menus
+
+// Rebuilds its menu every time it opens (status-bar Settings submenus), so
+// checkmarks and newly installed fonts are always current.
+final class DynamicMenuDelegate: NSObject, NSMenuDelegate {
+    private let build: (NSMenu) -> Void
+    init(_ build: @escaping (NSMenu) -> Void) { self.build = build }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        build(menu)
+    }
+}
+var dynamicMenuDelegates: [DynamicMenuDelegate] = []
+
+// installed font families by type (nerd / mono / sans / serif / display),
+// computed once and refreshed after a font install
+private var fontFamilyCache: [String: [String]]?
+// brew casks currently installing (menu shows "Installing…")
+private var fontInstallsRunning: Set<String> = []
+
+enum FontTarget { case editor, terminal }
+
+extension SwitcherController {
+    // index of the notes (type = note) command
+    var noteCommandIndex: Int? { commands.firstIndex(where: { $0.kind == .note }) }
+
+    // the live notes window, if one exists
+    var noteWindow: PopupWindow? {
+        guard let i = noteCommandIndex else { return nil }
+        return subWindows.first(where: { $0.config.name == commands[i].windowName })
+    }
+
+    // closure-backed menu item (targets retained in menuActionTargets)
+    func menuItem(_ title: String, state: Bool? = nil, enabled: Bool = true,
+                  _ action: @escaping () -> Void) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(MenuActionTarget.run),
+                              keyEquivalent: "")
+        let t = MenuActionTarget(action: action)
+        item.target = t
+        menuActionTargets.append(t)
+        if let state { item.state = state ? .on : .off }
+        item.isEnabled = enabled
+        return item
+    }
+
+    // a disabled section label inside a menu
+    private func menuHeader(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    // MARK: Font classification
+
+    static let fontTypeOrder: [(key: String, label: String)] = [
+        ("nerd", "Nerd Fonts"), ("mono", "Monospace"), ("sans", "Sans Serif"),
+        ("serif", "Serif"), ("display", "Display & Script"),
+    ]
+
+    private static func fontType(_ family: String) -> String? {
+        if family.hasPrefix(".") { return nil }
+        let lower = family.lowercased()
+        if ["emoji", "symbol", "dingbat", "webdings", "wingdings", "lastresort"]
+            .contains(where: { lower.contains($0) }) { return nil }
+        if family.contains("Nerd Font") { return "nerd" }
+        guard let f = NSFontManager.shared.font(withFamily: family, traits: [],
+                                                weight: 5, size: 13) else { return nil }
+        let traits = f.fontDescriptor.symbolicTraits
+        if traits.contains(.monoSpace) || f.isFixedPitch { return "mono" }
+        // NSFontFamilyClass lives in the top 4 bits of the symbolic traits
+        switch (traits.rawValue >> 28) & 0xF {
+        case 1...7: return "serif"
+        case 8: return "sans"
+        case 9, 10: return "display"
+        case 12: return nil
+        default:
+            return lower.contains("serif") && !lower.contains("sans") ? "serif" : "sans"
+        }
+    }
+
+    static func installedFontsByType() -> [String: [String]] {
+        if let c = fontFamilyCache { return c }
+        var out: [String: [String]] = [:]
+        for fam in NSFontManager.shared.availableFontFamilies.sorted() {
+            if let t = fontType(fam) { out[t, default: []].append(fam) }
+        }
+        fontFamilyCache = out
+        return out
+    }
+
+    // MARK: Applying fonts
+
+    func currentFont(_ target: FontTarget) -> String {
+        switch target {
+        case .editor: return noteCommandIndex.flatMap { commands[$0].font } ?? "SF Mono"
+        case .terminal: return settings.terminalFont
+        }
+    }
+
+    func currentFontSize(_ target: FontTarget) -> CGFloat {
+        switch target {
+        case .editor:
+            let s = noteCommandIndex.map { commands[$0].fontSize } ?? 0
+            return s > 0 ? s : 13
+        case .terminal: return settings.terminalFontSize
+        }
+    }
+
+    // persist to commands.conf + apply live to every open window
+    func applyFont(_ family: String, target: FontTarget) {
+        switch target {
+        case .editor:
+            guard let i = noteCommandIndex else { return }
+            commands[i].font = family
+            saveConfigValue(section: commands[i].name, key: "font", value: family)
+            noteWindow?.applyFonts(editor: family)
+        case .terminal:
+            settings.terminalFont = family
+            saveConfigValue(section: "app", key: "terminal-font", value: family)
+            subWindows.forEach { $0.applyFonts(terminal: family) }
+        }
+        log("font: \(target == .editor ? "editor" : "terminal") -> \(family)")
+    }
+
+    func applyFontSize(_ size: CGFloat, target: FontTarget) {
+        let s = min(40, max(8, size))
+        let v = s == s.rounded() ? String(Int(s)) : String(format: "%.1f", s)
+        switch target {
+        case .editor:
+            guard let i = noteCommandIndex else { return }
+            commands[i].fontSize = s
+            saveConfigValue(section: commands[i].name, key: "font-size", value: v)
+            noteWindow?.applyFonts(editorSize: s)
+        case .terminal:
+            settings.terminalFontSize = s
+            saveConfigValue(section: "app", key: "terminal-font-size", value: v)
+            subWindows.forEach { $0.applyFonts(terminalSize: s) }
+        }
+        log("font size: \(target == .editor ? "editor" : "terminal") -> \(v)")
+    }
+
+    // Cmd+Opt+= / Cmd+Opt+- in the notes window: step both sizes together
+    func stepFontSizes(_ delta: Int) {
+        applyFontSize(currentFontSize(.editor) + CGFloat(delta), target: .editor)
+        applyFontSize(currentFontSize(.terminal) + CGFloat(delta), target: .terminal)
+    }
+
+    // MARK: Font menu
+
+    // Font ▸ Editor Font ▸ <type> ▸ families, Terminal Font ▸ …, Size ▸ …,
+    // Install Font ▸ <type> ▸ casks, Other… (system font panel)
+    func buildFontMenu(into menu: NSMenu) {
+        let byType = SwitcherController.installedFontsByType()
+        for (target, title) in [(FontTarget.editor, "Editor Font"),
+                                (FontTarget.terminal, "Terminal Font")] {
+            let current = currentFont(target)
+            let sub = NSMenu(title: title)
+            // the terminal (and the vim pane) need a fixed-pitch grid
+            let types = target == .terminal
+                ? SwitcherController.fontTypeOrder.filter { ["nerd", "mono"].contains($0.key) }
+                : SwitcherController.fontTypeOrder
+            for (key, label) in types {
+                guard let fams = byType[key], !fams.isEmpty else { continue }
+                let typeMenu = NSMenu(title: label)
+                for fam in fams {
+                    let item = menuItem(fam, state: fam == current) { [weak self] in
+                        self?.applyFont(fam, target: target)
+                    }
+                    if let f = NSFont(name: fam, size: 13)
+                        ?? NSFontManager.shared.font(withFamily: fam, traits: [],
+                                                     weight: 5, size: 13) {
+                        item.attributedTitle = NSAttributedString(string: fam,
+                                                                  attributes: [.font: f])
+                    }
+                    typeMenu.addItem(item)
+                }
+                let typeItem = NSMenuItem(title: "\(label) (\(fams.count))", action: nil,
+                                          keyEquivalent: "")
+                typeItem.submenu = typeMenu
+                if fams.contains(current) { typeItem.state = .on }
+                sub.addItem(typeItem)
+            }
+            sub.addItem(.separator())
+            let sizeMenu = NSMenu(title: "Size")
+            let curSize = currentFontSize(target)
+            for n in [11, 12, 13, 14, 15, 16, 18, 20, 24] {
+                sizeMenu.addItem(menuItem("\(n) pt", state: CGFloat(n) == curSize) { [weak self] in
+                    self?.applyFontSize(CGFloat(n), target: target)
+                })
+            }
+            let sizeItem = NSMenuItem(title: "Size (\(Int(curSize)) pt)", action: nil,
+                                      keyEquivalent: "")
+            sizeItem.submenu = sizeMenu
+            sub.addItem(sizeItem)
+            let item = NSMenuItem(title: "\(title): \(current)", action: nil, keyEquivalent: "")
+            item.submenu = sub
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        // Install Font ▸ grouped by type (curated brew casks, commands.conf
+        // `font-install-casks`)
+        let install = NSMenu(title: "Install Font")
+        for (key, label) in SwitcherController.fontTypeOrder {
+            let entries = settings.fontInstallCasks.filter { $0.type == key }
+            guard !entries.isEmpty else { continue }
+            install.addItem(menuHeader(label))
+            for e in entries {
+                let running = fontInstallsRunning.contains(e.cask)
+                let installed = SwitcherController.isFontInstalled(e.label)
+                let title = running ? "\(e.label) — installing…"
+                    : installed ? "\(e.label) — installed" : e.label
+                install.addItem(menuItem(title, state: installed ? true : nil,
+                                         enabled: !running && !installed) { [weak self] in
+                    self?.installFontCask(e.label, cask: e.cask)
+                })
+            }
+        }
+        let installItem = NSMenuItem(title: "Install Font…", action: nil, keyEquivalent: "")
+        installItem.submenu = install
+        menu.addItem(installItem)
+        menu.addItem(menuItem("Other Font… (Font Panel)") { [weak self] in
+            self?.showSystemFontPanel()
+        })
+    }
+
+    // loose match: "JetBrains Mono Nerd Font" vs family "JetBrainsMono Nerd Font"
+    static func isFontInstalled(_ label: String) -> Bool {
+        let norm = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let want = norm(label)
+        return NSFontManager.shared.availableFontFamilies.contains { norm($0) == want }
+    }
+
+    // brew install --cask <cask> in the background; on success offer to use
+    // the new font right away
+    func installFontCask(_ label: String, cask: String) {
+        guard !fontInstallsRunning.contains(cask) else { return }
+        guard let brew = resolveBinary("brew")
+                ?? ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+                    .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            log("font install: brew not found")
+            noteWindow?.setStatus("Install failed: Homebrew (brew) not found", isError: true)
+            return
+        }
+        fontInstallsRunning.insert(cask)
+        let before = Set(NSFontManager.shared.availableFontFamilies)
+        log("font install: brew install --cask \(cask)")
+        noteWindow?.setStatus("Installing \(label)…", isError: false)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: brew)
+        p.arguments = ["install", "--cask", cask]
+        var env = ProcessInfo.processInfo.environment
+        env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
+        p.environment = env
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        p.standardOutput = FileHandle.nullDevice
+        p.terminationHandler = { proc in
+            let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(),
+                             encoding: .utf8) ?? ""
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                fontInstallsRunning.remove(cask)
+                fontFamilyCache = nil
+                guard proc.terminationStatus == 0 else {
+                    let msg = err.split(separator: "\n").last.map(String.init) ?? "exit \(proc.terminationStatus)"
+                    self.log("font install \(cask) failed: \(err)")
+                    self.noteWindow?.setStatus("Install failed: \(msg)", isError: true)
+                    return
+                }
+                self.log("font install \(cask): ok")
+                self.noteWindow?.setStatus(nil, isError: false)
+                self.offerNewFont(label: label, before: before, tries: 0)
+            }
+        }
+        do { try p.run() } catch {
+            fontInstallsRunning.remove(cask)
+            log("font install \(cask): \(error)")
+            noteWindow?.setStatus("Install failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // the system registers new font files a moment after they land in
+    // ~/Library/Fonts — poll briefly for the new family, then ask where to
+    // use it
+    private func offerNewFont(label: String, before: Set<String>, tries: Int) {
+        let now = Set(NSFontManager.shared.availableFontFamilies)
+        let added = now.subtracting(before).sorted()
+        if added.isEmpty && tries < 10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.offerNewFont(label: label, before: before, tries: tries + 1)
+            }
+            return
+        }
+        let norm = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let family = added.first(where: { norm($0) == norm(label) })
+            ?? added.first(where: { !$0.contains("Propo") && !$0.hasSuffix("Mono") })
+            ?? added.first
+        guard let family else {
+            log("font install: \(label) installed, family not registered yet")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Installed \(family)"
+        alert.informativeText = "Use it now?"
+        alert.addButton(withTitle: "Editor")
+        alert.addButton(withTitle: "Terminal")
+        alert.addButton(withTitle: "Not Now")
+        let apply: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            if r == .alertFirstButtonReturn { self?.applyFont(family, target: .editor) }
+            if r == .alertSecondButtonReturn { self?.applyFont(family, target: .terminal) }
+        }
+        if let w = noteWindow, w.isShown {
+            alert.beginSheetModal(for: w.nativeWindow, completionHandler: apply)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            apply(alert.runModal())
+        }
+    }
+
+    // the system Font Panel for anything not in the lists; picks apply to
+    // the editor font
+    func showSystemFontPanel() {
+        let fm = NSFontManager.shared
+        fm.target = FontPanelReceiver.shared
+        fm.action = #selector(FontPanelReceiver.changeFont(_:))
+        FontPanelReceiver.shared.onPick = { [weak self] family in
+            self?.applyFont(family, target: .editor)
+        }
+        let cur = NSFont(name: currentFont(.editor), size: currentFontSize(.editor))
+            ?? NSFont.systemFont(ofSize: 13)
+        fm.setSelectedFont(cur, isMultiple: false)
+        NSApp.activate(ignoringOtherApps: true)
+        fm.orderFrontFontPanel(nil)
+    }
+
+    // MARK: Notes settings menu
+
+    func buildNotesSettingsMenu(into menu: NSMenu) {
+        guard let i = noteCommandIndex else { return }
+        let cmd = commands[i]
+        menu.addItem(menuItem("Vim Mode", state: cmd.vimMode) { [weak self] in
+            self?.toggleVimModeForNotes()
+        })
+        // editor binary: only the ones actually installed
+        let vimMenu = NSMenu(title: "Vim Binary")
+        let curBin = (cmd.vimBin as NSString).lastPathComponent
+        for name in ["nvim", "vim"] {
+            guard let path = resolveBinary(name)
+                    ?? ["/opt/homebrew/bin/", "/usr/local/bin/", "/usr/bin/"]
+                        .map({ $0 + name })
+                        .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+            else { continue }
+            let note = name == "vim" ? "  (no tab RPC — keystroke fallback)" : ""
+            vimMenu.addItem(menuItem(name + note, state: curBin == name) { [weak self] in
+                self?.updateNoteSetting("vim-bin", path, rebuild: cmd.vimMode) { $0.vimBin = path }
+            })
+        }
+        let vimItem = NSMenuItem(title: "Vim Binary: \(curBin)", action: nil, keyEquivalent: "")
+        vimItem.submenu = vimMenu
+        menu.addItem(vimItem)
+        // drawer open at launch
+        let startMenu = NSMenu(title: "Start With")
+        for (value, label) in [("browser", "File Browser"), ("terminal", "Terminal"),
+                               ("none", "Nothing (editor only)")] {
+            startMenu.addItem(menuItem(label, state: cmd.startDrawer == value) { [weak self] in
+                self?.updateNoteSetting("start-drawer", value, rebuild: true) { $0.startDrawer = value }
+            })
+        }
+        let startItem = NSMenuItem(title: "Start With", action: nil, keyEquivalent: "")
+        startItem.submenu = startMenu
+        menu.addItem(startItem)
+        menu.addItem(menuItem("Voice Recording Bar", state: cmd.voice) { [weak self] in
+            let v = !cmd.voice
+            self?.updateNoteSetting("voice", v ? "true" : "false", rebuild: true) { $0.voice = v }
+        })
+        menu.addItem(menuItem("Keep Visible When Unfocused (Sticky)", state: cmd.sticky) { [weak self] in
+            let v = !cmd.sticky
+            self?.updateNoteSetting("sticky", v ? "true" : "false", rebuild: false) { $0.sticky = v }
+            self?.noteWindow?.config.sticky = v
+        })
+        menu.addItem(.separator())
+        let firstDir = cmd.paths.first.map { p -> String in
+            let e = (p as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: e, isDirectory: &isDir)
+            return isDir.boolValue ? e : (e as NSString).deletingLastPathComponent
+        }
+        if let dir = firstDir {
+            menu.addItem(menuItem("Open Notes Folder in Finder") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+            })
+        }
+        menu.addItem(menuItem("Reload Config") { [weak self] in
+            self?.reloadConfig()
+        })
+    }
+
+    // persist one [notes] key, update the in-memory spec, and (optionally)
+    // rebuild the open notes window so it takes effect now
+    func updateNoteSetting(_ key: String, _ value: String, rebuild: Bool,
+                           _ mutate: (inout CommandSpec) -> Void) {
+        guard let i = noteCommandIndex else { return }
+        mutate(&commands[i])
+        saveConfigValue(section: commands[i].name, key: key, value: value)
+        log("notes setting: \(key) = \(value)")
+        if rebuild { rebuildNoteWindow() }
+    }
+
+    // tear down + reopen the notes window with the current spec (the note is
+    // flushed first: vim :wall, native saveNote via onEditorClose)
+    func rebuildNoteWindow() {
+        guard let i = noteCommandIndex else { return }
+        guard let w = noteWindow else { return }
+        let wasShown = w.isShown
+        let restoreWID = savedWID
+        let restorePID = savedPID
+        if wasShown { w.hide(restore: false) } else { w.onEditorClose?(w.currentEditorText) }
+        w.shutdownVim()
+        subWindows.removeAll { $0 === w }
+        w.releaseHooks()
+        w.nativeWindow.orderOut(nil)
+        if wasShown {
+            openNoteWindow(commands[i], restoreWID: restoreWID, restorePID: restorePID)
+        }
+    }
+
+    // re-read commands.conf and rebuild the notes window from it
+    func reloadConfig() {
+        commands = loadCommands()
+        fontFamilyCache = nil
+        log("config reloaded (\(commands.count) commands)")
+        rebuildNoteWindow()
+    }
+}
+
+// NSFontManager target for the system Font Panel ("Other Font…")
+final class FontPanelReceiver: NSObject {
+    static let shared = FontPanelReceiver()
+    var onPick: ((String) -> Void)?
+    @objc func changeFont(_ sender: Any?) {
+        guard let fm = sender as? NSFontManager else { return }
+        let f = fm.convert(NSFont.systemFont(ofSize: 13))
+        if let fam = f.familyName { onPick?(fam) }
     }
 }

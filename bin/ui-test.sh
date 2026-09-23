@@ -127,6 +127,21 @@ echo "  binary:    $BIN"
 echo "  date:      $(date)"
 echo
 
+# This suite types native-editor keystrokes into the ACTIVE note. With
+# [notes] vim-mode = true those keys become vim commands and rewrite the
+# note — so run with vim mode OFF and put the setting back on exit.
+# (The vim pane has its own safe suite: bin/ui-test-vim.sh.)
+CONF_FILE="$ROOT/../commands.conf"
+if grep -Eq '^vim-mode *= *true' "$CONF_FILE"; then
+    sed -i '' -E 's/^vim-mode *= *true/vim-mode = false/' "$CONF_FILE"
+    restore_vim_mode() {
+        sed -i '' -E 's/^vim-mode *= *false/vim-mode = true/' "$CONF_FILE"
+        pkill -x workspace-switcher 2>/dev/null || true
+    }
+    trap restore_vim_mode EXIT
+    echo "  (vim-mode temporarily off for this run)"
+fi
+
 # Kill any existing daemon
 pkill -f "workspace-switcher.app" 2>/dev/null || true
 sleep 0.5
