@@ -462,6 +462,8 @@ struct CommandSpec {
     var vimBin: String         // note: vim binary path or name (default "nvim")
     var vimInit: String?       // note: init file for the vim pane (nil = bundled)
     var startDrawer: String    // note: drawer open at launch: browser|terminal|none
+    var vimEscClose: Int       // note: rapid Esc presses that close from vim (0 = off)
+    var imageRows: Int         // note: screen rows an inline image gets in vim
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
     let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
 
@@ -487,6 +489,7 @@ struct CommandSpec {
          vimMode: Bool = false, vimBin: String = "nvim",
          vimInit: String? = nil, startDrawer: String = "browser",
          fontSize: CGFloat = 0,
+         vimEscClose: Int = 3, imageRows: Int = 10,
          maxHeight: CGFloat = 0,
          icon: NSImage? = nil,
          saveDir: String = "/tmp/") {
@@ -537,6 +540,8 @@ struct CommandSpec {
         self.vimInit = vimInit
         self.startDrawer = startDrawer
         self.fontSize = fontSize
+        self.vimEscClose = vimEscClose
+        self.imageRows = imageRows
         self.icon = icon
         self.saveDir = saveDir
     }
@@ -703,6 +708,8 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         startDrawer: (vars["start-drawer"] ?? "").isEmpty ? "browser"
             : vars["start-drawer"]!.lowercased(),
         fontSize: num(vars["font-size"]),
+        vimEscClose: Int(vars["vim-esc-close"] ?? "") ?? 3,
+        imageRows: Int(vars["image-rows"] ?? "") ?? 10,
         maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName),
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
@@ -2056,7 +2063,13 @@ final class SwitcherController: NSObject {
                     let msg = String(bytes: buf[..<n], encoding: .utf8) ?? ""
                     let name = msg.trimmingCharacters(in: .whitespacesAndNewlines)
                     DispatchQueue.main.async { [weak self] in
-                        if name.hasPrefix("open:") {
+                        if name == "reset-size" {
+                            self?.noteWindow?.resetToDefaultSize()
+                        } else if name == "toggle-terminal" || name == "toggle-browser" {
+                            // drawer toggles on the notes window (scripts/tests)
+                            guard let w = self?.noteWindow else { return }
+                            if name == "toggle-terminal" { w.toggleTerminalDrawer() } else { w.toggleFileBrowser() }
+                        } else if name.hasPrefix("open:") {
                             // "open:<absolute path>" opens that file as a
                             // notes tab (same as Finder's "Open in Notes")
                             let path = String(name.dropFirst(5))
@@ -2303,6 +2316,9 @@ final class SwitcherController: NSObject {
                           Int(round(cc.greenComponent * 255)),
                           Int(round(cc.blueComponent * 255)))
         }
+        let imgFile = (socket as NSString).deletingPathExtension + ".images.json"
+        a += ["--cmd", "let g:ws_img_file='\(imgFile)'",
+              "--cmd", "let g:ws_img_rows=\(max(1, cmd.imageRows))"]
         a += ["--cmd", "let g:ws_fg='\(rgb(TEXT))'",
               "--cmd", "let g:ws_dim='\(rgb(DIM))'",
               "--cmd", "let g:ws_sel='\(rgb(GROUP_BG))'"]
@@ -2799,10 +2815,14 @@ private func trimmed(_ s: String) -> String? {
         // over its --listen socket, so nothing quits or relaunches.
         let vimSocket = NSHomeDirectory()
             + "/.cache/workspace-switcher/nvim-\(cmd.name)-\(getpid()).sock"
+        // inline-image placements the editor writes (vim/notes-init.vim)
+        let vimImageFile = (vimSocket as NSString).deletingPathExtension + ".images.json"
         if cmd.vimMode {
             let exe = resolveBinary(cmd.vimBin) ?? cmd.vimBin
             cfg.vimEditorExecutable = exe
             cfg.vimEditorSocket = vimSocket
+            cfg.vimEscCloseCount = max(0, cmd.vimEscClose)
+            cfg.vimImageFile = vimImageFile
             cfg.vimEditorArgs = vimArgs(for: cmd, socket: vimSocket,
                                         file: noteIsPreview(currentPath) ? nil : currentPath)
             log("note '\(cmd.name)': vim pane \(exe) socket \(vimSocket)")

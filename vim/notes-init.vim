@@ -86,3 +86,109 @@ augroup ws_markdown
   autocmd!
   autocmd FileType markdown setlocal conceallevel=0
 augroup END
+
+" --- inline images -------------------------------------------------------------
+" Markdown image links (![alt](path)) get g:ws_img_rows blank virtual lines
+" under them; the notes window draws the real image over those rows. The
+" screen rows of every visible image are written to g:ws_img_file as JSON
+" whenever the view changes (scroll, edit, resize, buffer switch).
+lua << LUA
+local out = vim.g.ws_img_file
+if not out or out == '' then return end
+local rows = tonumber(vim.g.ws_img_rows) or 10
+local ns = vim.api.nvim_create_namespace('ws_images')
+local pattern = '!%[[^%]]*%]%(([^%)]+)%)'
+
+-- PNG pixel size from the IHDR header (pasted images are PNG); other
+-- formats fall back to the full row budget
+local function png_size(p)
+  local f = io.open(p, 'rb')
+  if not f then return nil end
+  local h = f:read(24)
+  f:close()
+  if not h or #h < 24 or h:sub(2, 4) ~= 'PNG' then return nil end
+  local function u32(x) local a, b, c, d = x:byte(1, 4); return ((a * 256 + b) * 256 + c) * 256 + d end
+  return u32(h:sub(17, 20)), u32(h:sub(21, 24))
+end
+
+-- rows an image needs at the pane's cell height (g:ws_cell_h, set by the
+-- window), capped at g:ws_img_rows
+local function rows_for(p)
+  local _, h = png_size(p)
+  local cell = tonumber(vim.g.ws_cell_h) or 16
+  if not h then return rows end
+  return math.max(2, math.min(rows, math.ceil(h / cell) + 1))
+end
+
+local function resolve(buf, rel)
+  rel = rel:gsub('%s+"[^"]*"%s*$', '')           -- ![](path "title")
+  if rel:match('^%a[%w+.-]*://') then return nil end
+  rel = vim.fn.expand(rel)
+  if rel:sub(1, 1) ~= '/' then
+    rel = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':p:h') .. '/' .. rel
+  end
+  local p = vim.fn.fnamemodify(rel, ':p')
+  if vim.fn.filereadable(p) == 1 then return p end
+  return nil
+end
+
+-- (re)place the virtual lines only when the set of image lines changed
+local marked = {}
+local function mark(buf)
+  local found, sig = {}, {}
+  for i, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+    local rel = l:match(pattern)
+    local p = rel and resolve(buf, rel)
+    if p then
+      local n = rows_for(p)
+      found[#found + 1] = { i, p, n }
+      sig[#sig + 1] = i .. p .. ':' .. n
+    end
+  end
+  local s = table.concat(sig, '|')
+  if marked[buf] ~= s then
+    marked[buf] = s
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    for _, f in ipairs(found) do
+      local blank = {}
+      for _ = 1, f[3] do blank[#blank + 1] = { { ' ', 'Normal' } } end
+      pcall(vim.api.nvim_buf_set_extmark, buf, ns, f[1] - 1, 0, { virt_lines = blank })
+    end
+  end
+  return found
+end
+
+local last = ''
+local function place()
+  local buf, win = vim.api.nvim_get_current_buf(), vim.api.nvim_get_current_win()
+  local imgs = {}
+  local top, bot = vim.fn.line('w0'), vim.fn.line('w$')
+  for _, f in ipairs(mark(buf)) do
+    local lnum, p, n = f[1], f[2], f[3]
+    if lnum >= top and lnum <= bot then
+      -- screen row of the link line's LAST character (a wrapped line spans
+      -- several rows); the image starts on the next row
+      local pos = vim.fn.screenpos(win, lnum, math.max(1, #vim.fn.getline(lnum)))
+      if pos.row > 0 then
+        imgs[#imgs + 1] = string.format('{"path":%s,"row":%d,"rows":%d}',
+          vim.fn.json_encode(p), pos.row, n)
+      end
+    end
+  end
+  local json = string.format('{"lines":%d,"columns":%d,"images":[%s]}',
+    vim.o.lines, vim.o.columns, table.concat(imgs, ','))
+  if json ~= last then
+    last = json
+    vim.fn.writefile({ json }, out)
+  end
+end
+
+-- the window calls this after a font change (new cell height)
+_G.ws_images_refresh = function() marked = {}; last = ''; place() end
+
+vim.api.nvim_create_autocmd({ 'BufEnter', 'BufWinEnter', 'TextChanged', 'TextChangedI',
+  'WinScrolled', 'WinResized', 'VimResized', 'CursorMoved', 'CursorMovedI', 'BufWritePost' }, {
+  group = vim.api.nvim_create_augroup('ws_images', { clear = true }),
+  callback = function() vim.schedule(place) end,
+})
+LUA

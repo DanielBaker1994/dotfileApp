@@ -67,7 +67,7 @@ wframe() { osascript -e 'tell application "System Events" to tell process "works
   end repeat
 end tell' 2>/dev/null | tr -d ' '; }
 wcount() { osascript -e 'tell application "System Events" to count (windows of process "workspace-switcher")' 2>/dev/null; }
-vim_pid() { pgrep -f "nvim --embed --listen $(SOCK)" | head -1; }
+vim_pid() { pgrep -f "nvim --embed.*--listen $(SOCK)" | head -1; }
 disk() { tr '\n' '|' < "$1"; }
 buf() { vx "join(getline(1,'\$'),'|')"; }
 # click inside the vim pane (upper third of the window)
@@ -133,6 +133,26 @@ W0="$(wcount)"; ESC; ESC; sleep 0.4
 check "Esc stays in the window" "$(wcount)" "$W0"
 typ "i"; sleep 0.2; ESC; sleep 0.4
 check "i + Esc -> Normal" "$(vx 'mode()')" "n"
+# rapid Esc x3 (vim-esc-close, default 3) closes the window from Normal mode
+sleep 0.8
+# N rapid presses, sent in ONE burst ~150ms apart like a human tapping
+esc_burst() {
+    guard || return 1
+    local n=$1 script=(-e 'tell application "System Events"') i
+    for ((i = 0; i < n; i++)); do script+=(-e 'key code 53' -e 'delay 0.15'); done
+    osascript "${script[@]}" -e 'end tell'
+}
+typ "i"; sleep 0.2; esc_burst 2; sleep 0.8
+check "Insert + Esc Esc keeps the window" "$(wcount)" "$W0"
+check "...and leaves vim in Normal mode" "$(vx 'mode()')" "n"
+typ "i"; sleep 0.2; esc_burst 3; sleep 0.8
+check "3 rapid Esc from Insert close the window" "$(wcount)" "0"
+ws_send notes; sleep 1.2
+check "re-show lands in Normal mode" "$(vx 'mode()')" "n"
+sleep 0.8; esc_burst 3; sleep 0.8
+check "3 rapid Esc from Normal close the window" "$(wcount)" "0"
+ws_send notes; sleep 1.2
+check "re-show after Esc-close keeps the same note" "$(vx "expand('%:t')")" "zz-a.md"
 
 # --- 4. edit shortcuts (rule 1) ---------------------------------------------------
 echo "== edit shortcuts =="
@@ -157,6 +177,7 @@ echo "== tab switch =="
 ws_send "open:$T/zz-b.md"; sleep 1.2
 check "second note opens in the same vim" "$(vx "expand('%:t')")" "zz-b.md"
 PID1="$(vim_pid)"
+[[ -n "$PID1" ]] && pass "editor pid found ($PID1)" || fail "editor pid not found"
 typ "A typed-in-b"; sleep 0.3
 check "still inserting before switch" "$(vx 'mode()')" "i"
 ws_send "open:$T/zz-a.md"; sleep 1.2
@@ -186,7 +207,40 @@ check "relaunch reopens the current note" "$(vx "expand('%:t')")" "zz-a.md"
 typ "Go"; typ "after relaunch"; ESC; sleep 0.8
 check "relaunched editor takes input" "$(tail -1 "$T/zz-a.md")" "after relaunch"
 
-# --- 8. host-side append (voice path) lands in the buffer -------------------------
+# --- 8. inline images ------------------------------------------------------------
+echo "== inline images =="
+IMGJSON="$(dirname "$(SOCK)")/$(basename "$(SOCK)" .sock).images.json"
+mkdir -p "$T/assets"
+# a 200x60 PNG test image
+IMG_SRC="$(ls "$HOME"/notes/assets/*.png 2>/dev/null | head -1)"
+if [[ -n "$IMG_SRC" ]]; then
+    cp "$IMG_SRC" "$T/assets/pic.png"
+    printf 'top line\n![](assets/pic.png)\nbelow image\n' > "$T/zz-img.md"
+    ws_send "open:$T/zz-img.md"; sleep 1.5
+    img_row() { python3 -c "import json,sys; d=json.load(open('$IMGJSON')); print(d['images'][0]['row'] if d.get('images') else -1)"; }
+    check "image placed under its link line" "$(img_row)" "2"
+    click_pane; sleep 0.3
+    ESC; typ "ggO"; typ "new 1"; ESC; typ "o"; typ "new 2"; ESC; sleep 0.6
+    check "image follows edits above it" "$(img_row)" "4"
+    typ "u"; typ "u"; sleep 0.6
+    check "image follows undo" "$(img_row)" "2"
+    screencapture -x -R "$(osascript -e 'tell application "System Events" to tell process "workspace-switcher" to get {position, size} of (first window whose size is not {0,0})' | tr -d ' ')" /tmp/ws-vim-image.png
+    # paste an image from the clipboard (Cmd+V) -> saved to assets + linked
+    osascript -e "set the clipboard to (read (POSIX file \"$T/assets/pic.png\") as «class PNGf»)"
+    BEFORE=$(ls "$T/assets" | wc -l | tr -d ' ')
+    typ "Go"; CMD v; sleep 0.8; ESC; sleep 0.8
+    LAST="$(vx "getline('\$')")"
+    [[ "$LAST" == "![](assets/img-"*".png)" ]] && pass "Cmd+V image pastes a markdown link ($LAST)" \
+        || fail "Cmd+V image paste — last line [$LAST]"
+    check "pasted image saved next to the note" "$(ls "$T/assets" | wc -l | tr -d ' ')" "$((BEFORE + 1))"
+    check "pasted image renders inline" "$(python3 -c "import json; print(len(json.load(open('$IMGJSON'))['images']))")" "2"
+    ws_send "open:$T/zz-a.md"; sleep 1.2
+    check "no images drawn for a note without images" "$(python3 -c "import json; print(len(json.load(open('$IMGJSON'))['images']))")" "0"
+else
+    echo "SKIP: no PNG under ~/notes/assets to test inline images with"
+fi
+
+# --- 9. host-side append (voice path) lands in the buffer -------------------------
 echo "== external append =="
 printf 'external line\n' >> "$T/zz-a.md"; sleep 2.5
 check "external write reloads into vim" "$(vx "getline('\$')")" "external line"
