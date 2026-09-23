@@ -12,3 +12,7 @@ README.pdf
 __pycache__/
 create_a_file_here.txt
 testbackups/
+
+# commands.conf safety copies (last-known-good + parked invalid edits)
+commands.conf.bak
+commands.conf.broken-*

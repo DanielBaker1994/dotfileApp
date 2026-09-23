@@ -457,6 +457,8 @@ public struct PopupConfig {
     // terminal + file explorer share one "panel" look); the terminal's text
     // color is derived from it automatically for contrast
     public var terminalBackground = NSColor(srgbRed: 0.31, green: 0.35, blue: 0.43, alpha: 0.78)
+    // shell drawer text color (nil = colors.text)
+    public var terminalForeground: NSColor? = nil
     // when a file-browser drawer is installed, open it (and close the
     // terminal) from the start instead of the terminal being the default
     public var fileBrowserDefault = false
@@ -815,23 +817,60 @@ public final class PopupPlainWindow: PopupBaseWindow {}
 // border color with a crisp hairline — no heavy accent blocks.
 enum ButtonState { case idle, hover, pressed, on, onHover }
 
+// Live retheme (Theme ▸ presets): every view that holds its own PopupConfig
+// copy takes the window's new palette and redraws — no window rebuild, so
+// the shell session and the vim pane survive.
+protocol PopupThemeable: AnyObject {
+    func applyColors(_ c: PopupColors)
+}
+extension PopupTabsBar: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension PopupFilterBar: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension PopupRowView: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension PopupStatusBar: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension PopupChrome: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension ThemeButton: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension FileListPane: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
+extension PopupFileBrowser: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; retheme() }
+}
+
 enum ButtonStyle {
+    // Soft, borderless surfaces: state reads from the fill alone; only the
+    // active ("on") chip gets a faint hairline so it sits slightly raised.
+    // Everything derives from the text color, so light and dark presets both
+    // get the right contrast without per-theme tuning.
     static func fill(_ st: ButtonState, _ c: PopupColors) -> NSColor {
         switch st {
-        case .idle:    return c.text.withAlphaComponent(0.055)
-        case .hover:   return c.text.withAlphaComponent(0.11)
-        case .pressed: return c.text.withAlphaComponent(0.17)
-        case .on:      return c.border.withAlphaComponent(0.20)
-        case .onHover: return c.border.withAlphaComponent(0.27)
+        case .idle:    return c.text.withAlphaComponent(0.05)
+        case .hover:   return c.text.withAlphaComponent(0.10)
+        case .pressed: return c.text.withAlphaComponent(0.15)
+        case .on:      return c.text.withAlphaComponent(0.14)
+        case .onHover: return c.text.withAlphaComponent(0.18)
         }
     }
     static func stroke(_ st: ButtonState, _ c: PopupColors) -> NSColor {
         switch st {
-        case .idle:          return c.text.withAlphaComponent(0.09)
-        case .hover:         return c.text.withAlphaComponent(0.18)
-        case .pressed:       return c.text.withAlphaComponent(0.22)
-        case .on, .onHover:  return c.border.withAlphaComponent(0.60)
+        case .idle, .hover, .pressed: return .clear
+        case .on, .onHover:           return c.text.withAlphaComponent(0.12)
         }
+    }
+    // text inputs keep a faint outline so they still read as fields
+    static func inputStroke(_ c: PopupColors) -> NSColor {
+        c.text.withAlphaComponent(0.12)
     }
     static func text(_ st: ButtonState, _ c: PopupColors) -> NSColor {
         switch st {
@@ -845,14 +884,36 @@ enum ButtonStyle {
     }
 
     // surface: rounded rect with a half-pixel-aligned hairline
-    static func draw(_ rect: NSRect, _ st: ButtonState, _ c: PopupColors, radius: CGFloat) {
+    // `flat`: no surface at rest (tabs, icon buttons) — it appears on hover
+    static func draw(_ rect: NSRect, _ st: ButtonState, _ c: PopupColors, radius: CGFloat,
+                     flat: Bool = false) {
+        if flat && st == .idle { return }
         let r = rect.insetBy(dx: 0.5, dy: 0.5)
         let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
         fill(st, c).setFill()
         path.fill()
-        stroke(st, c).setStroke()
+        let s = stroke(st, c)
+        guard s.alphaComponent > 0 else { return }
+        s.setStroke()
         path.lineWidth = 1
         path.stroke()
+    }
+
+    // SF Symbol tinted to `color`, centered in `rect` (sharper than text
+    // glyphs like ★ / ←)
+    static func symbol(_ name: String, in rect: NSRect, color: NSColor, size: CGFloat) {
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: size, weight: .semibold)) else { return }
+        let tinted = NSImage(size: base.size, flipped: false) { r in
+            base.draw(in: r)
+            color.set()
+            r.fill(using: .sourceAtop)
+            return true
+        }
+        let o = NSPoint(x: (rect.midX - base.size.width / 2).rounded(),
+                        y: (rect.midY - base.size.height / 2).rounded())
+        tinted.draw(in: NSRect(origin: o, size: base.size), from: .zero, operation: .sourceOver,
+                    fraction: 1, respectFlipped: true, hints: nil)
     }
 
     // centered label (optionally within a sub-rect)
@@ -1078,7 +1139,7 @@ final class PopupBackdrop: NSView {
 // selected tab is highlighted. With many tabs the pills WRAP to the next row
 // (never hidden); the "+" add button comes first. Clicking fires onSelect.
 final class PopupTabsBar: NSView {
-    let config: PopupConfig
+    var config: PopupConfig
     var zoom: CGFloat = 1.0
     var titles: [String] = [] {
         didSet { needsDisplay = true }
@@ -1212,7 +1273,7 @@ final class PopupTabsBar: NSView {
             let st: ButtonState = pressedIndex == i ? .pressed
                 : isSelectedTab ? (hovered ? .onHover : .on)
                 : hovered ? .hover : .idle
-            ButtonStyle.draw(rect, st, c, radius: radius)
+            ButtonStyle.draw(rect, st, c, radius: radius, flat: !isSelectedTab)
             if title == "+" {
                 ButtonStyle.plus(in: rect, color: ButtonStyle.text(st, c), arm: 4.5 * zoom)
                 continue
@@ -1293,7 +1354,7 @@ final class PopupTabsBar: NSView {
 // "label: current", click opens an NSMenu with "All" + the unique values;
 // picking one fires onSelect(dimension, valueIndex).
 final class PopupFilterBar: NSView {
-    let config: PopupConfig
+    var config: PopupConfig
     var zoom: CGFloat = 1.0
     var labels: [String] = []
     var values: [[String]] = []      // per dimension; index 0 = "All"
@@ -1491,7 +1552,7 @@ final class PopupSearchFieldCell: NSTextFieldCell {
 // row rect itself (full control: pill, icons, anything). Otherwise a minimal
 // generic default (highlight pill + title) is drawn.
 final class PopupRowView: NSView {
-    let config: PopupConfig
+    var config: PopupConfig
     var zoom: CGFloat = 1.0 {
         didSet { invalidateHeightCache(); needsDisplay = true }
     }
@@ -2077,19 +2138,24 @@ final class PopupTextView: NSTextView {
 // A small theme-aware push button (pills, star, parent) drawn with the
 // window colors so it fits the dark chrome instead of the system accent.
 final class ThemeButton: NSView {
-    private let config: PopupConfig
+    private var config: PopupConfig
     var title: String { didSet { needsDisplay = true } }
-    // "on" state (e.g. ★ pinned): rendered with the solid highlight fill so
-    // an active toggle reads clearly against the idle accent buttons
+    // optional SF Symbol drawn before the title (icon-only when title is "")
+    var symbol: String? { didSet { needsDisplay = true } }
+    // no surface at rest; the fill appears on hover (toolbar icon buttons)
+    var flat = false
+    // "on" state (e.g. pinned): rendered with the raised active fill so an
+    // active toggle reads clearly against the idle buttons
     var isOn = false { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
     private var down = false
     private var hover = false
     private var trackingArea: NSTrackingArea?
 
-    init(config: PopupConfig, title: String) {
+    init(config: PopupConfig, title: String, symbol: String? = nil) {
         self.config = config
         self.title = title
+        self.symbol = symbol
         super.init(frame: .zero)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
@@ -2111,8 +2177,24 @@ final class ThemeButton: NSView {
         let st: ButtonState = down ? .pressed
             : isOn ? (hover ? .onHover : .on)
             : hover ? .hover : .idle
-        ButtonStyle.draw(bounds, st, config.colors, radius: config.buttonRadius)
-        ButtonStyle.label(title, in: bounds, st, config.colors, size: config.buttonFontSize)
+        ButtonStyle.draw(bounds, st, config.colors, radius: config.buttonRadius, flat: flat)
+        guard let symbol else {
+            ButtonStyle.label(title, in: bounds, st, config.colors, size: config.buttonFontSize)
+            return
+        }
+        let color = ButtonStyle.text(st, config.colors)
+        if title.isEmpty {
+            ButtonStyle.symbol(symbol, in: bounds, color: color, size: config.buttonFontSize + 0.5)
+            return
+        }
+        let tw = (title as NSString).size(withAttributes: [
+            .font: ButtonStyle.font(config.buttonFontSize, st)]).width
+        let iw: CGFloat = 12, gap: CGFloat = 4
+        let x0 = (bounds.midX - (iw + gap + tw) / 2).rounded()
+        ButtonStyle.symbol(symbol, in: NSRect(x: x0, y: 0, width: iw, height: bounds.height),
+                           color: color, size: config.buttonFontSize)
+        ButtonStyle.label(title, in: NSRect(x: x0 + iw + gap, y: 0, width: tw, height: bounds.height),
+                          st, config.colors, size: config.buttonFontSize)
     }
     override func mouseDown(with e: NSEvent) { down = true; needsDisplay = true }
     override func mouseUp(with e: NSEvent) {
@@ -2126,7 +2208,7 @@ final class ThemeButton: NSView {
 // select (preview), double-click/Return to open, arrows to move. Printable
 // keys hand focus to the search field.
 final class FileListPane: NSView {
-    private let config: PopupConfig
+    private var config: PopupConfig
     var rows: [PopupFileBrowser.Entry] = [] {
         didSet {
             if let h = hover, !rows.indices.contains(h) { hover = nil }
@@ -2397,7 +2479,7 @@ final class DocxTextExtractor: NSObject, XMLParserDelegate {
 }
 
 final class PopupFileBrowser: NSView, NSTextFieldDelegate {
-    let config: PopupConfig
+    var config: PopupConfig
     var onOpen: ((String) -> Void)?          // open a FILE in its default app
     var onDirChange: ((String) -> Void)?     // cwd changed (host labels)
     var onCopyDir: ((String) -> Void)?       // copy current dir path
@@ -2459,6 +2541,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // live restyle from the color picker: swap the panel background without
     // rebuilding the browser (the color's own alpha sets the translucency)
     func setBackground(_ c: NSColor) {
+        config.fileBrowserBackground = c
         layer?.backgroundColor = c.cgColor
         needsDisplay = true
     }
@@ -2472,7 +2555,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             string: "filter…",
             attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: c.dim])
         searchField.layer?.backgroundColor = ButtonStyle.fill(.idle, c).cgColor
-        searchField.layer?.borderColor = ButtonStyle.stroke(.hover, c).cgColor
+        searchField.layer?.borderColor = ButtonStyle.inputStroke(c).cgColor
         previewText.textColor = c.text
         previewHint.textColor = c.dim
         splitter.layer?.backgroundColor = c.border.withAlphaComponent(0.35).cgColor
@@ -2490,8 +2573,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.zoxideFavorites = zoxideFavorites
         let home = NSHomeDirectory()
         self.favURL = favoritesURL ?? URL(fileURLWithPath: home + "/.cache/workspace-switcher/files-favorites.json")
-        self.parentButton = ThemeButton(config: config, title: "← up")
-        self.starButton = ThemeButton(config: config, title: "★ pin")
+        self.parentButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
+        self.starButton = ThemeButton(config: config, title: "Pin", symbol: "star")
         self.listPane = FileListPane(config: config)
         self.previewList = FileListPane(config: config)
         super.init(frame: .zero)
@@ -2553,10 +2636,12 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         searchField.layer?.backgroundColor = ButtonStyle.fill(.idle, config.colors).cgColor
         searchField.layer?.cornerRadius = config.buttonRadius
         searchField.layer?.borderWidth = 1
-        searchField.layer?.borderColor = ButtonStyle.stroke(.hover, config.colors).cgColor
+        searchField.layer?.borderColor = ButtonStyle.inputStroke(config.colors).cgColor
 
         parentButton.onClick = { [weak self] in self?.cdParent() }
         starButton.onClick = { [weak self] in self?.toggleStar() }
+        parentButton.toolTip = "Parent folder"
+        starButton.toolTip = "Pin this folder to the favorites row"
 
         previewText.isEditable = false
         previewText.isSelectable = true
@@ -2652,9 +2737,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let toolbarY: CGFloat = 4
         let toolbarH: CGFloat = 24
         // pin first (left), then parent, then the filter bar fills the rest
-        starButton.frame = NSRect(x: 6, y: toolbarY, width: 74, height: toolbarH)
+        starButton.frame = NSRect(x: 6, y: toolbarY, width: 72, height: toolbarH)
         parentButton.frame = NSRect(x: starButton.frame.maxX + 4, y: toolbarY,
-                                    width: 44, height: toolbarH)
+                                    width: toolbarH + 4, height: toolbarH)
         searchField.frame = NSRect(x: parentButton.frame.maxX + 6, y: toolbarY,
                                    width: max(60, w - parentButton.frame.maxX - 12),
                                    height: toolbarH)
@@ -3168,7 +3253,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private func updateStarTitle() {
         let on = shownFavorites.contains(cwd)
         starButton.isOn = on
-        starButton.title = on ? "★ pinned" : "★ pin"
+        starButton.title = on ? "Pinned" : "Pin"
+        starButton.symbol = on ? "star.fill" : "star"
     }
     private func rebuildPills() {
         for p in favPills { p.removeFromSuperview() }
@@ -3255,7 +3341,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
 // + red monospace text; normal state = subtle highlight matching the pill
 // theme. Hidden when there's nothing to say.
 final class PopupStatusBar: NSView {
-    let config: PopupConfig
+    var config: PopupConfig
     var text: String = "" { didSet { needsDisplay = true } }
     var isError = false { didSet { needsDisplay = true } }
 
@@ -3303,7 +3389,7 @@ final class PopupStatusBar: NSView {
 // or drag-anywhere for list windows). Non-chrome areas return nil from
 // hitTest so the content below keeps its own events (text selection, typing).
 final class PopupChrome: NSView {
-    let config: PopupConfig
+    var config: PopupConfig
     // live header fill pushed by the color picker — the chrome holds its own
     // copy of the config struct, so the window re-pushes the picked color
     // here for the drag-header strip to restyle without a rebuild
@@ -3706,7 +3792,7 @@ private func headerButtonFont(_ label: String) -> NSFont {
             let isz: CGFloat = 16
             let badge = iconButtonRect
             let st: ButtonState = iconMenuOpen ? .on : iconHovered ? .hover : .idle
-            ButtonStyle.draw(badge, st, config.colors, radius: config.buttonRadius)
+            ButtonStyle.draw(badge, st, config.colors, radius: config.buttonRadius, flat: true)
             popupDrawImage(icon, in: NSRect(x: badge.minX + 6,
                                             y: badge.midY - isz / 2,
                                             width: isz, height: isz))
@@ -4849,7 +4935,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 // silvery-blue panel color (config.terminalBackground) carries
                 // its own alpha — the color picker's opacity slider sets it
                 term.nativeBackgroundColor = config.terminalBackground
-                term.nativeForegroundColor = config.colors.text
+                term.nativeForegroundColor = config.terminalForeground ?? config.colors.text
                 backdrop.addSubview(term)
                 terminalDrawer = term
                 currentTerminalHeight = config.terminalHeight
@@ -6432,8 +6518,16 @@ private func scrollSelectionIntoView() {
         // dismisses them with Esc); everything else hides on focus loss —
         // unless the global hide-on-focus-loss setting is disabled, in which
         // case no window hides on focus loss (only Esc dismisses)
-        if isShown && !config.sticky && settings.hideOnFocusLoss {
-            hide(restore: false)
+        // Checked on the next turn, once the new key window is known: our own
+        // sheets / alerts / color panel / open panel / header menus take key
+        // without the user leaving the window, so they never count as a loss.
+        guard isShown && !config.sticky && settings.hideOnFocusLoss else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isShown, !self.config.sticky, settings.hideOnFocusLoss,
+                  !self.isShowingMenu, !self.panel.isKeyWindow,
+                  self.panel.attachedSheet == nil else { return }
+            if let k = NSApp.keyWindow, k is NSPanel, !(k.delegate is PopupWindow) { return }
+            self.hide(restore: false)
         }
     }
 
@@ -6951,8 +7045,9 @@ public enum ThemeRole: String, CaseIterable {
             config.terminalBackground = c
             if let term = terminalDrawer {
                 term.nativeBackgroundColor = c
-                // terminal text color stays the theme's fixed color
-                term.nativeForegroundColor = config.colors.text
+                // terminal text color stays the window's text color unless a
+                // preset gave the drawer its own
+                term.nativeForegroundColor = config.terminalForeground ?? config.colors.text
             }
         case .notepad:
             // the card fill only — the editor's text/selection colors are
@@ -6973,6 +7068,49 @@ public enum ThemeRole: String, CaseIterable {
         }
         panel.contentView?.needsDisplay = true
     }
+
+    // Window-wide text palette (Theme ▸ presets, light <-> dark): the editor,
+    // the vim pane, the shell drawer and every themed subview pick it up live.
+    public func setTextColors(text: NSColor, dim: NSColor, highlight: NSColor) {
+        config.colors.text = text
+        config.colors.dim = dim
+        config.colors.highlight = highlight
+        if let tv = editorView {
+            tv.textColor = text
+            tv.insertionPointColor = text
+            tv.selectedTextAttributes = [.backgroundColor: highlight, .foregroundColor: text]
+        }
+        findField?.textColor = text
+        findCountLabel?.textColor = dim
+        if let vv = vimView {
+            vv.nativeForegroundColor = text
+            func hex(_ c: NSColor) -> String {
+                let cc = c.usingColorSpace(.sRGB) ?? c
+                return String(format: "#%02X%02X%02X", Int(round(cc.redComponent * 255)),
+                              Int(round(cc.greenComponent * 255)), Int(round(cc.blueComponent * 255)))
+            }
+            // the bundled init re-applies its highlights on ColorScheme
+            vimCommand("let g:ws_fg='\(hex(text))' | let g:ws_dim='\(hex(dim))' | let g:ws_sel='\(hex(highlight))' | silent! doautocmd ColorScheme")
+        }
+        if config.terminalForeground == nil {
+            terminalDrawer?.nativeForegroundColor = text
+        }
+        func walk(_ v: NSView) {
+            (v as? PopupThemeable)?.applyColors(config.colors)
+            v.subviews.forEach(walk)
+        }
+        if let root = panel.contentView { walk(root) }
+        panel.contentView?.needsDisplay = true
+    }
+
+    // the shell drawer's own text color (nil = follow the window text)
+    public func setTerminalForeground(_ c: NSColor?) {
+        config.terminalForeground = c
+        terminalDrawer?.nativeForegroundColor = c ?? config.colors.text
+    }
+
+    public var hasTerminalDrawer: Bool { terminalDrawer != nil }
+    public var hasFileBrowser: Bool { fileBrowser != nil }
 
     // the current window's drag-header rect (for popping the theme menu under
     // the paint-brush button)

@@ -92,6 +92,11 @@ struct AppSettings {
     var aeroLog = NSString(string: "~/.cache/ws-aero.log").expandingTildeInPath
     var authDebugFlag = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInPath
     var voiceLocale = "en-US"
+    // bundle ids of screenshot tools whose capture overlay is an ordinary
+    // window: while one is frontmost our floating windows step down so the
+    // selection rectangle draws ON TOP of them ([app] screenshot-apps)
+    var screenshotApps = ["org.flameshot", "pl.maketheweb.cleanshotx",
+                          "cc.ffitch.shottr", "com.skitch.skitch"]
     // global hide behavior: when false, windows only dismiss via Esc (regardless
     // of per-window sticky); when true (default), non-sticky windows hide on focus loss
     var hideOnFocusLoss = true
@@ -181,8 +186,7 @@ func parseColors() -> [String: NSColor] {
 // The interactive color picker edits this section live.
 func parseTheme() -> [String: NSColor] {
     var out: [String: NSColor] = [:]
-    guard let content = try? String(contentsOfFile: settings.commandsConfPath,
-                                    encoding: .utf8) else { return out }
+    guard let content = readConfigText() else { return out }
     var inTheme = false
     for line in content.split(separator: "\n") {
         let s = line.trimmingCharacters(in: .whitespaces)
@@ -423,9 +427,9 @@ struct CommandSpec {
     let root: String?     // files: starting directory for the file browser
     let favorites: [String]  // files: static favorite dirs (commands.conf, tilde ok)
     let zoxideTop: Int       // files: include the top-N dirs from zoxide as favorites
-    let browserBackground: NSColor?  // files: panel background (default silvery blue)
-    let backgroundColor: NSColor?  // note/files: window card fill (the notepad)
-    let tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
+    var browserBackground: NSColor?  // files: panel background (default silvery blue)
+    var backgroundColor: NSColor?  // note/files: window card fill (the notepad)
+    var tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
     let primary: String?   // list: field shown as the row title
     let content: String?   // list: field drawn next to the title (truncated)
     let detail: String?    // list: field drawn dim on line 2 (left)
@@ -452,12 +456,17 @@ struct CommandSpec {
     let maxHeight: CGFloat    // cap on the window height (0 = 60% of screen)
     var font: String?         // font family for this window's text
     var fontSize: CGFloat     // note: editor point size (0 = default 13)
-    let headerColor: NSColor? // drag-header tint (nil = window background)
+    var headerColor: NSColor? // drag-header tint (nil = window background)
     var voice: Bool           // note: record + transcribe button in the header
     let terminal: Bool        // note: embedded shell drawer at the bottom
     let terminalHeight: CGFloat
     let terminalDir: String?  // note: starting directory for the embedded shell
-    let terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
+    var terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
+    // per-window text palette (Theme ▸ presets); nil = the [theme] colors
+    var textColor: NSColor? = nil
+    var dimColor: NSColor? = nil
+    var highlightColor: NSColor? = nil
+    var terminalForeground: NSColor? = nil  // shell drawer text (nil = textColor)
     var vimMode: Bool          // note: edit notes in an embedded nvim pane
     var vimBin: String         // note: vim binary path or name (default "nvim")
     var vimInit: String?       // note: init file for the vim pane (nil = bundled)
@@ -550,8 +559,7 @@ struct CommandSpec {
 func loadCommands() -> [CommandSpec] {
     // app-level settings first — [app] may sit anywhere in the file
     applyAppConfigFromDisk()
-    let path = settings.commandsConfPath
-    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+    guard let content = readConfigText() else {
         FileHandle.standardError.write(Data("ws: \(commandsConfName) missing — no command palette\n".utf8))
         return []
     }
@@ -607,9 +615,8 @@ func loadCommands() -> [CommandSpec] {
 // when [jira] enabled = true, booted out otherwise. Runs at daemon start, so
 // the poll literally cannot run in the background when jira is disabled.
 private func syncJiraLaunchAgent() {
-    let confPath = settings.commandsConfPath
     var enabled = false
-    if let content = try? String(contentsOfFile: confPath, encoding: .utf8) {
+    if let content = readConfigText() {
         var inJira = false
         for line in content.split(separator: "\n") {
             let s = line.trimmingCharacters(in: .whitespaces)
@@ -668,7 +675,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     let width = (vars["width"] ?? "").isEmpty
         ? 0 : CGFloat(Double(vars["width"] ?? "") ?? 0)
     let maxRows = Int(vars["max-rows"] ?? "") ?? 0
-    return CommandSpec(
+    var spec = CommandSpec(
         name: name, kind: kind, windowName: vars["name"], chromeTitle: vars["title"],
         script: vars["script"],
         paths: csv(vars["paths"] ?? vars["path"]),
@@ -713,6 +720,11 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName),
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
+    spec.textColor = hexColor(vars["text-color"])
+    spec.dimColor = hexColor(vars["dim-color"])
+    spec.highlightColor = hexColor(vars["highlight-color"])
+    spec.terminalForeground = hexColor(vars["terminal-foreground"])
+    return spec
 }
 
 // hex color from commands.conf: "7d8fa6", "0x7d8fa6" or "#7d8fa6" (opaque),
@@ -748,8 +760,7 @@ private func tri(_ s: String?) -> Bool? {
 // from loadCommands (and from main.swift before any socket ping) so app
 // settings are in place before anything else — order-independent of [icons].
 func applyAppConfigFromDisk() {
-    guard let content = try? String(contentsOfFile: settings.commandsConfPath,
-                                    encoding: .utf8) else { return }
+    guard let content = readConfigText() else { return }
     var vars: [String: String] = [:]
     var inApp = false
     for line in content.split(separator: "\n") {
@@ -812,15 +823,359 @@ private func parseAppConfig(_ vars: [String: String]) {
         settings.aeroLog = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
     }
     if let v = str("voice-locale"), !v.isEmpty { settings.voiceLocale = v }
+    if vars["screenshot-apps"] != nil { settings.screenshotApps = csv(vars["screenshot-apps"]) }
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
+}
+
+// MARK: - Theme presets (header icon menu ▸ Theme)
+
+// A coordinated palette for one window. "Whole Window" applies every surface
+// (the blended look: notepad, a slightly deeper explorer + terminal, a raised
+// header); the per-surface items apply just that surface. Transparency is
+// kept per surface — a preset changes hues, never how see-through it is.
+struct ThemePreset {
+    let name: String
+    let background: NSColor   // notepad / window card
+    let browser: NSColor      // file-explorer panel
+    let terminal: NSColor     // shell drawer
+    let header: NSColor       // drag header
+    let text: NSColor
+    let dim: NSColor
+    let highlight: NSColor    // selection / active pills
+
+    var isLight: Bool { background.relativeLuminance > 0.45 }
+
+    // commands.conf [themes]:  Name = bg, browser, terminal, header, text, dim, highlight
+    static func parse(name: String, _ value: String) -> ThemePreset? {
+        let c = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !name.isEmpty, c.count == 7 else { return nil }
+        let colors = c.compactMap { hexColor($0) }
+        guard colors.count == 7 else { return nil }
+        return ThemePreset(name: name, background: colors[0], browser: colors[1],
+                           terminal: colors[2], header: colors[3], text: colors[4],
+                           dim: colors[5], highlight: colors[6])
+    }
+
+    // the stock palettes (official hex values where the theme publishes them)
+    static let builtIn: [ThemePreset] = [
+        ("Tokyo Night", "1A1B26, 16161E, 13141C, 24283B, C0CAF5, 9AA5CE, 283457"),
+        ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 292E42, C0CAF5, 9AA5CE, 2E3C64"),
+        ("Catppuccin Mocha", "1E1E2E, 181825, 11111B, 313244, CDD6F4, A6ADC8, 45475A"),
+        ("Catppuccin Macchiato", "24273A, 1E2030, 181926, 363A4F, CAD3F5, A5ADCB, 494D64"),
+        ("Dracula", "282A36, 21222C, 191A21, 343746, F8F8F2, A4AACC, 44475A"),
+        ("Nord", "2E3440, 3B4252, 272C36, 434C5E, ECEFF4, A3ACBD, 4C566A"),
+        ("Gruvbox Dark", "282828, 1D2021, 1D2021, 3C3836, EBDBB2, A89984, 504945"),
+        ("One Dark", "282C34, 21252B, 1E2127, 2C313A, ABB2BF, 7F848E, 3E4451"),
+        ("Rosé Pine", "191724, 1F1D2E, 16141F, 26233A, E0DEF4, 908CAA, 403D52"),
+        ("Solarized Dark", "002B36, 073642, 00212B, 073642, 93A1A1, 657B83, 0A4A5A"),
+        ("Graphite", "1E1E1E, 252525, 181818, 2D2D2D, E5E5E5, 9A9A9A, 3A3A3A"),
+        ("Catppuccin Latte", "EFF1F5, E6E9EF, DCE0E8, CCD0DA, 4C4F69, 6C6F85, BCC0CC"),
+        ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C4C8DA, 3760BF, 6172B0, B7C1E3"),
+        ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1"),
+        ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6"),
+    ].compactMap { parse(name: $0.0, $0.1) }
+
+    // built-ins + commands.conf [themes] entries (same name = override)
+    static func all() -> [ThemePreset] {
+        var out = builtIn
+        guard let content = readConfigText() else { return out }
+        var inThemes = false
+        for line in content.split(separator: "\n") {
+            let s = line.trimmingCharacters(in: .whitespaces)
+            if s.isEmpty || s.hasPrefix("#") { continue }
+            if s.hasPrefix("[") && s.hasSuffix("]") {
+                inThemes = s == "[themes]"
+                continue
+            }
+            guard inThemes, let eq = s.firstIndex(of: "=") else { continue }
+            let name = s[..<eq].trimmingCharacters(in: .whitespaces)
+            guard let p = parse(name: name, String(s[s.index(after: eq)...])) else { continue }
+            if let i = out.firstIndex(where: { $0.name == name }) { out[i] = p } else { out.append(p) }
+        }
+        return out
+    }
+
+    // a small swatch strip for the menu item: background, terminal, text
+    func swatch() -> NSImage {
+        let size = NSSize(width: 30, height: 14)
+        return NSImage(size: size, flipped: false) { r in
+            let card = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+            self.background.setFill()
+            card.fill()
+            NSGraphicsContext.current?.saveGraphicsState()
+            card.addClip()
+            self.terminal.setFill()
+            NSRect(x: r.maxX - 10, y: 0, width: 10, height: r.height).fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
+            self.text.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 5, y: r.midY - 3, width: 6, height: 6)).fill()
+            self.highlight.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 12, y: r.midY - 3, width: 6, height: 6)).fill()
+            NSColor.black.withAlphaComponent(0.25).setStroke()
+            card.lineWidth = 1
+            card.stroke()
+            return true
+        }
+    }
+}
+
+extension NSColor {
+    // WCAG relative luminance (0 = black, 1 = white)
+    var relativeLuminance: CGFloat {
+        let c = usingColorSpace(.sRGB) ?? self
+        func lin(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
+    }
+}
+
+// MARK: - commands.conf store (validated reads + backed-up writes)
+//
+// Every read of commands.conf goes through readConfigText() and every write
+// through writeConfigText(). A file that fails validation (unreadable, empty,
+// binary, a malformed [section] header, mostly-garbage lines) is never used:
+// the last-known-good copy in commands.conf.bak stands in for it. Each valid
+// read refreshes that backup, and an app write that would produce an invalid
+// file is refused, so neither a bad hand edit nor an app write can leave the
+// app without a working config. Value-level problems (a non-hex color, a
+// non-number width) are only warnings: the loader already ignores them and
+// falls back to the built-in default.
+
+struct ConfigIssue {
+    let line: Int          // 1-based; 0 = whole file
+    let message: String
+    let fatal: Bool        // true = the file is unusable as a whole
+}
+
+var configBackupPath: String { settings.commandsConfPath + ".bak" }
+// findings of the latest read (status-bar "Config Issues…" item)
+private(set) var configIssues: [ConfigIssue] = []
+// true while commands.conf is invalid and the backup is being read instead
+private(set) var configUsingBackup = false
+// (mtime+size stamp, text handed out) so repeated reads don't re-validate
+private var configReadCache: (stamp: String, text: String?)?
+
+private func configLog(_ s: String) {
+    let line = "ws: \(s)\n"
+    FileHandle.standardError.write(Data(line.utf8))
+    if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/ws-debug.log")) {
+        fh.seekToEndOfFile()
+        fh.write(Data(line.utf8))
+        try? fh.close()
+    }
+}
+
+private let configBoolKeys: Set<String> = [
+    "enabled", "resize", "drag", "sticky", "voice", "terminal", "vim-mode",
+    "checkbox", "hide-on-focus-loss",
+]
+private let configNumberKeys: [String: ClosedRange<Double>] = [
+    "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
+    "terminal-height": 40...4000, "font-size": 6...96, "terminal-font-size": 6...96,
+    "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
+    "body-lines": 0...100, "zoxide-top": 0...100, "search-width": 0...1,
+    "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
+    "vim-esc-close": 0...20,
+]
+private let configColorKeys: Set<String> = [
+    "header-color", "background-color", "browser-background", "terminal-background",
+    "text-color", "dim-color", "highlight-color", "terminal-foreground",
+]
+private let configEnumKeys: [String: Set<String>] = [
+    "type": ["shell", "note", "list", "output", "files"],
+    "start-drawer": ["browser", "terminal", "none"],
+    "copy-format": ["tsv"],
+]
+
+// why `value` is invalid for `key` in [section], or nil when it's fine.
+// Empty values are always allowed (they mean "use the default").
+private func configValueProblem(section: String, key: String, value: String) -> String? {
+    guard !value.isEmpty else { return nil }
+    if section == "theme" {
+        return hexColor(value) == nil ? "'\(value)' is not a hex color (RRGGBB / AARRGGBB)" : nil
+    }
+    if section == "themes" {
+        return ThemePreset.parse(name: key, value) == nil
+            ? "expected 7 hex colors: background, browser, terminal, header, text, dim, highlight"
+            : nil
+    }
+    if configBoolKeys.contains(key), tri(value) == nil {
+        return "'\(value)' is not true/false"
+    }
+    if let range = configNumberKeys[key] {
+        guard let n = Double(value) else { return "'\(value)' is not a number" }
+        if !range.contains(n) {
+            return "\(value) is outside \(range.lowerBound.clean)…\(range.upperBound.clean)"
+        }
+    }
+    if configColorKeys.contains(key), hexColor(value) == nil {
+        return "'\(value)' is not a hex color (RRGGBB / AARRGGBB)"
+    }
+    if let allowed = configEnumKeys[key], !allowed.contains(value.lowercased()) {
+        return "'\(value)' is not one of \(allowed.sorted().joined(separator: " | "))"
+    }
+    return nil
+}
+
+private extension Double {
+    var clean: String { self == rounded() ? String(Int(self)) : String(self) }
+}
+
+func validateConfig(_ text: String) -> [ConfigIssue] {
+    var issues: [ConfigIssue] = []
+    func warn(_ n: Int, _ m: String) { issues.append(ConfigIssue(line: n, message: m, fatal: false)) }
+    func fail(_ n: Int, _ m: String) { issues.append(ConfigIssue(line: n, message: m, fatal: true)) }
+    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        fail(0, "the file is empty")
+        return issues
+    }
+    if text.contains("\u{0}") {
+        fail(0, "the file contains binary (NUL) data")
+        return issues
+    }
+    var section: String?
+    var seenSections: Set<String> = []
+    var seenKeys: Set<String> = []
+    var entries = 0
+    var garbage = 0
+    for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        let n = i + 1
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty || s.hasPrefix("#") { continue }
+        if s.hasPrefix("[") {
+            // a broken header would silently fold the next keys into the
+            // PREVIOUS section (e.g. [notes keys landing in [theme]) — fatal
+            let name = s.hasSuffix("]")
+                ? String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces) : ""
+            guard !name.isEmpty, !name.contains("["), !name.contains("]") else {
+                fail(n, "malformed section header '\(s.prefix(40))' (expected [name])")
+                continue
+            }
+            if seenSections.contains(name) {
+                warn(n, "duplicate section [\(name)]")
+            }
+            seenSections.insert(name)
+            section = name
+            seenKeys = []
+            continue
+        }
+        guard let eq = s.firstIndex(of: "=") else {
+            garbage += 1
+            warn(n, "ignored line (no '='): \(s.prefix(40))")
+            continue
+        }
+        let key = s[..<eq].trimmingCharacters(in: .whitespaces)
+        let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        guard !key.isEmpty else {
+            garbage += 1
+            warn(n, "missing key before '='")
+            continue
+        }
+        entries += 1
+        guard let sec = section else { continue }   // top-level `name = command`
+        if seenKeys.contains(key) {
+            warn(n, "[\(sec)] duplicate key '\(key)' (the last one wins)")
+        }
+        seenKeys.insert(key)
+        if let problem = configValueProblem(section: sec, key: key, value: val) {
+            warn(n, "[\(sec)] \(key): \(problem)")
+        }
+    }
+    if entries == 0 {
+        fail(0, "no `key = value` entries")
+    } else if garbage > max(5, entries) {
+        fail(0, "\(garbage) unparseable lines — the file looks corrupted")
+    }
+    return issues
+}
+
+// commands.conf as the app should see it: the file itself when it validates,
+// otherwise the last-known-good backup (nil when neither is usable).
+func readConfigText() -> String? {
+    let path = settings.commandsConfPath
+    let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+    let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    let stamp = "\(mtime)-\((attrs?[.size] as? Int) ?? -1)"
+    if let c = configReadCache, c.stamp == stamp { return c.text }
+
+    let text = try? String(contentsOfFile: path, encoding: .utf8)
+    let backup = try? String(contentsOfFile: configBackupPath, encoding: .utf8)
+    var issues = text.map(validateConfig) ?? [ConfigIssue(
+        line: 0,
+        message: attrs == nil ? "\(commandsConfName) is missing" : "\(commandsConfName) is not readable UTF-8 text",
+        fatal: true)]
+    var result = text
+    var usingBackup = false
+    if issues.contains(where: \.fatal) {
+        if let backup, !validateConfig(backup).contains(where: \.fatal) {
+            result = backup
+            usingBackup = true
+            if attrs == nil {
+                // nothing on disk to lose: put the backup back in place
+                try? backup.write(toFile: path, atomically: true, encoding: .utf8)
+                issues = [ConfigIssue(line: 0, message: "\(commandsConfName) was missing — restored from backup", fatal: false)]
+                usingBackup = false
+            }
+            let why = issues.filter(\.fatal)
+                .map { ($0.line > 0 ? "line \($0.line): " : "") + $0.message }
+                .joined(separator: "; ")
+            configLog("commands.conf invalid (\(why)) — using \(configBackupPath)")
+        }
+        // a rejected file's per-value warnings are mostly fallout of the
+        // fatal error (keys folded into the wrong section) — list only it
+        issues = issues.filter(\.fatal) + issues.filter { !$0.fatal && attrs == nil }
+    } else if let text, text != backup {
+        try? text.write(toFile: configBackupPath, atomically: true, encoding: .utf8)
+    }
+    for i in issues where !i.fatal { configLog("commands.conf:\(i.line): \(i.message)") }
+    configIssues = issues
+    configUsingBackup = usingBackup
+    // re-stat: restoring a missing file changes the stamp
+    let a2 = try? FileManager.default.attributesOfItem(atPath: path)
+    let m2 = (a2?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    configReadCache = ("\(m2)-\((a2?[.size] as? Int) ?? -1)", result)
+    return result
+}
+
+// Write commands.conf. Refuses content that would not validate; otherwise the
+// current file is snapshotted first — a valid one becomes the backup, a broken
+// hand edit is parked as commands.conf.broken-<time> so it's never lost.
+@discardableResult
+func writeConfigText(_ text: String) -> Bool {
+    let fatal = validateConfig(text).filter(\.fatal)
+    guard fatal.isEmpty else {
+        configLog("commands.conf: write refused — \(fatal.map(\.message).joined(separator: "; "))")
+        return false
+    }
+    let path = settings.commandsConfPath
+    if let cur = try? String(contentsOfFile: path, encoding: .utf8), cur != text {
+        if validateConfig(cur).contains(where: \.fatal) {
+            let parked = path + ".broken-\(Int(Date().timeIntervalSince1970))"
+            try? cur.write(toFile: parked, atomically: true, encoding: .utf8)
+            configLog("commands.conf: invalid file parked at \(parked)")
+        } else {
+            try? cur.write(toFile: configBackupPath, atomically: true, encoding: .utf8)
+        }
+    }
+    do {
+        try text.write(toFile: path, atomically: true, encoding: .utf8)
+        return true
+    } catch {
+        configLog("commands.conf: write failed: \(error)")
+        return false
+    }
+}
+
+// Status-bar "Restore Backup": park the broken file, copy the backup over it.
+func restoreConfigFromBackup() -> Bool {
+    guard let bak = try? String(contentsOfFile: configBackupPath, encoding: .utf8) else { return false }
+    return writeConfigText(bak)
 }
 
 // Persist a config value back to commands.conf. Finds the target section,
 // updates the key if it exists, or appends it after the section header.
 // Preserves all comments, formatting, and other sections untouched.
 func saveConfigValue(section: String, key: String, value: String) {
-    let path = settings.commandsConfPath
-    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+    guard let content = readConfigText() else { return }
     var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     var inTarget = false
     var keyFound = false
@@ -854,13 +1209,45 @@ func saveConfigValue(section: String, key: String, value: String) {
     }
 
     let newContent = lines.joined(separator: "\n")
-    try? newContent.write(toFile: path, atomically: true, encoding: .utf8)
+    writeConfigText(newContent)
+}
+
+// Set (or, for a nil value, remove) several keys of one [section] in a single
+// validated write — a theme preset touches up to 8 keys at once.
+func saveConfigValues(section: String, _ kv: [(String, String?)]) {
+    guard let content = readConfigText() else { return }
+    var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    for (key, value) in kv {
+        var header = -1
+        var lastInSection = -1
+        var found = -1
+        var inTarget = false
+        for i in 0..<lines.count {
+            let s = lines[i].trimmingCharacters(in: .whitespaces)
+            if s.hasPrefix("[") && s.hasSuffix("]") {
+                inTarget = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces) == section
+                if inTarget { header = i; lastInSection = i }
+                continue
+            }
+            guard inTarget, let eq = s.firstIndex(of: "=") else { continue }
+            lastInSection = i
+            if s[..<eq].trimmingCharacters(in: .whitespaces) == key { found = i }
+        }
+        switch (found >= 0, value) {
+        case (true, let v?): lines[found] = "\(key) = \(v)"
+        case (true, nil): lines.remove(at: found)
+        case (false, let v?) where header >= 0: lines.insert("\(key) = \(v)", at: lastInSection + 1)
+        case (false, let v?):
+            lines += ["", "[\(section)]", "\(key) = \(v)"]
+        case (false, nil): break
+        }
+    }
+    writeConfigText(lines.joined(separator: "\n"))
 }
 
 // Remove a config key from commands.conf (for reset-to-default).
 func removeConfigValue(section: String, key: String) {
-    let path = settings.commandsConfPath
-    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+    guard let content = readConfigText() else { return }
     var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     var inTarget = false
     var toRemove: [Int] = []
@@ -890,7 +1277,7 @@ func removeConfigValue(section: String, key: String) {
     }
 
     let newContent = lines.joined(separator: "\n")
-    try? newContent.write(toFile: path, atomically: true, encoding: .utf8)
+    writeConfigText(newContent)
 }
 
 // [icons] section -> IconRule list. Line format per app:
@@ -1855,6 +2242,42 @@ final class SwitcherController: NSObject {
         popup.start()
         startCommandServer()
         startFocusPoller()
+        startScreenshotYield()
+    }
+
+    // Our windows float at the pop-up-menu level, above everything. Tools like
+    // Flameshot grab the screen first, then show that frozen image in an
+    // ordinary (level 0) overlay — so the live popup kept covering it and the
+    // selection rectangle looked like it was drawn BEHIND our window. While
+    // such a tool is the active app our visible popups go fully transparent
+    // (the frozen image already contains them, so the shot is unchanged);
+    // they come back as soon as any other app activates.
+    private var yieldedWindows: [NSWindow] = []
+    private func startScreenshotYield() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let id = app?.bundleIdentifier ?? ""
+            if settings.screenshotApps.contains(id) {
+                guard self.yieldedWindows.isEmpty else { return }
+                self.yieldedWindows = NSApp.windows.filter {
+                    $0.isVisible && $0.alphaValue > 0 && $0.delegate is PopupWindow
+                }
+                for w in self.yieldedWindows {
+                    w.alphaValue = 0
+                    w.ignoresMouseEvents = true
+                }
+                if !self.yieldedWindows.isEmpty { self.log("screenshot tool \(id) active — popups yield") }
+            } else if !self.yieldedWindows.isEmpty {
+                for w in self.yieldedWindows {
+                    w.alphaValue = 1
+                    w.ignoresMouseEvents = false
+                }
+                self.yieldedWindows = []
+            }
+        }
     }
 
     // macOS refuses EXTERNAL activation of an accessory app (aerospace's
@@ -2319,9 +2742,9 @@ final class SwitcherController: NSObject {
         let imgFile = (socket as NSString).deletingPathExtension + ".images.json"
         a += ["--cmd", "let g:ws_img_file='\(imgFile)'",
               "--cmd", "let g:ws_img_rows=\(max(1, cmd.imageRows))"]
-        a += ["--cmd", "let g:ws_fg='\(rgb(TEXT))'",
-              "--cmd", "let g:ws_dim='\(rgb(DIM))'",
-              "--cmd", "let g:ws_sel='\(rgb(GROUP_BG))'"]
+        a += ["--cmd", "let g:ws_fg='\(rgb(cmd.textColor ?? TEXT))'",
+              "--cmd", "let g:ws_dim='\(rgb(cmd.dimColor ?? DIM))'",
+              "--cmd", "let g:ws_sel='\(rgb(cmd.highlightColor ?? GROUP_BG))'"]
         if let file { a.append(file) }
         return a
     }
@@ -2798,7 +3221,9 @@ private func trimmed(_ s: String) -> String? {
         cfg.stretchHeaderButtons = true
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+                                 text: cmd.textColor ?? TEXT, dim: cmd.dimColor ?? DIM,
+                                 highlight: cmd.highlightColor ?? GROUP_BG, accent: ACCENT)
+        cfg.terminalForeground = cmd.terminalForeground
         if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
         if let bg = cmd.backgroundColor {
             let cc = bg.usingColorSpace(.sRGB) ?? bg
@@ -3082,17 +3507,10 @@ private func trimmed(_ s: String) -> String? {
             menu.addItem(notesItem)
             menu.addItem(.separator())
 
-            // — color picker —
-            let colorItem = NSMenuItem(title: "Pick Color…", action: nil, keyEquivalent: "")
-            let colorTarget = MenuActionTarget {
-                self.presentThemeRoleMenu(for: w,
-                                          roles: [.terminal, .browser, .notepad, .header],
-                                          section: cmd.name)
-            }
-            colorItem.target = colorTarget
-            colorItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(colorTarget)
-            menu.addItem(colorItem)
+            menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
+            menu.addItem(.separator())
+            // — theme presets + transparency —
+            self.addThemeMenus(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
 
             // — reset actions —
@@ -3104,7 +3522,7 @@ private func trimmed(_ s: String) -> String? {
             menu.addItem(resetSizeItem)
 
             let resetColorItem = NSMenuItem(title: "Reset Default Colors", action: nil, keyEquivalent: "")
-            let rcTarget = MenuActionTarget { w.resetToDefaultColors() }
+            let rcTarget = MenuActionTarget { self.resetWindowTheme(w, section: cmd.name) }
             resetColorItem.target = rcTarget
             resetColorItem.action = #selector(MenuActionTarget.run)
             menuActionTargets.append(rcTarget)
@@ -3647,13 +4065,34 @@ private func trimmed(_ s: String) -> String? {
         } catch {
             log("note '\(cmd.name)': save failed: \(error)")
         }
+        if (path as NSString).standardizingPath
+            == (settings.commandsConfPath as NSString).standardizingPath {
+            reportConfigEdit(text)
+        }
+    }
+
+    // editing commands.conf as a note: surface validation problems in the
+    // window's status strip as you save (the running app keeps its config;
+    // an invalid file is replaced by the backup at the next launch)
+    private func reportConfigEdit(_ text: String) {
+        let issues = validateConfig(text)
+        if let f = issues.first(where: \.fatal) {
+            let at = f.line > 0 ? "line \(f.line): " : ""
+            noteWindow?.setStatus("commands.conf \(at)\(f.message) — the last good backup will be used until this is fixed",
+                                  isError: true)
+        } else if let w = issues.first {
+            let more = issues.count > 1 ? " (+\(issues.count - 1) more)" : ""
+            noteWindow?.setStatus("commands.conf line \(w.line): \(w.message)\(more)", isError: false)
+        } else {
+            noteWindow?.setStatus(nil, isError: false)
+        }
     }
 
     // keep commands.conf in sync: append a newly created note to the [notes]
     // section's paths= line, using the tilde form for paths under $HOME
     private func addNotePathToConfig(_ path: String, section: String) {
         let confPath = settings.commandsConfPath
-        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+        guard let content = readConfigText() else {
             log("commands.conf: cannot read \(confPath)")
             return
         }
@@ -3699,8 +4138,7 @@ private func trimmed(_ s: String) -> String? {
             } else {
                 continue
             }
-            try? (lines.joined(separator: "\n"))
-                .write(toFile: confPath, atomically: true, encoding: .utf8)
+            writeConfigText(lines.joined(separator: "\n"))
             log("commands.conf: added note \(display)")
             return
         }
@@ -3711,7 +4149,7 @@ private func trimmed(_ s: String) -> String? {
     // (paths= entries that no longer exist on disk are removed)
     private func removeNotePathFromConfig(_ path: String, section: String) {
         let confPath = settings.commandsConfPath
-        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+        guard let content = readConfigText() else {
             log("commands.conf: cannot read \(confPath)")
             return
         }
@@ -3743,12 +4181,242 @@ private func trimmed(_ s: String) -> String? {
             } else {
                 lines[i] = "paths = " + kept.joined(separator: ", ")
             }
-            try? (lines.joined(separator: "\n"))
-                .write(toFile: confPath, atomically: true, encoding: .utf8)
+            writeConfigText(lines.joined(separator: "\n"))
             log("commands.conf: removed \(display) from [\(section)]")
             return
         }
         log("commands.conf: no [\(section)] section to update")
+    }
+
+    // MARK: Theme presets + transparency (header icon menu)
+
+    enum ThemeScope {
+        case window, notepad, terminal, browser
+    }
+
+    // surfaces this window can style: notes = all four, files = the explorer
+    private func themeScopes(for w: PopupWindow) -> [(ThemeScope, String)] {
+        var out: [(ThemeScope, String)] = [(.window, "Whole Window")]
+        if w.config.editMode { out.append((.notepad, "Notepad Only")) }
+        if w.config.editMode && w.hasTerminalDrawer { out.append((.terminal, "Terminal Only")) }
+        if w.config.editMode && w.hasFileBrowser { out.append((.browser, "File Explorer Only")) }
+        return out
+    }
+
+    // Theme ▸ (presets, each with a Whole Window / per-surface submenu),
+    // Transparency ▸, Custom Color…, Reset. Added to both header icon menus.
+    func addThemeMenus(to menu: NSMenu, window w: PopupWindow, section: String) {
+        let scopes = themeScopes(for: w)
+        let themeMenu = NSMenu(title: "Theme")
+        let currentBg = hexString(w.themeColor(.notepad).withAlphaComponent(1))
+        let currentBrowser = hexString(w.themeColor(.browser).withAlphaComponent(1))
+        let windowTextIsLight = w.config.colors.text.relativeLuminance > 0.45
+        let presets = ThemePreset.all()
+        for (i, p) in presets.enumerated() {
+            if i > 0, p.isLight, !presets[i - 1].isLight {
+                themeMenu.addItem(.separator())
+            }
+            let item = NSMenuItem(title: p.name, action: nil, keyEquivalent: "")
+            item.image = p.swatch()
+            let matches = w.config.editMode ? currentBg == hexString(p.background)
+                                            : currentBrowser == hexString(p.background)
+            item.state = matches ? .on : .off
+            let sub = NSMenu(title: p.name)
+            sub.autoenablesItems = false   // keep unreadable combos greyed
+            for (scope, label) in scopes {
+                // explorer-only keeps the window's text color, so it only
+                // offers presets that stay readable under it
+                let readable = scope != .browser || p.isLight != windowTextIsLight
+                let si = menuItem(label, enabled: readable) { [weak self, weak w] in
+                    guard let self, let w else { return }
+                    self.applyThemePreset(p, scope: scope, to: w, section: section)
+                }
+                if !readable {
+                    si.toolTip = "Needs the window's text color — use Whole Window"
+                }
+                sub.addItem(si)
+                if scope == .window && scopes.count > 1 { sub.addItem(.separator()) }
+            }
+            item.submenu = sub
+            themeMenu.addItem(item)
+        }
+        themeMenu.addItem(.separator())
+        themeMenu.addItem(menuItem("Custom Color…") { [weak self, weak w] in
+            guard let self, let w else { return }
+            let roles: [PopupWindow.ThemeRole] = w.config.editMode
+                ? [.terminal, .browser, .notepad, .header] : [.browser, .header]
+            self.presentThemeRoleMenu(for: w, roles: roles, section: section)
+        })
+        themeMenu.addItem(menuItem("Reset to Defaults") { [weak self, weak w] in
+            guard let self, let w else { return }
+            self.resetWindowTheme(w, section: section)
+        })
+        let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
+
+        // Transparency ▸ <surface> ▸ level
+        let levels: [(String, CGFloat)] = [
+            ("Opaque", 0), ("Frosted — 10%", 0.10), ("Soft — 22% (default)", 0.22),
+            ("Glass — 35%", 0.35), ("Clear — 50%", 0.50), ("Ghost — 70%", 0.70),
+        ]
+        let tMenu = NSMenu(title: "Transparency")
+        for (scope, label) in scopes {
+            let lm = NSMenu(title: label)
+            let primary = themeRoles(for: scope, window: w).first ?? .notepad
+            let alpha = (w.themeColor(primary).usingColorSpace(.sRGB) ?? w.themeColor(primary)).alphaComponent
+            for (name, t) in levels {
+                lm.addItem(menuItem(name, state: abs((1 - t) - alpha) < 0.03) { [weak self, weak w] in
+                    guard let self, let w else { return }
+                    self.applyTransparency(t, scope: scope, to: w, section: section)
+                })
+            }
+            let li = NSMenuItem(title: label.replacingOccurrences(of: " Only", with: ""),
+                                action: nil, keyEquivalent: "")
+            li.submenu = lm
+            tMenu.addItem(li)
+        }
+        let tItem = NSMenuItem(title: "Transparency", action: nil, keyEquivalent: "")
+        tItem.submenu = tMenu
+        menu.addItem(tItem)
+    }
+
+    private func themeRoles(for scope: ThemeScope, window w: PopupWindow) -> [PopupWindow.ThemeRole] {
+        switch scope {
+        case .window:
+            var r: [PopupWindow.ThemeRole] = [.notepad, .header]
+            if w.hasFileBrowser { r.append(.browser) }
+            if w.hasTerminalDrawer { r.append(.terminal) }
+            // the files window IS its explorer: lead with it (menu checkmarks)
+            return w.config.editMode ? r : [.browser, .header, .notepad]
+        case .notepad: return [.notepad, .header]
+        case .terminal: return [.terminal]
+        case .browser: return [.browser]
+        }
+    }
+
+    private func configKey(for role: PopupWindow.ThemeRole) -> String {
+        switch role {
+        case .browser: return "browser-background"
+        case .terminal: return "terminal-background"
+        case .notepad: return "background-color"
+        case .header: return "header-color"
+        }
+    }
+
+    // keep the in-memory spec in step with commands.conf so a window rebuild
+    // (vim toggle, Start With…) keeps the look
+    private func updateSpecColors(section: String, _ kv: [(String, NSColor?)]) {
+        guard let i = commands.firstIndex(where: { $0.name == section }) else { return }
+        for (key, c) in kv {
+            switch key {
+            case "browser-background": commands[i].browserBackground = c
+            case "terminal-background": commands[i].terminalBackground = c
+            case "background-color": commands[i].backgroundColor = c
+                if c != nil { commands[i].tintAlpha = nil }
+            case "header-color": commands[i].headerColor = c
+            case "text-color": commands[i].textColor = c
+            case "dim-color": commands[i].dimColor = c
+            case "highlight-color": commands[i].highlightColor = c
+            case "terminal-foreground": commands[i].terminalForeground = c
+            default: break
+            }
+        }
+    }
+
+    // live-apply + persist color keys for a window (nil = remove the key)
+    private func commitColors(_ w: PopupWindow, section: String, _ kv: [(String, NSColor?)]) {
+        updateSpecColors(section: section, kv)
+        saveConfigValues(section: section, kv.map { ($0.0, $0.1.map(hexString)) })
+        log("commands.conf [\(section)]: " + kv.map { "\($0.0)=\($0.1.map(hexString) ?? "-")" }.joined(separator: " "))
+    }
+
+    func applyThemePreset(_ p: ThemePreset, scope: ThemeScope,
+                          to w: PopupWindow, section: String) {
+        var kv: [(String, NSColor?)] = []
+        // swap the hue, keep the surface's current transparency
+        func paint(_ role: PopupWindow.ThemeRole, _ c: NSColor) {
+            let cur = w.themeColor(role).usingColorSpace(.sRGB) ?? w.themeColor(role)
+            let col = (c.usingColorSpace(.sRGB) ?? c).withAlphaComponent(cur.alphaComponent)
+            w.setThemeColor(col, for: role)
+            kv.append((configKey(for: role), col))
+        }
+        switch scope {
+        case .window:
+            paint(.notepad, p.background)
+            paint(.header, p.header)
+            if w.hasFileBrowser { paint(.browser, w.config.editMode ? p.browser : p.background) }
+            if w.hasTerminalDrawer { paint(.terminal, p.terminal) }
+            w.setTerminalForeground(nil)
+            kv.append(("terminal-foreground", nil))
+        case .notepad:
+            paint(.notepad, p.background)
+            paint(.header, p.header)
+        case .terminal:
+            paint(.terminal, p.background)
+            w.setTerminalForeground(p.text)
+            kv.append(("terminal-foreground", p.text))
+        case .browser:
+            paint(.browser, p.background)
+        }
+        if scope == .window || scope == .notepad {
+            w.setTextColors(text: p.text, dim: p.dim, highlight: p.highlight)
+            kv += [("text-color", p.text), ("dim-color", p.dim), ("highlight-color", p.highlight)]
+        }
+        commitColors(w, section: section, kv)
+        log("theme '\(p.name)' applied to [\(section)] scope=\(scope)")
+    }
+
+    func applyTransparency(_ t: CGFloat, scope: ThemeScope,
+                           to w: PopupWindow, section: String) {
+        var kv: [(String, NSColor?)] = []
+        for role in themeRoles(for: scope, window: w) {
+            let cur = w.themeColor(role).usingColorSpace(.sRGB) ?? w.themeColor(role)
+            let col = cur.withAlphaComponent(max(1 - t, 0.08))
+            w.setThemeColor(col, for: role)
+            kv.append((configKey(for: role), col))
+        }
+        commitColors(w, section: section, kv)
+    }
+
+    // drop every per-window color key and live-restore the [theme] defaults
+    // (text colors included)
+    func resetWindowTheme(_ w: PopupWindow, section: String) {
+        removeColorKeysFromConfig(section: section)
+        updateSpecColors(section: section, [
+            "browser-background", "terminal-background", "background-color", "header-color",
+            "text-color", "dim-color", "highlight-color", "terminal-foreground",
+        ].map { ($0, nil) })
+        let base = PopupConfig(name: "")
+        w.setThemeColor(THEME_BROWSER ?? base.fileBrowserBackground, for: .browser)
+        w.setThemeColor(THEME_TERMINAL ?? base.terminalBackground, for: .terminal)
+        w.setThemeColor(BAR.withAlphaComponent(base.tintAlpha), for: .notepad)
+        w.setThemeColor(headerBlueSilver, for: .header)
+        w.setTerminalForeground(nil)
+        w.setTextColors(text: TEXT, dim: DIM, highlight: GROUP_BG)
+        NSColorPanel.shared.orderOut(nil)
+        log("theme reset for [\(section)] — back to system defaults")
+    }
+
+    // "Hide When Focus Is Lost" (header icon menu): the per-window inverse of
+    // `sticky`. Esc always dismisses; this adds hiding when another app takes
+    // focus. Turning it on also re-enables the global [app] switch.
+    func focusLossMenuItem(for w: PopupWindow, section: String) -> NSMenuItem {
+        let on = !w.config.sticky && settings.hideOnFocusLoss
+        return menuItem("Hide When Focus Is Lost", state: on) { [weak self, weak w] in
+            guard let self, let w else { return }
+            let hide = !on
+            w.config.sticky = !hide
+            if let i = self.commands.firstIndex(where: { $0.name == section }) {
+                self.commands[i].sticky = !hide
+            }
+            saveConfigValue(section: section, key: "sticky", value: hide ? "false" : "true")
+            if hide && !settings.hideOnFocusLoss {
+                settings.hideOnFocusLoss = true
+                saveConfigValue(section: "app", key: "hide-on-focus-loss", value: "true")
+            }
+            self.log("[\(section)] hide on focus loss = \(hide)")
+        }
     }
 
     // MARK: Interactive color picker (header paint-brush button)
@@ -3818,19 +4486,7 @@ private func trimmed(_ s: String) -> String? {
     // defaults — browser, terminal, notepad and header all go back.
     @objc private func resetThemeColors(_ sender: Any?) {
         guard let w = pickerWindow else { return }
-        let section = pickerSection
-        removeColorKeysFromConfig(section: section)
-        // the [theme] app-wide defaults (or the built-in fallbacks)
-        let base = PopupConfig(name: "")
-        let browserDefault = THEME_BROWSER ?? base.fileBrowserBackground
-        let terminalDefault = THEME_TERMINAL ?? base.terminalBackground
-        let notepadDefault = BAR.withAlphaComponent(base.tintAlpha)
-        w.setThemeColor(browserDefault, for: .browser)
-        w.setThemeColor(terminalDefault, for: .terminal)
-        w.setThemeColor(notepadDefault, for: .notepad)
-        w.setThemeColor(headerBlueSilver, for: .header)
-        NSColorPanel.shared.orderOut(nil)
-        log("theme reset for [\(section)] — back to system defaults")
+        resetWindowTheme(w, section: pickerSection)
     }
 
     private func startColorPicker(for w: PopupWindow, role: PopupWindow.ThemeRole) {
@@ -4002,6 +4658,7 @@ private func trimmed(_ s: String) -> String? {
         case .header: key = "header-color"
         }
         updateColorKeyInConfig(hex, key: key, section: pickerSection)
+        updateSpecColors(section: pickerSection, [(key, color)])
         log("commands.conf [\(pickerSection)]: \(key) -> #\(hex)")
     }
 
@@ -4023,7 +4680,7 @@ private func trimmed(_ s: String) -> String? {
     // picks up the persisted pick
     private func updateColorKeyInConfig(_ value: String, key: String, section: String) {
         let confPath = settings.commandsConfPath
-        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+        guard let content = readConfigText() else {
             log("commands.conf: cannot read \(confPath)")
             return
         }
@@ -4040,8 +4697,7 @@ private func trimmed(_ s: String) -> String? {
             let k = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
             if k == key {
                 lines[i] = key + " = " + value
-                try? (lines.joined(separator: "\n"))
-                    .write(toFile: confPath, atomically: true, encoding: .utf8)
+                writeConfigText(lines.joined(separator: "\n"))
                 return
             }
         }
@@ -4058,21 +4714,21 @@ private func trimmed(_ s: String) -> String? {
             insertion = lines.count
         }
         lines.insert(key + " = " + value, at: insertion)
-        try? (lines.joined(separator: "\n"))
-            .write(toFile: confPath, atomically: true, encoding: .utf8)
+        writeConfigText(lines.joined(separator: "\n"))
     }
 
     // drop every color-override key from a [section] so the [theme] defaults
     // apply again ("Reset to system defaults" in the picker menu)
     private func removeColorKeysFromConfig(section: String) {
         let confPath = settings.commandsConfPath
-        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else {
+        guard let content = readConfigText() else {
             log("commands.conf: cannot read \(confPath)")
             return
         }
         let keys: Set<String> = ["header-color", "background-color",
                                  "browser-background", "terminal-background",
-                                 "tint-alpha"]
+                                 "tint-alpha", "text-color", "dim-color",
+                                 "highlight-color", "terminal-foreground"]
         let target = "[" + section + "]"
         var inSection = false
         var changed = false
@@ -4095,8 +4751,7 @@ private func trimmed(_ s: String) -> String? {
             log("commands.conf [\(section)]: no color overrides to reset")
             return
         }
-        try? out.joined(separator: "\n")
-            .write(toFile: confPath, atomically: true, encoding: .utf8)
+        writeConfigText(out.joined(separator: "\n"))
         log("commands.conf [\(section)]: reset color overrides to defaults")
     }
 
@@ -4434,7 +5089,9 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.headerHeight = 30
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+                                 text: cmd.textColor ?? TEXT, dim: cmd.dimColor ?? DIM,
+                                 highlight: cmd.highlightColor ?? GROUP_BG, accent: ACCENT)
+        cfg.terminalForeground = cmd.terminalForeground
         if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
         if let bg = cmd.backgroundColor {
             let cc = bg.usingColorSpace(.sRGB) ?? bg
@@ -4454,15 +5111,10 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             let menu = NSMenu()
             menu.autoenablesItems = false
 
-            // color picker
-            let colorItem = NSMenuItem(title: "Pick Color…", action: nil, keyEquivalent: "")
-            let colorTarget = MenuActionTarget {
-                self.presentThemeRoleMenu(for: w, roles: [.browser, .header], section: cmd.name)
-            }
-            colorItem.target = colorTarget
-            colorItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(colorTarget)
-            menu.addItem(colorItem)
+            menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
+            menu.addItem(.separator())
+            // theme presets + transparency
+            self.addThemeMenus(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
 
             // reset actions
@@ -4474,7 +5126,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             menu.addItem(resetSizeItem)
 
             let resetColorItem = NSMenuItem(title: "Reset Default Colors", action: nil, keyEquivalent: "")
-            let rcTarget = MenuActionTarget { w.resetToDefaultColors() }
+            let rcTarget = MenuActionTarget { self.resetWindowTheme(w, section: cmd.name) }
             resetColorItem.target = rcTarget
             resetColorItem.action = #selector(MenuActionTarget.run)
             menuActionTargets.append(rcTarget)
@@ -4765,6 +5417,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "workspace-switcher"
         let menu = NSMenu()
         menu.delegate = MenuTarget.shared  // for checkmark updates
+        // shown only while commands.conf has validation findings
+        let issues = NSMenuItem(title: "Config Issues…",
+                                action: #selector(MenuTarget.showConfigIssues(_:)),
+                                keyEquivalent: "")
+        issues.target = MenuTarget.shared
+        issues.tag = MenuTarget.configIssuesTag
+        issues.isHidden = configIssues.isEmpty
+        menu.addItem(issues)
         menu.addItem(.separator())
 
         // File-like section: resets and close
@@ -4897,7 +5557,16 @@ final class MenuTarget: NSObject, NSMenuDelegate {
     static weak var controller: SwitcherController?
 
     // MARK: NSMenuDelegate — update checkmarks before the menu opens
+    static let configIssuesTag = 7401
+
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if let item = menu.item(withTag: MenuTarget.configIssuesTag) {
+            _ = readConfigText()   // re-validates only when the file changed
+            item.isHidden = configIssues.isEmpty
+            item.title = configUsingBackup
+                ? "⚠ Config Invalid — Using Backup…"
+                : "⚠ Config Warnings (\(configIssues.count))…"
+        }
         guard let controller = MenuTarget.controller else { return }
         // Find the key PopupWindow (the one currently focused)
         let keyWindow = NSApp.keyWindow
@@ -5029,6 +5698,38 @@ final class MenuTarget: NSObject, NSMenuDelegate {
     private var vimModeEnabled: Bool {
         guard let controller = MenuTarget.controller else { return false }
         return controller.commands.first(where: { $0.name == "notes" })?.vimMode ?? false
+    }
+
+    // MARK: Config validation
+
+    @objc func showConfigIssues(_ sender: Any?) {
+        _ = readConfigText()
+        let alert = NSAlert()
+        alert.alertStyle = configUsingBackup ? .critical : .warning
+        alert.messageText = configUsingBackup
+            ? "commands.conf is invalid — the last good backup is in use"
+            : "commands.conf has \(configIssues.count) warning\(configIssues.count == 1 ? "" : "s")"
+        let lines = configIssues.prefix(15).map { i in
+            (i.line > 0 ? "line \(i.line): " : "") + i.message
+        }
+        let more = configIssues.count > 15 ? "\n…and \(configIssues.count - 15) more" : ""
+        alert.informativeText = lines.joined(separator: "\n") + more
+            + (configUsingBackup
+               ? "\n\nBackup: \(configBackupPath)\nRestoring it moves the invalid file aside as commands.conf.broken-<time>."
+               : "\n\nInvalid values are ignored; the built-in defaults apply.")
+        alert.addButton(withTitle: "Open Config")
+        if configUsingBackup { alert.addButton(withTitle: "Restore Backup") }
+        alert.addButton(withTitle: "Close")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            MenuTarget.controller?.openNoteFile(settings.commandsConfPath)
+        case .alertSecondButtonReturn where configUsingBackup:
+            _ = restoreConfigFromBackup()
+            _ = readConfigText()
+        default:
+            break
+        }
     }
 
     // MARK: Settings toggles
