@@ -1,6 +1,7 @@
 # built artifacts
 workspace-switcher.app/
 .build/
+.agents/
 
 # generated docs
 README.html

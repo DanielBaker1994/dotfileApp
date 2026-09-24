@@ -79,7 +79,7 @@ automatically-unhide-macos-hidden-apps = true
 # even when they are invisible.
 # This config option is only available since 'config-version = 2'
 # Fallback value (if you omit the key): persistent-workspaces = []
-persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8"]
+persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 # A callback that runs every time binding mode changes
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -107,6 +107,20 @@ on-window-detected = [
   { if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
   { if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
   { if = 'test %{app-bundle-id} = WebEx-PT.webexAppLauncher', run = ['move-node-to-workspace 9'] },
+  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.apple.finder', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace 1'] },
+  { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 1'] },
 ]
 
 
