@@ -34,7 +34,7 @@ bin/ui-test.sh --verbose
 - `main.swift` — entry point
 - `workspace_switcher.swift` — app logic (~7300 lines)
 - `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
-- `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`)
+- `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
 - `commands.conf` — config (windows, commands, colors, paths)
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller");
   tests: `python3 Tests/test_jira_poll.py`
@@ -51,16 +51,33 @@ bin/ui-test.sh --verbose
   Window" (`showJiraDashboard`). No other jira menu items — everything else
   lives in that window. Socket messages `jira-poll-on/off/toggle`,
   `jira-setup`, `jira-dashboard` (CLI: `workspace-switcher jira-poll on|off|toggle|setup|dashboard`).
-- Jira Config window: `JiraDashboard.swift` (`JiraDashboardWindow`, own file,
-  compiled by `bin/workspace_switcher.sh`). All data from ONE call:
-  `jira_poll.py --describe` (per job: schedule, status, next window, full JQL,
-  full curl of every request; [jira] columns → API fields; paths). Pages
-  (segmented control, NOT NSTabView — it fights auto layout): Poll Jobs
-  (on/off, interval → `jira_config.py --set-*`; Poll Now / Full Resync via
-  `jiraPollNow(_:full:done:)`; Cancel → `jira_poll.py --cancel` SIGTERMs the
-  lock holder, jobs become "cancelled"), Columns (edit → `saveJiraColumns`
-  rewrites `columns` + rebuilds an open jira window), Connection. Refreshes
-  every `[jira] dashboard-refresh` s (default 5); size `dashboard-width/height`.
+- Jira Config window: `JiraDashboard.swift` (`JiraDashboardWindow` +
+  `JiraColumnEditor`; own file, compiled by `bin/workspace_switcher.sh`).
+  Master–detail: sidebar (POLL JOBS / SEARCHES / SETTINGS: Connection, Known
+  Columns) → editor per item. All data from ONE call: `jira_poll.py
+  --describe` (per job/search: schedule, status, next window, full JQL, full
+  curl of every request, its columns → API fields; `catalog`; `searchKinds`).
+  Edits only via `jira_config.py --upsert-endpoint|--upsert-search|
+  --delete-*|--set-columns` (validated, JSON result). Force Poll warns with a
+  SHEET when the lock is held (app-modal NSAlerts open hidden behind this
+  window — always use `ask(_:then:)`), Stop = `jira_poll.py --cancel`.
+  Search Run = `jira_poll.py --search NAME` → `search-<name>.json` tab.
+  `reloadJiraWindow()` rebuilds an open Jira window after edits.
+- Per-job columns: every endpoint/search in config.json owns `columns` (same
+  one-line format); `[jira] columns` = starter template + fallback for tabs
+  no job owns (one-time migration copies it into jobs on load). Jira window:
+  `tabColumns` / `JiraPoll.owner(ofTab:)` swap columns per tab
+  (`setTableColumns`); header drags save to the owning job. Poller fetches
+  per-job fields (`job_fields`). Catalog: defined columns + fields seen in
+  published data (`~/.cache/jira/fields_seen.json`).
+- Jira window: Cmd+K → `PopupWindow.showActionPicker` (↑↓ / Ctrl+N/P / Tab,
+  Return, digits, Esc closes only the picker) via `onCommandK`; acts on
+  ticked rows else the highlighted row (`actionRows`): Copy to clipboard /
+  Open all in browser (+ copies `KEY<TAB>URL`). No "copy selected" header
+  button (`PopupConfig.copyRowsButton = false`); icon menu is window chrome +
+  "Open Jira Config Window" only.
+- `jira_poll.py --projects '*'` = every job (`all` only when no job is named
+  "all" — the default job IS named "all").
 - Setup window: `JiraSetupWindow` (plain NSWindow above `.popUpMenu`, own key
   monitor for edit shortcuts + Esc). Token goes to python over stdin only.
 - Auth: config.json `auth` = `bearer` (Server/DC PAT, `Authorization: Bearer`,

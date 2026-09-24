@@ -554,6 +554,9 @@ public struct PopupConfig {
     // The header grows a "copy all" / "copy N" button that fires onCopyRows
     // with the picked rows (all rows when nothing is ticked).
     public var selectableRows: Bool = false
+    // false = keep the checkboxes but drop the header "copy selected" button
+    // (the host offers the copy through an action picker, e.g. Cmd+K)
+    public var copyRowsButton: Bool = true
 
     // cap on how much a single row may stretch when the window is resized
     // larger than its content: filling a tall window with few rows would
@@ -4988,6 +4991,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // The framework owns the pasteboard write + header feedback.
     public var onCopyRows: (([PopupRow]) -> String)?
 
+    // Cmd+K in the row list (not the file browser, which keeps its own
+    // Cmd+K = copy path): the host usually opens showActionPicker
+    public var onCommandK: (() -> Void)?
+
+    // rows an action applies to: the ticked rows, else the highlighted one
+    public var actionRows: [PopupRow] {
+        let idx = rowView.selected.isEmpty ? [selection] : rowView.selected.sorted()
+        return idx.filter { rows.indices.contains($0) }.map { rows[$0] }
+    }
+
     // extra header buttons (ids >= 10) and their click callback
     public var headerButtons: [(String, Int)] = [] {
         didSet {
@@ -5034,7 +5047,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // "copy all" when nothing is ticked, else "copy N"; hidden unless the host
     // turned on selectableRows
     private func updateCopyRowsLabel() {
-        guard config.selectableRows else {
+        guard config.selectableRows, config.copyRowsButton else {
             chrome?.copyRowsLabel = nil
             return
         }
@@ -6311,6 +6324,8 @@ scroll.documentView = rowView
         onEditorClose = nil
         onDrawRow = nil          // didSet also clears rowView.onDrawRow
         onCopyRows = nil
+        onCommandK = nil
+        closeActionPicker()
         onHeaderButton = nil
         onMeterRecord = nil
         onMeterPause = nil
@@ -6934,6 +6949,9 @@ private func scrollSelectionIntoView() {
     }
 
     private func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        // an open action picker owns the keyboard (its Esc never counts
+        // toward the window's Esc-streak close)
+        if actionPicker != nil { return actionPickerKey(code, mods) }
         // an Esc streak (N rapid Esc close the window) only counts
         // CONSECUTIVE presses — any other key starts it over
         if code != 53 { escStreak = 0 }
@@ -7140,6 +7158,13 @@ private func scrollSelectionIntoView() {
                 default: return false   // every other Cmd/Ctrl key goes to the shell
                 }
             }
+            // Cmd+K: the host's action picker (the file browser keeps its
+            // own Cmd+K = copy path while it has focus)
+            if cmd && code == 40, let hook = onCommandK,
+               !(fileBrowser.map { browserActive() && browserHasFocus($0) } ?? false) {
+                hook()
+                return true
+            }
             // Cmd+L: focus the browser's filter bar (address-bar shortcut),
             // selecting the current path so typing replaces it
             if cmd && code == 37, let fb = fileBrowser, browserActive() {
@@ -7331,6 +7356,135 @@ private func scrollSelectionIntoView() {
             return true
         }
         return false
+    }
+
+    // MARK: Action picker (Cmd+K)
+
+    // A small centered list of actions over the window: Up/Down, Ctrl+N/P
+    // or Tab move, Return / click picks, Esc closes just the picker.
+    private var actionPicker: NSView?
+    private var actionItems: [(title: String, detail: String)] = []
+    private var actionIndex = 0
+    private var actionPick: ((Int) -> Void)?
+    private var actionTitle = ""
+
+    public func showActionPicker(title: String, items: [(title: String, detail: String)],
+                                 onPick: @escaping (Int) -> Void) {
+        guard !items.isEmpty else { return }
+        actionTitle = title
+        actionItems = items
+        actionIndex = 0
+        actionPick = onPick
+        escStreak = 0
+        renderActionPicker()
+    }
+
+    public func closeActionPicker() {
+        actionPicker?.removeFromSuperview()
+        actionPicker = nil
+        actionPick = nil
+        escStreak = 0
+    }
+
+    private func actionPickerKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        let ctrl = mods.contains(.control)
+        switch (code, ctrl) {
+        case (125, _), (45, true): actionIndex = (actionIndex + 1) % actionItems.count
+        case (126, _), (35, true): actionIndex = (actionIndex - 1 + actionItems.count) % actionItems.count
+        case (48, _): actionIndex = (actionIndex + (mods.contains(.shift) ? -1 : 1) + actionItems.count)
+            % actionItems.count
+        case (36, _), (76, _), (38, true):
+            let pick = actionPick, i = actionIndex
+            closeActionPicker()
+            pick?(i)
+            return true
+        case (53, _):
+            closeActionPicker()
+            return true
+        default:
+            // a digit picks directly (1…9)
+            if let n = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9][Int(code)],
+               n <= actionItems.count {
+                let pick = actionPick
+                closeActionPicker()
+                pick?(n - 1)
+            }
+            return true   // everything else is swallowed while the picker is up
+        }
+        renderActionPicker()
+        return true
+    }
+
+    private final class PickerView: NSView {
+        var rowRects: [NSRect] = []
+        var onClick: ((Int) -> Void)?
+        override var isFlipped: Bool { true }
+        override func mouseDown(with e: NSEvent) {
+            let p = convert(e.locationInWindow, from: nil)
+            if let i = rowRects.firstIndex(where: { $0.contains(p) }) { onClick?(i) }
+        }
+    }
+
+    private func renderActionPicker() {
+        guard let root = panel.contentView else { return }
+        actionPicker?.removeFromSuperview()
+        let c = config.colors
+        let z = zoom
+        let rowH = 34 * z, pad = 8 * z, titleH = 26 * z
+        let w = min(420 * z, root.bounds.width - 40)
+        let h = titleH + CGFloat(actionItems.count) * rowH + pad * 2
+        let v = PickerView(frame: NSRect(x: (root.bounds.width - w) / 2,
+                                         y: root.isFlipped ? max(40, root.bounds.height * 0.28)
+                                                           : root.bounds.height * 0.72 - h,
+                                         width: w, height: h))
+        v.autoresizingMask = [.minXMargin, .maxXMargin]
+        v.wantsLayer = true
+        let fill = (c.background.usingColorSpace(.sRGB) ?? c.background)
+            .blended(withFraction: 0.25, of: .black) ?? c.background
+        v.layer?.backgroundColor = fill.withAlphaComponent(0.97).cgColor
+        v.layer?.cornerRadius = 10 * z
+        v.layer?.borderColor = c.text.withAlphaComponent(0.15).cgColor
+        v.layer?.borderWidth = 1
+        v.layer?.shadowColor = NSColor.black.cgColor
+        v.layer?.shadowOpacity = 0.35
+        v.layer?.shadowRadius = 14
+        let t = NSTextField(labelWithString: actionTitle + "   ↑↓ / ⌃N ⌃P · ↩ · esc")
+        t.font = .systemFont(ofSize: 11 * z, weight: .medium)
+        t.textColor = c.dim
+        t.frame = NSRect(x: pad + 6 * z, y: pad, width: w - pad * 2, height: titleH - 6 * z)
+        v.addSubview(t)
+        var rects: [NSRect] = []
+        for (i, item) in actionItems.enumerated() {
+            let r = NSRect(x: pad, y: pad + titleH + CGFloat(i) * rowH, width: w - pad * 2, height: rowH)
+            rects.append(r)
+            if i == actionIndex {
+                let hl = NSView(frame: r)
+                hl.wantsLayer = true
+                hl.layer?.backgroundColor = c.highlight.cgColor
+                hl.layer?.cornerRadius = 6 * z
+                v.addSubview(hl)
+            }
+            let l = NSTextField(labelWithString: "\(i + 1)  \(item.title)")
+            l.font = .systemFont(ofSize: 13 * z, weight: .semibold)
+            l.textColor = c.text
+            l.frame = NSRect(x: r.minX + 10 * z, y: r.minY + 3 * z, width: r.width - 20 * z, height: 16 * z)
+            v.addSubview(l)
+            let d = NSTextField(labelWithString: item.detail)
+            d.font = .systemFont(ofSize: 11 * z)
+            d.textColor = c.dim
+            d.lineBreakMode = .byTruncatingTail
+            d.frame = NSRect(x: r.minX + 26 * z, y: r.minY + 18 * z, width: r.width - 36 * z, height: 14 * z)
+            v.addSubview(d)
+        }
+        v.rowRects = rects
+        v.onClick = { [weak self] i in
+            guard let self else { return }
+            let pick = self.actionPick
+            self.closeActionPicker()
+            pick?(i)
+        }
+        root.addSubview(v, positioned: .above, relativeTo: nil)
+        actionPicker = v
     }
 
     // MARK: Toast

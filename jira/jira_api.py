@@ -671,7 +671,8 @@ def window_since(w: str):
 
 
 def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
-         fetch_comments=True, snapshot_keep=30, quiet=False, debug=False) -> dict:
+         fetch_comments=True, snapshot_keep=30, quiet=False, debug=False,
+         default_projects=True) -> dict:
     """Load issues updated within `window` (optionally only `projects` / a
     custom `jql`), merge them into the cache, return stats + matched keys."""
     fields = api_fields or jira_config.api_fields(team=c.team)
@@ -680,7 +681,8 @@ def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
     clauses = []
     if jql:
         clauses.append(f"({jql})")
-    projects = projects or c.team.get("project_keys") or None
+    if default_projects:   # a saved search's JQL already scopes its projects
+        projects = projects or c.team.get("project_keys") or None
     if projects:
         clauses.append("project in (" + ", ".join(f'"{p}"' for p in projects) + ")")
     clauses.append(f'updated >= "{since}"' if since else "project != null")

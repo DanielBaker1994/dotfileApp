@@ -5120,9 +5120,19 @@ private func trimmed(_ s: String) -> String? {
         // a source may be a single file OR a directory — a directory expands
         // to all matching files (sorted), so adding a file to a folder needs
         // no commands.conf edit
+        // jira: each tab (json file) belongs to a poll job or saved search
+        // in config.json with its OWN columns; [jira] columns is the fallback
+        func tabColumns(_ path: String?) -> [ListColumn] {
+            guard cmd.table else { return [] }
+            if cmd.name == "jira", let path, let own = JiraPoll.owner(ofTab: path),
+               !own.columns.isEmpty {
+                return own.columns
+            }
+            return cmd.columns
+        }
         var tabs: [(path: String, items: [FieldRow])] =
             expandPaths(cmd.sources, extensions: ["json", "tsv"]).map { path in
-                return (path, loadListItems(path, cmd: cmd))
+                return (path, loadListItems(path, cmd: cmd, columns: tabColumns(path)))
             }
         var currentTab = 0
         // filter dimensions that actually exist in the current tab (parallel
@@ -5197,6 +5207,9 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.highlightMatches = true
         cfg.filters = !cmd.filters.isEmpty
         cfg.selectableRows = cmd.checkbox ?? !cmd.copyFields.isEmpty
+        // jira: rows are acted on through Cmd+K (copy / open in browser),
+        // so the header's "copy selected" button goes
+        cfg.copyRowsButton = cmd.name != "jira"
         cfg.bodyMaxLines = cmd.bodyLines > 0 ? cmd.bodyLines : 5
         cfg.height = cmd.height > 0 ? cmd.height : defaultListSize.height
         cfg.width = cmd.width > 0 ? cmd.width : defaultListSize.width
@@ -5212,7 +5225,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.fontName = cmd.font
         // table mode (`table = true` + `columns`): spreadsheet rows under a
         // sticky, sortable, resizable header; absent columns = preview rows
-        var columns = cmd.table ? cmd.columns : []
+        var columns = tabColumns(tabs.first?.path)
         if !columns.isEmpty {
             cfg.tableColumns = columns.map { $0.popup }
             cfg.rowHeight = 26
@@ -5247,12 +5260,46 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 }
                 .joined(separator: "\n")
         }
+        // Cmd+K: act on the ticked rows (else the highlighted one) — copy,
+        // and for jira open every issue in the browser
+        w.onCommandK = { [weak self, weak w] in
+            guard let self, let w else { return }
+            let rows = w.actionRows.compactMap { $0 as? FieldRow }.filter { !$0.loadMore }
+            guard !rows.isEmpty else { return }
+            let n = rows.count, what = n == 1 ? (rows[0].fields["key"] ?? "1 row") : "\(n) rows"
+            var items: [(title: String, detail: String)] = [
+                ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
+            let site = cmd.name == "jira" ? jiraSite : ""
+            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
+            if !site.isEmpty && !keys.isEmpty {
+                items.append(("Open all in browser",
+                              "opens \(keys.count) issue\(keys.count == 1 ? "" : "s") · copies KEY + URL"))
+            }
+            w.showActionPicker(title: "Actions for \(what)", items: items) { [weak self, weak w] i in
+                guard let self, let w else { return }
+                if i == 0 {
+                    let text = w.onCopyRows?(rows) ?? ""
+                    self.copy(text, "\(n) row(s)")
+                    w.showToast("Copied \(what)", symbol: "doc.on.clipboard")
+                } else {
+                    let lines = keys.map { "\($0)\t\(site)/browse/\($0)" }
+                    for k in keys {
+                        if let u = URL(string: site + "/browse/" + k) { NSWorkspace.shared.open(u) }
+                    }
+                    self.copy(lines.joined(separator: "\n"), "\(keys.count) jira key(s) + URLs")
+                    w.showToast("Opened \(keys.count) · copied keys + URLs", symbol: "safari")
+                    self.log("list '\(cmd.name)': opened \(keys.joined(separator: ","))")
+                }
+            }
+        }
         // clicking the drag header copies the active tab's source path
         w.onChromeHeaderClick = { [weak self] in
             guard let self, tabs.indices.contains(currentTab) else { return }
             self.copy(tabs[currentTab].path, "source path: \(tabs[currentTab].path)")
         }
-        // header "config" button: copy the commands.conf path
+        // header "config" button: copy the commands.conf path (not on jira:
+        // its config lives in the Jira Config window)
+        if cmd.name == "jira" { w.copyConfigButtonLabel = "" }
         w.onChromeConfigClick = { [weak self] in
             self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
         }
@@ -5271,25 +5318,27 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             let menu = NSMenu()
             menu.autoenablesItems = false
             let fm = FileManager.default
-            if tabs.indices.contains(currentTab) {
-                let src = tabs[currentTab].path
-                menu.addItem(self.menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [weak self] in
-                    self?.copy(src, "source path: \(src)")
-                })
-            }
-            menu.addItem(self.menuItem("Copy Config Path") { [weak self] in
-                self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
-            })
-            menu.addItem(.separator())
-            menu.addItem(self.menuItem("Open Config") { [weak self] in
-                let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
-                let p = fm.fileExists(atPath: canonical) ? canonical : settings.commandsConfPath
-                if fm.fileExists(atPath: p) { self?.openNoteFile(p) }
-            })
             if cmd.name == "jira" {
-                // polling, jobs, queries, curls, columns: all in one window
+                // jira: config, paths, jobs, queries, curls, columns — all
+                // live in the Jira Config window; this menu is window chrome
                 menu.addItem(self.menuItem("Open Jira Config Window") { [weak self] in
                     self?.showJiraDashboard()
+                })
+            } else {
+                if tabs.indices.contains(currentTab) {
+                    let src = tabs[currentTab].path
+                    menu.addItem(self.menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [weak self] in
+                        self?.copy(src, "source path: \(src)")
+                    })
+                }
+                menu.addItem(self.menuItem("Copy Config Path") { [weak self] in
+                    self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
+                })
+                menu.addItem(.separator())
+                menu.addItem(self.menuItem("Open Config") { [weak self] in
+                    let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
+                    let p = fm.fileExists(atPath: canonical) ? canonical : settings.commandsConfPath
+                    if fm.fileExists(atPath: p) { self?.openNoteFile(p) }
                 })
             }
             menu.addItem(.separator())
@@ -5376,6 +5425,16 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             guard let self, index < tabs.count, index != currentTab else { return }
             currentTab = index
             visibleOffset = 0
+            if cmd.table {
+                let cols = tabColumns(tabs[index].path)
+                if cols.map(\.field) != columns.map(\.field) || cols.map(\.width) != columns.map(\.width)
+                    || cols.map(\.title) != columns.map(\.title) {
+                    columns = cols
+                    w.setTableColumns(cols.map { $0.popup })
+                }
+                if let k = sortKey, !columns.contains(where: { $0.field == k.field }) { sortKey = nil }
+                syncSortArrow()
+            }
             w.clearInput()
             applyFilterData()
             w.setRows(filteredRows(query: ""))
@@ -5439,6 +5498,15 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             let item = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 let spec = ListColumn.serialize(columns)
+                // a jira tab owned by a poll job / search saves into THAT job
+                if cmd.name == "jira", tabs.indices.contains(currentTab),
+                   let own = JiraPoll.owner(ofTab: tabs[currentTab].path) {
+                    JiraPoll.run("jira_config.py", ["--set-columns", own.kind, own.name, spec]) { [weak self] code, _, err in
+                        self?.log("jira: \(own.kind) \(own.name) columns -> \(spec) (exit \(code))"
+                                  + (code == 0 ? "" : " " + err))
+                    }
+                    return
+                }
                 if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
                     self.commands[ci].columns = columns
                 }
@@ -5471,7 +5539,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             }
             guard !changed.isEmpty else { return }
             for i in changed {
-                tabs[i].items = loadListItems(tabs[i].path, cmd: cmd)
+                tabs[i].items = loadListItems(tabs[i].path, cmd: cmd, columns: tabColumns(tabs[i].path))
                 self.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
             }
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
@@ -5728,7 +5796,8 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
     // Read one list data file. JSON array of objects preferred (fields looked up
     // by name); TSV lines (key<TAB>title<TAB>status) as fallback when the file
     // has no JSON.
-    private func loadListItems(_ path: String, cmd: CommandSpec) -> [FieldRow] {
+    private func loadListItems(_ path: String, cmd: CommandSpec,
+                               columns: [ListColumn]? = nil) -> [FieldRow] {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let text = String(data: data, encoding: .utf8) else {
             log("list '\(cmd.name)': cannot read \(path)")
@@ -5739,7 +5808,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             : cmd.filter
         // table mode: every `filter`-flagged column is searchable too
         if cmd.table {
-            for c in cmd.columns where c.filterable && !fields.contains(c.field) {
+            for c in (columns ?? cmd.columns) where c.filterable && !fields.contains(c.field) {
                 fields.append(c.field)
             }
         }
@@ -6814,6 +6883,21 @@ enum JiraPoll {
     static var status: [String: Any]? { readJSON(statusPath) }
     static var endpoints: [[String: Any]] { readJSON(configPath)?["endpoints"] as? [[String: Any]] ?? [] }
 
+    // the poll job / saved search that writes this jira tab (json file), with
+    // its own columns — nil for a file no job owns
+    static func owner(ofTab path: String) -> (kind: String, name: String, columns: [ListColumn])? {
+        guard let d = readJSON(configPath) else { return nil }
+        let file = (path as NSString).lastPathComponent
+        for (kind, key) in [("endpoint", "endpoints"), ("search", "searches")] {
+            for e in d[key] as? [[String: Any]] ?? [] {
+                guard let name = e["name"] as? String else { continue }
+                let f = e["file"] as? String ?? (kind == "search" ? "search-\(name).json" : "\(name).json")
+                if f == file { return (kind, name, ListColumn.parse(e["columns"] as? String)) }
+            }
+        }
+        return nil
+    }
+
     // last meaningful stderr line of a failed script ("jira-api: …" prefix off)
     static func errorLine(_ err: String, fallback: String) -> String {
         let line = err.split(separator: "\n").map(String.init)
@@ -6952,13 +7036,9 @@ extension SwitcherController {
         }
     }
 
-    // Jira Config window ▸ Columns ▸ Save: write [jira] columns (one line),
-    // update the live spec, and rebuild an open jira window so it redraws
-    // with the new table
-    func saveJiraColumns(_ cols: [ListColumn], spec: String) {
-        saveConfigValue(section: "jira", key: "columns", value: spec)
-        if let ci = commands.firstIndex(where: { $0.name == "jira" }) { commands[ci].columns = cols }
-        log("jira: columns -> \(spec)")
+    // rebuild an open jira window so it picks up new / removed tabs and each
+    // tab's current columns (after Jira Config window edits)
+    func reloadJiraWindow() {
         guard let w = subWindows.first(where: { $0.config.name == "jira" }) else { return }
         let wasShown = w.isShown
         w.hide(restore: false)

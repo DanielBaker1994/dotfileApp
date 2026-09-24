@@ -29,7 +29,8 @@ no publish, just status {enabled:false} — unless `poll-when-disabled = true`
 
 Usage:
   jira_poll.py                    run whatever is due
-  jira_poll.py --projects all     run every enabled endpoint now
+  jira_poll.py --projects '*'     run every enabled endpoint now ("all"
+                                  works too unless a job is named "all")
   jira_poll.py --projects SAM1,releases   run these endpoints now
   jira_poll.py --init             full sync of the (selected/all) endpoints
   jira_poll.py --window 2h        explicit window override (implies now)
@@ -39,6 +40,9 @@ Usage:
                                   endpoint's schedule, status, full JQL and
                                   the full curl of each request (real token),
                                   plus the [jira] columns -> API fields map
+  jira_poll.py --search NAME      run one saved search now (config.json
+                                  "searches"): full sync of its JQL, published
+                                  as search-<name>.json = a Jira window tab
   jira_poll.py --cancel           stop the running poll (SIGTERM to the lock
                                   holder); its endpoints become "cancelled"
   jira_poll.py --quiet            no progress output (launchd)
@@ -63,6 +67,7 @@ import jira_status  # noqa: E402
 
 LEGACY_POLL_STATE = os.path.join(jira_config.CACHE_DIR, "poll-state")
 KEYS_DIR = os.path.join(jira_config.CACHE_DIR, "endpoints")
+FIELDS_SEEN = os.path.join(jira_config.CACHE_DIR, "fields_seen.json")
 MAX_TRIES = 3
 RETRY_BASE = 5          # seconds; 5, 10 between the 3 attempts
 ERROR_RETRY = 300       # a failed endpoint is retried after min(window, 5m)
@@ -77,7 +82,7 @@ def say(msg: str) -> None:
 
 def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
-         "force": False, "describe": False, "cancel": False}
+         "force": False, "describe": False, "cancel": False, "search": ""}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -107,6 +112,8 @@ def parse_args(argv: list) -> dict:
             o["describe"] = True
         elif name == "--cancel":
             o["cancel"] = True
+        elif name == "--search":
+            o["search"] = val()
         elif name == "--force":
             o["force"] = True
         elif name in ("-h", "--help"):
@@ -266,6 +273,25 @@ def publish(path: str, items: list, dry: bool) -> None:
         return
     jira_api.write_json(path, items, mode=0o644)
     say(f"wrote {len(items)} item(s) to {path}")
+    note_fields_seen(os.path.basename(path), items)
+
+
+def note_fields_seen(file: str, items: list) -> None:
+    """The field catalog's "seen" half: field -> files where it had a value
+    (~/.cache/jira/fields_seen.json). Best effort."""
+    seen = jira_api.read_json(FIELDS_SEEN, {})
+    if not isinstance(seen, dict):
+        seen = {}
+    filled = {k for it in items for k, v in it.items() if v not in ("", None, [], {})}
+    for f in set(seen) | {k for it in items for k in it}:
+        files = [x for x in seen.get(f, []) if x != file]
+        if f in filled:
+            files.append(file)
+        seen[f] = sorted(files)
+    try:
+        jira_api.write_json(FIELDS_SEEN, seen)
+    except OSError:
+        pass
 
 
 def keys_file(name: str) -> str:
@@ -302,8 +328,15 @@ def release_items(rels: list) -> list:
     return sorted(out, key=lambda e: (e["releaseDate"], e["title"]))[::-1]
 
 
+def job_fields(ep: dict, team: dict) -> tuple:
+    """(api fields, publish keys) from THIS job's own columns."""
+    spec = jira_config.job_columns(ep)
+    return (jira_config.api_fields(team=team, columns=spec),
+            jira_config.publish_keys(columns=spec))
+
+
 def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_dir: str,
-                 dry: bool) -> int:
+                 dry: bool, default_projects: bool = True) -> int:
     """One endpoint, one attempt. Returns the published item count."""
     path = os.path.join(out_dir, ep["file"])
     projects = ep.get("projects", "*")
@@ -314,7 +347,8 @@ def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_d
         return len(items)
     res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""), api_fields=fields,
                         fetch_comments=bool(cfg["fetchComments"]),
-                        snapshot_keep=int(cfg.get("snapshotKeep", 30)), quiet=QUIET)
+                        snapshot_keep=int(cfg.get("snapshotKeep", 30)), quiet=QUIET,
+                        default_projects=default_projects)
     if ep.get("jql"):
         kf = keys_file(ep["name"])
         keys = set() if window == "full" else set(jira_api.read_json(kf, []))
@@ -326,15 +360,55 @@ def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_d
     return len(items)
 
 
+def columns_meta(spec: str, aliases: dict) -> list:
+    """Parsed columns + the Jira API field(s) each one fetches."""
+    out = []
+    for col in jira_config.parse_columns(spec):
+        f = col["field"]
+        if f in jira_config.FIELD_SOURCES:
+            src = jira_config.FIELD_SOURCES[f]
+        else:
+            src = [aliases[f]["id"] if f in aliases else f]
+        col.update({"apiFields": src, "label": aliases.get(f, {}).get("label", ""),
+                    "description": aliases.get(f, {}).get("description", "")})
+        out.append(col)
+    return out
+
+
+def search_as_endpoint(sr: dict, team: dict) -> dict:
+    """A saved search runs through the poll machinery as a one-off job."""
+    return {"name": f"search-{sr['name']}", "file": sr.get("file") or f"search-{sr['name']}.json",
+            "type": "issues", "projects": "*", "jql": jira_config.search_jql(sr, team),
+            "columns": sr.get("columns", "")}
+
+
 def describe(cfg, team: dict) -> dict:
-    """Everything the dashboard shows, in one JSON: no network (curls are
-    built by a dry Client), no writes."""
+    """Everything the Jira Config window shows, in one JSON: no network
+    (curls are built by a dry Client), no writes."""
     status = jira_status.read()
     c = jira_api.Client.from_config(cfg, dry=True)
-    fields = jira_config.api_fields(team=team)
     aliases = jira_config.custom_field_aliases(team)
     margin = int(cfg["pollMarginMinutes"] or 5)
     known_projects = list(team.get("project_keys") or []) or jira_config._cache_projects()
+    template = jira_config.read_section("jira").get("columns", "")
+
+    def issue_requests(ep, window, fields, default_projects=True):
+        projects = ep.get("projects", "*")
+        plist = None if projects == "*" else list(projects)
+        c.captured = []
+        res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""), api_fields=fields,
+                            fetch_comments=False, quiet=True, default_projects=default_projects)
+        reqs = [{"purpose": "search (first page; startAt / nextPageToken pages follow)", "curl": x}
+                for x in c.captured]
+        if cfg["fetchComments"]:
+            reqs.append({"purpose": "comments - one per changed issue (example key)",
+                         "curl": c.curl_cmd(c.url(c.path("issue", key="KEY-1"), "fields=comment"))})
+        if "fixVersions" in fields:
+            reqs.append({"purpose": "release dates - one per project in the results",
+                         "curl": c.curl_cmd(c.url(c.path(
+                             "project_versions", project=(plist or known_projects or ["PROJ"])[0])))})
+        return res["jql"], reqs
+
     eps = []
     for ep in cfg.endpoints:
         entry = jira_status.endpoint_entry(status, ep["name"])
@@ -345,11 +419,12 @@ def describe(cfg, team: dict) -> dict:
             wsec = 0
         projects = ep.get("projects", "*")
         plist = None if projects == "*" else list(projects)
-        c.captured = []
-        reqs, jql, notes = [], "", []
-        window = "-"
+        spec = jira_config.job_columns(ep)
+        fields, _ = job_fields(ep, team)
+        reqs, jql, notes, window = [], "", [], "-"
         try:
             if typ == "releases":
+                c.captured = []
                 jira_api.releases(c, projects=plist)
                 reqs += [{"purpose": "list projects" if plist is None and not team.get("project_keys")
                           else "versions", "curl": x} for x in c.captured]
@@ -357,21 +432,11 @@ def describe(cfg, team: dict) -> dict:
                     for p in known_projects:
                         reqs.append({"purpose": f"versions of {p} (one per project)",
                                      "curl": c.curl_cmd(c.url(c.path("project_versions", project=p)))})
-                    notes.append("projects = \"*\": every project the token can see gets one versions call")
+                    notes.append('projects = "*": every project the token can see gets one versions call')
             else:
                 window = choose_window(ep, entry, {"init": False, "window": ""}, margin)
-                res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""),
-                                    api_fields=fields, fetch_comments=False, quiet=True)
-                jql = res["jql"]
-                reqs += [{"purpose": "search (first page; startAt / nextPageToken pages follow)",
-                          "curl": x} for x in c.captured]
-                if cfg["fetchComments"]:
-                    reqs.append({"purpose": "comments - one per changed issue (example key)",
-                                 "curl": c.curl_cmd(c.url(c.path("issue", key="KEY-1"), "fields=comment"))})
-                if "fixVersions" in fields:
-                    reqs.append({"purpose": "release dates - one per project in the results",
-                                 "curl": c.curl_cmd(c.url(c.path("project_versions",
-                                                                 project=(plist or known_projects or ["PROJ"])[0])))})
+                jql, r = issue_requests(ep, window, fields)
+                reqs += r
         except (jira_config.ConfigError, jira_api.ApiError) as err:
             notes.append(f"cannot build request: {err}")
         nx = next_run(entry, wsec) if wsec else None
@@ -380,27 +445,63 @@ def describe(cfg, team: dict) -> dict:
             "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
             "path": os.path.join(os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT),
                                  ep.get("file", "")),
-            "projects": projects, "extraJql": ep.get("jql", ""),
+            "projects": projects, "extraJql": ep.get("userJql", ep.get("jql", "")),
             "job": ep.get("job") or ep.get("template") or "", "args": ep.get("args") or {},
             "nextWindow": window, "jql": jql, "requests": reqs, "notes": notes,
+            "columnsSpec": spec, "columns": columns_meta(spec, aliases), "apiFields": fields,
             "status": entry.get("status", "never run"), "lastRun": entry.get("lastRun", ""),
             "lastSuccess": entry.get("lastSuccess", ""), "lastWindow": entry.get("lastWindow", ""),
             "nextRun": jira_status.now_str(nx) if nx else "due",
             "items": entry.get("items"), "lastError": entry.get("lastError", ""),
             "lastCurl": entry.get("lastCurl", ""),
         })
-    sec = jira_config.read_section("jira")
-    cols = []
-    for col in jira_config.parse_columns(sec.get("columns", "")):
-        f = col["field"]
-        if f in jira_config.FIELD_SOURCES:
-            src = jira_config.FIELD_SOURCES[f]
-        else:
-            src = [aliases[f]["id"] if f in aliases else f]
-        col.update({"apiFields": src, "label": aliases.get(f, {}).get("label", ""),
-                    "description": aliases.get(f, {}).get("description", "")})
-        cols.append(col)
-    avail = list(jira_config.BASE_WINDOW_KEYS) + ["updated"] + list(aliases)
+
+    srs = []
+    sstat = status.get("searches") or {}
+    for sr in cfg.searches:
+        st = sstat.get(sr.get("name"), {})
+        spec = jira_config.job_columns(sr)
+        jql, reqs, notes = "", [], []
+        try:
+            ep = search_as_endpoint(sr, team)
+            fields, _ = job_fields(ep, team)
+            jql, reqs = issue_requests(ep, "full", fields, default_projects=False)
+        except (jira_config.ConfigError, jira_api.ApiError) as err:
+            notes.append(f"cannot build request: {err}")
+        srs.append({
+            "name": sr.get("name"), "kind": sr.get("kind", "text"), "args": sr.get("args") or {},
+            "projects": sr.get("projects") or [], "file": sr.get("file", ""),
+            "columnsSpec": spec, "columns": columns_meta(spec, aliases),
+            "jql": jql, "requests": reqs, "notes": notes,
+            "status": st.get("status", "never run"), "lastRun": st.get("lastRun", ""),
+            "items": st.get("items"), "lastError": st.get("lastError", ""),
+            "lastCurl": st.get("lastCurl", ""),
+        })
+
+    # field catalog: every column any job/search defines + every field seen
+    # in published data + what can be added (base keys, custom aliases)
+    defined: dict = {}
+    for kind, lst in (("job", eps), ("search", srs)):
+        for j in lst:
+            for col in j["columns"]:
+                d = defined.setdefault(col["field"], {"field": col["field"], "titles": [],
+                                                      "usedBy": [], "apiFields": col["apiFields"],
+                                                      "label": col["label"]})
+                if col["title"] not in d["titles"]:
+                    d["titles"].append(col["title"])
+                d["usedBy"].append(f"{kind}:{j['name']}")
+    seen = jira_api.read_json(FIELDS_SEEN, {})
+    if not isinstance(seen, dict):
+        seen = {}
+    avail = list(dict.fromkeys(list(jira_config.BASE_WINDOW_KEYS) + ["updated"] + list(aliases)
+                               + list(defined) + sorted(seen)))
+    catalog = []
+    for f in avail:
+        d = defined.get(f, {"field": f, "titles": [], "usedBy": [], "label":
+                            aliases.get(f, {}).get("label", ""),
+                            "apiFields": columns_meta(f, aliases)[0]["apiFields"]})
+        catalog.append({**d, "seenIn": seen.get(f, [])})
+
     lock = Lock(jira_status.POLL_LOCK, 10)
     held = not lock._try()
     if not held:
@@ -421,10 +522,68 @@ def describe(cfg, team: dict) -> dict:
         "lastError": status.get("lastError", ""),
         "lock": {"held": held, **(lock.holder() if held else {})},
         "projectKeys": team.get("project_keys") or [],
-        "apiFields": fields, "columns": cols, "availableFields": list(dict.fromkeys(avail)),
+        "columnsTemplate": template,
+        "searchKinds": [{"kind": k, **v} for k, v in jira_config.SEARCH_KINDS.items()],
+        "teamJobs": [j.get("key") for j in team.get("jobs") or [] if isinstance(j, dict)]
+        + [k for k in (team.get("jql_templates") or {})],
+        "catalog": catalog, "availableFields": avail,
         "loginCurl": c.captured[0] if c.captured else "",
-        "endpoints": eps,
+        "endpoints": eps, "searches": srs,
     }
+
+
+def run_search(name: str) -> int:
+    """--search NAME: one saved search, now. Holds the poll lock (the cache
+    is shared); records status.json searches[NAME]."""
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(f"jira-poll: {err}", file=sys.stderr)
+        return 2
+    sr = cfg.search(name)
+    if sr is None:
+        print(f"jira-poll: unknown search '{name}' "
+              f"(known: {', '.join(x.get('name', '?') for x in cfg.searches) or 'none'})", file=sys.stderr)
+        return 2
+    try:
+        ep = search_as_endpoint(sr, team)
+    except jira_config.ConfigError as err:
+        print(f"jira-poll: search '{name}': {err}", file=sys.stderr)
+        return 2
+    lock = Lock(jira_status.POLL_LOCK, int(cfg["lockStaleMinutes"] or 10))
+    if not lock.acquire():
+        h = lock.holder()
+        print(f"jira-poll: a poll is running (pid {h.get('pid')} since {h.get('since')}) - "
+              "try again when it finishes", file=sys.stderr)
+        return 3
+    signal.signal(signal.SIGTERM, on_sigterm)
+    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+    c = jira_api.Client.from_config(cfg)
+    err, curl, items = "", "", None
+
+    def mark(d, **kw):
+        d.setdefault("searches", {}).setdefault(name, {}).update(kw)
+    jira_status.update(lambda d: mark(d, status="running", jql=ep["jql"]))
+    try:
+        fields, pkeys = job_fields(ep, team)
+        items = run_endpoint(c, ep, "full", cfg, fields, pkeys, out_dir, False, default_projects=False)
+    except jira_api.ApiError as e:
+        err, curl = str(e), e.curl
+    except Cancelled:
+        err = "cancelled by user"
+    except (OSError, ValueError) as e:
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        lock.release()
+    jira_status.update(lambda d: mark(d, status="error" if err else "ok", lastRun=jira_status.now_str(),
+                                      lastError=err, lastCurl=curl if err else "",
+                                      **({} if err else {"items": items})))
+    if err:
+        print(f"jira-poll: search '{name}': {err}", file=sys.stderr)
+        return 1
+    say(f"search '{name}': {items} item(s) -> {ep['file']}")
+    return 0
 
 
 def main(argv: list) -> int:
@@ -433,6 +592,8 @@ def main(argv: list) -> int:
     QUIET = o["quiet"]
     if o["cancel"]:
         return cancel_running()
+    if o["search"]:
+        return run_search(o["search"])
     if o["describe"]:
         try:
             cfg = jira_config.load()
@@ -524,14 +685,16 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
     now = time.time()
     names = [n.strip() for n in o["projects"].split(",") if n.strip()] if o["projects"] else []
     forced = bool(names) or o["init"] or bool(o["window"])
-    unknown = [n for n in names if n != "all" and not cfg.endpoint(n)]
+    # "*" = every enabled job; "all" too, unless a job is literally named "all"
+    everything = "*" in names or ("all" in names and not cfg.endpoint("all"))
+    unknown = [n for n in names if n not in ("*", "all") and not cfg.endpoint(n)]
     if unknown:
         print(f"jira-poll: unknown endpoint(s): {', '.join(unknown)} "
               f"(known: {', '.join(e['name'] for e in cfg.endpoints)})", file=sys.stderr)
         return 2
     plan = []
     for ep in cfg.endpoints:
-        wanted = (not names or "all" in names) and ep.get("enabled", True) or ep["name"] in names
+        wanted = (not names or everything) and ep.get("enabled", True) or ep["name"] in names
         entry = jira_status.endpoint_entry(status, ep["name"])
         wsec = jira_config.parse_window(ep.get("window", "10m"))
         nxt = next_run(entry, wsec)
@@ -593,7 +756,8 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
         items = None
         for attempt in range(1, MAX_TRIES + 1):
             try:
-                items = run_endpoint(c, ep, window, cfg, fields, pkeys, out_dir, False)
+                f_ep, k_ep = job_fields(ep, team)
+                items = run_endpoint(c, ep, window, cfg, f_ep, k_ep, out_dir, False)
                 err = ""
                 break
             except jira_api.ApiError as e:

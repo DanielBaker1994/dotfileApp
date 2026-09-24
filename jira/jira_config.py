@@ -34,6 +34,18 @@ CLI (used by the menu bar + setup sheet):
                                    token travels on stdin, never argv
   jira_config.py --set-window NAME WINDOW     change one endpoint's schedule
   jira_config.py --set-enabled NAME true|false
+  jira_config.py --upsert-endpoint   JSON object on stdin: add / replace one
+                                     poll job (validated; JSON result)
+  jira_config.py --upsert-search     same for a saved search
+  jira_config.py --delete-endpoint NAME | --delete-search NAME
+  jira_config.py --set-columns endpoint|search NAME SPEC
+                                     one job's columns (the jira window's
+                                     header drags save through this)
+
+Poll jobs ("endpoints") and searches each own their columns (one-line
+`field:Title:width:align:flags, ...`). [jira] columns in commands.conf is only
+the starter template for new ones (and the fallback for a tab no job owns);
+jobs created before per-job columns get a copy of it once, on load.
 Stdlib only (python 3.9+: launchd may run the CLT /usr/bin/python3).
 """
 from __future__ import annotations
@@ -70,6 +82,7 @@ DEFAULTS = {
     "snapshotKeep": 30,
     "outDir": OUT_DIR_DEFAULT,
     "endpoints": [],
+    "searches": [],
 }
 
 DEFAULT_ENDPOINTS = [
@@ -433,10 +446,13 @@ def parse_columns(spec: str) -> list:
     return cols
 
 
-def window_fields(section: dict | None = None) -> list:
+def window_fields(section: dict | None = None, columns: str | None = None) -> list:
     """Every window-json field the [jira] section references, columns first
-    (ordered, de-duplicated). Empty section -> the legacy base keys."""
-    sec = read_section("jira") if section is None else section
+    (ordered, de-duplicated). Empty section -> the legacy base keys.
+    `columns` = one job's own columns spec (replaces [jira] columns)."""
+    sec = dict(read_section("jira") if section is None else section)
+    if columns is not None:
+        sec["columns"] = columns
     seen: list = []
 
     def add(f):
@@ -452,13 +468,14 @@ def window_fields(section: dict | None = None) -> list:
     return seen or list(BASE_WINDOW_KEYS)
 
 
-def api_fields(section: dict | None = None, team: dict | None = None) -> list:
+def api_fields(section: dict | None = None, team: dict | None = None,
+               columns: str | None = None) -> list:
     """The Jira fields= list: sources of every referenced window field plus
     the always-needed ones. THE coupling between [jira] columns and the API.
     A team.json custom_fields alias (e.g. package_info) maps to its id."""
     aliases = custom_field_aliases(team or {})
     out: list = []
-    for f in window_fields(section) + ALWAYS_API_FIELDS:
+    for f in window_fields(section, columns) + ALWAYS_API_FIELDS:
         srcs = FIELD_SOURCES.get(f) if f in FIELD_SOURCES else [aliases[f]["id"] if f in aliases else f]
         for src in srcs:
             if src not in out:
@@ -466,14 +483,96 @@ def api_fields(section: dict | None = None, team: dict | None = None) -> list:
     return out
 
 
-def publish_keys(section: dict | None = None) -> list:
+def publish_keys(section: dict | None = None, columns: str | None = None) -> list:
     """Keys written to each window json: the legacy base shape plus any
     extra referenced field (comments stay cache-only - not a string)."""
     keys = list(BASE_WINDOW_KEYS)
-    for f in window_fields(section):
+    for f in window_fields(section, columns):
         if f not in keys and f != "comments":
             keys.append(f)
     return keys
+
+
+def job_columns(job: dict, section: dict | None = None) -> str:
+    """A poll job's / search's own columns spec; [jira] columns when unset."""
+    spec = (job or {}).get("columns")
+    if isinstance(spec, str) and spec.strip():
+        return spec.strip()
+    sec = read_section("jira") if section is None else section
+    return sec.get("columns", "")
+
+
+def columns_problem(spec: str) -> str:
+    """'' when a columns spec is valid (same rules as the app's
+    configValueProblem for `columns`), else the reason."""
+    if "\n" in spec:
+        return "columns must stay on one line"
+    if not spec.strip():
+        return "at least one column is required"
+    for part in spec.split(","):
+        seg = [x.strip() for x in part.split(":")]
+        if not seg[0]:
+            return "an entry has no field name"
+        if len(seg) > 2 and seg[2]:
+            try:
+                w = float(seg[2])
+            except ValueError:
+                return f"'{seg[0]}' width '{seg[2]}' is not a number (percent)"
+            if not 0 <= w <= 100:
+                return f"'{seg[0]}' width {seg[2]} must be 0-100"
+        if len(seg) > 3 and seg[3] and seg[3].lower() not in ("left", "right", "center"):
+            return f"'{seg[0]}' align '{seg[3]}' is not left | right | center"
+    return ""
+
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
+
+# saved searches: kind -> label + the argument the user fills. Run on demand
+# (jira_poll.py --search NAME), published as search-<name>.json = a tab.
+SEARCH_KINDS = {
+    "reporter": {"label": "Reporter", "arg": "username", "argLabel": "Reporter (username)"},
+    "assignee": {"label": "Assignee", "arg": "username", "argLabel": "Assignee (username)"},
+    "project": {"label": "Project", "arg": "project", "argLabel": "Project key"},
+    "text": {"label": "Text in summary / description", "arg": "query", "argLabel": "Search text"},
+    "jql": {"label": "Custom JQL", "arg": "jql", "argLabel": "JQL"},
+    "job": {"label": "team.json job / template", "arg": "job", "argLabel": "Job key"},
+}
+
+
+def search_jql(search: dict, team: dict) -> str:
+    """The JQL a saved search runs (no ORDER BY: sync ANDs it with its own
+    clause). projects = the search's list, else team.json project_keys."""
+    kind = search.get("kind", "text")
+    args = dict(search.get("args") or {})
+    projects = search.get("projects")
+    if not (isinstance(projects, list) and projects):
+        projects = team.get("project_keys") or []
+    if kind == "jql":
+        q = (args.get("jql") or search.get("jql") or "").strip()
+        if not q:
+            raise ConfigError("custom JQL is empty")
+        return re.sub(r"\s+ORDER\s+BY\s+.*$", "", q, flags=re.I | re.S)
+    if kind == "job":
+        ep = {"job": args.get("job") or search.get("job"), "args": {k: v for k, v in args.items()
+                                                                    if k != "job"}}
+        if projects:
+            ep["projects"] = projects
+        if not ep["job"]:
+            raise ConfigError("no team.json job chosen")
+        return endpoint_jql(ep, team)
+    spec = SEARCH_KINDS.get(kind)
+    if not spec:
+        raise ConfigError(f"unknown search kind '{kind}' ({', '.join(SEARCH_KINDS)})")
+    v = str(args.get(spec["arg"], "")).strip()
+    if not v:
+        raise ConfigError(f"{spec['argLabel']} is empty")
+    q = jql_quote(v)
+    clause = {"reporter": f'reporter = "{q}"', "assignee": f'assignee = "{q}"',
+              "project": f'project = "{q}"',
+              "text": f'(summary ~ "{q}" OR description ~ "{q}")'}[kind]
+    if projects and kind != "project":
+        clause = "project in (" + ", ".join(f'"{jql_quote(p)}"' for p in projects) + ") AND " + clause
+    return clause
 
 
 # ------------------------------------------------------------ config.json
@@ -610,6 +709,16 @@ class Config:
                 return e
         return None
 
+    @property
+    def searches(self) -> list:
+        return self.data.get("searches") or []
+
+    def search(self, name: str) -> dict | None:
+        for s in self.searches:
+            if s.get("name") == name:
+                return s
+        return None
+
     def problems(self) -> list:
         p = []
         for k in ("site", "token") + (("email",) if self.auth == "basic" else ()):
@@ -637,6 +746,21 @@ class Config:
                 p.append(f"endpoint '{n}': projects must be \"*\" or a list of keys")
             if not e.get("file"):
                 p.append(f"endpoint '{n}': file missing")
+            if isinstance(e.get("columns"), str) and columns_problem(e["columns"]):
+                p.append(f"endpoint '{n}': {columns_problem(e['columns'])}")
+        snames = set()
+        for i, sr in enumerate(self.searches):
+            n = sr.get("name") or f"#{i}"
+            if n in snames:
+                p.append(f"search '{n}': duplicate name")
+            snames.add(n)
+            if sr.get("kind", "text") not in SEARCH_KINDS:
+                p.append(f"search '{n}': kind must be one of {'/'.join(SEARCH_KINDS)}")
+            if isinstance(sr.get("columns"), str) and columns_problem(sr["columns"]):
+                p.append(f"search '{n}': {columns_problem(sr['columns'])}")
+        files = [x.get("file") for x in self.endpoints + self.searches if x.get("file")]
+        for f in sorted({f for f in files if files.count(f) > 1}):
+            p.append(f"file '{f}' is written by more than one job/search")
         return p
 
     def masked(self) -> dict:
@@ -674,6 +798,29 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
                 notes.append(f"reading legacy {LEGACY_CONFIG} (cannot write config.json: {err})")
     if not data.get("endpoints"):
         data["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
+    # per-job columns: jobs from before get their own copy of [jira] columns
+    # once (written back; env / flag credentials are applied AFTER this so
+    # they never leak into the file)
+    template = read_section("jira").get("columns", "")
+    if migrate and source == "config.json" and template:
+        missing = [e for e in data["endpoints"] + (data.get("searches") or [])
+                   if isinstance(e, dict) and not e.get("columns")]
+        if missing:
+            try:
+                with open(CONFIG_JSON, encoding="utf-8") as fh:
+                    raw = json.load(fh)
+                for e in raw.get("endpoints") or []:
+                    if isinstance(e, dict) and not e.get("columns"):
+                        e["columns"] = template
+                for e in raw.get("searches") or []:
+                    if isinstance(e, dict) and not e.get("columns"):
+                        e["columns"] = template
+                write_json_600(CONFIG_JSON, raw)
+                for e in missing:
+                    e["columns"] = template
+                notes.append(f"gave {len(missing)} job(s) their own copy of [jira] columns")
+            except (OSError, ValueError) as err:
+                notes.append(f"per-job columns migration skipped: {err}")
     for k in ("site", "email", "token"):
         env = os.environ.get("JIRA_" + k.upper(), "")
         if env and not data.get(k):
@@ -693,7 +840,7 @@ def save(updates: dict) -> str:
             base.update(json.load(fh))
     elif os.path.exists(LEGACY_CONFIG):
         base = migrate_legacy(parse_legacy(LEGACY_CONFIG))
-    allowed = set(DEFAULTS) | {"endpoints", "teamConfig"}
+    allowed = set(DEFAULTS) | {"endpoints", "searches", "teamConfig"}
     for k, v in updates.items():
         if k in allowed and v is not None:
             base[k] = v
@@ -709,6 +856,97 @@ def save(updates: dict) -> str:
         base["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
     write_json_600(CONFIG_JSON, base)
     return CONFIG_JSON
+
+
+def edit_jobs(cmd: str, args: list) -> int:
+    """Dashboard writers. Print JSON {ok, problems, name}; exit 0 / 1. The
+    edited config is validated as a whole BEFORE anything is written."""
+    def result(ok, problems=(), **extra):
+        print(json.dumps({"ok": ok, "problems": list(problems), **extra}))
+        return 0 if ok else 1
+
+    try:
+        cfg = load()
+    except ConfigError as err:
+        return result(False, [str(err)])
+    eps = [dict(e) for e in cfg.endpoints]
+    srs = [dict(x) for x in cfg.searches]
+    if cmd in ("--upsert-endpoint", "--upsert-search"):
+        try:
+            obj = json.load(sys.stdin)
+            if not isinstance(obj, dict):
+                raise ValueError("expected a JSON object")
+        except ValueError as err:
+            return result(False, [f"bad input: {err}"])
+        is_ep = cmd == "--upsert-endpoint"
+        name = str(obj.get("name") or "").strip()
+        if not NAME_RE.match(name):
+            return result(False, ["name is required: letters, digits, _ . - (max 40)"])
+        lst = eps if is_ep else srs
+        cur = next((x for x in lst if x.get("name") == name), None)
+        new = dict(cur or {})
+        new.update({k: v for k, v in obj.items() if v is not None})
+        new["name"] = name
+        new.setdefault("file", f"{name}.json" if is_ep else f"search-{name}.json")
+        if not new.get("columns"):
+            new["columns"] = read_section("jira").get("columns", "")
+        if is_ep:
+            new.setdefault("type", "issues")
+            new.setdefault("window", "30m")
+            new.setdefault("projects", "*")
+            new.setdefault("enabled", True)
+        else:
+            new.setdefault("kind", "text")
+            new.setdefault("args", {})
+        if cur is None:
+            lst.append(new)
+        else:
+            lst[lst.index(cur)] = new
+        probs = Config({**cfg.data, "endpoints": eps, "searches": srs}, CONFIG_JSON, [],
+                       cfg.source).problems()
+        probs = [x for x in probs if "missing (setup" not in x]  # creds: not this edit's concern
+        if not is_ep:
+            try:
+                search_jql(new, load_team(cfg.data))
+            except ConfigError as err:
+                probs.append(f"search '{name}': {err}")
+        if is_ep and (new.get("job") or new.get("template")):
+            try:
+                endpoint_jql(new, load_team(cfg.data))
+            except ConfigError as err:
+                probs.append(f"endpoint '{name}': {err}")
+        if probs:
+            return result(False, probs, name=name)
+        save({"endpoints": eps, "searches": srs})
+        return result(True, name=name, created=cur is None)
+    if cmd in ("--delete-endpoint", "--delete-search"):
+        if len(args) != 1:
+            return result(False, [f"{cmd} NAME"])
+        lst = eps if cmd == "--delete-endpoint" else srs
+        keep = [x for x in lst if x.get("name") != args[0]]
+        if len(keep) == len(lst):
+            return result(False, [f"unknown name '{args[0]}'"])
+        if cmd == "--delete-endpoint":
+            if not keep:
+                return result(False, ["the last poll job cannot be deleted (disable it instead)"])
+            save({"endpoints": keep})
+        else:
+            save({"searches": keep})
+        return result(True, name=args[0])
+    # --set-columns endpoint|search NAME SPEC
+    if len(args) != 3 or args[0] not in ("endpoint", "search"):
+        return result(False, ["--set-columns endpoint|search NAME SPEC"])
+    kind, name, spec = args
+    bad = columns_problem(spec)
+    if bad:
+        return result(False, [bad])
+    lst = eps if kind == "endpoint" else srs
+    hit = next((x for x in lst if x.get("name") == name), None)
+    if hit is None:
+        return result(False, [f"unknown {kind} '{name}'"])
+    hit["columns"] = spec.strip()
+    save({"endpoints": eps} if kind == "endpoint" else {"searches": srs})
+    return result(True, name=name)
 
 
 def main(argv: list) -> int:
@@ -732,6 +970,9 @@ def main(argv: list) -> int:
             return 2
         print(save(updates))
         return 0
+    if cmd in ("--upsert-endpoint", "--upsert-search", "--delete-endpoint", "--delete-search",
+               "--set-columns"):
+        return edit_jobs(cmd, argv[1:])
     if cmd in ("--set-window", "--set-enabled"):
         if len(argv) != 3:
             print(f"jira-config: {cmd} NAME VALUE", file=sys.stderr)
