@@ -100,27 +100,26 @@ key-mapping.preset = 'qwerty'
 # regular windows still tile by default.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
-  { if = 'test %{app-bundle-id} = com.microsoft.Word', run = ['layout floating'], check-further-callbacks = true },
+  #{ if = 'test %{app-bundle-id} = com.microsoft.Word', run = ['layout floating'], check-further-callbacks = true },
   # ALL workspace-switcher windows (popup, notes, jira) are overlays: one
   # app-name rule floats them; per-title rules went stale every time a
   # window name changed in commands.conf.
   #{ if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
-  { if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
-  { if = 'test %{app-bundle-id} = WebEx-PT.webexAppLauncher', run = ['move-node-to-workspace 9'] },
-  #{ if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.apple.finder', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace 1'] },
-  { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 1'] },
+  #{ if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
+#{ if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
+#{ if = 'test %{app-bundle-id} = com.apple.finder', run = ['move-node-to-workspace 1'] },
+#{ if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
+#{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
+{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
+{ if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 1'] },
+{ if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
+{ if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
+{ if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },
+{ if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 8'] },
+{ if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
+{ if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
+{ if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace W'] },
+{ if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace W'] }
 ]
 
 
