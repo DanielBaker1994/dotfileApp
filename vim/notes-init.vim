@@ -7,7 +7,7 @@
 "
 " The host passes the theme in before this file runs:
 "   --cmd "let g:ws_fg='#RRGGBB'" --cmd "let g:ws_dim='#RRGGBB'"
-"   --cmd "let g:ws_sel='#RRGGBB'"
+"   --cmd "let g:ws_sel='#RRGGBB'" --cmd "let g:ws_line='#RRGGBB'"
 " Point commands.conf `[notes] vim-init` at your own file to replace this one.
 
 set nocompatible
@@ -44,7 +44,12 @@ set noshowcmd
 set cmdheight=1
 set shortmess+=FIWcs
 set signcolumn=no
-set nonumber norelativenumber
+set number norelativenumber
+set numberwidth=3
+" highlight the cursor's line (like iTerm2's cursor guide); the number
+" column's current line is brightened too
+set cursorline
+set cursorlineopt=both
 set fillchars=eob:\ ,vert:\
 set nofoldenable
 set belloff=all
@@ -63,6 +68,7 @@ function! s:WsTheme() abort
   let fg = get(g:, 'ws_fg', '#CAD3F5')
   let dim = get(g:, 'ws_dim', '#939AB7')
   let sel = get(g:, 'ws_sel', '#3F4A5A')
+  let line = get(g:, 'ws_line', '#2E3440')
   for grp in ['Normal', 'NormalNC', 'NormalFloat', 'EndOfBuffer', 'NonText',
         \ 'SignColumn', 'LineNr', 'FoldColumn', 'MsgArea', 'StatusLine',
         \ 'StatusLineNC', 'VertSplit', 'WinSeparator']
@@ -71,7 +77,9 @@ function! s:WsTheme() abort
   execute 'highlight Normal guifg=' . fg
   execute 'highlight MsgArea guifg=' . dim
   execute 'highlight Visual guibg=' . sel . ' guifg=NONE'
-  execute 'highlight CursorLine guibg=NONE'
+  execute 'highlight CursorLine guibg=' . line . ' gui=NONE cterm=NONE'
+  execute 'highlight LineNr guifg=' . dim . ' guibg=NONE'
+  execute 'highlight CursorLineNr guifg=' . fg . ' guibg=' . line . ' gui=bold'
   execute 'highlight Pmenu guibg=' . sel . ' guifg=' . fg
 endfunction
 augroup ws_theme

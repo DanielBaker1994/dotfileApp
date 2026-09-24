@@ -101,8 +101,12 @@ struct AppSettings {
     // of per-window sticky); when true (default), non-sticky windows hide on focus loss
     var hideOnFocusLoss = true
     // [app] float: popup windows stay above other apps' windows (default
-    // true); per window `float` in its section overrides it
-    var float = true
+    // false); per window `float` in its section overrides it
+    var float = false
+    // [app] esc-close: rapid Esc presses that close a notes / files / jira
+    // window (default 3; 1 = single Esc, 0 = never). Per window `esc-close`
+    // overrides it. The switcher palette always closes on one Esc.
+    var escClose = 3
     // [app] terminal-app: app the file browser's `term` command opens when
     // the window has no embedded shell drawer (default Ghostty, else Terminal)
     var terminalApp = ""
@@ -534,7 +538,7 @@ struct CommandSpec {
     var vimBin: String         // note: vim binary path or name (default "nvim")
     var vimInit: String?       // note: init file for the vim pane (nil = bundled)
     var startDrawer: String    // note: drawer open at launch: browser|terminal|none
-    var vimEscClose: Int       // note: rapid Esc presses that close from vim (0 = off)
+    var escClose: Int?         // rapid Esc presses that close the window (nil = [app] esc-close; 0 = never)
     var imageRows: Int         // note: screen rows an inline image gets in vim
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
     let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
@@ -567,7 +571,7 @@ struct CommandSpec {
          vimMode: Bool = false, vimBin: String = "nvim",
          vimInit: String? = nil, startDrawer: String = "browser",
          fontSize: CGFloat = 0,
-         vimEscClose: Int = 3, imageRows: Int = 10,
+         escClose: Int? = nil, imageRows: Int = 10,
          maxHeight: CGFloat = 0,
          icon: NSImage? = nil,
          saveDir: String = "/tmp/") {
@@ -618,7 +622,7 @@ struct CommandSpec {
         self.vimInit = vimInit
         self.startDrawer = startDrawer
         self.fontSize = fontSize
-        self.vimEscClose = vimEscClose
+        self.escClose = escClose
         self.imageRows = imageRows
         self.icon = icon
         self.saveDir = saveDir
@@ -818,7 +822,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         startDrawer: (vars["start-drawer"] ?? "").isEmpty ? "browser"
             : vars["start-drawer"]!.lowercased(),
         fontSize: num(vars["font-size"]),
-        vimEscClose: Int(vars["vim-esc-close"] ?? "") ?? 3,
+        escClose: Int(vars["esc-close"] ?? vars["vim-esc-close"] ?? ""),
         imageRows: Int(vars["image-rows"] ?? "") ?? 10,
         maxHeight: num(vars["max-height"]),
         icon: vars["icon"].flatMap(resolveIconName),
@@ -939,6 +943,7 @@ private func parseAppConfig(_ vars: [String: String]) {
     if vars["screenshot-apps"] != nil { settings.screenshotApps = csv(vars["screenshot-apps"]) }
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
     if let v = tri(str("float")) { settings.float = v }
+    if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
     if let v = str("terminal-app") { settings.terminalApp = v }
 }
 
@@ -1137,7 +1142,7 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "zoxide-top": 0...100, "search-width": 0...1,
     "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
-    "vim-esc-close": 0...20, "search-limit": 1...1_000_000,
+    "vim-esc-close": 0...20, "esc-close": 0...20, "search-limit": 1...1_000_000,
 ]
 private let configColorKeys: Set<String> = [
     "header-color", "background-color", "browser-background", "terminal-background",
@@ -2982,6 +2987,11 @@ final class SwitcherController: NSObject {
         a += ["--cmd", "let g:ws_fg='\(rgb(cmd.textColor ?? TEXT))'",
               "--cmd", "let g:ws_dim='\(rgb(cmd.dimColor ?? DIM))'",
               "--cmd", "let g:ws_sel='\(rgb(cmd.highlightColor ?? GROUP_BG))'"]
+        // cursor-line band (iTerm2-style cursor guide): the selection color
+        // pulled halfway toward the card so it reads fainter than Visual
+        let sel = (cmd.highlightColor ?? GROUP_BG).usingColorSpace(.sRGB) ?? GROUP_BG
+        let card = (cmd.backgroundColor ?? BAR).withAlphaComponent(1).usingColorSpace(.sRGB) ?? BAR
+        a += ["--cmd", "let g:ws_line='\(rgb(sel.blended(withFraction: 0.5, of: card) ?? sel))'"]
         if let file { a.append(file) }
         return a
     }
@@ -3026,6 +3036,7 @@ final class SwitcherController: NSObject {
         cfg.enableDrag = true
         cfg.sticky = true
         cfg.floating = cmd.float ?? settings.float
+        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
         cfg.colors = PopupColors(background: BAR, border: BORDER,
@@ -3096,6 +3107,7 @@ final class SwitcherController: NSObject {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
+        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
         cfg.height = cmd.height > 0 ? cmd.height : defaultOutputSize.height
         // same header styling as the jira window: slim bluey-silver bar, no
@@ -3429,6 +3441,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
+        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.tabs = true
         cfg.tabsAddButton = true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
@@ -3488,7 +3501,6 @@ private func trimmed(_ s: String) -> String? {
             let exe = resolveBinary(cmd.vimBin) ?? cmd.vimBin
             cfg.vimEditorExecutable = exe
             cfg.vimEditorSocket = vimSocket
-            cfg.vimEscCloseCount = max(0, cmd.vimEscClose)
             cfg.vimImageFile = vimImageFile
             cfg.vimEditorArgs = vimArgs(for: cmd, socket: vimSocket,
                                         file: noteIsPreview(currentPath) ? nil : currentPath)
@@ -5146,6 +5158,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
+        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.wrapContent = true
         cfg.showSearchBar = true
         cfg.dragHeader = true
@@ -5552,6 +5565,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
+        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.enableNavigation = false   // the browser owns up/down/return
         cfg.enableSearch = false       // the browser has its own search field
         cfg.showSearchBar = false

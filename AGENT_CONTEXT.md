@@ -1,6 +1,8 @@
 # workspace-switcher
 
-Swift/AppKit macOS menu-bar app. Full project context: `AGENT_CONTEXT.md`.
+Swift/AppKit macOS menu-bar app. `CLAUDE.md` is a symlink to this file
+(`AGENT_CONTEXT.md`) — edit it once. Don't read the big Swift files whole:
+grep the symbol from the code map below, then read ~60 lines around it.
 
 ## Non-negotiable rules
 
@@ -30,13 +32,12 @@ bin/ui-test.sh --verbose
 ## Key files
 
 - `main.swift` — entry point
-- `workspace_switcher.swift` — app logic (~4600 lines)
-- `PopupWindow.swift` — popup window framework (~6900 lines)
+- `workspace_switcher.swift` — app logic (~7300 lines)
+- `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
 - `commands.conf` — config (windows, commands, colors, paths)
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller");
   tests: `python3 Tests/test_jira_poll.py`
-- `AGENT_CONTEXT.md` — architecture, window types, known bugs, code locations
-- `BUG_window_shake.md` — known drag-shake bug analysis
+- `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
 
 ## Jira poller (python, v2)
 
@@ -60,3 +61,85 @@ bin/ui-test.sh --verbose
   `table-sort`, widths back into `columns`. `columns` MUST stay on one line.
 - Tests: `python3 Tests/test_jira_poll.py` (jq parity vs the legacy bash
   transforms, lock, disabled no-op, env-token override).
+
+# Code map
+
+Line numbers drift; grep the symbol names (they're stable).
+
+## Repo facts
+
+- Real repo: `/Users/danielbaker/.config/workspace-switcher` (rule.md still
+  says `dotfileApp` — that's the old name; same rule: no git in backups).
+- `./build.sh` builds AND relaunches the app (exit 0 + no output = OK). The
+  running process is `workspace-switcher.app/Contents/MacOS/workspace-switcher`.
+- Python jira tests: `python3 Tests/test_jira_poll.py`. UI suites
+  (`bin/ui-test*.sh`) are slow/flaky — run once at most, don't loop them.
+
+## Where things live
+
+### workspace_switcher.swift (host / app logic)
+| Symbol | What |
+|---|---|
+| `struct AppSettings` / `settings` | `[app]` values (float, esc-close, shell, …) |
+| `parseAppConfig(_:)` | parses `[app]` into `settings` |
+| `struct CommandSpec` | one `[section]` (note/list/files/output) |
+| `makeCommand(_:_:)` | `[section]` key → CommandSpec field parsing |
+| `configNumberKeys` | numeric range validation for keys (add new numeric keys here) |
+| `validateConfig`, `configValueProblem` | config validation / warnings |
+| `saveConfigValue(s)`, `removeConfigValue` | write back into commands.conf |
+| `THEME`, `BAR`, `GROUP_BG`, `TEXT`, `DIM` | `[theme]` globals |
+| `vimArgs(for:socket:file:)` | nvim launch args, passes `g:ws_fg/dim/sel/line` |
+| `showDetail` | jira detail window (PopupConfig built here) |
+| `openOutputWindow` / `openNoteWindow` / `openListWindow` / `openFilesWindow` | build `PopupConfig` per window type — per-window config goes here (`cfg.floating = cmd.float ?? settings.float` line is a good anchor) |
+| `installStatusMenus` | menu-bar menu |
+| `reloadConfig()` | re-read commands.conf |
+| `handleEscape()` (SwitcherController) | switcher palette Esc (command mode → back) |
+
+### PopupWindow.swift (window framework)
+| Symbol | What |
+|---|---|
+| `public struct PopupConfig` | every window option (tabs, editMode, escCloseCount, floating, vim…) |
+| `PopupBaseWindow` / `PopupPanel` | NSWindow/NSPanel subclasses; `cancelOperation` → `onEscape` |
+| `PopupTabsBar` | tab strip; `PopupWindow.tabTitles` / `selectedTab` (setter fires `onTabChange`) |
+| `FileListPane` | file list; `moveSelection(_:)`, `selection` |
+| `PopupFileBrowser` | browser (notes drawer + files window); `copyRowPath`, `listView`, `searchView`, `control(_:textView:doCommandBy:)` for filter-bar Return/Tab/Up/Down |
+| `PopupWindow.installMonitors()` | local keyDown monitor → `handleKey` |
+| `PopupWindow.handleKey(_:_:)` | ALL keyboard routing (see order below) |
+| `escStreakCloses()` | N-rapid-Esc counter (0.6 s window) |
+| `focusedVim()`, `vimRemote`, `vimEval`, `vimCommand` | nvim pane + RPC |
+| `browserHasFocus`, `browserActive` | file browser focus checks |
+
+### handleKey order (first match wins)
+1. Esc streak reset on non-Esc key; Cmd+Opt+=/- font; Cmd+=/- resize.
+2. `cmd || ctrl`: sheet edit keys → Ctrl+J/K pane focus → **Ctrl+Tab / Ctrl+Shift+Tab
+   tab cycle (wraps)** → Ctrl+Shift+HJKL resize → vim-pane shortcuts →
+   terminal (Cmd+C/V only) → Cmd+L → **file browser keys (Ctrl+N/P move,
+   Cmd+K copy abs path, Cmd+A/C/V/X/Z)** → generic edit keys.
+3. `editMode`: terminal focused (Esc passes to shell; Nth rapid Esc closes),
+   vim pane (Esc → pty; Nth rapid Esc closes only in Normal mode), find
+   bar (single Esc closes bar), Esc (streak), Cmd+S, Cmd+O.
+4. list navigation (Up/Down/Tab/C-n/C-p/Return), then Esc (streak).
+
+## Keyboard shortcuts (user-facing)
+
+- Esc: `esc-close` rapid presses (default 3, `[app]` or per section; 1 =
+  single, 0 = never) close notes/files/jira/detail/output windows. The
+  switcher palette always closes on one Esc. Find bar: one Esc.
+- Ctrl+Tab / Ctrl+Shift+Tab: next/prev tab (notes, jira sources), wraps.
+- File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's
+  absolute path, Cmd+L focus filter bar, Tab completes, Enter opens.
+- Ctrl+J/K: move focus between editor / browser / terminal panes.
+
+## Config defaults worth knowing
+
+- `[app] float` default **false** (windows are normal, not floating).
+- `[app] esc-close` default 3; per-section `esc-close` (alias `vim-esc-close`).
+- Vim pane (`vim/notes-init.vim`): `number` + `cursorline` on; cursor-line
+  color `g:ws_line` = highlight color blended 50% toward the card color.
+
+## Verifying vim-pane changes without UI tests
+
+```bash
+S=$(ls -t ~/.cache/workspace-switcher/nvim-notes-*.sock | head -1)
+nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
+```

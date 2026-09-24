@@ -500,9 +500,11 @@ public struct PopupConfig {
     public var vimEditorArgs: [String] = []
     // nvim --listen socket path (RPC for tab switches / saves / queries)
     public var vimEditorSocket: String?
-    // vim pane: this many rapid Esc presses (vim already in Normal mode on
-    // the last one) close the window. 0 = Esc never closes from vim.
-    public var vimEscCloseCount: Int = 3
+    // this many rapid Esc presses close the window (editor, file browser,
+    // list, shell drawer; in the vim pane vim must already be in Normal mode
+    // on the last one). Earlier presses still reach vim / the shell.
+    // 1 = a single Esc closes, 0 = Esc never closes.
+    public var escCloseCount: Int = 1
     // vim pane: JSON file the editor writes inline-image placements to
     // (vim/notes-init.vim); the window draws the images over those rows
     public var vimImageFile: String?
@@ -5135,9 +5137,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // inline images drawn over the vim pane (click-through overlay)
     private var vimImageOverlay: VimImageOverlay?
     private var vimImageWatch: DispatchSourceFileSystemObject?
-    // rapid-Esc streak in the vim pane (see config.vimEscCloseCount)
-    private var vimEscStreak = 0
-    private var vimLastEsc = Date.distantPast
+    // rapid-Esc streak (see config.escCloseCount)
+    private var escStreak = 0
+    private var lastEsc = Date.distantPast
     private var rowScroll: NSScrollView?
     // table mode (config.tableColumns): sticky column header over the rows
     private var tableHeader: PopupTableHeaderView?
@@ -6916,9 +6918,9 @@ private func scrollSelectionIntoView() {
     }
 
     private func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
-        // an Esc streak (vim pane: N rapid Esc close the window) only counts
+        // an Esc streak (N rapid Esc close the window) only counts
         // CONSECUTIVE presses — any other key starts it over
-        if code != 53 { vimEscStreak = 0 }
+        if code != 53 { escStreak = 0 }
         // Cmd + plus/minus (main "="/"+" and "-", plus the keypad): grow or
         // shrink the window; rows stretch to fill from then on
         let cmd = mods.contains(.command)
@@ -7009,6 +7011,14 @@ private func scrollSelectionIntoView() {
                 }
                 // single pane (editor only) — fall through so the emacs
                 // bindings (Ctrl+J newline, Ctrl+K kill-line) reach the text view
+            }
+            // Ctrl+Tab / Ctrl+Shift+Tab: next / previous tab (open notes),
+            // wrapping at either end. Before the vim/terminal branches so it
+            // works from every pane.
+            if ctrl && !cmd && code == 48, config.tabs, tabTitles.count > 1 {
+                let n = tabTitles.count
+                selectedTab = (selectedTab + (mods.contains(.shift) ? -1 : 1) + n) % n
+                return true
             }
             // Ctrl+Shift+HJKL: resize window like tmux pane resize
             // H = shrink width, L = grow width, J = shrink height, K = grow height
@@ -7114,6 +7124,12 @@ private func scrollSelectionIntoView() {
             // the filter bar.
             if let fb = fileBrowser, browserActive(), browserHasFocus(fb) {
                 switch code {
+                case 45 where ctrl, 35 where ctrl:   // Ctrl+N / Ctrl+P — next / prev result
+                    fb.listView.moveSelection(code == 45 ? 1 : -1)
+                    return true
+                case 40 where cmd:  // Cmd+K — copy the selected row's absolute path
+                    fb.copyRowPath(fb.listView.selection)
+                    return true
                 case 0:   // A — select all in the filter bar
                     fb.searchView.selectText(nil)
                     return true
@@ -7207,6 +7223,11 @@ private func scrollSelectionIntoView() {
             if let term = terminalDrawer, terminalShown, terminalFocused(term) {
                 // the embedded terminal has keyboard focus: let SwiftTerm see
                 // EVERYTHING (including Esc — the shell's, not the window's)
+                // except the Nth rapid Esc, which closes the window
+                if code == 53, escStreakCloses() {
+                    handleEscape()
+                    return true
+                }
                 return false
             }
             if let vv = focusedVim() {
@@ -7215,16 +7236,11 @@ private func scrollSelectionIntoView() {
                 // (e.g. .function left over from an arrow key event) makes
                 // the terminal view drop it, stranding vim in Insert mode.
                 if code == 53, mods.intersection([.command, .control, .option]).isEmpty {
-                    let now = Date()
-                    vimEscStreak = now.timeIntervalSince(vimLastEsc) < 0.6 ? vimEscStreak + 1 : 1
-                    vimLastEsc = now
                     // the Nth rapid Esc closes the window — but only when vim
                     // is ALREADY in Normal mode (the earlier presses got it
                     // there), so leaving Insert/Visual never closes anything
-                    let n = config.vimEscCloseCount
-                    if n > 0, vimEscStreak >= n,
+                    if escStreakCloses(),
                        vimEval("mode()")?.trimmingCharacters(in: .whitespacesAndNewlines) == "n" {
-                        vimEscStreak = 0
                         handleEscape()
                         return true
                     }
@@ -7246,7 +7262,7 @@ private func scrollSelectionIntoView() {
                 return false
             }
             if code == 53 {
-                handleEscape()
+                if escStreakCloses() { handleEscape() }
                 return true
             }
             if code == 1, mods.contains(.command), editorView != nil {
@@ -7278,10 +7294,22 @@ private func scrollSelectionIntoView() {
             }
         }
         if config.enableEscape && code == 53 {
-            handleEscape()
+            if escStreakCloses() { handleEscape() }
             return true
         }
         return false
+    }
+
+    // counts one Esc press toward config.escCloseCount; true (and the streak
+    // resets) on the Nth press within 0.6 s of the previous one
+    private func escStreakCloses() -> Bool {
+        let now = Date()
+        escStreak = now.timeIntervalSince(lastEsc) < 0.6 ? escStreak + 1 : 1
+        lastEsc = now
+        let n = config.escCloseCount
+        guard n > 0, escStreak >= n else { return false }
+        escStreak = 0
+        return true
     }
 
     private func moveSelection(_ delta: Int) {
