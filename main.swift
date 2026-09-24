@@ -25,13 +25,15 @@ if cliArgs.count > 1 {
     case "toggle":
         exit(sendToggle(name: settings.switcherWindowName) ? 0 : 1)
     case "jira-poll":
-        // THE jira switch via the running daemon: on | off | toggle | setup
+        // THE jira switch via the running daemon: on | off | toggle | setup,
+        // or open the Jira Config window: dashboard
         let action = cliArgs.count > 2 ? cliArgs[2] : "toggle"
-        guard ["on", "off", "toggle", "setup"].contains(action) else {
-            FileHandle.standardError.write(Data("usage: workspace-switcher jira-poll on|off|toggle|setup\n".utf8))
+        guard ["on", "off", "toggle", "setup", "dashboard"].contains(action) else {
+            FileHandle.standardError.write(Data("usage: workspace-switcher jira-poll on|off|toggle|setup|dashboard\n".utf8))
             exit(2)
         }
-        if sendLaunchMessage(action == "setup" ? "jira-setup" : "jira-poll-" + action) { exit(0) }
+        let msg = action == "setup" ? "jira-setup" : action == "dashboard" ? "jira-dashboard" : "jira-poll-" + action
+        if sendLaunchMessage(msg) { exit(0) }
         FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
         exit(1)
     case "notes", "jira", "voice", "files":

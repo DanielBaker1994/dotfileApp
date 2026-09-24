@@ -19,6 +19,7 @@ BIN="$APP/Contents/MacOS/workspace-switcher"
 MAIN="$ROOT/main.swift"
 SRC="$ROOT/workspace_switcher.swift"
 FRAMEWORK="$ROOT/PopupWindow.swift"
+JIRA_DASH="$ROOT/JiraDashboard.swift"
 # SwiftTerm is precompiled ONCE into a static library + module (it is ~230
 # files); the daemon links it. Rebuilt only when a SwiftTerm source changes.
 TERM_LIB="$ROOT/.build/SwiftTerm/libSwiftTerm.a"
@@ -85,7 +86,7 @@ fi
 # BUNDLE ID, which is stable across rebuilds — a bare binary loses its grant
 # every time the ad-hoc signature changes.
 if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRAMEWORK" -nt "$BIN" ] \
-    || [ ! -f "$TERM_LIB" ]; then
+    || [ "$JIRA_DASH" -nt "$BIN" ] || [ ! -f "$TERM_LIB" ]; then
     build_term_lib
     # a REBUILD means any RUNNING daemon is the OLD binary — kill it or the
     # socket ping keeps talking to the stale, grant-less process
@@ -94,10 +95,10 @@ if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRA
     BUILD_TMP="$(mktemp "$TMP/ws-build.XXXXXX")" || exit 1
     if swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
         -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-        "$FRAMEWORK" "$SRC" "$MAIN" -o "$BUILD_TMP" >/dev/null 2>&1 ||
+        "$FRAMEWORK" "$SRC" "$JIRA_DASH" "$MAIN" -o "$BUILD_TMP" >/dev/null 2>&1 ||
        swiftc -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
         -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-        "$FRAMEWORK" "$SRC" "$MAIN" -o "$BUILD_TMP"; then
+        "$FRAMEWORK" "$SRC" "$JIRA_DASH" "$MAIN" -o "$BUILD_TMP"; then
         mv "$BUILD_TMP" "$BIN"
         # the bundle's on-disk Info.plist is what LaunchServices reads for
         # Finder right-click services (NSServices) — keep it in sync or the

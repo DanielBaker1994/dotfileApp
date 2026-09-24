@@ -35,6 +35,12 @@ Usage:
   jira_poll.py --window 2h        explicit window override (implies now)
   jira_poll.py --dry-run          print the plan (due, windows, JQL fields);
                                   no network, no writes
+  jira_poll.py --describe         JSON for the dashboard window: every
+                                  endpoint's schedule, status, full JQL and
+                                  the full curl of each request (real token),
+                                  plus the [jira] columns -> API fields map
+  jira_poll.py --cancel           stop the running poll (SIGTERM to the lock
+                                  holder); its endpoints become "cancelled"
   jira_poll.py --quiet            no progress output (launchd)
   jira_poll.py --force            run even when [jira] enabled = false
 
@@ -71,7 +77,7 @@ def say(msg: str) -> None:
 
 def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
-         "force": False}
+         "force": False, "describe": False, "cancel": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -97,6 +103,10 @@ def parse_args(argv: list) -> dict:
             o["dry"] = True
         elif name == "--quiet":
             o["quiet"] = True
+        elif name == "--describe":
+            o["describe"] = True
+        elif name == "--cancel":
+            o["cancel"] = True
         elif name == "--force":
             o["force"] = True
         elif name in ("-h", "--help"):
@@ -169,6 +179,34 @@ class Lock:
             except OSError:
                 pass
             self.fh = None
+
+
+class Cancelled(Exception):
+    """SIGTERM (dashboard Cancel / a stale-lock breaker) mid-poll."""
+
+
+def on_sigterm(signum, frame):
+    raise Cancelled()
+
+
+def cancel_running() -> int:
+    """--cancel: SIGTERM the process holding the poll lock (if any)."""
+    lock = Lock(jira_status.POLL_LOCK, 10)
+    if lock._try():             # nobody held it
+        lock.release()
+        print("jira-poll: no poll is running")
+        return 0
+    pid = lock.holder().get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        print("jira-poll: lock held but no pid recorded", file=sys.stderr)
+        return 1
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as err:
+        print(f"jira-poll: cannot stop pid {pid}: {err}", file=sys.stderr)
+        return 1
+    print(f"jira-poll: sent SIGTERM to poll pid {pid}")
+    return 0
 
 
 # ------------------------------------------------------------ scheduling
@@ -288,10 +326,130 @@ def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_d
     return len(items)
 
 
+def describe(cfg, team: dict) -> dict:
+    """Everything the dashboard shows, in one JSON: no network (curls are
+    built by a dry Client), no writes."""
+    status = jira_status.read()
+    c = jira_api.Client.from_config(cfg, dry=True)
+    fields = jira_config.api_fields(team=team)
+    aliases = jira_config.custom_field_aliases(team)
+    margin = int(cfg["pollMarginMinutes"] or 5)
+    known_projects = list(team.get("project_keys") or []) or jira_config._cache_projects()
+    eps = []
+    for ep in cfg.endpoints:
+        entry = jira_status.endpoint_entry(status, ep["name"])
+        typ = ep.get("type", "issues")
+        try:
+            wsec = jira_config.parse_window(ep.get("window", "10m"))
+        except jira_config.ConfigError:
+            wsec = 0
+        projects = ep.get("projects", "*")
+        plist = None if projects == "*" else list(projects)
+        c.captured = []
+        reqs, jql, notes = [], "", []
+        window = "-"
+        try:
+            if typ == "releases":
+                jira_api.releases(c, projects=plist)
+                reqs += [{"purpose": "list projects" if plist is None and not team.get("project_keys")
+                          else "versions", "curl": x} for x in c.captured]
+                if plist is None and not team.get("project_keys"):
+                    for p in known_projects:
+                        reqs.append({"purpose": f"versions of {p} (one per project)",
+                                     "curl": c.curl_cmd(c.url(c.path("project_versions", project=p)))})
+                    notes.append("projects = \"*\": every project the token can see gets one versions call")
+            else:
+                window = choose_window(ep, entry, {"init": False, "window": ""}, margin)
+                res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""),
+                                    api_fields=fields, fetch_comments=False, quiet=True)
+                jql = res["jql"]
+                reqs += [{"purpose": "search (first page; startAt / nextPageToken pages follow)",
+                          "curl": x} for x in c.captured]
+                if cfg["fetchComments"]:
+                    reqs.append({"purpose": "comments - one per changed issue (example key)",
+                                 "curl": c.curl_cmd(c.url(c.path("issue", key="KEY-1"), "fields=comment"))})
+                if "fixVersions" in fields:
+                    reqs.append({"purpose": "release dates - one per project in the results",
+                                 "curl": c.curl_cmd(c.url(c.path("project_versions",
+                                                                 project=(plist or known_projects or ["PROJ"])[0])))})
+        except (jira_config.ConfigError, jira_api.ApiError) as err:
+            notes.append(f"cannot build request: {err}")
+        nx = next_run(entry, wsec) if wsec else None
+        eps.append({
+            "name": ep["name"], "type": typ, "window": ep.get("window", "10m"),
+            "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
+            "path": os.path.join(os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT),
+                                 ep.get("file", "")),
+            "projects": projects, "extraJql": ep.get("jql", ""),
+            "job": ep.get("job") or ep.get("template") or "", "args": ep.get("args") or {},
+            "nextWindow": window, "jql": jql, "requests": reqs, "notes": notes,
+            "status": entry.get("status", "never run"), "lastRun": entry.get("lastRun", ""),
+            "lastSuccess": entry.get("lastSuccess", ""), "lastWindow": entry.get("lastWindow", ""),
+            "nextRun": jira_status.now_str(nx) if nx else "due",
+            "items": entry.get("items"), "lastError": entry.get("lastError", ""),
+            "lastCurl": entry.get("lastCurl", ""),
+        })
+    sec = jira_config.read_section("jira")
+    cols = []
+    for col in jira_config.parse_columns(sec.get("columns", "")):
+        f = col["field"]
+        if f in jira_config.FIELD_SOURCES:
+            src = jira_config.FIELD_SOURCES[f]
+        else:
+            src = [aliases[f]["id"] if f in aliases else f]
+        col.update({"apiFields": src, "label": aliases.get(f, {}).get("label", ""),
+                    "description": aliases.get(f, {}).get("description", "")})
+        cols.append(col)
+    avail = list(jira_config.BASE_WINDOW_KEYS) + ["updated"] + list(aliases)
+    lock = Lock(jira_status.POLL_LOCK, 10)
+    held = not lock._try()
+    if not held:
+        lock.release()
+    c.captured = []
+    c.get(c.path("myself"))
+    return {
+        "enabled": jira_config.jira_enabled(), "backgroundPoll": jira_config.poll_active()
+        and not jira_config.jira_enabled(),
+        "site": cfg.site, "auth": cfg.auth, "hasToken": bool(cfg["token"]),
+        "configPath": cfg.path, "teamPath": team.get("path", jira_config.TEAM_JSON),
+        "teamExists": os.path.exists(team.get("path", jira_config.TEAM_JSON)),
+        "commandsConf": jira_config.COMMANDS_CONF, "statusPath": jira_status.STATUS_FILE,
+        "curlLog": jira_api.CURL_LOG, "pollScript": jira_status.POLL_SCRIPT,
+        "tick": "60s (launchd StartInterval)", "pollMarginMinutes": margin,
+        "fetchComments": bool(cfg["fetchComments"]),
+        "status": status.get("status", ""), "lastRun": status.get("lastRun", ""),
+        "lastError": status.get("lastError", ""),
+        "lock": {"held": held, **(lock.holder() if held else {})},
+        "projectKeys": team.get("project_keys") or [],
+        "apiFields": fields, "columns": cols, "availableFields": list(dict.fromkeys(avail)),
+        "loginCurl": c.captured[0] if c.captured else "",
+        "endpoints": eps,
+    }
+
+
 def main(argv: list) -> int:
     global QUIET
     o = parse_args(argv)
     QUIET = o["quiet"]
+    if o["cancel"]:
+        return cancel_running()
+    if o["describe"]:
+        try:
+            cfg = jira_config.load()
+            team = jira_config.load_team(cfg.data)
+            bad = []
+            for ep in cfg.endpoints:
+                if not ep.get("jql") and (ep.get("job") or ep.get("template")):
+                    try:
+                        ep["jql"] = jira_config.endpoint_jql(ep, team)
+                    except jira_config.ConfigError as err:   # show the job, flag the problem
+                        bad.append(f"endpoint '{ep.get('name')}': {err}")
+            d = describe(cfg, team)
+            d["problems"] = cfg.problems() + bad + [f"team: {x}" for x in jira_config.team_problems(team)]
+        except jira_config.ConfigError as err:
+            d = {"problems": [str(err)], "endpoints": [], "columns": []}
+        print(json.dumps(d, indent=2))
+        return 0
     enabled = jira_config.jira_enabled()
     active = jira_config.poll_active()
     base = {"script": jira_status.POLL_SCRIPT, "curlLog": jira_api.CURL_LOG,
@@ -315,6 +473,16 @@ def main(argv: list) -> int:
         return 2
     base["configNotes"] = cfg.notes
     probs = cfg.problems()
+    try:
+        team = jira_config.load_team(cfg.data)
+        probs += [f"team: {x}" for x in jira_config.team_problems(team)]
+        # job / template endpoints -> plain jql (in memory; config.json untouched)
+        for ep in cfg.endpoints:
+            if not ep.get("jql") and (ep.get("job") or ep.get("template")):
+                ep["jql"] = jira_config.endpoint_jql(ep, team)
+    except jira_config.ConfigError as err:
+        probs.append(str(err))
+        team = {}
     if probs:
         msg = "config: " + "; ".join(probs)
         jira_status.update(lambda d: set_base(d, status="error", lastError=msg,
@@ -331,15 +499,27 @@ def main(argv: list) -> int:
             "pid": os.getpid(), "holder": h.get("pid")},
             lock={"held": True, "pid": h.get("pid"), "since": h.get("since")}))
         return 3
+    signal.signal(signal.SIGTERM, on_sigterm)
     try:
-        return poll(o, cfg, base, set_base, lock)
+        return poll(o, cfg, team, base, set_base, lock)
+    except Cancelled:
+        def mark(d):
+            for e in d.get("endpoints") or []:
+                if e.get("status") == "running":
+                    e["status"] = "cancelled"
+                    e["lastError"] = "cancelled by user"
+            set_base(d, status="cancelled", lastError="poll cancelled",
+                     lastRun=jira_status.now_str())
+        jira_status.update(mark)
+        say("cancelled")
+        return 130
     finally:
         lock.release()
         if not o["dry"]:
             jira_status.update(lambda d: d.update(lock={"held": False, "pid": None, "since": None}))
 
 
-def poll(o: dict, cfg, base: dict, set_base, lock: Lock) -> int:
+def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
     status = jira_status.read()
     now = time.time()
     names = [n.strip() for n in o["projects"].split(",") if n.strip()] if o["projects"] else []
@@ -359,7 +539,7 @@ def poll(o: dict, cfg, base: dict, set_base, lock: Lock) -> int:
         if due:
             plan.append((ep, entry, wsec))
     margin = int(cfg["pollMarginMinutes"] or 5)
-    fields = jira_config.api_fields()
+    fields = jira_config.api_fields(team=team)
     pkeys = jira_config.publish_keys()
     out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
 
@@ -403,12 +583,13 @@ def poll(o: dict, cfg, base: dict, set_base, lock: Lock) -> int:
         jira_status.update(lambda d: None)
         return 0
 
-    c = jira_api.Client(cfg.site, cfg["email"], cfg["token"])
+    c = jira_api.Client.from_config(cfg)
     failures = []
     for ep, entry, wsec in plan:
         window = choose_window(ep, entry, o, margin) if ep.get("type", "issues") == "issues" else "-"
         say(f"{ep['name']}: window={window}")
         err = ""
+        curl = ""
         items = None
         for attempt in range(1, MAX_TRIES + 1):
             try:
@@ -417,6 +598,7 @@ def poll(o: dict, cfg, base: dict, set_base, lock: Lock) -> int:
                 break
             except jira_api.ApiError as e:
                 err = str(e)
+                curl = e.curl
                 say(f"{ep['name']}: attempt {attempt}/{MAX_TRIES} failed: {err}")
                 if e.code in (401, 403) or attempt == MAX_TRIES:
                     break   # auth errors never fix themselves on retry
@@ -426,12 +608,13 @@ def poll(o: dict, cfg, base: dict, set_base, lock: Lock) -> int:
                 break
         ran = jira_status.now_str()
 
-        def record(d, ep=ep, err=err, items=items, window=window, ran=ran, wsec=wsec):
+        def record(d, ep=ep, err=err, items=items, window=window, ran=ran, wsec=wsec, curl=curl):
             e = jira_status.endpoint_entry(d, ep["name"])
             e["lastRun"] = ran
             e["lastWindow"] = window
             e["status"] = "error" if err else "ok"
             e["lastError"] = err
+            e["lastCurl"] = curl if err else ""   # the failing request, runnable ($JIRA_TOKEN)
             if not err:
                 e["lastSuccess"] = ran
                 e["items"] = items

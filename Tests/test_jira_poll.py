@@ -183,6 +183,140 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual([e["name"] for e in cfg["endpoints"]], ["all", "A", "B", "releases"])
 
 
+FAKE_CURL = r'''#!/usr/bin/env python3
+# fake curl: logs argv, serves a 5-issue v2 /search in startAt pages
+import json, os, sys, urllib.parse
+with open(os.environ["FAKE_CURL_LOG"], "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\n")
+url = sys.argv[-1]
+q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+if url.endswith("/myself"):
+    body = {"displayName": "Fake User", "name": "fake"}
+else:
+    start, n = int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
+    body = {"startAt": start, "total": 5, "issues": [
+        {"key": f"P-{i}", "fields": {"summary": f"s{i}", "customfield_20214": {"value": "pkg"}}}
+        for i in range(start, min(start + n, 5))]}
+sys.stdout.write(json.dumps(body) + "\n200")
+'''
+
+MESSY_TEAM = {
+    "custom_fields": {
+        "package_info": {"field id": "customfield 20214", "Label": "Package Information"},
+        "itrs_info": {"Field_id": "customfield_15262", "label": "ITRS Information"},
+    },
+    "field mappings": {"customfield 10086": "Acceptance Criteria"},
+    "project_keys": ["P1", "P2"],
+    "jobs": [{"key": "partial_search", "name": "Partial Search",
+              "args": [{"name": "query", "Label": "Search Text", "type": "text"}]}],
+    "api_endpoints": {"board_issues": "/board/{board_id}/issue"},
+    "boards": [{"id": 9148, "name": "TEAM", "type": "scrum"}],
+    "search defaults": {"max_results_search": 2, "timeout_seconds": 7},
+}
+
+
+class BearerAndTeamTests(unittest.TestCase):
+    def client(self, **kw):
+        team = jira_config.load_team({})
+        team.update(jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"}))
+        kw.setdefault("auth", "bearer")
+        return jira_api.Client("https://jira.example.com", "TOK", team=team, **kw)
+
+    def test_bearer_curl_matches_sample(self):
+        c = self.client()
+        self.assertEqual(
+            c.curl_cmd("https://jira.example.com/rest/api/2/myself"),
+            "curl -X GET -H 'Content-Type: application/json' -H 'Authorization: Bearer TOK' "
+            "'https://jira.example.com/rest/api/2/myself'")
+        self.assertIn('"Authorization: Bearer $JIRA_TOKEN"',
+                      c.curl_cmd("https://x/rest/api/2/myself", masked=True))
+        self.assertNotIn("-u", c.curl_argv("https://x"))
+
+    def test_auth_mode_derivation(self):
+        mk = lambda d: jira_config.Config(d, "", [], "test")
+        self.assertEqual(mk({"site": "https://j", "token": "t"}).auth, "bearer")
+        self.assertEqual(mk({"email": "a@b", "token": "t"}).auth, "basic")
+        self.assertEqual(mk({"email": "a@b", "auth": "bearer"}).auth, "bearer")
+        # bearer needs no email
+        self.assertEqual(mk({"site": "https://j", "token": "t"}).problems(), [])
+        self.assertTrue(any("email" in p for p in mk({"site": "https://j", "token": "t",
+                                                       "auth": "basic"}).problems()))
+
+    def test_messy_team_keys_normalize(self):
+        t = jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"})
+        al = jira_config.custom_field_aliases(t)
+        self.assertEqual(al["package_info"]["id"], "customfield_20214")
+        self.assertEqual(al["package_info"]["label"], "Package Information")
+        self.assertEqual(al["customfield_10086"]["label"], "Acceptance Criteria")
+        self.assertEqual(t["search_defaults"]["timeout_seconds"], 7)
+        self.assertEqual(jira_config.team_problems(t), [])
+
+    def test_alias_columns_drive_api_fields_and_cache(self):
+        t = jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"})
+        sec = {"columns": "key:Key:80, package_info:Package:120, title:Title"}
+        fields = jira_config.api_fields(sec, team=t)
+        self.assertIn("customfield_20214", fields)
+        self.assertNotIn("package_info", fields)
+        e = jira_api.cache_entry({"key": "P-1", "fields": {"customfield_20214": {"value": "pkg"}}},
+                                 {}, None, fields, jira_config.custom_field_aliases(t))
+        self.assertEqual(e["package_info"], "pkg")
+
+    def test_paths_and_templates(self):
+        t = jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"})
+        self.assertEqual(jira_config.resolve_path(t, "board_issues", board_id=9148),
+                         "/rest/agile/1.0/board/9148/issue")
+        self.assertEqual(jira_config.resolve_path(t, "search", "https://jira.example.com"),
+                         "/rest/api/2/search")
+        self.assertEqual(jira_config.resolve_path(t, "search", "https://x.atlassian.net"),
+                         "/rest/api/3/search/jql")
+        t2 = jira_config.load_team({"api_endpoints": {"search": "/search"}, "teamConfig": "/x"})
+        self.assertEqual(jira_config.resolve_path(t2, "search", "https://x.atlassian.net"),
+                         "/rest/api/2/search")   # explicit wins
+        self.assertEqual(jira_config.job_jql(t, "partial_search", {"query": 'a "b"'}),
+                         'project in ("P1", "P2") AND (summary ~ "a \\"b\\"" OR description ~ '
+                         '"a \\"b\\"") ORDER BY updated DESC')
+        with self.assertRaises(jira_config.ConfigError):
+            jira_config.job_jql(t, "partial_search", {})
+        self.assertEqual(jira_config.endpoint_jql({"job": "users_search"}, t), 'project in ("P1", "P2")')
+
+    def test_v2_search_paginates_with_startat_via_curl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "curl")
+            with open(fake, "w") as fh:
+                fh.write(FAKE_CURL)
+            os.chmod(fake, 0o755)
+            log = os.path.join(tmp, "calls.jsonl")
+            old = (os.environ.get("PATH", ""), jira_api.CURL_LOG)
+            os.environ["PATH"] = tmp + os.pathsep + old[0]
+            os.environ["FAKE_CURL_LOG"] = log
+            jira_api.CURL_LOG = os.path.join(tmp, "curl.log")
+            try:
+                res = self.client().search("project = P", "summary")
+            finally:
+                os.environ["PATH"], jira_api.CURL_LOG = old
+            self.assertEqual([i["key"] for i in res["issues"]], [f"P-{i}" for i in range(5)])
+            with open(log) as fh:
+                calls = [json.loads(x) for x in fh]
+            self.assertEqual(len(calls), 3)   # page size 2 -> 2+2+1
+            self.assertIn("Authorization: Bearer TOK", calls[0])
+            self.assertIn("7", calls[0])      # timeout_seconds -> -m 7
+            self.assertTrue(all("/rest/api/2/search?" in c[-1] for c in calls))
+            self.assertIn("startAt=4", calls[2][-1])
+
+    def test_curl_flag_prints_without_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = isolated_env(tmp, token="SECRET")
+            env["PATH"] = tmp   # no curl at all: --curl must not execute
+            p = subprocess.run([sys.executable, os.path.join(JIRA, "jira_api.py"), "--curl",
+                                "--mask", "--auth", "bearer", "--site", "https://jira.example.com"],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout.strip(),
+                             "curl -X GET -H 'Content-Type: application/json' -H \"Authorization: "
+                             "Bearer $JIRA_TOKEN\" 'https://jira.example.com/rest/api/2/myself'")
+            self.assertNotIn("SECRET", p.stdout)
+
+
 def isolated_env(tmp, token=""):
     """Env pointing every path at `tmp` (never touches the real config)."""
     conf = os.path.join(tmp, "commands.conf")
@@ -197,7 +331,8 @@ def isolated_env(tmp, token=""):
     env = dict(os.environ)
     env.update({"WS_COMMANDS_CONF": conf, "JIRA_CONFIG_JSON": cfgj,
                 "JIRA_CONFIG_FILE": os.path.join(tmp, "nolegacy"),
-                "JIRA_CACHE_DIR": os.path.join(tmp, "cache")})
+                "JIRA_CACHE_DIR": os.path.join(tmp, "cache"),
+                "JIRA_TEAM_JSON": os.path.join(tmp, "team.json")})
     env.pop("JIRA_TOKEN", None)
     return env
 
@@ -234,6 +369,37 @@ class PollTests(unittest.TestCase):
             self.assertEqual(st["status"], "disabled")
             self.assertFalse(st["enabled"])
             self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "curl.log")))
+
+    def test_describe_lists_full_curl_and_jql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = isolated_env(tmp, token="SECRET")
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                cfg = json.load(fh)
+            cfg.update({"site": "https://jira.example.com", "email": "", "auth": "bearer"})
+            cfg["endpoints"].append({"name": "mine", "window": "30m", "projects": ["P"],
+                                     "type": "issues", "file": "mine.json", "job": "users_search"})
+            with open(env["JIRA_CONFIG_JSON"], "w") as fh:
+                json.dump(cfg, fh)
+            env["PATH"] = tmp   # describe must never run curl
+            p = subprocess.run([sys.executable, os.path.join(JIRA, "jira_poll.py"), "--describe"],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            d = json.loads(p.stdout)
+            self.assertEqual(d["auth"], "bearer")
+            self.assertIn("-H 'Authorization: Bearer SECRET'", d["loginCurl"])
+            eps = {e["name"]: e for e in d["endpoints"]}
+            self.assertEqual(eps["all"]["nextWindow"], "full")      # no cache yet
+            self.assertIn("/rest/api/2/search?", eps["all"]["requests"][0]["curl"])
+            self.assertIn('project in ("P")', eps["mine"]["jql"])   # job -> jql
+            self.assertEqual(eps["mine"]["job"], "users_search")
+
+    def test_cancel_without_running_poll(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = isolated_env(tmp, token="x")
+            p = subprocess.run([sys.executable, os.path.join(JIRA, "jira_poll.py"), "--cancel"],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("no poll is running", p.stdout)
 
     def test_poll_when_disabled_keeps_poll_active(self):
         with tempfile.TemporaryDirectory() as tmp:

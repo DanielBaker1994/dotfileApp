@@ -34,6 +34,7 @@ bin/ui-test.sh --verbose
 - `main.swift` — entry point
 - `workspace_switcher.swift` — app logic (~7300 lines)
 - `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
+- `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`)
 - `commands.conf` — config (windows, commands, colors, paths)
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller");
   tests: `python3 Tests/test_jira_poll.py`
@@ -44,12 +45,36 @@ bin/ui-test.sh --verbose
 - Switch: `[jira] enabled` in commands.conf gates the window, the launchd
   agent (`syncJiraLaunchAgent()`, re-run on every `reloadConfig()`), and the
   poll itself (`jira_poll.py` no-ops when false unless `--force`).
-- Menu: `installStatusMenus` → "Toggle Jira Poll" (`SwitcherController.toggleJiraPoll`:
+- Menu: `installStatusMenus` → "Enable Jira" (`SwitcherController.toggleJiraPoll`:
   `jira_config.py --check` → setup window if missing → `jira_api.py --myself`
-  → `setJiraEnabled(true)`) and "Jira Poll…" (`buildJiraPollMenu`, rebuilt on open).
-  Socket messages `jira-poll-on/off/toggle`, `jira-setup` (CLI: `workspace-switcher jira-poll …`).
+  → `setJiraEnabled(true)`), "Toggle Jira Window", and ONE "Open Jira Config
+  Window" (`showJiraDashboard`). No other jira menu items — everything else
+  lives in that window. Socket messages `jira-poll-on/off/toggle`,
+  `jira-setup`, `jira-dashboard` (CLI: `workspace-switcher jira-poll on|off|toggle|setup|dashboard`).
+- Jira Config window: `JiraDashboard.swift` (`JiraDashboardWindow`, own file,
+  compiled by `bin/workspace_switcher.sh`). All data from ONE call:
+  `jira_poll.py --describe` (per job: schedule, status, next window, full JQL,
+  full curl of every request; [jira] columns → API fields; paths). Pages
+  (segmented control, NOT NSTabView — it fights auto layout): Poll Jobs
+  (on/off, interval → `jira_config.py --set-*`; Poll Now / Full Resync via
+  `jiraPollNow(_:full:done:)`; Cancel → `jira_poll.py --cancel` SIGTERMs the
+  lock holder, jobs become "cancelled"), Columns (edit → `saveJiraColumns`
+  rewrites `columns` + rebuilds an open jira window), Connection. Refreshes
+  every `[jira] dashboard-refresh` s (default 5); size `dashboard-width/height`.
 - Setup window: `JiraSetupWindow` (plain NSWindow above `.popUpMenu`, own key
   monitor for edit shortcuts + Esc). Token goes to python over stdin only.
+- Auth: config.json `auth` = `bearer` (Server/DC PAT, `Authorization: Bearer`,
+  no email) or `basic` (Cloud email+token); unset → basic iff email set.
+- Team schema: `~/.config/jira/team.json` (example `jira/team.example.json`):
+  `custom_fields` (alias → field_id; aliases usable as [jira] columns),
+  `field_mappings`, `project_keys`, `jobs`, `api_endpoints` (every REST path;
+  `resolve_path`), `boards`, `search_defaults`, `jql_templates`. Keys are
+  normalized (`norm_key`). Poll endpoints may use `job`/`template` + `args`.
+- curl: every request is a canonical `curl -X GET -H 'Content-Type…' -H
+  'Authorization: Bearer …' 'URL'` (`Client.curl_argv`). `jira_api.py --curl
+  [--mask]` prints instead of running; failures print a `$JIRA_TOKEN` repro
+  line and poll status stores `lastCurl` (shown in the Jira Config window);
+  setup window: "Copy curl".
 - Python: `jira/jira_config.py` (config.json, legacy env-config migration,
   `api_fields()` = [jira] columns + field keys), `jira_api.py` (curl via
   subprocess → `~/.cache/jira/curl.log`), `jira_poll.py` (flock

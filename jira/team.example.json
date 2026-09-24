@@ -1,0 +1,63 @@
+{
+  "custom_fields": {
+    "package_info": {
+      "field_id": "customfield_20214",
+      "label": "Package Information",
+      "description": "Information about the package/deployment"
+    },
+    "itrs_info": {
+      "field_id": "customfield_15262",
+      "label": "ITRS Information",
+      "description": "ITRS related information and configuration"
+    },
+    "acceptance_criteria": {
+      "field_id": "customfield_10086",
+      "label": "Acceptance Criteria",
+      "description": "Criteria that must be met for issue completion"
+    }
+  },
+  "field_mappings": {
+    "customfield_20214": "Package Information",
+    "customfield_15262": "ITRS Information",
+    "customfield_10086": "Acceptance Criteria"
+  },
+  "project_keys": ["PROJECTKEY1", "PROJECTKEY2", "PROJECTKEY3"],
+  "jobs": [
+    {
+      "key": "partial_search",
+      "name": "Partial Search (summary/desc)",
+      "args": [{"name": "query", "label": "Search Text", "type": "text"}]
+    }
+  ],
+  "api_endpoints": {
+    "myself": "/myself",
+    "search": "/search",
+    "issue": "/issue/{key}",
+    "projects": "/project",
+    "project_versions": "/project/{project}/versions",
+    "statuses": "/status",
+    "fields": "/field",
+    "assignable_users": "/user/assignable/search",
+    "board_issues": "/board/{board_id}/issue"
+  },
+  "boards": [
+    {"id": 9148, "name": "PROJECT_NAME_HERE", "type": "scrum"}
+  ],
+  "search_defaults": {
+    "max_results_users": 500,
+    "max_results_search": 50,
+    "page_size": 1000,
+    "timeout_seconds": 30,
+    "cache_timeout_seconds": 1800,
+    "versions_lookback_days": 3650
+  },
+  "jql_templates": {
+    "partial_search": "project in ({projects}) AND (summary ~ \"{query}\" OR description ~ \"{query}\") ORDER BY updated DESC",
+    "users_search": "project in ({projects}) ORDER BY updated ASC",
+    "assignee_search": "project in ({projects}) AND assignee = \"{username}\" ORDER BY updated DESC",
+    "reporter_search": "project in ({projects}) AND reporter = \"{username}\" ORDER BY updated DESC",
+    "assignee_reporter_search": "project in ({projects}) AND assignee = \"{assignee}\" AND reporter = \"{reporter}\" ORDER BY updated DESC",
+    "release_search": "project = \"{project}\" AND fixVersion = \"{version}\"",
+    "release_search_all": "project = \"{project}\" AND fixVersion = \"{version}\" ORDER BY created ASC"
+  }
+}

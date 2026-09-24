@@ -3,13 +3,21 @@
 
 Single source of truth for everything the python poller reads:
 
-  ~/.config/jira/config.json     site, auth, endpoints (chmod 600)
+  ~/.config/jira/config.json     site, auth, token, poll endpoints (chmod 600)
+  ~/.config/jira/team.json       team schema - custom_fields, field_mappings,
+                                 project_keys, jobs, api_endpoints, boards,
+                                 search_defaults, jql_templates (no secrets,
+                                 shareable; example: jira/team.example.json)
   commands.conf [jira]           enabled (THE SWITCH) + columns (render
                                  fields AND the API fields= param)
 
 The legacy env-style ~/.config/jira/config (JIRA_SITE=... lines, written by
 the old jira-api.sh --init) is migrated to config.json on first load; the old
 file is left untouched.
+
+Auth: "auth" = "bearer" (Server / Data Center personal access token, sent as
+`Authorization: Bearer <token>`, no email) or "basic" (Cloud: email + API
+token). Unset -> basic when an email is configured, else bearer.
 
 Credential precedence: --site/--email/--token flags > config.json value >
 exported JIRA_SITE / JIRA_EMAIL / JIRA_TOKEN (env only fills EMPTY config
@@ -20,6 +28,7 @@ CLI (used by the menu bar + setup sheet):
   jira_config.py --check           validate; JSON {ok, problems, notes, ...}
   jira_config.py --show            print config.json with the token masked
   jira_config.py --fields          print the API fields= list from [jira]
+  jira_config.py --team            print the resolved team.json (defaults merged)
   jira_config.py --save            merge a JSON object from stdin into
                                    config.json (site/email/token/...); the
                                    token travels on stdin, never argv
@@ -41,6 +50,7 @@ JIRA_DIR = os.path.dirname(os.path.abspath(__file__))
 WS_ROOT = os.path.dirname(JIRA_DIR)
 
 CONFIG_JSON = os.environ.get("JIRA_CONFIG_JSON") or os.path.join(HOME, ".config/jira/config.json")
+TEAM_JSON = os.environ.get("JIRA_TEAM_JSON") or os.path.join(HOME, ".config/jira/team.json")
 LEGACY_CONFIG = os.environ.get("JIRA_CONFIG_FILE") or os.path.join(HOME, ".config/jira/config")
 COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "commands.conf")
 
@@ -49,6 +59,7 @@ OUT_DIR_DEFAULT = os.path.join(HOME, ".cache/workspace-switcher/jira_json")
 
 DEFAULTS = {
     "site": "",
+    "auth": "",
     "email": "",
     "token": "",
     "defaultProject": "",
@@ -105,8 +116,249 @@ FIELD_KEYS = ("primary", "content", "detail", "trailing", "body", "filter",
               "filters", "copy-fields")
 
 
+AUTH_MODES = ("bearer", "basic")
+
+# ------------------------------------------------------------ team.json
+# Every Jira REST path the tools call. Relative paths hang off /rest/api/2;
+# "board*" paths off /rest/agile/1.0; paths starting /rest/ are used as-is.
+# {name} placeholders are filled per request (url-encoded).
+DEFAULT_API_ENDPOINTS = {
+    "myself": "/myself",
+    "search": "/search",
+    "issue": "/issue/{key}",
+    "projects": "/project",
+    "project_versions": "/project/{project}/versions",
+    "statuses": "/status",
+    "fields": "/field",
+    "assignable_users": "/user/assignable/search",
+    "board_issues": "/board/{board_id}/issue",
+}
+API_BASE = "/rest/api/2"
+AGILE_BASE = "/rest/agile/1.0"
+CLOUD_SEARCH = "/rest/api/3/search/jql"   # Cloud removed v2 /search
+
+DEFAULT_SEARCH = {
+    "max_results_users": 50,
+    "max_results_search": 50,     # page size of one search request
+    "page_size": 50,              # page size of one board request
+    "timeout_seconds": 30,        # curl -m
+    "cache_timeout_seconds": 0,   # re-use versions.json this long (0 = always refetch)
+    "versions_lookback_days": 0,  # drop releases dated older than this (0 = keep all)
+}
+
+# {projects} = the project list ("A", "B"); every other {name} is a job /
+# --arg value (quotes inside values are escaped for JQL).
+DEFAULT_JQL_TEMPLATES = {
+    "partial_search": 'project in ({projects}) AND (summary ~ "{query}" OR description ~ "{query}") '
+                      "ORDER BY updated DESC",
+    "users_search": "project in ({projects}) ORDER BY updated ASC",
+    "assignee_search": 'project in ({projects}) AND assignee = "{username}" ORDER BY updated DESC',
+    "reporter_search": 'project in ({projects}) AND reporter = "{username}" ORDER BY updated DESC',
+    "assignee_reporter_search": 'project in ({projects}) AND assignee = "{assignee}" '
+                                'AND reporter = "{reporter}" ORDER BY updated DESC',
+    "release_search": 'project = "{project}" AND fixVersion = "{version}"',
+    "release_search_all": 'project = "{project}" AND fixVersion = "{version}" ORDER BY created ASC',
+}
+
+TEAM_KEYS = ("custom_fields", "field_mappings", "project_keys", "jobs", "api_endpoints",
+             "boards", "search_defaults", "jql_templates")
+CUSTOMFIELD_RE = re.compile(r"^customfield[ _-]*(\d+)$", re.I)
+PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
 class ConfigError(Exception):
     pass
+
+
+def norm_key(k: str) -> str:
+    """'Field ID' / 'field-id' / 'Field_id' -> 'field_id'; 'customfield 15262'
+    -> 'customfield_15262' (hand-written team files are forgiven)."""
+    k = str(k).strip()
+    m = CUSTOMFIELD_RE.match(k)
+    if m:
+        return f"customfield_{m.group(1)}"
+    return re.sub(r"[\s-]+", "_", k).lower()
+
+
+def norm_field_id(v) -> str:
+    v = str(v or "").strip()
+    m = CUSTOMFIELD_RE.match(v)
+    return f"customfield_{m.group(1)}" if m else v
+
+
+def _norm_keys(obj):
+    """Normalize every dict key of the team schema (see norm_key)."""
+    if isinstance(obj, dict):
+        return {norm_key(k): _norm_keys(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_norm_keys(x) for x in obj]
+    return obj
+
+
+def load_team(cfg_data: dict | None = None) -> dict:
+    """team.json merged over the defaults; the same keys inside config.json
+    win (a single-file setup works too). Raises ConfigError on bad JSON."""
+    team = {k: {} for k in TEAM_KEYS}
+    team.update({"project_keys": [], "jobs": [], "boards": [],
+                 "api_endpoints": dict(DEFAULT_API_ENDPOINTS),
+                 "search_defaults": dict(DEFAULT_SEARCH),
+                 "jql_templates": dict(DEFAULT_JQL_TEMPLATES)})
+    layers = []
+    path = (cfg_data or {}).get("teamConfig") or TEAM_JSON
+    path = os.path.expanduser(path)
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                t = json.load(fh)
+            if not isinstance(t, dict):
+                raise ValueError("top level is not an object")
+        except (OSError, ValueError) as err:
+            raise ConfigError(f"{path}: invalid JSON ({err})")
+        layers.append(t)
+    if cfg_data:
+        layers.append({k: v for k, v in cfg_data.items() if norm_key(k) in TEAM_KEYS})
+    explicit_api: list = []
+    for layer in layers:
+        layer = _norm_keys(layer)
+        if isinstance(layer.get("api_endpoints"), dict):
+            explicit_api += list(layer["api_endpoints"])
+        for k in TEAM_KEYS:
+            if k not in layer or layer[k] is None:
+                continue
+            v = layer[k]
+            if isinstance(team[k], dict) and isinstance(v, dict):
+                team[k].update(v)
+            else:
+                team[k] = v
+    team["path"] = path
+    team["_explicit_api"] = explicit_api
+    return team
+
+
+def custom_field_aliases(team: dict) -> dict:
+    """alias -> {id, label, description} from custom_fields, plus every
+    field_mappings id (alias = the id itself)."""
+    out = {}
+    for alias, spec in (team.get("custom_fields") or {}).items():
+        if isinstance(spec, dict):
+            fid = norm_field_id(spec.get("field_id") or spec.get("id"))
+            if fid:
+                out[alias] = {"id": fid, "label": spec.get("label") or alias,
+                              "description": spec.get("description") or ""}
+        elif isinstance(spec, str) and spec:
+            out[alias] = {"id": norm_field_id(spec), "label": alias, "description": ""}
+    for fid, label in (team.get("field_mappings") or {}).items():
+        fid = norm_field_id(fid)
+        if fid and fid not in out:
+            out[fid] = {"id": fid, "label": str(label), "description": ""}
+    return out
+
+
+def team_problems(team: dict) -> list:
+    p = []
+    for alias, spec in (team.get("custom_fields") or {}).items():
+        if isinstance(spec, dict) and not (spec.get("field_id") or spec.get("id")):
+            p.append(f"custom_fields.{alias}: field_id missing")
+    for fid in (team.get("field_mappings") or {}):
+        if not norm_field_id(fid).startswith("customfield_"):
+            p.append(f"field_mappings: '{fid}' is not a customfield_NNNNN id")
+    pk = team.get("project_keys")
+    if not (isinstance(pk, list) and all(isinstance(x, str) for x in pk)):
+        p.append("project_keys must be a list of project keys")
+    for i, j in enumerate(team.get("jobs") or []):
+        if not isinstance(j, dict) or not j.get("key"):
+            p.append(f"jobs[{i}]: key missing")
+            continue
+        if not (j.get("jql") or j.get("template") or j["key"] in (team.get("jql_templates") or {})):
+            p.append(f"job '{j['key']}': no jql, template, or jql_templates.{j['key']}")
+    for b in team.get("boards") or []:
+        if not isinstance(b, dict) or not b.get("id"):
+            p.append(f"boards: entry without id: {b}")
+    return p
+
+
+def jql_quote(v) -> str:
+    return str(v).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def render_jql(template: str, args: dict, team: dict) -> str:
+    """Fill {placeholders}. {projects} defaults to project_keys (quoted,
+    comma-joined); a missing value raises ConfigError naming it."""
+    args = dict(args or {})
+    if "projects" not in args:
+        pk = team.get("project_keys") or []
+        if pk:
+            args["projects"] = ", ".join(f'"{jql_quote(p)}"' for p in pk)
+    elif isinstance(args["projects"], (list, tuple)):
+        args["projects"] = ", ".join(f'"{jql_quote(p)}"' for p in args["projects"])
+    missing = [n for n in PLACEHOLDER_RE.findall(template) if n not in args]
+    if missing:
+        hint = " (set project_keys in team.json)" if "projects" in missing else ""
+        raise ConfigError(f"JQL template needs: {', '.join(dict.fromkeys(missing))}{hint}")
+
+    def sub(m):
+        v = args[m.group(1)]
+        return v if m.group(1) == "projects" else jql_quote(v)
+    return PLACEHOLDER_RE.sub(sub, template)
+
+
+def find_job(team: dict, key: str) -> dict | None:
+    for j in team.get("jobs") or []:
+        if isinstance(j, dict) and j.get("key") == key:
+            return j
+    return None
+
+
+def job_jql(team: dict, key: str, args: dict) -> str:
+    """A job's JQL: its own `jql`, else jql_templates[job.template or key].
+    Plain template names work as jobs too."""
+    job = find_job(team, key) or {}
+    tmpl = job.get("jql") or (team.get("jql_templates") or {}).get(job.get("template") or key)
+    if not tmpl:
+        raise ConfigError(f"unknown job/template '{key}' (see --jobs)")
+    merged = {}
+    for a in job.get("args") or []:
+        if isinstance(a, dict) and a.get("name") and "default" in a:
+            merged[a["name"]] = a["default"]
+    merged.update(job.get("values") or {})
+    merged.update(args or {})
+    return render_jql(tmpl, merged, team)
+
+
+def endpoint_jql(ep: dict, team: dict) -> str:
+    """A poll endpoint's extra JQL: `jql`, or `job` / `template` + `args`."""
+    if ep.get("jql"):
+        return ep["jql"]
+    key = ep.get("job") or ep.get("template")
+    if not key:
+        return ""
+    args = dict(ep.get("args") or {})
+    if "projects" not in args and isinstance(ep.get("projects"), list) and ep["projects"]:
+        args["projects"] = ep["projects"]     # the endpoint's own project list fills {projects}
+    jql = job_jql(team, key, args)
+    # sync() ANDs this with its own window clause - an ORDER BY can't be nested
+    return re.sub(r"\s+ORDER\s+BY\s+.*$", "", jql, flags=re.I | re.S)
+
+
+def resolve_path(team: dict, name: str, site: str = "", **params) -> str:
+    """api_endpoints[name] with {params} url-encoded, as a /rest/... path."""
+    import urllib.parse
+    eps = team.get("api_endpoints") or DEFAULT_API_ENDPOINTS
+    raw = eps.get(name) or DEFAULT_API_ENDPOINTS.get(name)
+    if not raw:
+        raise ConfigError(f"api_endpoints.{name} not defined")
+    if name == "search" and "search" not in (team.get("_explicit_api") or ()) \
+            and raw == DEFAULT_API_ENDPOINTS["search"] and ".atlassian.net" in site:
+        raw = CLOUD_SEARCH
+    missing = [n for n in PLACEHOLDER_RE.findall(raw) if n not in params]
+    if missing:
+        raise ConfigError(f"api_endpoints.{name} ({raw}) needs: {', '.join(missing)}")
+    path = PLACEHOLDER_RE.sub(lambda m: urllib.parse.quote(str(params[m.group(1)]), safe=""), raw)
+    if path.startswith(("http://", "https://", "/rest/")):
+        return path
+    if not path.startswith("/"):
+        path = "/" + path
+    return (AGILE_BASE if name.startswith("board") else API_BASE) + path
 
 
 # ------------------------------------------------------------ commands.conf
@@ -200,12 +452,15 @@ def window_fields(section: dict | None = None) -> list:
     return seen or list(BASE_WINDOW_KEYS)
 
 
-def api_fields(section: dict | None = None) -> list:
+def api_fields(section: dict | None = None, team: dict | None = None) -> list:
     """The Jira fields= list: sources of every referenced window field plus
-    the always-needed ones. THE coupling between [jira] columns and the API."""
+    the always-needed ones. THE coupling between [jira] columns and the API.
+    A team.json custom_fields alias (e.g. package_info) maps to its id."""
+    aliases = custom_field_aliases(team or {})
     out: list = []
     for f in window_fields(section) + ALWAYS_API_FIELDS:
-        for src in FIELD_SOURCES.get(f, [f]):
+        srcs = FIELD_SOURCES.get(f) if f in FIELD_SOURCES else [aliases[f]["id"] if f in aliases else f]
+        for src in srcs:
             if src not in out:
                 out.append(src)
     return out
@@ -339,6 +594,13 @@ class Config:
         return (self.data.get("site") or "").rstrip("/")
 
     @property
+    def auth(self) -> str:
+        a = str(self.data.get("auth") or "").strip().lower()
+        if a in AUTH_MODES:
+            return a
+        return "basic" if self.data.get("email") else "bearer"
+
+    @property
     def endpoints(self) -> list:
         return self.data.get("endpoints") or []
 
@@ -350,9 +612,12 @@ class Config:
 
     def problems(self) -> list:
         p = []
-        for k in ("site", "email", "token"):
+        for k in ("site", "token") + (("email",) if self.auth == "basic" else ()):
             if not self.data.get(k):
                 p.append(f"{k} missing (setup sheet, jira_api.py --init, or export JIRA_{k.upper()})")
+        a = str(self.data.get("auth") or "").strip().lower()
+        if a and a not in AUTH_MODES:
+            p.append(f"auth '{a}' must be one of {'/'.join(AUTH_MODES)}")
         if self.site and not self.site.startswith(("https://", "http://")):
             p.append(f"site '{self.site}' must start with https://")
         names = set()
@@ -428,7 +693,7 @@ def save(updates: dict) -> str:
             base.update(json.load(fh))
     elif os.path.exists(LEGACY_CONFIG):
         base = migrate_legacy(parse_legacy(LEGACY_CONFIG))
-    allowed = set(DEFAULTS) | {"endpoints"}
+    allowed = set(DEFAULTS) | {"endpoints", "teamConfig"}
     for k, v in updates.items():
         if k in allowed and v is not None:
             base[k] = v
@@ -504,12 +769,24 @@ def main(argv: list) -> int:
     if cmd == "--show":
         print(json.dumps(cfg.masked(), indent=2))
         return 0
+    if cmd == "--team":
+        try:
+            print(json.dumps(load_team(cfg.data), indent=2))
+        except ConfigError as err:
+            print(f"jira-config: {err}", file=sys.stderr)
+            return 2
+        return 0
     if cmd == "--check":
         probs = cfg.problems()
+        try:
+            team = load_team(cfg.data)
+            probs += [f"team: {x}" for x in team_problems(team)]
+        except ConfigError as err:
+            probs.append(str(err))
         print(json.dumps({
             "ok": not probs, "exists": os.path.exists(CONFIG_JSON), "path": CONFIG_JSON,
             "source": cfg.source, "problems": probs, "notes": cfg.notes,
-            "site": cfg.site, "email": cfg["email"], "hasToken": bool(cfg["token"]),
+            "site": cfg.site, "auth": cfg.auth, "email": cfg["email"], "hasToken": bool(cfg["token"]),
             "defaultProject": cfg["defaultProject"], "defaultMax": cfg["defaultMax"],
             "endpoints": [{k: e.get(k) for k in ("name", "type", "window", "enabled", "file")}
                           for e in cfg.endpoints],

@@ -702,7 +702,13 @@ func jiraPollActiveInConfig() -> Bool { jiraEnabledInConfig() || jiraBackgroundP
 
 // boolean key of the [jira] section, false when absent (disabled by default)
 func jiraConfigFlag(_ key: String) -> Bool {
-    guard let content = readConfigText() else { return false }
+    guard let val = jiraConfigValue(key) else { return false }
+    return ["true", "yes", "1", "on"].contains(val.lowercased())
+}
+
+// raw value of a [jira] key straight from commands.conf (nil when absent)
+func jiraConfigValue(_ key: String) -> String? {
+    guard let content = readConfigText() else { return nil }
     var inJira = false
     for line in content.split(separator: "\n") {
         let s = line.trimmingCharacters(in: .whitespaces)
@@ -712,11 +718,10 @@ func jiraConfigFlag(_ key: String) -> Bool {
         }
         guard inJira, !s.hasPrefix("#"), let eq = s.firstIndex(of: "=") else { continue }
         if s[..<eq].trimmingCharacters(in: .whitespaces) == key {
-            let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            return ["true", "yes", "1", "on"].contains(val.lowercased())
+            return s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
         }
     }
-    return false
+    return nil
 }
 
 // launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
@@ -1147,6 +1152,7 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "body-lines": 0...100, "zoxide-top": 0...100, "search-width": 0...1,
     "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
     "vim-esc-close": 0...20, "esc-close": 0...20, "search-limit": 1...1_000_000,
+    "dashboard-width": 600...8000, "dashboard-height": 400...8000, "dashboard-refresh": 2...3600,
 ]
 private let configColorKeys: Set<String> = [
     "header-color", "background-color", "browser-background", "terminal-background",
@@ -2746,6 +2752,8 @@ final class SwitcherController: NSObject {
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
                         } else if name == "notes" {
                             self?.showNotes()
+                        } else if name == "jira-dashboard" {
+                            self?.showJiraDashboard()
                         } else if name.hasPrefix("jira-poll-") || name == "jira-setup" {
                             // THE jira switch (menu-bar "Enable Jira"/"Disable Jira")
                             guard let self else { return }
@@ -2908,7 +2916,7 @@ final class SwitcherController: NSObject {
 
     // MARK: Command actions
 
-    private func log(_ s: String) {
+    func log(_ s: String) {
         FileHandle.standardError.write(Data("ws: \(s)\n".utf8))
         let p = "/tmp/ws-debug.log"
         if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: p)) {
@@ -5272,11 +5280,6 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             menu.addItem(self.menuItem("Copy Config Path") { [weak self] in
                 self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
             })
-            if cmd.name == "jira" {
-                menu.addItem(self.menuItem("Copy Jira Config Path") { [weak self] in
-                    self?.copy(JiraPoll.configPath, "jira config path: \(JiraPoll.configPath)")
-                })
-            }
             menu.addItem(.separator())
             menu.addItem(self.menuItem("Open Config") { [weak self] in
                 let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
@@ -5284,17 +5287,10 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 if fm.fileExists(atPath: p) { self?.openNoteFile(p) }
             })
             if cmd.name == "jira" {
-                menu.addItem(self.menuItem("Open Jira Config",
-                                           enabled: fm.fileExists(atPath: JiraPoll.configPath)) { [weak self] in
-                    self?.openNoteFile(JiraPoll.configPath)
+                // polling, jobs, queries, curls, columns: all in one window
+                menu.addItem(self.menuItem("Open Jira Config Window") { [weak self] in
+                    self?.showJiraDashboard()
                 })
-                // Jira Poll ▸ — the same live submenu as the menu bar
-                let poll = NSMenu(title: "Jira Poll")
-                poll.autoenablesItems = false
-                self.buildJiraPollMenu(into: poll)
-                let pollItem = NSMenuItem(title: "Jira Poll", action: nil, keyEquivalent: "")
-                pollItem.submenu = poll
-                menu.addItem(pollItem)
             }
             menu.addItem(.separator())
             menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
@@ -5969,18 +5965,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         // Jira: THE SWITCH ([jira] enabled — window + launchd agent; titled
-        // "Enable Jira" / "Disable Jira" by menuNeedsUpdate), then the window
+        // "Enable Jira" / "Disable Jira" by menuNeedsUpdate), the window
         // toggle (hidden while disabled, so enabling brings it back without a
-        // relaunch) and a submenu with the live poll state + every option
+        // relaunch), and ONE entry for everything else: the Jira Config window
+        // (poll jobs, schedules, JQL, curls, columns, connection)
         addMenuItem(menu, "Enable Jira", #selector(MenuTarget.toggleJiraPoll(_:)), key: "")
         addMenuItem(menu, "Toggle Jira Window", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
-        let jiraMenu = NSMenu(title: "Jira Poll…")
-        let jiraDelegate = DynamicMenuDelegate { [weak c] m in c?.buildJiraPollMenu(into: m) }
-        dynamicMenuDelegates.append(jiraDelegate)
-        jiraMenu.delegate = jiraDelegate
-        let jiraItem = NSMenuItem(title: "Jira Poll…", action: nil, keyEquivalent: "")
-        jiraItem.submenu = jiraMenu
-        menu.addItem(jiraItem)
+        addMenuItem(menu, "Open Jira Config Window", #selector(MenuTarget.openJiraDashboard(_:)), key: "")
         menu.addItem(.separator())
 
         // Settings submenu with toggleable config options
@@ -6228,6 +6219,10 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     @objc func toggleJiraPoll(_ sender: Any?) {
         MenuTarget.controller?.toggleJiraPoll()
+    }
+
+    @objc func openJiraDashboard(_ sender: Any?) {
+        MenuTarget.controller?.showJiraDashboard()
     }
 
     @objc func toggleHealthChecks(_ sender: Any?) {
@@ -6938,147 +6933,46 @@ extension SwitcherController {
         JiraSetupWindow.show(controller: self, reason: reason)
     }
 
-    // "Poll Now": non-blocking; the poll holds its own lock, the status line
-    // shows "(running…)" until it returns
-    func jiraPollNow(_ endpoint: String) {
+    func showJiraDashboard() {
+        JiraDashboardWindow.show(controller: self)
+    }
+
+    // "Poll Now": non-blocking; the poll holds its own lock, the dashboard
+    // shows "running" until it returns. full = --init (full resync).
+    func jiraPollNow(_ endpoint: String, full: Bool = false, done: (() -> Void)? = nil) {
         guard !JiraPoll.running.contains(endpoint) else { return }
         JiraPoll.running.insert(endpoint)
-        log("jira: poll now (\(endpoint))")
-        JiraPoll.run("jira_poll.py", ["--force", "--quiet", "--projects", endpoint]) { [weak self] code, _, err in
+        log("jira: poll now (\(endpoint)\(full ? ", full resync" : ""))")
+        let args = ["--force", "--quiet", "--projects", endpoint] + (full ? ["--init"] : [])
+        JiraPoll.run("jira_poll.py", args) { [weak self] code, _, err in
             JiraPoll.running.remove(endpoint)
             self?.log("jira: poll \(endpoint) finished (exit \(code))"
                       + (code == 0 ? "" : ": " + JiraPoll.errorLine(err, fallback: "see status.json")))
+            done?()
         }
     }
 
-    // Jira Poll ▸ — rebuilt on every open, so it always shows the live state
-    func buildJiraPollMenu(into m: NSMenu) {
-        let enabled = jiraEnabledInConfig()
-        func info(_ title: String) {
-            let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            i.isEnabled = false
-            m.addItem(i)
-        }
-        let background = !enabled && jiraBackgroundPollInConfig()
-        info(enabled ? "Polling ON — launchd agent every 60s"
-             : background ? "Jira disabled — still polling in the background (every 60s)"
-             : "Polling OFF — [jira] enabled = false")
-        if background {
-            m.addItem(menuItem("Stop Background Polling") { [weak self] in
-                self?.setJiraEnabled(false, keepPolling: false)
-            })
-        }
-        if let e = JiraPoll.lastEnableError { info("⚠ enable failed: \(e)") }
-        let st = JiraPoll.status ?? [:]
-        if st.isEmpty {
-            info("no status yet (the poller has never run)")
-        } else {
-            let top = st["status"] as? String ?? "?"
-            info("Status: \(top) · last run \(JiraPoll.short(st["lastRun"] as? String))")
-            if let e = st["lastError"] as? String, !e.isEmpty { info("⚠ \(e.prefix(90))") }
-            for n in st["configNotes"] as? [String] ?? [] { info("ℹ︎ \(n)") }
-            if let lock = st["lock"] as? [String: Any], lock["held"] as? Bool == true {
-                info("🔒 poll running (pid \(lock["pid"] ?? "?"))")
-            }
-            for e in st["endpoints"] as? [[String: Any]] ?? [] {
-                let name = e["name"] as? String ?? "?"
-                let items = (e["items"] as? Int).map { " · \($0) items" } ?? ""
-                let off = e["enabled"] as? Bool == false ? " (disabled)" : ""
-                let run = JiraPoll.running.contains(name) || JiraPoll.running.contains("all")
-                    ? " · running…" : ""
-                info("   \(name): \(e["status"] as? String ?? "?")\(off) · every \(e["window"] as? String ?? "?")"
-                     + " · next \(JiraPoll.short(e["nextRun"] as? String))\(items)\(run)")
-            }
-        }
-        m.addItem(.separator())
-
-        let eps = JiraPoll.endpoints
-        let names = eps.compactMap { $0["name"] as? String }
-        // Poll Now ▸ All / per endpoint
-        let now = NSMenu(title: "Poll Now")
-        now.addItem(menuItem("All Endpoints", enabled: !JiraPoll.running.contains("all")) { [weak self] in
-            self?.jiraPollNow("all")
-        })
-        if !names.isEmpty { now.addItem(.separator()) }
-        for n in names {
-            now.addItem(menuItem(n, enabled: !JiraPoll.running.contains(n)) { [weak self] in
-                self?.jiraPollNow(n)
-            })
-        }
-        let nowItem = NSMenuItem(title: "Poll Now", action: nil, keyEquivalent: "")
-        nowItem.submenu = now
-        nowItem.isEnabled = !eps.isEmpty
-        m.addItem(nowItem)
-
-        // Poll Interval ▸ endpoint ▸ 5m … 1d (+ on/off) — written to
-        // config.json through jira_config.py so validation stays in one place
-        let iv = NSMenu(title: "Poll Interval")
-        for e in eps {
-            guard let n = e["name"] as? String else { continue }
-            let cur = e["window"] as? String ?? ""
-            let sub = NSMenu(title: n)
-            var choices = JiraPoll.intervals
-            if !cur.isEmpty && !choices.contains(cur) { choices.insert(cur, at: 0) }
-            for w in choices {
-                sub.addItem(menuItem("every \(w)", state: w == cur) { [weak self] in
-                    JiraPoll.run("jira_config.py", ["--set-window", n, w]) { code, _, err in
-                        self?.log("jira: \(n) window -> \(w) (exit \(code))\(code == 0 ? "" : " " + err)")
-                    }
-                })
-            }
-            sub.addItem(.separator())
-            let on = e["enabled"] as? Bool ?? true
-            sub.addItem(menuItem("Enabled", state: on) { [weak self] in
-                JiraPoll.run("jira_config.py", ["--set-enabled", n, on ? "false" : "true"]) { code, _, _ in
-                    self?.log("jira: \(n) enabled -> \(!on) (exit \(code))")
-                }
-            })
-            let item = NSMenuItem(title: "\(n) — every \(cur)", action: nil, keyEquivalent: "")
-            item.submenu = sub
-            iv.addItem(item)
-        }
-        let ivItem = NSMenuItem(title: "Poll Interval", action: nil, keyEquivalent: "")
-        ivItem.submenu = iv
-        ivItem.isEnabled = !eps.isEmpty
-        m.addItem(ivItem)
-        m.addItem(.separator())
-
-        // observability: every path the user may want to inspect
-        m.addItem(menuItem("Status…") { [weak self] in
-            guard let self else { return }
-            if self.commands.contains(where: { $0.name == "health-checks" }) {
-                self.showCommand("health-checks")
-            } else {
-                self.openNoteFile(JiraPoll.statusPath)
-            }
-        })
-        let fm = FileManager.default
-        m.addItem(menuItem("View Config", enabled: fm.fileExists(atPath: JiraPoll.configPath)) { [weak self] in
-            self?.openNoteFile(JiraPoll.configPath)
-        })
-        m.addItem(menuItem("View Status JSON", enabled: fm.fileExists(atPath: JiraPoll.statusPath)) { [weak self] in
-            self?.openNoteFile(JiraPoll.statusPath)
-        })
-        m.addItem(menuItem("View curl Log", enabled: fm.fileExists(atPath: JiraPoll.curlLogPath)) { [weak self] in
-            self?.openNoteFile(JiraPoll.curlLogPath)
-        })
-        m.addItem(menuItem("Copy Config Path") { [weak self] in
-            self?.copy(JiraPoll.configPath, "jira config path: \(JiraPoll.configPath)")
-        })
-        m.addItem(menuItem("Copy Poll Script Path") { [weak self] in
-            self?.copy(JiraPoll.pollScript, "jira poll script: \(JiraPoll.pollScript)")
-        })
-        m.addItem(menuItem("Copy curl Log Path") { [weak self] in
-            self?.copy(JiraPoll.curlLogPath, "jira curl log: \(JiraPoll.curlLogPath)")
-        })
-        m.addItem(.separator())
-        m.addItem(menuItem("Setup…") { [weak self] in self?.showJiraSetup() })
+    // Jira Config window ▸ Columns ▸ Save: write [jira] columns (one line),
+    // update the live spec, and rebuild an open jira window so it redraws
+    // with the new table
+    func saveJiraColumns(_ cols: [ListColumn], spec: String) {
+        saveConfigValue(section: "jira", key: "columns", value: spec)
+        if let ci = commands.firstIndex(where: { $0.name == "jira" }) { commands[ci].columns = cols }
+        log("jira: columns -> \(spec)")
+        guard let w = subWindows.first(where: { $0.config.name == "jira" }) else { return }
+        let wasShown = w.isShown
+        w.hide(restore: false)
+        subWindows.removeAll { $0 === w }
+        w.releaseHooks()
+        w.nativeWindow.orderOut(nil)
+        if wasShown { showCommand("jira") }
     }
 }
 
-// Jira credentials window: site, email, API token (secure), default project,
-// max results. "Test Connection" runs jira_api.py --myself against what is
-// typed; "Save & Enable" writes config.json (chmod 600, via jira_config.py
+// Jira credentials window: site, email (Cloud only — blank = Bearer token for
+// Server/Data Center), token (secure), default project, max results. "Test
+// Connection" runs jira_api.py --myself against what is typed; "Copy curl"
+// copies that same request as a runnable curl (jira_api.py --curl); "Save & Enable" writes config.json (chmod 600, via jira_config.py
 // --save — the token travels on stdin), re-tests, then flips [jira] enabled.
 // A plain titled NSWindow (not an NSAlert) so every field takes focus, and a
 // local key monitor routes Cmd/Ctrl+V, Cmd+A/C/X/Z to the field editor
@@ -7096,6 +6990,7 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private let result = NSTextField(wrappingLabelWithString: "")
     private let testButton = NSButton(title: "Test Connection", target: nil, action: nil)
     private let saveButton = NSButton(title: "Save & Enable", target: nil, action: nil)
+    private let curlButton = NSButton(title: "Copy curl", target: nil, action: nil)
     private var monitor: Any?
     private weak var controller: SwitcherController?
 
@@ -7130,14 +7025,15 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         window.delegate = self
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
         let head = NSTextField(wrappingLabelWithString:
-            "Connect the jira poller to your Jira Cloud site. Token: id.atlassian.com → Security → API tokens.")
+            "Server / Data Center: paste a personal access token (sent as Authorization: Bearer) "
+            + "and leave Email blank. Cloud: email + API token (id.atlassian.com → Security).")
         head.font = .systemFont(ofSize: 12)
         head.frame = NSRect(x: 20, y: H - 50, width: W - 40, height: 34)
         content.addSubview(head)
         let rows: [(String, NSTextField, String)] = [
-            ("Site URL", site, "https://your-org.atlassian.net"),
-            ("Email", email, "you@example.com"),
-            ("API Token", token, "paste your API token"),
+            ("Site URL", site, "https://jira.example.com"),
+            ("Email (Cloud)", email, "blank = Bearer token (Server / Data Center)"),
+            ("Token", token, "personal access token / API token"),
             ("Default project", project, "e.g. SAM1 (optional)"),
             ("Max results", maxResults, "25"),
         ]
@@ -7164,7 +7060,10 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         content.addSubview(result)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
         cancel.keyEquivalent = "\u{1b}"
-        for b in [testButton, saveButton, cancel] { b.bezelStyle = .rounded }
+        for b in [testButton, saveButton, cancel, curlButton] { b.bezelStyle = .rounded }
+        curlButton.target = self
+        curlButton.action = #selector(copyCurl(_:))
+        curlButton.toolTip = "Copy the login test (GET /rest/api/2/myself) as a curl command"
         saveButton.keyEquivalent = "\r"
         saveButton.target = self
         saveButton.action = #selector(saveAndEnable(_:))
@@ -7173,7 +7072,9 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         saveButton.frame = NSRect(x: W - 20 - 130, y: 16, width: 130, height: 30)
         cancel.frame = NSRect(x: saveButton.frame.minX - 96, y: 16, width: 90, height: 30)
         testButton.frame = NSRect(x: 20, y: 16, width: 140, height: 30)
+        curlButton.frame = NSRect(x: testButton.frame.maxX + 6, y: 16, width: 100, height: 30)
         content.addSubview(testButton)
+        content.addSubview(curlButton)
         content.addSubview(cancel)
         content.addSubview(saveButton)
         window.contentView = content
@@ -7235,6 +7136,32 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private func busy(_ on: Bool) {
         testButton.isEnabled = !on
         saveButton.isEnabled = !on
+        curlButton.isEnabled = !on
+    }
+
+    // typed values -> jira_api.py flags (blank fields fall back to config/env);
+    // the token travels on stdin. A blank email means Bearer auth.
+    private func typedArgs() -> (args: [String], stdin: String?) {
+        let v = trimmed
+        var args: [String] = [], stdin: String? = nil
+        if !v.site.isEmpty { args += ["--site", v.site] }
+        args += v.email.isEmpty ? ["--auth", "bearer"] : ["--email", v.email, "--auth", "basic"]
+        if !v.token.isEmpty { args.append("--token-stdin"); stdin = v.token + "\n" }
+        return (args, stdin)
+    }
+
+    @objc private func copyCurl(_ sender: Any?) {
+        let t = typedArgs()
+        JiraPoll.run("jira_api.py", ["--curl", "--myself"] + t.args, stdin: t.stdin) { [weak self] code, out, err in
+            let cmd = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard code == 0, !cmd.isEmpty else {
+                self?.setResult("✗ \(JiraPoll.errorLine(err, fallback: "could not build curl (exit \(code))"))", ok: false)
+                return
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(cmd, forType: .string)
+            self?.setResult("curl copied (includes the token) — paste into a terminal to test the login.", ok: nil)
+        }
     }
 
     private var trimmed: (site: String, email: String, token: String, project: String, max: String) {
@@ -7246,18 +7173,18 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private func runLoginTest(useTyped: Bool, done: @escaping (Bool, String) -> Void) {
         var args = ["--myself", "--no-auth-check"]
         var stdin: String? = nil
-        let v = trimmed
         if useTyped {
-            if !v.site.isEmpty { args += ["--site", v.site] }
-            if !v.email.isEmpty { args += ["--email", v.email] }
-            if !v.token.isEmpty { args.append("--token-stdin"); stdin = v.token + "\n" }
+            let t = typedArgs()
+            args += t.args
+            stdin = t.stdin
         }
         JiraPoll.run("jira_api.py", args, stdin: stdin) { code, out, err in
             if code == 0,
                let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] {
                 done(true, d["displayName"] as? String ?? "unknown user")
             } else {
-                done(false, JiraPoll.errorLine(err, fallback: "login failed (exit \(code))"))
+                done(false, JiraPoll.errorLine(err, fallback: "login failed (exit \(code))")
+                     + " — Copy curl to reproduce in a terminal")
             }
         }
     }
@@ -7277,8 +7204,9 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
             setResult("✗ Site URL must start with https://", ok: false)
             return
         }
-        var obj: [String: Any] = ["site": v.site, "email": v.email, "defaultProject": v.project,
-                                  "defaultMax": Int(v.max) ?? 25]
+        var obj: [String: Any] = ["site": v.site, "email": v.email,
+                                  "auth": v.email.isEmpty ? "bearer" : "basic",
+                                  "defaultProject": v.project, "defaultMax": Int(v.max) ?? 25]
         if !v.token.isEmpty { obj["token"] = v.token }
         guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         busy(true)
