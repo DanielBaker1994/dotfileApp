@@ -235,6 +235,17 @@ class PollTests(unittest.TestCase):
             self.assertFalse(st["enabled"])
             self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "curl.log")))
 
+    def test_poll_when_disabled_keeps_poll_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = os.path.join(tmp, "commands.conf")
+            with open(conf, "w") as fh:
+                fh.write("[jira]\nenabled = false\npoll-when-disabled = true\n")
+            self.assertFalse(jira_config.jira_enabled(conf))
+            self.assertTrue(jira_config.poll_active(conf))
+            with open(conf, "w") as fh:
+                fh.write("[jira]\nenabled = false\n")
+            self.assertFalse(jira_config.poll_active(conf))
+
     @unittest.skipUnless(os.environ.get("TEST_TOKEN_NOT_REAL"), "TEST_TOKEN_NOT_REAL not exported")
     def test_env_token_override_is_visible_and_logs_in(self):
         with tempfile.TemporaryDirectory() as tmp:

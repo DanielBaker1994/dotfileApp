@@ -200,6 +200,7 @@ ok "sketchybar + borders running"
 
 # jira poll agent: only load when [jira] enabled = true in commands.conf
 JIRA_ENABLED=""
+JIRA_BG_POLL=""
 if [ -f "$ROOT/commands.conf" ]; then
     in_jira=0
     while IFS= read -r line; do
@@ -211,13 +212,15 @@ if [ -f "$ROOT/commands.conf" ]; then
                     key="$(echo "$s" | cut -d= -f1 | sed 's/[[:space:]]//g')"
                     val="$(echo "$s" | cut -d= -f2- | sed 's/^[[:space:]]*//')"
                     [ "$key" = "enabled" ] && JIRA_ENABLED="$val"
+                    [ "$key" = "poll-when-disabled" ] && JIRA_BG_POLL="$val"
                 fi
                 ;;
         esac
     done < "$ROOT/commands.conf"
 fi
-case "${JIRA_ENABLED,,}" in
-    true|yes|1|on)
+# poll-when-disabled = true (menu "Disable Jira" → Keep Polling) keeps it too
+case "${JIRA_ENABLED,,} ${JIRA_BG_POLL,,}" in
+    true*|yes*|1*|on*|*" true"|*" yes"|*" 1"|*" on")
         step "6b/7 jira poll agent (launchd)"
         PLIST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
         sed "s|__WS_CONFIG__|$HOME/.config/workspace-switcher|g" \

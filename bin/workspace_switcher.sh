@@ -46,7 +46,7 @@ FOCUS_FILE="$TMP/workspace-switcher-focus"
 MODE="${1:-}"
 
 # jira-poll: flip the poll feature through the running daemon (same code
-# path as the menu-bar "Toggle Jira Poll": config check, login test, setup
+# path as the menu-bar "Enable Jira"/"Disable Jira": config check, login test, setup
 # window). Kept apart from `jira` (window) so the two never get conflated.
 if [ "$MODE" = "jira-poll" ]; then
     exec "$BIN" jira-poll "${2:-toggle}"

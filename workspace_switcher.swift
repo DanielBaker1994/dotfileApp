@@ -675,15 +675,26 @@ func loadCommands() -> [CommandSpec] {
     }
     flushSection()
     // keep the launchd jira-poll agent in lock-step with commands.conf — it
-    // must never run unless the [jira] section says enabled = true
+    // must never run unless [jira] says enabled (or poll-when-disabled) = true
     syncJiraLaunchAgent()
     return cmds
 }
 
 // [jira] enabled — THE SWITCH for the jira window, the poll agent and the
-// menu-bar "Toggle Jira Poll" checkmark. Read straight from commands.conf so
+// menu-bar "Enable Jira"/"Disable Jira" title. Read straight from commands.conf so
 // every caller sees the same truth (loadCommands drops disabled sections).
-func jiraEnabledInConfig() -> Bool {
+func jiraEnabledInConfig() -> Bool { jiraConfigFlag("enabled") }
+
+// [jira] poll-when-disabled — the "Keep Polling" answer when the user
+// disables jira while the poller runs: the launchd agent stays loaded (and
+// jira_poll.py keeps publishing) with the window + menu entries hidden.
+func jiraBackgroundPollInConfig() -> Bool { jiraConfigFlag("poll-when-disabled") }
+
+// the launchd agent runs whenever either switch says so
+func jiraPollActiveInConfig() -> Bool { jiraEnabledInConfig() || jiraBackgroundPollInConfig() }
+
+// boolean key of the [jira] section, false when absent (disabled by default)
+func jiraConfigFlag(_ key: String) -> Bool {
     guard let content = readConfigText() else { return false }
     var inJira = false
     for line in content.split(separator: "\n") {
@@ -693,7 +704,7 @@ func jiraEnabledInConfig() -> Bool {
             continue
         }
         guard inJira, !s.hasPrefix("#"), let eq = s.firstIndex(of: "=") else { continue }
-        if s[..<eq].trimmingCharacters(in: .whitespaces) == "enabled" {
+        if s[..<eq].trimmingCharacters(in: .whitespaces) == key {
             let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
             return ["true", "yes", "1", "on"].contains(val.lowercased())
         }
@@ -702,13 +713,14 @@ func jiraEnabledInConfig() -> Bool {
 }
 
 // launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
-// when [jira] enabled = true, booted out otherwise. Runs at daemon start and
+// when [jira] enabled = true (or poll-when-disabled = true), booted out
+// otherwise. Runs at daemon start and
 // on every config reload (the menu-bar switch), so the poll literally cannot
 // run in the background when jira is disabled. The installed plist is kept
 // in sync with the repo template (jira/com.jira.poll.plist, __WS_CONFIG__
 // substituted); an already-loaded, unchanged agent is left running.
 func syncJiraLaunchAgent() {
-    let enabled = jiraEnabledInConfig()
+    let enabled = jiraPollActiveInConfig()
     let home = NSHomeDirectory()
     let plist = home + "/Library/LaunchAgents/com.jira.poll.plist"
     let gui = "gui/\(getuid())"
@@ -2037,7 +2049,38 @@ struct FieldRow: PopupRow {
     let fields: [String: String]   // raw field values (dropdown filter dims)
 
     var loadMore: Bool { fields["__loadmore"] != nil }
-    func cellText(_ field: String) -> String? { fields[field] }
+    // list/table cells show ISO timestamps trimmed to local minutes; the raw
+    // value (ms + offset) stays in `fields` for sort, filters and the
+    // double-click detail window
+    func cellText(_ field: String) -> String? { fields[field].map(compactTimestamp) }
+}
+
+// "2026-09-13T11:54:04.850-0400" -> "2026-09-13 11:54" (local time). Anything
+// that is not an ISO-8601 date-time passes through untouched; the cheap shape
+// check keeps per-cell drawing fast.
+private let isoParsers: [DateFormatter] = [
+    "yyyy-MM-dd'T'HH:mm:ss.SSSZ", "yyyy-MM-dd'T'HH:mm:ssZ",
+    "yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX", "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+].map { fmt in
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = fmt
+    return f
+}
+private let compactStampFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd HH:mm"
+    return f
+}()
+func compactTimestamp(_ s: String) -> String {
+    let u = Array(s.utf8)
+    guard u.count >= 19, u.count <= 35, u[4] == 45, u[7] == 45, u[10] == 84, u[13] == 58
+    else { return s }
+    for p in isoParsers {
+        if let d = p.date(from: s) { return compactStampFormatter.string(from: d) }
+    }
+    return s
 }
 
 // MARK: - Voice notes (record -> Apple speech recognition)
@@ -2684,7 +2727,7 @@ final class SwitcherController: NSObject {
                         } else if name == "notes" {
                             self?.showNotes()
                         } else if name.hasPrefix("jira-poll-") || name == "jira-setup" {
-                            // THE jira switch (menu-bar "Toggle Jira Poll")
+                            // THE jira switch (menu-bar "Enable Jira"/"Disable Jira")
                             guard let self else { return }
                             let on = jiraEnabledInConfig()
                             switch name {
@@ -3681,6 +3724,19 @@ private func trimmed(_ s: String) -> String? {
                 toggleItem(micShown ? "Mute Microphone" : "Enable Microphone", micShown) {
                     let shown = !w.meterEnabled
                     w.meterEnabled = shown
+                }
+            }
+            // Jira: "Enable Jira" flips [jira] enabled through the checked
+            // path (config check, login test, setup window) and opens the
+            // window; once enabled it becomes a window toggle like the drawers
+            if jiraEnabledInConfig() {
+                let shown = self.subWindows.first(where: { $0.config.name == "jira" })?.isShown ?? false
+                toggleItem("Toggle Jira", shown) {
+                    self.toggleCommand("jira")
+                }
+            } else {
+                toggleItem("Enable Jira", false) {
+                    self.enableJiraChecked()
                 }
             }
             // Vim mode toggle — reads the LIVE spec (cmd is this window's
@@ -5163,12 +5219,68 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         let cap = cmd.maxRows > 0 ? cmd.maxRows : Int.max
         var visibleOffset = 0
         var reloadWatcher: Timer?
-        // header "copy … path" button follows the ACTIVE tab; refreshed on
-        // every tab change and every on-disk reload, not just once at open
+        // the copy-path / copy-config actions live in the top-left icon menu
+        // (below), not as header buttons — keep the header bar uncluttered
         func refreshPathLabel() {
-            guard tabs.indices.contains(currentTab) else { return }
-            w.copyPathButtonLabel =
-                "copy \(URL(fileURLWithPath: tabs[currentTab].path).lastPathComponent) path"
+            w.copyPathButtonLabel = ""
+        }
+        // top-left app glyph: window menu (copy paths, open config, jira
+        // poll options, window settings) — same idea as the notes window
+        w.onChromeIconClick = { [weak self, weak w] in
+            guard let self, let w else { return }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            let fm = FileManager.default
+            if tabs.indices.contains(currentTab) {
+                let src = tabs[currentTab].path
+                menu.addItem(self.menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [weak self] in
+                    self?.copy(src, "source path: \(src)")
+                })
+            }
+            menu.addItem(self.menuItem("Copy Config Path") { [weak self] in
+                self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
+            })
+            if cmd.name == "jira" {
+                menu.addItem(self.menuItem("Copy Jira Config Path") { [weak self] in
+                    self?.copy(JiraPoll.configPath, "jira config path: \(JiraPoll.configPath)")
+                })
+            }
+            menu.addItem(.separator())
+            menu.addItem(self.menuItem("Open Config") { [weak self] in
+                let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
+                let p = fm.fileExists(atPath: canonical) ? canonical : settings.commandsConfPath
+                if fm.fileExists(atPath: p) { self?.openNoteFile(p) }
+            })
+            if cmd.name == "jira" {
+                menu.addItem(self.menuItem("Open Jira Config",
+                                           enabled: fm.fileExists(atPath: JiraPoll.configPath)) { [weak self] in
+                    self?.openNoteFile(JiraPoll.configPath)
+                })
+                // Jira Poll ▸ — the same live submenu as the menu bar
+                let poll = NSMenu(title: "Jira Poll")
+                poll.autoenablesItems = false
+                self.buildJiraPollMenu(into: poll)
+                let pollItem = NSMenuItem(title: "Jira Poll", action: nil, keyEquivalent: "")
+                pollItem.submenu = poll
+                menu.addItem(pollItem)
+            }
+            menu.addItem(.separator())
+            menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
+            menu.addItem(self.floatMenuItem(for: w, section: cmd.name))
+            menu.addItem(.separator())
+            self.addThemeMenus(to: menu, window: w, section: cmd.name)
+            menu.addItem(.separator())
+            menu.addItem(self.menuItem("Reset Default Size") { w.resetToDefaultSize() })
+            menu.addItem(self.menuItem("Reset Default Colors") { [weak self] in
+                self?.resetWindowTheme(w, section: cmd.name)
+            })
+            if cmd.name == "jira" {
+                menu.addItem(.separator())
+                menu.addItem(self.menuItem("Disable Jira…") { [weak self] in
+                    self?.disableJiraAsking()
+                })
+            }
+            w.showHeaderMenu(menu)
         }
 
         // combined filter: search (fuzzy) + dropdown selections, then the
@@ -5347,7 +5459,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         }
         RunLoop.main.add(watcher, forMode: .common)
         reloadWatcher = watcher
-        w.copyConfigButtonLabel = "copy config path"
+        w.copyConfigButtonLabel = ""
         refreshPathLabel()
         subWindows.append(w)
         w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
@@ -5619,7 +5731,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 let detail = cmd.detail.map { spec -> String? in
                     let vals = spec.split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .compactMap { d[$0] as? String }
+                        .compactMap { (d[$0] as? String).map(compactTimestamp) }
                         .filter { !$0.isEmpty }
                     return vals.isEmpty ? nil : vals.joined(separator: " · ")
                 }
@@ -5627,7 +5739,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 let trailing = cmd.trailing.map { spec -> String? in
                     let vals = spec.split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .compactMap { d[$0] as? String }
+                        .compactMap { (d[$0] as? String).map(compactTimestamp) }
                         .filter { !$0.isEmpty }
                     return vals.isEmpty ? nil : vals.joined(separator: " · ")
                 }
@@ -5819,15 +5931,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Window toggles
         addMenuItem(menu, "Toggle Notes", #selector(MenuTarget.toggleNotes(_:)), key: "n", modifiers: .command)
-        // always present; hidden while [jira] enabled = false (menuNeedsUpdate)
-        // so the menu-bar switch below can bring it back without a relaunch
-        addMenuItem(menu, "Toggle Jira", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         addMenuItem(menu, "Toggle Health Checks", #selector(MenuTarget.toggleHealthChecks(_:)), key: "h", modifiers: .command)
         menu.addItem(.separator())
 
-        // Jira poll: THE SWITCH ([jira] enabled — window + launchd agent) and
-        // a submenu with its live state + every polling option
-        addMenuItem(menu, "Toggle Jira Poll", #selector(MenuTarget.toggleJiraPoll(_:)), key: "")
+        // Jira: THE SWITCH ([jira] enabled — window + launchd agent; titled
+        // "Enable Jira" / "Disable Jira" by menuNeedsUpdate), then the window
+        // toggle (hidden while disabled, so enabling brings it back without a
+        // relaunch) and a submenu with the live poll state + every option
+        addMenuItem(menu, "Enable Jira", #selector(MenuTarget.toggleJiraPoll(_:)), key: "")
+        addMenuItem(menu, "Toggle Jira Window", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         let jiraMenu = NSMenu(title: "Jira Poll…")
         let jiraDelegate = DynamicMenuDelegate { [weak c] m in c?.buildJiraPollMenu(into: m) }
         dynamicMenuDelegates.append(jiraDelegate)
@@ -5980,7 +6092,7 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 item.state = windowState(for: "jira", controller: controller)
                 item.isHidden = !jiraEnabledInConfig()
             case #selector(toggleJiraPoll(_:)):
-                item.state = jiraEnabledInConfig() ? .on : .off
+                item.title = jiraEnabledInConfig() ? "Disable Jira" : "Enable Jira"
             case #selector(toggleHealthChecks(_:)):
                 item.state = windowState(for: "health-checks", controller: controller)
             case #selector(toggleHideOnFocusLoss(_:)):
@@ -6690,23 +6802,54 @@ enum JiraPoll {
 }
 
 extension SwitcherController {
-    // menu-bar "Toggle Jira Poll": off -> flip + unload; on -> check the
-    // config, test the login, and only THEN flip (setup window when the
+    // menu-bar "Enable Jira" / "Disable Jira": on -> off asks whether the
+    // poller should keep running in the background; off -> on checks the
+    // config, tests the login, and only THEN flips (setup window when the
     // config is missing, an explained failure when the login fails)
     func toggleJiraPoll() {
         if jiraEnabledInConfig() {
-            setJiraEnabled(false)
+            disableJiraAsking()
         } else {
             enableJiraChecked()
         }
     }
 
-    func setJiraEnabled(_ on: Bool) {
-        saveConfigValue(section: "jira", key: "enabled", value: on ? "true" : "false")
+    // Disabling while the poller is loaded: offer to keep it polling in the
+    // background (cache stays fresh, window + menu entries hide) or stop it.
+    func disableJiraAsking() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Disable Jira?"
+        var info = "The Jira poller is running (launchd, every 60s)"
+        if !JiraPoll.running.isEmpty {
+            info += " and a poll is in progress right now"
+        }
+        info += ". Keep polling in the background while Jira is disabled?\n\n"
+            + "Keep Polling: the window and menu entries hide, the cache keeps updating.\n"
+            + "Stop Polling: the launchd agent is unloaded — nothing touches the network."
+        alert.informativeText = info
+        alert.addButton(withTitle: "Stop Polling")
+        alert.addButton(withTitle: "Keep Polling")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: setJiraEnabled(false, keepPolling: false)
+        case .alertSecondButtonReturn: setJiraEnabled(false, keepPolling: true)
+        default: log("jira: disable cancelled")
+        }
+    }
+
+    func setJiraEnabled(_ on: Bool, keepPolling: Bool = false) {
+        // enabling always clears the background-poll flag (enabled implies
+        // polling); disabling sets it only when the user chose Keep Polling
+        saveConfigValues(section: "jira", [
+            ("enabled", on ? "true" : "false"),
+            ("poll-when-disabled", !on && keepPolling ? "true" : nil),
+        ])
         // reloadConfig -> loadCommands -> syncJiraLaunchAgent: the agent is
         // bootstrapped (RunAtLoad polls at once) or booted out right here
         reloadConfig()
-        log("jira: [jira] enabled = \(on) (menu-bar switch)")
+        log("jira: [jira] enabled = \(on)\(!on && keepPolling ? " (background polling kept)" : "") (menu-bar switch)")
         if on {
             JiraPoll.lastEnableError = nil
             JiraPoll.run("jira_status.py", ["--note-error"])
@@ -6778,7 +6921,15 @@ extension SwitcherController {
             i.isEnabled = false
             m.addItem(i)
         }
-        info(enabled ? "Polling ON — launchd agent every 60s" : "Polling OFF — [jira] enabled = false")
+        let background = !enabled && jiraBackgroundPollInConfig()
+        info(enabled ? "Polling ON — launchd agent every 60s"
+             : background ? "Jira disabled — still polling in the background (every 60s)"
+             : "Polling OFF — [jira] enabled = false")
+        if background {
+            m.addItem(menuItem("Stop Background Polling") { [weak self] in
+                self?.setJiraEnabled(false, keepPolling: false)
+            })
+        }
         if let e = JiraPoll.lastEnableError { info("⚠ enable failed: \(e)") }
         let st = JiraPoll.status ?? [:]
         if st.isEmpty {

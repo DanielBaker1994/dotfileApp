@@ -144,6 +144,13 @@ def jira_enabled(path: str | None = None) -> bool:
     return truthy(read_section("jira", path).get("enabled", "false"))
 
 
+def poll_active(path: str | None = None) -> bool:
+    """The poller runs when jira is enabled, or when the user chose to keep
+    polling in the background after disabling it (`poll-when-disabled`)."""
+    sec = read_section("jira", path)
+    return truthy(sec.get("enabled", "false")) or truthy(sec.get("poll-when-disabled", "false"))
+
+
 def parse_columns(spec: str) -> list:
     """`field:Title:width:align:flags, ...` -> [{field,title,width,align,
     sortable,filterable}]. flags: filter / sort, joined with + (filter+sort)

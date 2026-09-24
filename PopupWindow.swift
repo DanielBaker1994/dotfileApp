@@ -2896,6 +2896,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private let parentButton: ThemeButton
     private let starButton: ThemeButton
     private let sortButton: ThemeButton
+    private let orderButton: ThemeButton
     // dim one-line feedback under the list: match counts, "↵ cd …", search progress
     private let statusLine = NSTextField(labelWithString: "")
     private let listPane: FileListPane
@@ -2962,7 +2963,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.starButton = ThemeButton(config: config, title: "Pin", symbol: "star")
         self.sortKey = SortKey(rawValue: config.browserSort.lowercased()) ?? .name
         self.sortDescending = config.browserSortDescending
-        self.sortButton = ThemeButton(config: config, title: "", symbol: "arrow.up.arrow.down")
+        self.sortButton = ThemeButton(config: config, title: "", symbol: "line.3.horizontal.decrease")
+        self.orderButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
         self.listPane = FileListPane(config: config)
         self.previewList = FileListPane(config: config)
         super.init(frame: .zero)
@@ -3033,9 +3035,11 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         parentButton.onClick = { [weak self] in self?.cdParent() }
         starButton.onClick = { [weak self] in self?.toggleStar() }
         sortButton.onClick = { [weak self] in self?.showSortMenu() }
+        orderButton.onClick = { [weak self] in self?.toggleSortOrder() }
         parentButton.toolTip = "Parent folder"
         starButton.toolTip = "Pin this folder to the favorites row"
         sortButton.toolTip = "Sort by name, date modified, date created, size or kind"
+        orderButton.toolTip = "Toggle ascending / descending"
         updateSortTitle()
         searchField.toolTip = """
             Filter this folder, or type a path (~/notes/todo) to look inside it — \
@@ -3116,6 +3120,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         addSubview(searchField)
         addSubview(starButton)
         addSubview(sortButton)
+        addSubview(orderButton)
         addSubview(statusLine)
         addSubview(listScroll)
         addSubview(splitter)
@@ -3148,14 +3153,19 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let w = bounds.width
         let toolbarY: CGFloat = 4
         let toolbarH: CGFloat = 24
-        // pin first (left), then parent, then the filter bar fills the rest
+        // pin first (left), then parent, then the sort pair (sort-key
+        // dropdown + labelled Asc/Desc toggle — kept away from the parent
+        // arrow so the two never read as one control), then the filter bar
         starButton.frame = NSRect(x: 6, y: toolbarY, width: 72, height: toolbarH)
         parentButton.frame = NSRect(x: starButton.frame.maxX + 4, y: toolbarY,
                                     width: toolbarH + 4, height: toolbarH)
         let sortW = pillWidth(sortButton.title) + 16
-        sortButton.frame = NSRect(x: w - sortW - 6, y: toolbarY, width: sortW, height: toolbarH)
-        searchField.frame = NSRect(x: parentButton.frame.maxX + 6, y: toolbarY,
-                                   width: max(60, sortButton.frame.minX - parentButton.frame.maxX - 12),
+        sortButton.frame = NSRect(x: parentButton.frame.maxX + 10, y: toolbarY,
+                                  width: sortW, height: toolbarH)
+        orderButton.frame = NSRect(x: sortButton.frame.maxX + 4, y: toolbarY,
+                                   width: pillWidth(orderButton.title) + 8, height: toolbarH)
+        searchField.frame = NSRect(x: orderButton.frame.maxX + 6, y: toolbarY,
+                                   width: max(60, w - orderButton.frame.maxX - 12),
                                    height: toolbarH)
         // favorites wrap to as many lines as their paths need
         let favY = toolbarY + toolbarH + 5
@@ -3653,14 +3663,6 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             item.state = k == sortKey ? .on : .off
             menu.addItem(item)
         }
-        menu.addItem(.separator())
-        for (title, desc) in [("Ascending", false), ("Descending", true)] {
-            let item = NSMenuItem(title: title, action: #selector(pickSortOrder(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = desc ? 1 : 0
-            item.state = desc == sortDescending ? .on : .off
-            menu.addItem(item)
-        }
         menu.popUp(positioning: nil,
                    at: NSPoint(x: sortButton.frame.minX, y: sortButton.frame.maxY + 2), in: self)
     }
@@ -3670,8 +3672,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         sortKey = k
         applySort()
     }
-    @objc private func pickSortOrder(_ sender: NSMenuItem) {
-        sortDescending = sender.tag == 1
+    private func toggleSortOrder() {
+        sortDescending.toggle()
         applySort()
     }
     private func applySort() {
@@ -3691,7 +3693,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         needsLayout = true
     }
     private func updateSortTitle() {
-        sortButton.title = sortKey.short + (sortDescending ? " ↓" : " ↑")
+        sortButton.title = sortKey.short + " ▾"
+        orderButton.symbol = sortDescending ? "arrow.down" : "arrow.up"
+        orderButton.title = sortDescending ? "Desc" : "Asc"
     }
 
     private func scrollListToTop() {
@@ -4600,6 +4604,9 @@ private func headerButtonFont(_ label: String) -> NSFont {
         // stretch mode shares the leftover width evenly across the segments
         let perSegExtra = stretch ? max(0, barW - naturalBarW) / CGFloat(segs.count) : 0
         headerSegRects = []
+        // a button whose label was cleared must stop catching clicks
+        copyButtonRect = .zero
+        configButtonRect = .zero
         var sx = barRect.minX
         for (i, seg) in segs.enumerated() {
             let segRect = NSRect(x: sx, y: barRect.minY,

@@ -24,7 +24,8 @@ longer than lockStaleMinutes belongs to a hung poll: that process is
 terminated and the lock taken over.
 
 Honors commands.conf [jira] enabled (THE SWITCH): disabled -> no network,
-no publish, just status {enabled:false}. --force overrides (menu Poll Now).
+no publish, just status {enabled:false} — unless `poll-when-disabled = true`
+(the menu-bar "keep polling" choice). --force overrides (menu Poll Now).
 
 Usage:
   jira_poll.py                    run whatever is due
@@ -292,15 +293,16 @@ def main(argv: list) -> int:
     o = parse_args(argv)
     QUIET = o["quiet"]
     enabled = jira_config.jira_enabled()
+    active = jira_config.poll_active()
     base = {"script": jira_status.POLL_SCRIPT, "curlLog": jira_api.CURL_LOG,
             "config": jira_config.CONFIG_JSON, "commandsConf": jira_config.COMMANDS_CONF,
-            "enabled": enabled}
+            "enabled": enabled, "backgroundPoll": active and not enabled}
 
     def set_base(d, **kw):
         d.update(base)
         d.update(kw)
 
-    if not enabled and not o["force"] and not o["dry"]:
+    if not active and not o["force"] and not o["dry"]:
         jira_status.update(lambda d: set_base(d, status="disabled",
                                               lastCheck=jira_status.now_str()))
         return 0
