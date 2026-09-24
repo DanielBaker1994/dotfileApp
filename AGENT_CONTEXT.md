@@ -70,6 +70,10 @@ Line numbers drift; grep the symbol names (they're stable).
 
 - Real repo: `/Users/danielbaker/.config/workspace-switcher` (rule.md still
   says `dotfileApp` — that's the old name; same rule: no git in backups).
+- Backdrop (`panel.contentView`) is FLIPPED — y=0 is the top when placing overlays.
+- Signing: `bin/workspace_switcher.sh` signs with the self-signed login-keychain
+  cert "workspace-switcher codesign" (stable TCC grants across rebuilds);
+  falls back to ad-hoc (`-`) if the cert is missing.
 - `./build.sh` builds AND relaunches the app (exit 0 + no output = OK). The
   running process is `workspace-switcher.app/Contents/MacOS/workspace-switcher`.
 - Python jira tests: `python3 Tests/test_jira_poll.py`. UI suites
@@ -106,6 +110,7 @@ Line numbers drift; grep the symbol names (they're stable).
 | `PopupWindow.installMonitors()` | local keyDown monitor → `handleKey` |
 | `PopupWindow.handleKey(_:_:)` | ALL keyboard routing (see order below) |
 | `escStreakCloses()` | N-rapid-Esc counter (0.6 s window) |
+| `showToast(_:symbol:)` | Raycast-style bottom-center pill (fade/rise, 1.4 s); used by Cmd+K copy |
 | `focusedVim()`, `vimRemote`, `vimEval`, `vimCommand` | nvim pane + RPC |
 | `browserHasFocus`, `browserActive` | file browser focus checks |
 
@@ -127,13 +132,14 @@ Line numbers drift; grep the symbol names (they're stable).
   switcher palette always closes on one Esc. Find bar: one Esc.
 - Ctrl+Tab / Ctrl+Shift+Tab: next/prev tab (notes, jira sources), wraps.
 - File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's
-  absolute path, Cmd+L focus filter bar, Tab completes, Enter opens.
+  absolute path (+ toast), Cmd+L focus filter bar, Tab completes, Enter opens.
 - Ctrl+J/K: move focus between editor / browser / terminal panes.
 
 ## Config defaults worth knowing
 
 - `[app] float` default **false** (windows are normal, not floating).
 - `[app] esc-close` default 3; per-section `esc-close` (alias `vim-esc-close`).
+- `[app] copy-toast` default `Copied {} to clipboard` (`{}` = ~-path; empty = off).
 - Vim pane (`vim/notes-init.vim`): `number` + `cursorline` on; cursor-line
   color `g:ws_line` = highlight color blended 50% toward the card color.
 

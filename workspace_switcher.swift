@@ -107,6 +107,9 @@ struct AppSettings {
     // window (default 3; 1 = single Esc, 0 = never). Per window `esc-close`
     // overrides it. The switcher palette always closes on one Esc.
     var escClose = 3
+    // [app] copy-toast: pill shown after Cmd+K copies a file browser path
+    // ("{}" = the path; empty = no toast)
+    var copyToast = "Copied {} to clipboard"
     // [app] terminal-app: app the file browser's `term` command opens when
     // the window has no embedded shell drawer (default Ghostty, else Terminal)
     var terminalApp = ""
@@ -944,6 +947,7 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
     if let v = tri(str("float")) { settings.float = v }
     if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
+    if vars["copy-toast"] != nil { settings.copyToast = str("copy-toast") ?? "" }
     if let v = str("terminal-app") { settings.terminalApp = v }
 }
 
@@ -2538,15 +2542,26 @@ final class SwitcherController: NSObject {
             globalClickMonitor = m
         }
         let t = Timer(timeInterval: focusPollInterval, repeats: true) { [weak self] _ in
-            guard let self, !NSApp.isActive,
-                  self.subWindows.contains(where: { $0.isShown }) else { return }
-            if let last = self.lastOtherAppClick,
-               Date().timeIntervalSince(last) < 1.0 { return }
+            guard let self else { return }
+            // consume EVERY bridge write, even while we're already active:
+            // a write left unconsumed (notes focused while active) used to
+            // fire later — switching workspaces 4 -> 1 deactivated us, the
+            // poller saw the stale "notes focused" write, re-activated the
+            // notes window and aerospace jumped straight back to 4
             var st = stat()
             guard stat(path, &st) == 0 else { return }
             let mt = (Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec))
             if let prev = self.bridgeMtime, prev.0 == mt.0, prev.1 == mt.1 { return }
             self.bridgeMtime = mt
+            guard !NSApp.isActive,
+                  self.subWindows.contains(where: { $0.isShown }) else { return }
+            if let last = self.lastOtherAppClick,
+               Date().timeIntervalSince(last) < 1.0 { return }
+            // only a FRESH write means aerospace just focused us — never act
+            // on one that sat around (e.g. the first tick after launch)
+            let age = Date().timeIntervalSince1970
+                - (Double(mt.0) + Double(mt.1) / 1_000_000_000)
+            guard age < 1.0 else { return }
             guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
                   let id = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
                   let w = self.subWindows.first(where: {
@@ -3037,6 +3052,7 @@ final class SwitcherController: NSObject {
         cfg.sticky = true
         cfg.floating = cmd.float ?? settings.float
         cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.copyToast = settings.copyToast
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
         cfg.colors = PopupColors(background: BAR, border: BORDER,
@@ -3108,6 +3124,7 @@ final class SwitcherController: NSObject {
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
         cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.copyToast = settings.copyToast
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
         cfg.height = cmd.height > 0 ? cmd.height : defaultOutputSize.height
         // same header styling as the jira window: slim bluey-silver bar, no
@@ -3442,6 +3459,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
         cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.copyToast = settings.copyToast
         cfg.tabs = true
         cfg.tabsAddButton = true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
@@ -5159,6 +5177,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
         cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.copyToast = settings.copyToast
         cfg.wrapContent = true
         cfg.showSearchBar = true
         cfg.dragHeader = true
@@ -5566,6 +5585,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
         cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.copyToast = settings.copyToast
         cfg.enableNavigation = false   // the browser owns up/down/return
         cfg.enableSearch = false       // the browser has its own search field
         cfg.showSearchBar = false
@@ -6004,6 +6024,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        configLog("app terminating (front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"))")
     }
 
     // Build a real macOS app menu (top-left click) so the user has obvious

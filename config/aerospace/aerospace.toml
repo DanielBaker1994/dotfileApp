@@ -104,10 +104,10 @@ on-window-detected = [
   # ALL workspace-switcher windows (popup, notes, jira) are overlays: one
   # app-name rule floats them; per-title rules went stale every time a
   # window name changed in commands.conf.
-  { if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
+  #{ if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
   { if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
   { if = 'test %{app-bundle-id} = WebEx-PT.webexAppLauncher', run = ['move-node-to-workspace 9'] },
-  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
+  #{ if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
   { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace 1'] },
   { if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
   { if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace 1'] },

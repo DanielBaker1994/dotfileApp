@@ -505,6 +505,9 @@ public struct PopupConfig {
     // on the last one). Earlier presses still reach vim / the shell.
     // 1 = a single Esc closes, 0 = Esc never closes.
     public var escCloseCount: Int = 1
+    // toast shown after Cmd+K copies a path in the file browser; "{}" is
+    // replaced by the (~-abbreviated) path. Empty = no toast.
+    public var copyToast: String = "Copied {} to clipboard"
     // vim pane: JSON file the editor writes inline-image placements to
     // (vim/notes-init.vim); the window draws the images over those rows
     public var vimImageFile: String?
@@ -3734,11 +3737,13 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         onCopyDir?(cwd)
     }
     // copy a list row's path (Cmd+C while the list is focused)
-    func copyRowPath(_ i: Int) {
-        guard rows.indices.contains(i) else { return }
+    @discardableResult
+    func copyRowPath(_ i: Int) -> String? {
+        guard rows.indices.contains(i) else { return nil }
         let p = rows[i].path
         onCopyPath?(p)
         onStatus?("copied \(p)")
+        return p
     }
     private func openIndex(_ i: Int) {
         guard rows.indices.contains(i) else { return }
@@ -6249,6 +6254,17 @@ scroll.documentView = rowView
     public func hide(restore: Bool) {
         guard isShown else { return }
         isShown = false
+        // who hid it? (diagnosing windows vanishing on TCC permission prompts)
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+        let caller = Thread.callStackSymbols.dropFirst().prefix(4)
+            .map { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).prefix(1).joined() }
+            .joined(separator: " < ")
+        let line = "ws: hide '\(config.name)' restore=\(restore) front=\(front) via \(caller)\n"
+        if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/ws-debug.log")) {
+            fh.seekToEndOfFile()
+            fh.write(Data(line.utf8))
+            try? fh.close()
+        }
         removeMonitors()
         panel.orderOut(nil)
         if config.editMode, editorView != nil {
@@ -6988,18 +7004,31 @@ private func scrollSelectionIntoView() {
                 if terminalShown, let term = terminalDrawer { panes.append(term); paneTypes.append(.terminal) }
                 if panes.count > 1 {
                     let current = panel.firstResponder
-                    let curIdx = panes.firstIndex { p in
+                    var curIdx = panes.firstIndex { p in
                         if let current, current === p { return true }
                         if let v = current as? NSView, let pv = p as? NSView {
                             return v.isDescendant(of: pv)
                         }
                         return false
                     }
+                    // the filter bar (its field editor), pills and preview
+                    // sit OUTSIDE the list view but are still the browser
+                    // pane — without this, Ctrl+J/K from the filter bar saw
+                    // "no pane focused" and jumped to the first/last pane
+                    // instead of the neighbour, needing extra presses
+                    var inFilterBar = false
+                    if curIdx == nil, fileBrowserShown, let fb = fileBrowser,
+                       browserHasFocus(fb), let bi = paneTypes.firstIndex(of: .browser) {
+                        curIdx = bi
+                        inFilterBar = fb.searchView.currentEditor() != nil
+                    }
                     if let curIdx {
                         let target = code == 38
                             ? min(curIdx + 1, panes.count - 1)
                             : max(curIdx - 1, 0)
-                        if target != curIdx { panel.makeFirstResponder(panes[target]) }
+                        // at the edge from the filter bar: drop into the list
+                        // (the browser is still the pane, focus still moves)
+                        if target != curIdx || inFilterBar { panel.makeFirstResponder(panes[target]) }
                         focusedPane = paneTypes[target]
                     } else {
                         let target = code == 38 ? panes[0] : panes[panes.count - 1]
@@ -7128,7 +7157,11 @@ private func scrollSelectionIntoView() {
                     fb.listView.moveSelection(code == 45 ? 1 : -1)
                     return true
                 case 40 where cmd:  // Cmd+K — copy the selected row's absolute path
-                    fb.copyRowPath(fb.listView.selection)
+                    if let p = fb.copyRowPath(fb.listView.selection), !config.copyToast.isEmpty {
+                        let shown = (p as NSString).abbreviatingWithTildeInPath
+                        showToast(config.copyToast.replacingOccurrences(of: "{}", with: shown),
+                                  symbol: "doc.on.clipboard")
+                    }
                     return true
                 case 0:   // A — select all in the filter bar
                     fb.searchView.selectText(nil)
@@ -7298,6 +7331,81 @@ private func scrollSelectionIntoView() {
             return true
         }
         return false
+    }
+
+    // MARK: Toast
+
+    // Raycast-style confirmation pill: pops in at the bottom-center of the
+    // window (fade + small rise/scale), holds, then fades. A new toast
+    // replaces the one on screen.
+    private weak var toastView: NSView?
+    func showToast(_ text: String, symbol: String? = nil) {
+        guard let root = panel.contentView else { return }
+        toastView?.removeFromSuperview()
+        let c = config.colors
+        let pill = NSView()
+        pill.wantsLayer = true
+        let fill = (c.background.usingColorSpace(.sRGB) ?? c.background)
+            .blended(withFraction: 0.35, of: .black) ?? c.background
+        pill.layer?.backgroundColor = fill.withAlphaComponent(0.94).cgColor
+        pill.layer?.borderColor = c.text.withAlphaComponent(0.10).cgColor
+        pill.layer?.borderWidth = 1
+        pill.layer?.shadowColor = NSColor.black.cgColor
+        pill.layer?.shadowOpacity = 0.25
+        pill.layer?.shadowRadius = 8
+        pill.layer?.shadowOffset = CGSize(width: 0, height: -2)
+
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 12.5 * zoom, weight: .medium)
+        label.textColor = c.text
+        label.lineBreakMode = .byTruncatingMiddle
+        label.cell?.truncatesLastVisibleLine = true
+        var views: [NSView] = [label]
+        if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            let iv = NSImageView(image: img)
+            iv.symbolConfiguration = .init(pointSize: 12.5 * zoom, weight: .medium)
+            iv.contentTintColor = c.text.withAlphaComponent(0.85)
+            views.insert(iv, at: 0)
+        }
+        let stack = NSStackView(views: views)
+        stack.orientation = .horizontal
+        stack.spacing = 8 * zoom
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 14 * zoom, bottom: 0, right: 16 * zoom)
+        stack.frame.size = stack.fittingSize
+        let h = 32 * zoom
+        let w = min(stack.fittingSize.width, root.bounds.width - 32)
+        // bottom-center, clear of the footer strip; the backdrop is flipped
+        let inset = 30 * zoom
+        let flipped = root.isFlipped
+        pill.frame = NSRect(x: (root.bounds.width - w) / 2,
+                            y: flipped ? root.bounds.height - h - inset : inset,
+                            width: w, height: h)
+        pill.autoresizingMask = [.minXMargin, .maxXMargin, flipped ? .minYMargin : .maxYMargin]
+        pill.layer?.cornerRadius = h / 2
+        stack.frame = pill.bounds
+        stack.autoresizingMask = [.width, .height]
+        pill.addSubview(stack)
+        root.addSubview(pill, positioned: .above, relativeTo: nil)
+        toastView = pill
+
+        // pop in: rise 6pt + fade, then hold and fade out
+        let final = pill.frame
+        pill.alphaValue = 0
+        pill.setFrameOrigin(NSPoint(x: final.minX, y: final.minY + (flipped ? 6 : -6) * zoom))
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            pill.animator().alphaValue = 1
+            pill.animator().setFrameOrigin(final.origin)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak pill] in
+            guard let pill, pill.superview != nil else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.25
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                pill.animator().alphaValue = 0
+            }, completionHandler: { pill.removeFromSuperview() })
+        }
     }
 
     // counts one Esc press toward config.escCloseCount; true (and the streak

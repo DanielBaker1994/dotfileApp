@@ -103,7 +103,19 @@ if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRA
         # Finder right-click services (NSServices) — keep it in sync or the
         # "Copy Path" / "Open in Notes" context items never register
         cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-        codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
+        # sign with the stable self-signed cert (login keychain) so TCC
+        # grants (Desktop/Documents folders, …) survive rebuilds — an ad-hoc
+        # signature's designated requirement is its cdhash, which changes
+        # every build and re-prompts. Falls back to ad-hoc if the cert is gone.
+        SIGN_ID="workspace-switcher codesign"
+        if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
+            # perl alarm = portable timeout: an unapproved key ACL pops a
+            # keychain dialog and would hang the build forever
+            perl -e 'alarm 15; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1 \
+                || codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
+        else
+            codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
+        fi
         # fresh build = fresh signature — re-grant mic + speech silently so
         # voice notes keep working (bundle-id grants persist across rebuilds)
         "$DIR/voice-permissions.sh" >/dev/null 2>&1 || true
