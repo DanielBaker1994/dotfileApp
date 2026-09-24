@@ -559,6 +559,12 @@ public struct PopupConfig {
     // (fzf-style), using the current search text
     public var highlightMatches: Bool = false
 
+    // table mode: rows render as spreadsheet cells under a sticky header
+    // (click a sortable title to sort, drag a divider to resize). Empty =
+    // the classic preview rows. Needs scrollableRows.
+    public var tableColumns: [PopupTableColumn] = []
+    public var tableHeaderHeight: CGFloat = 24
+
     // optional font family for row/header/search/editor text (nil = system);
     // commands.conf `font` drives it so windows can look distinct
     public var fontName: String?
@@ -595,6 +601,8 @@ public protocol PopupRow {
     var body: String? { get }      // with wrapContent: wrapped multi-line text
                                    // under line 2 (capped at 2 lines)
     var loadMore: Bool { get }     // synthetic "load next page" row
+    // table mode: the text of one cell (config.tableColumns field)
+    func cellText(_ field: String) -> String?
 }
 
 public extension PopupRow {
@@ -604,6 +612,48 @@ public extension PopupRow {
     var detail: String? { nil }
     var body: String? { nil }
     var loadMore: Bool { false }
+    func cellText(_ field: String) -> String? { nil }
+}
+
+// One table column: `width` is a percent of the row's usable width (0 =
+// share whatever the explicit widths leave over). Explicit widths adding up
+// past 100 are scaled down to fit.
+public struct PopupTableColumn {
+    public var field: String
+    public var title: String
+    public var width: CGFloat
+    public var align: NSTextAlignment
+    public var sortable: Bool
+    public init(field: String, title: String, width: CGFloat = 0,
+                align: NSTextAlignment = .left, sortable: Bool = false) {
+        self.field = field
+        self.title = title
+        self.width = width
+        self.align = align
+        self.sortable = sortable
+    }
+}
+
+extension Array where Element == PopupTableColumn {
+    // (x, width) of every column across [x0, x0 + usable) — the header and
+    // the rows share this so cells always sit under their titles
+    func frames(x0: CGFloat, usable: CGFloat) -> [(x: CGFloat, w: CGFloat)] {
+        guard !isEmpty, usable > 0 else { return map { _ in (x0, 0) } }
+        let explicit = reduce(CGFloat(0)) { $0 + Swift.max(0, $1.width) }
+        let autos = filter { $0.width <= 0 }.count
+        let leftover = Swift.max(0, 100 - explicit)
+        var pcts = map { $0.width > 0 ? $0.width : (autos > 0 ? leftover / CGFloat(autos) : 0) }
+        // autos with no room left still get a sliver so they stay visible
+        for i in pcts.indices where pcts[i] <= 0 { pcts[i] = 5 }
+        let total = pcts.reduce(0, +)
+        let scale = total > 100 ? 100 / total : 1
+        var x = x0
+        return pcts.map { p in
+            let w = usable * p * scale / 100
+            defer { x += w }
+            return (x, w)
+        }
+    }
 }
 
 // MARK: - Fuzzy search (generic, framework-level)
@@ -1690,6 +1740,12 @@ final class PopupRowView: NSView {
         config.padding + 10 + (config.selectableRows ? 22 : 0)
     }
 
+    // table geometry for a given view width (the header view uses the same)
+    static func tableFrames(_ config: PopupConfig, width: CGFloat) -> [(x: CGFloat, w: CGFloat)] {
+        let x0 = config.padding + 10 + (config.selectableRows ? 22 : 0)
+        return config.tableColumns.frames(x0: x0, usable: width - x0 - (config.padding + 10))
+    }
+
     private func checkBoxRect(in band: NSRect) -> NSRect {
         let s: CGFloat = 13
         return NSRect(x: config.padding + 2, y: band.midY - s / 2, width: s, height: s)
@@ -1759,6 +1815,7 @@ final class PopupRowView: NSView {
     //   body      — wrapped, capped at bodyMaxLines
     // Extra bottom padding so the meta text clears the pill.
     func rowHeight(for row: PopupRow, width: CGFloat? = nil) -> CGFloat {
+        if !config.tableColumns.isEmpty { return config.rowHeight * zoom }
         guard config.wrapContent, row.content != nil || row.detail != nil else {
             return config.rowHeight * zoom
         }
@@ -1945,8 +2002,12 @@ final class PopupRowView: NSView {
             p.lineWidth = 1.5
             p.stroke()
         }
-        if config.selectableRows {
+        if config.selectableRows, !row.loadMore || config.tableColumns.isEmpty {
             drawCheckBox(checkBoxRect(in: band), on: selected.contains(index))
+        }
+        if !config.tableColumns.isEmpty {
+            drawTableRow(row, band: band)
+            return
         }
         let font = config.rowFont(config.rowFontSize * zoom)
         let lineH = font.ascender + abs(font.descender) + font.leading
@@ -2047,6 +2108,42 @@ final class PopupRowView: NSView {
         }
     }
 
+    // Table row: one truncated, aligned cell per column (fzf highlight on),
+    // a faint divider under the row. A "load more" row spans the table.
+    private func drawTableRow(_ row: PopupRow, band: NSRect) {
+        let font = config.rowFont(config.rowFontSize * zoom)
+        let lineH = font.ascender + abs(font.descender) + font.leading
+        let y = band.midY - lineH / 2
+        let highlight = config.highlightMatches && !highlightQuery.isEmpty
+        if row.loadMore {
+            drawText(row.title, in: NSRect(x: contentX, y: y, width: band.width - 2 * contentX,
+                                           height: lineH),
+                     font: font, baseColor: config.colors.dim, accent: config.colors.border,
+                     wrap: false, highlight: false)
+            return
+        }
+        let frames = PopupRowView.tableFrames(config, width: band.width)
+        for (i, col) in config.tableColumns.enumerated() where i < frames.count {
+            let f = frames[i]
+            guard f.w > 8 else { continue }
+            let text = row.cellText(col.field) ?? ""
+            guard !text.isEmpty else { continue }
+            // one line per cell: newlines (descriptions) collapse to spaces
+            let flat = text.replacingOccurrences(of: "\n", with: " ")
+            let color = i == 0 ? config.colors.text
+                : config.colors.text.withAlphaComponent(0.92)
+            drawText(flat, in: NSRect(x: f.x + 3, y: y, width: f.w - 8, height: lineH),
+                     font: font, baseColor: color, accent: config.colors.border,
+                     wrap: false, highlight: highlight, align: col.align)
+        }
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: contentX, y: band.maxY - 0.5))
+        line.line(to: NSPoint(x: band.maxX - config.padding - 10, y: band.maxY - 0.5))
+        config.colors.border.withAlphaComponent(0.18).setStroke()
+        line.lineWidth = 0.5
+        line.stroke()
+    }
+
     // Rounded checkbox: dim outline when unticked, filled + check mark when in
     // the copy selection.
     private func drawCheckBox(_ r: NSRect, on: Bool) {
@@ -2074,7 +2171,7 @@ final class PopupRowView: NSView {
     // are drawn in the accent color
     private func drawText(_ text: String, in rect: NSRect, font: NSFont,
                           baseColor: NSColor, accent: NSColor,
-                          wrap: Bool, highlight: Bool) {
+                          wrap: Bool, highlight: Bool, align: NSTextAlignment = .natural) {
         let attr = NSMutableAttributedString(string: text, attributes: [
             .font: font, .foregroundColor: baseColor,
         ])
@@ -2086,6 +2183,7 @@ final class PopupRowView: NSView {
         }
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = wrap ? .byWordWrapping : .byTruncatingTail
+        para.alignment = align
         attr.addAttribute(.paragraphStyle, value: para,
                           range: NSRange(location: 0, length: attr.length))
         // clip to the rect: wrapped lines that measure/draw off-by-one must
@@ -2094,6 +2192,139 @@ final class PopupRowView: NSView {
         NSBezierPath(rect: rect).addClip()
         attr.draw(with: rect, options: [.usesLineFragmentOrigin, .usesFontLeading])
         NSGraphicsContext.current?.restoreGraphicsState()
+    }
+}
+
+// MARK: - Table header
+
+// Sticky column header for table-mode lists (a floating subview of the row
+// scroll view, so it never scrolls away). Click a sortable title to sort
+// (click again to flip the direction); drag the gap between two titles to
+// resize them — the pair trades width, so the table total never changes.
+final class PopupTableHeaderView: NSView {
+    var config: PopupConfig
+    var zoom: CGFloat = 1 { didSet { needsDisplay = true } }
+    var sortColumn: Int? { didSet { needsDisplay = true } }
+    var sortAscending = true { didSet { needsDisplay = true } }
+    var onSort: ((Int) -> Void)?
+    // effective percent widths after a drag; final = true on mouseUp
+    var onResize: (([CGFloat], Bool) -> Void)?
+    private var drag: (divider: Int, startX: CGFloat, start: [CGFloat])?
+    private var downX: CGFloat = 0
+    private var moved = false
+
+    override var isFlipped: Bool { true }
+
+    init(config: PopupConfig) {
+        self.config = config
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    private var frames: [(x: CGFloat, w: CGFloat)] {
+        PopupRowView.tableFrames(config, width: bounds.width)
+    }
+    private var usable: CGFloat {
+        let x0 = config.padding + 10 + (config.selectableRows ? 22 : 0)
+        return max(1, bounds.width - x0 - (config.padding + 10))
+    }
+
+    // the grab zone of the divider after column i (every column but the last)
+    private func dividerRect(_ i: Int) -> NSRect {
+        let f = frames[i]
+        return NSRect(x: f.x + f.w - 4, y: 0, width: 8, height: bounds.height)
+    }
+
+    override func resetCursorRects() {
+        let n = config.tableColumns.count
+        guard n > 1 else { return }
+        for i in 0..<(n - 1) { addCursorRect(dividerRect(i), cursor: .resizeLeftRight) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        config.colors.background.setFill()
+        bounds.fill()
+        config.colors.highlight.withAlphaComponent(0.55).setFill()
+        bounds.fill()
+        let font = NSFontManager.shared.convert(config.rowFont(config.rowFontSize * zoom * 0.92),
+                                                toHaveTrait: .boldFontMask)
+        let lineH = font.ascender + abs(font.descender) + font.leading
+        let fs = frames
+        for (i, col) in config.tableColumns.enumerated() where i < fs.count {
+            let f = fs[i]
+            var title = col.title
+            if sortColumn == i { title += sortAscending ? " ▲" : " ▼" }
+            let para = NSMutableParagraphStyle()
+            para.lineBreakMode = .byTruncatingTail
+            para.alignment = col.align
+            let color = sortColumn == i ? config.colors.text : config.colors.dim
+            (title as NSString).draw(
+                with: NSRect(x: f.x + 3, y: bounds.midY - lineH / 2, width: max(0, f.w - 8), height: lineH),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
+            if i < fs.count - 1 {
+                let d = NSBezierPath()
+                d.move(to: NSPoint(x: f.x + f.w - 0.5, y: 5))
+                d.line(to: NSPoint(x: f.x + f.w - 0.5, y: bounds.height - 5))
+                config.colors.dim.withAlphaComponent(0.35).setStroke()
+                d.lineWidth = 1
+                d.stroke()
+            }
+        }
+        let base = NSBezierPath()
+        base.move(to: NSPoint(x: 0, y: bounds.height - 0.5))
+        base.line(to: NSPoint(x: bounds.width, y: bounds.height - 0.5))
+        config.colors.border.withAlphaComponent(0.5).setStroke()
+        base.lineWidth = 1
+        base.stroke()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        downX = p.x
+        moved = false
+        let n = config.tableColumns.count
+        if n > 1, let i = (0..<(n - 1)).first(where: { dividerRect($0).contains(p) }) {
+            drag = (i, p.x, frames.map { $0.w / usable * 100 })
+        } else {
+            drag = nil
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let d = drag else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        moved = true
+        var pcts = d.start
+        let minPct: CGFloat = 3
+        var delta = (p.x - d.startX) / usable * 100
+        delta = max(minPct - pcts[d.divider], min(delta, pcts[d.divider + 1] - minPct))
+        pcts[d.divider] += delta
+        pcts[d.divider + 1] -= delta
+        onResize?(pcts.map { ($0 * 10).rounded() / 10 }, false)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let d = drag {
+            drag = nil
+            if moved {
+                var pcts = d.start
+                let minPct: CGFloat = 3
+                var delta = (p.x - d.startX) / usable * 100
+                delta = max(minPct - pcts[d.divider], min(delta, pcts[d.divider + 1] - minPct))
+                pcts[d.divider] += delta
+                pcts[d.divider + 1] -= delta
+                onResize?(pcts.map { ($0 * 10).rounded() / 10 }, true)
+                window?.invalidateCursorRects(for: self)
+            }
+            return
+        }
+        guard abs(p.x - downX) < 5 else { return }
+        if let i = frames.firstIndex(where: { p.x >= $0.x && p.x < $0.x + $0.w }),
+           config.tableColumns[i].sortable {
+            onSort?(i)
+        }
     }
 }
 
@@ -4901,6 +5132,19 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var vimEscStreak = 0
     private var vimLastEsc = Date.distantPast
     private var rowScroll: NSScrollView?
+    // table mode (config.tableColumns): sticky column header over the rows
+    private var tableHeader: PopupTableHeaderView?
+    // host-owned sort state, mirrored in the header (arrow on that column)
+    public var tableSort: (column: Int, ascending: Bool)? {
+        didSet {
+            tableHeader?.sortColumn = tableSort?.column
+            tableHeader?.sortAscending = tableSort?.ascending ?? true
+        }
+    }
+    // a sortable column title was clicked (index into config.tableColumns)
+    public var onTableSort: ((Int) -> Void)?
+    // a divider drag changed the column widths (percent); final = mouseUp
+    public var onTableColumnsResized: (([CGFloat], Bool) -> Void)?
     private var chrome: PopupChrome?
     // transparent resize edge views that sit ON TOP of all content so drag
     // resize works even when the editor/terminal/browser fills the window
@@ -5627,9 +5871,22 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 scroll.borderType = .noBorder
                 rowView.topInset = 4
                 rowView.bottomInset = 16   // room for the pill border stroke
+                if !config.tableColumns.isEmpty {
+                    let header = PopupTableHeaderView(config: config)
+                    header.frame = NSRect(x: 0, y: 0, width: backdrop.bounds.width,
+                                          height: config.tableHeaderHeight * zoom)
+                    header.autoresizingMask = [.width]
+                    tableHeader = header
+                    rowView.topInset = config.tableHeaderHeight * zoom + 2
+                }
                 // + breathing room below the last row (the scroll view now
                 // ends exactly at the window bottom, so no huge inset needed)
 scroll.documentView = rowView
+                if let header = tableHeader {
+                    // floating: pinned to the top of the visible rows,
+                    // never scrolls away
+                    scroll.addFloatingSubview(header, for: .vertical)
+                }
                 backdrop.addSubview(scroll)
                 rowScroll = scroll
             } else {
@@ -5819,6 +6076,14 @@ scroll.documentView = rowView
                 self?.toggleRowSelection(index)
             }
             updateCopyRowsLabel()
+        }
+        tableHeader?.onSort = { [weak self] i in self?.onTableSort?(i) }
+        tableHeader?.onResize = { [weak self] pcts, final in
+            guard let self else { return }
+            var cols = self.config.tableColumns
+            for i in cols.indices where i < pcts.count { cols[i].width = pcts[i] }
+            self.setTableColumns(cols)
+            self.onTableColumnsResized?(pcts, final)
         }
         chrome?.onMeterRecord = { [weak self] in self?.onMeterRecord?() }
         chrome?.onMeterPause = { [weak self] in self?.onMeterPause?() }
@@ -7172,7 +7437,27 @@ private func scrollSelectionIntoView() {
         // a stale width would make the document too short and clip the last
         // row's pill after a resize
         rowView.frame.size.width = w
+        if let header = tableHeader {
+            header.zoom = zoom
+            header.frame = NSRect(x: 0, y: 0, width: w, height: config.tableHeaderHeight * zoom)
+            rowView.topInset = config.tableHeaderHeight * zoom + 2
+            header.needsDisplay = true
+        }
         rowView.frame.size.height = scrollDocumentHeight()
+    }
+
+    // new column widths/titles for a table-mode list (live divider drags,
+    // config reloads): header + rows re-measure and redraw together
+    public func setTableColumns(_ cols: [PopupTableColumn]) {
+        config.tableColumns = cols
+        rowView.config.tableColumns = cols
+        rowView.invalidateHeightCache()
+        rowView.needsDisplay = true
+        if let header = tableHeader {
+            header.config.tableColumns = cols
+            header.needsDisplay = true
+            header.window?.invalidateCursorRects(for: header)
+        }
     }
 
     // Tab bar height is dynamic: many tabs WRAP to extra rows instead of

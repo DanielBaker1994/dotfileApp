@@ -8,6 +8,10 @@
 #   workspace_switcher.sh notes      open ONLY the notes window (no popup)
 #   workspace_switcher.sh jira       open ONLY the jira window (no popup)
 #   workspace_switcher.sh voice      open ONLY the voice-to-text window
+#   workspace_switcher.sh jira-poll [on|off|toggle|setup]
+#                                    THE jira switch ([jira] enabled + the
+#                                    launchd poll agent) — NOT the window
+#                                    toggle above; needs a running daemon
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 APP="$ROOT/workspace-switcher.app"
@@ -40,6 +44,13 @@ build_term_lib() {
 TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/workspace-switcher-focus"
 MODE="${1:-}"
+
+# jira-poll: flip the poll feature through the running daemon (same code
+# path as the menu-bar "Toggle Jira Poll": config check, login test, setup
+# window). Kept apart from `jira` (window) so the two never get conflated.
+if [ "$MODE" = "jira-poll" ]; then
+    exec "$BIN" jira-poll "${2:-toggle}"
+fi
 
 # Karabiner runs shell_commands with a MINIMAL PATH, so `aerospace` is not
 # found unless we add its location (it would silently fail every IPC call).

@@ -155,10 +155,13 @@ W = ['DELL', 'main']
     # AeroSpace has no `hyper` keyword, so it's spelled out as
     # alt-cmd-ctrl-shift). Notes window: Hyper+N — workspace_switcher.sh moves
     # the notes window onto the CURRENT workspace if it is already open, then
-    # focuses it (never spawns a duplicate).
+    # focuses it (never spawns a duplicate). Jira window: Hyper+J.
     alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
     alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh notes'
     alt-cmd-ctrl-shift-f = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh files'
+    # Jira window: Hyper+J — opens/focuses the jira list (moved onto the current
+    # workspace like notes); a no-op when [jira] enabled = false.
+    alt-cmd-ctrl-shift-j = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh jira'
 
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
     # window that closes itself after you pick one. Works from any app.

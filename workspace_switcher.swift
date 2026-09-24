@@ -421,6 +421,51 @@ func gatherWorkspaces() -> [WorkspaceInfo] {
 
 // MARK: - Command palette (loaded once from commands.conf)
 
+// One `columns` entry of a table-mode list: field:Title:width:align:flags.
+// The SAME string drives jira_poll.py's API fields= param (jira_config.py
+// parse_columns) — keep the two parsers in step.
+struct ListColumn {
+    var field: String
+    var title: String
+    var width: CGFloat          // % of the usable row width, 0 = share leftover
+    var align: String           // left | right | center
+    var sortable: Bool
+    var filterable: Bool
+
+    static func parse(_ spec: String?) -> [ListColumn] {
+        (spec ?? "").split(separator: ",").compactMap { part in
+            let seg = part.split(separator: ":", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard let field = seg.first, !field.isEmpty else { return nil }
+            let title = seg.count > 1 && !seg[1].isEmpty ? seg[1] : field
+            let width = seg.count > 2 ? CGFloat(Double(seg[2]) ?? 0) : 0
+            var align = seg.count > 3 && !seg[3].isEmpty ? seg[3].lowercased() : "left"
+            if !["left", "right", "center"].contains(align) { align = "left" }
+            let flags = Set(seg.dropFirst(4).flatMap {
+                $0.lowercased().split(whereSeparator: { "+/|".contains($0) }).map(String.init)
+            })
+            return ListColumn(field: field, title: title, width: max(0, width), align: align,
+                              sortable: flags.contains("sort"), filterable: flags.contains("filter"))
+        }
+    }
+
+    // back to the commands.conf form (after a divider drag)
+    static func serialize(_ cols: [ListColumn]) -> String {
+        cols.map { c in
+            let w = c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width)
+            let flags = [c.filterable ? "filter" : nil, c.sortable ? "sort" : nil]
+                .compactMap { $0 }.joined(separator: "+")
+            return "\(c.field):\(c.title):\(w):\(c.align)" + (flags.isEmpty ? "" : ":\(flags)")
+        }.joined(separator: ", ")
+    }
+
+    var popup: PopupTableColumn {
+        PopupTableColumn(field: field, title: title, width: width,
+                         align: align == "right" ? .right : align == "center" ? .center : .left,
+                         sortable: sortable)
+    }
+}
+
 // Typed command specs. Plain `name = script` lines become .shell commands;
 // INI-style sections configure note/list behavior (see commands.conf).
 struct CommandSpec {
@@ -493,6 +538,12 @@ struct CommandSpec {
     var imageRows: Int         // note: screen rows an inline image gets in vim
     let icon: NSImage?        // window header glyph (jira/notes/heart/png)
     let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
+    // list: spreadsheet mode — `table = true` + `columns = field:Title:
+    // width%:align:flags, …` (flags filter / sort, e.g. filter+sort);
+    // table-sort = field:asc|desc remembers the last clicked header
+    var table: Bool = false
+    var columns: [ListColumn] = []
+    var tableSort: String? = nil
 
     init(name: String, kind: Kind = .shell, windowName: String? = nil,
          chromeTitle: String? = nil, script: String? = nil, paths: [String] = [],
@@ -629,48 +680,70 @@ func loadCommands() -> [CommandSpec] {
     return cmds
 }
 
-// launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
-// when [jira] enabled = true, booted out otherwise. Runs at daemon start, so
-// the poll literally cannot run in the background when jira is disabled.
-private func syncJiraLaunchAgent() {
-    var enabled = false
-    if let content = readConfigText() {
-        var inJira = false
-        for line in content.split(separator: "\n") {
-            let s = line.trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("[") && s.hasSuffix("]") {
-                inJira = s == "[jira]"
-                continue
-            }
-            guard inJira, let eq = s.firstIndex(of: "=") else { continue }
-            let key = s[..<eq].trimmingCharacters(in: .whitespaces)
+// [jira] enabled — THE SWITCH for the jira window, the poll agent and the
+// menu-bar "Toggle Jira Poll" checkmark. Read straight from commands.conf so
+// every caller sees the same truth (loadCommands drops disabled sections).
+func jiraEnabledInConfig() -> Bool {
+    guard let content = readConfigText() else { return false }
+    var inJira = false
+    for line in content.split(separator: "\n") {
+        let s = line.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("[") && s.hasSuffix("]") {
+            inJira = s == "[jira]"
+            continue
+        }
+        guard inJira, !s.hasPrefix("#"), let eq = s.firstIndex(of: "=") else { continue }
+        if s[..<eq].trimmingCharacters(in: .whitespaces) == "enabled" {
             let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            if key == "enabled" {
-                enabled = ["true", "yes", "1", "on"].contains(val.lowercased())
-                break
-            }
+            return ["true", "yes", "1", "on"].contains(val.lowercased())
         }
     }
-    let home = NSHomeDirectory()
-    let plist = home + "/Library/LaunchAgents/com.jira.poll.plist"
-    guard FileManager.default.fileExists(atPath: plist) else { return }
-    let gui = "gui/\(getuid())"
-    if enabled {
-        runLaunchctl(["bootout", gui, plist])
-        runLaunchctl(["bootstrap", gui, plist])
-    } else {
-        runLaunchctl(["bootout", gui, plist])
-    }
+    return false
 }
 
-private func runLaunchctl(_ args: [String]) {
+// launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
+// when [jira] enabled = true, booted out otherwise. Runs at daemon start and
+// on every config reload (the menu-bar switch), so the poll literally cannot
+// run in the background when jira is disabled. The installed plist is kept
+// in sync with the repo template (jira/com.jira.poll.plist, __WS_CONFIG__
+// substituted); an already-loaded, unchanged agent is left running.
+func syncJiraLaunchAgent() {
+    let enabled = jiraEnabledInConfig()
+    let home = NSHomeDirectory()
+    let plist = home + "/Library/LaunchAgents/com.jira.poll.plist"
+    let gui = "gui/\(getuid())"
+    guard enabled else {
+        if FileManager.default.fileExists(atPath: plist) { runLaunchctl(["bootout", gui, plist]) }
+        return
+    }
+    var changed = false
+    if let tmpl = try? String(contentsOfFile: binDir + "/jira/com.jira.poll.plist", encoding: .utf8) {
+        let want = tmpl.replacingOccurrences(of: "__WS_CONFIG__",
+                                             with: home + "/.config/workspace-switcher")
+        let have = try? String(contentsOfFile: plist, encoding: .utf8)
+        if have != want {
+            try? FileManager.default.createDirectory(atPath: home + "/Library/LaunchAgents",
+                                                     withIntermediateDirectories: true)
+            changed = (try? want.write(toFile: plist, atomically: true, encoding: .utf8)) != nil
+        }
+    }
+    guard FileManager.default.fileExists(atPath: plist) else { return }
+    let loaded = runLaunchctl(["print", gui + "/com.jira.poll"]) == 0
+    if loaded && !changed { return }
+    if loaded { runLaunchctl(["bootout", gui, plist]) }
+    runLaunchctl(["bootstrap", gui, plist])
+}
+
+@discardableResult
+private func runLaunchctl(_ args: [String]) -> Int32 {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
     p.arguments = args
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
-    try? p.run()
+    guard (try? p.run()) != nil else { return -1 }
     p.waitUntilExit()
+    return p.terminationStatus
 }
 
 private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpec {
@@ -749,6 +822,9 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     if vars["search-exclude"] != nil { spec.searchExclude = csv(vars["search-exclude"]) }
     if vars["terminal-words"] != nil { spec.terminalWords = csv(vars["terminal-words"]) }
     spec.terminalForeground = hexColor(vars["terminal-foreground"])
+    spec.table = tri(vars["table"]) ?? false
+    spec.columns = ListColumn.parse(vars["columns"])
+    spec.tableSort = vars["table-sort"]
     return spec
 }
 
@@ -1041,7 +1117,7 @@ private func configLog(_ s: String) {
 
 private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "terminal", "vim-mode",
-    "checkbox", "hide-on-focus-loss", "float",
+    "checkbox", "hide-on-focus-loss", "float", "table",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
@@ -1089,6 +1165,28 @@ private func configValueProblem(section: String, key: String, value: String) -> 
     }
     if let allowed = configEnumKeys[key], !allowed.contains(value.lowercased()) {
         return "'\(value)' is not one of \(allowed.sorted().joined(separator: " | "))"
+    }
+    if key == "columns" {
+        // field:Title:width:align:flags — the widths are % of the row
+        for part in value.split(separator: ",") {
+            let seg = part.split(separator: ":", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            if seg.first?.isEmpty ?? true { return "an entry has no field name" }
+            if seg.count > 2, !seg[2].isEmpty, Double(seg[2]) == nil {
+                return "'\(seg[0])' width '\(seg[2])' is not a number (percent)"
+            }
+            if seg.count > 3, !seg[3].isEmpty, !["left", "right", "center"].contains(seg[3].lowercased()) {
+                return "'\(seg[0])' align '\(seg[3])' is not left | right | center"
+            }
+            for f in seg.dropFirst(4).flatMap({ $0.lowercased().split(whereSeparator: { "+/|".contains($0) }) })
+            where f != "filter" && f != "sort" {
+                return "'\(seg[0])' flag '\(f)' is not filter | sort"
+            }
+        }
+        let total = ListColumn.parse(value).reduce(CGFloat(0)) { $0 + $1.width }
+        if total > 100.5 {
+            return "column widths add up to \(Int(total))% (> 100 — they are scaled to fit)"
+        }
     }
     return nil
 }
@@ -1847,7 +1945,15 @@ func fileIconTile(_ path: String, size: CGFloat) -> NSImage? {
 
 
 // JIRA_SITE for the per-row "open in browser" action (config is chmod 600)
-let jiraSite: String = {
+// the Jira site for "open in browser": config.json (python poller) first,
+// then the legacy env-style config. Computed on every use — the setup sheet
+// can change it while the app runs.
+var jiraSite: String {
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: JiraPoll.configPath)),
+       let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let site = d["site"] as? String, !site.isEmpty {
+        return site.hasSuffix("/") ? String(site.dropLast()) : site
+    }
     let conf = NSString(string: "~/.config/jira/config").expandingTildeInPath
     guard let s = try? String(contentsOfFile: conf, encoding: .utf8) else { return "" }
     for line in s.split(separator: "\n") where line.hasPrefix("JIRA_SITE=") {
@@ -1855,7 +1961,7 @@ let jiraSite: String = {
             .trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
     }
     return ""
-}()
+}
 
 func iconForApp(_ app: AppInfo) -> NSImage {
     // config-driven overrides (commands.conf [icons]): an app's windows get a
@@ -1931,6 +2037,7 @@ struct FieldRow: PopupRow {
     let fields: [String: String]   // raw field values (dropdown filter dims)
 
     var loadMore: Bool { fields["__loadmore"] != nil }
+    func cellText(_ field: String) -> String? { fields[field] }
 }
 
 // MARK: - Voice notes (record -> Apple speech recognition)
@@ -2576,6 +2683,16 @@ final class SwitcherController: NSObject {
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
                         } else if name == "notes" {
                             self?.showNotes()
+                        } else if name.hasPrefix("jira-poll-") || name == "jira-setup" {
+                            // THE jira switch (menu-bar "Toggle Jira Poll")
+                            guard let self else { return }
+                            let on = jiraEnabledInConfig()
+                            switch name {
+                            case "jira-setup": self.showJiraSetup()
+                            case "jira-poll-on": if !on { self.enableJiraChecked() }
+                            case "jira-poll-off": if on { self.setJiraEnabled(false) }
+                            default: self.toggleJiraPoll()
+                            }
                         } else {
                             self?.showCommand(name)
                         }
@@ -4997,10 +5114,31 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         if cmd.searchWidth > 0 { cfg.searchWidthFraction = cmd.searchWidth }
         if cmd.maxStretch > 0 { cfg.maxRowStretch = cmd.maxStretch }
         cfg.fontName = cmd.font
+        // table mode (`table = true` + `columns`): spreadsheet rows under a
+        // sticky, sortable, resizable header; absent columns = preview rows
+        var columns = cmd.table ? cmd.columns : []
+        if !columns.isEmpty {
+            cfg.tableColumns = columns.map { $0.popup }
+            cfg.rowHeight = 26
+        }
         let w = PopupWindow(config: cfg)
         // empty `title` in commands.conf = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
         w.headerIcon = jiraAppIcon
+        // header-click sort: (field, ascending); restored from table-sort
+        var sortKey: (field: String, ascending: Bool)?
+        if let ts = cmd.tableSort, !columns.isEmpty {
+            let parts = ts.split(separator: ":").map { $0.trimmingCharacters(in: .whitespaces) }
+            if let f = parts.first, columns.contains(where: { $0.field == f }) {
+                sortKey = (f, !(parts.count > 1 && parts[1].lowercased().hasPrefix("desc")))
+            }
+        }
+        func syncSortArrow() {
+            w.tableSort = sortKey.flatMap { k in
+                columns.firstIndex(where: { $0.field == k.field }).map { ($0, k.ascending) }
+            }
+        }
+        syncSortArrow()
         // row copy: ticked rows (or every row) serialized as TSV lines of the
         // configured copy-fields; the framework owns checkboxes + button +
         // pasteboard, this closure is the only list-specific part
@@ -5033,23 +5171,34 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 "copy \(URL(fileURLWithPath: tabs[currentTab].path).lastPathComponent) path"
         }
 
-        // combined filter: search (fuzzy) + dropdown selections
+        // combined filter: search (fuzzy) + dropdown selections, then the
+        // table's header sort (numeric-aware; blanks always last)
         func filteredRows(query: String) -> [FieldRow] {
             let byQuery = PopupFuzzy.filter(currentItems(), query: query) { $0.searchText }
-            let result: [FieldRow]
+            var matched: [FieldRow]
             if activeDims.isEmpty {
-                result = Array(byQuery.prefix(cap))
+                matched = byQuery
             } else {
                 let opts = w.filterValues
-                result = Array(byQuery.filter { row in
+                matched = byQuery.filter { row in
                     for (i, sel) in w.filterSelections.enumerated() where sel > 0 {
                         guard i < activeDims.count, opts.indices.contains(i),
                               opts[i].indices.contains(sel) else { continue }
                         if row.fields[activeDims[i]] != opts[i][sel] { return false }
                     }
                     return true
-                }.prefix(cap))
+                }
             }
+            if let k = sortKey {
+                matched = matched.enumerated().sorted { a, b in
+                    let x = a.element.fields[k.field] ?? "", y = b.element.fields[k.field] ?? ""
+                    if x.isEmpty != y.isEmpty { return y.isEmpty }
+                    let c = x.localizedStandardCompare(y)
+                    if c == .orderedSame { return a.offset < b.offset }
+                    return k.ascending ? c == .orderedAscending : c == .orderedDescending
+                }.map { $0.element }
+            }
+            let result = Array(matched.prefix(cap))
             // paging: page-size > 0 keeps huge lists snappy while browsing; a
             // "load more" row at the bottom reveals the next page on Enter or
             // click. Searching is cheap (capped search text) and rendering a
@@ -5123,6 +5272,41 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             guard let self, index >= 0, index < w.rows.count,
                   let row = w.rows[index] as? FieldRow, !row.loadMore else { return }
             self.showDetail(row, cmd: cmd)
+        }
+        // table header: click = sort (again = flip), divider drag = resize;
+        // both persist to commands.conf so the window reopens the same way
+        w.onTableSort = { [weak self] i in
+            guard let self, columns.indices.contains(i) else { return }
+            let f = columns[i].field
+            sortKey = sortKey?.field == f ? (f, !(sortKey?.ascending ?? true)) : (f, true)
+            syncSortArrow()
+            visibleOffset = 0
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            let v = "\(f):\(sortKey!.ascending ? "asc" : "desc")"
+            if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
+                self.commands[ci].tableSort = v
+            }
+            saveConfigValue(section: cmd.name, key: "table-sort", value: v)
+            self.log("list '\(cmd.name)': sort -> \(v)")
+        }
+        // persisted on a short debounce after the LAST live drag update (not
+        // only on mouseUp — the header's mouseUp isn't guaranteed to arrive)
+        var resizeSave: DispatchWorkItem?
+        w.onTableColumnsResized = { [weak self] pcts, final in
+            guard let self else { return }
+            for i in columns.indices where i < pcts.count { columns[i].width = pcts[i] }
+            resizeSave?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                let spec = ListColumn.serialize(columns)
+                if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
+                    self.commands[ci].columns = columns
+                }
+                saveConfigValue(section: cmd.name, key: "columns", value: spec)
+                self.log("list '\(cmd.name)': columns -> \(spec)")
+            }
+            resizeSave = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + (final ? 0.05 : 0.6), execute: item)
         }
         w.onEscape = { w.hide(restore: true) }
         w.onHide = { [weak self] restore in
@@ -5408,9 +5592,15 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             log("list '\(cmd.name)': cannot read \(path)")
             return []
         }
-        let fields = cmd.filter.isEmpty
+        var fields = cmd.filter.isEmpty
             ? [cmd.primary, cmd.content, cmd.trailing].compactMap { $0 }
             : cmd.filter
+        // table mode: every `filter`-flagged column is searchable too
+        if cmd.table {
+            for c in cmd.columns where c.filterable && !fields.contains(c.field) {
+                fields.append(c.field)
+            }
+        }
         if let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
             return arr.compactMap { d in
                 let str = { (k: String?) -> String? in
@@ -5629,10 +5819,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Window toggles
         addMenuItem(menu, "Toggle Notes", #selector(MenuTarget.toggleNotes(_:)), key: "n", modifiers: .command)
-        if c.commands.contains(where: { $0.name == "jira" }) {
-            addMenuItem(menu, "Toggle Jira", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
-        }
+        // always present; hidden while [jira] enabled = false (menuNeedsUpdate)
+        // so the menu-bar switch below can bring it back without a relaunch
+        addMenuItem(menu, "Toggle Jira", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         addMenuItem(menu, "Toggle Health Checks", #selector(MenuTarget.toggleHealthChecks(_:)), key: "h", modifiers: .command)
+        menu.addItem(.separator())
+
+        // Jira poll: THE SWITCH ([jira] enabled — window + launchd agent) and
+        // a submenu with its live state + every polling option
+        addMenuItem(menu, "Toggle Jira Poll", #selector(MenuTarget.toggleJiraPoll(_:)), key: "")
+        let jiraMenu = NSMenu(title: "Jira Poll…")
+        let jiraDelegate = DynamicMenuDelegate { [weak c] m in c?.buildJiraPollMenu(into: m) }
+        dynamicMenuDelegates.append(jiraDelegate)
+        jiraMenu.delegate = jiraDelegate
+        let jiraItem = NSMenuItem(title: "Jira Poll…", action: nil, keyEquivalent: "")
+        jiraItem.submenu = jiraMenu
+        menu.addItem(jiraItem)
         menu.addItem(.separator())
 
         // Settings submenu with toggleable config options
@@ -5776,6 +5978,9 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 item.state = windowState(for: "notes", controller: controller)
             case #selector(toggleJira(_:)):
                 item.state = windowState(for: "jira", controller: controller)
+                item.isHidden = !jiraEnabledInConfig()
+            case #selector(toggleJiraPoll(_:)):
+                item.state = jiraEnabledInConfig() ? .on : .off
             case #selector(toggleHealthChecks(_:)):
                 item.state = windowState(for: "health-checks", controller: controller)
             case #selector(toggleHideOnFocusLoss(_:)):
@@ -5869,6 +6074,10 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     @objc func toggleJira(_ sender: Any?) {
         MenuTarget.controller?.toggleCommand("jira")
+    }
+
+    @objc func toggleJiraPoll(_ sender: Any?) {
+        MenuTarget.controller?.toggleJiraPoll()
     }
 
     @objc func toggleHealthChecks(_ sender: Any?) {
@@ -6392,5 +6601,536 @@ final class FontPanelReceiver: NSObject {
         guard let fm = sender as? NSFontManager else { return }
         let f = fm.convert(NSFont.systemFont(ofSize: 13))
         if let fam = f.familyName { onPick?(fam) }
+    }
+}
+
+// MARK: - Jira poll (menu-bar switch, polling options, setup window)
+
+// The python poller (jira/jira_poll.py + friends) owns the network, the cache
+// and ~/.cache/jira/status.json; the app only flips THE SWITCH ([jira]
+// enabled), kicks polls, edits schedules through jira_config.py, and SHOWS
+// the state — so the menu, jira-doctor and `cat status.json` always agree.
+enum JiraPoll {
+    static var dir: String { binDir + "/jira" }
+    static let configPath = NSHomeDirectory() + "/.config/jira/config.json"
+    static let statusPath = NSHomeDirectory() + "/.cache/jira/status.json"
+    static let curlLogPath = NSHomeDirectory() + "/.cache/jira/curl.log"
+    static var pollScript: String { dir + "/jira_poll.py" }
+    // why the last menu-bar enable attempt left jira disabled (submenu line)
+    static var lastEnableError: String?
+    // "Poll Now" jobs in flight (endpoint name, or "all")
+    static var running: Set<String> = []
+    // schedule choices offered under Poll Interval ▸
+    static let intervals = ["5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d"]
+
+    // Run a jira/*.py script off the main thread; `done` gets (exit code,
+    // stdout, stderr) on the main thread. stdin carries secrets (the token)
+    // so they never show up in `ps`.
+    static func run(_ script: String, _ args: [String], stdin: String? = nil,
+                    done: ((Int32, String, String) -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            p.arguments = ["python3", dir + "/" + script] + args
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+            p.environment = env
+            let out = Pipe(), err = Pipe(), inp = Pipe()
+            p.standardOutput = out
+            p.standardError = err
+            p.standardInput = inp
+            do { try p.run() } catch {
+                DispatchQueue.main.async { done?(-1, "", "cannot run python3: \(error)") }
+                return
+            }
+            if let s = stdin { inp.fileHandleForWriting.write(Data(s.utf8)) }
+            try? inp.fileHandleForWriting.close()
+            // drain both pipes concurrently — a full stderr buffer must never
+            // block the child while we wait on stdout
+            var o = Data(), e = Data()
+            let g = DispatchGroup()
+            g.enter()
+            DispatchQueue.global().async { o = out.fileHandleForReading.readDataToEndOfFile(); g.leave() }
+            e = err.fileHandleForReading.readDataToEndOfFile()
+            g.wait()
+            p.waitUntilExit()
+            let code = p.terminationStatus
+            DispatchQueue.main.async {
+                done?(code, String(decoding: o, as: UTF8.self), String(decoding: e, as: UTF8.self))
+            }
+        }
+    }
+
+    static func readJSON(_ path: String) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    static var status: [String: Any]? { readJSON(statusPath) }
+    static var endpoints: [[String: Any]] { readJSON(configPath)?["endpoints"] as? [[String: Any]] ?? [] }
+
+    // last meaningful stderr line of a failed script ("jira-api: …" prefix off)
+    static func errorLine(_ err: String, fallback: String) -> String {
+        let line = err.split(separator: "\n").map(String.init)
+            .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? fallback
+        for p in ["jira-api: ", "jira-poll: ", "jira-config: "] where line.hasPrefix(p) {
+            return String(line.dropFirst(p.count))
+        }
+        return line
+    }
+
+    // "2026-09-23 22:19:17" -> "22:19" today, "Sep 22 22:19" otherwise
+    static func short(_ ts: String?) -> String {
+        guard let ts, ts.count >= 16 else { return ts ?? "never" }
+        let today = String(ISO8601DateFormatter.string(from: Date(), timeZone: .current,
+                                                       formatOptions: [.withFullDate]))
+        let hm = String(ts.dropFirst(11).prefix(5))
+        return ts.hasPrefix(today) ? hm : String(ts.prefix(10)) + " " + hm
+    }
+}
+
+extension SwitcherController {
+    // menu-bar "Toggle Jira Poll": off -> flip + unload; on -> check the
+    // config, test the login, and only THEN flip (setup window when the
+    // config is missing, an explained failure when the login fails)
+    func toggleJiraPoll() {
+        if jiraEnabledInConfig() {
+            setJiraEnabled(false)
+        } else {
+            enableJiraChecked()
+        }
+    }
+
+    func setJiraEnabled(_ on: Bool) {
+        saveConfigValue(section: "jira", key: "enabled", value: on ? "true" : "false")
+        // reloadConfig -> loadCommands -> syncJiraLaunchAgent: the agent is
+        // bootstrapped (RunAtLoad polls at once) or booted out right here
+        reloadConfig()
+        log("jira: [jira] enabled = \(on) (menu-bar switch)")
+        if on {
+            JiraPoll.lastEnableError = nil
+            JiraPoll.run("jira_status.py", ["--note-error"])
+            showCommand("jira")
+        } else if let w = subWindows.first(where: { $0.config.name == "jira" }) {
+            w.hide(restore: false)
+        }
+    }
+
+    func enableJiraChecked() {
+        JiraPoll.run("jira_config.py", ["--check"]) { [weak self] _, out, err in
+            guard let self else { return }
+            let chk = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
+            let problems = chk?["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "config unreadable")]
+            if chk?["exists"] as? Bool != true || !problems.isEmpty {
+                self.log("jira: enable -> setup window (\(problems.joined(separator: "; ")))")
+                self.showJiraSetup(reason: problems.isEmpty
+                    ? "No Jira config yet — fill in your site and API token."
+                    : problems.joined(separator: "\n"))
+                return
+            }
+            JiraPoll.run("jira_api.py", ["--myself"]) { [weak self] code, _, err in
+                guard let self else { return }
+                if code == 0 {
+                    self.setJiraEnabled(true)
+                    return
+                }
+                let msg = JiraPoll.errorLine(err, fallback: "login test failed (exit \(code))")
+                JiraPoll.lastEnableError = msg
+                JiraPoll.run("jira_status.py", ["--note-error", "login failed: " + msg])
+                self.log("jira: enable refused — \(msg)")
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Jira login failed — polling stays off"
+                alert.informativeText = msg + "\n\nEvery request is logged (copy-pasteable) in "
+                    + JiraPoll.curlLogPath
+                alert.addButton(withTitle: "Setup…")
+                alert.addButton(withTitle: "Close")
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertFirstButtonReturn {
+                    self.showJiraSetup(reason: msg)
+                }
+            }
+        }
+    }
+
+    func showJiraSetup(reason: String? = nil) {
+        JiraSetupWindow.show(controller: self, reason: reason)
+    }
+
+    // "Poll Now": non-blocking; the poll holds its own lock, the status line
+    // shows "(running…)" until it returns
+    func jiraPollNow(_ endpoint: String) {
+        guard !JiraPoll.running.contains(endpoint) else { return }
+        JiraPoll.running.insert(endpoint)
+        log("jira: poll now (\(endpoint))")
+        JiraPoll.run("jira_poll.py", ["--force", "--quiet", "--projects", endpoint]) { [weak self] code, _, err in
+            JiraPoll.running.remove(endpoint)
+            self?.log("jira: poll \(endpoint) finished (exit \(code))"
+                      + (code == 0 ? "" : ": " + JiraPoll.errorLine(err, fallback: "see status.json")))
+        }
+    }
+
+    // Jira Poll ▸ — rebuilt on every open, so it always shows the live state
+    func buildJiraPollMenu(into m: NSMenu) {
+        let enabled = jiraEnabledInConfig()
+        func info(_ title: String) {
+            let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            i.isEnabled = false
+            m.addItem(i)
+        }
+        info(enabled ? "Polling ON — launchd agent every 60s" : "Polling OFF — [jira] enabled = false")
+        if let e = JiraPoll.lastEnableError { info("⚠ enable failed: \(e)") }
+        let st = JiraPoll.status ?? [:]
+        if st.isEmpty {
+            info("no status yet (the poller has never run)")
+        } else {
+            let top = st["status"] as? String ?? "?"
+            info("Status: \(top) · last run \(JiraPoll.short(st["lastRun"] as? String))")
+            if let e = st["lastError"] as? String, !e.isEmpty { info("⚠ \(e.prefix(90))") }
+            for n in st["configNotes"] as? [String] ?? [] { info("ℹ︎ \(n)") }
+            if let lock = st["lock"] as? [String: Any], lock["held"] as? Bool == true {
+                info("🔒 poll running (pid \(lock["pid"] ?? "?"))")
+            }
+            for e in st["endpoints"] as? [[String: Any]] ?? [] {
+                let name = e["name"] as? String ?? "?"
+                let items = (e["items"] as? Int).map { " · \($0) items" } ?? ""
+                let off = e["enabled"] as? Bool == false ? " (disabled)" : ""
+                let run = JiraPoll.running.contains(name) || JiraPoll.running.contains("all")
+                    ? " · running…" : ""
+                info("   \(name): \(e["status"] as? String ?? "?")\(off) · every \(e["window"] as? String ?? "?")"
+                     + " · next \(JiraPoll.short(e["nextRun"] as? String))\(items)\(run)")
+            }
+        }
+        m.addItem(.separator())
+
+        let eps = JiraPoll.endpoints
+        let names = eps.compactMap { $0["name"] as? String }
+        // Poll Now ▸ All / per endpoint
+        let now = NSMenu(title: "Poll Now")
+        now.addItem(menuItem("All Endpoints", enabled: !JiraPoll.running.contains("all")) { [weak self] in
+            self?.jiraPollNow("all")
+        })
+        if !names.isEmpty { now.addItem(.separator()) }
+        for n in names {
+            now.addItem(menuItem(n, enabled: !JiraPoll.running.contains(n)) { [weak self] in
+                self?.jiraPollNow(n)
+            })
+        }
+        let nowItem = NSMenuItem(title: "Poll Now", action: nil, keyEquivalent: "")
+        nowItem.submenu = now
+        nowItem.isEnabled = !eps.isEmpty
+        m.addItem(nowItem)
+
+        // Poll Interval ▸ endpoint ▸ 5m … 1d (+ on/off) — written to
+        // config.json through jira_config.py so validation stays in one place
+        let iv = NSMenu(title: "Poll Interval")
+        for e in eps {
+            guard let n = e["name"] as? String else { continue }
+            let cur = e["window"] as? String ?? ""
+            let sub = NSMenu(title: n)
+            var choices = JiraPoll.intervals
+            if !cur.isEmpty && !choices.contains(cur) { choices.insert(cur, at: 0) }
+            for w in choices {
+                sub.addItem(menuItem("every \(w)", state: w == cur) { [weak self] in
+                    JiraPoll.run("jira_config.py", ["--set-window", n, w]) { code, _, err in
+                        self?.log("jira: \(n) window -> \(w) (exit \(code))\(code == 0 ? "" : " " + err)")
+                    }
+                })
+            }
+            sub.addItem(.separator())
+            let on = e["enabled"] as? Bool ?? true
+            sub.addItem(menuItem("Enabled", state: on) { [weak self] in
+                JiraPoll.run("jira_config.py", ["--set-enabled", n, on ? "false" : "true"]) { code, _, _ in
+                    self?.log("jira: \(n) enabled -> \(!on) (exit \(code))")
+                }
+            })
+            let item = NSMenuItem(title: "\(n) — every \(cur)", action: nil, keyEquivalent: "")
+            item.submenu = sub
+            iv.addItem(item)
+        }
+        let ivItem = NSMenuItem(title: "Poll Interval", action: nil, keyEquivalent: "")
+        ivItem.submenu = iv
+        ivItem.isEnabled = !eps.isEmpty
+        m.addItem(ivItem)
+        m.addItem(.separator())
+
+        // observability: every path the user may want to inspect
+        m.addItem(menuItem("Status…") { [weak self] in
+            guard let self else { return }
+            if self.commands.contains(where: { $0.name == "health-checks" }) {
+                self.showCommand("health-checks")
+            } else {
+                self.openNoteFile(JiraPoll.statusPath)
+            }
+        })
+        let fm = FileManager.default
+        m.addItem(menuItem("View Config", enabled: fm.fileExists(atPath: JiraPoll.configPath)) { [weak self] in
+            self?.openNoteFile(JiraPoll.configPath)
+        })
+        m.addItem(menuItem("View Status JSON", enabled: fm.fileExists(atPath: JiraPoll.statusPath)) { [weak self] in
+            self?.openNoteFile(JiraPoll.statusPath)
+        })
+        m.addItem(menuItem("View curl Log", enabled: fm.fileExists(atPath: JiraPoll.curlLogPath)) { [weak self] in
+            self?.openNoteFile(JiraPoll.curlLogPath)
+        })
+        m.addItem(menuItem("Copy Config Path") { [weak self] in
+            self?.copy(JiraPoll.configPath, "jira config path: \(JiraPoll.configPath)")
+        })
+        m.addItem(menuItem("Copy Poll Script Path") { [weak self] in
+            self?.copy(JiraPoll.pollScript, "jira poll script: \(JiraPoll.pollScript)")
+        })
+        m.addItem(menuItem("Copy curl Log Path") { [weak self] in
+            self?.copy(JiraPoll.curlLogPath, "jira curl log: \(JiraPoll.curlLogPath)")
+        })
+        m.addItem(.separator())
+        m.addItem(menuItem("Setup…") { [weak self] in self?.showJiraSetup() })
+    }
+}
+
+// Jira credentials window: site, email, API token (secure), default project,
+// max results. "Test Connection" runs jira_api.py --myself against what is
+// typed; "Save & Enable" writes config.json (chmod 600, via jira_config.py
+// --save — the token travels on stdin), re-tests, then flips [jira] enabled.
+// A plain titled NSWindow (not an NSAlert) so every field takes focus, and a
+// local key monitor routes Cmd/Ctrl+V, Cmd+A/C/X/Z to the field editor
+// (rule.md #1 — the accessory app has no reliable Edit key equivalents).
+final class JiraSetupWindow: NSObject, NSWindowDelegate {
+    private static var live: JiraSetupWindow?
+
+    private let window: NSWindow
+    private let site = NSTextField()
+    private let email = NSTextField()
+    private let token = NSSecureTextField()
+    private let project = NSTextField()
+    private let maxResults = NSTextField()
+    private let notice = NSTextField(wrappingLabelWithString: "")
+    private let result = NSTextField(wrappingLabelWithString: "")
+    private let testButton = NSButton(title: "Test Connection", target: nil, action: nil)
+    private let saveButton = NSButton(title: "Save & Enable", target: nil, action: nil)
+    private var monitor: Any?
+    private weak var controller: SwitcherController?
+
+    static func show(controller: SwitcherController, reason: String?) {
+        if let w = live {
+            if let reason { w.setResult(reason, ok: nil) }
+            NSApp.activate(ignoringOtherApps: true)
+            w.window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let w = JiraSetupWindow(controller: controller)
+        live = w
+        if let reason { w.setResult(reason, ok: nil) }
+        w.prefill()
+        NSApp.activate(ignoringOtherApps: true)
+        w.window.center()
+        w.window.makeKeyAndOrderFront(nil)
+        w.window.makeFirstResponder(w.site)
+    }
+
+    private init(controller: SwitcherController) {
+        self.controller = controller
+        let W: CGFloat = 520, H: CGFloat = 372
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        super.init()
+        window.title = "Jira Setup"
+        window.isReleasedWhenClosed = false
+        // above the popup windows (they float at .popUpMenu) — otherwise the
+        // setup window opens hidden behind the jira window
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+        window.delegate = self
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        let head = NSTextField(wrappingLabelWithString:
+            "Connect the jira poller to your Jira Cloud site. Token: id.atlassian.com → Security → API tokens.")
+        head.font = .systemFont(ofSize: 12)
+        head.frame = NSRect(x: 20, y: H - 50, width: W - 40, height: 34)
+        content.addSubview(head)
+        let rows: [(String, NSTextField, String)] = [
+            ("Site URL", site, "https://your-org.atlassian.net"),
+            ("Email", email, "you@example.com"),
+            ("API Token", token, "paste your API token"),
+            ("Default project", project, "e.g. SAM1 (optional)"),
+            ("Max results", maxResults, "25"),
+        ]
+        var y = H - 88
+        for (label, field, placeholder) in rows {
+            let l = NSTextField(labelWithString: label)
+            l.alignment = .right
+            l.frame = NSRect(x: 20, y: y + 3, width: 110, height: 18)
+            field.frame = NSRect(x: 140, y: y, width: W - 160, height: 24)
+            field.placeholderString = placeholder
+            field.usesSingleLineMode = true
+            field.cell?.wraps = false
+            field.cell?.isScrollable = true
+            content.addSubview(l)
+            content.addSubview(field)
+            y -= 34
+        }
+        notice.font = .systemFont(ofSize: 11)
+        notice.textColor = .secondaryLabelColor
+        notice.frame = NSRect(x: 20, y: y - 18, width: W - 40, height: 40)
+        content.addSubview(notice)
+        result.font = .systemFont(ofSize: 12)
+        result.frame = NSRect(x: 20, y: 58, width: W - 40, height: 44)
+        content.addSubview(result)
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        for b in [testButton, saveButton, cancel] { b.bezelStyle = .rounded }
+        saveButton.keyEquivalent = "\r"
+        saveButton.target = self
+        saveButton.action = #selector(saveAndEnable(_:))
+        testButton.target = self
+        testButton.action = #selector(test(_:))
+        saveButton.frame = NSRect(x: W - 20 - 130, y: 16, width: 130, height: 30)
+        cancel.frame = NSRect(x: saveButton.frame.minX - 96, y: 16, width: 90, height: 30)
+        testButton.frame = NSRect(x: 20, y: 16, width: 140, height: 30)
+        content.addSubview(testButton)
+        content.addSubview(cancel)
+        content.addSubview(saveButton)
+        window.contentView = content
+        window.autorecalculatesKeyViewLoop = true
+        window.initialFirstResponder = site
+        installEditShortcuts()
+    }
+
+    private func installEditShortcuts() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            guard let self, self.window.isKeyWindow else { return e }
+            // Esc = Cancel even when a field editor swallows the key
+            // equivalent (accessory app: no reliable button key equivalents)
+            if e.keyCode == 53 { self.close(); return nil }
+            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let cmd = mods.contains(.command), ctrl = mods.contains(.control)
+            guard cmd || ctrl, let ed = self.window.firstResponder as? NSText else { return e }
+            switch e.keyCode {
+            case 9: ed.paste(nil)                        // Cmd+V / Ctrl+V
+            case 8: ed.copy(nil)                         // Cmd+C / Ctrl+C
+            case 0 where cmd: ed.selectAll(nil)          // Cmd+A
+            case 7 where cmd: ed.cut(nil)                // Cmd+X
+            case 6 where cmd: ed.undoManager?.undo()     // Cmd+Z
+            default: return e
+            }
+            return nil
+        }
+    }
+
+    // current config (token never leaves python — only whether one is set)
+    private func prefill() {
+        JiraPoll.run("jira_config.py", ["--check"]) { [weak self] _, out, _ in
+            guard let self,
+                  let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
+            else { return }
+            if self.site.stringValue.isEmpty { self.site.stringValue = d["site"] as? String ?? "" }
+            if self.email.stringValue.isEmpty { self.email.stringValue = d["email"] as? String ?? "" }
+            if self.project.stringValue.isEmpty { self.project.stringValue = d["defaultProject"] as? String ?? "" }
+            if self.maxResults.stringValue.isEmpty, let m = d["defaultMax"] as? Int {
+                self.maxResults.stringValue = String(m)
+            }
+            let notes = d["notes"] as? [String] ?? []
+            var lines = ["Saves to \(JiraPoll.configPath) (chmod 600)."]
+            for k in ["SITE", "EMAIL", "TOKEN"] where notes.contains(where: { $0.contains("env JIRA_\(k)") }) {
+                lines.append("Using JIRA_\(k) from the environment — save will persist it into config.json.")
+            }
+            if d["hasToken"] as? Bool == true {
+                self.token.placeholderString = "token set — leave blank to keep it"
+            }
+            self.notice.stringValue = lines.joined(separator: "\n")
+        }
+    }
+
+    private func setResult(_ text: String, ok: Bool?) {
+        result.stringValue = text
+        result.textColor = ok == true ? .systemGreen : ok == false ? .systemRed : .secondaryLabelColor
+    }
+
+    private func busy(_ on: Bool) {
+        testButton.isEnabled = !on
+        saveButton.isEnabled = !on
+    }
+
+    private var trimmed: (site: String, email: String, token: String, project: String, max: String) {
+        let t = { (f: NSTextField) in f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return (t(site), t(email), t(token), t(project), t(maxResults))
+    }
+
+    // --myself against the TYPED values (blank fields fall back to config/env)
+    private func runLoginTest(useTyped: Bool, done: @escaping (Bool, String) -> Void) {
+        var args = ["--myself", "--no-auth-check"]
+        var stdin: String? = nil
+        let v = trimmed
+        if useTyped {
+            if !v.site.isEmpty { args += ["--site", v.site] }
+            if !v.email.isEmpty { args += ["--email", v.email] }
+            if !v.token.isEmpty { args.append("--token-stdin"); stdin = v.token + "\n" }
+        }
+        JiraPoll.run("jira_api.py", args, stdin: stdin) { code, out, err in
+            if code == 0,
+               let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] {
+                done(true, d["displayName"] as? String ?? "unknown user")
+            } else {
+                done(false, JiraPoll.errorLine(err, fallback: "login failed (exit \(code))"))
+            }
+        }
+    }
+
+    @objc private func test(_ sender: Any?) {
+        busy(true)
+        setResult("Testing…", ok: nil)
+        runLoginTest(useTyped: true) { [weak self] ok, msg in
+            self?.busy(false)
+            self?.setResult(ok ? "✓ Connected as \(msg)" : "✗ \(msg)", ok: ok)
+        }
+    }
+
+    @objc private func saveAndEnable(_ sender: Any?) {
+        let v = trimmed
+        guard !v.site.isEmpty, v.site.hasPrefix("http") else {
+            setResult("✗ Site URL must start with https://", ok: false)
+            return
+        }
+        var obj: [String: Any] = ["site": v.site, "email": v.email, "defaultProject": v.project,
+                                  "defaultMax": Int(v.max) ?? 25]
+        if !v.token.isEmpty { obj["token"] = v.token }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        busy(true)
+        setResult("Saving…", ok: nil)
+        JiraPoll.run("jira_config.py", ["--save"], stdin: String(decoding: data, as: UTF8.self)) {
+            [weak self] code, _, err in
+            guard let self else { return }
+            guard code == 0 else {
+                self.busy(false)
+                self.setResult("✗ save failed: \(JiraPoll.errorLine(err, fallback: "exit \(code)"))", ok: false)
+                return
+            }
+            self.setResult("Saved. Testing login…", ok: nil)
+            self.runLoginTest(useTyped: false) { [weak self] ok, msg in
+                guard let self else { return }
+                self.busy(false)
+                guard ok else {
+                    self.setResult("✗ saved, but login failed: \(msg) — polling stays off", ok: false)
+                    JiraPoll.lastEnableError = msg
+                    return
+                }
+                self.setResult("✓ Connected as \(msg) — enabling…", ok: true)
+                let c = self.controller
+                self.close()
+                c?.setJiraEnabled(true)
+            }
+        }
+    }
+
+    @objc private func cancel(_ sender: Any?) { close() }
+
+    private func close() {
+        window.orderOut(nil)
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        monitor = nil
+        JiraSetupWindow.live = nil
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        monitor = nil
+        JiraSetupWindow.live = nil
     }
 }

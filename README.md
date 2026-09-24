@@ -42,7 +42,9 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | Notes / Jira / Voice / Health windows | menu-bar **wrench** icon |
 | Voice notes | red record button → dictation → text, pause/resume, live draft |
 | Menu-bar stack | sketchybar + borders (brew services) |
-| Jira poll agent | launchd `com.jira.poll` |
+| Jira window | Hyper+J (aerospace) — spreadsheet table, columns from `commands.conf [jira] columns` |
+| Jira poll on/off + options | wrench menu → **Toggle Jira Poll** / **Jira Poll…** (status, Poll Now, intervals, Setup…) |
+| Jira poll agent | launchd `com.jira.poll` (60s tick; `jira_poll.py` runs only due endpoints) |
 
 ## Development
 
@@ -62,8 +64,23 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 - `bin/workspace_switcher.sh` — hotkey launcher (pings the daemon, launches via
   LaunchServices so mic/speech TCC grants attach to the app bundle)
 - `bin/voice-permissions.sh` — writes the mic + speech TCC grants
-- `jira/` — jira-api.sh (cache/sync), jira-poll.sh (publish window JSON),
-  jira-doctor.sh (health checks, `/health-checks` window)
+- `jira/` — python poller (stdlib only): `jira_api.py` (API client, JQL
+  queries, `--sync`, curl logging), `jira_poll.py` (per-endpoint scheduler,
+  lock, publish), `jira_config.py` (config.json load/migrate/validate +
+  `[jira] columns` → API `fields=`), `jira_status.py` (status.json);
+  `jira-api.sh` / `jira-poll.sh` are thin compat wrappers; `jira-doctor.sh`
+  (health checks, `/health-checks` window). Tests: `python3 Tests/test_jira_poll.py`
+
+### Jira poller at a glance
+
+| What | Where |
+| --- | --- |
+| On/off switch | `commands.conf [jira] enabled` (menu **Toggle Jira Poll**, or `bin/workspace_switcher.sh jira-poll on\|off\|toggle\|setup`) |
+| Credentials + endpoints (schedules) | `~/.config/jira/config.json` (chmod 600; menu **Jira Poll… ▸ Setup…**) |
+| Live state (last/next run, errors, lock) | `~/.cache/jira/status.json` · `jira/jira_status.py` · `jira-doctor.sh` |
+| Every HTTP request, copy-pasteable | `~/.cache/jira/curl.log` (chmod 600 — contains the basic-auth token) |
+| Window data | `~/.cache/workspace-switcher/jira_json/<endpoint file>.json` |
+
 
 ### Vendored SwiftTerm (one-time pull for the embedded terminal)
 

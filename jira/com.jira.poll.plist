@@ -4,15 +4,22 @@
 <dict>
     <key>Label</key>
     <string>com.jira.poll</string>
+    <!-- launchd ticks every 60s; jira_poll.py runs only the endpoints whose
+         own window (config.json) has elapsed, so a tick is usually a no-op -->
     <key>ProgramArguments</key>
     <array>
-        <string>__WS_CONFIG__/jira/jira-poll.sh</string>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>__WS_CONFIG__/jira/jira_poll.py</string>
         <string>--quiet</string>
-        <string>--projects</string>
-        <string>all</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
     <key>StartInterval</key>
-    <integer>600</integer>
+    <integer>60</integer>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

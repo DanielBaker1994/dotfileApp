@@ -21,9 +21,9 @@ FIX=0
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WS_APP="$WS_ROOT/workspace-switcher.app"
 WS_BIN="$WS_APP/Contents/MacOS/workspace-switcher"
-CONF="$HOME/.config/jira/config"
+CONF_JSON="$HOME/.config/jira/config.json"
 CACHE="$HOME/.cache/jira"
-STATE="$CACHE/poll-state"
+STATUS="$CACHE/status.json"
 JSON_DIR="$HOME/.cache/workspace-switcher/jira_json"
 PLIST_SRC="$WS_ROOT/jira/com.jira.poll.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
@@ -43,11 +43,9 @@ head_() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 
 running() { pgrep -x "$1" >/dev/null 2>&1; }
 
-cfg() { grep "^$1=" "$CONF" 2>/dev/null | cut -d\' -f2; }
-
 # ---------------------------------------------------------------- deps
 head_ "== dependencies =="
-for b in curl jq aerospace swiftc brew; do
+for b in curl jq python3 aerospace swiftc brew; do
     if command -v "$b" >/dev/null 2>&1; then ok "$b ($(command -v "$b"))"; else bad "$b missing"; fi
 done
 
@@ -243,63 +241,67 @@ else
 fi
 
 # ---------------------------------------------------------------- jira (optional)
+# Everything here reads the python poller's own surfaces: jira_config.py
+# --check (config.json) and ~/.cache/jira/status.json (written by EVERY
+# jira_poll.py tick) — so the doctor, the menu bar and `cat` agree.
 head_ "== jira (optional) =="
 JIRA_ENABLED="$(awk '/^\[jira\]/{f=1;next} /^\[/{f=0} f&&/^enabled/{print $3}' "$WS_ROOT/commands.conf" 2>/dev/null)"
 if [ "$JIRA_ENABLED" = "true" ]; then
-    if [ -f "$CONF" ]; then
-        ok "config: $CONF"
-        for k in JIRA_SITE JIRA_EMAIL JIRA_TOKEN; do
-            if [ -n "$(cfg "$k")" ]; then ok "$k set"; else bad "$k missing in $CONF"; fi
-        done
-    else
-        bad "config missing: $CONF (run: jira-api --init)"
+    PY="$(command -v python3 || true)"
+    if [ -z "$PY" ]; then
+        bad "python3 missing — the jira poller is jira/jira_poll.py"
     fi
-    SITE="$(cfg JIRA_SITE)"; EMAIL="$(cfg JIRA_EMAIL)"; TOK="$(cfg JIRA_TOKEN)"
-    if [ -n "$SITE" ] && [ -n "$EMAIL" ] && [ -n "$TOK" ]; then
-        ME="$(curl -s -m 15 -u "$EMAIL:$TOK" "$SITE/rest/api/2/myself" | jq -r '.displayName // empty' 2>/dev/null)"
-        if [ -n "$ME" ]; then
-            ok "login OK ($ME) — $SITE"
-        else
-            bad "login failed against $SITE (check token / network)"
-        fi
+    for s in jira_poll.py jira_api.py jira_config.py jira_status.py; do
+        if [ -f "$WS_ROOT/jira/$s" ]; then ok "script: $WS_ROOT/jira/$s"; else bad "jira/$s missing"; fi
+    done
+    CHECK="$("$PY" "$WS_ROOT/jira/jira_config.py" --check 2>/dev/null)"
+    jf() { printf '%s' "$1" | jq -r "$2" 2>/dev/null; }
+    if [ "$(jf "$CHECK" '.exists')" = "true" ]; then
+        ok "config: $CONF_JSON"
+        MODE="$(stat -f '%Lp' "$CONF_JSON" 2>/dev/null)"
+        [ "$MODE" = "600" ] || warn "config mode is $MODE (expected 600): chmod 600 $CONF_JSON"
     else
-        warn "skipped (config incomplete)"
+        bad "config missing: $CONF_JSON (menu: Jira Poll ▸ Setup…, or jira_api.py --init)"
+    fi
+    if [ "$(jf "$CHECK" '.ok')" = "true" ]; then
+        ok "config valid ($(jf "$CHECK" '.site'), $(jf "$CHECK" '.endpoints | length') endpoint(s))"
+    else
+        jf "$CHECK" '.problems[]?' | while IFS= read -r p; do bad "config: $p"; done
+    fi
+    jf "$CHECK" '.notes[]?' | while IFS= read -r n; do warn "config note: $n"; done
+    ME="$("$PY" "$WS_ROOT/jira/jira_api.py" --myself 2>/dev/null | jq -r '.displayName // empty' 2>/dev/null)"
+    if [ -n "$ME" ]; then
+        ok "login OK ($ME) — $(jf "$CHECK" '.site')"
+    else
+        bad "login failed against $(jf "$CHECK" '.site') (check token / network; see $CACHE/curl.log)"
     fi
     if [ -f "$CACHE/jiras.json" ]; then
-        N="$(jq 'length' "$CACHE/jiras.json" 2>/dev/null)"
-        ok "cache: $CACHE/jiras.json ($N issues)"
+        ok "cache: $CACHE/jiras.json ($(jq 'length' "$CACHE/jiras.json" 2>/dev/null) issues)"
     else
-        bad "cache missing: $CACHE/jiras.json (run: jira-api --sync full)"
+        bad "cache missing: $CACHE/jiras.json (run: jira_poll.py --init --force)"
     fi
-    if [ -f "$JSON_DIR/all.json" ]; then
-        ok "window json: $JSON_DIR/all.json (modified $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$JSON_DIR/all.json"))"
-    else
-        bad "window json missing: $JSON_DIR/all.json (run: jira-poll.sh)"
-    fi
-    for s in jira-api.sh jira-poll.sh; do
-        if [ -x "$WS_ROOT/jira/$s" ]; then ok "jira/$s present"; else bad "jira/$s missing or not executable"; fi
-    done
-    INTERVAL=600
+    PLIST_WANT="$(sed "s|__WS_CONFIG__|$HOME/.config/workspace-switcher|g" "$PLIST_SRC")"
     if [ -f "$PLIST_DST" ]; then
         ok "plist installed: $PLIST_DST"
-        if ! diff -q "$PLIST_SRC" "$PLIST_DST" >/dev/null 2>&1; then
+        if [ "$PLIST_WANT" != "$(cat "$PLIST_DST")" ]; then
             if [ "$FIX" = 1 ]; then
-                cp "$PLIST_SRC" "$PLIST_DST" && ok "plist refreshed from repo (--fix)"
+                printf '%s\n' "$PLIST_WANT" > "$PLIST_DST" && ok "plist refreshed from repo (--fix)"
+                launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null
+                launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null
             else
                 warn "installed plist differs from repo copy (jira-doctor --fix)"
             fi
         fi
     else
         if [ "$FIX" = 1 ]; then
-            mkdir -p "$HOME/Library/LaunchAgents" && cp "$PLIST_SRC" "$PLIST_DST" \
+            mkdir -p "$HOME/Library/LaunchAgents" && printf '%s\n' "$PLIST_WANT" > "$PLIST_DST" \
                 && ok "plist installed (--fix): $PLIST_DST"
         else
             bad "plist not installed (jira-doctor --fix installs it)"
         fi
     fi
-    INTERVAL="$(plutil -extract StartInterval raw "$PLIST_SRC" 2>/dev/null || echo 600)"
     if launchctl list "$LABEL" >/dev/null 2>&1; then
-        ok "agent loaded: $LABEL"
+        ok "agent loaded: $LABEL (ticks every $(plutil -extract StartInterval raw "$PLIST_SRC" 2>/dev/null || echo 60)s)"
     else
         if [ "$FIX" = 1 ]; then
             if launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null \
@@ -312,36 +314,45 @@ if [ "$JIRA_ENABLED" = "true" ]; then
             bad "agent NOT loaded — polling is dead (jira-doctor --fix loads it)"
         fi
     fi
-    LAST_POLL=""; PSTATUS=""
-    if [ -f "$STATE" ]; then
-        LAST_POLL="$(grep '^LAST_POLL=' "$STATE" | cut -d= -f2-)"
-        PSTATUS="$(grep '^STATUS=' "$STATE" | cut -d= -f2-)"
-        ITEMS="$(grep '^ITEMS=' "$STATE" | cut -d= -f2-)"
-        if [ -n "$LAST_POLL" ]; then
-            ok "last run: $LAST_POLL (status=${PSTATUS:-?}, items=${ITEMS:-?})"
-            LAST_EPOCH="$(date -j -f '%Y-%m-%d %H:%M:%S' "$LAST_POLL" '+%s' 2>/dev/null || echo 0)"
-            if [ "$LAST_EPOCH" != 0 ]; then
-                NEXT_EPOCH=$((LAST_EPOCH + INTERVAL))
-                NOW_EPOCH="$(date '+%s')"
-                NEXT_HUMAN="$(date -r "$NEXT_EPOCH" '+%Y-%m-%d %H:%M:%S')"
-                if [ "$NOW_EPOCH" -le "$NEXT_EPOCH" ]; then
-                    ok "next run: $NEXT_HUMAN (in $(( (NEXT_EPOCH - NOW_EPOCH) / 60 ))m, every ${INTERVAL}s)"
-                else
-                    OVERDUE=$(( (NOW_EPOCH - NEXT_EPOCH) / 60 ))
-                    if launchctl list "$LABEL" >/dev/null 2>&1; then
-                        warn "next run was $NEXT_HUMAN — ${OVERDUE}m overdue (launchd fires on wake/load)"
+    if [ -f "$STATUS" ]; then
+        S="$(cat "$STATUS")"
+        ok "status: $STATUS (updated $(jf "$S" '.updatedAt // "?"'))"
+        TOP="$(jf "$S" '.status // "?"')"
+        case "$TOP" in
+            ok|idle) ok "last run: $(jf "$S" '.lastRun // "never"') (status=$TOP)" ;;
+            disabled) warn "poller saw [jira] disabled at $(jf "$S" '.lastCheck // "?"') — agent ticked before the switch flipped" ;;
+            *) bad "last run: $(jf "$S" '.lastRun // "never"') status=$TOP — $(jf "$S" '.lastError // ""')" ;;
+        esac
+        [ "$(jf "$S" '.lock.held')" = "true" ] && warn "poll lock held by pid $(jf "$S" '.lock.pid') since $(jf "$S" '.lock.since')"
+        SK="$(jf "$S" '.lastSkipped.at // empty')"
+        [ -n "$SK" ] && ok "last overlap skipped cleanly at $SK (lock works)"
+        NOW_EPOCH="$(date '+%s')"
+        while IFS=$'\t' read -r name typ win en last nxt st items err; do
+            [ -n "$name" ] || continue
+            line="$name ($typ, every $win): last $last, next $nxt, items=$items"
+            if [ "$en" = "false" ]; then ok "endpoint $line [disabled]"; continue; fi
+            case "$st" in
+                ok|running)
+                    NX="$(date -j -f '%Y-%m-%d %H:%M:%S' "$nxt" '+%s' 2>/dev/null || echo 0)"
+                    if [ "$NX" != 0 ] && [ $((NOW_EPOCH - NX)) -gt 180 ]; then
+                        warn "endpoint $line — $(( (NOW_EPOCH - NX) / 60 ))m overdue (agent loaded? machine asleep?)"
                     else
-                        bad "next run was $NEXT_HUMAN — ${OVERDUE}m overdue and the agent is not loaded"
-                    fi
-                fi
-                AGE=$(( (NOW_EPOCH - LAST_EPOCH) / 60 ))
-                [ "$AGE" -gt $((INTERVAL * 3 / 60)) ] && warn "last run was ${AGE}m ago (> 3 intervals)"
-            fi
-        else
-            bad "poll-state has no LAST_POLL"
-        fi
+                        ok "endpoint $line"
+                    fi ;;
+                *) bad "endpoint $line status=$st — $err" ;;
+            esac
+        done < <(jf "$S" '.endpoints[]? | [.name, .type, .window, (.enabled|tostring), (.lastRun // "never"), (.nextRun // "-"), (.status // "?"), ((.items // "-")|tostring), (.lastError // "")] | @tsv')
+        for f in $(jf "$S" '.endpoints[]? | select(.enabled != false) | .path // empty'); do
+            if [ -f "$f" ]; then ok "window json: $f"; else bad "window json missing: $f"; fi
+        done
     else
-        bad "poll-state missing: $STATE (agent has never run)"
+        bad "status missing: $STATUS (the poller has never run: jira_poll.py --force)"
+    fi
+    if [ -f "$CACHE/curl.log" ]; then
+        ok "curl log: $CACHE/curl.log (last 3 requests, token masked here):"
+        tail -3 "$CACHE/curl.log" | sed -E 's/(-u [^ :]+:)[^ ]+/\1****/; s/^/          /'
+    else
+        warn "curl log missing: $CACHE/curl.log (no API request made yet)"
     fi
     if [ -f "$WS_ROOT/jira_icon.png" ]; then
         ok "jira icon asset: $WS_ROOT/jira_icon.png"
@@ -350,6 +361,10 @@ if [ "$JIRA_ENABLED" = "true" ]; then
     fi
 else
     ok "jira disabled in commands.conf ([jira] enabled = false) — jira checks skipped"
+    # the menu-bar switch leaves jira disabled when its login test fails —
+    # say why, so "I clicked enable and nothing happened" is answerable here
+    EE="$(jq -r '.enableError | select(. != null) | "\(.at): \(.message)"' "$STATUS" 2>/dev/null)"
+    [ -n "$EE" ] && bad "last menu-bar enable attempt failed ($EE) — Jira Poll ▸ Setup…"
 fi
 
 # ---------------------------------------------------------------- summary
