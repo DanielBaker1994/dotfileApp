@@ -6840,17 +6840,37 @@ private func scrollSelectionIntoView() {
     // after Ctrl+J/K cycles.
     private func updateFocusedPane() {
         let fr = panel.firstResponder
+        // Evaluate every pane independently — the browser branch must not
+        // gate the terminal check. The notes window opens with the file
+        // browser drawer (start-drawer = browser), so the old else-if chain
+        // entered the browser branch on EVERY click and never reached the
+        // terminal branch: clicking the shell drawer focused the shell (keys
+        // worked) but the focus border stayed on whatever pane was last.
+        var inVim = false
         if let vv = vimView, vimPaneActive, fr === vv || (fr as? NSView)?.isDescendant(of: vv) == true {
-            focusedPane = .editor
-        } else if let ed = editorView, fr === ed || (fr as? NSTextView)?.isDescendant(of: ed) == true {
-            focusedPane = .editor
-        } else if fileBrowserShown, let fb = fileBrowser {
+            inVim = true
+        }
+        var inEditor = false
+        if let ed = editorView, fr === ed || (fr as? NSTextView)?.isDescendant(of: ed) == true {
+            inEditor = true
+        }
+        var inBrowser = false
+        if fileBrowserShown, let fb = fileBrowser {
             let lv = fb.listView
             if fr === lv || (fr as? NSView)?.isDescendant(of: lv) == true {
-                focusedPane = .browser
+                inBrowser = true
             }
-        } else if terminalShown, let term = terminalDrawer,
-                  (fr === term || (fr as? NSView)?.isDescendant(of: term) == true) {
+        }
+        var inTerminal = false
+        if terminalShown, let term = terminalDrawer,
+           fr === term || (fr as? NSView)?.isDescendant(of: term) == true {
+            inTerminal = true
+        }
+        if inVim || inEditor {
+            focusedPane = .editor
+        } else if inBrowser {
+            focusedPane = .browser
+        } else if inTerminal {
             focusedPane = .terminal
         }
         updateFocusIndicator()
