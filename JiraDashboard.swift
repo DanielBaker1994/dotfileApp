@@ -6,37 +6,81 @@ import AppKit
 // `workspace-switcher jira-poll dashboard`). Master–detail:
 //
 //   sidebar          POLL JOBS  (each endpoint in config.json, + Add Poll Job)
-//                    SEARCHES   (saved searches, + Add Search)
-//                    SETTINGS   (Connection, Known Columns)
+//                    SETTINGS   (Live Search, Connection, Definitions)
 //   detail           the selected item's editor
 //
-// Poll job / search editor: its settings, ITS OWN columns (each job writes
-// one tab of the Jira window and owns that tab's table), the full JQL and the
-// full curl of every request (Copy curl), Save / Revert / Delete, and Force
-// Poll (jobs; warns when a poll is already running) or Run (searches: the
-// results become a search-<name>.json tab).
+// Poll job editor: its settings (projects from a picker, page size / max
+// issues), ITS OWN columns (each job writes one tab of the Jira window and
+// owns that tab's table), the full JQL and the full curl of every request
+// (Copy curl), Save / Revert / Delete, and Force Poll (warns when a poll is
+// already running). The `directory` job caches projects + users + statuses
+// for the pickers (weekly; no tab).
+// Live Search: the Cmd+F search tab's columns + max results.
+// Definitions: everything team.json defines (projects, custom fields, API
+// endpoints, JQL templates, search defaults) — add / edit (double-click) /
+// remove — plus read-only views of the cached users / statuses / columns.
 //
-// Everything shown comes from ONE python call — `jira_poll.py --describe` —
-// and every edit goes through jira_config.py (--upsert-* / --delete-* /
-// --set-columns), which validates before writing config.json. Config stays
-// the source of truth; the window is a view + editor over it.
+// Everything shown comes from ONE python call — `jira_poll.py --describe`
+// (+ directory.json) — and every edit goes through jira_config.py
+// (--upsert-endpoint / --delete-endpoint / --set-columns / --set-live-search
+// / --team-set), which validates before writing. Config stays the source of
+// truth; the window is a view + editor over it.
 // Sizes / refresh: [jira] dashboard-width, dashboard-height, dashboard-refresh.
 
-// One column list editor (a job's or a search's columns).
-final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+// A label/control form in an NSAlert sheet (the window floats above the
+// popups: an app-modal alert would open hidden behind it). `then(true)` =
+// the first button.
+func jiraFormSheet(on window: NSWindow, title: String, info: String, rows: [(String, NSView)],
+                   ok: String = "Save", first: NSView? = nil, then: @escaping (Bool) -> Void) {
+    let g = NSGridView(views: rows.map { r -> [NSView] in
+        let l = NSTextField(labelWithString: r.0)
+        l.alignment = .right
+        l.textColor = .secondaryLabelColor
+        return [l, r.1]
+    })
+    g.rowSpacing = 8
+    g.columnSpacing = 10
+    g.column(at: 0).xPlacement = .trailing
+    g.rowAlignment = .firstBaseline
+    for (_, v) in rows where v is NSTextField || v is JiraMultiPicker {
+        v.widthAnchor.constraint(greaterThanOrEqualToConstant: 340).isActive = true
+    }
+    g.layoutSubtreeIfNeeded()
+    g.setFrameSize(NSSize(width: max(460, g.fittingSize.width), height: g.fittingSize.height))
+    let a = NSAlert()
+    a.messageText = title
+    a.informativeText = info
+    a.accessoryView = g
+    a.addButton(withTitle: ok)
+    a.addButton(withTitle: "Cancel")
+    a.window.initialFirstResponder = first ?? rows.first?.1
+    a.beginSheetModal(for: window) { r in then(r == .alertFirstButtonReturn) }
+}
+
+// One column list editor (a job's or the live search's columns). Rows are
+// read-only; double-click (or Edit…, or Return) opens the column's sheet.
+final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     var cols: [ListColumn] = [] { didSet { table.reloadData() } }
     var meta: [String: [String: Any]] = [:]      // field -> catalog entry (apiFields, label)
+    var catalogFields: [String] = []
     var onChange: (() -> Void)?
+    weak var sheetWindow: NSWindow?
     let table = NSTableView()
-    let addField = NSComboBox()
     let copyFrom = NSPopUpButton(frame: .zero, pullsDown: true)
     var copySources: [(String, String)] = []     // (menu title, columns spec)
     private(set) var view = NSView()
 
     private static let spec: [(id: String, title: String, width: CGFloat)] = [
-        ("field", "Field", 130), ("title", "Title", 120), ("width", "Width %", 58),
-        ("align", "Align", 78), ("sort", "Sort", 38), ("filter", "Filter", 42),
-        ("api", "Fetches (API field)", 150), ("label", "Custom field label", 150),
+        ("title", "Column", 150), ("field", "Field (what is fetched)", 260), ("width", "Width %", 62),
+        ("align", "Align", 58), ("sort", "Sort", 40), ("filter", "Filter", 44),
+    ]
+    // window fields the poller derives from Jira fields (jira_config FIELD_SOURCES)
+    static let baseNames: [String: String] = [
+        "key": "Issue key", "title": "Summary", "status": "Status", "assignee": "Assignee",
+        "reporter": "Reporter", "priority": "Priority", "labels": "Labels", "description": "Description",
+        "project": "Project", "updated": "Updated", "release": "Fix versions",
+        "releaseLabel": "Fix versions + dates", "releaseDate": "Release date",
+        "releaseStatus": "Released / Upcoming", "comments": "Comments",
     ]
 
     override init() {
@@ -50,22 +94,21 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         }
         table.dataSource = self
         table.delegate = self
-        table.rowHeight = 24
+        table.rowHeight = 22
         table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.target = self
+        table.doubleAction = #selector(editClicked(_:))
         let sv = NSScrollView()
         sv.documentView = table
         sv.hasVerticalScroller = true
         sv.hasHorizontalScroller = true
         sv.borderType = .bezelBorder
 
-        addField.placeholderString = "add a field (created, duedate, customfield_10010, …)"
-        addField.completes = true
-        addField.target = self
-        addField.action = #selector(add(_:))
         copyFrom.addItem(withTitle: "Copy columns from…")
         copyFrom.target = self
         copyFrom.action = #selector(copyColumns(_:))
+        copyFrom.controlSize = .small
         func btn(_ t: String, _ a: Selector, _ tip: String? = nil) -> NSButton {
             let b = NSButton(title: t, target: self, action: a)
             b.bezelStyle = .rounded
@@ -73,16 +116,16 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
             b.toolTip = tip
             return b
         }
-        copyFrom.controlSize = .small
-        addField.controlSize = .small
-        let bar = NSStackView(views: [addField, btn("Add", #selector(add(_:))),
+        let hint = NSTextField(labelWithString: "Double-click a column to edit it")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .tertiaryLabelColor
+        let bar = NSStackView(views: [btn("Add…", #selector(add(_:))), btn("Edit…", #selector(editClicked(_:))),
                                       btn("Remove", #selector(remove(_:))),
                                       btn("◀", #selector(up(_:)), "Move left"),
-                                      btn("▶", #selector(down(_:)), "Move right"), copyFrom])
+                                      btn("▶", #selector(down(_:)), "Move right"), copyFrom, hint])
         bar.orientation = .horizontal
         bar.spacing = 6
         bar.setHuggingPriority(.required, for: .vertical)
-        addField.widthAnchor.constraint(equalToConstant: 280).isActive = true
         let stack = NSStackView(views: [sv, bar])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -96,14 +139,23 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 
     func setCatalog(_ fields: [String], sources: [(String, String)]) {
-        addField.removeAllItems()
-        addField.addItems(withObjectValues: fields.filter { f in !cols.contains { $0.field == f } })
+        catalogFields = fields
         copySources = sources
         while copyFrom.numberOfItems > 1 { copyFrom.removeItem(at: 1) }
         for (t, _) in sources { copyFrom.addItem(withTitle: t) }
     }
 
     private func changed() { table.reloadData(); onChange?() }
+
+    // "Summary" / "Package Information" + the Jira field(s) it fetches
+    func fieldName(_ f: String) -> String {
+        let m = meta[f] ?? [:]
+        return (m["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? Self.baseNames[f] ?? ""
+    }
+    func apiText(_ f: String) -> String {
+        let api = (meta[f]?["apiFields"] as? [String]).map { $0.isEmpty ? "(no API field)" : $0.joined(separator: ", ") } ?? f
+        return api == f ? "" : api
+    }
 
     // MARK: table
     func numberOfRows(in tableView: NSTableView) -> Int { cols.count }
@@ -120,106 +172,100 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         return c
     }
 
-    private func label(_ s: String, dim: Bool = false, mono: Bool = false) -> NSTextField {
-        let f = NSTextField(labelWithString: s)
-        f.lineBreakMode = .byTruncatingTail
-        if dim { f.textColor = .secondaryLabelColor }
-        if mono { f.font = .monospacedSystemFont(ofSize: 11, weight: .regular) }
-        f.toolTip = s
-        return f
-    }
-
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let id = tableColumn?.identifier.rawValue, row < cols.count else { return nil }
         let c = cols[row]
-        func edit(_ s: String, _ tag: String) -> NSView {
-            let f = NSTextField(string: s)
-            f.isBordered = false
-            f.drawsBackground = false
-            f.identifier = NSUserInterfaceItemIdentifier(tag)
-            f.tag = row
-            f.delegate = self
-            return cell(f)
-        }
-        func check(_ on: Bool, _ tag: String) -> NSView {
-            let b = NSButton(checkboxWithTitle: "", target: self, action: #selector(flag(_:)))
-            b.state = on ? .on : .off
-            b.identifier = NSUserInterfaceItemIdentifier(tag)
-            b.tag = row
-            return cell(b)
-        }
-        let m = meta[c.field] ?? [:]
+        let l = NSTextField(labelWithString: "")
+        l.lineBreakMode = .byTruncatingTail
         switch id {
-        case "field": return cell(label(c.field, mono: true))
-        case "title": return edit(c.title, "title")
-        case "width": return edit(c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width), "width")
-        case "align":
-            let p = NSPopUpButton(frame: .zero, pullsDown: false)
-            p.controlSize = .small
-            p.addItems(withTitles: ["left", "center", "right"])
-            p.selectItem(withTitle: c.align)
-            p.tag = row
-            p.target = self
-            p.action = #selector(align(_:))
-            return cell(p)
-        case "sort": return check(c.sortable, "sort")
-        case "filter": return check(c.filterable, "filter")
-        case "api":
-            let api = (m["apiFields"] as? [String]).map { $0.isEmpty ? "(key)" : $0.joined(separator: ", ") }
-            return cell(label(api ?? c.field, dim: true, mono: true))
-        case "label": return cell(label(m["label"] as? String ?? "", dim: true))
+        case "title": l.stringValue = c.title
+        case "field":
+            let s = NSMutableAttributedString(string: c.field, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor])
+            let extra = [fieldName(c.field), apiText(c.field)].filter { !$0.isEmpty && $0 != c.field }
+            if !extra.isEmpty {
+                s.append(NSAttributedString(string: "  " + extra.joined(separator: " · "), attributes: [
+                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+            l.attributedStringValue = s
+        case "width": l.stringValue = c.width == 0 ? "auto" : (c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width))
+        case "align": l.stringValue = c.align
+        case "sort": l.stringValue = c.sortable ? "✓" : ""
+        case "filter": l.stringValue = c.filterable ? "✓" : ""
         default: return nil
         }
+        if id == "width" || id == "align" { l.textColor = .secondaryLabelColor }
+        l.toolTip = id == "field" ? "\(c.field) — \(fieldName(c.field)) \(apiText(c.field))" : l.stringValue
+        return cell(l)
     }
 
-    // commit a title / width edit (Return, Tab or focus loss)
-    func controlTextDidEndEditing(_ obj: Notification) {
-        guard let f = obj.object as? NSTextField, f.tag < cols.count else { return }
-        let r = f.tag
-        let v = f.stringValue.trimmingCharacters(in: .whitespaces)
-        switch f.identifier?.rawValue {
-        case "title":
+    // MARK: edit sheet
+
+    @objc func editClicked(_ sender: Any?) {
+        let r = sender is NSTableView ? table.clickedRow : table.selectedRow
+        guard r >= 0, r < cols.count else { return }
+        editSheet(r)
+    }
+    func editSelected() { editClicked(nil) }
+
+    @objc func add(_ sender: Any?) { editSheet(nil) }
+
+    private func editSheet(_ index: Int?) {
+        guard let win = sheetWindow else { return }
+        let c = index.map { cols[$0] }
+            ?? ListColumn(field: "", title: "", width: 0, align: "left", sortable: true, filterable: true)
+        let field = NSComboBox()
+        field.addItems(withObjectValues: catalogFields.filter { f in f == c.field || !cols.contains { $0.field == f } })
+        field.completes = true
+        field.numberOfVisibleItems = 14
+        field.stringValue = c.field
+        field.placeholderString = "created, duedate, customfield_10010, a team alias…"
+        let title = NSTextField(string: index == nil ? "" : c.title)
+        title.placeholderString = "header text (defaults to the field's name)"
+        let width = NSTextField(string: c.width == 0 ? "" : String(format: c.width == c.width.rounded() ? "%.0f" : "%.1f", c.width))
+        width.placeholderString = "percent of the row — empty = share the leftover"
+        let align = NSPopUpButton(frame: .zero, pullsDown: false)
+        align.addItems(withTitles: ["left", "center", "right"])
+        align.selectItem(withTitle: c.align)
+        let sort = NSButton(checkboxWithTitle: "Sortable — click the header to sort", target: nil, action: nil)
+        sort.state = c.sortable ? .on : .off
+        let filter = NSButton(checkboxWithTitle: "Filterable — a dropdown of its values in the window", target: nil, action: nil)
+        filter.state = c.filterable ? .on : .off
+        let info = "Field = what the poll fetches from Jira and shows (a window field like title, a "
+            + "team.json custom field alias, or a raw Jira field id). Column = the header text."
+        jiraFormSheet(on: win, title: index == nil ? "Add Column" : "Edit Column “\(c.title)”", info: info,
+                      rows: [("Field", field), ("Column", title), ("Width %", width), ("Align", align),
+                             ("", sort), ("", filter)],
+                      first: index == nil ? field : title) { [weak self] ok in
+            guard ok, let self else { return }
             // ':' and ',' are the columns-line separators
-            let t = v.replacingOccurrences(of: ":", with: " ").replacingOccurrences(of: ",", with: " ")
-            let nt = t.isEmpty ? cols[r].field : t
-            guard nt != cols[r].title else { return }
-            cols[r].title = nt
-        case "width":
-            guard let w = Double(v), w >= 0, w <= 100 else { table.reloadData(); return }
-            guard CGFloat(w) != cols[r].width else { return }
-            cols[r].width = CGFloat(w)
-        default: return
+            func clean(_ s: String) -> String {
+                s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ":", with: " ")
+                    .replacingOccurrences(of: ",", with: " ")
+            }
+            let f = clean(field.stringValue).replacingOccurrences(of: " ", with: "")
+            guard !f.isEmpty else { NSSound.beep(); return }
+            if self.cols.enumerated().contains(where: { $0.offset != index && $0.element.field == f }) {
+                NSSound.beep()
+                return
+            }
+            var nc = c
+            nc.field = f
+            let t = clean(title.stringValue)
+            nc.title = t.isEmpty ? (self.fieldName(f).isEmpty ? f : self.fieldName(f)) : t
+            nc.width = CGFloat(min(100, max(0, Double(width.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0)))
+            nc.align = align.titleOfSelectedItem ?? "left"
+            nc.sortable = sort.state == .on
+            nc.filterable = filter.state == .on
+            let at: Int
+            if let i = index { self.cols[i] = nc; at = i } else { self.cols.append(nc); at = self.cols.count - 1 }
+            self.changed()
+            self.table.selectRowIndexes(IndexSet(integer: at), byExtendingSelection: false)
+            self.table.scrollRowToVisible(at)
         }
-        changed()
     }
 
-    @objc private func flag(_ b: NSButton) {
-        guard b.tag < cols.count else { return }
-        if b.identifier?.rawValue == "sort" { cols[b.tag].sortable = b.state == .on }
-        else { cols[b.tag].filterable = b.state == .on }
-        changed()
-    }
-
-    @objc private func align(_ p: NSPopUpButton) {
-        guard p.tag < cols.count, let a = p.titleOfSelectedItem else { return }
-        cols[p.tag].align = a
-        changed()
-    }
-
-    @objc func add(_ sender: Any?) {
-        let f = addField.stringValue.trimmingCharacters(in: .whitespaces)
-            .replacingOccurrences(of: ":", with: "").replacingOccurrences(of: ",", with: "")
-        guard !f.isEmpty, !cols.contains(where: { $0.field == f }) else { return }
-        let lbl = (meta[f]?["label"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        let title = lbl ?? ((meta[f]?["titles"] as? [String])?.first ?? f)
-        cols.append(ListColumn(field: f, title: title, width: 0, align: "left", sortable: true, filterable: true))
-        addField.stringValue = ""
-        table.selectRowIndexes(IndexSet(integer: cols.count - 1), byExtendingSelection: false)
-        table.scrollRowToVisible(cols.count - 1)
-        changed()
-    }
-
-    @objc private func remove(_ sender: Any?) {
+    @objc func remove(_ sender: Any?) {
         let r = table.selectedRow
         guard r >= 0, r < cols.count, cols.count > 1 else { return }
         cols.remove(at: r)
@@ -249,7 +295,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private static var live: JiraDashboardWindow?
 
     private enum Item: Equatable {
-        case group(String), job(String), addJob, search(String), addSearch, connection, known
+        case group(String), job(String), addJob, liveSearch, connection, definitions
     }
 
     private weak var controller: SwitcherController?
@@ -258,11 +304,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private var timer: Timer?
     private var describing = false
 
-    // data (jira_poll.py --describe)
+    // data (jira_poll.py --describe + directory.json)
     private var info: [String: Any] = [:]
     private var eps: [[String: Any]] = []
-    private var srs: [[String: Any]] = []
     private var catalog: [[String: Any]] = []
+    private var dir = JiraDirectory()
     private var items: [Item] = []
     private var current: Item = .connection
     private var didInitialSelect = false
@@ -278,22 +324,21 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let sidebar = NSTableView()
     private let detailHost = NSView()
 
-    // editor state (job or search)
+    // job editor state
     private var isNew = false
     private var dirty = false
-    private var isSearch = false
     private let colEditor = JiraColumnEditor()
     private let nameField = NSTextField()
     private let fileLabel = NSTextField(labelWithString: "")
     private let typePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let everyBox = NSComboBox()
-    private let projectsField = NSTextField()
+    private let projectsPicker = JiraMultiPicker(noun: "project", allTitle: "All projects")
     private let queryPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let jqlField = NSTextField()
     private let argsField = NSTextField()
+    private let pageSizeField = NSTextField()
+    private let maxTotalField = NSTextField()
     private let enabledCheck = NSButton(checkboxWithTitle: "Scheduled (poll on its interval)", target: nil, action: nil)
-    private let kindPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let valueField = NSTextField()
     private let editorStatus = NSTextField(wrappingLabelWithString: "")
     private let editorMsg = NSTextField(wrappingLabelWithString: "")
     private let requestText = NSTextView()
@@ -302,11 +347,28 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
     private let actionButton = NSButton(title: "Force Poll", target: nil, action: nil)
     private let copyCurlButton = NSButton(title: "Copy curl", target: nil, action: nil)
+    private var colsTitle = NSTextField(labelWithString: "")
+    private let liveMaxField = NSTextField()
 
-    // connection / known columns
+    // connection / definitions
     private let connText = NSTextView()
     private let connResult = NSTextField(wrappingLabelWithString: "")
-    private let knownTable = NSTableView()
+    private enum DefTab: String, CaseIterable {
+        case projects = "Projects", customFields = "Custom Fields", columns = "Columns", users = "Users",
+             lists = "Statuses & Types", api = "API Endpoints", jql = "JQL Templates", defaults = "Search Defaults"
+        var editable: Bool { ![.columns, .users, .lists].contains(self) }
+    }
+    private var defTab: DefTab = .projects
+    private let defSeg = NSSegmentedControl()
+    private let defTable = NSTableView()
+    private var defRows: [[String]] = []
+    private var defKeys: [String] = []           // row -> team.json key / alias / project key
+    private let defHint = NSTextField(wrappingLabelWithString: "")
+    private let defMsg = NSTextField(wrappingLabelWithString: "")
+    private let defAdd = NSButton(title: "Add…", target: nil, action: nil)
+    private let defEdit = NSButton(title: "Edit…", target: nil, action: nil)
+    private let defRemove = NSButton(title: "Remove", target: nil, action: nil)
+    private let defFetch = NSButton(title: "Fetch from Jira now", target: nil, action: nil)
 
     static func show(controller: SwitcherController) {
         if let w = live {
@@ -341,6 +403,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         window.delegate = self
         window.contentView = buildContent()
         colEditor.onChange = { [weak self] in self?.markDirty() }
+        colEditor.sheetWindow = window
         installKeys()
     }
 
@@ -408,6 +471,13 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         return l
     }
 
+    private func hint(_ s: String) -> NSTextField {
+        let l = NSTextField(wrappingLabelWithString: s)
+        l.font = .systemFont(ofSize: 11)
+        l.textColor = .secondaryLabelColor
+        return l
+    }
+
     private func buildContent() -> NSView {
         let content = NSView()
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -471,24 +541,27 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         ])
         DispatchQueue.main.async { split.setPosition(210, ofDividerAt: 0) }
         setupEditorControls()
+        setupDefinitions()
         return content
     }
 
     private func setupEditorControls() {
-        typePopup.addItems(withTitles: ["issues", "releases"])
+        typePopup.addItems(withTitles: ["issues", "releases", "directory"])
         everyBox.addItems(withObjectValues: JiraPoll.intervals)
         everyBox.completes = true
-        projectsField.placeholderString = "*  (all)   or   KEY1, KEY2"
         jqlField.placeholderString = "extra JQL, ANDed with the time window (e.g. assignee = currentUser())"
         argsField.placeholderString = "name=value, name=value"
-        valueField.placeholderString = "value"
-        for f in [nameField, projectsField, jqlField, argsField, valueField, everyBox] as [NSTextField] {
+        maxTotalField.placeholderString = "empty = every matching issue"
+        liveMaxField.placeholderString = "100"
+        projectsPicker.placeholder = "All projects"
+        projectsPicker.onChange = { [weak self] in self?.markDirty() }
+        for f in [nameField, jqlField, argsField, everyBox, pageSizeField, maxTotalField, liveMaxField] as [NSTextField] {
             NotificationCenter.default.addObserver(self, selector: #selector(textDidChange(_:)),
                                                    name: NSControl.textDidChangeNotification, object: f)
         }
         everyBox.target = self
         everyBox.action = #selector(fieldChanged(_:))
-        for p in [typePopup, queryPopup, kindPopup] {
+        for p in [typePopup, queryPopup] {
             p.target = self
             p.action = #selector(popupChanged(_:))
         }
@@ -509,11 +582,16 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     private func installKeys() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self, self.window.isKeyWindow, self.window.attachedSheet == nil else { return e }
+            guard let self else { return e }
+            // a sheet (column / definition editor) is its own key window
+            if let sheet = self.window.attachedSheet {
+                return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
+            }
+            guard self.window.isKeyWindow else { return e }
             let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let cmd = mods.contains(.command), ctrl = mods.contains(.control)
-            let editing = self.window.firstResponder is NSTextView
-                && (self.window.firstResponder as? NSTextView)?.isEditable == true
+            let cmd = mods.contains(.command)
+            let fr = self.window.firstResponder
+            let editing = (fr as? NSTextView)?.isEditable == true
             if e.keyCode == 53 {                       // Esc: end an edit, else close
                 if editing { self.window.makeFirstResponder(nil); return nil }
                 self.close()
@@ -522,16 +600,16 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             if cmd && e.keyCode == 13 { self.close(); return nil }           // Cmd+W
             if cmd && e.keyCode == 15 { self.refresh(); return nil }         // Cmd+R
             if cmd && e.keyCode == 1 { self.save(nil); return nil }          // Cmd+S
-            guard cmd || ctrl, let ed = self.window.firstResponder as? NSText else { return e }
-            switch e.keyCode {
-            case 9: ed.paste(nil)                        // Cmd+V / Ctrl+V
-            case 8: ed.copy(nil)                         // Cmd+C / Ctrl+C
-            case 0 where cmd: ed.selectAll(nil)          // Cmd+A
-            case 7 where cmd: ed.cut(nil)                // Cmd+X
-            case 6 where cmd: ed.undoManager?.undo()     // Cmd+Z
-            default: return e
+            // Return edits / Delete removes the selected column or definition
+            if !cmd, fr === self.colEditor.table {
+                if e.keyCode == 36 { self.colEditor.editSelected(); return nil }
+                if e.keyCode == 51 { self.colEditor.remove(nil); return nil }
             }
-            return nil
+            if !cmd, fr === self.defTable, self.defTab.editable {
+                if e.keyCode == 36 { self.defEditClicked(nil); return nil }
+                if e.keyCode == 51 { self.defRemoveClicked(nil); return nil }
+            }
+            return JiraEditKeys.route(e, in: self.window) ? nil : e
         }
     }
 
@@ -565,13 +643,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func apply(_ d: [String: Any]) {
         info = d
         eps = d["endpoints"] as? [[String: Any]] ?? []
-        srs = d["searches"] as? [[String: Any]] ?? []
         catalog = d["catalog"] as? [[String: Any]] ?? []
+        let fetched = (d["directory"] as? [String: Any])?["fetchedAt"] as? String ?? ""
+        if fetched != dir.fetchedAt { dir = JiraDirectory.load() }
         var its: [Item] = [.group("POLL JOBS")]
         its += eps.compactMap { ($0["name"] as? String).map(Item.job) }
-        its += [.addJob, .group("SEARCHES")]
-        its += srs.compactMap { ($0["name"] as? String).map(Item.search) }
-        its += [.addSearch, .group("SETTINGS"), .connection, .known]
+        its += [.addJob, .group("SETTINGS"), .liveSearch, .connection, .definitions]
         items = its
         sidebar.reloadData()
         if !didInitialSelect {
@@ -592,13 +669,14 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     private var lockHeld: Bool { (info["lock"] as? [String: Any])?["held"] as? Bool ?? false }
+    private var searchDefault: Int { (info["searchDefaults"] as? [String: Any])?["max_results_search"] as? Int ?? 50 }
 
     private func updateHeader() {
         let enabled = info["enabled"] as? Bool ?? jiraEnabledInConfig()
         let bg = info["backgroundPoll"] as? Bool ?? false
         let lock = info["lock"] as? [String: Any] ?? [:]
         var parts = [enabled ? "● Polling ON" : bg ? "◐ Jira disabled — background polling" : "○ Polling OFF"]
-        parts.append("\(eps.count) job\(eps.count == 1 ? "" : "s") · \(srs.count) search\(srs.count == 1 ? "" : "es")")
+        parts.append("\(eps.count) job\(eps.count == 1 ? "" : "s")")
         parts.append("launchd tick \(info["tick"] as? String ?? "60s")")
         if let lr = info["lastRun"] as? String, !lr.isEmpty {
             parts.append("last run \(JiraPoll.short(lr)) \(info["status"] as? String ?? "")")
@@ -621,6 +699,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             ("Team schema (team.json)", info["teamPath"] as? String),
             ("commands.conf", info["commandsConf"] as? String),
             ("Poll status (status.json)", info["statusPath"] as? String ?? JiraPoll.statusPath),
+            ("Directory cache (directory.json)", JiraPoll.directoryPath),
             ("curl log", info["curlLog"] as? String ?? JiraPoll.curlLogPath),
         ]
         for (title, path) in files {
@@ -638,7 +717,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     // MARK: sidebar
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === sidebar ? items.count : catalog.count
+        tableView === sidebar ? items.count : defRows.count
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
@@ -664,7 +743,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView === knownTable { return knownCell(tableColumn?.identifier.rawValue ?? "", row) }
+        if tableView === defTable { return defCell(tableColumn?.identifier.rawValue ?? "", row) }
         guard row < items.count else { return nil }
         let c = NSTableCellView()
         let l = NSTextField(labelWithString: "")
@@ -682,20 +761,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             dot = statusColor(st)
             let off = (e["enabled"] as? Bool ?? true) ? "" : "  (off)"
             l.stringValue = "\(n)  ·  \(e["window"] as? String ?? "")\(off)"
-        case .search(let n):
-            let s = srs.first { $0["name"] as? String == n } ?? [:]
-            var st = s["status"] as? String ?? ""
-            if JiraPoll.running.contains("search:\(n)") { st = "running" }
-            dot = statusColor(st)
-            l.stringValue = n
         case .addJob:
             l.stringValue = "+ Add Poll Job"
             l.textColor = .controlAccentColor
-        case .addSearch:
-            l.stringValue = "+ Add Search"
-            l.textColor = .controlAccentColor
+        case .liveSearch: l.stringValue = "Live Search  ⌘F"
         case .connection: l.stringValue = "Connection"
-        case .known: l.stringValue = "Known Columns"
+        case .definitions: l.stringValue = "Definitions"
         }
         var views: [NSView] = []
         if let dot {
@@ -737,7 +808,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         guard dirty else { then(); return }
         let a = NSAlert()
         a.messageText = "Discard unsaved changes?"
-        a.informativeText = "The edits to this \(isSearch ? "search" : "poll job") are not saved."
+        a.informativeText = current == .liveSearch ? "The live search settings are not saved."
+            : "The edits to this poll job are not saved."
         a.addButton(withTitle: "Discard")
         a.addButton(withTitle: "Keep Editing")
         ask(a) { [weak self] ok in
@@ -757,25 +829,22 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func showItem(_ it: Item) {
         dirty = false
         switch it {
-        case .job(let n): showEditor(search: false, data: eps.first { $0["name"] as? String == n }, new: false)
-        case .search(let n): showEditor(search: true, data: srs.first { $0["name"] as? String == n }, new: false)
-        case .addJob: showEditor(search: false, data: nil, new: true)
-        case .addSearch: showEditor(search: true, data: nil, new: true)
+        case .job(let n): showEditor(data: eps.first { $0["name"] as? String == n }, new: false)
+        case .addJob: showEditor(data: nil, new: true)
+        case .liveSearch: showLiveSearch()
         case .connection: showConnection()
-        case .known: showKnown()
+        case .definitions: showDefinitions()
         case .group: break
         }
     }
 
     private var editingName: String? {
-        switch current {
-        case .job(let n), .search(let n): return n
-        default: return nil
-        }
+        if case .job(let n) = current { return n }
+        return nil
     }
     private var liveData: [String: Any]? {
         guard let n = editingName else { return nil }
-        return (isSearch ? srs : eps).first { $0["name"] as? String == n }
+        return eps.first { $0["name"] as? String == n }
     }
 
     // label/control form; controls keep their natural height
@@ -800,96 +869,79 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         cell.row?.isHidden = hidden
     }
 
-    private func setRowLabel(_ v: NSView, _ text: String) {
-        guard let g = gridView, let row = g.cell(for: v)?.row,
-              let l = row.cell(at: 0).contentView as? NSTextField else { return }
-        l.stringValue = text
+    private func columnSources(excluding me: String?) -> [(String, String)] {
+        var sources: [(String, String)] = [("[jira] columns (starter template)", info["columnsTemplate"] as? String ?? "")]
+        for e in eps where (e["name"] as? String) != me && (e["type"] as? String) != "directory" {
+            sources.append(("job: \(e["name"] as? String ?? "")", e["columnsSpec"] as? String ?? ""))
+        }
+        if me != "\u{0}live", let ls = info["liveSearch"] as? [String: Any] {
+            sources.append(("live search", ls["columnsSpec"] as? String ?? ""))
+        }
+        return sources
     }
 
-    private func showEditor(search: Bool, data: [String: Any]?, new: Bool) {
-        isSearch = search
+    private func loadColumns(_ spec: String?, me: String?) {
+        var meta: [String: [String: Any]] = [:]
+        for c in catalog { if let f = c["field"] as? String { meta[f] = c } }
+        colEditor.meta = meta
+        colEditor.cols = ListColumn.parse(spec ?? (info["columnsTemplate"] as? String ?? ""))
+        colEditor.setCatalog(info["availableFields"] as? [String] ?? [], sources: columnSources(excluding: me))
+    }
+
+    private func showEditor(data: [String: Any]?, new: Bool) {
         isNew = new
         let d = data ?? [:]
         nameField.stringValue = d["name"] as? String ?? ""
         nameField.isEditable = new
         nameField.isSelectable = true
-        nameField.placeholderString = search ? "e.g. my-reported" : "e.g. team-bugs"
-        let projects: String = {
-            if let p = d["projects"] as? [String] { return p.joined(separator: ", ") }
-            return search ? "" : "*"
-        }()
-        projectsField.stringValue = projects
-        let template = info["columnsTemplate"] as? String ?? ""
-        var meta: [String: [String: Any]] = [:]
-        for c in catalog { if let f = c["field"] as? String { meta[f] = c } }
-        colEditor.meta = meta
-        colEditor.cols = ListColumn.parse((d["columnsSpec"] as? String) ?? template)
-        let me = d["name"] as? String
-        var sources: [(String, String)] = [("[jira] columns (starter template)", template)]
-        for e in eps where search || (e["name"] as? String) != me {
-            sources.append(("job: \(e["name"] as? String ?? "")", e["columnsSpec"] as? String ?? ""))
-        }
-        for s in srs where !search || (s["name"] as? String) != me {
-            sources.append(("search: \(s["name"] as? String ?? "")", s["columnsSpec"] as? String ?? ""))
-        }
-        colEditor.setCatalog(info["availableFields"] as? [String] ?? [], sources: sources)
+        nameField.placeholderString = "e.g. team-bugs"
+        // projects: only known keys (directory ∪ team.json project_keys)
+        projectsPicker.options = dir.projectOptions(extra: info["projectKeys"] as? [String] ?? [])
+        if let p = d["projects"] as? [String] { projectsPicker.set(p) } else { projectsPicker.set([], all: true) }
+        loadColumns(d["columnsSpec"] as? String, me: d["name"] as? String)
 
-        var form: [(String, NSView)] = [("Name", nameField), ("Writes tab", fileLabel)]
-        if search {
-            kindPopup.removeAllItems()
-            let kinds = info["searchKinds"] as? [[String: Any]] ?? []
-            for k in kinds {
-                kindPopup.addItem(withTitle: k["label"] as? String ?? "")
-                kindPopup.lastItem?.representedObject = k
-            }
-            let kind = d["kind"] as? String ?? "text"
-            if let i = kinds.firstIndex(where: { $0["kind"] as? String == kind }) { kindPopup.selectItem(at: i) }
-            let args = d["args"] as? [String: Any] ?? [:]
-            let argName = selectedKind["arg"] as? String ?? "query"
-            valueField.stringValue = args[argName] as? String ?? ""
-            argsField.stringValue = args.filter { $0.key != argName }
-                .map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
-            form += [("Search by", kindPopup), ("Value", valueField),
-                     ("Projects", projectsField), ("Job args", argsField)]
-            actionButton.title = "Run"
-            actionButton.toolTip = "Run this search now — the results become its tab in the Jira window"
+        typePopup.selectItem(withTitle: d["type"] as? String ?? "issues")
+        everyBox.stringValue = d["window"] as? String ?? "30m"
+        enabledCheck.state = (d["enabled"] as? Bool ?? true) ? .on : .off
+        queryPopup.removeAllItems()
+        queryPopup.addItem(withTitle: "Everything updated in the window")
+        queryPopup.addItem(withTitle: "Custom JQL")
+        for j in info["teamJobs"] as? [String] ?? [] { queryPopup.addItem(withTitle: "team.json: \(j)") }
+        let job = d["job"] as? String ?? ""
+        let jql = d["extraJql"] as? String ?? ""
+        if !job.isEmpty, queryPopup.item(withTitle: "team.json: \(job)") != nil {
+            queryPopup.selectItem(withTitle: "team.json: \(job)")
+            jqlField.stringValue = ""
+        } else if !jql.isEmpty {
+            queryPopup.selectItem(at: 1)
+            jqlField.stringValue = jql
         } else {
-            typePopup.selectItem(withTitle: d["type"] as? String ?? "issues")
-            everyBox.stringValue = d["window"] as? String ?? "30m"
-            enabledCheck.state = (d["enabled"] as? Bool ?? true) ? .on : .off
-            queryPopup.removeAllItems()
-            queryPopup.addItem(withTitle: "Everything updated in the window")
-            queryPopup.addItem(withTitle: "Custom JQL")
-            for j in info["teamJobs"] as? [String] ?? [] { queryPopup.addItem(withTitle: "team.json: \(j)") }
-            let job = d["job"] as? String ?? ""
-            let jql = d["extraJql"] as? String ?? ""
-            if !job.isEmpty, queryPopup.item(withTitle: "team.json: \(job)") != nil {
-                queryPopup.selectItem(withTitle: "team.json: \(job)")
-                jqlField.stringValue = ""
-            } else if !jql.isEmpty {
-                queryPopup.selectItem(at: 1)
-                jqlField.stringValue = jql
-            } else {
-                queryPopup.selectItem(at: 0)
-                jqlField.stringValue = ""
-            }
-            argsField.stringValue = (d["args"] as? [String: Any] ?? [:])
-                .map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
-            form += [("Type", typePopup), ("Every", everyBox), ("", enabledCheck),
-                     ("Projects", projectsField), ("Query", queryPopup), ("JQL", jqlField),
-                     ("Job args", argsField)]
-            actionButton.title = "Force Poll"
-            actionButton.toolTip = "Poll this job now (warns if a poll is already running)"
+            queryPopup.selectItem(at: 0)
+            jqlField.stringValue = ""
         }
+        argsField.stringValue = (d["args"] as? [String: Any] ?? [:])
+            .map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
+        let ps = d["maxResults"] as? Int ?? 0, mt = d["maxTotal"] as? Int ?? 0
+        pageSizeField.stringValue = ps > 0 ? String(ps) : ""
+        pageSizeField.placeholderString = "\(searchDefault) — the default (team.json search_defaults.max_results_search)"
+        pageSizeField.toolTip = "maxResults of ONE search request; more pages follow until every issue is fetched"
+        maxTotalField.stringValue = mt > 0 ? String(mt) : ""
+        maxTotalField.toolTip = "Stop after this many issues (the newest updated first)"
+        let form: [(String, NSView)] = [
+            ("Name", nameField), ("Writes", fileLabel), ("Type", typePopup), ("Every", everyBox),
+            ("", enabledCheck), ("Projects", projectsPicker), ("Query", queryPopup), ("JQL", jqlField),
+            ("Job args", argsField), ("Page size", pageSizeField), ("Max issues", maxTotalField),
+        ]
+        actionButton.title = "Force Poll"
+        actionButton.toolTip = "Poll this job now (warns if a poll is already running)"
         // a control lives in one grid at a time: detach from the previous page
         for (_, v) in form { v.removeFromSuperview() }
         let g = grid(form)
         gridView = g
-        for (_, v) in form where v is NSTextField && v !== fileLabel {
+        for (_, v) in form where (v is NSTextField && v !== fileLabel) || v === projectsPicker {
             v.widthAnchor.constraint(greaterThanOrEqualToConstant: 380).isActive = true
         }
-        let colsTitle = sectionTitle("COLUMNS — this \(search ? "search's" : "job's") tab in the Jira window "
-                                     + "(and the fields it fetches)")
+        colsTitle = sectionTitle("COLUMNS — this job's tab in the Jira window (and the fields it fetches)")
         let reqTitle = sectionTitle("REQUEST — full JQL + curl (includes the token)")
         let reqSV = monoTextView(requestText)
         reqSV.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
@@ -916,62 +968,59 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         if new { window.makeFirstResponder(nameField) }
     }
 
-    private var selectedKind: [String: Any] { kindPopup.selectedItem?.representedObject as? [String: Any] ?? [:] }
+    private var selectedType: String { typePopup.titleOfSelectedItem ?? "issues" }
 
     private func updateFormVisibility() {
         let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        fileLabel.stringValue = name.isEmpty ? "(set a name)"
-            : (isSearch ? "search-\(name).json" : "\(name).json")
-        if isSearch {
-            let kind = selectedKind["kind"] as? String ?? ""
-            setRowLabel(valueField, selectedKind["argLabel"] as? String ?? "Value")
-            setRowHidden(argsField, kind != "job")
-            setRowHidden(projectsField, kind == "project" || kind == "jql")
-            valueField.placeholderString = kind == "jql" ? "project = ABC AND status = Open"
-                : kind == "job" ? "team.json job key" : "value"
-        } else {
-            let q = queryPopup.indexOfSelectedItem
-            let releases = typePopup.titleOfSelectedItem == "releases"
-            setRowHidden(queryPopup, releases)
-            setRowHidden(jqlField, releases || q != 1)
-            setRowHidden(argsField, releases || q < 2)
+        let type = selectedType
+        fileLabel.stringValue = type == "directory"
+            ? "~/.cache/jira/directory.json — projects, users, statuses for the pickers (no tab)"
+            : name.isEmpty ? "(set a name)" : "\(name).json"
+        let issues = type == "issues"
+        let q = queryPopup.indexOfSelectedItem
+        setRowHidden(queryPopup, !issues)
+        setRowHidden(jqlField, !issues || q != 1)
+        setRowHidden(argsField, !issues || q < 2)
+        setRowHidden(pageSizeField, !issues)
+        setRowHidden(maxTotalField, !issues)
+        colsTitle.isHidden = type == "directory"
+        colEditor.view.isHidden = type == "directory"
+        if let pr = gridView?.cell(for: projectsPicker)?.row,
+           let l = pr.cell(at: 0).contentView as? NSTextField {
+            l.stringValue = type == "directory" ? "Users of" : "Projects"
         }
     }
 
     // status line + request text from the latest describe (never touches the form)
     private func updateLive() {
         switch current {
-        case .job, .search, .addJob, .addSearch: break
+        case .job, .addJob: break
+        case .liveSearch, .group: return
         case .connection: updateConnection(); return
-        case .known: knownTable.reloadData(); return
-        case .group: return
+        case .definitions: reloadDefinitions(); return
         }
         sidebar.reloadData()
         if let i = items.firstIndex(of: current) {
             sidebar.selectRowIndexes(IndexSet(integer: i), byExtendingSelection: false)
         }
         guard let d = liveData, !isNew else {
-            editorStatus.stringValue = isSearch
-                ? "New search — choose what to search by, Save, then Run. The results become their own tab in the Jira window."
-                : "New poll job — give it a name, a schedule and a query, then Save. It becomes its own tab in the Jira window."
+            editorStatus.stringValue = "New poll job — give it a name, a schedule and a query, then Save. "
+                + "It becomes its own tab in the Jira window."
             editorStatus.textColor = .secondaryLabelColor
             requestText.string = "Save to see the exact JQL and curl requests."
             return
         }
         let name = d["name"] as? String ?? ""
+        let type = d["type"] as? String ?? "issues"
         var st = d["status"] as? String ?? ""
-        if !isSearch, JiraPoll.running.contains(name) || JiraPoll.running.contains("*") { st = "running" }
-        if isSearch, JiraPoll.running.contains("search:\(name)") { st = "running" }
+        if JiraPoll.running.contains(name) || JiraPoll.running.contains("*") { st = "running" }
         var parts = ["● \(st)"]
         parts.append("last run \(JiraPoll.short(d["lastRun"] as? String))")
-        if !isSearch {
-            parts.append("next \(JiraPoll.short(d["nextRun"] as? String))")
-            if (d["type"] as? String) == "issues" { parts.append("next window ≥ \(d["nextWindow"] as? String ?? "?")") }
-        }
-        if let n = d["items"] as? Int { parts.append("\(n) items") }
+        parts.append("next \(JiraPoll.short(d["nextRun"] as? String))")
+        if type == "issues" { parts.append("next window ≥ \(d["nextWindow"] as? String ?? "?")") }
+        if let n = d["items"] as? Int { parts.append(type == "directory" ? "\(n) users" : "\(n) items") }
         editorStatus.stringValue = parts.joined(separator: "  ·  ")
-        editorStatus.textColor = st == "ok" ? .systemGreen : st == "error" ? .systemRed
-            : st == "running" ? .systemOrange : .secondaryLabelColor
+        editorStatus.textColor = statusColor(st) == .tertiaryLabelColor ? .secondaryLabelColor : statusColor(st)
 
         let out = NSMutableAttributedString()
         let mono = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
@@ -983,7 +1032,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             out.append(NSAttributedString(string: s + "\n", attributes: [.font: mono, .foregroundColor: c]))
         }
         if let jql = d["jql"] as? String, !jql.isEmpty {
-            head("JQL\(isSearch ? "" : " (next run)")")
+            head("JQL (next run)")
             line(jql)
         }
         for r in d["requests"] as? [[String: Any]] ?? [] {
@@ -1010,7 +1059,6 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         copyCurlButton.isEnabled = !isNew
         actionButton.isEnabled = !isNew
         if case .job(let n) = current, JiraPoll.running.contains(n) { actionButton.isEnabled = false }
-        if case .search(let n) = current, JiraPoll.running.contains("search:\(n)") { actionButton.isEnabled = false }
         stopButton.isHidden = !(lockHeld || !JiraPoll.running.isEmpty)
     }
 
@@ -1041,50 +1089,52 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         return out
     }
 
-    private func draftJSON() -> [String: Any] {
-        window.makeFirstResponder(nil)   // commit an in-progress cell edit
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        let pr = projectsField.stringValue.trimmingCharacters(in: .whitespaces)
-        let plist = pr.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        var o: [String: Any] = ["name": name, "columns": ListColumn.serialize(colEditor.cols)]
-        if isSearch {
-            let kind = selectedKind["kind"] as? String ?? "text"
-            let argName = selectedKind["arg"] as? String ?? "query"
-            var args: [String: Any] = kind == "job" ? parseArgs(argsField.stringValue) : [:]
-            args[argName] = valueField.stringValue.trimmingCharacters(in: .whitespaces)
-            o["kind"] = kind
-            o["args"] = args
-            o["projects"] = plist
-        } else {
-            o["type"] = typePopup.titleOfSelectedItem ?? "issues"
-            o["window"] = everyBox.stringValue.trimmingCharacters(in: .whitespaces)
-            o["enabled"] = enabledCheck.state == .on
-            o["projects"] = (pr.isEmpty || pr == "*") ? "*" as Any : plist as Any
-            let q = queryPopup.indexOfSelectedItem
-            o["jql"] = q == 1 ? jqlField.stringValue.trimmingCharacters(in: .whitespaces) : ""
-            o["job"] = q >= 2 ? String((queryPopup.titleOfSelectedItem ?? "").dropFirst("team.json: ".count)) : ""
-            o["args"] = q >= 2 ? parseArgs(argsField.stringValue) : [String: String]()
+    // "" -> 0 (= the default); anything else must be a whole number
+    private func limit(_ f: NSTextField, _ what: String) -> Int? {
+        let s = f.stringValue.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty { return 0 }
+        guard let n = Int(s), n >= 0 else {
+            editorMsg.textColor = .systemRed
+            editorMsg.stringValue = "✗ \(what) must be a whole number (empty = default)"
+            return nil
         }
+        return n
+    }
+
+    private func draftJSON() -> [String: Any]? {
+        window.makeFirstResponder(nil)   // commit an in-progress edit
+        guard let ps = limit(pageSizeField, "Page size"), let mt = limit(maxTotalField, "Max issues") else { return nil }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+        let type = selectedType
+        var o: [String: Any] = ["name": name, "type": type, "maxResults": ps, "maxTotal": mt,
+                                "window": everyBox.stringValue.trimmingCharacters(in: .whitespaces),
+                                "enabled": enabledCheck.state == .on]
+        if type != "directory" { o["columns"] = ListColumn.serialize(colEditor.cols) }
+        let picked = projectsPicker.selected
+        o["projects"] = projectsPicker.isAll || picked.isEmpty ? "*" as Any : picked as Any
+        let q = type == "issues" ? queryPopup.indexOfSelectedItem : 0
+        o["jql"] = q == 1 ? jqlField.stringValue.trimmingCharacters(in: .whitespaces) : ""
+        o["job"] = q >= 2 ? String((queryPopup.titleOfSelectedItem ?? "").dropFirst("team.json: ".count)) : ""
+        o["args"] = q >= 2 ? parseArgs(argsField.stringValue) : [String: String]()
         return o
     }
 
     @objc private func save(_ sender: Any?) {
         guard dirty || isNew else { return }
         switch current {
-        case .job, .search, .addJob, .addSearch: persist(then: nil)
+        case .job, .addJob: persist(then: nil)
+        case .liveSearch: persistLive()
         default: return
         }
     }
 
     // validate + write via jira_config.py; `then` runs after a successful save
     private func persist(then: ((String) -> Void)?) {
-        let o = draftJSON()
-        guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
+        guard let o = draftJSON(), let data = try? JSONSerialization.data(withJSONObject: o) else { return }
         let name = o["name"] as? String ?? ""
-        let search = isSearch
         editorMsg.textColor = .secondaryLabelColor
         editorMsg.stringValue = "Saving…"
-        JiraPoll.run("jira_config.py", [search ? "--upsert-search" : "--upsert-endpoint"],
+        JiraPoll.run("jira_config.py", ["--upsert-endpoint"],
                      stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
             guard let self else { return }
             let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
@@ -1094,10 +1144,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                 self.editorMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
                 return
             }
-            self.controller?.log("jira: saved \(search ? "search" : "job") \(name)")
+            self.controller?.log("jira: saved job \(name)")
             self.dirty = false
             self.isNew = false
-            self.current = search ? .search(name) : .job(name)
+            self.current = .job(name)
             self.nameField.isEditable = false
             self.deleteButton.isHidden = false
             self.updateButtons()
@@ -1119,18 +1169,18 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         guard let name = editingName, let d = liveData else { return }
         let a = NSAlert()
         a.alertStyle = .warning
-        a.messageText = "Delete \(isSearch ? "search" : "poll job") “\(name)”?"
-        a.informativeText = "It is removed from config.json and its tab (\(d["file"] as? String ?? "")) "
-            + "disappears from the Jira window."
+        a.messageText = "Delete poll job “\(name)”?"
+        a.informativeText = (d["type"] as? String) == "directory"
+            ? "It is removed from config.json; the pickers keep the last cached lists but they stop refreshing."
+            : "It is removed from config.json and its tab (\(d["file"] as? String ?? "")) disappears from the Jira window."
         a.addButton(withTitle: "Delete")
         a.addButton(withTitle: "Cancel")
         ask(a) { [weak self] ok in if ok { self?.performDelete(name, d) } }
     }
 
     private func performDelete(_ name: String, _ d: [String: Any]) {
-        let search = isSearch
-        let path = tabPath(d)
-        JiraPoll.run("jira_config.py", [search ? "--delete-search" : "--delete-endpoint", name]) { [weak self] code, out, _ in
+        let path = (d["type"] as? String) == "directory" ? nil : tabPath(d)
+        JiraPoll.run("jira_config.py", ["--delete-endpoint", name]) { [weak self] code, out, _ in
             guard let self else { return }
             let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
             guard code == 0, r["ok"] as? Bool == true else {
@@ -1140,7 +1190,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             }
             // the tab file goes with it (otherwise it lingers as a stale tab)
             if let path { try? FileManager.default.removeItem(atPath: path) }
-            self.controller?.log("jira: deleted \(search ? "search" : "job") \(name)")
+            self.controller?.log("jira: deleted job \(name)")
             self.dirty = false
             self.didInitialSelect = false
             self.controller?.reloadJiraWindow()
@@ -1148,7 +1198,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         }
     }
 
-    // absolute path of an item's tab file (outDir is the endpoints' dir)
+    // absolute path of a job's tab file
     private func tabPath(_ d: [String: Any]) -> String? {
         if let p = d["path"] as? String, !p.isEmpty { return p }
         guard let f = d["file"] as? String, !f.isEmpty,
@@ -1158,12 +1208,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     @objc private func primaryAction(_ sender: Any?) {
         if dirty {
-            // Force Poll / Run act on the SAVED definition: save first
+            // Force Poll acts on the SAVED definition: save first
             persist { [weak self] _ in self?.primaryAction(nil) }
             return
         }
         guard let name = editingName else { return }
-        if isSearch { runSearch(name); return }
         guard lockHeld || !JiraPoll.running.isEmpty else { forcePoll(name); return }
         let lock = info["lock"] as? [String: Any] ?? [:]
         let a = NSAlert()
@@ -1186,35 +1235,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func forcePoll(_ name: String) {
         controller?.jiraPollNow(name) { [weak self] in
             self?.controller?.reloadJiraWindow()
+            self?.dir = JiraDirectory.load()
             self?.refresh()
         }
         updateButtons()
         updateLive()
         refresh()
-    }
-
-    private func runSearch(_ name: String) {
-        let tag = "search:\(name)"
-        guard !JiraPoll.running.contains(tag) else { return }
-        JiraPoll.running.insert(tag)
-        updateButtons()
-        updateLive()
-        editorMsg.textColor = .secondaryLabelColor
-        editorMsg.stringValue = "Running…"
-        JiraPoll.run("jira_poll.py", ["--search", name, "--quiet"]) { [weak self] code, _, err in
-            JiraPoll.running.remove(tag)
-            guard let self else { return }
-            if code == 0 {
-                self.editorMsg.textColor = .systemGreen
-                self.editorMsg.stringValue = "✓ Done — see its tab in the Jira window"
-                self.controller?.reloadJiraWindow()
-            } else {
-                self.editorMsg.textColor = .systemRed
-                self.editorMsg.stringValue = "✗ " + JiraPoll.errorLine(err, fallback: "search failed (exit \(code))")
-            }
-            self.updateButtons()
-            self.refresh()
-        }
     }
 
     @objc private func copyCurl(_ sender: Any?) {
@@ -1226,6 +1252,65 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         NSPasteboard.general.setString(text, forType: .string)
         editorMsg.textColor = .secondaryLabelColor
         editorMsg.stringValue = "curl copied (\(reqs.count) request\(reqs.count == 1 ? "" : "s"), includes the token)"
+    }
+
+    // MARK: live search settings
+
+    private func showLiveSearch() {
+        isNew = false
+        let ls = info["liveSearch"] as? [String: Any] ?? [:]
+        loadColumns(ls["columnsSpec"] as? String, me: "\u{0}live")
+        liveMaxField.stringValue = (ls["maxResults"] as? Int).map(String.init) ?? ""
+        liveMaxField.removeFromSuperview()
+        liveMaxField.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        let g = grid([("Max results", liveMaxField)])
+        gridView = g
+        let about = hint("⌘F in the Jira window opens the search bar: free text, projects, and "
+            + "“+ Filter” rows (assignee, reporter, status, type, priority, dates, labels, any column) "
+            + "picked from the cached directory. Results land in the Jira window's “search.json” tab; "
+            + "these are that tab's columns. Max results = issues per search (the bar can override it).")
+        for b in [saveButton, revertButton] { b.removeFromSuperview() }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow - 30, for: .horizontal)
+        let buttons = row([saveButton, revertButton, spacer])
+        colEditor.view.removeFromSuperview()
+        editorMsg.removeFromSuperview()
+        editorMsg.stringValue = ""
+        colEditor.view.isHidden = false
+        let page = vstack([sectionTitle("LIVE SEARCH"), about, g,
+                           sectionTitle("COLUMNS — the search.json tab (and the fields a search fetches)"),
+                           colEditor.view, editorMsg, buttons], spacing: 8)
+        for v in [about, colEditor.view, editorMsg, buttons] as [NSView] {
+            v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
+        }
+        colEditor.view.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
+        showPage(page)
+        updateButtons()
+    }
+
+    private func persistLive() {
+        window.makeFirstResponder(nil)
+        guard let m = limit(liveMaxField, "Max results") else { return }
+        var o: [String: Any] = ["columns": ListColumn.serialize(colEditor.cols)]
+        o["maxResults"] = m
+        guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
+        JiraPoll.run("jira_config.py", ["--set-live-search"], stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
+            guard let self else { return }
+            let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+            guard code == 0, r["ok"] as? Bool == true else {
+                let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
+                self.editorMsg.textColor = .systemRed
+                self.editorMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
+                return
+            }
+            self.dirty = false
+            self.updateButtons()
+            self.controller?.reloadJiraWindow()
+            self.refresh {
+                self.editorMsg.textColor = .systemGreen
+                self.editorMsg.stringValue = "✓ Saved to config.json"
+            }
+        }
     }
 
     // MARK: header actions
@@ -1286,8 +1371,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         auth        \(auth) — \(auth == "basic" ? "Cloud: email + API token (curl -u)" : "Server/Data Center: personal access token (Authorization: Bearer)")
         token       \((info["hasToken"] as? Bool ?? false) ? "set" : "MISSING")
         config      \(s("configPath"))
-        team.json   \(s("teamPath"))\((info["teamExists"] as? Bool ?? false) ? "" : "  (not created — Open… ▸ Team schema)")
+        team.json   \(s("teamPath"))\((info["teamExists"] as? Bool ?? false) ? "" : "  (not created — Definitions creates it on the first save)")
         status      \(s("statusPath"))
+        directory   \(JiraPoll.directoryPath)
         curl log    \(s("curlLog"))
         poller      \(s("pollScript"))
 
@@ -1323,63 +1409,211 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         connResult.textColor = .secondaryLabelColor
     }
 
-    // MARK: known columns
+    // MARK: definitions (team.json + the directory cache)
 
-    private static let knownSpec: [(id: String, title: String, width: CGFloat)] = [
-        ("field", "Field", 150), ("titles", "Title(s)", 130), ("usedBy", "Used by", 200),
-        ("seenIn", "Has data in", 180), ("api", "Fetches (API field)", 150), ("label", "Custom field label", 150),
-    ]
-
-    private func showKnown() {
-        if knownTable.tableColumns.isEmpty {
-            for c in Self.knownSpec {
-                let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(c.id))
-                col.title = c.title
-                col.width = c.width
-                knownTable.addTableColumn(col)
-            }
-            knownTable.dataSource = self
-            knownTable.delegate = self
-            knownTable.usesAlternatingRowBackgroundColors = true
-            knownTable.rowHeight = 22
+    private func setupDefinitions() {
+        defSeg.segmentCount = DefTab.allCases.count
+        for (i, t) in DefTab.allCases.enumerated() {
+            defSeg.setLabel(t.rawValue, forSegment: i)
+            defSeg.setWidth(0, forSegment: i)
         }
-        knownTable.enclosingScrollView?.removeFromSuperview()
+        defSeg.trackingMode = .selectOne
+        defSeg.selectedSegment = 0
+        defSeg.segmentStyle = .automatic
+        defSeg.controlSize = .small
+        defSeg.target = self
+        defSeg.action = #selector(defTabChanged(_:))
+        defTable.dataSource = self
+        defTable.delegate = self
+        defTable.usesAlternatingRowBackgroundColors = true
+        defTable.rowHeight = 22
+        defTable.allowsMultipleSelection = true
+        defTable.target = self
+        defTable.doubleAction = #selector(defEditClicked(_:))
+        defTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        button(defAdd, #selector(defAddClicked(_:)))
+        button(defEdit, #selector(defEditClicked(_:)))
+        button(defRemove, #selector(defRemoveClicked(_:)))
+        button(defFetch, #selector(defFetchClicked(_:)), tip: "Run the directory job now (projects, users, statuses, fields)")
+        defMsg.font = .systemFont(ofSize: 12)
+        defHint.font = .systemFont(ofSize: 11)
+        defHint.textColor = .secondaryLabelColor
+    }
+
+    private func showDefinitions() {
         let sv = NSScrollView()
-        sv.documentView = knownTable
+        sv.documentView = defTable
         sv.hasVerticalScroller = true
         sv.hasHorizontalScroller = true
         sv.borderType = .bezelBorder
         sv.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
-        let hint = NSTextField(wrappingLabelWithString:
-            "Every column any poll job or search defines, every field that came back with data "
-            + "(fields_seen.json), plus base fields and team.json custom fields — the building blocks "
-            + "for a new job's or search's columns (its column editor's Add list).")
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-        let page = vstack([sectionTitle("KNOWN COLUMNS"), hint, sv], spacing: 8)
-        for v in [hint, sv] as [NSView] { v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true }
+        for v in [defSeg, defHint, defMsg, defAdd, defEdit, defRemove, defFetch] as [NSView] { v.removeFromSuperview() }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow - 30, for: .horizontal)
+        let buttons = row([defAdd, defEdit, defRemove, spacer, defFetch])
+        let page = vstack([sectionTitle("DEFINITIONS — team.json + what the directory job cached"), defSeg,
+                           defHint, sv, defMsg, buttons], spacing: 8)
+        for v in [defHint, sv, defMsg, buttons] as [NSView] {
+            v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
+        }
         showPage(page)
-        knownTable.reloadData()
+        defMsg.stringValue = ""
+        reloadDefinitions(rebuildColumns: true)
     }
 
-    private func knownCell(_ id: String, _ row: Int) -> NSView? {
-        guard row < catalog.count else { return nil }
-        let c = catalog[row]
-        let s: String
-        switch id {
-        case "field": s = c["field"] as? String ?? ""
-        case "titles": s = (c["titles"] as? [String] ?? []).joined(separator: ", ")
-        case "usedBy": s = (c["usedBy"] as? [String] ?? []).joined(separator: ", ")
-        case "seenIn": s = (c["seenIn"] as? [String] ?? []).joined(separator: ", ")
-        case "api": s = (c["apiFields"] as? [String] ?? []).joined(separator: ", ")
-        case "label": s = c["label"] as? String ?? ""
-        default: s = ""
+    @objc private func defTabChanged(_ sender: Any?) {
+        defTab = DefTab.allCases[max(0, defSeg.selectedSegment)]
+        defMsg.stringValue = ""
+        reloadDefinitions(rebuildColumns: true)
+    }
+
+    // merged with the defaults (display) / team.json's own values (edits)
+    private var team: [String: Any] { info["team"] as? [String: Any] ?? [:] }
+    private var teamOwn: [String: Any] { info["teamOwn"] as? [String: Any] ?? [:] }
+    private func own(_ key: String) -> [String: Any] { teamOwn[key] as? [String: Any] ?? [:] }
+
+    private func defColumns() -> [(String, String, CGFloat)] {
+        switch defTab {
+        case .projects: return [("a", "Project key", 120), ("b", "Name", 260), ("c", "Users cached", 120)]
+        case .customFields: return [("a", "Alias (column field)", 170), ("b", "Jira field", 170),
+                                    ("c", "Label", 180), ("d", "Description", 240)]
+        case .columns: return [("a", "Field", 150), ("b", "Name", 170), ("c", "Jira field", 150),
+                               ("d", "Used by", 180), ("e", "Has data in", 180)]
+        case .users: return [("a", "Name", 200), ("b", "ID (used in JQL)", 170), ("c", "Email", 200), ("d", "Projects", 200)]
+        case .lists: return [("a", "Kind", 120), ("b", "Value", 300)]
+        case .api: return [("a", "Name", 170), ("b", "Path", 420)]
+        case .jql: return [("a", "Name", 190), ("b", "JQL", 520)]
+        case .defaults: return [("a", "Setting", 190), ("b", "Value", 90), ("c", "Meaning", 420)]
         }
+    }
+
+    private static let defaultMeaning: [String: String] = [
+        "max_results_search": "page size of one issue search request (jobs without their own Page size)",
+        "max_results_users": "page size of one user-directory request (directory job)",
+        "page_size": "page size of one agile board request",
+        "timeout_seconds": "curl -m: seconds before a request gives up",
+        "cache_timeout_seconds": "re-use versions.json this long (0 = always refetch)",
+        "versions_lookback_days": "drop releases dated older than this (0 = keep all)",
+    ]
+
+    private func str(_ v: Any?) -> String {
+        switch v {
+        case let s as String: return s
+        case let n as NSNumber: return n.stringValue
+        case nil: return ""
+        default:
+            let d = (try? JSONSerialization.data(withJSONObject: v!, options: [.fragmentsAllowed])) ?? Data()
+            return String(decoding: d, as: UTF8.self)
+        }
+    }
+
+    private func reloadDefinitions(rebuildColumns: Bool = false) {
+        guard current == .definitions else { return }
+        if rebuildColumns {
+            while let c = defTable.tableColumns.first { defTable.removeTableColumn(c) }
+            for (id, title, w) in defColumns() {
+                let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+                col.title = title
+                col.width = w
+                col.minWidth = 40
+                defTable.addTableColumn(col)
+            }
+        }
+        var rows: [[String]] = [], keys: [String] = []
+        switch defTab {
+        case .projects:
+            let names = Dictionary(dir.projects.map { ($0.key, $0.name) }, uniquingKeysWith: { a, _ in a })
+            for k in team["project_keys"] as? [String] ?? [] {
+                let n = dir.users.filter { $0.projects.contains(k) }.count
+                rows.append([k, names[k] ?? (dir.isEmpty ? "" : "(not visible to the token)"), dir.isEmpty ? "" : "\(n)"])
+                keys.append(k)
+            }
+            defHint.stringValue = "The team's projects (team.json project_keys): the default scope of every "
+                + "job and search, and whose users the directory job caches. Add picks from the projects "
+                + "your token can see."
+        case .customFields:
+            for (alias, v) in (team["custom_fields"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+                let d = v as? [String: Any] ?? [:]
+                rows.append([alias, str(d["field_id"] ?? d["id"]), str(d["label"]), str(d["description"])])
+                keys.append(alias)
+            }
+            defHint.stringValue = "Jira custom fields by a friendly alias — the alias works as a column "
+                + "field and as a search filter. Add picks from the fields Jira reports (directory job)."
+        case .columns:
+            for c in catalog {
+                let f = str(c["field"])
+                rows.append([f, str(c["label"]).isEmpty ? (JiraColumnEditor.baseNames[f] ?? "") : str(c["label"]),
+                             (c["apiFields"] as? [String] ?? []).joined(separator: ", "),
+                             (c["usedBy"] as? [String] ?? []).joined(separator: ", "),
+                             (c["seenIn"] as? [String] ?? []).joined(separator: ", ")])
+                keys.append(f)
+            }
+            defHint.stringValue = "Every field a column can show: base fields, team custom fields, every "
+                + "column a job defines and every field that came back with data. Edit columns per job "
+                + "(Poll Jobs) or for the search tab (Live Search)."
+        case .users:
+            for u in dir.users {
+                rows.append([u.name, u.id, u.email, u.projects.joined(separator: ", ")])
+                keys.append(u.id)
+            }
+            defHint.stringValue = dir.isEmpty
+                ? "Nothing cached yet — the weekly directory job fills this (Fetch from Jira now)."
+                : "\(dir.users.count) assignable users of the team's projects, cached \(JiraPoll.short(dir.fetchedAt)) "
+                    + "by the directory job — the assignee / reporter pickers."
+        case .lists:
+            for (kind, vals) in [("Status", dir.statuses), ("Issue type", dir.issueTypes), ("Priority", dir.priorities)] {
+                for v in vals { rows.append([kind, v]); keys.append(v) }
+            }
+            defHint.stringValue = dir.isEmpty ? "Nothing cached yet — Fetch from Jira now."
+                : "Cached \(JiraPoll.short(dir.fetchedAt)) by the directory job — the search pickers."
+        case .api:
+            let mine = own("api_endpoints")
+            for (k, v) in (team["api_endpoints"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+                rows.append([k, str(v) + (mine[k] == nil ? "   (built-in default)" : "")])
+                keys.append(k)
+            }
+            defHint.stringValue = "Every Jira REST path the tools call (relative to /rest/api/2; board* to "
+                + "/rest/agile/1.0; a /rest/… path is used as-is). {name} placeholders are filled per request."
+        case .jql:
+            let mine = own("jql_templates")
+            for (k, v) in (team["jql_templates"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+                rows.append([k, str(v) + (mine[k] == nil ? "   (built-in default)" : "")])
+                keys.append(k)
+            }
+            defHint.stringValue = "JQL templates a poll job can run (Query ▸ team.json: NAME). {projects} = "
+                + "the job's projects; every other {name} comes from the job's args."
+        case .defaults:
+            let eff = info["searchDefaults"] as? [String: Any] ?? [:]
+            let mine = own("search_defaults")
+            for k in eff.keys.sorted() {
+                rows.append([k, str(eff[k]), (Self.defaultMeaning[k] ?? "") + (mine[k] == nil ? "" : "  (set in team.json)")])
+                keys.append(k)
+            }
+            defHint.stringValue = "Request limits and timeouts. max_results_search is the “maxResults=50” in "
+                + "every search curl — a poll job's own Page size overrides it. Reset = back to the default."
+        }
+        defRows = rows
+        defKeys = keys
+        defTable.reloadData()
+        let editable = defTab.editable
+        defAdd.isHidden = !editable || defTab == .defaults
+        defEdit.isHidden = !editable || defTab == .projects
+        defRemove.isHidden = !editable
+        defRemove.title = defTab == .defaults ? "Reset to Default" : "Remove"
+        defFetch.isHidden = ![.projects, .users, .lists, .customFields].contains(defTab)
+    }
+
+    private func defCell(_ id: String, _ row: Int) -> NSView? {
+        guard row < defRows.count else { return nil }
+        let i = Int((id.unicodeScalars.first?.value ?? 97) - 97)
+        let s = i < defRows[row].count ? defRows[row][i] : ""
         let l = NSTextField(labelWithString: s)
         l.lineBreakMode = .byTruncatingTail
         l.toolTip = s
-        if id == "field" || id == "api" { l.font = .monospacedSystemFont(ofSize: 11, weight: .regular) }
-        if id != "field" { l.textColor = .secondaryLabelColor }
+        if i == 0 || [.api, .jql].contains(defTab) || (defTab == .customFields && i == 1) {
+            l.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        }
+        if i > 0 && !(defTab == .jql || defTab == .api) { l.textColor = .secondaryLabelColor }
         let cell = NSTableCellView()
         l.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(l)
@@ -1389,6 +1623,240 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             l.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
+    }
+
+    // write one team.json key (validated by jira_config.py --team-set)
+    private func teamSet(_ key: String, _ value: Any, done: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return }
+        defMsg.textColor = .secondaryLabelColor
+        defMsg.stringValue = "Saving…"
+        JiraPoll.run("jira_config.py", ["--team-set", key], stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
+            guard let self else { return }
+            let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+            guard code == 0, r["ok"] as? Bool == true else {
+                let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
+                self.defMsg.textColor = .systemRed
+                self.defMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
+                return
+            }
+            self.controller?.log("jira: team.json \(key) — \(done)")
+            self.refresh {
+                self.defMsg.textColor = .systemGreen
+                self.defMsg.stringValue = "✓ \(done) — saved to team.json"
+            }
+        }
+    }
+
+    private var defSelection: [Int] { defTable.selectedRowIndexes.filter { $0 < defKeys.count } }
+
+    @objc private func defAddClicked(_ sender: Any?) {
+        switch defTab {
+        case .projects: addProjects()
+        case .customFields: editCustomField(nil)
+        case .api, .jql: editKeyValue(nil)
+        default: break
+        }
+    }
+
+    @objc private func defEditClicked(_ sender: Any?) {
+        guard defTab.editable, defTab != .projects else { return }
+        let r = sender is NSTableView ? defTable.clickedRow : (defSelection.first ?? -1)
+        guard r >= 0, r < defKeys.count else { return }
+        switch defTab {
+        case .customFields: editCustomField(defKeys[r])
+        case .api, .jql: editKeyValue(defKeys[r])
+        case .defaults: editDefault(defKeys[r])
+        default: break
+        }
+    }
+
+    @objc private func defRemoveClicked(_ sender: Any?) {
+        let keys = defSelection.map { defKeys[$0] }
+        guard !keys.isEmpty else { return }
+        let what = keys.count == 1 ? "“\(keys[0])”" : "\(keys.count) entries"
+        let a = NSAlert()
+        a.messageText = defTab == .defaults ? "Reset \(what) to the default?" : "Remove \(what) from \(defTab.rawValue)?"
+        a.informativeText = "team.json is updated right away."
+        a.addButton(withTitle: defTab == .defaults ? "Reset" : "Remove")
+        a.addButton(withTitle: "Cancel")
+        ask(a) { [weak self] ok in
+            guard ok, let self else { return }
+            switch self.defTab {
+            case .projects:
+                self.teamSet("project_keys", (self.team["project_keys"] as? [String] ?? []).filter { !keys.contains($0) },
+                             done: "removed \(what)")
+            default:
+                guard let tk = self.teamKey else { return }
+                // built-in defaults can't be removed (they come back): only team.json's own
+                var d = self.own(tk)
+                let builtIn = keys.filter { d[$0] == nil && tk != "custom_fields" }
+                if !builtIn.isEmpty && builtIn.count == keys.count {
+                    self.defMsg.textColor = .secondaryLabelColor
+                    self.defMsg.stringValue = "\(builtIn.joined(separator: ", ")): built-in default — edit it to override"
+                    return
+                }
+                for k in keys { d.removeValue(forKey: k) }
+                self.teamSet(tk, d, done: self.defTab == .defaults ? "reset \(what)" : "removed \(what)")
+            }
+        }
+    }
+
+    private var teamKey: String? {
+        switch defTab {
+        case .projects: return "project_keys"
+        case .customFields: return "custom_fields"
+        case .api: return "api_endpoints"
+        case .jql: return "jql_templates"
+        case .defaults: return "search_defaults"
+        default: return nil
+        }
+    }
+
+    @objc private func defFetchClicked(_ sender: Any?) {
+        defFetch.isEnabled = false
+        defMsg.textColor = .secondaryLabelColor
+        defMsg.stringValue = "Fetching projects, users, statuses, fields… (one call per project)"
+        JiraPoll.run("jira_poll.py", ["--directory", "--quiet"]) { [weak self] code, _, err in
+            guard let self else { return }
+            self.defFetch.isEnabled = true
+            if code == 0 {
+                self.dir = JiraDirectory.load()
+                self.reloadDefinitions()
+                self.defMsg.textColor = .systemGreen
+                self.defMsg.stringValue = "✓ \(self.dir.users.count) users · \(self.dir.projects.count) projects · "
+                    + "\(self.dir.fields.count) fields cached"
+                self.refresh()
+            } else {
+                self.defMsg.textColor = .systemRed
+                self.defMsg.stringValue = "✗ " + JiraPoll.errorLine(err, fallback: "directory failed (exit \(code))")
+            }
+        }
+    }
+
+    // projects: pick from what the token can see (typed keys only when the
+    // directory has never run)
+    private func addProjects() {
+        let have = team["project_keys"] as? [String] ?? []
+        if dir.projects.isEmpty {
+            let f = NSTextField()
+            f.placeholderString = "KEY1, KEY2 (Fetch from Jira now to pick from a list instead)"
+            jiraFormSheet(on: window, title: "Add Projects", info: "Project keys, comma separated.",
+                          rows: [("Keys", f)], ok: "Add") { [weak self] ok in
+                guard ok, let self else { return }
+                let add = f.stringValue.uppercased().split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !have.contains($0) }
+                guard !add.isEmpty else { return }
+                self.teamSet("project_keys", have + add, done: "added \(add.joined(separator: ", "))")
+            }
+            return
+        }
+        let p = JiraMultiPicker(noun: "project")
+        p.options = dir.projectOptions().filter { !have.contains($0.id) }
+        p.placeholder = "Choose projects…"
+        jiraFormSheet(on: window, title: "Add Projects",
+                      info: "Projects your token can see (directory cache). Their users are cached on the next directory run.",
+                      rows: [("Projects", p)], ok: "Add", first: p) { [weak self] ok in
+            guard ok, let self, !p.selected.isEmpty else { return }
+            self.teamSet("project_keys", have + p.selected, done: "added \(p.selected.joined(separator: ", "))")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { p.togglePopover(nil) }
+    }
+
+    private func snakeCase(_ s: String) -> String {
+        let parts = s.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        var out = parts.joined(separator: "_")
+        if let f = out.first, !f.isLetter { out = "f_" + out }
+        return out
+    }
+
+    private func editCustomField(_ alias: String?) {
+        let cur = alias.flatMap { own("custom_fields")[$0] as? [String: Any] ?? (team["custom_fields"] as? [String: Any])?[$0] as? [String: Any] } ?? [:]
+        let customs = dir.fields.filter { $0.custom }
+        let field = NSComboBox()
+        field.completes = true
+        field.numberOfVisibleItems = 16
+        field.addItems(withObjectValues: customs.map { "\($0.name) — \($0.id)" })
+        let curID = str(cur["field_id"] ?? cur["id"])
+        field.stringValue = curID.isEmpty ? "" : (customs.first { $0.id == curID }.map { "\($0.name) — \($0.id)" } ?? curID)
+        field.placeholderString = customs.isEmpty ? "customfield_NNNNN (Fetch from Jira now to pick by name)"
+            : "type to find a Jira field by name"
+        let aliasF = NSTextField(string: alias ?? "")
+        aliasF.placeholderString = "column / filter name, e.g. package_info"
+        aliasF.isEditable = alias == nil
+        let label = NSTextField(string: str(cur["label"]))
+        label.placeholderString = "header / display name"
+        let desc = NSTextField(string: str(cur["description"]))
+        desc.placeholderString = "optional"
+        jiraFormSheet(on: window, title: alias == nil ? "Add Custom Field" : "Edit Custom Field “\(alias!)”",
+                      info: "Maps a Jira custom field to a friendly alias you can use as a column and as a search filter.",
+                      rows: [("Jira field", field), ("Alias", aliasF), ("Label", label), ("Description", desc)],
+                      first: alias == nil ? field : label) { [weak self] ok in
+            guard ok, let self else { return }
+            let raw = field.stringValue
+            var fid = raw.range(of: #"customfield_\d+"#, options: .regularExpression).map { String(raw[$0]) } ?? ""
+            if fid.isEmpty, let hit = customs.first(where: { $0.name.caseInsensitiveCompare(raw) == .orderedSame }) {
+                fid = hit.id
+            }
+            guard !fid.isEmpty else {
+                self.defMsg.textColor = .systemRed
+                self.defMsg.stringValue = "✗ pick a Jira custom field (or type its customfield_NNNNN id)"
+                return
+            }
+            let jiraName = customs.first { $0.id == fid }?.name ?? ""
+            let lbl = label.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ? jiraName
+                : label.stringValue.trimmingCharacters(in: .whitespaces)
+            var a = aliasF.stringValue.trimmingCharacters(in: .whitespaces)
+            if a.isEmpty { a = self.snakeCase(lbl.isEmpty ? fid : lbl) }
+            var d = self.own("custom_fields")
+            var entry: [String: Any] = ["field_id": fid, "label": lbl.isEmpty ? a : lbl]
+            let ds = desc.stringValue.trimmingCharacters(in: .whitespaces)
+            if !ds.isEmpty { entry["description"] = ds }
+            d[a] = entry
+            self.teamSet("custom_fields", d, done: alias == nil ? "added \(a)" : "updated \(a)")
+        }
+    }
+
+    private func editKeyValue(_ key: String?) {
+        guard let tk = teamKey else { return }
+        let d = team[tk] as? [String: Any] ?? [:]      // shows built-in values too
+        let k = NSTextField(string: key ?? "")
+        k.placeholderString = tk == "api_endpoints" ? "e.g. components" : "e.g. my_bugs"
+        k.isEditable = key == nil
+        let v = NSTextField(string: key.map { str(d[$0]) } ?? "")
+        v.placeholderString = tk == "api_endpoints" ? "/project/{project}/components"
+            : "project in ({projects}) AND assignee = currentUser()"
+        v.widthAnchor.constraint(greaterThanOrEqualToConstant: 520).isActive = true
+        let single = tk == "api_endpoints" ? "API endpoint" : "JQL template"
+        jiraFormSheet(on: window, title: key == nil ? "Add \(single)" : "Edit \(single) “\(key!)”",
+                      info: tk == "api_endpoints" ? "A REST path relative to /rest/api/2 ({name} = filled per request)."
+                          : "{projects} = the job's projects; other {name}s come from the job's args.",
+                      rows: [("Name", k), (tk == "api_endpoints" ? "Path" : "JQL", v)],
+                      first: key == nil ? k : v) { [weak self] ok in
+            guard ok, let self else { return }
+            let name = k.stringValue.trimmingCharacters(in: .whitespaces)
+            let val = v.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, !val.isEmpty else { NSSound.beep(); return }
+            var nd = self.own(tk)
+            nd[name] = val
+            self.teamSet(tk, nd, done: key == nil ? "added \(name)" : "updated \(name)")
+        }
+    }
+
+    private func editDefault(_ key: String) {
+        let eff = info["searchDefaults"] as? [String: Any] ?? [:]
+        let v = NSTextField(string: str(eff[key]))
+        jiraFormSheet(on: window, title: "Edit \(key)", info: Self.defaultMeaning[key] ?? "",
+                      rows: [("Value", v)], first: v) { [weak self] ok in
+            guard ok, let self else { return }
+            guard let n = Int(v.stringValue.trimmingCharacters(in: .whitespaces)), n >= 0 else {
+                self.defMsg.textColor = .systemRed
+                self.defMsg.stringValue = "✗ \(key) must be a whole number"
+                return
+            }
+            var d = self.own("search_defaults")
+            d[key] = n
+            self.teamSet("search_defaults", d, done: "\(key) = \(n)")
+        }
     }
 
     // MARK: close

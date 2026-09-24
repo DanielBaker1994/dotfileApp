@@ -4994,6 +4994,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // Cmd+K in the row list (not the file browser, which keeps its own
     // Cmd+K = copy path): the host usually opens showActionPicker
     public var onCommandK: (() -> Void)?
+    // Cmd+F in the row list (list windows only; the notes editor keeps its
+    // find bar): e.g. the jira live-search panel
+    public var onCommandF: (() -> Void)?
 
     // rows an action applies to: the ticked rows, else the highlighted one
     public var actionRows: [PopupRow] {
@@ -6325,6 +6328,7 @@ scroll.documentView = rowView
         onDrawRow = nil          // didSet also clears rowView.onDrawRow
         onCopyRows = nil
         onCommandK = nil
+        onCommandF = nil
         closeActionPicker()
         onHeaderButton = nil
         onMeterRecord = nil
@@ -7162,6 +7166,10 @@ private func scrollSelectionIntoView() {
             // own Cmd+K = copy path while it has focus)
             if cmd && code == 40, let hook = onCommandK,
                !(fileBrowser.map { browserActive() && browserHasFocus($0) } ?? false) {
+                hook()
+                return true
+            }
+            if cmd && code == 3, !config.editMode, let hook = onCommandF {
                 hook()
                 return true
             }

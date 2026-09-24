@@ -36,13 +36,18 @@ CLI (used by the menu bar + setup sheet):
   jira_config.py --set-enabled NAME true|false
   jira_config.py --upsert-endpoint   JSON object on stdin: add / replace one
                                      poll job (validated; JSON result)
-  jira_config.py --upsert-search     same for a saved search
-  jira_config.py --delete-endpoint NAME | --delete-search NAME
-  jira_config.py --set-columns endpoint|search NAME SPEC
-                                     one job's columns (the jira window's
-                                     header drags save through this)
+  jira_config.py --delete-endpoint NAME
+  jira_config.py --set-columns endpoint|live NAME SPEC
+                                     one job's columns (or the live search
+                                     tab's: `live search`); the jira window's
+                                     header drags save through this
+  jira_config.py --team-set KEY      JSON value on stdin -> team.json KEY
+                                     (project_keys, custom_fields, ...;
+                                     validated; JSON result)
+  jira_config.py --criteria-jql      criteria JSON on stdin -> the live
+                                     search JQL (see criteria_jql)
 
-Poll jobs ("endpoints") and searches each own their columns (one-line
+Poll jobs ("endpoints") and the live search each own their columns (one-line
 `field:Title:width:align:flags, ...`). [jira] columns in commands.conf is only
 the starter template for new ones (and the fallback for a tab no job owns);
 jobs created before per-job columns get a copy of it once, on load.
@@ -82,17 +87,27 @@ DEFAULTS = {
     "snapshotKeep": 30,
     "outDir": OUT_DIR_DEFAULT,
     "endpoints": [],
-    "searches": [],
+    "liveSearch": {},   # {columns, maxResults}: the Jira window's search tab
 }
+
+LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
+LIVE_SEARCH_MAX = 100                # default max results of one live search
+
+# the directory job: projects + assignable users + statuses / types /
+# priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).
+# User search is expensive: weekly. Publishes no tab.
+DIRECTORY_ENDPOINT = {"name": "directory", "window": "1w", "projects": "*", "type": "directory",
+                      "enabled": True}
 
 DEFAULT_ENDPOINTS = [
     {"name": "all", "window": "10m", "projects": "*", "type": "issues",
      "file": "all.json", "enabled": True},
     {"name": "releases", "window": "1h", "projects": "*", "type": "releases",
      "file": "releases.json", "enabled": True},
+    DIRECTORY_ENDPOINT,
 ]
 
-ENDPOINT_TYPES = ("issues", "releases")
+ENDPOINT_TYPES = ("issues", "releases", "directory")
 WINDOW_RE = re.compile(r"^(\d+)([smhdw])$")
 WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -144,6 +159,8 @@ DEFAULT_API_ENDPOINTS = {
     "statuses": "/status",
     "fields": "/field",
     "assignable_users": "/user/assignable/search",
+    "priorities": "/priority",
+    "issue_types": "/issuetype",
     "board_issues": "/board/{board_id}/issue",
 }
 API_BASE = "/rest/api/2"
@@ -527,52 +544,85 @@ def columns_problem(spec: str) -> str:
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 
-# saved searches: kind -> label + the argument the user fills. Run on demand
-# (jira_poll.py --search NAME), published as search-<name>.json = a tab.
-SEARCH_KINDS = {
-    "reporter": {"label": "Reporter", "arg": "username", "argLabel": "Reporter (username)"},
-    "assignee": {"label": "Assignee", "arg": "username", "argLabel": "Assignee (username)"},
-    "project": {"label": "Project", "arg": "project", "argLabel": "Project key"},
-    "text": {"label": "Text in summary / description", "arg": "query", "argLabel": "Search text"},
-    "jql": {"label": "Custom JQL", "arg": "jql", "argLabel": "JQL"},
-    "job": {"label": "team.json job / template", "arg": "job", "argLabel": "Job key"},
+# live search (the Jira window's Cmd+F panel): criteria -> JQL. Multi-value
+# criteria are ORed (`x in (...)`); criteria are ANDed together.
+CRITERIA_LISTS = {          # criteria key -> JQL field (values picked from lists)
+    "projects": "project", "assignee": "assignee", "reporter": "reporter",
+    "status": "status", "issuetype": "issuetype", "priority": "priority",
+    "labels": "labels", "fixVersion": "fixVersion",
 }
+CRITERIA_DATES = ("updated", "created", "resolved", "duedate")
+# window-json column -> the JQL field a free-text criterion on it searches
+CRITERIA_TEXT_FIELDS = {"title": "summary", "description": "description", "key": "issuekey",
+                        "release": "fixVersion", "releaseLabel": "fixVersion",
+                        "project": "project"}
+FUNC_RE = re.compile(r"^\w+\(\)$")                    # currentUser(), EMPTY-ish functions
+DATE_RE = re.compile(r"^(\d+)([hdw])$")
 
 
-def search_jql(search: dict, team: dict) -> str:
-    """The JQL a saved search runs (no ORDER BY: sync ANDs it with its own
-    clause). projects = the search's list, else team.json project_keys."""
-    kind = search.get("kind", "text")
-    args = dict(search.get("args") or {})
-    projects = search.get("projects")
-    if not (isinstance(projects, list) and projects):
-        projects = team.get("project_keys") or []
-    if kind == "jql":
-        q = (args.get("jql") or search.get("jql") or "").strip()
-        if not q:
-            raise ConfigError("custom JQL is empty")
-        return re.sub(r"\s+ORDER\s+BY\s+.*$", "", q, flags=re.I | re.S)
-    if kind == "job":
-        ep = {"job": args.get("job") or search.get("job"), "args": {k: v for k, v in args.items()
-                                                                    if k != "job"}}
-        if projects:
-            ep["projects"] = projects
-        if not ep["job"]:
-            raise ConfigError("no team.json job chosen")
-        return endpoint_jql(ep, team)
-    spec = SEARCH_KINDS.get(kind)
-    if not spec:
-        raise ConfigError(f"unknown search kind '{kind}' ({', '.join(SEARCH_KINDS)})")
-    v = str(args.get(spec["arg"], "")).strip()
-    if not v:
-        raise ConfigError(f"{spec['argLabel']} is empty")
-    q = jql_quote(v)
-    clause = {"reporter": f'reporter = "{q}"', "assignee": f'assignee = "{q}"',
-              "project": f'project = "{q}"',
-              "text": f'(summary ~ "{q}" OR description ~ "{q}")'}[kind]
-    if projects and kind != "project":
-        clause = "project in (" + ", ".join(f'"{jql_quote(p)}"' for p in projects) + ") AND " + clause
-    return clause
+def _jql_value(v) -> str:
+    v = str(v).strip()
+    return v if FUNC_RE.match(v) or v.upper() in ("EMPTY", "NULL") else f'"{jql_quote(v)}"'
+
+
+def criteria_jql(crit: dict, team: dict, field_types: dict | None = None) -> str:
+    """The live search's JQL. crit = {text, projects[], assignee[], reporter[],
+    status[], issuetype[], priority[], labels[], fixVersion[], updated|created|
+    resolved|duedate: "today"|"7d"|"2w"|"-30d", fields: {column: value}, jql}.
+    `fields` keys are window columns / team custom_fields aliases / raw ids;
+    custom fields use `~` when field_types says string (or unknown), else `=`.
+    Raises ConfigError when nothing narrows the search."""
+    if not isinstance(crit, dict):
+        raise ConfigError("criteria must be a JSON object")
+    aliases = custom_field_aliases(team or {})
+    types = field_types or {}
+    clauses = []
+    for key, fld in CRITERIA_LISTS.items():
+        vals = crit.get(key) or []
+        if isinstance(vals, str):
+            vals = [vals]
+        vals = [v for v in (str(x).strip() for x in vals if x is not None) if v and v != "*"]
+        if not vals:
+            continue
+        clauses.append(f"{fld} = {_jql_value(vals[0])}" if len(vals) == 1
+                       else f"{fld} in ({', '.join(_jql_value(v) for v in vals)})")
+    text = str(crit.get("text") or "").strip()
+    if text:
+        clauses.append(f'text ~ "{jql_quote(text)}"')
+    for key in CRITERIA_DATES:
+        v = str(crit.get(key) or "").strip().lstrip("-")
+        if not v:
+            continue
+        if v == "today":
+            clauses.append(f"{key} >= startOfDay()")
+            continue
+        m = DATE_RE.match(v)
+        if not m:
+            raise ConfigError(f"{key}: '{v}' is not today / 7d / 2w / 12h")
+        clauses.append(f"{key} >= -{v}")
+    for col, val in (crit.get("fields") or {}).items():
+        val = str(val or "").strip()
+        if not val:
+            continue
+        if col in aliases:
+            fid = aliases[col]["id"]
+        elif col in CRITERIA_TEXT_FIELDS:
+            fid = CRITERIA_TEXT_FIELDS[col]
+        else:
+            fid = norm_field_id(col)
+        m = re.match(r"^customfield_(\d+)$", fid)
+        ref = f"cf[{m.group(1)}]" if m else fid
+        if fid in ("summary", "description", "environment", "comment") or \
+                (m and types.get(fid, "string") in ("string", "")):
+            clauses.append(f'{ref} ~ "{jql_quote(val)}"')
+        else:
+            clauses.append(f"{ref} = {_jql_value(val)}")
+    raw = str(crit.get("jql") or "").strip()
+    if raw:
+        clauses.append("(" + re.sub(r"\s+ORDER\s+BY\s+.*$", "", raw, flags=re.I | re.S) + ")")
+    if not clauses:
+        raise ConfigError("choose at least one criterion (text, project, assignee, ...)")
+    return " AND ".join(clauses) + " ORDER BY updated DESC"
 
 
 # ------------------------------------------------------------ config.json
@@ -671,6 +721,15 @@ def write_json_600(path: str, obj) -> None:
         raise
 
 
+def limit_problem(v, lo: int, hi: int = 1000) -> str:
+    """'' when v is unset or an int in lo..hi (a page size / result cap)."""
+    if v is None or v == "":
+        return ""
+    if isinstance(v, bool) or not isinstance(v, int):
+        return f"'{v}' must be a whole number"
+    return "" if lo <= v <= hi else f"{v} must be {lo}-{hi}"
+
+
 class Config:
     """Resolved poller config. `notes` lists human-readable facts the user
     must be told (env overrides, migration); `problems` lists what is wrong."""
@@ -710,14 +769,9 @@ class Config:
         return None
 
     @property
-    def searches(self) -> list:
-        return self.data.get("searches") or []
-
-    def search(self, name: str) -> dict | None:
-        for s in self.searches:
-            if s.get("name") == name:
-                return s
-        return None
+    def live_search(self) -> dict:
+        ls = self.data.get("liveSearch")
+        return ls if isinstance(ls, dict) else {}
 
     def problems(self) -> list:
         p = []
@@ -744,23 +798,25 @@ class Config:
             pr = e.get("projects", "*")
             if pr != "*" and not (isinstance(pr, list) and all(isinstance(x, str) for x in pr)):
                 p.append(f"endpoint '{n}': projects must be \"*\" or a list of keys")
-            if not e.get("file"):
+            if not e.get("file") and e.get("type", "issues") != "directory":
                 p.append(f"endpoint '{n}': file missing")
+            if e.get("file") == LIVE_SEARCH_FILE:
+                p.append(f"endpoint '{n}': file {LIVE_SEARCH_FILE} is the live search's tab")
             if isinstance(e.get("columns"), str) and columns_problem(e["columns"]):
                 p.append(f"endpoint '{n}': {columns_problem(e['columns'])}")
-        snames = set()
-        for i, sr in enumerate(self.searches):
-            n = sr.get("name") or f"#{i}"
-            if n in snames:
-                p.append(f"search '{n}': duplicate name")
-            snames.add(n)
-            if sr.get("kind", "text") not in SEARCH_KINDS:
-                p.append(f"search '{n}': kind must be one of {'/'.join(SEARCH_KINDS)}")
-            if isinstance(sr.get("columns"), str) and columns_problem(sr["columns"]):
-                p.append(f"search '{n}': {columns_problem(sr['columns'])}")
-        files = [x.get("file") for x in self.endpoints + self.searches if x.get("file")]
+            for k, lo in (("maxResults", 1), ("maxTotal", 0)):
+                bad = limit_problem(e.get(k), lo)
+                if bad:
+                    p.append(f"endpoint '{n}': {k} {bad}")
+        ls = self.live_search
+        if isinstance(ls.get("columns"), str) and columns_problem(ls["columns"]):
+            p.append(f"live search: {columns_problem(ls['columns'])}")
+        bad = limit_problem(ls.get("maxResults"), 1)
+        if bad:
+            p.append(f"live search: maxResults {bad}")
+        files = [x.get("file") for x in self.endpoints if x.get("file")]
         for f in sorted({f for f in files if files.count(f) > 1}):
-            p.append(f"file '{f}' is written by more than one job/search")
+            p.append(f"file '{f}' is written by more than one job")
         return p
 
     def masked(self) -> dict:
@@ -798,22 +854,23 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
                 notes.append(f"reading legacy {LEGACY_CONFIG} (cannot write config.json: {err})")
     if not data.get("endpoints"):
         data["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
+    if migrate and source == "config.json":
+        migrate_v3(data, notes)
     # per-job columns: jobs from before get their own copy of [jira] columns
     # once (written back; env / flag credentials are applied AFTER this so
     # they never leak into the file)
     template = read_section("jira").get("columns", "")
     if migrate and source == "config.json" and template:
-        missing = [e for e in data["endpoints"] + (data.get("searches") or [])
-                   if isinstance(e, dict) and not e.get("columns")]
+        missing = [e for e in data["endpoints"]
+                   if isinstance(e, dict) and not e.get("columns")
+                   and e.get("type", "issues") != "directory"]
         if missing:
             try:
                 with open(CONFIG_JSON, encoding="utf-8") as fh:
                     raw = json.load(fh)
                 for e in raw.get("endpoints") or []:
-                    if isinstance(e, dict) and not e.get("columns"):
-                        e["columns"] = template
-                for e in raw.get("searches") or []:
-                    if isinstance(e, dict) and not e.get("columns"):
+                    if isinstance(e, dict) and not e.get("columns") \
+                            and e.get("type", "issues") != "directory":
                         e["columns"] = template
                 write_json_600(CONFIG_JSON, raw)
                 for e in missing:
@@ -832,6 +889,48 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
     return Config(data, CONFIG_JSON, notes, source)
 
 
+def migrate_v3(data: dict, notes: list) -> None:
+    """One-time config.json upgrades (written back): saved searches are gone
+    (the live search replaced them - their search-*.json tabs are deleted),
+    and the weekly directory job is added once (a user may delete it later)."""
+    raw_changes = {}
+    if "searches" in data:
+        srs = data.pop("searches") or []
+        out = os.path.expanduser(data.get("outDir") or OUT_DIR_DEFAULT)
+        for sr in srs if isinstance(srs, list) else []:
+            if not isinstance(sr, dict):
+                continue
+            f = sr.get("file") or f"search-{sr.get('name')}.json"
+            try:
+                os.unlink(os.path.join(out, os.path.basename(f)))
+            except OSError:
+                pass
+        raw_changes["searches"] = None
+        if srs:
+            notes.append(f"removed {len(srs)} saved search(es): use the live search (Cmd+F in "
+                         "the Jira window)")
+    if not data.get("directoryJob"):
+        if not any(e.get("type") == "directory" for e in data["endpoints"] if isinstance(e, dict)):
+            data["endpoints"].append(dict(DIRECTORY_ENDPOINT))
+            raw_changes["endpoints"] = data["endpoints"]
+            notes.append("added the weekly 'directory' job (projects + users for the pickers)")
+        data["directoryJob"] = True
+        raw_changes["directoryJob"] = True
+    if not raw_changes:
+        return
+    try:
+        with open(CONFIG_JSON, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        for k, v in raw_changes.items():
+            if v is None:
+                raw.pop(k, None)
+            else:
+                raw[k] = v
+        write_json_600(CONFIG_JSON, raw)
+    except (OSError, ValueError) as err:
+        notes.append(f"config upgrade not saved: {err}")
+
+
 def save(updates: dict) -> str:
     """Merge `updates` into config.json (creating it, keeping endpoints)."""
     base = dict(DEFAULTS)
@@ -840,7 +939,7 @@ def save(updates: dict) -> str:
             base.update(json.load(fh))
     elif os.path.exists(LEGACY_CONFIG):
         base = migrate_legacy(parse_legacy(LEGACY_CONFIG))
-    allowed = set(DEFAULTS) | {"endpoints", "searches", "teamConfig"}
+    allowed = set(DEFAULTS) | {"endpoints", "teamConfig", "directoryJob"}
     for k, v in updates.items():
         if k in allowed and v is not None:
             base[k] = v
@@ -870,83 +969,185 @@ def edit_jobs(cmd: str, args: list) -> int:
     except ConfigError as err:
         return result(False, [str(err)])
     eps = [dict(e) for e in cfg.endpoints]
-    srs = [dict(x) for x in cfg.searches]
-    if cmd in ("--upsert-endpoint", "--upsert-search"):
+
+    def check(new_data: dict) -> list:
+        probs = Config(new_data, CONFIG_JSON, [], cfg.source).problems()
+        return [x for x in probs if "missing (setup" not in x]  # creds: not this edit's concern
+
+    if cmd == "--upsert-endpoint":
         try:
             obj = json.load(sys.stdin)
             if not isinstance(obj, dict):
                 raise ValueError("expected a JSON object")
         except ValueError as err:
             return result(False, [f"bad input: {err}"])
-        is_ep = cmd == "--upsert-endpoint"
         name = str(obj.get("name") or "").strip()
         if not NAME_RE.match(name):
             return result(False, ["name is required: letters, digits, _ . - (max 40)"])
-        lst = eps if is_ep else srs
-        cur = next((x for x in lst if x.get("name") == name), None)
+        cur = next((x for x in eps if x.get("name") == name), None)
         new = dict(cur or {})
         new.update({k: v for k, v in obj.items() if v is not None})
         new["name"] = name
-        new.setdefault("file", f"{name}.json" if is_ep else f"search-{name}.json")
-        if not new.get("columns"):
-            new["columns"] = read_section("jira").get("columns", "")
-        if is_ep:
-            new.setdefault("type", "issues")
-            new.setdefault("window", "30m")
-            new.setdefault("projects", "*")
-            new.setdefault("enabled", True)
+        # 0 / "" = use the default (search_defaults / no cap): drop the key
+        for k in ("maxResults", "maxTotal"):
+            if new.get(k) in (0, "", None):
+                new.pop(k, None)
+        new.setdefault("type", "issues")
+        if new["type"] == "directory":
+            new.pop("file", None)
+            new.pop("columns", None)
         else:
-            new.setdefault("kind", "text")
-            new.setdefault("args", {})
+            new.setdefault("file", f"{name}.json")
+            if not new.get("columns"):
+                new["columns"] = read_section("jira").get("columns", "")
+        new.setdefault("window", "30m")
+        new.setdefault("projects", "*")
+        new.setdefault("enabled", True)
         if cur is None:
-            lst.append(new)
+            eps.append(new)
         else:
-            lst[lst.index(cur)] = new
-        probs = Config({**cfg.data, "endpoints": eps, "searches": srs}, CONFIG_JSON, [],
-                       cfg.source).problems()
-        probs = [x for x in probs if "missing (setup" not in x]  # creds: not this edit's concern
-        if not is_ep:
-            try:
-                search_jql(new, load_team(cfg.data))
-            except ConfigError as err:
-                probs.append(f"search '{name}': {err}")
-        if is_ep and (new.get("job") or new.get("template")):
+            eps[eps.index(cur)] = new
+        probs = check({**cfg.data, "endpoints": eps})
+        if new.get("job") or new.get("template"):
             try:
                 endpoint_jql(new, load_team(cfg.data))
             except ConfigError as err:
                 probs.append(f"endpoint '{name}': {err}")
         if probs:
             return result(False, probs, name=name)
-        save({"endpoints": eps, "searches": srs})
+        save({"endpoints": eps})
         return result(True, name=name, created=cur is None)
-    if cmd in ("--delete-endpoint", "--delete-search"):
+    if cmd == "--delete-endpoint":
         if len(args) != 1:
             return result(False, [f"{cmd} NAME"])
-        lst = eps if cmd == "--delete-endpoint" else srs
-        keep = [x for x in lst if x.get("name") != args[0]]
-        if len(keep) == len(lst):
+        keep = [x for x in eps if x.get("name") != args[0]]
+        if len(keep) == len(eps):
             return result(False, [f"unknown name '{args[0]}'"])
-        if cmd == "--delete-endpoint":
-            if not keep:
-                return result(False, ["the last poll job cannot be deleted (disable it instead)"])
-            save({"endpoints": keep})
-        else:
-            save({"searches": keep})
+        if not any(x.get("type", "issues") != "directory" for x in keep):
+            return result(False, ["the last poll job cannot be deleted (disable it instead)"])
+        save({"endpoints": keep})
         return result(True, name=args[0])
-    # --set-columns endpoint|search NAME SPEC
-    if len(args) != 3 or args[0] not in ("endpoint", "search"):
-        return result(False, ["--set-columns endpoint|search NAME SPEC"])
+    if cmd == "--set-live-search":
+        # {maxResults, columns}: merged into config.json liveSearch
+        try:
+            obj = json.load(sys.stdin)
+            if not isinstance(obj, dict):
+                raise ValueError("expected a JSON object")
+        except ValueError as err:
+            return result(False, [f"bad input: {err}"])
+        ls = dict(cfg.live_search)
+        ls.update({k: v for k, v in obj.items() if k in ("maxResults", "columns") and v is not None})
+        if ls.get("maxResults") in (0, ""):
+            ls.pop("maxResults")
+        probs = check({**cfg.data, "liveSearch": ls})
+        if probs:
+            return result(False, probs)
+        save({"liveSearch": ls})
+        return result(True, name="search")
+    # --set-columns endpoint|live NAME SPEC
+    if len(args) != 3 or args[0] not in ("endpoint", "live"):
+        return result(False, ["--set-columns endpoint|live NAME SPEC"])
     kind, name, spec = args
     bad = columns_problem(spec)
     if bad:
         return result(False, [bad])
-    lst = eps if kind == "endpoint" else srs
-    hit = next((x for x in lst if x.get("name") == name), None)
+    if kind == "live":
+        ls = dict(cfg.live_search)
+        ls["columns"] = spec.strip()
+        save({"liveSearch": ls})
+        return result(True, name=name)
+    hit = next((x for x in eps if x.get("name") == name), None)
     if hit is None:
         return result(False, [f"unknown {kind} '{name}'"])
     hit["columns"] = spec.strip()
-    save({"endpoints": eps} if kind == "endpoint" else {"searches": srs})
+    save({"endpoints": eps})
     return result(True, name=name)
+
+
+def live_search_columns(cfg: "Config") -> str:
+    """The live search tab's columns: its own, else the [jira] template."""
+    return job_columns(cfg.live_search)
+
+
+# team.json keys the Jira Config window's Definitions page may replace
+TEAM_EDITABLE = {"project_keys": list, "custom_fields": dict, "field_mappings": dict,
+                 "api_endpoints": dict, "jql_templates": dict, "search_defaults": dict,
+                 "boards": list, "jobs": list}
+
+
+def team_set(key: str) -> int:
+    """--team-set KEY: replace one team.json key with the JSON value on stdin
+    (validated with the rest of the schema first; other keys, and unknown
+    extras, are kept). Creates team.json from the example when missing."""
+    def result(ok, problems=()):
+        print(json.dumps({"ok": ok, "problems": list(problems), "key": key, "path": TEAM_JSON}))
+        return 0 if ok else 1
+
+    key = norm_key(key)
+    if key not in TEAM_EDITABLE:
+        return result(False, [f"'{key}' is not editable ({', '.join(TEAM_EDITABLE)})"])
+    try:
+        value = json.load(sys.stdin)
+    except ValueError as err:
+        return result(False, [f"bad input: {err}"])
+    if not isinstance(value, TEAM_EDITABLE[key]):
+        return result(False, [f"{key} must be a JSON {TEAM_EDITABLE[key].__name__}"])
+    try:
+        cfg = load()
+    except ConfigError as err:
+        return result(False, [str(err)])
+    path = os.path.expanduser(cfg.data.get("teamConfig") or TEAM_JSON)
+    raw: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if not isinstance(raw, dict):
+                raise ValueError("top level is not an object")
+        except (OSError, ValueError) as err:
+            return result(False, [f"{path}: {err}"])
+    # replace the key whatever spelling the hand-written file used for it
+    for k in [k for k in raw if norm_key(k) == key]:
+        del raw[k]
+    raw[key] = value
+    if key == "search_defaults":
+        for k, v in value.items():
+            if norm_key(k) in DEFAULT_SEARCH and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+                return result(False, [f"search_defaults.{k} must be a whole number >= 0"])
+    probs = []
+    for alias, spec in (value.items() if key == "custom_fields" else ()):
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", str(alias)):
+            probs.append(f"custom_fields: alias '{alias}' must be letters, digits, _")
+        fid = norm_field_id((spec or {}).get("field_id") if isinstance(spec, dict) else "")
+        if fid and not fid.startswith("customfield_"):
+            probs.append(f"custom_fields.{alias}: '{fid}' is not a customfield_NNNNN id")
+    if key == "project_keys":
+        probs += [f"project_keys: '{k}' is not a project key" for k in value
+                  if not re.match(r"^[A-Z][A-Z0-9_]*$", str(k))]
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(raw, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.chmod(tmp, 0o644)
+        # validate the file as it WILL be loaded (team.json layer only)
+        try:
+            probs += team_problems(load_team({"teamConfig": tmp}))
+        except ConfigError as err:
+            probs.append(str(err))
+        if probs:
+            os.unlink(tmp)
+            return result(False, probs)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return result(True)
 
 
 def main(argv: list) -> int:
@@ -970,9 +1171,21 @@ def main(argv: list) -> int:
             return 2
         print(save(updates))
         return 0
-    if cmd in ("--upsert-endpoint", "--upsert-search", "--delete-endpoint", "--delete-search",
-               "--set-columns"):
+    if cmd in ("--upsert-endpoint", "--delete-endpoint", "--set-columns", "--set-live-search"):
         return edit_jobs(cmd, argv[1:])
+    if cmd == "--team-set":
+        if len(argv) != 2:
+            print("jira-config: --team-set KEY  (JSON value on stdin)", file=sys.stderr)
+            return 2
+        return team_set(argv[1])
+    if cmd == "--criteria-jql":
+        try:
+            crit = json.load(sys.stdin)
+            print(criteria_jql(crit, load_team(load().data)))
+        except (ValueError, ConfigError) as err:
+            print(f"jira-config: {err}", file=sys.stderr)
+            return 2
+        return 0
     if cmd in ("--set-window", "--set-enabled"):
         if len(argv) != 3:
             print(f"jira-config: {cmd} NAME VALUE", file=sys.stderr)

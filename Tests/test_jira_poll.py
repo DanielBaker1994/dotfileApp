@@ -190,8 +190,23 @@ with open(os.environ["FAKE_CURL_LOG"], "a") as fh:
     fh.write(json.dumps(sys.argv[1:]) + "\n")
 url = sys.argv[-1]
 q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+path = urllib.parse.urlparse(url).path
 if url.endswith("/myself"):
     body = {"displayName": "Fake User", "name": "fake"}
+elif path.endswith("/project"):
+    body = [{"key": "P1", "name": "Proj One"}, {"key": "P2", "name": "Proj Two"}]
+elif path.endswith("/user/assignable/search"):
+    # 3 users per project, served in pages; "bob" is in both projects
+    proj, start, n = q["project"][0], int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
+    us = [{"name": f"{proj.lower()}u{i}", "displayName": f"{proj} User {i}"} for i in range(2)]
+    us.append({"name": "bob", "displayName": "Bob", "emailAddress": "bob@x"})
+    body = us[start:start + n]
+elif path.endswith("/status") or path.endswith("/priority") or path.endswith("/issuetype"):
+    body = [{"name": "B"}, {"name": "a"}, {"name": "B"}]
+elif path.endswith("/field"):
+    body = [{"id": "summary", "name": "Summary", "custom": False, "schema": {"type": "string"}},
+            {"id": "customfield_20214", "name": "Package", "custom": True,
+             "schema": {"type": "option"}}]
 else:
     start, n = int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
     body = {"startAt": start, "total": 5, "issues": [
@@ -317,7 +332,7 @@ class BearerAndTeamTests(unittest.TestCase):
             self.assertNotIn("SECRET", p.stdout)
 
 
-class JobsAndSearchesTests(unittest.TestCase):
+class JobsAndLiveSearchTests(unittest.TestCase):
     COLS = "key:Key:10:left:filter+sort, title:Title:0:left:filter"
 
     def env(self, tmp, **cfg_extra):
@@ -362,18 +377,19 @@ class JobsAndSearchesTests(unittest.TestCase):
             self.assertTrue(r["ok"], r)
             ep = [e for e in self.cfgjson(env)["endpoints"] if e["name"] == "mine"][0]
             self.assertEqual((ep["file"], ep["type"], ep["enabled"]), ("mine.json", "issues", True))
-            self.assertFalse(up({"name": "s1", "kind": "reporter"}, "search")["ok"])   # empty arg
-            r = up({"name": "s1", "kind": "reporter", "args": {"username": "bob"}}, "search")
-            self.assertTrue(r["ok"], r)
-            self.assertEqual(self.cfgjson(env)["searches"][0]["file"], "search-s1.json")
-            self.assertEqual(self.cfgjson(env)["searches"][0]["columns"], self.COLS)   # template
+            self.assertFalse(up({"name": "x", "maxResults": 5000})["ok"])      # page size 1-1000
+            self.assertFalse(up({"name": "x", "file": "search.json"})["ok"])   # the live tab
+            r = up({"name": "mine", "maxResults": 25, "maxTotal": 0})
+            ep = [e for e in self.cfgjson(env)["endpoints"] if e["name"] == "mine"][0]
+            self.assertEqual(ep["maxResults"], 25)
+            self.assertNotIn("maxTotal", ep)        # 0 = no cap = key dropped
             r = json.loads(self.run_py(env, "jira_config.py", "--set-columns", "endpoint", "mine",
                                        "key:Key:50").stdout)
             self.assertTrue(r["ok"])
             self.assertTrue(json.loads(self.run_py(env, "jira_config.py", "--delete-endpoint",
                                                    "mine").stdout)["ok"])
             last = json.loads(self.run_py(env, "jira_config.py", "--delete-endpoint", "all").stdout)
-            self.assertFalse(last["ok"])   # never delete the last job
+            self.assertFalse(last["ok"])   # never delete the last job (directory doesn't count)
 
     def test_per_job_api_fields_differ(self):
         a = jira_config.api_fields({}, {}, columns="key:K, labels:L")
@@ -383,48 +399,148 @@ class JobsAndSearchesTests(unittest.TestCase):
         self.assertIn("duedate", b)
         self.assertIn("duedate", jira_config.publish_keys({}, columns="key:K, duedate:Due"))
 
-    def test_search_jql_kinds(self):
-        t = {"project_keys": ["A"]}
-        sj = jira_config.search_jql
-        self.assertEqual(sj({"kind": "reporter", "args": {"username": "bob"}}, t),
-                         'project in ("A") AND reporter = "bob"')
-        self.assertEqual(sj({"kind": "project", "args": {"project": "Z"}}, t), 'project = "Z"')
-        self.assertEqual(sj({"kind": "text", "args": {"query": "x"}, "projects": ["B"]}, t),
-                         'project in ("B") AND (summary ~ "x" OR description ~ "x")')
-        self.assertEqual(sj({"kind": "jql", "args": {"jql": "a = 1 ORDER BY created"}}, t), "a = 1")
-        with self.assertRaises(jira_config.ConfigError):
-            sj({"kind": "assignee", "args": {}}, t)
+    def test_criteria_jql(self):
+        t = jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"})
+        cj = jira_config.criteria_jql
+        self.assertEqual(cj({"assignee": ["ann", "bob"], "projects": ["P1"]}, t),
+                         'project = "P1" AND assignee in ("ann", "bob") ORDER BY updated DESC')
+        self.assertEqual(cj({"text": 'a "b"', "reporter": ["currentUser()"], "updated": "7d"}, t),
+                         'reporter = currentUser() AND text ~ "a \\"b\\"" AND updated >= -7d '
+                         "ORDER BY updated DESC")
+        self.assertEqual(cj({"created": "today", "projects": "*"}, t),
+                         "created >= startOfDay() ORDER BY updated DESC")
+        # custom alias -> cf[]; text type (or unknown) uses ~, options use =
+        self.assertEqual(cj({"fields": {"package_info": "pkg"}}, t),
+                         'cf[20214] ~ "pkg" ORDER BY updated DESC')
+        self.assertEqual(cj({"fields": {"package_info": "pkg"}}, t, {"customfield_20214": "option"}),
+                         'cf[20214] = "pkg" ORDER BY updated DESC')
+        self.assertEqual(cj({"fields": {"title": "x"}, "jql": "a = 1 ORDER BY created"}, t),
+                         'summary ~ "x" AND (a = 1) ORDER BY updated DESC')
+        for bad in ({}, {"projects": []}, {"updated": "soon"}):
+            with self.assertRaises(jira_config.ConfigError):
+                cj(bad, t)
 
-    def test_run_search_publishes_its_own_tab(self):
+    def fake_curl(self, tmp, env):
+        fake = os.path.join(tmp, "curl")
+        with open(fake, "w") as fh:
+            fh.write(FAKE_CURL)
+        os.chmod(fake, 0o755)
+        env["PATH"] = tmp + os.pathsep + env["PATH"]
+        env["FAKE_CURL_LOG"] = os.path.join(tmp, "calls.jsonl")
+
+    def urls(self, env):
+        with open(env["FAKE_CURL_LOG"]) as fh:
+            return [json.loads(x)[-1] for x in fh]
+
+    def test_live_search_publishes_search_tab(self):
         with tempfile.TemporaryDirectory() as tmp:
-            env = self.env(tmp, searches=[{"name": "s1", "kind": "text", "args": {"query": "pkg"},
-                                           "file": "search-s1.json",
-                                           "columns": "key:Key, title:Title, customfield_20214:Pkg"}])
-            fake = os.path.join(tmp, "curl")
-            with open(fake, "w") as fh:
-                fh.write(FAKE_CURL)
-            os.chmod(fake, 0o755)
-            env["PATH"] = tmp + os.pathsep + env["PATH"]
-            env["FAKE_CURL_LOG"] = os.path.join(tmp, "calls.jsonl")
-            p = self.run_py(env, "jira_poll.py", "--search", "s1")
-            self.assertEqual(p.returncode, 0, p.stderr)
-            with open(os.path.join(tmp, "out", "search-s1.json")) as fh:
+            env = self.env(tmp, liveSearch={"columns": "key:Key, title:Title, customfield_20214:Pkg",
+                                            "maxResults": 3})
+            self.fake_curl(tmp, env)
+            crit = json.dumps({"text": "pkg", "projects": ["P1"]})
+            p = self.run_py(env, "jira_poll.py", "--live-search", "--dry-run", stdin=crit)
+            dry = json.loads(p.stdout)
+            self.assertEqual(dry["jql"], 'project = "P1" AND text ~ "pkg" ORDER BY updated DESC')
+            self.assertIn("maxResults=3", dry["curl"])
+            self.assertFalse(os.path.exists(env["FAKE_CURL_LOG"]))   # dry: no request
+            p = self.run_py(env, "jira_poll.py", "--live-search", stdin=crit)
+            r = json.loads(p.stdout)
+            self.assertTrue(r["ok"], p.stdout + p.stderr)
+            self.assertEqual((r["count"], r["total"], r["more"]), (3, 5, True))
+            with open(os.path.join(tmp, "out", "search.json")) as fh:
                 items = json.load(fh)
-            self.assertEqual([i["key"] for i in items], [f"P-{i}" for i in range(5)])
+            self.assertEqual([i["key"] for i in items], ["P-0", "P-1", "P-2"])
             self.assertEqual(items[0]["customfield_20214"], "pkg")
-            with open(env["FAKE_CURL_LOG"]) as fh:
-                urls = [json.loads(x)[-1] for x in fh]
-            self.assertTrue(any("summary%20~%20%22pkg%22" in u for u in urls), urls)
-            self.assertTrue(all("customfield_20214" in u for u in urls if "/search?" in u))
-            with open(os.path.join(tmp, "cache", "status.json")) as fh:
-                st = json.load(fh)["searches"]["s1"]
-            self.assertEqual((st["status"], st["items"]), ("ok", 5))
-            with open(os.path.join(tmp, "cache", "fields_seen.json")) as fh:
-                self.assertIn("search-s1.json", json.load(fh)["customfield_20214"])
+            self.assertTrue(all("customfield_20214" in u for u in self.urls(env)))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "jiras.json")))  # no merge
+            bad = json.loads(self.run_py(env, "jira_poll.py", "--live-search", stdin="{}").stdout)
+            self.assertFalse(bad["ok"])
+            self.assertIn("at least one criterion", bad["error"])
             d = json.loads(self.run_py(env, "jira_poll.py", "--describe").stdout)
-            self.assertEqual(d["searches"][0]["items"], 5)
+            self.assertEqual(d["liveSearch"]["maxResults"], 3)
             cat = {c["field"]: c for c in d["catalog"]}
-            self.assertIn("search:s1", cat["customfield_20214"]["usedBy"])
+            self.assertIn("live:search", cat["customfield_20214"]["usedBy"])
+            r = json.loads(self.run_py(env, "jira_config.py", "--set-columns", "live", "search",
+                                       "key:K").stdout)
+            self.assertTrue(r["ok"])
+            self.assertEqual(self.cfgjson(env)["liveSearch"]["columns"], "key:K")
+
+    def test_directory_job_caches_users(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.fake_curl(tmp, env)
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["P1", "P2"], "search_defaults": {"max_results_users": 2}}, fh)
+            p = self.run_py(env, "jira_poll.py", "--directory")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(os.path.join(tmp, "cache", "directory.json")) as fh:
+                d = json.load(fh)
+            self.assertEqual([x["key"] for x in d["projects"]], ["P1", "P2"])
+            ids = [u["id"] for u in d["users"]]
+            self.assertEqual(len(ids), 5)                 # bob merged across projects
+            bob = [u for u in d["users"] if u["id"] == "bob"][0]
+            self.assertEqual((bob["projects"], bob["email"]), (["P1", "P2"], "bob@x"))
+            self.assertEqual(d["statuses"], ["a", "B"])    # de-duplicated, sorted
+            self.assertEqual(d["fields"][0]["id"], "customfield_20214")   # custom first
+            pages = [u for u in self.urls(env) if "assignable" in u]
+            self.assertEqual(len(pages), 4)               # page size 2: 2 + 1, per project
+            d = json.loads(self.run_py(env, "jira_poll.py", "--describe").stdout)
+            self.assertEqual(d["directory"]["counts"]["users"], 5)
+            ep = [e for e in d["endpoints"] if e["type"] == "directory"][0]
+            self.assertEqual((ep["window"], ep["items"], ep["file"]), ("1w", 5, ""))
+            self.assertTrue(any("assignable users of P2" in r["purpose"] for r in ep["requests"]))
+
+    def test_upgrade_drops_searches_adds_directory_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, searches=[{"name": "s1", "kind": "text", "file": "search-s1.json"}])
+            os.makedirs(os.path.join(tmp, "out"))
+            stale = os.path.join(tmp, "out", "search-s1.json")
+            open(stale, "w").close()
+            p = self.run_py(env, "jira_config.py", "--check")
+            self.assertIn("removed 1 saved search", p.stdout)
+            cfg = self.cfgjson(env)
+            self.assertNotIn("searches", cfg)
+            self.assertFalse(os.path.exists(stale))
+            self.assertEqual([e["type"] for e in cfg["endpoints"]], ["issues", "directory"])
+            self.assertNotIn("columns", cfg["endpoints"][1])
+            r = json.loads(self.run_py(env, "jira_config.py", "--delete-endpoint", "directory").stdout)
+            self.assertTrue(r["ok"])
+            self.run_py(env, "jira_config.py", "--check")
+            self.assertEqual(len(self.cfgjson(env)["endpoints"]), 1)   # not re-added
+
+    def test_page_size_reaches_the_curl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            up = json.loads(self.run_py(env, "jira_config.py", "--upsert-endpoint",
+                                        stdin=json.dumps({"name": "all", "maxResults": 7})).stdout)
+            self.assertTrue(up["ok"], up)
+            d = json.loads(self.run_py(env, "jira_poll.py", "--describe").stdout)
+            ep = [e for e in d["endpoints"] if e["name"] == "all"][0]
+            self.assertIn("maxResults=7", ep["requests"][0]["curl"])
+            self.assertEqual(ep["maxResults"], 7)
+            self.assertEqual(d["searchDefaults"]["max_results_search"], 50)
+
+    def test_team_set_validates_and_keeps_other_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"Project Keys": ["OLD"], "boards": [{"id": 1}], "extra": 1}, fh)
+            ts = lambda k, v: json.loads(self.run_py(  # noqa: E731
+                env, "jira_config.py", "--team-set", k, stdin=json.dumps(v)).stdout)
+            self.assertFalse(ts("project_keys", ["bad key"])["ok"])
+            self.assertFalse(ts("project_keys", "P1")["ok"])                    # not a list
+            self.assertFalse(ts("custom_fields", {"pkg": {"field_id": "summary"}})["ok"])
+            self.assertFalse(ts("custom_fields", {"pkg": {"label": "no id"}})["ok"])
+            self.assertFalse(ts("site", "x")["ok"])                             # not editable
+            self.assertTrue(ts("project_keys", ["P1", "P2"])["ok"])
+            r = ts("custom_fields", {"pkg": {"field_id": "customfield_1", "label": "Pkg"}})
+            self.assertTrue(r["ok"], r)
+            with open(env["JIRA_TEAM_JSON"]) as fh:
+                t = json.load(fh)
+            self.assertEqual(t["project_keys"], ["P1", "P2"])
+            self.assertNotIn("Project Keys", t)        # the old spelling is replaced
+            self.assertEqual((t["boards"], t["extra"]), ([{"id": 1}], 1))
+            self.assertEqual(t["custom_fields"]["pkg"]["field_id"], "customfield_1")
 
 
 def isolated_env(tmp, token=""):

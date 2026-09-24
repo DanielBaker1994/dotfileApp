@@ -16,6 +16,9 @@ Per due endpoint:
   2. issues:   sync that window (projects "*" or a list, optional custom
                `jql`) into ~/.cache/jira/jiras.json, publish <file>
      releases: every version of the projects -> <file>
+     directory: projects + assignable users + statuses / types / priorities
+               / fields -> ~/.cache/jira/directory.json (the pickers' lists;
+               weekly - user search is expensive; no tab)
   3. record lastRun / lastSuccess / nextRun / status / items / lastError.
 
 Guarded by an flock on ~/.cache/jira/poll.lock: a second invocation while a
@@ -40,9 +43,14 @@ Usage:
                                   endpoint's schedule, status, full JQL and
                                   the full curl of each request (real token),
                                   plus the [jira] columns -> API fields map
-  jira_poll.py --search NAME      run one saved search now (config.json
-                                  "searches"): full sync of its JQL, published
-                                  as search-<name>.json = a Jira window tab
+  jira_poll.py --live-search      criteria JSON on stdin (see
+                                  jira_config.criteria_jql) -> one search now,
+                                  published as <outDir>/search.json (the Jira
+                                  window's search tab). No lock, no cache
+                                  merge. Prints {ok, count, total, jql, curl}.
+                                  With --dry-run: only the JQL + curl.
+  jira_poll.py --directory        refresh directory.json now (= Force Poll of
+                                  the directory job)
   jira_poll.py --cancel           stop the running poll (SIGTERM to the lock
                                   holder); its endpoints become "cancelled"
   jira_poll.py --quiet            no progress output (launchd)
@@ -82,7 +90,7 @@ def say(msg: str) -> None:
 
 def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
-         "force": False, "describe": False, "cancel": False, "search": ""}
+         "force": False, "describe": False, "cancel": False, "live": False, "directory": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -112,8 +120,10 @@ def parse_args(argv: list) -> dict:
             o["describe"] = True
         elif name == "--cancel":
             o["cancel"] = True
-        elif name == "--search":
-            o["search"] = val()
+        elif name == "--live-search":
+            o["live"] = True
+        elif name == "--directory":
+            o["directory"] = True
         elif name == "--force":
             o["force"] = True
         elif name in ("-h", "--help"):
@@ -294,6 +304,13 @@ def note_fields_seen(file: str, items: list) -> None:
         pass
 
 
+def ep_path(ep: dict, out_dir: str) -> str:
+    """Where a job publishes: its tab file, or directory.json."""
+    if ep.get("type") == "directory":
+        return jira_api.DIRECTORY_FILE
+    return os.path.join(out_dir, ep.get("file", ""))
+
+
 def keys_file(name: str) -> str:
     return os.path.join(KEYS_DIR, f"{name}.keys.json")
 
@@ -338,9 +355,18 @@ def job_fields(ep: dict, team: dict) -> tuple:
 def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_dir: str,
                  dry: bool, default_projects: bool = True) -> int:
     """One endpoint, one attempt. Returns the published item count."""
-    path = os.path.join(out_dir, ep["file"])
     projects = ep.get("projects", "*")
     plist = None if projects == "*" else list(projects)
+    if ep.get("type", "issues") == "directory":
+        d = jira_api.directory(c, projects=plist, quiet=QUIET)
+        if dry:
+            say(f"dry-run: would write {len(d['users'])} user(s) to {jira_api.DIRECTORY_FILE}")
+        else:
+            jira_api.write_json(jira_api.DIRECTORY_FILE, d)
+            say(f"directory: {len(d['projects'])} project(s), {len(d['users'])} user(s)"
+                + (f", {len(d['warnings'])} warning(s)" if d["warnings"] else ""))
+        return len(d["users"])
+    path = os.path.join(out_dir, ep["file"])
     if ep.get("type", "issues") == "releases":
         items = release_items(jira_api.releases(c, projects=plist))
         publish(path, items, dry)
@@ -348,7 +374,8 @@ def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_d
     res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""), api_fields=fields,
                         fetch_comments=bool(cfg["fetchComments"]),
                         snapshot_keep=int(cfg.get("snapshotKeep", 30)), quiet=QUIET,
-                        default_projects=default_projects)
+                        default_projects=default_projects, page_size=ep.get("maxResults"),
+                        max_total=ep.get("maxTotal"))
     if ep.get("jql"):
         kf = keys_file(ep["name"])
         keys = set() if window == "full" else set(jira_api.read_json(kf, []))
@@ -375,11 +402,11 @@ def columns_meta(spec: str, aliases: dict) -> list:
     return out
 
 
-def search_as_endpoint(sr: dict, team: dict) -> dict:
-    """A saved search runs through the poll machinery as a one-off job."""
-    return {"name": f"search-{sr['name']}", "file": sr.get("file") or f"search-{sr['name']}.json",
-            "type": "issues", "projects": "*", "jql": jira_config.search_jql(sr, team),
-            "columns": sr.get("columns", "")}
+def team_own(path: str) -> dict:
+    """team.json as written (keys normalized), without the defaults."""
+    raw = jira_api.read_json(os.path.expanduser(path), {})
+    raw = jira_config._norm_keys(raw) if isinstance(raw, dict) else {}
+    return {k: raw[k] for k in jira_config.TEAM_EDITABLE if k in raw}
 
 
 def describe(cfg, team: dict) -> dict:
@@ -397,7 +424,8 @@ def describe(cfg, team: dict) -> dict:
         plist = None if projects == "*" else list(projects)
         c.captured = []
         res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""), api_fields=fields,
-                            fetch_comments=False, quiet=True, default_projects=default_projects)
+                            fetch_comments=False, quiet=True, default_projects=default_projects,
+                            page_size=ep.get("maxResults"), max_total=ep.get("maxTotal"))
         reqs = [{"purpose": "search (first page; startAt / nextPageToken pages follow)", "curl": x}
                 for x in c.captured]
         if cfg["fetchComments"]:
@@ -423,7 +451,19 @@ def describe(cfg, team: dict) -> dict:
         fields, _ = job_fields(ep, team)
         reqs, jql, notes, window = [], "", [], "-"
         try:
-            if typ == "releases":
+            if typ == "directory":
+                # dry: /project returns nothing, so name the projects it would page
+                users_of = plist or team.get("project_keys") or known_projects or ["PROJ"]
+                c.captured = []
+                jira_api.directory(c, projects=users_of)
+                purposes = ["projects"] + [f"assignable users of {p} (paginated)" for p in users_of]
+                purposes += ["statuses", "issue types", "priorities", "fields"]
+                reqs += [{"purpose": purposes[i] if i < len(purposes) else "", "curl": x}
+                         for i, x in enumerate(c.captured)]
+                if plist is None and not team.get("project_keys"):
+                    notes.append('projects = "*" and no team.json project_keys: users of EVERY '
+                                 "visible project are fetched (one paginated call each)")
+            elif typ == "releases":
                 c.captured = []
                 jira_api.releases(c, projects=plist)
                 reqs += [{"purpose": "list projects" if plist is None and not team.get("project_keys")
@@ -443,8 +483,8 @@ def describe(cfg, team: dict) -> dict:
         eps.append({
             "name": ep["name"], "type": typ, "window": ep.get("window", "10m"),
             "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
-            "path": os.path.join(os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT),
-                                 ep.get("file", "")),
+            "path": ep_path(ep, os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)),
+            "maxResults": ep.get("maxResults") or 0, "maxTotal": ep.get("maxTotal") or 0,
             "projects": projects, "extraJql": ep.get("userJql", ep.get("jql", "")),
             "job": ep.get("job") or ep.get("template") or "", "args": ep.get("args") or {},
             "nextWindow": window, "jql": jql, "requests": reqs, "notes": notes,
@@ -456,34 +496,23 @@ def describe(cfg, team: dict) -> dict:
             "lastCurl": entry.get("lastCurl", ""),
         })
 
-    srs = []
-    sstat = status.get("searches") or {}
-    for sr in cfg.searches:
-        st = sstat.get(sr.get("name"), {})
-        spec = jira_config.job_columns(sr)
-        jql, reqs, notes = "", [], []
-        try:
-            ep = search_as_endpoint(sr, team)
-            fields, _ = job_fields(ep, team)
-            jql, reqs = issue_requests(ep, "full", fields, default_projects=False)
-        except (jira_config.ConfigError, jira_api.ApiError) as err:
-            notes.append(f"cannot build request: {err}")
-        srs.append({
-            "name": sr.get("name"), "kind": sr.get("kind", "text"), "args": sr.get("args") or {},
-            "projects": sr.get("projects") or [], "file": sr.get("file", ""),
-            "columnsSpec": spec, "columns": columns_meta(spec, aliases),
-            "jql": jql, "requests": reqs, "notes": notes,
-            "status": st.get("status", "never run"), "lastRun": st.get("lastRun", ""),
-            "items": st.get("items"), "lastError": st.get("lastError", ""),
-            "lastCurl": st.get("lastCurl", ""),
-        })
+    # the live search tab (Cmd+F in the Jira window)
+    ls_spec = jira_config.live_search_columns(cfg)
+    live = {"file": jira_config.LIVE_SEARCH_FILE, "columnsSpec": ls_spec,
+            "columns": columns_meta(ls_spec, aliases),
+            "maxResults": cfg.live_search.get("maxResults") or jira_config.LIVE_SEARCH_MAX,
+            "path": os.path.join(os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT),
+                                 jira_config.LIVE_SEARCH_FILE)}
+    dirdata = jira_api.read_json(jira_api.DIRECTORY_FILE, {})
+    if not isinstance(dirdata, dict):
+        dirdata = {}
 
     # field catalog: every column any job/search defines + every field seen
     # in published data + what can be added (base keys, custom aliases)
     defined: dict = {}
-    for kind, lst in (("job", eps), ("search", srs)):
+    for kind, lst in (("job", eps), ("live", [{"name": "search", **live}])):
         for j in lst:
-            for col in j["columns"]:
+            for col in j.get("columns") or []:
                 d = defined.setdefault(col["field"], {"field": col["field"], "titles": [],
                                                       "usedBy": [], "apiFields": col["apiFields"],
                                                       "label": col["label"]})
@@ -523,67 +552,76 @@ def describe(cfg, team: dict) -> dict:
         "lock": {"held": held, **(lock.holder() if held else {})},
         "projectKeys": team.get("project_keys") or [],
         "columnsTemplate": template,
-        "searchKinds": [{"kind": k, **v} for k, v in jira_config.SEARCH_KINDS.items()],
+        "searchDefaults": {k: c.sd(k) for k in jira_config.DEFAULT_SEARCH},
+        "liveSearch": live,
+        "directory": {"path": jira_api.DIRECTORY_FILE, "fetchedAt": dirdata.get("fetchedAt", ""),
+                      "forProjects": dirdata.get("forProjects") or [],
+                      "warnings": dirdata.get("warnings") or [],
+                      "counts": {k: len(dirdata.get(k) or []) for k in
+                                 ("projects", "users", "statuses", "issueTypes", "priorities", "fields")}},
+        "team": {k: team.get(k) for k in jira_config.TEAM_EDITABLE},
+        # team.json's own values (what --team-set edits; `team` = merged with defaults)
+        "teamOwn": team_own(team.get("path", jira_config.TEAM_JSON)),
         "teamJobs": [j.get("key") for j in team.get("jobs") or [] if isinstance(j, dict)]
         + [k for k in (team.get("jql_templates") or {})],
         "catalog": catalog, "availableFields": avail,
         "loginCurl": c.captured[0] if c.captured else "",
-        "endpoints": eps, "searches": srs,
+        "endpoints": eps,
     }
 
 
-def run_search(name: str) -> int:
-    """--search NAME: one saved search, now. Holds the poll lock (the cache
-    is shared); records status.json searches[NAME]."""
+def field_types() -> dict:
+    """Jira field id -> schema type from directory.json ({} before the first
+    directory run): tells the live search `~` (text) from `=`."""
+    d = jira_api.read_json(jira_api.DIRECTORY_FILE, {})
+    return {f.get("id"): f.get("type") or "" for f in (d.get("fields") or [] if isinstance(d, dict) else [])
+            if isinstance(f, dict)}
+
+
+def live_search(dry: bool) -> int:
+    """--live-search: criteria JSON on stdin -> one search now, rows written
+    to <outDir>/search.json (the Jira window's search tab). No lock and no
+    cache merge (a live search never waits on / disturbs the poll)."""
+    def result(code, **kw):
+        print(json.dumps({"ok": code == 0, **kw}))
+        return code
+
     try:
+        crit = json.load(sys.stdin)
         cfg = jira_config.load()
         team = jira_config.load_team(cfg.data)
+        jql = jira_config.criteria_jql(crit, team, field_types())
+    except ValueError as err:
+        return result(2, error=f"bad criteria: {err}")
     except jira_config.ConfigError as err:
-        print(f"jira-poll: {err}", file=sys.stderr)
-        return 2
-    sr = cfg.search(name)
-    if sr is None:
-        print(f"jira-poll: unknown search '{name}' "
-              f"(known: {', '.join(x.get('name', '?') for x in cfg.searches) or 'none'})", file=sys.stderr)
-        return 2
-    try:
-        ep = search_as_endpoint(sr, team)
-    except jira_config.ConfigError as err:
-        print(f"jira-poll: search '{name}': {err}", file=sys.stderr)
-        return 2
-    lock = Lock(jira_status.POLL_LOCK, int(cfg["lockStaleMinutes"] or 10))
-    if not lock.acquire():
-        h = lock.holder()
-        print(f"jira-poll: a poll is running (pid {h.get('pid')} since {h.get('since')}) - "
-              "try again when it finishes", file=sys.stderr)
-        return 3
-    signal.signal(signal.SIGTERM, on_sigterm)
-    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+        return result(2, error=str(err))
+    ls = cfg.live_search
+    spec = jira_config.live_search_columns(cfg)
+    fields = jira_config.api_fields(team=team, columns=spec)
+    pkeys = jira_config.publish_keys(columns=spec)
+    cap = int((crit.get("maxResults") if isinstance(crit, dict) else 0) or ls.get("maxResults")
+              or jira_config.LIVE_SEARCH_MAX)
+    c = jira_api.Client.from_config(cfg, dry=True)
+    c.captured = []
+    c.search(jql, ",".join(fields), max_total=cap)
+    curl = c.captured[0] if c.captured else ""
+    if dry:
+        return result(0, jql=jql, curl=curl, maxResults=cap, fields=fields)
     c = jira_api.Client.from_config(cfg)
-    err, curl, items = "", "", None
-
-    def mark(d, **kw):
-        d.setdefault("searches", {}).setdefault(name, {}).update(kw)
-    jira_status.update(lambda d: mark(d, status="running", jql=ep["jql"]))
     try:
-        fields, pkeys = job_fields(ep, team)
-        items = run_endpoint(c, ep, "full", cfg, fields, pkeys, out_dir, False, default_projects=False)
-    except jira_api.ApiError as e:
-        err, curl = str(e), e.curl
-    except Cancelled:
-        err = "cancelled by user"
-    except (OSError, ValueError) as e:
-        err = f"{type(e).__name__}: {e}"
-    finally:
-        lock.release()
-    jira_status.update(lambda d: mark(d, status="error" if err else "ok", lastRun=jira_status.now_str(),
-                                      lastError=err, lastCurl=curl if err else "",
-                                      **({} if err else {"items": items})))
-    if err:
-        print(f"jira-poll: search '{name}': {err}", file=sys.stderr)
-        return 1
-    say(f"search '{name}': {items} item(s) -> {ep['file']}")
-    return 0
+        res = c.search(jql, ",".join(fields), max_total=cap)
+    except jira_api.ApiError as err:
+        return result(1, error=str(err), jql=jql, curl=err.curl or curl)
+    vers = jira_api.read_json(jira_api.VERSIONS_FILE, {})
+    aliases = jira_config.custom_field_aliases(team)
+    rows = [jira_api.cache_entry(i, vers if isinstance(vers, dict) else {}, None, fields, aliases)
+            for i in res["issues"]]
+    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+    path = os.path.join(out_dir, jira_config.LIVE_SEARCH_FILE)
+    jira_api.write_json(path, shape(rows, pkeys), mode=0o644)
+    note_fields_seen(jira_config.LIVE_SEARCH_FILE, rows)
+    return result(0, count=len(rows), total=res.get("total"), more=not res["isLast"],
+                  jql=jql, curl=curl, file=path, maxResults=cap)
 
 
 def main(argv: list) -> int:
@@ -592,8 +630,20 @@ def main(argv: list) -> int:
     QUIET = o["quiet"]
     if o["cancel"]:
         return cancel_running()
-    if o["search"]:
-        return run_search(o["search"])
+    if o["live"]:
+        return live_search(o["dry"])
+    if o["directory"]:
+        try:
+            names = [e["name"] for e in jira_config.load().endpoints if e.get("type") == "directory"]
+        except jira_config.ConfigError as err:
+            print(f"jira-poll: {err}", file=sys.stderr)
+            return 2
+        if not names:
+            print("jira-poll: no directory job in config.json (add one: type directory)",
+                  file=sys.stderr)
+            return 2
+        o["projects"] = ",".join(names)
+        o["force"] = True
     if o["describe"]:
         try:
             cfg = jira_config.load()
@@ -716,7 +766,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
             hit = any(p[0] is ep for p in plan)
             w = choose_window(ep, entry, o, margin) if ep.get("type", "issues") == "issues" else "-"
             print(f"  {ep['name']:<10} {ep.get('type', 'issues'):<8} every {ep.get('window'):<4} "
-                  f"{'DUE' if hit else 'not due':<8} window={w:<17} -> {os.path.join(out_dir, ep['file'])}")
+                  f"{'DUE' if hit else 'not due':<8} window={w:<17} -> {ep_path(ep, out_dir)}")
         return 0
 
     def mark_running(d):
@@ -733,8 +783,8 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
             e = jira_status.endpoint_entry(d, ep["name"])
             wsec = jira_config.parse_window(ep.get("window", "10m"))
             e.update({"type": ep.get("type", "issues"), "window": ep.get("window"),
-                      "enabled": ep.get("enabled", True), "file": ep["file"],
-                      "path": os.path.join(out_dir, ep["file"])})
+                      "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
+                      "path": ep_path(ep, out_dir)})
             if any(p[0] is ep for p in plan):
                 e["status"] = "running"
             nx = next_run(e, wsec)

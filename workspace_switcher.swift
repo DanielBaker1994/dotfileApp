@@ -2405,6 +2405,10 @@ final class SwitcherController: NSObject {
     // All open sub-windows (note editor / jira list). Several can coexist
     // (notes + jira at the same time); each hides on Esc and removes itself.
     var subWindows: [PopupWindow] = []
+    // the open jira window's "show this tab (freshly loaded)" hook — the live
+    // search panel calls it after a run (see openListWindow)
+    var jiraShowTab: ((String) -> Void)?
+    var pendingJiraTab: String?
     // When the user clicks another app, aerospace's on-focus-changed can fire
     // with a lag and write a STALE bridge entry naming one of our windows;
     // the poller would then yank focus back off the app the user just clicked.
@@ -5120,7 +5124,7 @@ private func trimmed(_ s: String) -> String? {
         // a source may be a single file OR a directory — a directory expands
         // to all matching files (sorted), so adding a file to a folder needs
         // no commands.conf edit
-        // jira: each tab (json file) belongs to a poll job or saved search
+        // jira: each tab (json file) belongs to a poll job or the live search
         // in config.json with its OWN columns; [jira] columns is the fallback
         func tabColumns(_ path: String?) -> [ListColumn] {
             guard cmd.table else { return [] }
@@ -5270,18 +5274,28 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             var items: [(title: String, detail: String)] = [
                 ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
             let site = cmd.name == "jira" ? jiraSite : ""
-            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
+            let keyed = rows.filter { !($0.fields["key"] ?? "").isEmpty }
+            let keys = keyed.compactMap { $0.fields["key"] }
+            let s = keys.count == 1 ? "" : "s"
             if !site.isEmpty && !keys.isEmpty {
-                items.append(("Open all in browser",
-                              "opens \(keys.count) issue\(keys.count == 1 ? "" : "s") · copies KEY + URL"))
+                items.append(("Copy URL and title", "\(keys.count) issue\(s) · one “URL Title” line each"))
+                items.append(("Open all in browser", "opens \(keys.count) issue\(s) · copies KEY + URL"))
             }
             w.showActionPicker(title: "Actions for \(what)", items: items) { [weak self, weak w] i in
-                guard let self, let w else { return }
-                if i == 0 {
+                guard let self, let w, items.indices.contains(i) else { return }
+                switch items[i].title {
+                case "Copy to clipboard":
                     let text = w.onCopyRows?(rows) ?? ""
                     self.copy(text, "\(n) row(s)")
                     w.showToast("Copied \(what)", symbol: "doc.on.clipboard")
-                } else {
+                case "Copy URL and title":
+                    let lines = keyed.map { r -> String in
+                        let t = (r.fields["title"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        return "\(site)/browse/\(r.fields["key"] ?? "")" + (t.isEmpty ? "" : " \(t)")
+                    }
+                    self.copy(lines.joined(separator: "\n"), "\(keys.count) jira URL(s) + titles")
+                    w.showToast("Copied \(keys.count) URL\(s) + title\(s)", symbol: "link")
+                default:
                     let lines = keys.map { "\($0)\t\(site)/browse/\($0)" }
                     for k in keys {
                         if let u = URL(string: site + "/browse/" + k) { NSWorkspace.shared.open(u) }
@@ -5290,6 +5304,13 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                     w.showToast("Opened \(keys.count) · copied keys + URLs", symbol: "safari")
                     self.log("list '\(cmd.name)': opened \(keys.joined(separator: ","))")
                 }
+            }
+        }
+        // Cmd+F (jira): the live-search panel docked to this window
+        if cmd.name == "jira" {
+            w.onCommandF = { [weak self, weak w] in
+                guard let self, let w else { return }
+                JiraSearchPanel.toggle(on: w, controller: self)
             }
         }
         // clicking the drag header copies the active tab's source path
@@ -5321,6 +5342,10 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             if cmd.name == "jira" {
                 // jira: config, paths, jobs, queries, curls, columns — all
                 // live in the Jira Config window; this menu is window chrome
+                menu.addItem(self.menuItem("Search Jira…  ⌘F") { [weak self, weak w] in
+                    guard let self, let w else { return }
+                    JiraSearchPanel.toggle(on: w, controller: self)
+                })
                 menu.addItem(self.menuItem("Open Jira Config Window") { [weak self] in
                     self?.showJiraDashboard()
                 })
@@ -5521,6 +5546,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             guard let self else { return }
             reloadWatcher?.invalidate()
             reloadWatcher = nil
+            if cmd.name == "jira" { JiraSearchPanel.detach(from: w) }
             self.unregisterSubWindow(w, restore: restore,
                                      restoreWID: restoreWID, restorePID: restorePID)
         }
@@ -5560,6 +5586,32 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         subWindows.append(w)
         w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
         w.show()
+        guard cmd.name == "jira" else { return }
+        // live search results: reload that tab from disk and select it (a
+        // tab the window doesn't have yet = rebuild the window, then select)
+        jiraShowTab = { [weak self, weak w] file in
+            guard let self, let w else { return }
+            guard let i = tabs.firstIndex(where: { ($0.path as NSString).lastPathComponent == file }) else {
+                self.pendingJiraTab = file
+                self.reloadJiraWindow()
+                return
+            }
+            tabs[i].items = loadListItems(tabs[i].path, cmd: cmd, columns: tabColumns(tabs[i].path))
+            tabMtimes[i] = mtime(of: tabs[i].path)
+            if i != currentTab {
+                w.selectedTab = i
+            } else {
+                applyFilterData()
+                visibleOffset = 0
+                w.setRows(filteredRows(query: w.currentQuery))
+            }
+            w.tabFooterText = lastWriteLabel(tabs[i].path)
+        }
+        if let f = pendingJiraTab {
+            pendingJiraTab = nil
+            jiraShowTab?(f)
+        }
+        JiraSearchPanel.reattach(to: w)
     }
 
     // Static favorite dirs + zoxide top-N for the file browser, taken from the
@@ -6835,7 +6887,10 @@ enum JiraPoll {
     // "Poll Now" jobs in flight (endpoint name, or "all")
     static var running: Set<String> = []
     // schedule choices offered under Poll Interval ▸
-    static let intervals = ["5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d"]
+    static let intervals = ["5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"]
+    static let directoryPath = NSHomeDirectory() + "/.cache/jira/directory.json"
+    // the live search's tab (jira_config.LIVE_SEARCH_FILE, in outDir)
+    static let liveSearchFile = "search.json"
 
     // Run a jira/*.py script off the main thread; `done` gets (exit code,
     // stdout, stderr) on the main thread. stdin carries secrets (the token)
@@ -6883,16 +6938,19 @@ enum JiraPoll {
     static var status: [String: Any]? { readJSON(statusPath) }
     static var endpoints: [[String: Any]] { readJSON(configPath)?["endpoints"] as? [[String: Any]] ?? [] }
 
-    // the poll job / saved search that writes this jira tab (json file), with
-    // its own columns — nil for a file no job owns
+    // the poll job (or the live search) that writes this jira tab (json
+    // file), with its own columns — nil for a file no job owns
     static func owner(ofTab path: String) -> (kind: String, name: String, columns: [ListColumn])? {
         guard let d = readJSON(configPath) else { return nil }
         let file = (path as NSString).lastPathComponent
-        for (kind, key) in [("endpoint", "endpoints"), ("search", "searches")] {
-            for e in d[key] as? [[String: Any]] ?? [] {
-                guard let name = e["name"] as? String else { continue }
-                let f = e["file"] as? String ?? (kind == "search" ? "search-\(name).json" : "\(name).json")
-                if f == file { return (kind, name, ListColumn.parse(e["columns"] as? String)) }
+        if file == liveSearchFile {
+            let ls = d["liveSearch"] as? [String: Any] ?? [:]
+            return ("live", "search", ListColumn.parse(ls["columns"] as? String))
+        }
+        for e in d["endpoints"] as? [[String: Any]] ?? [] {
+            guard let name = e["name"] as? String, (e["type"] as? String) != "directory" else { continue }
+            if (e["file"] as? String ?? "\(name).json") == file {
+                return ("endpoint", name, ListColumn.parse(e["columns"] as? String))
             }
         }
         return nil
@@ -7041,6 +7099,7 @@ extension SwitcherController {
     func reloadJiraWindow() {
         guard let w = subWindows.first(where: { $0.config.name == "jira" }) else { return }
         let wasShown = w.isShown
+        jiraShowTab = nil
         w.hide(restore: false)
         subWindows.removeAll { $0 === w }
         w.releaseHooks()

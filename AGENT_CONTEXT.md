@@ -35,6 +35,7 @@ bin/ui-test.sh --verbose
 - `workspace_switcher.swift` — app logic (~7300 lines)
 - `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
 - `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
+- `JiraSearch.swift` — Cmd+F live search (`JiraSearchPanel`), `JiraMultiPicker`, `JiraDirectory`
 - `commands.conf` — config (windows, commands, colors, paths)
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller");
   tests: `python3 Tests/test_jira_poll.py`
@@ -52,18 +53,49 @@ bin/ui-test.sh --verbose
   lives in that window. Socket messages `jira-poll-on/off/toggle`,
   `jira-setup`, `jira-dashboard` (CLI: `workspace-switcher jira-poll on|off|toggle|setup|dashboard`).
 - Jira Config window: `JiraDashboard.swift` (`JiraDashboardWindow` +
-  `JiraColumnEditor`; own file, compiled by `bin/workspace_switcher.sh`).
-  Master–detail: sidebar (POLL JOBS / SEARCHES / SETTINGS: Connection, Known
-  Columns) → editor per item. All data from ONE call: `jira_poll.py
-  --describe` (per job/search: schedule, status, next window, full JQL, full
-  curl of every request, its columns → API fields; `catalog`; `searchKinds`).
-  Edits only via `jira_config.py --upsert-endpoint|--upsert-search|
-  --delete-*|--set-columns` (validated, JSON result). Force Poll warns with a
-  SHEET when the lock is held (app-modal NSAlerts open hidden behind this
-  window — always use `ask(_:then:)`), Stop = `jira_poll.py --cancel`.
-  Search Run = `jira_poll.py --search NAME` → `search-<name>.json` tab.
-  `reloadJiraWindow()` rebuilds an open Jira window after edits.
-- Per-job columns: every endpoint/search in config.json owns `columns` (same
+  `JiraColumnEditor` + `jiraFormSheet`; own file, compiled by
+  `bin/workspace_switcher.sh`). Master–detail: sidebar (POLL JOBS / SETTINGS:
+  Live Search, Connection, Definitions) → editor per item. All data from ONE
+  call: `jira_poll.py --describe` (per job: schedule, status, next window, full
+  JQL, full curl of every request, `maxResults`/`maxTotal`, its columns → API
+  fields; `catalog`; `liveSearch`; `searchDefaults`; `directory` summary;
+  `team` = team.json merged with defaults, `teamOwn` = team.json as written)
+  + `directory.json` (`JiraDirectory.load()`). Edits only via `jira_config.py
+  --upsert-endpoint|--delete-endpoint|--set-columns endpoint|live NAME SPEC|
+  --set-live-search|--team-set KEY` (validated, JSON result; team edits write
+  ONLY `teamOwn` + the change, so built-in defaults are never pinned). Force
+  Poll warns with a SHEET when the lock is held (app-modal NSAlerts open hidden
+  behind this window — always use `ask(_:then:)` / `jiraFormSheet`), Stop =
+  `jira_poll.py --cancel`. `reloadJiraWindow()` rebuilds an open Jira window
+  after edits.
+- Poll job editor: Projects = `JiraMultiPicker` (known keys only, "All
+  projects" = `*`), Page size = endpoint `maxResults` (default
+  `search_defaults.max_results_search`, the old hidden `maxResults=50`), Max
+  issues = `maxTotal`. Types: issues / releases / `directory`.
+- Column editor: read-only rows (Column · Field + friendly name/API field ·
+  Width · Align · Sort · Filter); double-click / Edit… / Return opens the
+  column sheet; Delete removes.
+- Definitions page (`DefTab`): Projects, Custom Fields, API Endpoints, JQL
+  Templates, Search Defaults (editable → `--team-set`), plus read-only
+  Columns (catalog), Users, Statuses & Types (directory cache).
+- Directory job (endpoint `type: directory`, weekly `1w`, no tab; added once
+  by `migrate_v3`, flag `directoryJob`): `jira_api.directory()` → projects,
+  assignable users of `project_keys` (paginated, merged by id: Server `name`,
+  Cloud `accountId`), statuses, issue types, priorities, fields →
+  `~/.cache/jira/directory.json`. `jira_poll.py --directory` = run it now.
+- Live search (replaced saved searches; `migrate_v3` drops `searches` and
+  their `search-*.json` tabs): Cmd+F in the Jira window (`PopupWindow.onCommandF`,
+  list mode only) or icon menu "Search Jira…" → `JiraSearchPanel`
+  (`JiraSearch.swift`: child panel docked above/below the Jira window; free
+  text + Projects + "+ Filter" rows with `JiraMultiPicker`s over the
+  directory; last criteria in UserDefaults). Run = `jira_poll.py
+  --live-search` (criteria JSON on stdin → `jira_config.criteria_jql`: lists
+  ORed with `in (…)`, criteria ANDed, custom aliases → `cf[N]`) → writes
+  `<outDir>/search.json` (no lock, no cache merge) → `controller.jiraShowTab`
+  selects that tab (`pendingJiraTab` + rebuild when the tab is new). Its
+  columns/max: config.json `liveSearch` (Jira Config ▸ Live Search);
+  `owner(ofTab:)` maps search.json → `("live","search", …)`.
+- Per-job columns: every endpoint in config.json owns `columns` (same
   one-line format); `[jira] columns` = starter template + fallback for tabs
   no job owns (one-time migration copies it into jobs on load). Jira window:
   `tabColumns` / `JiraPoll.owner(ofTab:)` swap columns per tab
@@ -73,9 +105,10 @@ bin/ui-test.sh --verbose
 - Jira window: Cmd+K → `PopupWindow.showActionPicker` (↑↓ / Ctrl+N/P / Tab,
   Return, digits, Esc closes only the picker) via `onCommandK`; acts on
   ticked rows else the highlighted row (`actionRows`): Copy to clipboard /
-  Open all in browser (+ copies `KEY<TAB>URL`). No "copy selected" header
-  button (`PopupConfig.copyRowsButton = false`); icon menu is window chrome +
-  "Open Jira Config Window" only.
+  Copy URL and title (`SITE/browse/KEY Title` per line) / Open all in
+  browser (+ copies `KEY<TAB>URL`); actions are matched by title. No "copy
+  selected" header button (`PopupConfig.copyRowsButton = false`); icon menu
+  is window chrome + "Search Jira…" + "Open Jira Config Window".
 - `jira_poll.py --projects '*'` = every job (`all` only when no job is named
   "all" — the default job IS named "all").
 - Setup window: `JiraSetupWindow` (plain NSWindow above `.popUpMenu`, own key
@@ -102,7 +135,8 @@ bin/ui-test.sh --verbose
   clicks, divider drags) + `PopupRowView.drawTableRow`. Sort persists as
   `table-sort`, widths back into `columns`. `columns` MUST stay on one line.
 - Tests: `python3 Tests/test_jira_poll.py` (jq parity vs the legacy bash
-  transforms, lock, disabled no-op, env-token override).
+  transforms, lock, disabled no-op, env-token override, criteria JQL, live
+  search, directory job, page size, `--team-set`, v3 migration).
 
 # Code map
 

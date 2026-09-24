@@ -5,7 +5,7 @@
 #   ./build.sh --build-only   build + re-grant TCC, but DON'T launch
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "${1:-}" = "--force" ]; then
-    touch "$DIR/workspace_switcher.swift" "$DIR/PopupWindow.swift" "$DIR/JiraDashboard.swift" "$DIR/main.swift"
+    touch "$DIR/workspace_switcher.swift" "$DIR/PopupWindow.swift" "$DIR/JiraDashboard.swift" "$DIR/JiraSearch.swift" "$DIR/main.swift"
     shift
 fi
 if [ "${1:-}" = "--build-only" ]; then

@@ -88,6 +88,7 @@ CACHE_DIR = jira_config.CACHE_DIR
 CACHE_FILE = os.path.join(CACHE_DIR, "jiras.json")
 STATE_FILE = os.path.join(CACHE_DIR, "state")
 VERSIONS_FILE = os.path.join(CACHE_DIR, "versions.json")
+DIRECTORY_FILE = os.path.join(CACHE_DIR, "directory.json")   # the pickers' lists
 DUMP_DIR = os.path.join(CACHE_DIR, "dumps")
 CURL_LOG = os.path.join(CACHE_DIR, "curl.log")
 CURL_LOG_MAX = 5 * 1024 * 1024        # rotate: keep the newest ~2MB past 5MB
@@ -226,12 +227,16 @@ class Client:
             raise ApiError(code, f"non-JSON response from {url} (HTTP {code}; wrong site URL or an "
                                  f"SSO login page?): {body[:200]}", repro)
 
-    def search(self, jql: str, fields: str, max_total: int | None = None) -> dict:
+    def search(self, jql: str, fields: str, max_total: int | None = None,
+               page_size: int | None = None) -> dict:
         """All issues matching `jql` (up to max_total), paginating the way the
         configured search endpoint expects: v2 /search (Server/DC) uses
-        startAt/total; Cloud's /search/jql uses nextPageToken."""
+        startAt/total; Cloud's /search/jql uses nextPageToken. page_size =
+        maxResults of one request (default: search_defaults.max_results_search).
+        Returns {issues, isLast, total} (total: v2 only, else None)."""
         path = self.path("search")
-        page = self.sd("max_results_search")
+        page = page_size or self.sd("max_results_search")
+        total = None
         if max_total:
             page = min(page, max_total)
         issues: list = []
@@ -253,12 +258,13 @@ class Client:
                     raise ApiError(0, "pagination: no nextPageToken but isLast=false")
             else:
                 start += len(got)
-                last = not got or start >= int(body.get("total") or 0)
+                total = int(body.get("total") or 0)
+                last = not got or start >= total
             if last or (max_total and len(issues) >= max_total):
                 break
         if max_total and len(issues) > max_total:
             issues, last = issues[:max_total], False
-        return {"issues": issues, "isLast": last}
+        return {"issues": issues, "isLast": last, "total": total}
 
     def board_issues(self, board_id, jql: str, fields: str, max_total: int) -> dict:
         path = self.path("board_issues", board_id=board_id)
@@ -656,6 +662,74 @@ def releases(c: Client, project: str = "", projects: list | None = None) -> list
     return out
 
 
+def directory(c: Client, projects: list | None = None, quiet: bool = True) -> dict:
+    """The pickers' lists (the weekly `directory` job): every visible project,
+    the assignable users of `projects` (else team.json project_keys, else every
+    project - one paginated call each), statuses, issue types, priorities and
+    fields. A project the token may not read is skipped (noted in `warnings`)."""
+    out: dict = {"projects": [], "users": [], "statuses": [], "issueTypes": [], "priorities": [],
+                 "fields": [], "warnings": []}
+    for p in c.get(c.path("projects")) or []:
+        out["projects"].append({"key": p.get("key") or "", "name": p.get("name") or ""})
+    keys = list(projects or c.team.get("project_keys") or []) or [p["key"] for p in out["projects"]]
+    page = max(1, c.sd("max_results_users"))
+    users: dict = {}
+    for proj in keys:
+        start = 0
+        while True:
+            try:
+                got = c.get(c.path("assignable_users"),
+                            f"project={qenc(proj)}&startAt={start}&maxResults={page}")
+            except ApiError as err:
+                if err.code in (401,):
+                    raise
+                out["warnings"].append(f"users of {proj}: {err}")
+                break
+            if not isinstance(got, list):
+                break
+            for u in got:
+                # Server/DC: `name` is what JQL takes; Cloud: accountId
+                uid = u.get("accountId") or u.get("name") or u.get("key")
+                if not uid:
+                    continue
+                e = users.setdefault(uid, {"id": uid, "name": u.get("displayName") or uid,
+                                           "username": u.get("name") or "",
+                                           "email": u.get("emailAddress") or "",
+                                           "active": u.get("active", True) is not False,
+                                           "projects": []})
+                if proj not in e["projects"]:
+                    e["projects"].append(proj)
+            start += len(got)
+            if len(got) < page or start >= 50000:
+                break
+        if not quiet:
+            print(f"jira-api: directory: {proj}: {sum(proj in u['projects'] for u in users.values())} "
+                  "user(s)", file=sys.stderr)
+    out["users"] = sorted(users.values(), key=lambda u: u["name"].lower())
+    for key, name in (("statuses", "statuses"), ("issueTypes", "issue_types"),
+                      ("priorities", "priorities")):
+        try:
+            vals = c.get(c.path(name)) or []
+        except ApiError as err:
+            out["warnings"].append(f"{name}: {err}")
+            continue
+        out[key] = sorted({v.get("name") for v in vals if isinstance(v, dict) and v.get("name")},
+                          key=str.lower)
+    try:
+        flds = c.get(c.path("fields")) or []
+    except ApiError as err:
+        flds = []
+        out["warnings"].append(f"fields: {err}")
+    out["fields"] = sorted(({"id": f.get("id"), "name": f.get("name") or f.get("id"),
+                             "custom": bool(f.get("custom")),
+                             "type": ((f.get("schema") or {}).get("type") or "")}
+                            for f in flds if isinstance(f, dict) and f.get("id")),
+                           key=lambda f: (not f["custom"], (f["name"] or "").lower()))
+    out["fetchedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    out["forProjects"] = keys
+    return out
+
+
 def window_since(w: str):
     """--sync WINDOW -> JQL bound (None = full)."""
     if w == "full":
@@ -672,7 +746,7 @@ def window_since(w: str):
 
 def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
          fetch_comments=True, snapshot_keep=30, quiet=False, debug=False,
-         default_projects=True) -> dict:
+         default_projects=True, page_size=None, max_total=None) -> dict:
     """Load issues updated within `window` (optionally only `projects` / a
     custom `jql`), merge them into the cache, return stats + matched keys."""
     fields = api_fields or jira_config.api_fields(team=c.team)
@@ -681,7 +755,7 @@ def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
     clauses = []
     if jql:
         clauses.append(f"({jql})")
-    if default_projects:   # a saved search's JQL already scopes its projects
+    if default_projects:   # an explicit JQL may already scope its projects
         projects = projects or c.team.get("project_keys") or None
     if projects:
         clauses.append("project in (" + ", ".join(f'"{p}"' for p in projects) + ")")
@@ -689,7 +763,7 @@ def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
     q = " AND ".join(clauses)
     if debug:
         print(f"jira-api: JQL: {q}", file=sys.stderr)
-    raw = c.search(q, ",".join(fields))["issues"]
+    raw = c.search(q, ",".join(fields), max_total=max_total, page_size=page_size)["issues"]
     if c.dry:
         return {"fetched": 0, "changed": 0, "total": 0, "keys": [], "snapshot": "", "jql": q}
     # version name -> {released, date} per project: the release date + flag
