@@ -3,6 +3,7 @@ import PDFKit
 import SwiftTerm
 import Foundation
 import Darwin
+import UniformTypeIdentifiers
 
 // Keep a frame fully inside the screen's visible area (used by both the
 // popup window and the chrome/backdrop drag-resize handlers so the scrollbar
@@ -381,10 +382,10 @@ public struct PopupConfig {
     public var inputFontSize: CGFloat = 12
     public var rowFontSize: CGFloat = 11
 
-    // standardized button theme (pills, tabs, header segments, filter chips)
-    // — one look across every window: accent action fill, border stroke,
-    // consistent radius, hover/pressed feedback driven by the same colors
-    public var buttonRadius: CGFloat = 7
+    // standardized button theme (tabs, path chips, header segments, filter
+    // chips) — one look across every window: squared-off chips, a hover
+    // fill, and the active item marked by an accent underline (no capsules)
+    public var buttonRadius: CGFloat = 4
     public var buttonFontSize: CGFloat = 10.5
     // hover/pressed shading applied over the normal fill (0 = none)
     public var buttonHoverAlpha: CGFloat = 0.18
@@ -425,6 +426,10 @@ public struct PopupConfig {
     // another app has focus) dismisses it. Implies no click-off dismiss.
     public var sticky: Bool = false
 
+    // float: the window stays above every normal app window (default). Off =
+    // an ordinary window that other apps can cover (commands.conf `float`)
+    public var floating: Bool = true
+
     // multi-line rows: if a row supplies `content`, it is drawn wrapped under
     // the title (up to 3 lines) and the window grows to fit
     public var wrapContent: Bool = false
@@ -447,6 +452,14 @@ public struct PopupConfig {
     // embedded file-browser drawer (notes etc.): toggled like the terminal;
     // both drawers can be open at once (they stack, window grows)
     public var fileBrowserHeight: CGFloat = 300
+    // file browser ([files] in commands.conf): sort key (name | modified |
+    // created | size | kind) + direction, the recursive-search result cap and
+    // excluded globs, and the filter words that open a terminal in the cwd
+    public var browserSort = "name"
+    public var browserSortDescending = false
+    public var browserSearchLimit = 2000
+    public var browserSearchExcludes = ["/Library", "node_modules", ".Trash"]
+    public var browserTerminalWords = ["term", "terminal", "cmd"]
     // silvery-blue "panel" background shared by the file browser and the
     // embedded terminal drawer; commands.conf `browser-background` /
     // `terminal-background` override it. The interactive color picker (the
@@ -730,6 +743,18 @@ public protocol EscapableWindow: AnyObject {
 
 public class PopupBaseWindow: NSWindow, EscapableWindow {
     public var onEscape: (() -> Void)?
+
+    // themed text selection for every NSTextField in this window (search /
+    // filter / find bars share the window's field editor)
+    var selectionAttributes: [NSAttributedString.Key: Any]?
+    public override func fieldEditor(_ createFlag: Bool, for object: Any?) -> NSText? {
+        let ed = super.fieldEditor(createFlag, for: object)
+        if let tv = ed as? NSTextView, let a = selectionAttributes {
+            tv.selectedTextAttributes = a
+            tv.insertionPointColor = a[.foregroundColor] as? NSColor ?? tv.insertionPointColor
+        }
+        return ed
+    }
     // click-to-copy band at the top of the window: the invisible titlebar
     // swallows mouse events in its area, so clicks there never reach the
     // chrome — intercept them here instead. The click is fired WITHOUT
@@ -785,6 +810,18 @@ public class PopupBaseWindow: NSWindow, EscapableWindow {
 // Borderless variant (workspace switcher).
 public final class PopupPanel: NSPanel, EscapableWindow {
     public var onEscape: (() -> Void)?
+
+    // themed text selection for every NSTextField in this window (search /
+    // filter / find bars share the window's field editor)
+    var selectionAttributes: [NSAttributedString.Key: Any]?
+    public override func fieldEditor(_ createFlag: Bool, for object: Any?) -> NSText? {
+        let ed = super.fieldEditor(createFlag, for: object)
+        if let tv = ed as? NSTextView, let a = selectionAttributes {
+            tv.selectedTextAttributes = a
+            tv.insertionPointColor = a[.foregroundColor] as? NSColor ?? tv.insertionPointColor
+        }
+        return ed
+    }
 
     public override var canBecomeKey: Bool { true }
     public override var canBecomeMain: Bool { true }
@@ -863,10 +900,26 @@ enum ButtonStyle {
         }
     }
     static func stroke(_ st: ButtonState, _ c: PopupColors) -> NSColor {
-        switch st {
-        case .idle, .hover, .pressed: return .clear
-        case .on, .onHover:           return c.text.withAlphaComponent(0.12)
+        .clear
+    }
+    // the active marker: the theme accent, lifted until it reads on the card
+    static func accent(_ c: PopupColors) -> NSColor {
+        let card = opaque(c.background)
+        var a = opaque(c.accent)
+        var step = 0
+        while contrast(a, card) < 2.2, step < 6 {
+            a = a.blended(withFraction: 0.2, of: opaque(c.text)) ?? a
+            step += 1
         }
+        return a
+    }
+    // 2pt accent bar along the bottom edge of an active chip / selected tab
+    static func indicator(_ rect: NSRect, _ c: PopupColors) {
+        let inset = min(8, rect.width * 0.2)
+        let bar = NSRect(x: rect.minX + inset, y: rect.maxY - 2.5,
+                         width: max(4, rect.width - inset * 2), height: 2)
+        accent(c).setFill()
+        NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
     }
     // text inputs keep a faint outline so they still read as fields
     static func inputStroke(_ c: PopupColors) -> NSColor {
@@ -883,20 +936,53 @@ enum ButtonStyle {
         NSFont.systemFont(ofSize: size, weight: (st == .on || st == .onHover) ? .semibold : .medium)
     }
 
-    // surface: rounded rect with a half-pixel-aligned hairline
+    // Text selection (Cmd+A, drag-select, find jumps) in EVERY text input.
+    // AppKit's default follows the machine's accent color + light/dark mode,
+    // so the same build rendered unreadable selections on some Macs. Pin it
+    // to the theme: an opaque highlight that stands off the card, and a
+    // foreground picked for contrast against that highlight.
+    static func selection(_ c: PopupColors) -> [NSAttributedString.Key: Any] {
+        let card = opaque(c.background)
+        var bg = opaque(c.highlight)
+        // a highlight too close to the card is invisible — lift it toward
+        // the text color until it reads as a selection
+        var step = 0
+        while contrast(bg, card) < 1.7, step < 6 {
+            bg = bg.blended(withFraction: 0.18, of: opaque(c.text)) ?? bg
+            step += 1
+        }
+        return [.backgroundColor: bg, .foregroundColor: readable(on: bg, preferred: c.text)]
+    }
+    static func opaque(_ c: NSColor) -> NSColor {
+        (c.usingColorSpace(.sRGB) ?? c).withAlphaComponent(1)
+    }
+    static func luminance(_ c: NSColor) -> CGFloat {
+        let s = opaque(c)
+        func lin(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(s.redComponent) + 0.7152 * lin(s.greenComponent) + 0.0722 * lin(s.blueComponent)
+    }
+    // WCAG contrast ratio (1 … 21)
+    static func contrast(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        let la = luminance(a), lb = luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+    // `preferred` when it's comfortably readable on `bg`, else black/white
+    static func readable(on bg: NSColor, preferred: NSColor) -> NSColor {
+        if contrast(preferred, bg) >= 4.5 { return opaque(preferred) }
+        return contrast(.white, bg) >= contrast(.black, bg) ? .white : .black
+    }
+
+    // surface: squared-off rounded rect; the on state adds the accent bar
     // `flat`: no surface at rest (tabs, icon buttons) — it appears on hover
+    // (callers are flipped views, so the bar lands on the visual bottom)
     static func draw(_ rect: NSRect, _ st: ButtonState, _ c: PopupColors, radius: CGFloat,
-                     flat: Bool = false) {
+                     flat: Bool = false, indicator showBar: Bool = true) {
         if flat && st == .idle { return }
         let r = rect.insetBy(dx: 0.5, dy: 0.5)
         let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
         fill(st, c).setFill()
         path.fill()
-        let s = stroke(st, c)
-        guard s.alphaComponent > 0 else { return }
-        s.setStroke()
-        path.lineWidth = 1
-        path.stroke()
+        if showBar, st == .on || st == .onHover { indicator(r, c) }
     }
 
     // SF Symbol tinted to `color`, centered in `rect` (sharper than text
@@ -2224,9 +2310,12 @@ final class FileListPane: NSView {
     var onHover: ((Int?) -> Void)?
     var onCopyPath: ((Int) -> Void)?
     var onOpenInNotes: ((Int) -> Void)?
+    var onOpenTerminal: ((Int) -> Void)?
 
     private let rowH: CGFloat = 22
     private static let iconSize: CGFloat = 16
+    // right gutter for the size/date column: clears the overlay scroller
+    private static let trailingInset: CGFloat = 16
     private var trackingArea: NSTrackingArea?
 
     init(config: PopupConfig) {
@@ -2268,7 +2357,12 @@ final class FileListPane: NSView {
 
     override func draw(_ dirty: NSRect) {
         let w = bounds.width
-        for (i, e) in rows.enumerated() {
+        // only the rows in the dirty rect (search results can be thousands)
+        let first = max(0, Int(dirty.minY / rowH))
+        let last = min(rows.count - 1, Int(dirty.maxY / rowH))
+        guard first <= last else { return }
+        for i in first...last {
+            let e = rows[i]
             let r = rowRect(i)
             if i == selection {
                 config.colors.highlight.setFill()
@@ -2296,7 +2390,7 @@ final class FileListPane: NSView {
             var tx = ir.maxX + 6
             if e.isDir && e.name != ".." { tx += 4 }   // folder emoji leading space kept small
             let name = e.name as NSString
-            let avail = w - tx - 8 - (e.trailingWidth > 0 ? e.trailingWidth + 10 : 0)
+            let avail = w - tx - 8 - (e.trailingWidth > 0 ? e.trailingWidth + Self.trailingInset + 4 : 0)
             name.draw(with: NSRect(x: tx, y: r.minY + (rowH - 15) / 2, width: max(20, avail), height: 15),
                       options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
                       attributes: nameAttrs)
@@ -2316,7 +2410,7 @@ final class FileListPane: NSView {
                     .foregroundColor: config.colors.dim,
                 ]
                 let s = e.trailingText as NSString
-                s.draw(at: NSPoint(x: w - e.trailingWidth - 8, y: r.minY + (rowH - 12) / 2),
+                s.draw(at: NSPoint(x: w - e.trailingWidth - Self.trailingInset, y: r.minY + (rowH - 12) / 2),
                        withAttributes: szAttrs)
             }
         }
@@ -2345,6 +2439,7 @@ final class FileListPane: NSView {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(menuItem("Open", #selector(rowOpen(_:)), idx))
         menu.addItem(menuItem("Reveal in Finder", #selector(rowRevealInFinder(_:)), idx))
+        menu.addItem(menuItem("Open Terminal Here", #selector(rowOpenTerminal(_:)), idx))
         NSMenu.popUpContextMenu(menu, with: e, for: self)
     }
 
@@ -2368,6 +2463,11 @@ final class FileListPane: NSView {
     @objc private func rowOpen(_ sender: NSMenuItem) {
         guard let idx = sender.representedObject as? Int else { return }
         onOpen?(idx)
+    }
+
+    @objc private func rowOpenTerminal(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int else { return }
+        onOpenTerminal?(idx)
     }
 
     @objc private func rowRevealInFinder(_ sender: NSMenuItem) {
@@ -2486,18 +2586,67 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     var onCopyPath: ((String) -> Void)?      // copy an arbitrary path (hover/right-click)
     var onOpenInNotes: ((String) -> Void)?   // right-click "Open in Notes"
     var onStatus: ((String) -> Void)?        // transient feedback line
+    var onOpenTerminal: ((String) -> Void)?  // `term` in the filter / right-click
+    var onSortChange: ((String, Bool) -> Void)?  // persist (sort key, descending)
 
     struct Entry {
         let name: String
         let path: String
         let isDir: Bool
         let size: Int
+        var created = Date.distantPast
+        var modified = Date.distantPast
         var icon: NSImage?
         var trailingText: String = ""
         var trailingWidth: CGFloat = 0
     }
 
     private static var iconCache: [String: NSImage] = [:]
+
+    enum SortKey: String, CaseIterable {
+        case name, modified, created, size, kind
+        var label: String {
+            switch self {
+            case .name: return "Name"
+            case .modified: return "Date Modified"
+            case .created: return "Date Created"
+            case .size: return "Size"
+            case .kind: return "Kind"
+            }
+        }
+        var short: String {
+            switch self {
+            case .name: return "Name"
+            case .modified: return "Modified"
+            case .created: return "Created"
+            case .size: return "Size"
+            case .kind: return "Kind"
+            }
+        }
+        // what picking the key defaults to: newest / largest first
+        var naturalDescending: Bool { self == .modified || self == .created || self == .size }
+    }
+    private var sortKey: SortKey
+    private var sortDescending: Bool
+
+    // What the filter bar currently means (see parseQuery)
+    enum QueryMode {
+        case all                         // empty: the cwd listing
+        case terminal(String)            // `term [path]`: Enter opens a shell there
+        case local(String)               // filter the cwd (substring or glob)
+        case dir(String, String)         // a typed path: list that dir, filter by the tail
+        case recursive(String, String)   // `**` / wildcard dirs: rg under base with glob
+    }
+    private var mode: QueryMode = .all
+    // cwd incl. dotfiles, listed on demand for `.*` style filters
+    private var hiddenAll: [Entry]?
+    // last typed-path listing (dir, includesHidden, entries) — reused per keystroke
+    private var dirCache: (String, Bool, [Entry])?
+    // recursive search bookkeeping: a newer query bumps searchGen so stale
+    // results are dropped; the debounce keeps rg from spawning per keystroke
+    private var searchGen = 0
+    private var searchProcess: Process?
+    private var searchWork: DispatchWorkItem?
 
     private let favURL: URL
     // starred dirs (persisted to favURL) — the other two sources come from
@@ -2515,6 +2664,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private let searchField = BrowserSearchField()
     private let parentButton: ThemeButton
     private let starButton: ThemeButton
+    private let sortButton: ThemeButton
+    // dim one-line feedback under the list: match counts, "↵ cd …", search progress
+    private let statusLine = NSTextField(labelWithString: "")
     private let listPane: FileListPane
     private let listScroll = NSScrollView()
     private let splitter = PaneSplitter()
@@ -2557,7 +2709,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         searchField.layer?.backgroundColor = ButtonStyle.fill(.idle, c).cgColor
         searchField.layer?.borderColor = ButtonStyle.inputStroke(c).cgColor
         previewText.textColor = c.text
+        previewText.selectedTextAttributes = ButtonStyle.selection(c)
         previewHint.textColor = c.dim
+        statusLine.textColor = c.dim
         splitter.layer?.backgroundColor = c.border.withAlphaComponent(0.35).cgColor
         setBackground(config.fileBrowserBackground)
         listPane.needsDisplay = true
@@ -2575,6 +2729,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.favURL = favoritesURL ?? URL(fileURLWithPath: home + "/.cache/workspace-switcher/files-favorites.json")
         self.parentButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
         self.starButton = ThemeButton(config: config, title: "Pin", symbol: "star")
+        self.sortKey = SortKey(rawValue: config.browserSort.lowercased()) ?? .name
+        self.sortDescending = config.browserSortDescending
+        self.sortButton = ThemeButton(config: config, title: "", symbol: "arrow.up.arrow.down")
         self.listPane = FileListPane(config: config)
         self.previewList = FileListPane(config: config)
         super.init(frame: .zero)
@@ -2604,6 +2761,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         listPane.onOpenInNotes = { [weak self] i in
             guard let self, self.rows.indices.contains(i) else { return }
             self.onOpenInNotes?(self.rows[i].path)
+        }
+        listPane.onOpenTerminal = { [weak self] i in
+            guard let self, self.rows.indices.contains(i) else { return }
+            self.openTerminal(self.terminalDir(for: self.rows[i]))
         }
         listPane.onFocusSearch = { [weak self] chars in
             guard let self else { return }
@@ -2640,8 +2801,21 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
 
         parentButton.onClick = { [weak self] in self?.cdParent() }
         starButton.onClick = { [weak self] in self?.toggleStar() }
+        sortButton.onClick = { [weak self] in self?.showSortMenu() }
         parentButton.toolTip = "Parent folder"
         starButton.toolTip = "Pin this folder to the favorites row"
+        sortButton.toolTip = "Sort by name, date modified, date created, size or kind"
+        updateSortTitle()
+        searchField.toolTip = """
+            Filter this folder, or type a path (~/notes/todo) to look inside it — \
+            ⇥ completes. Wildcards: *.md, .* (dotfiles), ~/src/**/*.swift searches \
+            subfolders. Type "term" + ↵ to open a terminal here.
+            """
+
+        statusLine.font = NSFont.systemFont(ofSize: 10.5)
+        statusLine.textColor = config.colors.dim
+        statusLine.lineBreakMode = .byTruncatingMiddle
+        statusLine.isSelectable = false
 
         previewText.isEditable = false
         previewText.isSelectable = true
@@ -2649,6 +2823,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         previewText.textContainerInset = NSSize(width: 8, height: 8)
         previewText.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         previewText.textColor = config.colors.text
+        previewText.selectedTextAttributes = ButtonStyle.selection(config.colors)
         previewScroll.documentView = previewText
         previewScroll.hasVerticalScroller = true
         previewScroll.autohidesScrollers = true
@@ -2701,10 +2876,16 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             guard let self, self.previewList.rows.indices.contains(i) else { return }
             self.onOpenInNotes?(self.previewList.rows[i].path)
         }
+        previewList.onOpenTerminal = { [weak self] i in
+            guard let self, self.previewList.rows.indices.contains(i) else { return }
+            self.openTerminal(self.terminalDir(for: self.previewList.rows[i]))
+        }
 
         addSubview(parentButton)
         addSubview(searchField)
         addSubview(starButton)
+        addSubview(sortButton)
+        addSubview(statusLine)
         addSubview(listScroll)
         addSubview(splitter)
         addSubview(previewScroll)
@@ -2740,14 +2921,18 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         starButton.frame = NSRect(x: 6, y: toolbarY, width: 72, height: toolbarH)
         parentButton.frame = NSRect(x: starButton.frame.maxX + 4, y: toolbarY,
                                     width: toolbarH + 4, height: toolbarH)
+        let sortW = pillWidth(sortButton.title) + 16
+        sortButton.frame = NSRect(x: w - sortW - 6, y: toolbarY, width: sortW, height: toolbarH)
         searchField.frame = NSRect(x: parentButton.frame.maxX + 6, y: toolbarY,
-                                   width: max(60, w - parentButton.frame.maxX - 12),
+                                   width: max(60, sortButton.frame.minX - parentButton.frame.maxX - 12),
                                    height: toolbarH)
         // favorites wrap to as many lines as their paths need
         let favY = toolbarY + toolbarH + 5
         let favH = layoutFavorites(from: favY)
         let listY = favY + favH + 4
-        let bottomH: CGFloat = 0
+        let bottomH: CGFloat = 18
+        statusLine.frame = NSRect(x: 8, y: bounds.height - bottomH + 1,
+                                  width: max(0, w - 16), height: bottomH - 3)
         let splitW: CGFloat = 6
         // the split is draggable; clamp so neither pane gets tiny
         let splitX = min(max(splitFraction * w, 200), max(200, w - 200))
@@ -2816,18 +3001,20 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
     private func pillWidth(_ t: String) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: config.buttonFontSize, weight: .semibold)]
-        return (t as NSString).size(withAttributes: attrs).width + 18
+        // + the leading folder glyph (12) and its gap (4)
+        return (t as NSString).size(withAttributes: attrs).width + 18 + 16
     }
     // ~/notes instead of /Users/me/notes for pinned/config paths under home
     private func displayPath(_ p: String) -> String {
         let home = NSHomeDirectory()
+        if p == home { return "~" }
         if p.hasPrefix(home + "/") { return "~" + p.dropFirst(home.count) }
         return p
     }
 
     // MARK: data
 
-    private func listDir(_ dir: String) -> [Entry] {
+    private func listDir(_ dir: String, hidden: Bool = false) -> [Entry] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
         var out: [Entry] = []
@@ -2837,13 +3024,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             up.icon = Self.iconCache[parent] ?? NSWorkspace.shared.icon(forFile: parent)
             out.append(up)
         }
-        for n in names where !n.hasPrefix(".") {
+        for n in names where hidden || !n.hasPrefix(".") {
             let p = (dir as NSString).appendingPathComponent(n)
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: p, isDirectory: &isDir) else { continue }
-            let d = isDir.boolValue
-            var e = Entry(name: n, path: p, isDir: d,
-                          size: d ? 0 : (((try? fm.attributesOfItem(atPath: p))?[.size] as? NSNumber)?.intValue ?? 0))
+            guard var e = Self.makeEntry(name: n, path: p) else { continue }
             if let cached = Self.iconCache[p] {
                 e.icon = cached
             } else {
@@ -2851,18 +3034,76 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
                 e.icon = img
                 Self.iconCache[p] = img
             }
-            if !d {
-                e.trailingText = Self.humanSize(e.size)
-                e.trailingWidth = (e.trailingText as NSString)
-                    .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
-            }
+            decorate(&e)
             out.append(e)
         }
-        out.sort {
-            if $0.isDir != $1.isDir { return $0.isDir }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        return sortEntries(out)
+    }
+    // stat one path into an Entry (thread-safe: no icon, no decoration).
+    // Plain stat(2) on purpose: FileManager.attributesOfItem also reads
+    // extended attributes, and getxattr blocks forever on a stale network /
+    // FUSE mount — which froze the whole app while previewing ~.
+    fileprivate static func makeEntry(name: String, path: String) -> Entry? {
+        var st = Darwin.stat()
+        guard stat(path, &st) == 0 else { return nil }
+        let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+        func date(_ t: timespec) -> Date {
+            Date(timeIntervalSince1970: TimeInterval(t.tv_sec) + TimeInterval(t.tv_nsec) / 1e9)
         }
-        return out
+        var e = Entry(name: name, path: path, isDir: isDir, size: isDir ? 0 : Int(st.st_size))
+        e.created = date(st.st_birthtimespec)
+        e.modified = date(st.st_mtimespec)
+        return e
+    }
+    // trailing column follows the sort: dates when sorting by date, else size
+    private func decorate(_ e: inout Entry) {
+        switch sortKey {
+        case .modified: e.trailingText = e.name == ".." ? "" : Self.shortDate(e.modified)
+        case .created: e.trailingText = e.name == ".." ? "" : Self.shortDate(e.created)
+        default: e.trailingText = e.isDir ? "" : Self.humanSize(e.size)
+        }
+        e.trailingWidth = e.trailingText.isEmpty ? 0 : (e.trailingText as NSString)
+            .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
+    }
+    private static let sameYearFormat: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d HH:mm"; return f
+    }()
+    private static let otherYearFormat: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MMM d yyyy"; return f
+    }()
+    private static func shortDate(_ d: Date) -> String {
+        guard d != .distantPast else { return "" }
+        let cal = Calendar.current
+        return cal.component(.year, from: d) == cal.component(.year, from: Date())
+            ? sameYearFormat.string(from: d) : otherYearFormat.string(from: d)
+    }
+    // ".." first, folders on top (Finder style), then the chosen key; ties
+    // fall back to the name so the order is stable
+    private func sortEntries(_ list: [Entry]) -> [Entry] {
+        let key = sortKey, desc = sortDescending
+        let parent = list.filter { $0.name == ".." }
+        var rest = list.filter { $0.name != ".." }
+        func cmp<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {
+            a == b ? .orderedSame : (a < b ? .orderedAscending : .orderedDescending)
+        }
+        rest.sort { a, b in
+            if a.isDir != b.isDir { return a.isDir }
+            var r: ComparisonResult
+            switch key {
+            case .name: r = a.name.localizedStandardCompare(b.name)
+            case .modified: r = cmp(a.modified, b.modified)
+            case .created: r = cmp(a.created, b.created)
+            case .size: r = cmp(a.size, b.size)
+            case .kind:
+                r = (a.name as NSString).pathExtension.lowercased()
+                    .compare((b.name as NSString).pathExtension.lowercased())
+            }
+            if r == .orderedSame {
+                return a.name.localizedStandardCompare(b.name) == .orderedAscending
+            }
+            return desc ? r == .orderedDescending : r == .orderedAscending
+        }
+        return parent + rest
     }
     static func humanSize(_ bytes: Int) -> String {
         let units = ["B", "KB", "MB", "GB", "TB"]
@@ -2874,28 +3115,112 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
 
     func reload() {
         all = listDir(cwd)
+        hiddenAll = nil
+        dirCache = nil
         refilter()
     }
-    private func refilter() {
-        let q = query
-        if q.isEmpty {
-            rows = all
-        } else if q.contains("*") || q.contains("?") {
-            // glob matching (case-insensitive): * = any run, ? = one char.
-            // A path-like glob (~/… or /…) also matches the FULL path, so
-            // "/Users/me/notes/assets/img*" filters this listing like Finder.
-            let nameRE = Self.globRegex(q)
-            let pathRE = Self.globRegex(Self.expandTilde(q))
-            rows = all.filter { e in
-                Self.globMatch(nameRE, e.name) || Self.globMatch(pathRE, e.path)
+
+    // MARK: query
+
+    private static let globChars = CharacterSet(charactersIn: "*?[")
+    private static func hasGlob(_ s: String) -> Bool {
+        s.rangeOfCharacter(from: globChars) != nil
+    }
+    // ~ / relative (against the cwd) -> absolute, standardized
+    private func resolvePath(_ s: String) -> String {
+        var p = Self.expandTilde(s)
+        if !p.hasPrefix("/") { p = (cwd as NSString).appendingPathComponent(p) }
+        return (p as NSString).standardizingPath
+    }
+
+    // Filter-bar grammar:
+    //   term | terminal | cmd [path]   Enter opens a terminal there
+    //   notes / *.md / .*              filter this folder (.* shows dotfiles)
+    //   ~/notes/to  /etc/ho  ../x      list THAT folder, filtered by the tail
+    //   **/*.swift  ~/src/**/todo      recursive (ripgrep) below the folder
+    //   ~/src/*/README*                wildcard folders are recursive too
+    private func parseQuery(_ raw: String) -> QueryMode {
+        let q = raw.trimmingCharacters(in: .whitespaces)
+        if q.isEmpty { return .all }
+        let words = q.split(separator: " ", maxSplits: 1).map(String.init)
+        if let w = words.first?.lowercased(),
+           config.browserTerminalWords.contains(where: { $0.lowercased() == w }) {
+            if words.count == 1 { return .terminal(cwd) }
+            let target = resolvePath(words[1].trimmingCharacters(in: .whitespaces))
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: target, isDirectory: &isDir) {
+                return .terminal(isDir.boolValue ? target : (target as NSString).deletingLastPathComponent)
             }
-        } else if q.contains("/") || q.hasPrefix("~") {
-            // address-bar filter: match the full path, not just the bare name
-            let target = Self.expandTilde(q).lowercased()
-            rows = all.filter { $0.path.lowercased().contains(target) }
-        } else {
-            rows = all.filter { $0.name.lowercased().contains(q.lowercased()) }
         }
+        let pathLike = q.hasPrefix("/") || q.hasPrefix("~") || q.contains("/")
+        guard pathLike else {
+            return q.contains("**") ? .recursive(cwd, q) : .local(q)
+        }
+        // split at the last "/": the head is the folder, the tail the filter
+        let slash = q.range(of: "/", options: .backwards)
+        let head = slash.map { String(q[..<$0.upperBound]) } ?? ""
+        let tail = slash.map { String(q[$0.upperBound...]) } ?? q
+        if Self.hasGlob(head) {
+            // wildcard folders: search from the deepest literal folder
+            var base = head.hasPrefix("/") ? "/" : (head.hasPrefix("~") ? NSHomeDirectory() : cwd)
+            var rest: [String] = []
+            var literal = true
+            for comp in head.split(separator: "/").map(String.init) {
+                if literal && comp == "~" && base == NSHomeDirectory() { continue }
+                if literal && !Self.hasGlob(comp) {
+                    base = ((base as NSString).appendingPathComponent(comp) as NSString).standardizingPath
+                } else {
+                    literal = false
+                    rest.append(comp)
+                }
+            }
+            return .recursive(base, (rest + [tail.isEmpty ? "*" : tail]).joined(separator: "/"))
+        }
+        let dir = head.isEmpty ? cwd : resolvePath(head)
+        if tail.contains("**") { return .recursive(dir, tail) }
+        return .dir(dir, tail)
+    }
+
+    // name filter shared by the cwd and typed-path listings: a glob matches
+    // the whole name, plain text is a case-insensitive substring
+    private static func nameFilter(_ pattern: String) -> (Entry) -> Bool {
+        if pattern.isEmpty { return { $0.name != ".." } }
+        if hasGlob(pattern) {
+            let re = globRegex(pattern)
+            return { $0.name != ".." && globMatch(re, $0.name) }
+        }
+        let needle = pattern.lowercased()
+        return { $0.name != ".." && $0.name.lowercased().contains(needle) }
+    }
+
+    private func refilter() {
+        mode = parseQuery(query)
+        switch mode {
+        case .all, .terminal:
+            cancelSearch()
+            setRows(all)
+        case .local(let pat):
+            cancelSearch()
+            var source = all
+            if pat.hasPrefix(".") {
+                if hiddenAll == nil { hiddenAll = listDir(cwd, hidden: true) }
+                source = hiddenAll ?? all
+            }
+            setRows(source.filter(Self.nameFilter(pat)))
+        case .dir(let dir, let pat):
+            cancelSearch()
+            let hidden = pat.hasPrefix(".")
+            if dirCache?.0 != dir || dirCache?.1 != hidden {
+                dirCache = (dir, hidden, listDir(dir, hidden: hidden))
+            }
+            setRows((dirCache?.2 ?? []).filter(Self.nameFilter(pat)))
+        case .recursive(let base, let glob):
+            scheduleSearch(base: base, glob: glob)
+        }
+        updateStatus()
+    }
+    private func setRows(_ r: [Entry]) {
+        rows = r
         if selection >= rows.count { selection = max(0, rows.count - 1) }
         listPane.rows = rows
         listPane.selection = selection
@@ -2903,6 +3228,166 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         scrollListToTop()
         previewSelection()
     }
+
+    // MARK: recursive search (ripgrep)
+
+    private static let rgPath: String? = {
+        var cands = ["/opt/homebrew/bin/rg", "/usr/local/bin/rg"]
+        for d in (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":") {
+            cands.append(String(d) + "/rg")
+        }
+        return cands.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }()
+
+    private func cancelSearch() {
+        searchWork?.cancel()
+        searchWork = nil
+        searchGen += 1
+        searchProcess?.terminate()
+        searchProcess = nil
+    }
+    // debounced: typing "~/src/**/foo" must not spawn rg per keystroke
+    private func scheduleSearch(base: String, glob: String) {
+        cancelSearch()
+        setRows([])
+        setStatus("searching \(displayPath(base))…")
+        let work = DispatchWorkItem { [weak self] in self?.startSearch(base: base, glob: glob) }
+        searchWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+    private func startSearch(base: String, glob rawGlob: String) {
+        searchGen += 1
+        let gen = searchGen
+        // a bare word as the last segment means "name contains":
+        // **/sink -> **/*sink*
+        var glob = rawGlob
+        let last = (glob as NSString).lastPathComponent
+        if !Self.hasGlob(last) && !last.isEmpty {
+            glob = String(glob.dropLast(last.count)) + "*" + last + "*"
+        }
+        let limit = max(1, config.browserSearchLimit)
+        let excludes = config.browserSearchExcludes
+        let hidden = glob.hasPrefix(".") || glob.contains("/.")
+        var proc: Process?
+        if let rg = Self.rgPath {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: rg)
+            var args = ["--files", "--no-messages", "--color", "never",
+                        "--glob-case-insensitive", "-g", glob]
+            for x in excludes where !x.isEmpty { args += ["-g", "!" + x] }
+            if hidden { args += ["--hidden", "-g", "!.git"] }
+            p.arguments = args
+            p.currentDirectoryURL = URL(fileURLWithPath: base)
+            proc = p
+            searchProcess = p
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var rels: [String] = []
+            var truncated = false
+            if let proc {
+                let pipe = Pipe()
+                proc.standardOutput = pipe
+                proc.standardError = FileHandle.nullDevice
+                if (try? proc.run()) != nil {
+                    let h = pipe.fileHandleForReading
+                    var pending = Data()
+                    while true {
+                        let chunk = h.availableData
+                        if chunk.isEmpty { break }
+                        pending.append(chunk)
+                        while let nl = pending.firstIndex(of: 0x0A) {
+                            let line = pending[pending.startIndex..<nl]
+                            pending.removeSubrange(pending.startIndex...nl)
+                            if let s = String(data: line, encoding: .utf8), !s.isEmpty { rels.append(s) }
+                        }
+                        if rels.count >= limit {
+                            truncated = true
+                            proc.terminate()
+                            break
+                        }
+                    }
+                    proc.waitUntilExit()
+                }
+            } else {
+                // no ripgrep: walk with FileManager (slower, same semantics)
+                truncated = Self.walk(base: base, glob: glob, hidden: hidden,
+                                      excludes: excludes, limit: limit, into: &rels)
+            }
+            let entries = rels.prefix(limit).compactMap { rel in
+                Self.makeEntry(name: rel, path: (base as NSString).appendingPathComponent(rel))
+            }
+            DispatchQueue.main.async {
+                guard let self, gen == self.searchGen else { return }
+                self.searchProcess = nil
+                let decorated: [Entry] = entries.map {
+                    var e = $0
+                    e.icon = Self.typeIcon(e)
+                    self.decorate(&e)
+                    return e
+                }
+                self.selection = 0
+                self.setRows(self.sortEntries(decorated))
+                let n = decorated.count
+                var msg = "\(n) match\(n == 1 ? "" : "es") in \(self.displayPath(base))"
+                if truncated { msg += " — first \(limit) shown" }
+                if Self.rgPath == nil { msg += " (install ripgrep for faster search)" }
+                self.setStatus(msg)
+            }
+        }
+    }
+    // FileManager fallback for startSearch; returns true when capped
+    private static func walk(base: String, glob: String, hidden: Bool, excludes: [String],
+                             limit: Int, into out: inout [String]) -> Bool {
+        guard let re = pathGlobRegex(glob) else { return false }
+        let skip = Set(excludes.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
+        let opts: FileManager.DirectoryEnumerationOptions = hidden
+            ? [.skipsPackageDescendants] : [.skipsHiddenFiles, .skipsPackageDescendants]
+        guard let en = FileManager.default.enumerator(
+            at: URL(fileURLWithPath: base), includingPropertiesForKeys: [.isDirectoryKey],
+            options: opts) else { return false }
+        let prefix = (base as NSString).standardizingPath + "/"
+        for case let url as URL in en {
+            if skip.contains(url.lastPathComponent) { en.skipDescendants(); continue }
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { continue }
+            let rel = url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : url.path
+            if globMatch(re, rel) {
+                out.append(rel)
+                if out.count >= limit { return true }
+            }
+        }
+        return false
+    }
+    // gitignore-style glob over a relative path: * stays in one folder,
+    // ** crosses folders, and a slash-free glob matches at any depth
+    private static func pathGlobRegex(_ glob: String) -> NSRegularExpression? {
+        var out = glob.contains("/") ? "^" : "^(?:.*/)?"
+        let chars = Array(glob)
+        var i = 0
+        while i < chars.count {
+            let ch = chars[i]
+            if ch == "*", i + 1 < chars.count, chars[i + 1] == "*" {
+                if i + 2 < chars.count, chars[i + 2] == "/" { out += "(?:.*/)?"; i += 3 } else { out += ".*"; i += 2 }
+                continue
+            }
+            switch ch {
+            case "*": out += "[^/]*"
+            case "?": out += "[^/]"
+            default: out += NSRegularExpression.escapedPattern(for: String(ch))
+            }
+            i += 1
+        }
+        return try? NSRegularExpression(pattern: out + "$", options: [.caseInsensitive])
+    }
+    // one icon per file type (search results can be thousands of files)
+    private static var typeIcons: [String: NSImage] = [:]
+    private static func typeIcon(_ e: Entry) -> NSImage {
+        let ext = (e.path as NSString).pathExtension.lowercased()
+        if let i = typeIcons[ext] { return i }
+        let img = NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
+        typeIcons[ext] = img
+        return img
+    }
+
     // "*.md", "note*", "?og*" -> anchored, case-insensitive regex
     private static func globRegex(_ glob: String) -> NSRegularExpression {
         var out = "^"
@@ -2925,6 +3410,59 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private static func expandTilde(_ s: String) -> String {
         s.hasPrefix("~") ? (s as NSString).expandingTildeInPath : s
     }
+
+    // MARK: sort
+
+    private func showSortMenu() {
+        let menu = NSMenu()
+        for (i, k) in SortKey.allCases.enumerated() {
+            let item = NSMenuItem(title: k.label, action: #selector(pickSortKey(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            item.state = k == sortKey ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for (title, desc) in [("Ascending", false), ("Descending", true)] {
+            let item = NSMenuItem(title: title, action: #selector(pickSortOrder(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = desc ? 1 : 0
+            item.state = desc == sortDescending ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil,
+                   at: NSPoint(x: sortButton.frame.minX, y: sortButton.frame.maxY + 2), in: self)
+    }
+    @objc private func pickSortKey(_ sender: NSMenuItem) {
+        let k = SortKey.allCases[sender.tag]
+        if k != sortKey { sortDescending = k.naturalDescending }
+        sortKey = k
+        applySort()
+    }
+    @objc private func pickSortOrder(_ sender: NSMenuItem) {
+        sortDescending = sender.tag == 1
+        applySort()
+    }
+    private func applySort() {
+        updateSortTitle()
+        func resort(_ list: [Entry]) -> [Entry] {
+            sortEntries(list.map { var e = $0; decorate(&e); return e })
+        }
+        all = resort(all)
+        hiddenAll = hiddenAll.map(resort)
+        if let c = dirCache { dirCache = (c.0, c.1, resort(c.2)) }
+        if case .recursive = mode {
+            setRows(resort(rows))
+        } else {
+            refilter()
+        }
+        onSortChange?(sortKey.rawValue, sortDescending)
+        needsLayout = true
+    }
+    private func updateSortTitle() {
+        sortButton.title = sortKey.short + (sortDescending ? " ↓" : " ↑")
+    }
+
     private func scrollListToTop() {
         let clip = listScroll.contentView
         if clip.bounds.origin.y != 0 {
@@ -2935,6 +3473,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     func cd(_ dir: String) {
         cwd = (dir as NSString).standardizingPath
         query = ""
+        selection = 0
+        cancelSearch()
         reload()
         updateStarTitle()
         onDirChange?(cwd)
@@ -2973,65 +3513,35 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         }
     }
 
-    // Windows-explorer style: when the filter bar holds something that looks
-    // like a path (~/…, /…, …/…, or an existing entry) and the user hits
-    // Enter, jump straight to it (cd into a dir / open a file). Returns true
-    // when a jump happened, so the Enter is consumed and not treated as a
-    // list selection.
+    // Windows-explorer style: when the filter bar holds an EXISTING path
+    // (~/…, /…, ../…) and the user hits Enter, jump straight to it (cd into a
+    // dir / open a file). Anything else falls through to opening the list
+    // selection (typed-path and wildcard queries list their matches there).
     @discardableResult
     private func jumpToQueryPath() -> Bool {
         let q = searchField.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return false }
-        // only a real path: absolute/~/or a slash-bearing entry (a bare name
-        // like "notes" keeps filtering the current dir instead)
-        guard q.contains("/") || q.hasPrefix("~") else { return false }
-        let p = (q as NSString).expandingTildeInPath
-
-        // Wildcard path (~/notes/assets/img*): switch to the longest existing
-        // directory prefix, keep the glob as the active filter so the listing
-        // shows every match, then open the top one (like Enter on a bare-name
-        // filter opens the selection).
-        if q.contains("*") || q.contains("?") {
-            var dir = "/"
-            var found = false
-            for comp in (p as NSString).pathComponents {
-                if comp == "/" { continue }
-                let cand = (dir as NSString).appendingPathComponent(comp)
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: cand, isDirectory: &isDir),
-                   isDir.boolValue {
-                    dir = cand
-                    found = true
-                } else {
-                    break
-                }
-            }
-            if found, dir != cwd {
-                cd(dir)
-                query = q
-                searchField.stringValue = q
-                refilter()
-            }
-            if let w = window { w.makeFirstResponder(listPane) }
-            if let target = rows.firstIndex(where: { $0.name != ".." }) {
-                openIndex(target)
-            }
-            return true
-        }
-
+        guard !q.isEmpty, q.contains("/") || q.hasPrefix("~"), !Self.hasGlob(q) else { return false }
+        let p = resolvePath(q)
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir) else {
-            onStatus?("no such path: \(q)")
-            return true
-        }
+        guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir) else { return false }
         if isDir.boolValue {
             cd(p)
             if let w = window { w.makeFirstResponder(listPane) }
         } else {
             onOpen?(p)
-            onStatus?("opened \(p)")
+            setStatus("opened \(displayPath(p))")
         }
         return true
+    }
+
+    // `term` / right-click "Open Terminal Here": a folder opens itself, a
+    // file its folder
+    private func terminalDir(for e: Entry) -> String {
+        e.isDir ? e.path : (e.path as NSString).deletingLastPathComponent
+    }
+    private func openTerminal(_ dir: String) {
+        onOpenTerminal?(dir)
+        setStatus("terminal opened in \(displayPath(dir))")
     }
 
     // MARK: preview
@@ -3261,7 +3771,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         favPills = []
         shownFavorites = mergedFavorites()
         for fav in shownFavorites {
-            let p = ThemeButton(config: config, title: displayPath(fav))
+            let p = ThemeButton(config: config, title: displayPath(fav), symbol: "folder")
+            p.isOn = fav == cwd
             p.onClick = { [weak self] in
                 guard let self, FileManager.default.fileExists(atPath: fav) else { return }
                 self.cd(fav)
@@ -3290,35 +3801,75 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
         guard (obj.object as AnyObject?) === searchField else { return }
         query = searchField.stringValue
+        selection = 0
         refilter()
-        onStatus?(statusText())
     }
-    // transient feedback for the filter bar: an exact existing path shows
-    // "↵ open …" / "↵ cd …" (Enter will jump there) instead of "0 matches"
-    private func statusText() -> String {
-        let q = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !q.isEmpty {
+    private func setStatus(_ s: String) {
+        statusLine.stringValue = s
+        onStatus?(s)
+    }
+    // one dim line under the list describing what Enter will do
+    private func updateStatus() {
+        let items = rows.filter { $0.name != ".." }.count
+        let count = "\(items) item\(items == 1 ? "" : "s")"
+        switch mode {
+        case .all:
+            setStatus("\(count) · sorted by \(sortKey.label.lowercased())")
+        case .terminal(let dir):
+            setStatus("↵ open a terminal in \(displayPath(dir))")
+        case .local:
+            setStatus(items == 0 ? "no matches — try a path (~/…) or **/name to search subfolders"
+                                 : "\(count) · ↵ open")
+        case .dir(let dir, let pat):
             var isDir: ObjCBool = false
-            let p = (q as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: p, isDirectory: &isDir) {
-                return isDir.boolValue ? "↵ cd \(displayPath(p))" : "↵ open \(displayPath(p))"
+            guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
+                setStatus("no such folder: \(displayPath(dir))")
+                return
             }
+            let exact = (dir as NSString).appendingPathComponent(pat)
+            if !pat.isEmpty, FileManager.default.fileExists(atPath: exact, isDirectory: &isDir) {
+                setStatus(isDir.boolValue ? "↵ cd \(displayPath(exact)) · ⇥ list it"
+                                          : "↵ open \(displayPath(exact))")
+            } else {
+                setStatus("\(count) in \(displayPath(dir)) · ⇥ complete · ↵ open")
+            }
+        case .recursive:
+            break   // the search reports its own progress / result count
         }
-        return query.isEmpty ? "" : "\(rows.count) match\(rows.count == 1 ? "" : "es")"
     }
 
     // Field-editor commands for the filter bar: the field editor owns
-    // Return/Up/Down while editing, so this delegate hook (the only reliable
-    // interception) routes them — Return jumps to a typed path or opens the
-    // list selection; Up/Down move the list selection.
+    // Return/Tab/Up/Down while editing, so this delegate hook (the only
+    // reliable interception) routes them — Return runs `term`, jumps to a
+    // typed path or opens the list selection; Tab completes the selected
+    // row into the bar (shell style); Up/Down move the list selection.
     func control(_ control: NSControl, textView: NSTextView,
                  doCommandBy commandSelector: Selector) -> Bool {
         guard control === searchField else { return false }
         switch commandSelector {
         case #selector(NSResponder.insertNewline(_:)):
+            if case .terminal(let dir) = parseQuery(searchField.stringValue) {
+                openTerminal(dir)
+                return true
+            }
             if jumpToQueryPath() { return true }
+            guard rows.indices.contains(listPane.selection) else {
+                setStatus("nothing to open")
+                return true
+            }
             if let w = window { w.makeFirstResponder(listPane) }
             openIndex(listPane.selection)
+            return true
+        case #selector(NSResponder.insertTab(_:)):
+            guard !query.isEmpty, rows.indices.contains(listPane.selection) else { return true }
+            let e = rows[listPane.selection]
+            guard e.name != ".." else { return true }
+            let completed = displayPath(e.path) + (e.isDir ? "/" : "")
+            searchField.stringValue = completed
+            query = completed
+            selection = 0
+            refilter()
+            textView.selectedRange = NSRange(location: (completed as NSString).length, length: 0)
             return true
         case #selector(NSResponder.moveUp(_:)):
             if let w = window { w.makeFirstResponder(listPane) }
@@ -4689,7 +5240,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = config.hasShadow
-        panel.level = .popUpMenu
+        panel.level = config.floating ? .popUpMenu : .normal
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
         panel.title = config.name
@@ -4811,10 +5362,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             // machine — e.g. white text on a light-mode selection is
             // unreadable. Pin selection to the configured highlight + text
             // colors so it always contrasts, regardless of the machine.
-            tv.selectedTextAttributes = [
-                .backgroundColor: config.colors.highlight,
-                .foregroundColor: config.colors.text,
-            ]
+            tv.selectedTextAttributes = ButtonStyle.selection(config.colors)
             tv.backgroundColor = .clear
             tv.drawsBackground = false
             tv.textContainerInset = NSSize(width: 10, height: 10)
@@ -5144,6 +5692,8 @@ scroll.documentView = rowView
         panel.contentView = backdrop
 
         super.init()
+        // theme-pinned appearance + text selection (needs the drawers built)
+        applyThemeAppearance()
 
         // Wire the terminal restarter (self-safe now): auto-restart the shell.
         if let restarter = terminalRestarter {
@@ -7062,6 +7612,7 @@ public enum ThemeRole: String, CaseIterable {
             // keep the drag-header fill consistent when it falls back to the
             // card background
             chrome?.headerColorOverride = config.headerColor ?? config.colors.background
+            applyThemeAppearance()
         case .header:
             config.headerColor = c
             chrome?.headerColorOverride = c
@@ -7071,15 +7622,18 @@ public enum ThemeRole: String, CaseIterable {
 
     // Window-wide text palette (Theme ▸ presets, light <-> dark): the editor,
     // the vim pane, the shell drawer and every themed subview pick it up live.
-    public func setTextColors(text: NSColor, dim: NSColor, highlight: NSColor) {
+    public func setTextColors(text: NSColor, dim: NSColor, highlight: NSColor,
+                              accent: NSColor? = nil) {
         config.colors.text = text
         config.colors.dim = dim
         config.colors.highlight = highlight
+        if let accent { config.colors.accent = accent }
         if let tv = editorView {
             tv.textColor = text
             tv.insertionPointColor = text
-            tv.selectedTextAttributes = [.backgroundColor: highlight, .foregroundColor: text]
+            tv.selectedTextAttributes = ButtonStyle.selection(config.colors)
         }
+        applyThemeAppearance()
         findField?.textColor = text
         findCountLabel?.textColor = dim
         if let vv = vimView {
@@ -7101,6 +7655,49 @@ public enum ThemeRole: String, CaseIterable {
         }
         if let root = panel.contentView { walk(root) }
         panel.contentView?.needsDisplay = true
+    }
+
+    // Pin the window to the THEME's appearance instead of the Mac's: the
+    // blur material, scrollers, menus and selection all follow the window
+    // appearance, so a light-mode Mac used to wash dark presets out (and a
+    // dark-mode one muddied light presets). Also re-pins text selection.
+    func applyThemeAppearance() {
+        let light = ButtonStyle.luminance(config.colors.background) > 0.45
+        panel.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        let sel = ButtonStyle.selection(config.colors)
+        (panel as? PopupBaseWindow)?.selectionAttributes = sel
+        (panel as? PopupPanel)?.selectionAttributes = sel
+        if let ed = panel.fieldEditor(false, for: nil) as? NSTextView { ed.selectedTextAttributes = sel }
+        for term in [terminalDrawer, vimView].compactMap({ $0 }) {
+            term.selectedTextBackgroundColor = sel[.backgroundColor] as? NSColor ?? config.colors.highlight
+            term.selectedTextForegroundColor = sel[.foregroundColor] as? NSColor ?? config.colors.text
+        }
+    }
+
+    // host fallback for `term` when this window has no shell drawer (files
+    // window): open the configured terminal app in `dir`
+    public var onOpenExternalTerminal: ((String) -> Void)?
+
+    // cd the embedded shell drawer to `dir` (opening + focusing it), or hand
+    // off to an external terminal when there's no drawer
+    public func openTerminalHere(_ dir: String) {
+        guard let term = terminalDrawer else {
+            onOpenExternalTerminal?(dir)
+            return
+        }
+        if !terminalShown { toggleTerminalDrawer() }
+        let quoted = "'" + dir.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Ctrl+U clears whatever is half-typed at the prompt first
+        term.send(txt: "\u{15}cd -- \(quoted)\r")
+        panel.makeFirstResponder(term)
+        focusedPane = .terminal
+        updateFocusIndicator()
+    }
+
+    // live float toggle (header icon menu ▸ Float Above Other Windows)
+    public func setFloating(_ on: Bool) {
+        config.floating = on
+        panel.level = on ? .popUpMenu : .normal
     }
 
     // the shell drawer's own text color (nil = follow the window text)
@@ -7130,6 +7727,10 @@ public enum ThemeRole: String, CaseIterable {
         // right-click "Open in Notes" -> host hook
         fb.onOpenInNotes = { [weak self] p in
             self?.onFileBrowserOpenInNotes?(p)
+        }
+        // `term` in the filter bar / right-click "Open Terminal Here"
+        fb.onOpenTerminal = { [weak self] dir in
+            self?.openTerminalHere(dir)
         }
         if let chrome = self.chrome {
             backdrop.addSubview(fb, positioned: .below, relativeTo: chrome)

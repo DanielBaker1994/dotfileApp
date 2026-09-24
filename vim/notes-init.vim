@@ -19,6 +19,14 @@ set mouse=a
 if executable('pbcopy') && executable('pbpaste')
   set clipboard=unnamedplus
 endif
+" yank/copy -> system clipboard (unnamedplus above); every form of delete /
+" change goes to the black-hole register so it never clobbers the clipboard
+" (mirrors ~/.config/nvim/init.lua). Visual p replaces without yanking.
+for s:k in ['d', 'D', 'c', 'C', 'x', 'X', 's', 'S']
+  execute 'nnoremap ' . s:k . ' "_' . s:k
+  execute 'xnoremap ' . s:k . ' "_' . s:k
+endfor
+xnoremap p P
 set hidden
 set autoread
 set autowriteall

@@ -111,7 +111,7 @@ fi
 # ------------------------------------------------------------- 2. deps
 STEP="installing dependencies"
 step "2/7 dependencies (brew)"
-for f in aerospace sketchybar borders jq; do
+for f in aerospace sketchybar borders jq ripgrep; do
     if brew list "$f" >/dev/null 2>&1; then
         ok "$f already installed"
     else

@@ -100,6 +100,12 @@ struct AppSettings {
     // global hide behavior: when false, windows only dismiss via Esc (regardless
     // of per-window sticky); when true (default), non-sticky windows hide on focus loss
     var hideOnFocusLoss = true
+    // [app] float: popup windows stay above other apps' windows (default
+    // true); per window `float` in its section overrides it
+    var float = true
+    // [app] terminal-app: app the file browser's `term` command opens when
+    // the window has no embedded shell drawer (default Ghostty, else Terminal)
+    var terminalApp = ""
     // derived (recomputed whenever the settings change)
     var commandsConfPath: String { binDir + "/" + commandsConfName }
     var focusFilePath: String { popupTmpDir() + focusFileName }
@@ -110,6 +116,9 @@ var settings = AppSettings()
 
 // MARK: - Tunables (named constants for the numeric magic)
 
+// Theme ▸ presets raise a surface to at least this opacity so the palette
+// actually shows over the desktop blur
+let presetMinOpacity: CGFloat = 0.6
 let ipcSocketTimeout = 1.0    // s: aerospace socket reads + launcher ping
 let ipcFallbackTimeout = 1.5  // s: aerospace CLI fallback kill timeout
 let serverRecvTimeout = 2.0   // s: command-server socket recv timeout
@@ -450,6 +459,14 @@ struct CommandSpec {
     let resize: Bool          // drag edges/corners to resize
     let drag: Bool            // drag the window by its header
     var sticky: Bool          // stay visible when another app takes focus
+    var float: Bool? = nil    // stay above other apps' windows (nil = [app] float)
+    // files: browser sort (name|modified|created|size|kind) + asc/desc, the
+    // recursive-search cap/excludes and the filter words that open a terminal
+    var sort: String? = nil
+    var sortDescending: Bool? = nil
+    var searchLimit: Int? = nil
+    var searchExclude: [String]? = nil
+    var terminalWords: [String]? = nil
     let searchWidth: CGFloat  // list: search bar as a fraction of window width
     let maxStretch: CGFloat   // list: cap on per-row stretch when resized big
     let height: CGFloat       // window height in points
@@ -466,6 +483,7 @@ struct CommandSpec {
     var textColor: NSColor? = nil
     var dimColor: NSColor? = nil
     var highlightColor: NSColor? = nil
+    var accentColor: NSColor? = nil        // active tab / chip underline
     var terminalForeground: NSColor? = nil  // shell drawer text (nil = textColor)
     var vimMode: Bool          // note: edit notes in an embedded nvim pane
     var vimBin: String         // note: vim binary path or name (default "nvim")
@@ -723,6 +741,13 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     spec.textColor = hexColor(vars["text-color"])
     spec.dimColor = hexColor(vars["dim-color"])
     spec.highlightColor = hexColor(vars["highlight-color"])
+    spec.accentColor = hexColor(vars["accent-color"])
+    spec.float = tri(vars["float"])
+    spec.sort = vars["sort"]
+    if let o = vars["sort-order"]?.lowercased() { spec.sortDescending = o.hasPrefix("desc") }
+    spec.searchLimit = Int(vars["search-limit"] ?? "")
+    if vars["search-exclude"] != nil { spec.searchExclude = csv(vars["search-exclude"]) }
+    if vars["terminal-words"] != nil { spec.terminalWords = csv(vars["terminal-words"]) }
     spec.terminalForeground = hexColor(vars["terminal-foreground"])
     return spec
 }
@@ -825,6 +850,8 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("voice-locale"), !v.isEmpty { settings.voiceLocale = v }
     if vars["screenshot-apps"] != nil { settings.screenshotApps = csv(vars["screenshot-apps"]) }
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
+    if let v = tri(str("float")) { settings.float = v }
+    if let v = str("terminal-app") { settings.terminalApp = v }
 }
 
 // MARK: - Theme presets (header icon menu ▸ Theme)
@@ -833,6 +860,52 @@ private func parseAppConfig(_ vars: [String: String]) {
 // (the blended look: notepad, a slightly deeper explorer + terminal, a raised
 // header); the per-surface items apply just that surface. Transparency is
 // kept per surface — a preset changes hues, never how see-through it is.
+// Every color a Theme preset can touch on one window, captured when the
+// Theme menu opens so a hover preview can be undone exactly.
+struct ThemeSnapshot {
+    let roles: [(PopupWindow.ThemeRole, NSColor)]
+    let text, dim, highlight, accent: NSColor
+    let terminalForeground: NSColor?
+    init(_ w: PopupWindow) {
+        roles = PopupWindow.ThemeRole.allCases.map { ($0, w.themeColor($0)) }
+        text = w.config.colors.text
+        dim = w.config.colors.dim
+        highlight = w.config.colors.highlight
+        accent = w.config.colors.accent
+        terminalForeground = w.config.terminalForeground
+    }
+    func restore(_ w: PopupWindow) {
+        for (role, c) in roles { w.setThemeColor(c, for: role) }
+        w.setTerminalForeground(terminalForeground)
+        w.setTextColors(text: text, dim: dim, highlight: highlight, accent: accent)
+    }
+}
+
+// Theme menu delegate: reports the highlighted preset (item tag) and the
+// menu closing, so presets preview live while hovered.
+final class ThemePreviewDelegate: NSObject, NSMenuDelegate {
+    private let onHighlight: (Int?) -> Void
+    private let onClose: () -> Void
+    private var current: Int?
+    // set when a real Theme item was picked: closing must not undo it
+    var committed = false
+    init(onHighlight: @escaping (Int?) -> Void, onClose: @escaping () -> Void) {
+        self.onHighlight = onHighlight
+        self.onClose = onClose
+    }
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        // only preset rows carry a submenu; Custom/Reset rows restore
+        let tag = (item?.submenu != nil) ? item?.tag : nil
+        guard tag != current else { return }
+        current = tag
+        onHighlight(tag)
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        current = nil
+        if !committed { onClose() }
+    }
+}
+
 struct ThemePreset {
     let name: String
     let background: NSColor   // notepad / window card
@@ -842,37 +915,39 @@ struct ThemePreset {
     let text: NSColor
     let dim: NSColor
     let highlight: NSColor    // selection / active pills
+    let accent: NSColor       // active tab / chip underline (the theme's signature hue)
 
     var isLight: Bool { background.relativeLuminance > 0.45 }
 
-    // commands.conf [themes]:  Name = bg, browser, terminal, header, text, dim, highlight
+    // commands.conf [themes]:  Name = bg, browser, terminal, header, text, dim, highlight[, accent]
     static func parse(name: String, _ value: String) -> ThemePreset? {
         let c = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard !name.isEmpty, c.count == 7 else { return nil }
+        guard !name.isEmpty, c.count == 7 || c.count == 8 else { return nil }
         let colors = c.compactMap { hexColor($0) }
-        guard colors.count == 7 else { return nil }
+        guard colors.count == c.count else { return nil }
         return ThemePreset(name: name, background: colors[0], browser: colors[1],
                            terminal: colors[2], header: colors[3], text: colors[4],
-                           dim: colors[5], highlight: colors[6])
+                           dim: colors[5], highlight: colors[6],
+                           accent: colors.count == 8 ? colors[7] : colors[4])
     }
 
     // the stock palettes (official hex values where the theme publishes them)
     static let builtIn: [ThemePreset] = [
-        ("Tokyo Night", "1A1B26, 16161E, 13141C, 24283B, C0CAF5, 9AA5CE, 283457"),
-        ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 292E42, C0CAF5, 9AA5CE, 2E3C64"),
-        ("Catppuccin Mocha", "1E1E2E, 181825, 11111B, 313244, CDD6F4, A6ADC8, 45475A"),
-        ("Catppuccin Macchiato", "24273A, 1E2030, 181926, 363A4F, CAD3F5, A5ADCB, 494D64"),
-        ("Dracula", "282A36, 21222C, 191A21, 343746, F8F8F2, A4AACC, 44475A"),
-        ("Nord", "2E3440, 3B4252, 272C36, 434C5E, ECEFF4, A3ACBD, 4C566A"),
-        ("Gruvbox Dark", "282828, 1D2021, 1D2021, 3C3836, EBDBB2, A89984, 504945"),
-        ("One Dark", "282C34, 21252B, 1E2127, 2C313A, ABB2BF, 7F848E, 3E4451"),
-        ("Rosé Pine", "191724, 1F1D2E, 16141F, 26233A, E0DEF4, 908CAA, 403D52"),
-        ("Solarized Dark", "002B36, 073642, 00212B, 073642, 93A1A1, 657B83, 0A4A5A"),
-        ("Graphite", "1E1E1E, 252525, 181818, 2D2D2D, E5E5E5, 9A9A9A, 3A3A3A"),
-        ("Catppuccin Latte", "EFF1F5, E6E9EF, DCE0E8, CCD0DA, 4C4F69, 6C6F85, BCC0CC"),
-        ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C4C8DA, 3760BF, 6172B0, B7C1E3"),
-        ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1"),
-        ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6"),
+        ("Tokyo Night", "1A1B26, 16161E, 13141C, 24283B, C0CAF5, 9AA5CE, 283457, 7AA2F7"),
+        ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 292E42, C0CAF5, 9AA5CE, 2E3C64, 7AA2F7"),
+        ("Catppuccin Mocha", "1E1E2E, 181825, 11111B, 313244, CDD6F4, A6ADC8, 45475A, CBA6F7"),
+        ("Catppuccin Macchiato", "24273A, 1E2030, 181926, 363A4F, CAD3F5, A5ADCB, 494D64, C6A0F6"),
+        ("Dracula", "282A36, 21222C, 191A21, 343746, F8F8F2, A4AACC, 44475A, BD93F9"),
+        ("Nord", "2E3440, 3B4252, 272C36, 434C5E, ECEFF4, A3ACBD, 4C566A, 88C0D0"),
+        ("Gruvbox Dark", "282828, 1D2021, 1D2021, 3C3836, EBDBB2, A89984, 504945, FABD2F"),
+        ("One Dark", "282C34, 21252B, 1E2127, 2C313A, ABB2BF, 7F848E, 3E4451, 61AFEF"),
+        ("Rosé Pine", "191724, 1F1D2E, 16141F, 26233A, E0DEF4, 908CAA, 403D52, EBBCBA"),
+        ("Solarized Dark", "002B36, 073642, 00212B, 073642, 93A1A1, 657B83, 0A4A5A, 268BD2"),
+        ("Graphite", "1E1E1E, 252525, 181818, 2D2D2D, E5E5E5, 9A9A9A, 3A3A3A, 0A84FF"),
+        ("Catppuccin Latte", "EFF1F5, E6E9EF, DCE0E8, CCD0DA, 4C4F69, 6C6F85, BCC0CC, 8839EF"),
+        ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C4C8DA, 3760BF, 6172B0, B7C1E3, 2E7DE9"),
+        ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1, 268BD2"),
+        ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6, 007AFF"),
     ].compactMap { parse(name: $0.0, $0.1) }
 
     // built-ins + commands.conf [themes] entries (same name = override)
@@ -909,7 +984,7 @@ struct ThemePreset {
             NSGraphicsContext.current?.restoreGraphicsState()
             self.text.setFill()
             NSBezierPath(ovalIn: NSRect(x: 5, y: r.midY - 3, width: 6, height: 6)).fill()
-            self.highlight.setFill()
+            self.accent.setFill()
             NSBezierPath(ovalIn: NSRect(x: 12, y: r.midY - 3, width: 6, height: 6)).fill()
             NSColor.black.withAlphaComponent(0.25).setStroke()
             card.lineWidth = 1
@@ -966,7 +1041,7 @@ private func configLog(_ s: String) {
 
 private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "terminal", "vim-mode",
-    "checkbox", "hide-on-focus-loss",
+    "checkbox", "hide-on-focus-loss", "float",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
@@ -974,15 +1049,17 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "zoxide-top": 0...100, "search-width": 0...1,
     "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
-    "vim-esc-close": 0...20,
+    "vim-esc-close": 0...20, "search-limit": 1...1_000_000,
 ]
 private let configColorKeys: Set<String> = [
     "header-color", "background-color", "browser-background", "terminal-background",
-    "text-color", "dim-color", "highlight-color", "terminal-foreground",
+    "text-color", "dim-color", "highlight-color", "accent-color", "terminal-foreground",
 ]
 private let configEnumKeys: [String: Set<String>] = [
     "type": ["shell", "note", "list", "output", "files"],
     "start-drawer": ["browser", "terminal", "none"],
+    "sort": ["name", "modified", "created", "size", "kind"],
+    "sort-order": ["asc", "desc", "ascending", "descending"],
     "copy-format": ["tsv"],
 ]
 
@@ -2788,6 +2865,7 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = true
         cfg.sticky = true
+        cfg.floating = cmd.float ?? settings.float
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
         cfg.colors = PopupColors(background: BAR, border: BORDER,
@@ -2857,6 +2935,7 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
+        cfg.floating = cmd.float ?? settings.float
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
         cfg.height = cmd.height > 0 ? cmd.height : defaultOutputSize.height
         // same header styling as the jira window: slim bluey-silver bar, no
@@ -2908,6 +2987,7 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = true
         cfg.sticky = true
+        cfg.floating = cmd.float ?? settings.float
         cfg.width = 1000
         cfg.height = 600
         cfg.headerHeight = 30
@@ -3188,6 +3268,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
+        cfg.floating = cmd.float ?? settings.float
         cfg.tabs = true
         cfg.tabsAddButton = true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
@@ -3222,7 +3303,8 @@ private func trimmed(_ s: String) -> String? {
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
                                  text: cmd.textColor ?? TEXT, dim: cmd.dimColor ?? DIM,
-                                 highlight: cmd.highlightColor ?? GROUP_BG, accent: ACCENT)
+                                 highlight: cmd.highlightColor ?? GROUP_BG,
+                                 accent: cmd.accentColor ?? ACCENT)
         cfg.terminalForeground = cmd.terminalForeground
         if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
         if let bg = cmd.backgroundColor {
@@ -3508,6 +3590,7 @@ private func trimmed(_ s: String) -> String? {
             menu.addItem(.separator())
 
             menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
+            menu.addItem(self.floatMenuItem(for: w, section: cmd.name))
             menu.addItem(.separator())
             // — theme presets + transparency —
             self.addThemeMenus(to: menu, window: w, section: cmd.name)
@@ -4030,7 +4113,9 @@ private func trimmed(_ s: String) -> String? {
         // embedded file browser drawer (header "▤" toggles it): starts in the
         // note directory, favorites shared with the floating "files" window
         let favs = fileBrowserFavoritesConfig()
-        let fb = PopupFileBrowser(config: cfg, startDir: noteDir(currentPath),
+        var browserCfg = cfg
+        applyBrowserSettings(&browserCfg)
+        let fb = PopupFileBrowser(config: browserCfg, startDir: noteDir(currentPath),
                                   staticFavorites: favs.staticFavs,
                                   zoxideFavorites: zoxideTopDirs(favs.zoxideTop))
         fb.onOpen = { [weak self] path in
@@ -4043,6 +4128,8 @@ private func trimmed(_ s: String) -> String? {
         fb.onCopyDir = { [weak self] dir in
             self?.copy(dir, "directory path: \(dir)")
         }
+        fb.onSortChange = { [weak self] key, desc in self?.saveBrowserSort(key, desc) }
+        w.onOpenExternalTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
         fb.onStatus = { [weak self] s in
             if !s.isEmpty { self?.log("note '\(cmd.name)': \(s)") }
         }
@@ -4193,6 +4280,8 @@ private func trimmed(_ s: String) -> String? {
     enum ThemeScope {
         case window, notepad, terminal, browser
     }
+    // the open Theme menu's hover-preview delegate (NSMenu holds it weakly)
+    private var themePreviewDelegate: ThemePreviewDelegate?
 
     // surfaces this window can style: notes = all four, files = the explorer
     private func themeScopes(for w: PopupWindow) -> [(ThemeScope, String)] {
@@ -4212,11 +4301,29 @@ private func trimmed(_ s: String) -> String? {
         let currentBrowser = hexString(w.themeColor(.browser).withAlphaComponent(1))
         let windowTextIsLight = w.config.colors.text.relativeLuminance > 0.45
         let presets = ThemePreset.all()
+        // hovering a preset previews it live on this window; closing the
+        // menu without picking one puts the current look back
+        let snapshot = ThemeSnapshot(w)
+        let preview = ThemePreviewDelegate(
+            onHighlight: { [weak self, weak w] tag in
+                guard let self, let w else { return }
+                if let tag, presets.indices.contains(tag) {
+                    snapshot.restore(w)
+                    self.applyThemePreset(presets[tag], scope: .window, to: w,
+                                          section: section, persist: false)
+                } else {
+                    snapshot.restore(w)
+                }
+            },
+            onClose: { [weak w] in if let w { snapshot.restore(w) } })
+        themeMenu.delegate = preview
+        themePreviewDelegate = preview
         for (i, p) in presets.enumerated() {
             if i > 0, p.isLight, !presets[i - 1].isLight {
                 themeMenu.addItem(.separator())
             }
             let item = NSMenuItem(title: p.name, action: nil, keyEquivalent: "")
+            item.tag = i
             item.image = p.swatch()
             let matches = w.config.editMode ? currentBg == hexString(p.background)
                                             : currentBrowser == hexString(p.background)
@@ -4229,6 +4336,8 @@ private func trimmed(_ s: String) -> String? {
                 let readable = scope != .browser || p.isLight != windowTextIsLight
                 let si = menuItem(label, enabled: readable) { [weak self, weak w] in
                     guard let self, let w else { return }
+                    preview.committed = true
+                    snapshot.restore(w)
                     self.applyThemePreset(p, scope: scope, to: w, section: section)
                 }
                 if !readable {
@@ -4243,12 +4352,15 @@ private func trimmed(_ s: String) -> String? {
         themeMenu.addItem(.separator())
         themeMenu.addItem(menuItem("Custom Color…") { [weak self, weak w] in
             guard let self, let w else { return }
+            preview.committed = true
+            snapshot.restore(w)
             let roles: [PopupWindow.ThemeRole] = w.config.editMode
                 ? [.terminal, .browser, .notepad, .header] : [.browser, .header]
             self.presentThemeRoleMenu(for: w, roles: roles, section: section)
         })
         themeMenu.addItem(menuItem("Reset to Defaults") { [weak self, weak w] in
             guard let self, let w else { return }
+            preview.committed = true
             self.resetWindowTheme(w, section: section)
         })
         let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
@@ -4318,6 +4430,7 @@ private func trimmed(_ s: String) -> String? {
             case "text-color": commands[i].textColor = c
             case "dim-color": commands[i].dimColor = c
             case "highlight-color": commands[i].highlightColor = c
+            case "accent-color": commands[i].accentColor = c
             case "terminal-foreground": commands[i].terminalForeground = c
             default: break
             }
@@ -4332,12 +4445,15 @@ private func trimmed(_ s: String) -> String? {
     }
 
     func applyThemePreset(_ p: ThemePreset, scope: ThemeScope,
-                          to w: PopupWindow, section: String) {
+                          to w: PopupWindow, section: String, persist: Bool = true) {
         var kv: [(String, NSColor?)] = []
-        // swap the hue, keep the surface's current transparency
+        // swap the hue, keep the surface's current transparency — but never
+        // below presetMinOpacity: a near-invisible surface (e.g. a terminal at
+        // 8%) showed only the desktop blur, so every preset looked the same
         func paint(_ role: PopupWindow.ThemeRole, _ c: NSColor) {
             let cur = w.themeColor(role).usingColorSpace(.sRGB) ?? w.themeColor(role)
-            let col = (c.usingColorSpace(.sRGB) ?? c).withAlphaComponent(cur.alphaComponent)
+            let alpha = max(cur.alphaComponent, presetMinOpacity)
+            let col = (c.usingColorSpace(.sRGB) ?? c).withAlphaComponent(alpha)
             w.setThemeColor(col, for: role)
             kv.append((configKey(for: role), col))
         }
@@ -4360,9 +4476,11 @@ private func trimmed(_ s: String) -> String? {
             paint(.browser, p.background)
         }
         if scope == .window || scope == .notepad {
-            w.setTextColors(text: p.text, dim: p.dim, highlight: p.highlight)
-            kv += [("text-color", p.text), ("dim-color", p.dim), ("highlight-color", p.highlight)]
+            w.setTextColors(text: p.text, dim: p.dim, highlight: p.highlight, accent: p.accent)
+            kv += [("text-color", p.text), ("dim-color", p.dim), ("highlight-color", p.highlight),
+                   ("accent-color", p.accent)]
         }
+        guard persist else { return }
         commitColors(w, section: section, kv)
         log("theme '\(p.name)' applied to [\(section)] scope=\(scope)")
     }
@@ -4385,7 +4503,7 @@ private func trimmed(_ s: String) -> String? {
         removeColorKeysFromConfig(section: section)
         updateSpecColors(section: section, [
             "browser-background", "terminal-background", "background-color", "header-color",
-            "text-color", "dim-color", "highlight-color", "terminal-foreground",
+            "text-color", "dim-color", "highlight-color", "accent-color", "terminal-foreground",
         ].map { ($0, nil) })
         let base = PopupConfig(name: "")
         w.setThemeColor(THEME_BROWSER ?? base.fileBrowserBackground, for: .browser)
@@ -4393,9 +4511,35 @@ private func trimmed(_ s: String) -> String? {
         w.setThemeColor(BAR.withAlphaComponent(base.tintAlpha), for: .notepad)
         w.setThemeColor(headerBlueSilver, for: .header)
         w.setTerminalForeground(nil)
-        w.setTextColors(text: TEXT, dim: DIM, highlight: GROUP_BG)
+        w.setTextColors(text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
         NSColorPanel.shared.orderOut(nil)
         log("theme reset for [\(section)] — back to system defaults")
+    }
+
+    // "Float Above Other Windows" (header icon menu): per-window `float`.
+    // On = stays above every app (default); off = a normal window.
+    func floatMenuItem(for w: PopupWindow, section: String) -> NSMenuItem {
+        let on = w.config.floating
+        return menuItem("Float Above Other Windows", state: on) { [weak self, weak w] in
+            guard let self, let w else { return }
+            w.setFloating(!on)
+            if let i = self.commands.firstIndex(where: { $0.name == section }) {
+                self.commands[i].float = !on
+            }
+            saveConfigValue(section: section, key: "float", value: on ? "false" : "true")
+            self.log("[\(section)] float = \(!on)")
+        }
+    }
+
+    // global default for every popup (menu bar ▸ Settings ▸ Float Windows):
+    // applies live to windows without their own `float` key
+    func setGlobalFloat(_ on: Bool) {
+        settings.float = on
+        saveConfigValue(section: "app", key: "float", value: on ? "true" : "false")
+        for w in subWindows {
+            let own = commands.first(where: { $0.windowName == w.config.name })?.float
+            w.setFloating(own ?? on)
+        }
     }
 
     // "Hide When Focus Is Lost" (header icon menu): the per-window inverse of
@@ -4728,7 +4872,7 @@ private func trimmed(_ s: String) -> String? {
         let keys: Set<String> = ["header-color", "background-color",
                                  "browser-background", "terminal-background",
                                  "tint-alpha", "text-color", "dim-color",
-                                 "highlight-color", "terminal-foreground"]
+                                 "highlight-color", "accent-color", "terminal-foreground"]
         let target = "[" + section + "]"
         var inSection = false
         var changed = false
@@ -4828,6 +4972,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
+        cfg.floating = cmd.float ?? settings.float
         cfg.wrapContent = true
         cfg.showSearchBar = true
         cfg.dragHeader = true
@@ -5028,6 +5173,41 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
     // Static favorite dirs + zoxide top-N for the file browser, taken from the
     // [files] command section so the notes drawer and the floating window share
     // the same config. Zoxide top-N requires `zoxide` on PATH.
+    // [files] browser settings onto a window config (both the notes drawer
+    // and the standalone files window read the [files] section)
+    private func applyBrowserSettings(_ cfg: inout PopupConfig) {
+        guard let cmd = commands.first(where: { $0.kind == .files }) else { return }
+        if let v = cmd.sort { cfg.browserSort = v }
+        if let v = cmd.sortDescending { cfg.browserSortDescending = v }
+        if let v = cmd.searchLimit, v > 0 { cfg.browserSearchLimit = v }
+        if let v = cmd.searchExclude { cfg.browserSearchExcludes = v }
+        if let v = cmd.terminalWords, !v.isEmpty { cfg.browserTerminalWords = v }
+    }
+    // sort picked in either browser -> [files] sort / sort-order (and the
+    // in-memory spec, so the next browser built opens with it)
+    private func saveBrowserSort(_ key: String, _ desc: Bool) {
+        let section = commands.first(where: { $0.kind == .files })?.name ?? "files"
+        if let i = commands.firstIndex(where: { $0.kind == .files }) {
+            commands[i].sort = key
+            commands[i].sortDescending = desc
+        }
+        saveConfigValues(section: section, [("sort", key), ("sort-order", desc ? "desc" : "asc")])
+    }
+    // `term` in a browser without a shell drawer: [app] terminal-app (default
+    // Ghostty when installed, else Terminal) opened on the folder
+    private func openInTerminalApp(_ dir: String) {
+        var app = settings.terminalApp
+        if app.isEmpty {
+            let ghostty = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty")
+            app = ghostty != nil ? "Ghostty" : "Terminal"
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-a", app, dir]
+        do { try p.run() } catch { log("terminal-app \(app): \(error)") }
+        log("opened \(app) in \(dir)")
+    }
+
     private func fileBrowserFavoritesConfig() -> (staticFavs: [String], zoxideTop: Int) {
         let cmd = commands.first(where: { $0.kind == .files })
         return (cmd?.favorites ?? [], cmd?.zoxideTop ?? 0)
@@ -5075,6 +5255,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
+        cfg.floating = cmd.float ?? settings.float
         cfg.enableNavigation = false   // the browser owns up/down/return
         cfg.enableSearch = false       // the browser has its own search field
         cfg.showSearchBar = false
@@ -5090,7 +5271,8 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = PopupColors(background: BAR, border: BORDER,
                                  text: cmd.textColor ?? TEXT, dim: cmd.dimColor ?? DIM,
-                                 highlight: cmd.highlightColor ?? GROUP_BG, accent: ACCENT)
+                                 highlight: cmd.highlightColor ?? GROUP_BG,
+                                 accent: cmd.accentColor ?? ACCENT)
         cfg.terminalForeground = cmd.terminalForeground
         if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
         if let bg = cmd.backgroundColor {
@@ -5112,6 +5294,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             menu.autoenablesItems = false
 
             menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
+            menu.addItem(self.floatMenuItem(for: w, section: cmd.name))
             menu.addItem(.separator())
             // theme presets + transparency
             self.addThemeMenus(to: menu, window: w, section: cmd.name)
@@ -5153,7 +5336,9 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         }
 
         let favs = fileBrowserFavoritesConfig()
-        let fb = PopupFileBrowser(config: cfg, startDir: root,
+        var browserCfg = cfg
+        applyBrowserSettings(&browserCfg)
+        let fb = PopupFileBrowser(config: browserCfg, startDir: root,
                                   staticFavorites: favs.staticFavs,
                                   zoxideFavorites: zoxideTopDirs(favs.zoxideTop))
         fb.onOpen = { [weak self] path in
@@ -5174,6 +5359,8 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         fb.onCopyDir = { [weak self] dir in
             self?.copy(dir, "directory path: \(dir)")
         }
+        fb.onSortChange = { [weak self] key, desc in self?.saveBrowserSort(key, desc) }
+        w.onOpenExternalTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
         fb.onStatus = { [weak self] s in
             if !s.isEmpty { self?.log("files '\(cmd.name)': \(s)") }
         }
@@ -5455,6 +5642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(settingsItem)
 
         addMenuItem(settingsMenu, "Hide on Focus Loss", #selector(MenuTarget.toggleHideOnFocusLoss(_:)), key: "")
+        addMenuItem(settingsMenu, "Float Windows Above Others", #selector(MenuTarget.toggleFloat(_:)), key: "")
         // Vim Mode toggle — only when a note command is configured
         if c.commands.contains(where: { $0.kind == .note }) {
             addMenuItem(settingsMenu, "Vim Mode (Notes)", #selector(MenuTarget.toggleVimMode(_:)), key: "")
@@ -5605,6 +5793,8 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                     switch subItem.action {
                     case #selector(toggleHideOnFocusLoss(_:)):
                         subItem.state = settings.hideOnFocusLoss ? .on : .off
+                    case #selector(toggleFloat(_:)):
+                        subItem.state = settings.float ? .on : .off
                     case #selector(toggleVimMode(_:)):
                         subItem.state = vimModeEnabled ? .on : .off
                     default:
@@ -5739,6 +5929,10 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         saveConfigValue(section: "app", key: "hide-on-focus-loss", value: settings.hideOnFocusLoss ? "true" : "false")
     }
 
+    @objc func toggleFloat(_ sender: Any?) {
+        MenuTarget.controller?.setGlobalFloat(!settings.float)
+    }
+
     @objc func toggleVimMode(_ sender: Any?) {
         MenuTarget.controller?.toggleVimModeForNotes()
     }
@@ -5747,6 +5941,8 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         // Reset to defaults: remove custom values from commands.conf
         settings.hideOnFocusLoss = true
         removeConfigValue(section: "app", key: "hide-on-focus-loss")
+        MenuTarget.controller?.setGlobalFloat(true)
+        removeConfigValue(section: "app", key: "float")
         removeConfigValue(section: "notes", key: "vim-mode")
         removeConfigValue(section: "notes", key: "vim-bin")
     }

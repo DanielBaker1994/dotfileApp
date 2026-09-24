@@ -11,7 +11,7 @@ say() { printf '\033[1;36m== %s ==\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------- 1. brew
 say "1/6 brew dependencies"
-for f in aerospace sketchybar borders jq; do
+for f in aerospace sketchybar borders jq ripgrep; do
     brew list "$f" >/dev/null 2>&1 || brew install "$f"
 done
 for c in karabiner-elements font-sketchybar-app-font font-hack-nerd-font; do
