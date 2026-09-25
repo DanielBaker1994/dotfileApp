@@ -111,13 +111,14 @@ on-window-detected = [
 #{ if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
 #{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
-{ if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
 { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
+{ if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 3'] },
 { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 8'] },
 { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
+{ if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace M'] },
 { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace W'] },
 { if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace W'] }
 ]

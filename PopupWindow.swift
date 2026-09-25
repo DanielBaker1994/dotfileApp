@@ -397,6 +397,9 @@ public struct PopupConfig {
 
     // appearance
     public var tintAlpha: CGFloat = 0.78            // card fill opacity over the blur
+    // tabs strip sits on a SOLID card fill: the notepad's transparency never
+    // reaches the open-file pills (notes `tabs-opaque`, default on)
+    public var opaqueTabs: Bool = false
     public var material: NSVisualEffectView.Material = .hudWindow
     public var hasShadow: Bool = true
     public var colors: PopupColors = PopupColors()
@@ -1308,12 +1311,17 @@ final class PopupTabsBar: NSView {
     private var hoverCloseIndex: Int?
     private var pressedIndex: Int?
     private var trackingArea: NSTrackingArea?
+    // solid strip behind the pills (PopupConfig.opaqueTabs); nil = see-through
+    var fill: NSColor? {
+        didSet { needsDisplay = true }
+    }
 
     override var isFlipped: Bool { true }
 
     init(config: PopupConfig) {
         self.config = config
         super.init(frame: .zero)
+        if config.opaqueTabs { fill = config.colors.background.withAlphaComponent(1) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
@@ -1411,6 +1419,10 @@ final class PopupTabsBar: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let c = config.colors
         let radius = config.buttonRadius * zoom
+        if let fill {
+            fill.setFill()
+            bounds.fill()
+        }
         for (i, (rect, title, close)) in pillRects().enumerated() {
             let isSelectedTab = title != "+" && titles.firstIndex(of: title) == selected
             let hovered = hoverIndex == i
@@ -8219,6 +8231,7 @@ public enum ThemeRole: String, CaseIterable {
             config.tintAlpha = cc.alphaComponent
             tintView?.layer?.backgroundColor =
                 config.colors.background.withAlphaComponent(config.tintAlpha).cgColor
+            if config.opaqueTabs { tabsBar?.fill = config.colors.background }
             // keep the drag-header fill consistent when it falls back to the
             // card background
             chrome?.headerColorOverride = config.headerColor ?? config.colors.background

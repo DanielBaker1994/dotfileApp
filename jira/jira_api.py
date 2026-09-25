@@ -11,6 +11,11 @@ Discovery / setup:
   --myself          connectivity test: GET /rest/api/2/myself (prints JSON)
   --site/--email/--token VALUE   override the config for this run
   --auth bearer|basic            override the auth mode for this run
+  --detect-auth     try the token as a Bearer PAT (Server/DC) and as email +
+                    API token (Cloud; needs --email) against /myself and print
+                    JSON {ok, auth, user, tried[]} - the setup window saves
+                    the mode that answered 200 (*.atlassian.net tries basic
+                    first, every other site bearer first)
   --token-stdin     read the token from stdin (keeps it out of `ps`)
   --list-fields     every Jira field id + name (find customfield ids to map
                     in team.json custom_fields); "mapped" = your alias
@@ -155,25 +160,41 @@ class Client:
         u = path if path.startswith(("http://", "https://")) else f"{self.site}{path}"
         return f"{u}?{qs}" if qs else u
 
-    def curl_argv(self, url: str, method: str = "GET", masked: bool = False) -> list:
+    def curl_argv(self, url: str, method: str = "GET", masked: bool = False,
+                  readable: bool = False) -> list:
         """The canonical, copy-pasteable request:
-        curl -X GET -H 'Content-Type: application/json' -H 'Authorization: Bearer T' 'URL'"""
+        curl -X GET -H 'Authorization: Bearer T' -H 'Accept: application/json' 'URL'
+        (basic auth: -u 'EMAIL:T' instead of the Authorization header).
+        readable: the query string is split into `-G --data-urlencode 'k=v'`
+        so the JQL reads as written (curl sends the identical request)."""
         tok = "$JIRA_TOKEN" if masked else self.token
-        argv = ["curl", "-X", method, "-H", "Content-Type: application/json"]
+        argv = ["curl", "-X", method]
         if self.auth == "basic":
             argv += ["-u", f"{self.email}:{tok}"]
         else:
             argv += ["-H", f"Authorization: Bearer {tok}"]
-        return argv + [url]
+        argv += ["-H", "Accept: application/json"]
+        if method != "GET":
+            argv += ["-H", "Content-Type: application/json"]
+        base, sep, qs = url.partition("?")
+        if not (readable and sep and qs):
+            return argv + [url]
+        argv[1:1] = ["-G"]
+        argv.append(base)
+        for k, v in urllib.parse.parse_qsl(qs, keep_blank_values=True):
+            argv += ["--data-urlencode", f"{k}={v}"]
+        return argv
 
-    def curl_cmd(self, url: str, method: str = "GET", masked: bool = False) -> str:
-        """curl_argv as one shell line. Masked: the token becomes $JIRA_TOKEN
-        inside double quotes, so it still runs after `export JIRA_TOKEN=...`."""
+    def curl_cmd(self, url: str, method: str = "GET", masked: bool = False,
+                 readable: bool = True) -> str:
+        """curl_argv as one shell line (readable query by default). Masked: the
+        token becomes $JIRA_TOKEN inside double quotes, so it still runs after
+        `export JIRA_TOKEN=...`."""
         parts = []
-        for a in self.curl_argv(url, method, masked):
+        for a in self.curl_argv(url, method, masked, readable):
             if masked and "$JIRA_TOKEN" in a:
                 parts.append(f'"{a}"')
-            elif a == "curl" or re.match(r"^-[A-Za-z]$", a) or a in ("GET", "POST"):
+            elif a == "curl" or re.match(r"^-[A-Za-z]$|^--[a-z][a-z-]+$", a) or a in ("GET", "POST"):
                 parts.append(a)
             else:
                 parts.append("'" + a.replace("'", "'\\''") + "'")
@@ -665,10 +686,13 @@ def releases(c: Client, project: str = "", projects: list | None = None) -> list
 def directory(c: Client, projects: list | None = None, quiet: bool = True) -> dict:
     """The pickers' lists (the weekly `directory` job): every visible project,
     the assignable users of `projects` (else team.json project_keys, else every
-    project - one paginated call each), statuses, issue types, priorities and
-    fields. A project the token may not read is skipped (noted in `warnings`)."""
+    project - one paginated call each), statuses, issue types, priorities,
+    fields, and per project its releases (unarchived fix versions) and labels
+    (Jira has no per-project label list: the labels of its newest
+    search_defaults.labels_max_issues labelled issues). A project the token
+    may not read is skipped (noted in `warnings`)."""
     out: dict = {"projects": [], "users": [], "statuses": [], "issueTypes": [], "priorities": [],
-                 "fields": [], "warnings": []}
+                 "fields": [], "versions": [], "labels": [], "warnings": []}
     for p in c.get(c.path("projects")) or []:
         out["projects"].append({"key": p.get("key") or "", "name": p.get("name") or ""})
     keys = list(projects or c.team.get("project_keys") or []) or [p["key"] for p in out["projects"]]
@@ -725,9 +749,56 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True) -> di
                              "type": ((f.get("schema") or {}).get("type") or "")}
                             for f in flds if isinstance(f, dict) and f.get("id")),
                            key=lambda f: (not f["custom"], (f["name"] or "").lower()))
+    out["versions"] = project_releases(c, keys, out["warnings"])
+    out["labels"] = project_labels(c, keys, out["warnings"])
     out["fetchedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     out["forProjects"] = keys
     return out
+
+
+def project_releases(c: Client, keys: list, warnings: list) -> list:
+    """Unarchived versions of each project: unreleased first (soonest date
+    first), then released (newest first)."""
+    got_all: list = []
+    for proj in keys:
+        try:
+            got = c.get(c.path("project_versions", project=proj)) or []
+        except ApiError as err:
+            if err.code == 401:
+                raise
+            warnings.append(f"releases of {proj}: {err}")
+            continue
+        for v in got if isinstance(got, list) else []:
+            if isinstance(v, dict) and v.get("name") and not v.get("archived"):
+                got_all.append({"name": v["name"], "project": proj,
+                                "releaseDate": v.get("releaseDate") or "",
+                                "released": bool(v.get("released"))})
+    todo = sorted((v for v in got_all if not v["released"]),
+                  key=lambda v: (v["releaseDate"] or "9999", v["name"].lower()))
+    done = sorted((v for v in got_all if v["released"]),
+                  key=lambda v: (v["releaseDate"], v["name"].lower()), reverse=True)
+    return todo + done
+
+
+def project_labels(c: Client, keys: list, warnings: list) -> list:
+    """[{name, projects}] - every label on the newest labels_max_issues
+    labelled issues of each project (fields=labels only; 0 = skip)."""
+    cap = max(0, c.sd("labels_max_issues"))
+    seen: dict = {}
+    for proj in keys if cap else []:
+        jql = f"project = \"{jira_config.jql_quote(proj)}\" AND labels is not EMPTY ORDER BY updated DESC"
+        try:
+            res = c.search(jql, "labels", max_total=cap, page_size=min(cap, 100))
+        except ApiError as err:
+            if err.code == 401:
+                raise
+            warnings.append(f"labels of {proj}: {err}")
+            continue
+        for i in res["issues"]:
+            for lab in (i.get("fields") or {}).get("labels") or []:
+                if isinstance(lab, str) and lab:
+                    seen.setdefault(lab, set()).add(proj)
+    return [{"name": k, "projects": sorted(v)} for k, v in sorted(seen.items(), key=lambda kv: kv[0].lower())]
 
 
 def window_since(w: str):
@@ -932,7 +1003,8 @@ def parse_args(argv: list):
          "token_stdin": False, "max": "", "output": "table", "debug": False,
          "verbose": False, "no_auth": False, "sync": "", "releases": False,
          "interactive": False, "issue": "", "curl": False, "mask": False, "job": "",
-         "args": {}, "jobs": False, "board": "", "list_fields": False}
+         "args": {}, "jobs": False, "board": "", "list_fields": False,
+         "detect_auth": False, "email_set": False}
     f = Filters()
     valued = {"-p": "project", "--project": "project", "-a": "assignee", "--assignee": "assignee",
               "-r": "release", "--release": "release", "-s": "status", "--status": "status",
@@ -964,6 +1036,8 @@ def parse_args(argv: list):
             o["init"] = True
         elif name == "--myself":
             o["myself"] = True
+        elif name == "--detect-auth":
+            o["detect_auth"] = True
         elif name == "--token-stdin":
             o["token_stdin"] = True
         elif name == "--curl":
@@ -995,6 +1069,8 @@ def parse_args(argv: list):
             setattr(f, valued[name], val())
         elif name in opt_valued:
             v = val()
+            if name == "--email":
+                o["email_set"] = True
             if opt_valued[name]:
                 o[opt_valued[name]] = v
         elif a.startswith("-"):
@@ -1035,6 +1111,42 @@ def board_id(team: dict, ref: str) -> str:
     die(f"unknown board '{ref}' (team.json boards: id or name)")
 
 
+def auth_order(site: str, email: str) -> list:
+    """Modes worth trying, most likely first: Cloud (*.atlassian.net) API
+    tokens only work as email + token; Server/DC personal access tokens only
+    as a Bearer header. Basic is skipped without an email."""
+    host = urllib.parse.urlparse(site if "://" in site else "https://" + site).hostname or ""
+    modes = ["basic", "bearer"] if host.endswith(".atlassian.net") else ["bearer", "basic"]
+    return [m for m in modes if m != "basic" or email]
+
+
+def detect_auth(cfg, team: dict, email: str) -> int:
+    """--detect-auth: GET /myself with each plausible auth mode; the first
+    200 wins. Prints one JSON object (the setup window reads it)."""
+    def out(code, **kw):
+        print(json.dumps({"ok": code == 0, **kw}))
+        return code
+
+    if not cfg.site or not cfg["token"]:
+        return out(2, error="site and token are required", tried=[])
+    tried: list = []
+    last_curl = ""
+    for mode in auth_order(cfg.site, email):
+        c = Client(cfg.site, cfg["token"], email=email, auth=mode, team=team)
+        try:
+            me = c.get(c.path("myself")) or {}
+        except ApiError as err:
+            tried.append({"mode": mode, "http": err.code, "error": str(err)})
+            last_curl = err.curl or last_curl
+            continue
+        tried.append({"mode": mode, "http": 200})
+        return out(0, auth=mode, email=email if mode == "basic" else "",
+                   user=me.get("displayName") or me.get("name") or "",
+                   curl=c.curl_cmd(c.url(c.path("myself")), masked=True), tried=tried)
+    hint = ("" if email else " (a Jira Cloud API token also needs the account email)")
+    return out(1, error="no auth mode was accepted" + hint, tried=tried, curl=last_curl)
+
+
 def main(argv: list) -> int:
     o, f = parse_args(argv)
     if o["init"]:
@@ -1052,6 +1164,8 @@ def main(argv: list) -> int:
     if o["jobs"]:
         list_jobs(team)
         return 0
+    if o["detect_auth"]:
+        return detect_auth(cfg, team, o["email"] if o["email_set"] else (cfg["email"] or ""))
     need = ["site", "token"] + (["email"] if cfg.auth == "basic" else [])
     missing = [f"JIRA_{k.upper()}" for k in need if not cfg[k]]
     if missing and not (o["curl"] and o["mask"] and missing == ["JIRA_TOKEN"]):

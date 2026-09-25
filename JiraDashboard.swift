@@ -71,16 +71,8 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
     private(set) var view = NSView()
 
     private static let spec: [(id: String, title: String, width: CGFloat)] = [
-        ("title", "Column", 150), ("field", "Field (what is fetched)", 260), ("width", "Width %", 62),
+        ("title", "Header (field label)", 150), ("field", "Field (what is fetched)", 260), ("width", "Width %", 62),
         ("align", "Align", 58), ("sort", "Sort", 40), ("filter", "Filter", 44),
-    ]
-    // window fields the poller derives from Jira fields (jira_config FIELD_SOURCES)
-    static let baseNames: [String: String] = [
-        "key": "Issue key", "title": "Summary", "status": "Status", "assignee": "Assignee",
-        "reporter": "Reporter", "priority": "Priority", "labels": "Labels", "description": "Description",
-        "project": "Project", "updated": "Updated", "release": "Fix versions",
-        "releaseLabel": "Fix versions + dates", "releaseDate": "Release date",
-        "releaseStatus": "Released / Upcoming", "comments": "Comments",
     ]
 
     override init() {
@@ -147,10 +139,10 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     private func changed() { table.reloadData(); onChange?() }
 
-    // "Summary" / "Package Information" + the Jira field(s) it fetches
+    // the field's ONE label (Definitions ▸ Fields) + the Jira field(s) it fetches
     func fieldName(_ f: String) -> String {
         let m = meta[f] ?? [:]
-        return (m["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? Self.baseNames[f] ?? ""
+        return (m["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? JiraPoll.baseFieldLabels[f] ?? f
     }
     func apiText(_ f: String) -> String {
         let api = (meta[f]?["apiFields"] as? [String]).map { $0.isEmpty ? "(no API field)" : $0.joined(separator: ", ") } ?? f
@@ -178,11 +170,11 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         let l = NSTextField(labelWithString: "")
         l.lineBreakMode = .byTruncatingTail
         switch id {
-        case "title": l.stringValue = c.title
+        case "title": l.stringValue = fieldName(c.field)
         case "field":
             let s = NSMutableAttributedString(string: c.field, attributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor])
-            let extra = [fieldName(c.field), apiText(c.field)].filter { !$0.isEmpty && $0 != c.field }
+            let extra = [apiText(c.field)].filter { !$0.isEmpty && $0 != c.field }
             if !extra.isEmpty {
                 s.append(NSAttributedString(string: "  " + extra.joined(separator: " · "), attributes: [
                     .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
@@ -220,8 +212,6 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         field.numberOfVisibleItems = 14
         field.stringValue = c.field
         field.placeholderString = "created, duedate, customfield_10010, a team alias…"
-        let title = NSTextField(string: index == nil ? "" : c.title)
-        title.placeholderString = "header text (defaults to the field's name)"
         let width = NSTextField(string: c.width == 0 ? "" : String(format: c.width == c.width.rounded() ? "%.0f" : "%.1f", c.width))
         width.placeholderString = "percent of the row — empty = share the leftover"
         let align = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -232,11 +222,12 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         let filter = NSButton(checkboxWithTitle: "Filterable — a dropdown of its values in the window", target: nil, action: nil)
         filter.state = c.filterable ? .on : .off
         let info = "Field = what the poll fetches from Jira and shows (a window field like title, a "
-            + "team.json custom field alias, or a raw Jira field id). Column = the header text."
-        jiraFormSheet(on: win, title: index == nil ? "Add Column" : "Edit Column “\(c.title)”", info: info,
-                      rows: [("Field", field), ("Column", title), ("Width %", width), ("Align", align),
+            + "team.json custom field alias, or a raw Jira field id). The header is the field's label — "
+            + "rename it once in Definitions ▸ Fields and every job and the search tab follow."
+        jiraFormSheet(on: win, title: index == nil ? "Add Column" : "Edit Column “\(fieldName(c.field))”", info: info,
+                      rows: [("Field", field), ("Width %", width), ("Align", align),
                              ("", sort), ("", filter)],
-                      first: index == nil ? field : title) { [weak self] ok in
+                      first: index == nil ? field : width) { [weak self] ok in
             guard ok, let self else { return }
             // ':' and ',' are the columns-line separators
             func clean(_ s: String) -> String {
@@ -251,8 +242,7 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
             }
             var nc = c
             nc.field = f
-            let t = clean(title.stringValue)
-            nc.title = t.isEmpty ? (self.fieldName(f).isEmpty ? f : self.fieldName(f)) : t
+            nc.title = ""
             nc.width = CGFloat(min(100, max(0, Double(width.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0)))
             nc.align = align.titleOfSelectedItem ?? "left"
             nc.sortable = sort.state == .on
@@ -354,9 +344,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let connText = NSTextView()
     private let connResult = NSTextField(wrappingLabelWithString: "")
     private enum DefTab: String, CaseIterable {
-        case projects = "Projects", customFields = "Custom Fields", columns = "Columns", users = "Users",
+        case projects = "Projects", fields = "Fields", users = "Users",
              lists = "Statuses & Types", api = "API Endpoints", jql = "JQL Templates", defaults = "Search Defaults"
-        var editable: Bool { ![.columns, .users, .lists].contains(self) }
+        var editable: Bool { ![.users, .lists].contains(self) }
     }
     private var defTab: DefTab = .projects
     private let defSeg = NSSegmentedControl()
@@ -1109,7 +1099,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         var o: [String: Any] = ["name": name, "type": type, "maxResults": ps, "maxTotal": mt,
                                 "window": everyBox.stringValue.trimmingCharacters(in: .whitespaces),
                                 "enabled": enabledCheck.state == .on]
-        if type != "directory" { o["columns"] = ListColumn.serialize(colEditor.cols) }
+        if type != "directory" { o["columns"] = ListColumn.serialize(colEditor.cols, titles: false) }
         let picked = projectsPicker.selected
         o["projects"] = projectsPicker.isAll || picked.isEmpty ? "*" as Any : picked as Any
         let q = type == "issues" ? queryPopup.indexOfSelectedItem : 0
@@ -1291,7 +1281,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func persistLive() {
         window.makeFirstResponder(nil)
         guard let m = limit(liveMaxField, "Max results") else { return }
-        var o: [String: Any] = ["columns": ListColumn.serialize(colEditor.cols)]
+        var o: [String: Any] = ["columns": ListColumn.serialize(colEditor.cols, titles: false)]
         o["maxResults"] = m
         guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
         JiraPoll.run("jira_config.py", ["--set-live-search"], stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
@@ -1447,6 +1437,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         sv.hasHorizontalScroller = true
         sv.borderType = .bezelBorder
         sv.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
+        // no intrinsic height: without a floor the stack squeezed the table
+        // down to its header row
+        sv.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
         for v in [defSeg, defHint, defMsg, defAdd, defEdit, defRemove, defFetch] as [NSView] { v.removeFromSuperview() }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow - 30, for: .horizontal)
@@ -1475,10 +1468,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func defColumns() -> [(String, String, CGFloat)] {
         switch defTab {
         case .projects: return [("a", "Project key", 120), ("b", "Name", 260), ("c", "Users cached", 120)]
-        case .customFields: return [("a", "Alias (column field)", 170), ("b", "Jira field", 170),
-                                    ("c", "Label", 180), ("d", "Description", 240)]
-        case .columns: return [("a", "Field", 150), ("b", "Name", 170), ("c", "Jira field", 150),
-                               ("d", "Used by", 180), ("e", "Has data in", 180)]
+        case .fields: return [("a", "Field", 140), ("b", "Label", 170), ("c", "Jira field", 170),
+                              ("d", "Kind", 80), ("e", "Used by", 170), ("f", "Has data in", 160)]
         case .users: return [("a", "Name", 200), ("b", "ID (used in JQL)", 170), ("c", "Email", 200), ("d", "Projects", 200)]
         case .lists: return [("a", "Kind", 120), ("b", "Value", 300)]
         case .api: return [("a", "Name", 170), ("b", "Path", 420)]
@@ -1494,6 +1485,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         "timeout_seconds": "curl -m: seconds before a request gives up",
         "cache_timeout_seconds": "re-use versions.json this long (0 = always refetch)",
         "versions_lookback_days": "drop releases dated older than this (0 = keep all)",
+        "labels_max_issues": "directory job: newest labelled issues scanned per project for the ⌘F Labels picker (0 = skip)",
     ]
 
     private func str(_ v: Any?) -> String {
@@ -1531,26 +1523,20 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             defHint.stringValue = "The team's projects (team.json project_keys): the default scope of every "
                 + "job and search, and whose users the directory job caches. Add picks from the projects "
                 + "your token can see."
-        case .customFields:
-            for (alias, v) in (team["custom_fields"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
-                let d = v as? [String: Any] ?? [:]
-                rows.append([alias, str(d["field_id"] ?? d["id"]), str(d["label"]), str(d["description"])])
-                keys.append(alias)
-            }
-            defHint.stringValue = "Jira custom fields by a friendly alias — the alias works as a column "
-                + "field and as a search filter. Add picks from the fields Jira reports (directory job)."
-        case .columns:
+        case .fields:
             for c in catalog {
                 let f = str(c["field"])
-                rows.append([f, str(c["label"]).isEmpty ? (JiraColumnEditor.baseNames[f] ?? "") : str(c["label"]),
-                             (c["apiFields"] as? [String] ?? []).joined(separator: ", "),
+                let label = str(c["label"]).isEmpty ? (JiraPoll.baseFieldLabels[f] ?? f) : str(c["label"])
+                let kind = c["custom"] as? Bool == true ? "custom" : c["base"] as? Bool == true ? "built-in" : "Jira field"
+                rows.append([f, label + (c["renamed"] as? Bool == true ? "  ✎" : ""),
+                             (c["apiFields"] as? [String] ?? []).joined(separator: ", "), kind,
                              (c["usedBy"] as? [String] ?? []).joined(separator: ", "),
                              (c["seenIn"] as? [String] ?? []).joined(separator: ", ")])
                 keys.append(f)
             }
-            defHint.stringValue = "Every field a column can show: base fields, team custom fields, every "
-                + "column a job defines and every field that came back with data. Edit columns per job "
-                + "(Poll Jobs) or for the search tab (Live Search)."
+            defHint.stringValue = "Every field a column can show, each with ONE label — the header in every "
+                + "job, the search tab and the ⌘F filters. Double-click to rename (✎ = renamed). Add Custom "
+                + "Field maps a Jira custom field. Pick which columns a tab shows in its job (Poll Jobs / Live Search)."
         case .users:
             for u in dir.users {
                 rows.append([u.name, u.id, u.email, u.projects.joined(separator: ", ")])
@@ -1597,10 +1583,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         defTable.reloadData()
         let editable = defTab.editable
         defAdd.isHidden = !editable || defTab == .defaults
+        defAdd.title = defTab == .fields ? "Add Custom Field…" : "Add…"
+        defEdit.title = defTab == .fields ? "Rename…" : "Edit…"
         defEdit.isHidden = !editable || defTab == .projects
         defRemove.isHidden = !editable
-        defRemove.title = defTab == .defaults ? "Reset to Default" : "Remove"
-        defFetch.isHidden = ![.projects, .users, .lists, .customFields].contains(defTab)
+        defRemove.title = defTab == .defaults ? "Reset to Default" : defTab == .fields ? "Remove / Reset" : "Remove"
+        defFetch.isHidden = ![.projects, .users, .lists, .fields].contains(defTab)
     }
 
     private func defCell(_ id: String, _ row: Int) -> NSView? {
@@ -1610,7 +1598,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let l = NSTextField(labelWithString: s)
         l.lineBreakMode = .byTruncatingTail
         l.toolTip = s
-        if i == 0 || [.api, .jql].contains(defTab) || (defTab == .customFields && i == 1) {
+        if i == 0 || [.api, .jql].contains(defTab) || (defTab == .fields && i == 2) {
             l.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         }
         if i > 0 && !(defTab == .jql || defTab == .api) { l.textColor = .secondaryLabelColor }
@@ -1626,7 +1614,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     // write one team.json key (validated by jira_config.py --team-set)
-    private func teamSet(_ key: String, _ value: Any, done: String) {
+    private func teamSet(_ key: String, _ value: Any, done: String, then: (() -> Void)? = nil) {
         guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return }
         defMsg.textColor = .secondaryLabelColor
         defMsg.stringValue = "Saving…"
@@ -1640,6 +1628,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                 return
             }
             self.controller?.log("jira: team.json \(key) — \(done)")
+            // labels are the Jira window's column headers
+            if ["field_labels", "custom_fields"].contains(key) { self.controller?.reloadJiraWindow() }
+            if let then { then(); return }
             self.refresh {
                 self.defMsg.textColor = .systemGreen
                 self.defMsg.stringValue = "✓ \(done) — saved to team.json"
@@ -1652,18 +1643,21 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     @objc private func defAddClicked(_ sender: Any?) {
         switch defTab {
         case .projects: addProjects()
-        case .customFields: editCustomField(nil)
+        case .fields: editCustomField(nil)
         case .api, .jql: editKeyValue(nil)
         default: break
         }
     }
+
+    private var customAliases: Set<String> { Set((team["custom_fields"] as? [String: Any] ?? [:]).keys) }
 
     @objc private func defEditClicked(_ sender: Any?) {
         guard defTab.editable, defTab != .projects else { return }
         let r = sender is NSTableView ? defTable.clickedRow : (defSelection.first ?? -1)
         guard r >= 0, r < defKeys.count else { return }
         switch defTab {
-        case .customFields: editCustomField(defKeys[r])
+        case .fields:
+            customAliases.contains(defKeys[r]) ? editCustomField(defKeys[r]) : editFieldLabel(defKeys[r])
         case .api, .jql: editKeyValue(defKeys[r])
         case .defaults: editDefault(defKeys[r])
         default: break
@@ -1685,6 +1679,22 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             case .projects:
                 self.teamSet("project_keys", (self.team["project_keys"] as? [String] ?? []).filter { !keys.contains($0) },
                              done: "removed \(what)")
+            case .fields:
+                // custom fields are removed; a renamed field goes back to its default label
+                var cf = self.own("custom_fields"), fl = self.own("field_labels")
+                let drop = keys.filter { cf[$0] != nil }, reset = keys.filter { fl[$0] != nil }
+                guard !drop.isEmpty || !reset.isEmpty else {
+                    self.defMsg.textColor = .secondaryLabelColor
+                    self.defMsg.stringValue = "\(keys.joined(separator: ", ")): already the default label — Rename… to change it"
+                    return
+                }
+                for k in drop { cf.removeValue(forKey: k) }
+                for k in reset { fl.removeValue(forKey: k) }
+                let labels = { self.teamSet("field_labels", fl, done: "reset \(reset.joined(separator: ", "))") }
+                if drop.isEmpty { labels() } else {
+                    self.teamSet("custom_fields", cf, done: "removed \(drop.joined(separator: ", "))",
+                                 then: reset.isEmpty ? nil : labels)
+                }
             default:
                 guard let tk = self.teamKey else { return }
                 // built-in defaults can't be removed (they come back): only team.json's own
@@ -1704,7 +1714,6 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private var teamKey: String? {
         switch defTab {
         case .projects: return "project_keys"
-        case .customFields: return "custom_fields"
         case .api: return "api_endpoints"
         case .jql: return "jql_templates"
         case .defaults: return "search_defaults"
@@ -1812,7 +1821,30 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             let ds = desc.stringValue.trimmingCharacters(in: .whitespaces)
             if !ds.isEmpty { entry["description"] = ds }
             d[a] = entry
-            self.teamSet("custom_fields", d, done: alias == nil ? "added \(a)" : "updated \(a)")
+            // the custom field's own label IS its one label: drop an old rename
+            var fl = self.own("field_labels")
+            let clear = fl.removeValue(forKey: a) != nil
+            self.teamSet("custom_fields", d, done: alias == nil ? "added \(a)" : "updated \(a)",
+                         then: clear ? { self.teamSet("field_labels", fl, done: "label of \(a)") } : nil)
+        }
+    }
+
+    // a built-in / Jira field's one label (team.json field_labels)
+    private func editFieldLabel(_ f: String) {
+        let c = catalog.first { str($0["field"]) == f } ?? [:]
+        let def = str(c["defaultLabel"]).isEmpty ? (JiraPoll.baseFieldLabels[f] ?? f) : str(c["defaultLabel"])
+        let cur = own("field_labels")[f] as? String ?? ""
+        let l = NSTextField(string: cur)
+        l.placeholderString = def
+        jiraFormSheet(on: window, title: "Rename “\(f)”",
+                      info: "One label for this field: the column header in every job, the search tab and the ⌘F "
+                          + "filter. Empty = the default (\(def)).",
+                      rows: [("Label", l)], first: l) { [weak self] ok in
+            guard ok, let self else { return }
+            var d = self.own("field_labels")
+            let v = l.stringValue.trimmingCharacters(in: .whitespaces)
+            if v.isEmpty || v == def { d.removeValue(forKey: f) } else { d[f] = v }
+            self.teamSet("field_labels", d, done: v.isEmpty || v == def ? "\(f) back to “\(def)”" : "\(f) → “\(v)”")
         }
     }
 

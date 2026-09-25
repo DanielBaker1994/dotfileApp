@@ -129,11 +129,11 @@ check "autosave keeps disk in sync" "$(disk "$T/zz-a.md")" "first line|Hello fro
 
 # --- 3. Esc never hides the window ---------------------------------------------
 echo "== Esc =="
-W0="$(wcount)"; ESC; ESC; sleep 0.4
+W0="$(wcount)"; ESC; sleep 0.4
 check "Esc stays in the window" "$(wcount)" "$W0"
 typ "i"; sleep 0.2; ESC; sleep 0.4
 check "i + Esc -> Normal" "$(vx 'mode()')" "n"
-# rapid Esc x3 (vim-esc-close, default 3) closes the window from Normal mode
+# rapid Esc x2 (esc-close, default 2) closes the window from Normal mode
 sleep 0.8
 # N rapid presses, sent in ONE burst ~150ms apart like a human tapping
 esc_burst() {
@@ -142,15 +142,15 @@ esc_burst() {
     for ((i = 0; i < n; i++)); do script+=(-e 'key code 53' -e 'delay 0.15'); done
     osascript "${script[@]}" -e 'end tell'
 }
-typ "i"; sleep 0.2; esc_burst 2; sleep 0.8
-check "Insert + Esc Esc keeps the window" "$(wcount)" "$W0"
+typ "i"; sleep 0.2; esc_burst 1; sleep 0.8
+check "Insert + Esc keeps the window" "$(wcount)" "$W0"
 check "...and leaves vim in Normal mode" "$(vx 'mode()')" "n"
-typ "i"; sleep 0.2; esc_burst 3; sleep 0.8
-check "3 rapid Esc from Insert close the window" "$(wcount)" "0"
+typ "i"; sleep 0.2; esc_burst 2; sleep 0.8
+check "2 rapid Esc from Insert close the window" "$(wcount)" "0"
 ws_send notes; sleep 1.2
 check "re-show lands in Normal mode" "$(vx 'mode()')" "n"
-sleep 0.8; esc_burst 3; sleep 0.8
-check "3 rapid Esc from Normal close the window" "$(wcount)" "0"
+sleep 0.8; esc_burst 2; sleep 0.8
+check "2 rapid Esc from Normal close the window" "$(wcount)" "0"
 ws_send notes; sleep 1.2
 check "re-show after Esc-close keeps the same note" "$(vx "expand('%:t')")" "zz-a.md"
 

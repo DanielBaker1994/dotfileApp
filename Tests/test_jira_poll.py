@@ -203,10 +203,19 @@ elif path.endswith("/user/assignable/search"):
     body = us[start:start + n]
 elif path.endswith("/status") or path.endswith("/priority") or path.endswith("/issuetype"):
     body = [{"name": "B"}, {"name": "a"}, {"name": "B"}]
+elif path.endswith("/versions"):
+    body = [{"name": "1.0", "released": True, "releaseDate": "2026-01-01"},
+            {"name": "2.0", "released": False, "releaseDate": "2026-12-01"},
+            {"name": "old", "archived": True}]
 elif path.endswith("/field"):
     body = [{"id": "summary", "name": "Summary", "custom": False, "schema": {"type": "string"}},
             {"id": "customfield_20214", "name": "Package", "custom": True,
              "schema": {"type": "option"}}]
+elif q.get("fields") == ["labels"]:
+    proj = "P1" if '"P1"' in q["jql"][0] else "P2"
+    body = {"startAt": 0, "total": 2, "issues": [
+        {"key": f"{proj}-1", "fields": {"labels": ["shared", proj.lower()]}},
+        {"key": f"{proj}-2", "fields": {"labels": []}}]}
 else:
     start, n = int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
     body = {"startAt": start, "total": 5, "issues": [
@@ -241,7 +250,7 @@ class BearerAndTeamTests(unittest.TestCase):
         c = self.client()
         self.assertEqual(
             c.curl_cmd("https://jira.example.com/rest/api/2/myself"),
-            "curl -X GET -H 'Content-Type: application/json' -H 'Authorization: Bearer TOK' "
+            "curl -X GET -H 'Authorization: Bearer TOK' -H 'Accept: application/json' "
             "'https://jira.example.com/rest/api/2/myself'")
         self.assertIn('"Authorization: Bearer $JIRA_TOKEN"',
                       c.curl_cmd("https://x/rest/api/2/myself", masked=True))
@@ -318,6 +327,39 @@ class BearerAndTeamTests(unittest.TestCase):
             self.assertTrue(all("/rest/api/2/search?" in c[-1] for c in calls))
             self.assertIn("startAt=4", calls[2][-1])
 
+    def test_detect_auth_tries_the_likely_mode_first(self):
+        fake = r'''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_CURL_LOG"], "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\n")
+a = " ".join(sys.argv[1:])
+ok = ("Authorization: Bearer" in a) if os.environ["FAKE_AUTH"] == "bearer" else (" -u " in " " + a)
+sys.stdout.write((json.dumps({"displayName": "Dee"}) if ok else "{}") + "\n" + ("200" if ok else "401"))
+'''
+        cases = [("https://jira.example.com", "", "bearer", "bearer", ["bearer"]),
+                 ("https://jira.example.com", "me@x", "basic", "basic", ["bearer", "basic"]),
+                 ("https://x.atlassian.net", "me@x", "basic", "basic", ["basic"]),
+                 ("https://x.atlassian.net", "", "basic", None, ["bearer"])]
+        for site, email, server, want, tried in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                env = isolated_env(tmp, token="")
+                with open(os.path.join(tmp, "curl"), "w") as fh:
+                    fh.write(fake)
+                os.chmod(os.path.join(tmp, "curl"), 0o755)
+                env.update({"PATH": tmp + os.pathsep + env["PATH"], "FAKE_AUTH": server,
+                            "FAKE_CURL_LOG": os.path.join(tmp, "calls.jsonl")})
+                p = subprocess.run([sys.executable, os.path.join(JIRA, "jira_api.py"), "--detect-auth",
+                                    "--site", site, "--email", email, "--token-stdin"],
+                                   env=env, input="TOK\n", capture_output=True, text=True, timeout=30)
+                r = json.loads(p.stdout)
+                self.assertEqual(r.get("auth"), want, (site, email, r))
+                self.assertEqual([t["mode"] for t in r["tried"]], tried, (site, email))
+                if want:
+                    self.assertEqual(r["user"], "Dee")
+                    self.assertEqual(p.returncode, 0)
+                else:
+                    self.assertIn("needs the account email", r["error"])
+
     def test_curl_flag_prints_without_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = isolated_env(tmp, token="SECRET")
@@ -327,8 +369,8 @@ class BearerAndTeamTests(unittest.TestCase):
                                env=env, capture_output=True, text=True, timeout=30)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(p.stdout.strip(),
-                             "curl -X GET -H 'Content-Type: application/json' -H \"Authorization: "
-                             "Bearer $JIRA_TOKEN\" 'https://jira.example.com/rest/api/2/myself'")
+                             "curl -X GET -H \"Authorization: Bearer $JIRA_TOKEN\" -H 'Accept: "
+                             "application/json' 'https://jira.example.com/rest/api/2/myself'")
             self.assertNotIn("SECRET", p.stdout)
 
 
@@ -416,6 +458,9 @@ class JobsAndLiveSearchTests(unittest.TestCase):
                          'cf[20214] = "pkg" ORDER BY updated DESC')
         self.assertEqual(cj({"fields": {"title": "x"}, "jql": "a = 1 ORDER BY created"}, t),
                          'summary ~ "x" AND (a = 1) ORDER BY updated DESC')
+        # labels / releases come from the pickers as lists
+        self.assertEqual(cj({"labels": ["a b", "c"], "fixVersion": ["1.0"]}, t),
+                         'labels in ("a b", "c") AND fixVersion = "1.0" ORDER BY updated DESC')
         for bad in ({}, {"projects": []}, {"updated": "soon"}):
             with self.assertRaises(jira_config.ConfigError):
                 cj(bad, t)
@@ -465,6 +510,40 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             self.assertTrue(r["ok"])
             self.assertEqual(self.cfgjson(env)["liveSearch"]["columns"], "key:K")
 
+    def test_field_labels_one_per_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=[
+                {"name": "all", "window": "10m", "projects": "*", "type": "issues", "file": "all.json",
+                 "columns": "key:Key:8, title:Summary:40:left:sort, status:State"},
+                {"name": "B", "window": "10m", "projects": ["B"], "type": "issues", "file": "B.json",
+                 "columns": "key:Issue, title:Summary, status:Stage"}],
+                liveSearch={"columns": "key:Key, status:State:10"})
+            p = self.run_py(env, "jira_config.py", "--check")
+            self.assertIn("column titles -> team.json field_labels", p.stdout)
+            with open(env["JIRA_TEAM_JSON"]) as fh:
+                labels = json.load(fh)["field_labels"]
+            # most used title wins; titles equal to the default are not pinned
+            self.assertEqual(labels, {"title": "Summary", "status": "State"})
+            cfg = self.cfgjson(env)
+            self.assertEqual(cfg["endpoints"][0]["columns"], "key::8, title::40:left:sort, status")
+            self.assertEqual(cfg["liveSearch"]["columns"], "key, status::10")
+            self.assertTrue(cfg["fieldLabels"])
+            p = self.run_py(env, "jira_config.py", "--check")
+            self.assertNotIn("field_labels", p.stdout)             # once only
+            d = json.loads(self.run_py(env, "jira_poll.py", "--describe").stdout)
+            cat = {c["field"]: c for c in d["catalog"]}
+            self.assertEqual((cat["status"]["label"], cat["status"]["defaultLabel"], cat["status"]["renamed"]),
+                             ("State", "Status", True))
+            self.assertEqual((cat["key"]["label"], cat["key"]["renamed"], cat["key"]["base"]), ("Key", False, True))
+            r = json.loads(self.run_py(env, "jira_config.py", "--team-set", "field_labels",
+                                       stdin='{"status": ""}').stdout)
+            self.assertFalse(r["ok"])
+            r = json.loads(self.run_py(env, "jira_config.py", "--team-set", "field_labels",
+                                       stdin='{"status": "Workflow"}').stdout)
+            self.assertTrue(r["ok"], r)
+            d = json.loads(self.run_py(env, "jira_poll.py", "--describe").stdout)
+            self.assertEqual({c["field"]: c["label"] for c in d["catalog"]}["status"], "Workflow")
+
     def test_directory_job_caches_users(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.env(tmp)
@@ -489,6 +568,15 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             ep = [e for e in d["endpoints"] if e["type"] == "directory"][0]
             self.assertEqual((ep["window"], ep["items"], ep["file"]), ("1w", 5, ""))
             self.assertTrue(any("assignable users of P2" in r["purpose"] for r in ep["requests"]))
+            self.assertTrue(any("labels of P1" in r["purpose"] for r in ep["requests"]))
+            with open(os.path.join(tmp, "cache", "directory.json")) as fh:
+                d = json.load(fh)
+            # releases: archived dropped, unreleased first; per project
+            self.assertEqual([(v["name"], v["project"]) for v in d["versions"]],
+                             [("2.0", "P1"), ("2.0", "P2"), ("1.0", "P1"), ("1.0", "P2")])
+            self.assertEqual(d["labels"], [{"name": "p1", "projects": ["P1"]},
+                                           {"name": "p2", "projects": ["P2"]},
+                                           {"name": "shared", "projects": ["P1", "P2"]}])
 
     def test_upgrade_drops_searches_adds_directory_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -615,7 +703,10 @@ class PollTests(unittest.TestCase):
             self.assertIn("-H 'Authorization: Bearer SECRET'", d["loginCurl"])
             eps = {e["name"]: e for e in d["endpoints"]}
             self.assertEqual(eps["all"]["nextWindow"], "full")      # no cache yet
-            self.assertIn("/rest/api/2/search?", eps["all"]["requests"][0]["curl"])
+            # readable: the JQL is shown as written, curl url-encodes it
+            self.assertIn("-G", eps["all"]["requests"][0]["curl"])
+            self.assertIn("'https://jira.example.com/rest/api/2/search' --data-urlencode 'jql=",
+                          eps["all"]["requests"][0]["curl"])
             self.assertIn('project in ("P")', eps["mine"]["jql"])   # job -> jql
             self.assertEqual(eps["mine"]["job"], "users_search")
 

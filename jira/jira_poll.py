@@ -458,6 +458,8 @@ def describe(cfg, team: dict) -> dict:
                 jira_api.directory(c, projects=users_of)
                 purposes = ["projects"] + [f"assignable users of {p} (paginated)" for p in users_of]
                 purposes += ["statuses", "issue types", "priorities", "fields"]
+                purposes += [f"releases of {p}" for p in users_of]
+                purposes += [f"labels of {p} (labelled issues, fields=labels)" for p in users_of]
                 reqs += [{"purpose": purposes[i] if i < len(purposes) else "", "curl": x}
                          for i, x in enumerate(c.captured)]
                 if plist is None and not team.get("project_keys"):
@@ -525,11 +527,18 @@ def describe(cfg, team: dict) -> dict:
     avail = list(dict.fromkeys(list(jira_config.BASE_WINDOW_KEYS) + ["updated"] + list(aliases)
                                + list(defined) + sorted(seen)))
     catalog = []
+    own_labels = (team.get("field_labels") or {})
+    no_own = {**team, "field_labels": {}}
     for f in avail:
-        d = defined.get(f, {"field": f, "titles": [], "usedBy": [], "label":
-                            aliases.get(f, {}).get("label", ""),
+        d = defined.get(f, {"field": f, "titles": [], "usedBy": [],
                             "apiFields": columns_meta(f, aliases)[0]["apiFields"]})
-        catalog.append({**d, "seenIn": seen.get(f, [])})
+        # label = the field's ONE display name (Definitions ▸ Fields);
+        # defaultLabel = what it falls back to without a team.json rename
+        catalog.append({**d, "seenIn": seen.get(f, []),
+                        "label": jira_config.field_label(team, f, aliases),
+                        "defaultLabel": jira_config.field_label(no_own, f, aliases),
+                        "renamed": f in own_labels,
+                        "custom": f in aliases, "base": f in jira_config.BASE_FIELD_LABELS})
 
     lock = Lock(jira_status.POLL_LOCK, 10)
     held = not lock._try()
@@ -558,7 +567,8 @@ def describe(cfg, team: dict) -> dict:
                       "forProjects": dirdata.get("forProjects") or [],
                       "warnings": dirdata.get("warnings") or [],
                       "counts": {k: len(dirdata.get(k) or []) for k in
-                                 ("projects", "users", "statuses", "issueTypes", "priorities", "fields")}},
+                                 ("projects", "users", "statuses", "issueTypes", "priorities", "fields",
+                                  "versions", "labels")}},
         "team": {k: team.get(k) for k in jira_config.TEAM_EDITABLE},
         # team.json's own values (what --team-set edits; `team` = merged with defaults)
         "teamOwn": team_own(team.get("path", jira_config.TEAM_JSON)),

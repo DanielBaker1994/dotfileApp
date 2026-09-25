@@ -139,6 +139,16 @@ ALWAYS_API_FIELDS = ["updated", "project"]
 BASE_WINDOW_KEYS = ["key", "title", "status", "assignee", "release", "releaseLabel",
                     "releaseDate", "releaseStatus", "priority", "labels",
                     "description", "reporter", "project"]
+# a field's display name (column header, search filter title) unless team.json
+# field_labels renames it - ONE label per field (Jira Config ▸ Definitions ▸
+# Fields). Mirrored in the app: JiraPoll.baseFieldLabels (workspace_switcher.swift).
+BASE_FIELD_LABELS = {
+    "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
+    "reporter": "Reporter", "priority": "Priority", "labels": "Labels",
+    "description": "Description", "project": "Project", "updated": "Updated",
+    "release": "Fix versions", "releaseLabel": "Release", "releaseDate": "Release date",
+    "releaseStatus": "Released", "comments": "Comments",
+}
 # [jira] keys whose field names feed the API request
 FIELD_KEYS = ("primary", "content", "detail", "trailing", "body", "filter",
               "filters", "copy-fields")
@@ -174,6 +184,7 @@ DEFAULT_SEARCH = {
     "timeout_seconds": 30,        # curl -m
     "cache_timeout_seconds": 0,   # re-use versions.json this long (0 = always refetch)
     "versions_lookback_days": 0,  # drop releases dated older than this (0 = keep all)
+    "labels_max_issues": 2000,    # directory job: labelled issues scanned per project (0 = no labels)
 }
 
 # {projects} = the project list ("A", "B"); every other {name} is a job /
@@ -190,8 +201,8 @@ DEFAULT_JQL_TEMPLATES = {
     "release_search_all": 'project = "{project}" AND fixVersion = "{version}" ORDER BY created ASC',
 }
 
-TEAM_KEYS = ("custom_fields", "field_mappings", "project_keys", "jobs", "api_endpoints",
-             "boards", "search_defaults", "jql_templates")
+TEAM_KEYS = ("custom_fields", "field_mappings", "field_labels", "project_keys", "jobs",
+             "api_endpoints", "boards", "search_defaults", "jql_templates")
 CUSTOMFIELD_RE = re.compile(r"^customfield[ _-]*(\d+)$", re.I)
 PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
@@ -284,8 +295,39 @@ def custom_field_aliases(team: dict) -> dict:
     return out
 
 
+def field_label(team: dict, field: str, aliases: dict | None = None) -> str:
+    """The one label of a column field: team.json field_labels, else a
+    custom field's own label, else the built-in name, else the field."""
+    own = (team or {}).get("field_labels") or {}
+    if isinstance(own.get(field), str) and own[field].strip():
+        return own[field].strip()
+    aliases = custom_field_aliases(team or {}) if aliases is None else aliases
+    if field in aliases and aliases[field].get("label"):
+        return aliases[field]["label"]
+    return BASE_FIELD_LABELS.get(field, field)
+
+
+def strip_titles(spec: str) -> str:
+    """`field:Title:w:align:flags` -> `field::w:align:flags` (the header comes
+    from the field's label)."""
+    out = []
+    for part in (spec or "").split(","):
+        seg = [x.strip() for x in part.split(":")]
+        if not seg[0]:
+            continue
+        if len(seg) > 1:
+            seg[1] = ""
+        out.append(":".join(seg).rstrip(":") if len(seg) == 2 else ":".join(seg))
+    return ", ".join(out)
+
+
 def team_problems(team: dict) -> list:
     p = []
+    for f, label in (team.get("field_labels") or {}).items():
+        if not isinstance(label, str) or not label.strip():
+            p.append(f"field_labels.{f}: the label must be a non-empty string")
+        elif len(label) > 40:
+            p.append(f"field_labels.{f}: keep the label under 40 characters")
     for alias, spec in (team.get("custom_fields") or {}).items():
         if isinstance(spec, dict) and not (spec.get("field_id") or spec.get("id")):
             p.append(f"custom_fields.{alias}: field_id missing")
@@ -856,6 +898,8 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
         data["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
     if migrate and source == "config.json":
         migrate_v3(data, notes)
+        if not data.get("fieldLabels"):
+            migrate_field_labels(data, notes)
     # per-job columns: jobs from before get their own copy of [jira] columns
     # once (written back; env / flag credentials are applied AFTER this so
     # they never leak into the file)
@@ -887,6 +931,73 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
         if v:
             data[k] = v
     return Config(data, CONFIG_JSON, notes, source)
+
+
+def migrate_field_labels(data: dict, notes: list) -> None:
+    """One-time (flag `fieldLabels`): a field's header text moves out of every
+    columns spec into ONE team.json field_labels entry - the most used title
+    per field (ties: the first job's), skipped when it equals the default or
+    team.json already names the field - and the specs' titles are blanked."""
+    eps = [e for e in data.get("endpoints") or [] if isinstance(e, dict)]
+    live = data.get("liveSearch") if isinstance(data.get("liveSearch"), dict) else {}
+    counts: dict = {}
+    for spec in [e.get("columns") for e in eps] + [live.get("columns")]:
+        for col in parse_columns(spec if isinstance(spec, str) else ""):
+            if col["title"] != col["field"]:
+                t = counts.setdefault(col["field"], {})
+                t[col["title"]] = t.get(col["title"], 0) + 1
+    try:
+        team = load_team(data)
+        tpath = team["path"]
+        raw_team = {}
+        if os.path.exists(tpath):
+            with open(tpath, encoding="utf-8") as fh:
+                raw_team = json.load(fh)
+        if not isinstance(raw_team, dict):
+            raise ValueError("top level is not an object")
+    except (ConfigError, OSError, ValueError) as err:
+        notes.append(f"field labels migration skipped: {err}")
+        return
+    own = {norm_key(k): v for k, v in (raw_team.get("field_labels") or {}).items()} \
+        if isinstance(raw_team.get("field_labels"), dict) else {}
+    aliases = custom_field_aliases(team)
+    add = {}
+    for f, titles in counts.items():
+        best = max(titles.items(), key=lambda kv: kv[1])[0]
+        if f not in own and best != field_label({**team, "field_labels": {}}, f, aliases):
+            add[f] = best
+    try:
+        if add:
+            for k in [k for k in raw_team if norm_key(k) == "field_labels"]:
+                del raw_team[k]
+            raw_team["field_labels"] = {**own, **add}
+            os.makedirs(os.path.dirname(tpath), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(tpath), prefix="." + os.path.basename(tpath) + ".")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(raw_team, fh, indent=2, ensure_ascii=False)
+                fh.write("\n")
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, tpath)
+        with open(CONFIG_JSON, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        for e in raw.get("endpoints") or []:
+            if isinstance(e, dict) and isinstance(e.get("columns"), str):
+                e["columns"] = strip_titles(e["columns"])
+        if isinstance(raw.get("liveSearch"), dict) and isinstance(raw["liveSearch"].get("columns"), str):
+            raw["liveSearch"]["columns"] = strip_titles(raw["liveSearch"]["columns"])
+        raw["fieldLabels"] = True
+        write_json_600(CONFIG_JSON, raw)
+    except (OSError, ValueError) as err:
+        notes.append(f"field labels migration skipped: {err}")
+        return
+    for e in eps:
+        if isinstance(e.get("columns"), str):
+            e["columns"] = strip_titles(e["columns"])
+    if isinstance(live.get("columns"), str):
+        live["columns"] = strip_titles(live["columns"])
+    data["fieldLabels"] = True
+    if add:
+        notes.append(f"column titles -> team.json field_labels ({', '.join(f'{k}={v}' for k, v in add.items())})")
 
 
 def migrate_v3(data: dict, notes: list) -> None:
@@ -1070,7 +1181,7 @@ def live_search_columns(cfg: "Config") -> str:
 
 
 # team.json keys the Jira Config window's Definitions page may replace
-TEAM_EDITABLE = {"project_keys": list, "custom_fields": dict, "field_mappings": dict,
+TEAM_EDITABLE = {"project_keys": list, "custom_fields": dict, "field_mappings": dict, "field_labels": dict,
                  "api_endpoints": dict, "jql_templates": dict, "search_defaults": dict,
                  "boards": list, "jobs": list}
 

@@ -104,9 +104,9 @@ struct AppSettings {
     // false); per window `float` in its section overrides it
     var float = false
     // [app] esc-close: rapid Esc presses that close a notes / files / jira
-    // window (default 3; 1 = single Esc, 0 = never). Per window `esc-close`
+    // window (default 2; 1 = single Esc, 0 = never). Per window `esc-close`
     // overrides it. The switcher palette always closes on one Esc.
-    var escClose = 3
+    var escClose = 2
     // [app] copy-toast: pill shown after Cmd+K copies a file browser path
     // ("{}" = the path; empty = no toast)
     var copyToast = "Copied {} to clipboard"
@@ -456,13 +456,14 @@ struct ListColumn {
         }
     }
 
-    // back to the commands.conf form (after a divider drag)
-    static func serialize(_ cols: [ListColumn]) -> String {
+    // back to the commands.conf form (after a divider drag). titles: false =
+    // `field::w:align` — jira headers come from the field labels instead
+    static func serialize(_ cols: [ListColumn], titles: Bool = true) -> String {
         cols.map { c in
             let w = c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width)
             let flags = [c.filterable ? "filter" : nil, c.sortable ? "sort" : nil]
                 .compactMap { $0 }.joined(separator: "+")
-            return "\(c.field):\(c.title):\(w):\(c.align)" + (flags.isEmpty ? "" : ":\(flags)")
+            return "\(c.field):\(titles ? c.title : ""):\(w):\(c.align)" + (flags.isEmpty ? "" : ":\(flags)")
         }.joined(separator: ", ")
     }
 
@@ -512,6 +513,8 @@ struct CommandSpec {
     let drag: Bool            // drag the window by its header
     var sticky: Bool          // stay visible when another app takes focus
     var float: Bool? = nil    // stay above other apps' windows (nil = [app] float)
+    var label: String? = nil  // palette text for "/" commands (nil = the section name)
+    var tabsOpaque: Bool? = nil  // note: solid (never transparent) tabs strip (nil = on)
     // files: browser sort (name|modified|created|size|kind) + asc/desc, the
     // recursive-search cap/excludes and the filter words that open a terminal
     var sort: String? = nil
@@ -836,6 +839,8 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         icon: vars["icon"].flatMap(resolveIconName),
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
     spec.textColor = hexColor(vars["text-color"])
+    if let l = vars["label"]?.trimmingCharacters(in: .whitespaces), !l.isEmpty { spec.label = l }
+    spec.tabsOpaque = tri(vars["tabs-opaque"])
     spec.dimColor = hexColor(vars["dim-color"])
     spec.highlightColor = hexColor(vars["highlight-color"])
     spec.accentColor = hexColor(vars["accent-color"])
@@ -2047,7 +2052,7 @@ struct WorkspaceRow: PopupRow {
 struct CommandRow: PopupRow {
     let title: String
     let command: CommandSpec
-    init(_ c: CommandSpec) { title = "> \(c.name)"; command = c }
+    init(_ c: CommandSpec) { title = "> \(c.label ?? c.name)"; command = c }
 }
 
 // Generic row for list commands (jira etc.): primary field as title with the
@@ -2838,7 +2843,11 @@ final class SwitcherController: NSObject {
                 popup.selection = commandSelection
             }
             let sub = String(q.dropFirst()).trimmingCharacters(in: .whitespaces)
-            let cmds = PopupFuzzy.filter(commands, query: sub) { $0.name }
+            // [jira-config] only exists while Jira is enabled
+            let jira = jiraEnabledInConfig()
+            let cmds = PopupFuzzy.filter(commands.filter { $0.name != "jira-config" || jira }, query: sub) { c in
+                c.label.map { "\($0) \(c.name)" } ?? c.name
+            }
             if popup.selection >= cmds.count {
                 popup.selection = max(0, cmds.count - 1)
             }
@@ -2872,6 +2881,11 @@ final class SwitcherController: NSObject {
                 // paste-and-format window), not a shell script
                 if cmd.name == "prettyprint" {
                     openPrettyPrintWindow(cmd)
+                    break
+                }
+                // /jira-config opens the Jira Config window (in-process too)
+                if cmd.name == "jira-config" {
+                    showJiraDashboard()
                     break
                 }
                 commandRunner?.run(cmd.script ?? "") { out in
@@ -3474,6 +3488,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.copyToast = settings.copyToast
         cfg.tabs = true
         cfg.tabsAddButton = true
+        cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
         // `start-drawer` (browser | terminal | none) picks the pane open on
         // launch; the initial height folds in whichever drawer opens
@@ -3776,6 +3791,9 @@ private func trimmed(_ s: String) -> String? {
                 toggleItem("Toggle Jira", shown) {
                     self.toggleCommand("jira")
                 }
+                menu.addItem(self.menuItem("Open Jira Config Window") { [weak self] in
+                    self?.showJiraDashboard()
+                })
             } else {
                 toggleItem("Enable Jira", false) {
                     self.enableJiraChecked()
@@ -5128,11 +5146,11 @@ private func trimmed(_ s: String) -> String? {
         // in config.json with its OWN columns; [jira] columns is the fallback
         func tabColumns(_ path: String?) -> [ListColumn] {
             guard cmd.table else { return [] }
-            if cmd.name == "jira", let path, let own = JiraPoll.owner(ofTab: path),
-               !own.columns.isEmpty {
-                return own.columns
+            guard cmd.name == "jira" else { return cmd.columns }
+            if let path, let own = JiraPoll.owner(ofTab: path), !own.columns.isEmpty {
+                return JiraPoll.labeled(own.columns)
             }
-            return cmd.columns
+            return JiraPoll.labeled(cmd.columns)
         }
         var tabs: [(path: String, items: [FieldRow])] =
             expandPaths(cmd.sources, extensions: ["json", "tsv"]).map { path in
@@ -5522,7 +5540,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             resizeSave?.cancel()
             let item = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let spec = ListColumn.serialize(columns)
+                let spec = ListColumn.serialize(columns, titles: cmd.name != "jira")
                 // a jira tab owned by a poll job / search saves into THAT job
                 if cmd.name == "jira", tabs.indices.contains(currentTab),
                    let own = JiraPoll.owner(ofTab: tabs[currentTab].path) {
@@ -6892,6 +6910,52 @@ enum JiraPoll {
     // the live search's tab (jira_config.LIVE_SEARCH_FILE, in outDir)
     static let liveSearchFile = "search.json"
 
+    // a column field's built-in name — mirror of jira_config.BASE_FIELD_LABELS
+    static let baseFieldLabels: [String: String] = [
+        "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
+        "reporter": "Reporter", "priority": "Priority", "labels": "Labels",
+        "description": "Description", "project": "Project", "updated": "Updated",
+        "release": "Fix versions", "releaseLabel": "Release", "releaseDate": "Release date",
+        "releaseStatus": "Released", "comments": "Comments",
+    ]
+
+    // every field's ONE label (Jira Config ▸ Definitions ▸ Fields): team.json
+    // field_labels, else a custom field's own label, else the built-in name
+    // (jira_config.field_label). Column headers everywhere use it.
+    static func fieldLabels() -> [String: String] {
+        var out = baseFieldLabels
+        let teamPath = (readJSON(configPath)?["teamConfig"] as? String).map { ($0 as NSString).expandingTildeInPath }
+            ?? NSHomeDirectory() + "/.config/jira/team.json"
+        guard let team = readJSON(teamPath) else { return out }
+        func norm(_ k: String) -> String {
+            k.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"[\s-]+"#, with: "_",
+                                                                        options: .regularExpression).lowercased()
+        }
+        for (k, v) in team where norm(k) == "custom_fields" {
+            for (alias, spec) in v as? [String: Any] ?? [:] {
+                let d = (spec as? [String: Any] ?? [:]).reduce(into: [String: Any]()) { $0[norm($1.key)] = $1.value }
+                out[alias] = (d["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? alias
+            }
+        }
+        for (k, v) in team where norm(k) == "field_labels" {
+            for (f, l) in v as? [String: String] ?? [:] where !l.trimmingCharacters(in: .whitespaces).isEmpty {
+                out[f] = l.trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return out
+    }
+
+    // column titles = the fields' labels (a spec title only for a field
+    // that has no label, e.g. a raw Jira field id)
+    static func labeled(_ cols: [ListColumn]) -> [ListColumn] {
+        let labels = fieldLabels()
+        return cols.map { c in
+            var c = c
+            if let l = labels[c.field] { c.title = l }
+            return c
+        }
+    }
+
     // Run a jira/*.py script off the main thread; `done` gets (exit code,
     // stdout, stderr) on the main thread. stdin carries secrets (the token)
     // so they never show up in `ps`.
@@ -7132,6 +7196,8 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private let curlButton = NSButton(title: "Copy curl", target: nil, action: nil)
     private var monitor: Any?
     private weak var controller: SwitcherController?
+    // auth mode the last Test / Save detection found (jira_api.py --detect-auth)
+    private var detectedAuth: String?
 
     static func show(controller: SwitcherController, reason: String?) {
         if let w = live {
@@ -7164,14 +7230,15 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         window.delegate = self
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
         let head = NSTextField(wrappingLabelWithString:
-            "Server / Data Center: paste a personal access token (sent as Authorization: Bearer) "
-            + "and leave Email blank. Cloud: email + API token (id.atlassian.com → Security).")
+            "Paste your token — the auth type is detected on Test / Save. Server / Data Center "
+            + "personal access tokens go out as Authorization: Bearer; a Jira Cloud API token also "
+            + "needs the account email.")
         head.font = .systemFont(ofSize: 12)
         head.frame = NSRect(x: 20, y: H - 50, width: W - 40, height: 34)
         content.addSubview(head)
         let rows: [(String, NSTextField, String)] = [
             ("Site URL", site, "https://jira.example.com"),
-            ("Email (Cloud)", email, "blank = Bearer token (Server / Data Center)"),
+            ("Email (Cloud only)", email, "only for *.atlassian.net — blank for a personal access token"),
             ("Token", token, "personal access token / API token"),
             ("Default project", project, "e.g. SAM1 (optional)"),
             ("Max results", maxResults, "25"),
@@ -7250,7 +7317,11 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
                   let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
             else { return }
             if self.site.stringValue.isEmpty { self.site.stringValue = d["site"] as? String ?? "" }
-            if self.email.stringValue.isEmpty { self.email.stringValue = d["email"] as? String ?? "" }
+            // a saved Bearer setup never gets an email pre-filled (e.g. from
+            // JIRA_EMAIL) — that would silently switch it to basic auth
+            if self.email.stringValue.isEmpty, d["auth"] as? String != "bearer" {
+                self.email.stringValue = d["email"] as? String ?? ""
+            }
             if self.project.stringValue.isEmpty { self.project.stringValue = d["defaultProject"] as? String ?? "" }
             if self.maxResults.stringValue.isEmpty, let m = d["defaultMax"] as? Int {
                 self.maxResults.stringValue = String(m)
@@ -7278,20 +7349,43 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         curlButton.isEnabled = !on
     }
 
-    // typed values -> jira_api.py flags (blank fields fall back to config/env);
-    // the token travels on stdin. A blank email means Bearer auth.
+    // typed values -> jira_api.py flags (blank site / token fall back to
+    // config/env; the email is always the typed one); the token travels on stdin
     private func typedArgs() -> (args: [String], stdin: String?) {
         let v = trimmed
-        var args: [String] = [], stdin: String? = nil
+        var args: [String] = ["--email", v.email], stdin: String? = nil
         if !v.site.isEmpty { args += ["--site", v.site] }
-        args += v.email.isEmpty ? ["--auth", "bearer"] : ["--email", v.email, "--auth", "basic"]
         if !v.token.isEmpty { args.append("--token-stdin"); stdin = v.token + "\n" }
         return (args, stdin)
     }
 
+    private static func authTitle(_ mode: String) -> String {
+        mode == "basic" ? "email + API token (Cloud)" : "Bearer token (Server / Data Center)"
+    }
+
+    // jira_api.py --detect-auth on the typed values: tries Bearer and email +
+    // token against /myself; done(auth, user) on success, else (nil, error)
+    private func detect(done: @escaping (String?, String) -> Void) {
+        let t = typedArgs()
+        JiraPoll.run("jira_api.py", ["--detect-auth"] + t.args, stdin: t.stdin) { [weak self] code, out, err in
+            let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+            if code == 0, let auth = d["auth"] as? String {
+                self?.detectedAuth = auth
+                done(auth, d["user"] as? String ?? "unknown user")
+                return
+            }
+            let tried = (d["tried"] as? [[String: Any]] ?? []).map {
+                "\($0["mode"] as? String ?? "?") → HTTP \(($0["http"] as? Int).map(String.init) ?? "?")"
+            }.joined(separator: ", ")
+            let msg = d["error"] as? String ?? JiraPoll.errorLine(err, fallback: "login failed (exit \(code))")
+            done(nil, msg + (tried.isEmpty ? "" : " (tried \(tried))") + " — Copy curl to reproduce in a terminal")
+        }
+    }
+
     @objc private func copyCurl(_ sender: Any?) {
         let t = typedArgs()
-        JiraPoll.run("jira_api.py", ["--curl", "--myself"] + t.args, stdin: t.stdin) { [weak self] code, out, err in
+        let auth = detectedAuth ?? (trimmed.email.isEmpty ? "bearer" : "basic")
+        JiraPoll.run("jira_api.py", ["--curl", "--myself", "--auth", auth] + t.args, stdin: t.stdin) { [weak self] code, out, err in
             let cmd = out.trimmingCharacters(in: .whitespacesAndNewlines)
             guard code == 0, !cmd.isEmpty else {
                 self?.setResult("✗ \(JiraPoll.errorLine(err, fallback: "could not build curl (exit \(code))"))", ok: false)
@@ -7308,66 +7402,48 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         return (t(site), t(email), t(token), t(project), t(maxResults))
     }
 
-    // --myself against the TYPED values (blank fields fall back to config/env)
-    private func runLoginTest(useTyped: Bool, done: @escaping (Bool, String) -> Void) {
-        var args = ["--myself", "--no-auth-check"]
-        var stdin: String? = nil
-        if useTyped {
-            let t = typedArgs()
-            args += t.args
-            stdin = t.stdin
-        }
-        JiraPoll.run("jira_api.py", args, stdin: stdin) { code, out, err in
-            if code == 0,
-               let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] {
-                done(true, d["displayName"] as? String ?? "unknown user")
-            } else {
-                done(false, JiraPoll.errorLine(err, fallback: "login failed (exit \(code))")
-                     + " — Copy curl to reproduce in a terminal")
-            }
-        }
-    }
-
     @objc private func test(_ sender: Any?) {
         busy(true)
-        setResult("Testing…", ok: nil)
-        runLoginTest(useTyped: true) { [weak self] ok, msg in
+        setResult("Testing (detecting the auth type)…", ok: nil)
+        detect { [weak self] auth, msg in
             self?.busy(false)
-            self?.setResult(ok ? "✓ Connected as \(msg)" : "✗ \(msg)", ok: ok)
+            guard let auth else { self?.setResult("✗ \(msg)", ok: false); return }
+            self?.setResult("✓ Connected as \(msg) — \(Self.authTitle(auth))", ok: true)
         }
     }
 
+    // detect the auth type on the typed values, save it with them, enable
     @objc private func saveAndEnable(_ sender: Any?) {
         let v = trimmed
         guard !v.site.isEmpty, v.site.hasPrefix("http") else {
             setResult("✗ Site URL must start with https://", ok: false)
             return
         }
-        var obj: [String: Any] = ["site": v.site, "email": v.email,
-                                  "auth": v.email.isEmpty ? "bearer" : "basic",
-                                  "defaultProject": v.project, "defaultMax": Int(v.max) ?? 25]
-        if !v.token.isEmpty { obj["token"] = v.token }
-        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
         busy(true)
-        setResult("Saving…", ok: nil)
-        JiraPoll.run("jira_config.py", ["--save"], stdin: String(decoding: data, as: UTF8.self)) {
-            [weak self] code, _, err in
+        setResult("Detecting the auth type…", ok: nil)
+        detect { [weak self] auth, msg in
             guard let self else { return }
-            guard code == 0 else {
-                self.busy(false)
-                self.setResult("✗ save failed: \(JiraPoll.errorLine(err, fallback: "exit \(code)"))", ok: false)
-                return
-            }
-            self.setResult("Saved. Testing login…", ok: nil)
-            self.runLoginTest(useTyped: false) { [weak self] ok, msg in
+            let mode = auth ?? self.detectedAuth ?? (v.email.isEmpty ? "bearer" : "basic")
+            var obj: [String: Any] = ["site": v.site, "email": mode == "basic" ? v.email : "",
+                                      "auth": mode,
+                                      "defaultProject": v.project, "defaultMax": Int(v.max) ?? 25]
+            if !v.token.isEmpty { obj["token"] = v.token }
+            guard let data = try? JSONSerialization.data(withJSONObject: obj) else { self.busy(false); return }
+            self.setResult("Saving…", ok: nil)
+            JiraPoll.run("jira_config.py", ["--save"], stdin: String(decoding: data, as: UTF8.self)) {
+                [weak self] code, _, err in
                 guard let self else { return }
                 self.busy(false)
-                guard ok else {
+                guard code == 0 else {
+                    self.setResult("✗ save failed: \(JiraPoll.errorLine(err, fallback: "exit \(code)"))", ok: false)
+                    return
+                }
+                guard auth != nil else {
                     self.setResult("✗ saved, but login failed: \(msg) — polling stays off", ok: false)
                     JiraPoll.lastEnableError = msg
                     return
                 }
-                self.setResult("✓ Connected as \(msg) — enabling…", ok: true)
+                self.setResult("✓ Connected as \(msg) — \(Self.authTitle(mode)) — enabling…", ok: true)
                 let c = self.controller
                 self.close()
                 c?.setJiraEnabled(true)

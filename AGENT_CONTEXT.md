@@ -46,6 +46,8 @@ bin/ui-test.sh --verbose
 - Switch: `[jira] enabled` in commands.conf gates the window, the launchd
   agent (`syncJiraLaunchAgent()`, re-run on every `reloadConfig()`), and the
   poll itself (`jira_poll.py` no-ops when false unless `--force`).
+- Hyper+S "/Jira Config Window" (`[jira-config]`, `label =`, only while
+  enabled) and the notes icon menu also open `showJiraDashboard`.
 - Menu: `installStatusMenus` → "Enable Jira" (`SwitcherController.toggleJiraPoll`:
   `jira_config.py --check` → setup window if missing → `jira_api.py --myself`
   → `setJiraEnabled(true)`), "Toggle Jira Window", and ONE "Open Jira Config
@@ -72,23 +74,40 @@ bin/ui-test.sh --verbose
   projects" = `*`), Page size = endpoint `maxResults` (default
   `search_defaults.max_results_search`, the old hidden `maxResults=50`), Max
   issues = `maxTotal`. Types: issues / releases / `directory`.
-- Column editor: read-only rows (Column · Field + friendly name/API field ·
-  Width · Align · Sort · Filter); double-click / Edit… / Return opens the
-  column sheet; Delete removes.
-- Definitions page (`DefTab`): Projects, Custom Fields, API Endpoints, JQL
-  Templates, Search Defaults (editable → `--team-set`), plus read-only
-  Columns (catalog), Users, Statuses & Types (directory cache).
+- Column editor: read-only rows (Header = the field's label · Field + API
+  field · Width · Align · Sort · Filter); double-click / Edit… / Return opens
+  the column sheet (no title box); Delete removes.
+- Field labels: ONE label per field (team.json `field_labels`, else a custom
+  field's `custom_fields[alias].label`, else `BASE_FIELD_LABELS` — mirrored in
+  Swift `JiraPoll.baseFieldLabels`; `jira_config.field_label`). Column specs
+  are written `field::width:align:flags` (`ListColumn.serialize(titles:
+  false)`); the Jira window applies labels in `tabColumns` →
+  `JiraPoll.labeled`. One-time `migrate_field_labels` (flag `fieldLabels`)
+  moved old spec titles into `field_labels` and blanked them.
+- Definitions page (`DefTab`): Projects, Fields (the catalog: every column
+  field with its label; Rename… → `field_labels`, Add Custom Field… →
+  `custom_fields`, Remove / Reset), API Endpoints, JQL Templates, Search
+  Defaults (editable → `--team-set`), plus read-only Users, Statuses & Types
+  (directory cache). Label edits call `reloadJiraWindow()`.
 - Directory job (endpoint `type: directory`, weekly `1w`, no tab; added once
   by `migrate_v3`, flag `directoryJob`): `jira_api.directory()` → projects,
   assignable users of `project_keys` (paginated, merged by id: Server `name`,
-  Cloud `accountId`), statuses, issue types, priorities, fields →
-  `~/.cache/jira/directory.json`. `jira_poll.py --directory` = run it now.
+  Cloud `accountId`), statuses, issue types, priorities, fields, per-project
+  releases (`project_releases`: unarchived versions) and labels
+  (`project_labels`: labels of the newest `search_defaults.labels_max_issues`
+  labelled issues, fields=labels) → `~/.cache/jira/directory.json`.
+  `jira_poll.py --directory` = run it now.
 - Live search (replaced saved searches; `migrate_v3` drops `searches` and
   their `search-*.json` tabs): Cmd+F in the Jira window (`PopupWindow.onCommandF`,
   list mode only) or icon menu "Search Jira…" → `JiraSearchPanel`
   (`JiraSearch.swift`: child panel docked above/below the Jira window; free
-  text + Projects + "+ Filter" rows with `JiraMultiPicker`s over the
-  directory; last criteria in UserDefaults). Run = `jira_poll.py
+  text (`text ~`: title, description, comments) + Projects + "+ Filter" rows;
+  every known value (users, status, type, priority, Release, Labels — the
+  last two scoped to the picked projects) is a `JiraMultiPicker` over the
+  directory, never typed text; only "… contains" rows are text; no Raw JQL;
+  last criteria in UserDefaults). Drawn in the Jira window's theme
+  (`applyTheme`: appearance, blur + tint, `JiraInputBox`, `JiraChoiceButton`,
+  `ThemeButton`, custom-drawn picker pills). Run = `jira_poll.py
   --live-search` (criteria JSON on stdin → `jira_config.criteria_jql`: lists
   ORed with `in (…)`, criteria ANDed, custom aliases → `cf[N]`) → writes
   `<outDir>/search.json` (no lock, no cache merge) → `controller.jiraShowTab`
@@ -113,15 +132,22 @@ bin/ui-test.sh --verbose
   "all" — the default job IS named "all").
 - Setup window: `JiraSetupWindow` (plain NSWindow above `.popUpMenu`, own key
   monitor for edit shortcuts + Esc). Token goes to python over stdin only.
+  Test / Save run `jira_api.py --detect-auth` and save the mode that answers
+  `/myself` with 200.
 - Auth: config.json `auth` = `bearer` (Server/DC PAT, `Authorization: Bearer`,
   no email) or `basic` (Cloud email+token); unset → basic iff email set.
+  `--detect-auth` (`auth_order`): `*.atlassian.net` tries basic then bearer,
+  other sites bearer then basic (basic only with an email).
 - Team schema: `~/.config/jira/team.json` (example `jira/team.example.json`):
   `custom_fields` (alias → field_id; aliases usable as [jira] columns),
   `field_mappings`, `project_keys`, `jobs`, `api_endpoints` (every REST path;
   `resolve_path`), `boards`, `search_defaults`, `jql_templates`. Keys are
   normalized (`norm_key`). Poll endpoints may use `job`/`template` + `args`.
-- curl: every request is a canonical `curl -X GET -H 'Content-Type…' -H
-  'Authorization: Bearer …' 'URL'` (`Client.curl_argv`). `jira_api.py --curl
+- curl: every request is a canonical `curl -X GET -H 'Authorization: Bearer
+  …' -H 'Accept: application/json' 'URL'` (`Client.curl_argv`; basic = `-u`;
+  Content-Type only with a body). Shown curls (`curl_cmd`) are readable: `-G
+  'BASE' --data-urlencode 'jql=…'` (same request; the executed argv keeps the
+  encoded URL). `jira_api.py --curl
   [--mask]` prints instead of running; failures print a `$JIRA_TOKEN` repro
   line and poll status stores `lastCurl` (shown in the Jira Config window);
   setup window: "Copy curl".
@@ -203,7 +229,7 @@ Line numbers drift; grep the symbol names (they're stable).
 
 ## Keyboard shortcuts (user-facing)
 
-- Esc: `esc-close` rapid presses (default 3, `[app]` or per section; 1 =
+- Esc: `esc-close` rapid presses (default 2, `[app]` or per section; 1 =
   single, 0 = never) close notes/files/jira/detail/output windows. The
   switcher palette always closes on one Esc. Find bar: one Esc.
 - Ctrl+Tab / Ctrl+Shift+Tab: next/prev tab (notes, jira sources), wraps.
@@ -214,7 +240,7 @@ Line numbers drift; grep the symbol names (they're stable).
 ## Config defaults worth knowing
 
 - `[app] float` default **false** (windows are normal, not floating).
-- `[app] esc-close` default 3; per-section `esc-close` (alias `vim-esc-close`).
+- `[app] esc-close` default 2; per-section `esc-close` (alias `vim-esc-close`).
 - `[app] copy-toast` default `Copied {} to clipboard` (`{}` = ~-path; empty = off).
 - Vim pane (`vim/notes-init.vim`): `number` + `cursorline` on; cursor-line
   color `g:ws_line` = highlight color blended 50% toward the card color.
