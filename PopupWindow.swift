@@ -3529,11 +3529,15 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private var searchWork: DispatchWorkItem?
 
     private let favURL: URL
-    // starred dirs (persisted to favURL) — the other two sources come from
-    // commands.conf ([files] favorites + zoxide top-N)
+    // starred dirs (persisted to favURL) + commands.conf [files] favorites
     private var pinnedFavorites: [String] = []
     private let staticFavorites: [String]
-    private let zoxideFavorites: [String]
+    // the pinned "Recent" view: the host's newest created / modified files
+    // from anywhere (nil = no Recent pill). recentChanged() refreshes it.
+    public var recentProvider: (() -> [(path: String, at: Date)])? {
+        didSet { rebuildPills() }
+    }
+    private(set) var inRecent = false
     private var shownFavorites: [String] = []
     private(set) var cwd: String
     private var all: [Entry] = []
@@ -3611,11 +3615,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
 
     init(config: PopupConfig, startDir: String, favoritesURL: URL? = nil,
-         staticFavorites: [String] = [], zoxideFavorites: [String] = []) {
+         staticFavorites: [String] = []) {
         self.config = config
         self.cwd = (startDir as NSString).standardizingPath
         self.staticFavorites = staticFavorites
-        self.zoxideFavorites = zoxideFavorites
         let home = NSHomeDirectory()
         self.favURL = favoritesURL ?? URL(fileURLWithPath: home + "/.cache/workspace-switcher/files-favorites.json")
         self.parentButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
@@ -4078,7 +4081,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
 
     func reload() {
-        all = listDir(cwd)
+        all = inRecent ? recentEntries() : listDir(cwd)
         hiddenAll = nil
         dirCache = nil
         refilter()
@@ -4428,7 +4431,61 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             listScroll.reflectScrolledClipView(clip)
         }
     }
+    // MARK: Recent
+
+    // the newest created / modified files from anywhere (recentProvider),
+    // newest first; the dim trailing text says where + how long ago
+    public func showRecent() {
+        guard recentProvider != nil else { return }
+        inRecent = true
+        query = ""
+        selection = 0
+        cancelSearch()
+        reload()
+        rebuildPills()
+        showCwdInFilter()
+        needsLayout = true
+    }
+
+    // the host's recent list changed: refresh in place (selection kept)
+    public func recentChanged() {
+        guard inRecent, query.isEmpty else { return }
+        let keep = rows.indices.contains(selection) ? rows[selection].path : nil
+        all = recentEntries()
+        rows = all
+        selection = keep.flatMap { k in rows.firstIndex { $0.path == k } } ?? 0
+        listPane.rows = rows
+        listPane.selection = selection
+        layoutListDocument()
+        updateStatus()
+    }
+
+    private func recentEntries() -> [Entry] {
+        let now = Date()
+        return (recentProvider?() ?? []).compactMap { item in
+            let name = (item.path as NSString).lastPathComponent
+            guard var e = Self.makeEntry(name: name, path: item.path) else { return nil }
+            e.icon = Self.iconCache[item.path] ?? NSWorkspace.shared.icon(forFile: item.path)
+            Self.iconCache[item.path] = e.icon
+            var dir = displayPath((item.path as NSString).deletingLastPathComponent)
+            if dir.hasPrefix("/private/tmp") { dir.removeFirst("/private".count) }
+            e.trailingText = "\(dir) · \(Self.ago(now.timeIntervalSince(item.at)))"
+            e.trailingWidth = (e.trailingText as NSString)
+                .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
+            return e
+        }
+    }
+
+    private static func ago(_ secs: TimeInterval) -> String {
+        let s = max(0, Int(secs))
+        if s < 60 { return "just now" }
+        if s < 3600 { return "\(s / 60)m ago" }
+        if s < 86400 { return "\(s / 3600)h ago" }
+        return "\(s / 86400)d ago"
+    }
+
     func cd(_ dir: String) {
+        inRecent = false
         cwd = (dir as NSString).standardizingPath
         query = ""
         selection = 0
@@ -4441,6 +4498,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         needsLayout = true
     }
     func cdParent() {
+        if inRecent { cd(cwd); return }       // leave Recent for the last folder
         let parent = (cwd as NSString).deletingLastPathComponent
         if parent != cwd { cd(parent) }
     }
@@ -4448,6 +4506,11 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // directory; clicking it (select-all) lets you type a filter or a path
     func showCwdInFilter() {
         guard searchField.currentEditor() == nil else { return }
+        if inRecent {
+            searchField.stringValue = ""
+            searchField.placeholderString = "Recent — newest files anywhere · type to filter"
+            return
+        }
         searchField.stringValue = cwd
         searchField.placeholderString = nil
     }
@@ -4693,20 +4756,21 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             try? data.write(to: favURL)
         }
     }
-    // config favorites + zoxide top-N + starred, deduped, order-preserving
+    // config favorites + starred, deduped, order-preserving
     private func mergedFavorites() -> [String] {
         var out: [String] = []
         var seen = Set<String>()
-        for raw in staticFavorites + zoxideFavorites + pinnedFavorites {
+        for raw in staticFavorites + pinnedFavorites {
             let p = (raw as NSString).expandingTildeInPath
             if seen.insert(p).inserted { out.append(p) }
         }
         return out
     }
     private func toggleStar() {
+        guard !inRecent else { return }
         if shownFavorites.contains(cwd) {
             // it's already a favorite somewhere — pull it out of the pinned
-            // set only if it wasn't config/zoxide-supplied (those are fixed)
+            // set only if it wasn't config-supplied (those are fixed)
             if pinnedFavorites.contains(cwd) {
                 pinnedFavorites.removeAll { $0 == cwd }
             } else {
@@ -4730,9 +4794,16 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         for p in favPills { p.removeFromSuperview() }
         favPills = []
         shownFavorites = mergedFavorites()
+        if recentProvider != nil {
+            let r = ThemeButton(config: config, title: "Recent", symbol: "clock")
+            r.isOn = inRecent
+            r.onClick = { [weak self] in self?.showRecent() }
+            addSubview(r)
+            favPills.append(r)
+        }
         for fav in shownFavorites {
             let p = ThemeButton(config: config, title: displayPath(fav), symbol: "folder")
-            p.isOn = fav == cwd
+            p.isOn = fav == cwd && !inRecent
             p.onClick = { [weak self] in
                 guard let self, FileManager.default.fileExists(atPath: fav) else { return }
                 self.cd(fav)
@@ -4773,6 +4844,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let items = rows.filter { $0.name != ".." }.count
         let count = "\(items) item\(items == 1 ? "" : "s")"
         switch mode {
+        case .all where inRecent:
+            setStatus("\(count) · newest first · created or changed anywhere in ~ or /tmp")
         case .all:
             setStatus("\(count) · sorted by \(sortKey.label.lowercased())")
         case .terminal(let dir):
@@ -6641,6 +6714,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                     terminalShown = false
                     drawerInsetNow = 0
                 }
+            } else {
+                // no shell drawer at all: the editor must not reserve its
+                // band (a read-only detail view in the shared window left a
+                // blank terminal-height gap under the text)
+                terminalShown = false
             }
         }
 
@@ -7009,6 +7087,47 @@ scroll.documentView = rowView
         presentList()
     }
 
+    // first show at this exact frame instead of centered at the config
+    // size (the shared window opens a new view where the last one was)
+    public var initialFrame: NSRect?
+
+    // MARK: Shared window (park / unpark)
+
+    // Parked = ordered out but ALIVE and still registered with the host
+    // (editor text, vim / terminal sessions, list state survive). Unlike
+    // hide(), no onHide (no focus hand-back, no teardown). The editor is
+    // saved; a voice recording stops only when asked (the whole shared
+    // window hiding, not a view switch).
+    public var onPark: (() -> Void)?
+    public var onUnpark: (() -> Void)?
+    public func park(stopVoice: Bool = false) {
+        guard isShown else { return }
+        isShown = false
+        removeMonitors()
+        if config.editMode, editorView != nil {
+            onEditorClose?(currentEditorText)
+        }
+        if stopVoice { onHideVoiceStop?() }
+        onPark?()
+        panel.orderOut(nil)
+    }
+    public func unpark(frame: NSRect?) {
+        if let f = frame { panel.setFrame(f, display: false) }
+        if isShown {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            showPersistent()
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if config.editMode { layoutForZoom() } else {
+            layoutSearchField()
+            layoutScrollDocument()
+            relayoutTabs()
+        }
+        onUnpark?()
+    }
+
     private func presentList() {
         // let the host refresh its data (e.g. re-query window state) before
         // the rows are rebuilt — so re-shows never render stale entries
@@ -7021,10 +7140,15 @@ scroll.documentView = rowView
             }
             editorView?.isEditable = !editorReadOnly
             wireEditorTextChange()
-            let h = min(config.height, maxPanelHeight())
-            let origin = centeredOrigin(width: config.width, height: h)
-            panel.setContentSize(NSSize(width: config.width, height: h))
-            panel.setFrameOrigin(origin)
+            if let f = initialFrame {
+                panel.setFrame(f, display: false)
+                initialFrame = nil
+            } else {
+                let h = min(config.height, maxPanelHeight())
+                let origin = centeredOrigin(width: config.width, height: h)
+                panel.setContentSize(NSSize(width: config.width, height: h))
+                panel.setFrameOrigin(origin)
+            }
             // the window was just resized to its real height — re-frame the
             // editor, terminal and file-browser drawers to that final size
             // (otherwise the browser stretches to fill the window on first
@@ -7065,12 +7189,17 @@ scroll.documentView = rowView
         // screen (title bar, drag header, or any chrome can push the window
         // geometry off the visible area)
         panel.setFrame(clampToScreen(panel.frame), display: true)
+        if let f = initialFrame {
+            panel.setFrame(f, display: true)
+            initialFrame = nil
+        }
+        let docW = panel.contentView?.bounds.width ?? config.width
         if config.scrollableRows {
             // document view holds the FULL content height; the scroll view
             // clips and scrolls it
-            rowView.frame = NSRect(x: 0, y: 0, width: config.width, height: contentH)
+            rowView.frame = NSRect(x: 0, y: 0, width: docW, height: contentH)
         } else {
-            rowView.frame = NSRect(x: 0, y: 0, width: config.width, height: height)
+            rowView.frame = NSRect(x: 0, y: 0, width: docW, height: height)
         }
         rowView.sizingRowCount = rows.count
         rowView.needsDisplay = true
@@ -7137,6 +7266,8 @@ scroll.documentView = rowView
         onTableFilter = nil
         onToggleStar = nil
         onTableColumnsReordered = nil
+        onPark = nil
+        onUnpark = nil
         onFilterOpen = nil
         onAccept = nil
         onRowClick = nil

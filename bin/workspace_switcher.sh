@@ -83,8 +83,16 @@ if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ] || [ "
     WS_LIST=$(aerospace list-windows --all --format '%{window-id}|%{app-name}|%{window-title}' 2>/dev/null)
     LOG "list-windows (switcher):"
     echo "$WS_LIST" | grep 'workspace-switcher' | while IFS= read -r l; do LOG "  $l"; done
-    EXISTING=$(echo "$WS_LIST" \
-        | awk -F'|' -v t="$MODE" '$2=="workspace-switcher" && $3==t {print $1; exit}')
+    # notes + jira share ONE window ([app] shared-window, default on): its
+    # visible view may be any of them (the others are ordered out), so move
+    # whichever one is on screen
+    if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ]; then
+        EXISTING=$(echo "$WS_LIST" \
+            | awk -F'|' '$2=="workspace-switcher" && ($3=="notes" || $3=="jira" || $3=="jira-detail" || $3=="jira-releases" || $3=="Jira Config") {print $1; exit}')
+    else
+        EXISTING=$(echo "$WS_LIST" \
+            | awk -F'|' -v t="$MODE" '$2=="workspace-switcher" && $3==t {print $1; exit}')
+    fi
     LOG "existing id for '$MODE': [${EXISTING:-NONE}]"
     if [ -n "$EXISTING" ]; then
         CUR=$(aerospace list-workspaces --focused 2>/dev/null)

@@ -463,9 +463,19 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let defRemove = ThemedPushButton(title: "Remove", target: nil, action: nil)
     private let defFetch = ThemedPushButton(title: "Fetch from Jira now", target: nil, action: nil)
 
-    static func show(controller: SwitcherController) {
+    // the open window (the shared window shows it as its "config" view)
+    static var current: JiraDashboardWindow? { live }
+    // shared window: Esc = back (after the unsaved-edits check), ✕ / Cmd+W
+    // = hide the whole shared window; nil = a standalone window (closes)
+    var onSlotBack: (() -> Void)?
+    var onSlotHide: (() -> Void)?
+    private var slotNavClick: ((Int) -> Void)?
+
+    // present: false = create / refresh only (the shared window shows it)
+    static func show(controller: SwitcherController, present: Bool = true) {
         if let w = live {
             w.refresh()
+            guard present else { return }
             NSApp.activate(ignoringOtherApps: true)
             w.window.makeKeyAndOrderFront(nil)
             return
@@ -475,11 +485,36 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         PopupThemeDefaults.colors = JC.colors
         let w = JiraDashboardWindow(controller: controller)
         live = w
+        w.refresh()
+        w.startTimer()
+        guard present else { return }
         NSApp.activate(ignoringOtherApps: true)
         w.window.center()
         w.window.makeKeyAndOrderFront(nil)
-        w.refresh()
-        w.startTimer()
+    }
+
+    // the shared window's header: home / back / notes | jira
+    func setSlotNav(_ buttons: [(String, Int)], on: Set<Int>, click: @escaping (Int) -> Void) {
+        chrome?.extraButtons = buttons
+        chrome?.activeButtonIDs = on
+        chrome?.needsDisplay = true
+        slotNavClick = click
+    }
+
+    // leave by Esc: back in the shared window, else close
+    private func escape() {
+        guard let back = onSlotBack else { close(); return }
+        guard window.attachedSheet == nil else { return }
+        confirmDiscard { [weak self] in
+            self?.window.orderOut(nil)
+            self?.teardown()
+            back()
+        }
+    }
+
+    // ✕ / Cmd+W: hide the shared window (this view stays, edits and all)
+    private func closeOrHide() {
+        if let hide = onSlotHide { hide() } else { close() }
     }
 
     private init(controller: SwitcherController) {
@@ -581,7 +616,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         window.headerBand = cfg.headerHeight
         window.onHeaderClick = { [weak self] p in
             guard let self, let ch = self.chrome else { return }
-            if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) { self.close() }
+            if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
+                self.closeOrHide()
+            } else if let hit = ch.extraButtonRects.first(where: { $0.value.contains(p) }) {
+                self.slotNavClick?(hit.key)
+            }
         }
         return root
     }
@@ -802,10 +841,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             let editing = (fr as? NSTextView)?.isEditable == true
             if e.keyCode == 53 {                       // Esc: end an edit, else close
                 if editing { self.window.makeFirstResponder(nil); return nil }
-                self.close()
+                self.escape()
                 return nil
             }
-            if cmd && e.keyCode == 13 { self.close(); return nil }           // Cmd+W
+            if cmd && e.keyCode == 13 { self.closeOrHide(); return nil }     // Cmd+W
             if cmd && e.keyCode == 15 { self.refresh(); return nil }         // Cmd+R
             if cmd && e.keyCode == 1 { self.save(nil); return nil }          // Cmd+S
             // Return edits / Delete removes the selected column or definition
@@ -2493,4 +2532,25 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     func windowWillClose(_ notification: Notification) { teardown() }
+}
+
+// the shared window's "config" view (SharedWindow.swift): parked = ordered
+// out with its refresh timer stopped; unsaved edits stay until it returns
+extension JiraDashboardWindow: SlotMember {
+    var slotWindow: NSWindow { window }
+    var slotShown: Bool { window.isVisible }
+    func slotPark(stopVoice: Bool) {
+        timer?.invalidate()
+        timer = nil
+        window.orderOut(nil)
+    }
+    func slotShow(frame: NSRect?) {
+        if let f = frame { window.setFrame(f, display: false) }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        if timer == nil {
+            refresh()
+            startTimer()
+        }
+    }
 }

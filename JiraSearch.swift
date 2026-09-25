@@ -689,6 +689,20 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         p.unhook()
     }
 
+    // the shared window switched away from / back to the jira list: the
+    // panel hides with it and comes back docked when the list returns
+    private static weak var parkedHost: PopupWindow?
+    static func park(from w: PopupWindow) {
+        guard let p = live, p.host === w, p.panel.isVisible else { return }
+        parkedHost = w
+        p.unhook()
+    }
+    static func unpark(to w: PopupWindow) {
+        guard let p = live, parkedHost === w else { return }
+        parkedHost = nil
+        p.attach(to: w)
+    }
+
     // the rebuilt jira window: bring a panel parked moments ago back
     static func reattach(to w: PopupWindow) {
         guard let p = live, let t = parkedAt, Date().timeIntervalSince(t) < 3 else { return }

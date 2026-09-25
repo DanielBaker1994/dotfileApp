@@ -41,6 +41,17 @@ bin/ui-test.sh --verbose
 - `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
 - `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
 - `JiraSearch.swift` — Cmd+F live search (`JiraSearchPanel`), `JiraMultiPicker`, `JiraDirectory`
+- `SharedWindow.swift` — ONE window for notes + jira (`SharedWindow`, `SlotView`,
+  `SlotMember`): members are the existing windows, swapped in place
+  (`PopupWindow.park()` / `unpark(frame:)`); jira back stack (detail /
+  releases / config) with home + back header buttons (ids 60-63); hotkey
+  toggle uses the launcher's focus file (`toggleCommand` → `slot.hotkey`);
+  focus hand-back only when the whole window hides. `[app] shared-window`.
+  Esc: notes never (`escCloseCount 0`, Cmd+W / ✕ / hotkey hide), jira = back.
+- `RecentFiles.swift` — the file browser's pinned "Recent" view: FSEvents on
+  ~ + /private/tmp, Spotlight seed, noise filter, `recent.json`;
+  `PopupFileBrowser.recentProvider` / `showRecent()` / `recentChanged()`;
+  `[files] recent*`, `start = recent`. Zoxide favorites were removed.
 - `commands.conf` — config (windows, commands, colors, paths)
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller";
   `jira_log.py` = debug.log + raw response dumps);

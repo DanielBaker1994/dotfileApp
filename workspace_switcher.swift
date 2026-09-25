@@ -54,6 +54,12 @@ let commandsConfName = "commands.conf"
 // Defaults live here so the app works with no config; parseAppConfig() applies
 // the [app] section overrides when commands.conf is loaded at startup.
 struct AppSettings {
+    // notes + jira (and jira's details / releases / Config) share ONE window
+    // whose view is swapped in place (SharedWindow.swift); false = separate
+    // windows like before
+    var sharedWindow = true
+    var sharedWidth: CGFloat = 1100
+    var sharedHeight: CGFloat = 640
     var shell = "/opt/homebrew/bin/bash"
     // args for the embedded terminal's shell: --login -i sources the profile
     // AND rc files so aliases/functions (zoxide, etc.) work there
@@ -575,7 +581,12 @@ struct CommandSpec {
     var sources: [String]  // list: JSON array (or TSV) data files (tabs when > 1)
     let root: String?     // files: starting directory for the file browser
     let favorites: [String]  // files: static favorite dirs (commands.conf, tilde ok)
-    let zoxideTop: Int       // files: include the top-N dirs from zoxide as favorites
+    // files: the pinned "Recent" view (RecentFiles.swift) + where it opens
+    var recent = true
+    var recentDays = 7
+    var recentLimit = 200
+    var recentExclude: [String] = []
+    var startRecent = true    // files window opens on Recent (`start = recent`)
     var browserBackground: NSColor?  // files: panel background (default silvery blue)
     var backgroundColor: NSColor?  // note/files: window card fill (the notepad)
     var tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
@@ -649,7 +660,7 @@ struct CommandSpec {
     init(name: String, kind: Kind = .shell, windowName: String? = nil,
          chromeTitle: String? = nil, script: String? = nil, paths: [String] = [],
          sources: [String] = [], root: String? = nil,
-         favorites: [String] = [], zoxideTop: Int = 0,
+         favorites: [String] = [],
          browserBackground: NSColor? = nil,
          backgroundColor: NSColor? = nil,
          tintAlpha: CGFloat? = nil,
@@ -681,7 +692,6 @@ struct CommandSpec {
         self.sources = sources
         self.root = root
         self.favorites = favorites
-        self.zoxideTop = zoxideTop
         self.browserBackground = browserBackground
         self.backgroundColor = backgroundColor
         self.tintAlpha = tintAlpha
@@ -891,7 +901,6 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         sources: csv(vars["sources"] ?? vars["source"]),
         root: vars["root"],
         favorites: csv(vars["favorites"]),
-        zoxideTop: Int(vars["zoxide-top"] ?? "") ?? 0,
         browserBackground: hexColor(vars["browser-background"]),
         backgroundColor: hexColor(vars["background-color"]),
         tintAlpha: num(vars["tint-alpha"]) > 0 ? min(num(vars["tint-alpha"]), 1) : nil,
@@ -947,6 +956,11 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     spec.columns = ListColumn.parse(vars["columns"])
     spec.tableSort = vars["table-sort"]
     spec.voiceLive = tri(vars["voice-live"]) ?? true
+    spec.recent = tri(vars["recent"]) ?? true
+    spec.recentDays = Int(vars["recent-days"] ?? "") ?? 7
+    spec.recentLimit = Int(vars["recent-limit"] ?? "") ?? 200
+    spec.recentExclude = csv(vars["recent-exclude"])
+    spec.startRecent = (vars["start"] ?? "recent").lowercased() != "root"
     return spec
 }
 
@@ -1049,6 +1063,9 @@ private func parseAppConfig(_ vars: [String: String]) {
     if vars["screenshot-apps"] != nil { settings.screenshotApps = csv(vars["screenshot-apps"]) }
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
     if let v = tri(str("float")) { settings.float = v }
+    if let v = tri(str("shared-window")) { settings.sharedWindow = v }
+    if let v = str("shared-width"), let n = Double(v), n >= 400 { settings.sharedWidth = CGFloat(n) }
+    if let v = str("shared-height"), let n = Double(v), n >= 300 { settings.sharedHeight = CGFloat(n) }
     if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
     if vars["copy-toast"] != nil { settings.copyToast = str("copy-toast") ?? "" }
     if let v = str("terminal-app") { settings.terminalApp = v }
@@ -1282,14 +1299,15 @@ private func configLog(_ s: String) {
 }
 
 private let configBoolKeys: Set<String> = [
-    "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode",
-    "checkbox", "hide-on-focus-loss", "float", "table",
+    "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
+    "checkbox", "hide-on-focus-loss", "float", "table", "shared-window",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
+    "shared-width": 400...8000, "shared-height": 300...8000,
     "terminal-height": 40...4000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
-    "body-lines": 0...100, "zoxide-top": 0...100, "search-width": 0...1,
+    "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
     "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
     "vim-esc-close": 0...20, "esc-close": 0...20, "search-limit": 1...1_000_000,
     "dashboard-width": 600...8000, "dashboard-height": 400...8000, "dashboard-refresh": 2...3600,
@@ -2766,12 +2784,91 @@ final class SwitcherController: NSObject {
         RunLoop.main.add(t, forMode: .common)
     }
 
+    // MARK: shared window plumbing (SharedWindow.swift)
+
+    lazy var slot = SharedWindow(controller: self)
+    // the frame the NEXT slot window opens at (consumed by the openers)
+    var pendingSlotFrame: NSRect?
+
+    // the window behind a view (nil = not open)
+    func slotMember(_ v: SlotView) -> SlotMember? {
+        switch v {
+        case .notes: return noteWindow
+        case .jira: return subWindows.first { $0.config.name == "jira" }
+        case .detail: return subWindows.first { $0.config.name == settings.detailWindowName }
+        case .releases: return subWindows.first { $0.config.name == jiraReleasesWindow }
+        case .config: return JiraDashboardWindow.current
+        }
+    }
+
+    // which view a sub-window is (nil = not a shared-window member)
+    func slotView(of w: PopupWindow) -> SlotView? {
+        guard settings.sharedWindow else { return nil }
+        let n = w.config.name
+        if n == commands.first(where: { $0.kind == .note })?.windowName { return .notes }
+        if n == "jira" { return .jira }
+        if n == settings.detailWindowName { return .detail }
+        if n == jiraReleasesWindow { return .releases }
+        return nil
+    }
+
+    // open notes / jira if they aren't (shown at `frame`); false = can't
+    func ensureSlotMember(_ v: SlotView, frame: NSRect) -> Bool {
+        if slotMember(v) != nil { return true }
+        switch v {
+        case .notes:
+            guard let cmd = commands.first(where: { $0.kind == .note }) else { return false }
+            pendingSlotFrame = frame
+            openNoteWindow(cmd, restoreWID: nil, restorePID: nil)
+        case .jira:
+            guard let cmd = commands.first(where: { $0.name == "jira" }) else { return false }
+            pendingSlotFrame = frame
+            openListWindow(cmd, restoreWID: nil, restorePID: nil)
+        default:
+            return false
+        }
+        pendingSlotFrame = nil
+        return slotMember(v) != nil
+    }
+
+    // an opener about to show a slot window: place it at the shared frame
+    func placeSlotWindow(_ w: PopupWindow) {
+        guard settings.sharedWindow, slotView(of: w) != nil else { return }
+        w.initialFrame = pendingSlotFrame ?? slot.currentFrame()
+        pendingSlotFrame = nil
+    }
+
+    // a closed shared window hands focus back to what was focused when it
+    // was summoned (the app, then its exact window via aerospace)
+    func restoreFocus(wid: String?, pid: pid_t?) {
+        if let pid, pid != getpid() {
+            NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
+        }
+        if let wid {
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = aerospaceCall(["focus", "--window-id", wid])
+            }
+        }
+    }
+
+    // tear a slot window down for good (rebuilds): its onHide runs the
+    // normal teardown (unregister, watchers, search panel) even if parked
+    func closeSlotWindow(_ w: PopupWindow) {
+        if w.isShown { w.hide(restore: false) } else { w.onHide?(false) }
+        w.nativeWindow.orderOut(nil)
+    }
+
     // Dedicated notes-only entry point: opens the note window directly with no
     // switcher popup. Guarded: only ONE note window ever exists — re-invoking
     // just focuses it (works from any space).
     func showNotes() {
         if popup.isShown {
             popup.hide(restore: false)
+        }
+        if settings.sharedWindow {
+            if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
+            slot.open(.notes)
+            return
         }
         (savedWID, savedPID) = readFocusFile()
         guard let cmd = commands.first(where: { $0.kind == .note }) else {
@@ -2829,6 +2926,10 @@ final class SwitcherController: NSObject {
             log("launch: no command named '\(name)' in \(commandsConfName)")
             return
         }
+        if settings.sharedWindow && (cmd.kind == .note || cmd.name == "jira") {
+            slot.open(cmd.kind == .note ? .notes : .jira)
+            return
+        }
         switch cmd.kind {
         case .note:
             // match by NAME, not editMode: notes / voice / output windows are
@@ -2847,6 +2948,8 @@ final class SwitcherController: NSObject {
             // single instance, matched by NAME (jira is also editMode=false,
             // so a generic editMode guard could focus the wrong window)
             if let existing = subWindows.first(where: { $0.config.name == cmd.windowName }) {
+                // every summon lands on Recent (the thing you just downloaded)
+                if cmd.startRecent { existing.fileBrowser?.showRecent() }
                 focusSubWindow(existing)
                 return
             }
@@ -2933,6 +3036,9 @@ final class SwitcherController: NSObject {
                             // notes tab (same as Finder's "Open in Notes")
                             let path = String(name.dropFirst(5))
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
+                        } else if settings.sharedWindow && (name == "notes" || name == "voice" || name == "jira") {
+                            // Hyper+N / Hyper+J: toggle / switch the shared window
+                            self?.toggleCommand(name)
                         } else if name == "notes" {
                             self?.showNotes()
                         } else if name == "jira-dashboard" {
@@ -3152,6 +3258,14 @@ final class SwitcherController: NSObject {
     func toggleCommand(_ name: String) {
         // "voice" aliases the merged notes+voice window (see showCommand)
         let name = name == "voice" ? "notes" : name
+        if settings.sharedWindow, name == "jira" || commands.first(where: { $0.name == name })?.kind == .note {
+            // the launcher recorded the window aerospace had focused at the
+            // keypress: THE answer to "is the user in our window right now?"
+            let (wid, pid) = readFocusFile()
+            if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
+            slot.hotkey(name == "jira" ? .jira : .notes, userInIt: pid.map { $0 == getpid() })
+            return
+        }
         if let w = subWindows.first(where: { $0.config.name == name }),
            w.isShown, w.nativeWindow.isKeyWindow {
             w.hide(restore: true)
@@ -3227,11 +3341,17 @@ final class SwitcherController: NSObject {
     // to whatever window was focused when it opened.
     private func unregisterSubWindow(_ w: PopupWindow, restore: Bool,
                                      restoreWID: String?, restorePID: pid_t?) {
+        let view = slotView(of: w)
         subWindows.removeAll { $0 === w }
         // drop the host hooks so the window + its captured objects (e.g. the
         // voice recorder's AVAudioEngine, which holds the mic) dealloc — a
         // leaked engine made the next voice session's record button dead
         w.releaseHooks()
+        // shared-window members: the shared window owns the focus hand-back
+        if let view {
+            slot.memberGone(view)
+            return
+        }
         guard restore else { return }
         if let pid = restorePID {
             NSRunningApplication(processIdentifier: pid)?.activate(
@@ -3271,10 +3391,9 @@ final class SwitcherController: NSObject {
             }
             let rels = d["releases"] as? [[String: Any]] ?? []
             if let old = self.subWindows.first(where: { $0.config.name == jiraReleasesWindow }) {
-                old.hide(restore: false)
+                if settings.sharedWindow, old.isShown { self.pendingSlotFrame = old.nativeWindow.frame }
+                self.closeSlotWindow(old)
                 self.subWindows.removeAll { $0 === old }
-                old.releaseHooks()
-                old.nativeWindow.orderOut(nil)
             }
             rc.name = jiraReleasesWindow
             rc.windowName = jiraReleasesWindow
@@ -3283,6 +3402,7 @@ final class SwitcherController: NSObject {
             self.pendingReleaseTab = rels.first { ($0["key"] as? String) == key }?["file"] as? String
             self.log("jira: release view -> \(key) (\(rels.count) release(s))")
             self.openListWindow(rc, restoreWID: nil, restorePID: nil)
+            if settings.sharedWindow { self.slot.push(.releases) }
         }
     }
 
@@ -3296,8 +3416,12 @@ final class SwitcherController: NSObject {
         if let existing = subWindows.first(where: { $0.config.name == settings.detailWindowName }) {
             existing.setEditorText(text)
             existing.chromeHeaderTitle = key
-            existing.nativeWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if settings.sharedWindow {
+                slot.push(.detail)       // in place of the list; Esc = back
+            } else {
+                existing.nativeWindow.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
             return
         }
         var cfg = PopupConfig(name: settings.detailWindowName)
@@ -3306,7 +3430,7 @@ final class SwitcherController: NSObject {
         cfg.enableDrag = true
         cfg.sticky = true
         cfg.floating = cmd.float ?? settings.float
-        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
@@ -3328,7 +3452,9 @@ final class SwitcherController: NSObject {
         w.copyPathButtonLabel = "copy key"
         w.headerButtons = [("open in browser", 10)]
         w.onChromeHeaderClick = { [weak self] in
-            self?.copy(key, "jira key: \(key)")
+            // the row shown NOW (the window is reused across rows)
+            let k = self?.detailRow?.fields["key"] ?? key
+            self?.copy(k, "jira key: \(k)")
         }
         w.onHeaderButton = { [weak self] id in
             guard id == 10, let self else { return }
@@ -3344,7 +3470,14 @@ final class SwitcherController: NSObject {
                                      restoreWID: nil, restorePID: nil)
         }
         subWindows.append(w)
-        w.show()
+        if settings.sharedWindow {
+            w.onEscape = { [weak self] in self?.slot.back() }
+            placeSlotWindow(w)
+            w.show()
+            slot.push(.detail)
+        } else {
+            w.show()
+        }
         log("detail window opened for \(key)")
     }
 
@@ -3719,7 +3852,9 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
-        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        // shared window: Esc belongs to vim / the shell — never closes notes
+        // (hide with the hotkey, Cmd+W or ✕)
+        cfg.escCloseCount = settings.sharedWindow ? 0 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.tabs = true
         cfg.tabsAddButton = true
@@ -3752,7 +3887,8 @@ private func trimmed(_ s: String) -> String? {
         cfg.titlePill = false
         // the header buttons fill the whole top strip (right rounded edge back
         // to the app glyph / last-write line) instead of a compact right cluster
-        cfg.stretchHeaderButtons = true
+        // shared window: the notes | jira switch stays a compact pill pair
+        cfg.stretchHeaderButtons = !settings.sharedWindow
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.colors = windowColors(cmd)
         cfg.terminalForeground = cmd.terminalForeground
@@ -4614,12 +4750,11 @@ private func trimmed(_ s: String) -> String? {
         RunLoop.main.add(t, forMode: .common)
         // embedded file browser drawer (header "▤" toggles it): starts in the
         // note directory, favorites shared with the floating "files" window
-        let favs = fileBrowserFavoritesConfig()
+        let favs = fileBrowserFavorites()
         var browserCfg = cfg
         applyBrowserSettings(&browserCfg)
         let fb = PopupFileBrowser(config: browserCfg, startDir: noteDir(currentPath),
-                                  staticFavorites: favs.staticFavs,
-                                  zoxideFavorites: zoxideTopDirs(favs.zoxideTop))
+                                  staticFavorites: favs)
         fb.onOpen = { [weak self] path in
             self?.log("note '\(cmd.name)': browser opened \(path)")
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
@@ -4639,12 +4774,18 @@ private func trimmed(_ s: String) -> String? {
         w.onFileBrowserOpenInNotes = { [weak self] p in
             self?.openNoteFile(p)
         }
+        attachRecent(fb)
         w.installFileBrowser(fb, drawer: true)
         // mirror the post-install drawer state onto the header buttons
         // (browser is the default pane, so it's on and the terminal is off)
         w.setHeaderButtonOn(10, w.terminalShown)
         w.setHeaderButtonOn(20, w.fileBrowserShown)
         subWindows.append(w)
+        if settings.sharedWindow {
+            // Cmd+W: hide the shared window (Esc never does, see above)
+            w.onEscape = { [weak self] in self?.slot.hide() }
+            placeSlotWindow(w)
+        }
         w.show()
     }
 
@@ -5564,7 +5705,10 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
-        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        // shared window: ONE Esc = back (clearing a search first); at the
+        // jira list it hides the window
+        let inSlot = settings.sharedWindow && isJira
+        cfg.escCloseCount = inSlot ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.wrapContent = true
         cfg.showSearchBar = true
@@ -6071,7 +6215,21 @@ private func trimmed(_ s: String) -> String? {
             updateFilterIndicators()
             w?.onTableColumnsResized?(columns.map(\.width), true)
         }
-        w.onEscape = { w.hide(restore: true) }
+        w.onEscape = { [weak self] in
+            guard inSlot, let self else { w.hide(restore: true); return }
+            if !w.currentQuery.isEmpty {
+                w.clearInput()
+                visibleOffset = 0
+                w.setRows(filteredRows(query: ""))
+                return
+            }
+            self.slot.back()
+        }
+        if cmd.name == "jira" && inSlot {
+            // the Cmd+F panel hides / returns with the list
+            w.onPark = { JiraSearchPanel.park(from: w) }
+            w.onUnpark = { JiraSearchPanel.unpark(to: w) }
+        }
         w.onHide = { [weak self] restore in
             guard let self else { return }
             reloadWatcher?.invalidate()
@@ -6148,6 +6306,7 @@ private func trimmed(_ s: String) -> String? {
         refreshPathLabel()
         subWindows.append(w)
         w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
+        placeSlotWindow(w)
         w.show()
         if isReleaseView, let f = pendingReleaseTab {
             pendingReleaseTab = nil
@@ -6183,9 +6342,6 @@ private func trimmed(_ s: String) -> String? {
         JiraSearchPanel.reattach(to: w)
     }
 
-    // Static favorite dirs + zoxide top-N for the file browser, taken from the
-    // [files] command section so the notes drawer and the floating window share
-    // the same config. Zoxide top-N requires `zoxide` on PATH.
     // [files] browser settings onto a window config (both the notes drawer
     // and the standalone files window read the [files] section)
     private func applyBrowserSettings(_ cfg: inout PopupConfig) {
@@ -6221,35 +6377,34 @@ private func trimmed(_ s: String) -> String? {
         log("opened \(app) in \(dir)")
     }
 
-    private func fileBrowserFavoritesConfig() -> (staticFavs: [String], zoxideTop: Int) {
-        let cmd = commands.first(where: { $0.kind == .files })
-        return (cmd?.favorites ?? [], cmd?.zoxideTop ?? 0)
+    // [files] favorites: the folder pills of both browsers (plus the ones
+    // starred in the browser itself)
+    private func fileBrowserFavorites() -> [String] {
+        commands.first(where: { $0.kind == .files })?.favorites ?? []
     }
 
-    // zoxide query -l lists every directory ranked by frecency; take the top N
-    // that still exist. Silent if zoxide is not installed.
-    private func zoxideTopDirs(_ n: Int) -> [String] {
-        guard n > 0 else { return [] }
-        var bin: String? = nil
-        for cand in ["/opt/homebrew/bin/zoxide", "/usr/local/bin/zoxide"] {
-            if FileManager.default.isExecutableFile(atPath: cand) { bin = cand; break }
+    // the pinned "Recent" pill of a browser: RecentFiles' newest files,
+    // refreshed live while it's open
+    private var recentObservers: [NSObjectProtocol] = []
+    func attachRecent(_ fb: PopupFileBrowser) {
+        guard RecentFiles.shared.enabled else { return }
+        fb.recentProvider = {
+            RecentFiles.shared.paths().map { p in
+                (p, RecentFiles.shared.activity(of: p) ?? Date.distantPast)
+            }
         }
-        guard let bin else { return [] }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = ["query", "-l"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return [] }
-        p.waitUntilExit()
-        let data = (try? out.fileHandleForReading.readToEnd()) ?? Data()
-        return String(data: data, encoding: .utf8)?
-            .split(separator: "\n")
-            .map { String($0).trimmingCharacters(in: .whitespaces) }
-            .filter { FileManager.default.fileExists(atPath: $0) }
-            .prefix(n)
-            .map { $0 } ?? []
+        let o = NotificationCenter.default.addObserver(forName: RecentFiles.changed, object: nil,
+                                                       queue: .main) { [weak fb] _ in
+            fb?.recentChanged()
+        }
+        recentObservers.append(o)
+    }
+
+    // [files] recent / recent-days / recent-limit / recent-exclude
+    func configureRecentFiles() {
+        let cmd = commands.first(where: { $0.kind == .files })
+        RecentFiles.shared.configure(enabled: cmd?.recent ?? true, days: cmd?.recentDays ?? 7,
+                                     limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [])
     }
 
     // Read-only file browser ("files" commands): a keyboard-driven directory
@@ -6348,12 +6503,11 @@ private func trimmed(_ s: String) -> String? {
             w.showHeaderMenu(menu)
         }
 
-        let favs = fileBrowserFavoritesConfig()
+        let favs = fileBrowserFavorites()
         var browserCfg = cfg
         applyBrowserSettings(&browserCfg)
         let fb = PopupFileBrowser(config: browserCfg, startDir: root,
-                                  staticFavorites: favs.staticFavs,
-                                  zoxideFavorites: zoxideTopDirs(favs.zoxideTop))
+                                  staticFavorites: favs)
         fb.onOpen = { [weak self] path in
             self?.log("files '\(cmd.name)': opened \(path)")
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
@@ -6381,7 +6535,11 @@ private func trimmed(_ s: String) -> String? {
         w.onFileBrowserOpenInNotes = { [weak self] p in
             self?.openNoteFile(p)
         }
+        attachRecent(fb)
         w.installFileBrowser(fb, drawer: false)
+        // Hyper+F opens on Recent (the latest download / screenshot);
+        // [files] start = root keeps the old folder start
+        if cmd.startRecent { fb.showRecent() }
 
         w.copyPathButtonLabel = "copy \(URL(fileURLWithPath: root).lastPathComponent) path"
         w.copyConfigButtonLabel = "copy config path"
@@ -6604,6 +6762,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSUpdateDynamicServices()
         MenuTarget.controller = c
         installStatusMenus(c)
+        // the file browsers' "Recent" view tracks new files from launch on
+        c.configureRecentFiles()
         if showOnLaunch {
             c.show()
         }
@@ -7417,6 +7577,11 @@ extension SwitcherController {
         w.releaseHooks()
         w.nativeWindow.orderOut(nil)
         if wasShown {
+            if settings.sharedWindow {
+                slot.memberGone(.notes)
+                if ensureSlotMember(.notes, frame: w.nativeWindow.frame) { slot.present(.notes) }
+                return
+            }
             openNoteWindow(commands[i], restoreWID: restoreWID, restorePID: restorePID)
         }
     }
@@ -7424,6 +7589,7 @@ extension SwitcherController {
     // re-read commands.conf and rebuild the notes window from it
     func reloadConfig() {
         commands = loadCommands()
+        configureRecentFiles()
         fontFamilyCache = nil
         log("config reloaded (\(commands.count) commands)")
         rebuildNoteWindow()
@@ -7799,7 +7965,16 @@ extension SwitcherController {
     }
 
     func showJiraDashboard() {
-        JiraDashboardWindow.show(controller: self)
+        guard settings.sharedWindow else {
+            JiraDashboardWindow.show(controller: self)
+            return
+        }
+        // in place of the jira view (Esc / back returns to it)
+        if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
+        JiraDashboardWindow.show(controller: self, present: false)
+        JiraDashboardWindow.current?.onSlotBack = { [weak self] in self?.slot.back() }
+        JiraDashboardWindow.current?.onSlotHide = { [weak self] in self?.slot.hide() }
+        slot.push(.config)
     }
 
     // "Poll Now": non-blocking; the poll holds its own lock, the dashboard
@@ -7821,6 +7996,16 @@ extension SwitcherController {
     // tab's current columns (after Jira Config window edits)
     func reloadJiraWindow() {
         guard let w = subWindows.first(where: { $0.config.name == "jira" }) else { return }
+        if settings.sharedWindow {
+            // rebuild in place: same frame, still the visible view if it was
+            let wasCurrent = slot.current == .jira && w.isShown
+            let f = w.nativeWindow.frame
+            jiraShowTab = nil
+            closeSlotWindow(w)
+            subWindows.removeAll { $0 === w }
+            if wasCurrent, ensureSlotMember(.jira, frame: f) { slot.present(.jira) }
+            return
+        }
         let wasShown = w.isShown
         jiraShowTab = nil
         w.hide(restore: false)
