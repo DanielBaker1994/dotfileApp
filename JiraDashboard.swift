@@ -6,7 +6,7 @@ import AppKit
 // `workspace-switcher jira-poll dashboard`). Master–detail:
 //
 //   sidebar          POLL JOBS  (each endpoint in config.json, + Add Poll Job)
-//                    SETTINGS   (Live Search, Connection, Definitions)
+//                    SETTINGS   (Setup, Live Search, Connection, Definitions)
 //   detail           the selected item's editor
 //
 // Poll job editor: its settings (projects from a picker, page size / max
@@ -15,6 +15,14 @@ import AppKit
 // (Copy curl), Save / Revert / Delete, and Force Poll (warns when a poll is
 // already running). The `directory` job caches projects + users + statuses
 // for the pickers (weekly; no tab).
+// Setup: the projects in scope (typed by the user, never looked up — every
+// query stays inside them; team.json project_keys), the one-time setup
+// (`jira_poll.py --setup`: each step run + confirmed alone, Run / Retry per
+// step; scheduled polling starts when all are ✓), the shared issue cache
+// (last sync, an interrupted sync's resume point) and Rebuild from scratch.
+// While a poll runs, status.json `progress` is re-read every second: the
+// header and the Setup page show "Issue cache: 1,200 / 10,412 (11%)" or the
+// rate-limit countdown. The full history is ~/.cache/jira/poll.log.
 // Live Search: the Cmd+F search tab's columns + max results.
 // Definitions: everything team.json defines (projects, custom fields, API
 // endpoints, JQL templates, search defaults) — add / edit (double-click) /
@@ -26,6 +34,47 @@ import AppKit
 // / --team-set), which validates before writing. Config stays the source of
 // truth; the window is a view + editor over it.
 // Sizes / refresh: [jira] dashboard-width, dashboard-height, dashboard-refresh.
+//
+// Look: the Jira window's own theme (jiraWindowColors) — deep header,
+// mantle sidebar, themed buttons/pop-ups, status text in the palette's
+// success / warning / danger hues.
+
+// the window's palette roles (re-read each time the window opens)
+enum JC {
+    static var colors = jiraWindowColors()
+    static var text: NSColor { colors.text }
+    static var dim: NSColor { colors.dim }
+    static var faint: NSColor { colors.dim.withAlphaComponent(0.6) }
+    static var accent: NSColor { colors.accentOn }
+    static var ok: NSColor { colors.tone(.success) }
+    static var warn: NSColor { colors.tone(.warning) }
+    static var err: NSColor { colors.tone(.danger) }
+
+    // a scroll view as a recessed well (mantle + hairline + rounded)
+    static func well(_ sv: NSScrollView) {
+        sv.borderType = .noBorder
+        sv.wantsLayer = true
+        sv.layer?.cornerRadius = 6
+        sv.layer?.borderWidth = 1
+        sv.layer?.borderColor = ButtonStyle.inputStroke(colors).cgColor
+        sv.layer?.masksToBounds = true
+        sv.drawsBackground = true
+        sv.backgroundColor = colors.mantle.withAlphaComponent(0.7)
+    }
+    // a data table inside a well: clear background, themed stripes/selection
+    // (PopupTableRowView via rowViewForRow)
+    static func table(_ t: NSTableView) {
+        t.usesAlternatingRowBackgroundColors = false
+        t.backgroundColor = .clear
+        t.style = .plain
+    }
+    static func rowView(_ row: Int) -> NSTableRowView {
+        let v = PopupTableRowView()
+        v.colors = colors
+        v.striped = row % 2 == 1
+        return v
+    }
+}
 
 // A label/control form in an NSAlert sheet (the window floats above the
 // popups: an app-modal alert would open hidden behind it). `then(true)` =
@@ -35,7 +84,7 @@ func jiraFormSheet(on window: NSWindow, title: String, info: String, rows: [(Str
     let g = NSGridView(views: rows.map { r -> [NSView] in
         let l = NSTextField(labelWithString: r.0)
         l.alignment = .right
-        l.textColor = .secondaryLabelColor
+        l.textColor = JC.dim
         return [l, r.1]
     })
     g.rowSpacing = 8
@@ -66,7 +115,7 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
     var onChange: (() -> Void)?
     weak var sheetWindow: NSWindow?
     let table = NSTableView()
-    let copyFrom = NSPopUpButton(frame: .zero, pullsDown: true)
+    let copyFrom = ThemedPopUpButton(frame: .zero, pullsDown: true)
     var copySources: [(String, String)] = []     // (menu title, columns spec)
     private(set) var view = NSView()
 
@@ -87,7 +136,7 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         table.dataSource = self
         table.delegate = self
         table.rowHeight = 22
-        table.usesAlternatingRowBackgroundColors = true
+        JC.table(table)
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.target = self
         table.doubleAction = #selector(editClicked(_:))
@@ -95,14 +144,14 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         sv.documentView = table
         sv.hasVerticalScroller = true
         sv.hasHorizontalScroller = true
-        sv.borderType = .bezelBorder
+        JC.well(sv)
 
         copyFrom.addItem(withTitle: "Copy columns from…")
         copyFrom.target = self
         copyFrom.action = #selector(copyColumns(_:))
         copyFrom.controlSize = .small
         func btn(_ t: String, _ a: Selector, _ tip: String? = nil) -> NSButton {
-            let b = NSButton(title: t, target: self, action: a)
+            let b = ThemedPushButton(title: t, target: self, action: a)
             b.bezelStyle = .rounded
             b.controlSize = .small
             b.toolTip = tip
@@ -110,7 +159,7 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         }
         let hint = NSTextField(labelWithString: "Double-click a column to edit it")
         hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .tertiaryLabelColor
+        hint.textColor = JC.faint
         let bar = NSStackView(views: [btn("Add…", #selector(add(_:))), btn("Edit…", #selector(editClicked(_:))),
                                       btn("Remove", #selector(remove(_:))),
                                       btn("◀", #selector(up(_:)), "Move left"),
@@ -164,6 +213,10 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         return c
     }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        JC.rowView(row)
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let id = tableColumn?.identifier.rawValue, row < cols.count else { return nil }
         let c = cols[row]
@@ -173,11 +226,11 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         case "title": l.stringValue = fieldName(c.field)
         case "field":
             let s = NSMutableAttributedString(string: c.field, attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor])
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: JC.text])
             let extra = [apiText(c.field)].filter { !$0.isEmpty && $0 != c.field }
             if !extra.isEmpty {
                 s.append(NSAttributedString(string: "  " + extra.joined(separator: " · "), attributes: [
-                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+                    .font: NSFont.systemFont(ofSize: 11), .foregroundColor: JC.dim]))
             }
             l.attributedStringValue = s
         case "width": l.stringValue = c.width == 0 ? "auto" : (c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width))
@@ -186,7 +239,7 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         case "filter": l.stringValue = c.filterable ? "✓" : ""
         default: return nil
         }
-        if id == "width" || id == "align" { l.textColor = .secondaryLabelColor }
+        if id == "width" || id == "align" { l.textColor = JC.dim }
         l.toolTip = id == "field" ? "\(c.field) — \(fieldName(c.field)) \(apiText(c.field))" : l.stringValue
         return cell(l)
     }
@@ -214,7 +267,7 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         field.placeholderString = "created, duedate, customfield_10010, a team alias…"
         let width = NSTextField(string: c.width == 0 ? "" : String(format: c.width == c.width.rounded() ? "%.0f" : "%.1f", c.width))
         width.placeholderString = "percent of the row — empty = share the leftover"
-        let align = NSPopUpButton(frame: .zero, pullsDown: false)
+        let align = ThemedPopUpButton(frame: .zero, pullsDown: false)
         align.addItems(withTitles: ["left", "center", "right"])
         align.selectItem(withTitle: c.align)
         let sort = NSButton(checkboxWithTitle: "Sortable — click the header to sort", target: nil, action: nil)
@@ -319,7 +372,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private static var live: JiraDashboardWindow?
 
     private enum Item: Equatable {
-        case group(String), job(String), addJob, liveSearch, connection, definitions
+        case group(String), job(String), addJob, setup, liveSearch, connection, definitions
     }
 
     private weak var controller: SwitcherController?
@@ -341,9 +394,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     // header
     private let statusLine = NSTextField(labelWithString: "Loading…")
     private let problemsLine = NSTextField(wrappingLabelWithString: "")
-    private let enableButton = NSButton(title: "Enable Jira", target: nil, action: nil)
-    private let stopButton = NSButton(title: "Stop Poll", target: nil, action: nil)
-    private let openMenu = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let enableButton = ThemedPushButton(title: "Enable Jira", target: nil, action: nil)
+    private let stopButton = ThemedPushButton(title: "Stop Poll", target: nil, action: nil)
+    private let openMenu = ThemedPopUpButton(frame: .zero, pullsDown: true)
 
     // layout
     private let sidebar = NSTableView()
@@ -357,12 +410,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let fileLabel = NSTextField(labelWithString: "")
     // where the job lives: config.json › endpoints › NAME (+ open it)
     private let sourceLabel = NSTextField(labelWithString: "")
-    private let openConfigButton = NSButton(title: "Open config.json", target: nil, action: nil)
+    private let openConfigButton = ThemedPushButton(title: "Open config.json", target: nil, action: nil)
     private lazy var sourceRow: NSStackView = row([sourceLabel, openConfigButton])
-    private let typePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let typePopup = ThemedPopUpButton(frame: .zero, pullsDown: false)
     private let everyBox = NSComboBox()
-    private let projectsPicker = JiraMultiPicker(noun: "project", allTitle: "All projects")
-    private let queryPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let projectsPicker = JiraMultiPicker(noun: "project", allTitle: "All projects in scope")
+    private let queryPopup = ThemedPopUpButton(frame: .zero, pullsDown: false)
     private let jqlField = NSTextField()
     private let argsField = NSTextField()
     private let pageSizeField = NSTextField()
@@ -371,13 +424,24 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let editorStatus = NSTextField(wrappingLabelWithString: "")
     private let editorMsg = NSTextField(wrappingLabelWithString: "")
     private let requestText = NSTextView()
-    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
-    private let revertButton = NSButton(title: "Revert", target: nil, action: nil)
-    private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
-    private let actionButton = NSButton(title: "Force Poll", target: nil, action: nil)
-    private let copyCurlButton = NSButton(title: "Copy curl", target: nil, action: nil)
+    private let saveButton = ThemedPushButton(title: "Save", target: nil, action: nil)
+    private let revertButton = ThemedPushButton(title: "Revert", target: nil, action: nil)
+    private let deleteButton = ThemedPushButton(title: "Delete…", target: nil, action: nil)
+    private let actionButton = ThemedPushButton(title: "Force Poll", target: nil, action: nil)
+    private let copyCurlButton = ThemedPushButton(title: "Copy curl", target: nil, action: nil)
     private var colsTitle = NSTextField(labelWithString: "")
     private let liveMaxField = NSTextField()
+
+    // setup page: projects in scope, the one-time setup steps, the issue cache
+    private let scopeField = NSTextField()
+    private let setupSteps = NSStackView()
+    private let setupIntro = NSTextField(wrappingLabelWithString: "")
+    private let setupProgress = NSTextField(wrappingLabelWithString: "")
+    private let setupMsg = NSTextField(wrappingLabelWithString: "")
+    private let cacheText = NSTextField(wrappingLabelWithString: "")
+    private let runSetupButton = ThemedPushButton(title: "Run Setup", target: nil, action: nil)
+    private let rebuildButton = ThemedPushButton(title: "Rebuild Cache from Scratch…", target: nil, action: nil)
+    private var liveHeld = false          // the lock as last seen in status.json (1s timer)
 
     // connection / definitions
     private let connText = NSTextView()
@@ -394,10 +458,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private var defKeys: [String] = []           // row -> team.json key / alias / project key
     private let defHint = NSTextField(wrappingLabelWithString: "")
     private let defMsg = NSTextField(wrappingLabelWithString: "")
-    private let defAdd = NSButton(title: "Add…", target: nil, action: nil)
-    private let defEdit = NSButton(title: "Edit…", target: nil, action: nil)
-    private let defRemove = NSButton(title: "Remove", target: nil, action: nil)
-    private let defFetch = NSButton(title: "Fetch from Jira now", target: nil, action: nil)
+    private let defAdd = ThemedPushButton(title: "Add…", target: nil, action: nil)
+    private let defEdit = ThemedPushButton(title: "Edit…", target: nil, action: nil)
+    private let defRemove = ThemedPushButton(title: "Remove", target: nil, action: nil)
+    private let defFetch = ThemedPushButton(title: "Fetch from Jira now", target: nil, action: nil)
 
     static func show(controller: SwitcherController) {
         if let w = live {
@@ -406,6 +470,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             w.window.makeKeyAndOrderFront(nil)
             return
         }
+        // the Jira window's current theme (Theme ▸ presets may have changed it)
+        JC.colors = jiraWindowColors()
+        PopupThemeDefaults.colors = JC.colors
         let w = JiraDashboardWindow(controller: controller)
         live = w
         NSApp.activate(ignoringOtherApps: true)
@@ -441,11 +508,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     // rounded like them, with their header strip on top
     private func themedRoot(_ content: NSView) -> NSView {
         var cfg = PopupConfig(name: "jira-config")
-        cfg.colors = PopupColors(background: BAR, border: BORDER, text: TEXT, dim: DIM,
-                                 highlight: GROUP_BG, accent: ACCENT)
+        cfg.colors = JC.colors
         cfg.headerHeight = 30
         cfg.titlePill = false
-        cfg.headerColor = headerBlueSilver
+        cfg.headerColor = jiraHeaderColor
+        let card = cfg.colors.base
         let radius = cfg.cornerRadius + 1
         window.cornerRadius = radius
         window.titlebarAppearsTransparent = true
@@ -456,8 +523,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        let light = ButtonStyle.luminance(BAR) > 0.45
-        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.appearance = NSAppearance(named: cfg.colors.isLight ? .aqua : .darkAqua)
 
         let root = NSView()
         root.wantsLayer = true
@@ -470,8 +536,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let tint = NSView()
         tint.wantsLayer = true
         // denser than the list windows' card: this window is all form text
-        tint.layer?.backgroundColor = BAR.withAlphaComponent(max(cfg.tintAlpha, 0.92)).cgColor
-        tint.layer?.borderColor = BORDER.cgColor
+        tint.layer?.backgroundColor = card.withAlphaComponent(max(cfg.tintAlpha, 0.92)).cgColor
+        tint.layer?.borderColor = cfg.colors.border.cgColor
         tint.layer?.borderWidth = 1
         tint.layer?.cornerRadius = radius
         let ch = PopupChrome(config: cfg)
@@ -485,7 +551,23 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
-        for v in [fx, tint] as [NSView] { pinned(v, in: root) }
+        // pin the blur + tint WITHOUT re-adding them: addSubview on a view
+        // that's already a child moves it to the TOP, which buried the
+        // header and every control under the 92%-opaque tint (a blank card)
+        for v in [fx, tint] as [NSView] {
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+                v.topAnchor.constraint(equalTo: root.topAnchor),
+                v.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            ])
+        }
+        // every themed control in the form takes the window palette
+        func walk(_ v: NSView) {
+            (v as? PopupThemeable)?.applyColors(cfg.colors)
+            v.subviews.forEach(walk)
+        }
+        walk(content)
         NSLayoutConstraint.activate([
             ch.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             ch.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -548,7 +630,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func monoTextView(_ tv: NSTextView) -> NSScrollView {
         let sv = NSScrollView()
         sv.hasVerticalScroller = true
-        sv.borderType = .bezelBorder
+        // a recessed code well (mantle + hairline), like the popup inputs
+        JC.well(sv)
+        tv.drawsBackground = false
+        tv.textColor = JC.text
+        tv.selectedTextAttributes = ButtonStyle.selection(JC.colors)
         tv.isEditable = false
         tv.isSelectable = true
         tv.isRichText = true
@@ -562,16 +648,18 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     private func sectionTitle(_ s: String) -> NSTextField {
+        // same voice as the sidebar's group headers: small caps in the accent
         let l = NSTextField(labelWithString: s)
-        l.font = .systemFont(ofSize: 11, weight: .semibold)
-        l.textColor = .secondaryLabelColor
+        l.attributedStringValue = NSAttributedString(string: s.uppercased(), attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .bold), .kern: 0.8,
+            .foregroundColor: JC.accent])
         return l
     }
 
     private func hint(_ s: String) -> NSTextField {
         let l = NSTextField(wrappingLabelWithString: s)
         l.font = .systemFont(ofSize: 11)
-        l.textColor = .secondaryLabelColor
+        l.textColor = JC.dim
         return l
     }
 
@@ -580,7 +668,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         statusLine.font = .systemFont(ofSize: 13, weight: .semibold)
         statusLine.lineBreakMode = .byTruncatingTail
         problemsLine.font = .systemFont(ofSize: 11)
-        problemsLine.textColor = .systemRed
+        problemsLine.textColor = JC.err
         problemsLine.isHidden = true
         openMenu.addItem(withTitle: "Open…")
         openMenu.bezelStyle = .rounded
@@ -588,9 +676,13 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         openMenu.action = #selector(openFile(_:))
         openMenu.toolTip = "Open a jira file in the notes window"
         stopButton.isHidden = true
+        (stopButton as? ThemedPushButton)?.role = .danger
+        (saveButton as? ThemedPushButton)?.role = .primary
+        (deleteButton as? ThemedPushButton)?.role = .danger
+        (defRemove as? ThemedPushButton)?.role = .danger
         let header = row([
             button(enableButton, #selector(toggleEnabled(_:)), tip: "[jira] enabled — the Jira window + the launchd poll agent"),
-            button(NSButton(title: "Setup…", target: nil, action: nil), #selector(setup(_:)), tip: "Site, token, auth"),
+            button(ThemedPushButton(title: "Setup…", target: nil, action: nil), #selector(setup(_:)), tip: "Site, token, auth"),
             openMenu,
             button(stopButton, #selector(stopPoll(_:)), tip: "Stop the running poll (jira_poll.py --cancel)"),
         ])
@@ -603,7 +695,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         col.width = 200
         sidebar.addTableColumn(col)
         sidebar.headerView = nil
-        sidebar.style = .sourceList
+        // an inset list (not .sourceList: its vibrancy + system-blue
+        // selection ignored the theme) on a deeper mantle panel
+        sidebar.style = .inset
+        sidebar.backgroundColor = .clear
+        sidebar.floatsGroupRows = false
         sidebar.rowHeight = 26
         sidebar.dataSource = self
         sidebar.delegate = self
@@ -611,6 +707,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         sideSV.documentView = sidebar
         sideSV.hasVerticalScroller = true
         sideSV.drawsBackground = false
+        sideSV.wantsLayer = true
+        sideSV.layer?.backgroundColor = JC.colors.mantle.withAlphaComponent(0.55).cgColor
 
         let split = NSSplitView()
         split.isVertical = true
@@ -650,7 +748,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     private func setupEditorControls() {
-        sourceLabel.textColor = .secondaryLabelColor
+        sourceLabel.textColor = JC.dim
         sourceLabel.lineBreakMode = .byTruncatingMiddle
         sourceLabel.isSelectable = true
         openConfigButton.controlSize = .small
@@ -663,7 +761,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         argsField.placeholderString = "name=value, name=value"
         maxTotalField.placeholderString = "empty = every matching issue"
         liveMaxField.placeholderString = "100"
-        projectsPicker.placeholder = "All projects"
+        projectsPicker.placeholder = "All projects in scope"
         projectsPicker.onChange = { [weak self] in self?.markDirty() }
         for f in [nameField, jqlField, argsField, everyBox, pageSizeField, maxTotalField, liveMaxField] as [NSTextField] {
             NotificationCenter.default.addObserver(self, selector: #selector(textDidChange(_:)),
@@ -679,7 +777,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         enabledCheck.action = #selector(fieldChanged(_:))
         editorStatus.font = .systemFont(ofSize: 12)
         editorMsg.font = .systemFont(ofSize: 12)
-        fileLabel.textColor = .secondaryLabelColor
+        fileLabel.textColor = JC.dim
         fileLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         button(saveButton, #selector(save(_:)), tip: "Validate + write config.json (⌘S)")
         button(revertButton, #selector(revert(_:)))
@@ -725,12 +823,45 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     // MARK: data
 
+    // 1s tick: while a poll runs the live progress comes straight from
+    // status.json (no python); the full --describe runs every dashboard-refresh
     private func startTimer() {
         let secs = max(2, Double(jiraConfigValue("dashboard-refresh") ?? "") ?? 5)
-        timer = Timer.scheduledTimer(withTimeInterval: secs, repeats: true) { [weak self] _ in
+        var last = Date()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, self.window.isVisible else { return }
-            self.refresh()
+            if Date().timeIntervalSince(last) >= secs {
+                last = Date()
+                self.refresh()
+            }
+            if self.lockHeld || self.liveHeld || !JiraPoll.running.isEmpty { self.updateProgress() }
         }
+    }
+
+    private func updateProgress() {
+        guard let data = FileManager.default.contents(atPath: JiraPoll.statusPath),
+              let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        let held = (st["lock"] as? [String: Any])?["held"] as? Bool ?? false
+        let text = held ? progressText(st["progress"] as? [String: Any] ?? [:]) : ""
+        if liveHeld && !held { refresh() }         // just finished: rows, counts, errors
+        liveHeld = held
+        if current == .setup { setupProgress.stringValue = text; setupProgress.isHidden = text.isEmpty }
+        if held, !text.isEmpty, setupDone {
+            statusLine.stringValue = "● Polling on — " + text
+            statusLine.textColor = JC.text
+        }
+    }
+
+    // status.json progress -> one line; a rate-limit wait counts down live
+    private func progressText(_ p: [String: Any]) -> String {
+        let stage = p["stage"] as? String ?? ""
+        if let wu = p["waitingUntil"] as? Double, wu > Date().timeIntervalSince1970 {
+            let left = Int(wu - Date().timeIntervalSince1970)
+            let reason = p["reason"] as? String ?? "waiting"
+            return "\(stage.isEmpty ? "" : stage + ": ")\(reason) — resuming in "
+                + (left < 60 ? "\(left)s" : "\(left / 60)m \(left % 60)s")
+        }
+        return p["message"] as? String ?? ""
     }
 
     func refresh(then: (() -> Void)? = nil) {
@@ -742,7 +873,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             guard let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] else {
                 self.statusLine.stringValue = "✗ jira_poll.py --describe failed: "
                     + JiraPoll.errorLine(err, fallback: "exit \(code)")
-                self.statusLine.textColor = .systemRed
+                self.statusLine.textColor = JC.err
                 return
             }
             self.apply(d)
@@ -758,12 +889,14 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         if fetched != dir.fetchedAt { dir = JiraDirectory.load() }
         var its: [Item] = [.group("POLL JOBS")]
         its += eps.compactMap { ($0["name"] as? String).map(Item.job) }
-        its += [.addJob, .group("SETTINGS"), .liveSearch, .connection, .definitions]
+        its += [.addJob, .group("SETTINGS"), .setup, .liveSearch, .connection, .definitions]
         items = its
         sidebar.reloadData()
         if !didInitialSelect {
             didInitialSelect = true
-            current = eps.first.flatMap { ($0["name"] as? String).map(Item.job) } ?? .connection
+            // setup not finished (or no projects in scope): that page first
+            current = !setupDone ? .setup
+                : eps.first.flatMap { ($0["name"] as? String).map(Item.job) } ?? .connection
             showItem(current)
         } else if !items.contains(current) {
             current = .connection
@@ -779,6 +912,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     private var lockHeld: Bool { (info["lock"] as? [String: Any])?["held"] as? Bool ?? false }
+    private var setupInfo: [String: Any] { info["setup"] as? [String: Any] ?? [:] }
+    private var scope: [String] { info["scope"] as? [String] ?? [] }
+    private var setupDone: Bool { (setupInfo["state"] as? String ?? "done") == "done" && !scope.isEmpty }
     private var searchDefault: Int { (info["searchDefaults"] as? [String: Any])?["max_results_search"] as? Int ?? 50 }
 
     private func updateHeader() {
@@ -790,13 +926,16 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let lr = info["lastRun"] as? String ?? ""
         let failed = !(info["lastError"] as? String ?? "").isEmpty
         var line = enabled ? "● Polling on" : bg ? "◐ Polling in the background (Jira window off)" : "○ Polling off"
-        if lockHeld {
-            line += " — polling now…"
+        if !setupDone {
+            line += scope.isEmpty ? " — enter the projects in scope (Setup)" : " — setup not finished (Setup)"
+        } else if lockHeld {
+            let p = progressText(info["progress"] as? [String: Any] ?? [:])
+            line += " — " + (p.isEmpty ? "polling now…" : p)
         } else if !lr.isEmpty {
             line += failed ? " — last poll failed \(JiraPoll.short(lr))" : " — last checked \(JiraPoll.short(lr))"
         }
         statusLine.stringValue = line
-        statusLine.textColor = !enabled ? .secondaryLabelColor : failed ? .systemOrange : .labelColor
+        statusLine.textColor = !enabled ? JC.dim : failed ? JC.warn : JC.text
         var tip = ["\(eps.count) poll job\(eps.count == 1 ? "" : "s") in \(info["configPath"] as? String ?? JiraPoll.configPath)",
                    "launchd tick: \(info["tick"] as? String ?? "60s") — each job runs when its own interval is due"]
         if !lr.isEmpty { tip.append("last run \(lr) \(info["status"] as? String ?? "")") }
@@ -808,6 +947,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         problemsLine.stringValue = probs.map { "⚠ " + $0 }.joined(separator: "\n")
         problemsLine.isHidden = probs.isEmpty
         enableButton.title = enabled ? "Disable Jira" : "Enable Jira"
+        (enableButton as? ThemedPushButton)?.role = enabled ? .normal : .primary
         stopButton.isHidden = !(lockHeld || !JiraPoll.running.isEmpty)
 
         while openMenu.numberOfItems > 1 { openMenu.removeItem(at: 1) }
@@ -818,6 +958,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             ("commands.conf", info["commandsConf"] as? String),
             ("Poll status (status.json)", info["statusPath"] as? String ?? JiraPoll.statusPath),
             ("Directory cache (directory.json)", JiraPoll.directoryPath),
+            ("Poll log (poll.log)", info["pollLog"] as? String),
             ("curl log", info["curlLog"] as? String ?? JiraPoll.curlLogPath),
         ]
         for (title, path) in files {
@@ -838,6 +979,16 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         tableView === sidebar ? items.count : defRows.count
     }
 
+    // themed selection (highlight pill + accent edge) in both tables
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        if tableView === sidebar {
+            let v = PopupTableRowView()
+            v.colors = JC.colors
+            return v
+        }
+        return JC.rowView(row)
+    }
+
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
         guard tableView === sidebar, row < items.count, case .group = items[row] else { return false }
         return true
@@ -856,8 +1007,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     private func statusColor(_ st: String) -> NSColor {
-        st == "ok" ? .systemGreen : st == "error" ? .systemRed
-            : st == "running" ? .systemOrange : .tertiaryLabelColor
+        st == "ok" ? JC.ok : st == "error" ? JC.err
+            : st == "running" ? JC.warn : JC.faint
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -866,12 +1017,14 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let c = NSTableCellView()
         let l = NSTextField(labelWithString: "")
         l.lineBreakMode = .byTruncatingTail
+        l.textColor = JC.text
         var dot: NSColor?
         switch items[row] {
         case .group(let t):
-            l.stringValue = t
-            l.font = .systemFont(ofSize: 11, weight: .semibold)
-            l.textColor = .secondaryLabelColor
+            // section headers in the accent, small caps-style
+            l.attributedStringValue = NSAttributedString(string: t.uppercased(), attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold), .kern: 0.8,
+                .foregroundColor: JC.accent])
         case .job(let n):
             let e = eps.first { $0["name"] as? String == n } ?? [:]
             var st = e["status"] as? String ?? ""
@@ -881,7 +1034,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             l.stringValue = "\(n)  ·  \(e["window"] as? String ?? "")\(off)"
         case .addJob:
             l.stringValue = "+ Add Poll Job"
-            l.textColor = .controlAccentColor
+            l.textColor = JC.colors.tone(.accent2)
+        case .setup:
+            dot = setupDone ? JC.ok : JC.warn
+            l.stringValue = setupDone ? "Setup" : "Setup  (to do)"
         case .liveSearch: l.stringValue = "Live Search  ⌘F"
         case .connection: l.stringValue = "Connection"
         case .definitions: l.stringValue = "Definitions"
@@ -949,6 +1105,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         switch it {
         case .job(let n): showEditor(data: eps.first { $0["name"] as? String == n }, new: false)
         case .addJob: showEditor(data: nil, new: true)
+        case .setup: showSetup()
         case .liveSearch: showLiveSearch()
         case .connection: showConnection()
         case .definitions: showDefinitions()
@@ -971,7 +1128,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let g = NSGridView(views: rows.map { r -> [NSView] in
             let l = NSTextField(labelWithString: r.0)
             l.alignment = .right
-            l.textColor = .secondaryLabelColor
+            l.textColor = JC.dim
             return [l, r.1]
         })
         g.rowSpacing = 7
@@ -1014,7 +1171,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         nameField.isSelectable = true
         nameField.placeholderString = "e.g. team-bugs"
         // projects: only known keys (directory ∪ team.json project_keys)
-        projectsPicker.options = dir.projectOptions(extra: info["projectKeys"] as? [String] ?? [])
+        projectsPicker.options = dir.projectOptions(scope: scope)
         if let p = d["projects"] as? [String] { projectsPicker.set(p) } else { projectsPicker.set([], all: true) }
         loadColumns(d["columnsSpec"] as? String, me: d["name"] as? String)
 
@@ -1118,6 +1275,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         switch current {
         case .job, .addJob: break
         case .liveSearch, .group: return
+        case .setup: updateSetup(); return
         case .connection: updateConnection(); return
         case .definitions: reloadDefinitions(); return
         }
@@ -1128,7 +1286,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         guard let d = liveData, !isNew else {
             editorStatus.stringValue = "New poll job — give it a name, a schedule and a query, then Save. "
                 + "It becomes its own tab in the Jira window."
-            editorStatus.textColor = .secondaryLabelColor
+            editorStatus.textColor = JC.dim
             requestText.string = "Save to see the exact JQL and curl requests."
             return
         }
@@ -1150,15 +1308,15 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         editorStatus.toolTip = type == "issues"
             ? "Next poll fetches issues updated since \(d["nextWindow"] as? String ?? "?") (every \(d["window"] as? String ?? "?"))"
             : "Runs every \(d["window"] as? String ?? "?")"
-        editorStatus.textColor = statusColor(st) == .tertiaryLabelColor ? .secondaryLabelColor : statusColor(st)
+        editorStatus.textColor = statusColor(st) == JC.faint ? JC.dim : statusColor(st)
 
         let out = NSMutableAttributedString()
         let mono = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
         let bold = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .bold)
         func head(_ s: String) {
-            out.append(NSAttributedString(string: s + "\n", attributes: [.font: bold, .foregroundColor: NSColor.secondaryLabelColor]))
+            out.append(NSAttributedString(string: s + "\n", attributes: [.font: bold, .foregroundColor: JC.dim]))
         }
-        func line(_ s: String, _ c: NSColor = .labelColor) {
+        func line(_ s: String, _ c: NSColor = JC.text) {
             out.append(NSAttributedString(string: s + "\n", attributes: [.font: mono, .foregroundColor: c]))
         }
         if let jql = d["jql"] as? String, !jql.isEmpty {
@@ -1166,18 +1324,18 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             line(jql)
         }
         for r in d["requests"] as? [[String: Any]] ?? [] {
-            line("# \(r["purpose"] as? String ?? "")", .secondaryLabelColor)
+            line("# \(r["purpose"] as? String ?? "")", JC.dim)
             line(r["curl"] as? String ?? "")
         }
         if let err = d["lastError"] as? String, !err.isEmpty {
             head("\nLAST ERROR")
-            line(err, .systemRed)
+            line(err, JC.err)
             if let c = d["lastCurl"] as? String, !c.isEmpty {
-                line("# the failing request ($JIRA_TOKEN = your token)", .secondaryLabelColor)
+                line("# the failing request ($JIRA_TOKEN = your token)", JC.dim)
                 line(c)
             }
         }
-        for n in d["notes"] as? [String] ?? [] { line("ℹ︎ \(n)", .secondaryLabelColor) }
+        for n in d["notes"] as? [String] ?? [] { line("ℹ︎ \(n)", JC.dim) }
         let keep = requestText.enclosingScrollView?.contentView.bounds.origin
         requestText.textStorage?.setAttributedString(out)
         if let o = keep { requestText.enclosingScrollView?.contentView.scroll(to: o) }
@@ -1224,7 +1382,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let s = f.stringValue.trimmingCharacters(in: .whitespaces)
         if s.isEmpty { return 0 }
         guard let n = Int(s), n >= 0 else {
-            editorMsg.textColor = .systemRed
+            editorMsg.textColor = JC.err
             editorMsg.stringValue = "✗ \(what) must be a whole number (empty = default)"
             return nil
         }
@@ -1262,7 +1420,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func persist(then: ((String) -> Void)?) {
         guard let o = draftJSON(), let data = try? JSONSerialization.data(withJSONObject: o) else { return }
         let name = o["name"] as? String ?? ""
-        editorMsg.textColor = .secondaryLabelColor
+        editorMsg.textColor = JC.dim
         editorMsg.stringValue = "Saving…"
         JiraPoll.run("jira_config.py", ["--upsert-endpoint"],
                      stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
@@ -1270,7 +1428,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
             guard code == 0, r["ok"] as? Bool == true else {
                 let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
-                self.editorMsg.textColor = .systemRed
+                self.editorMsg.textColor = JC.err
                 self.editorMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
                 return
             }
@@ -1283,7 +1441,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             self.updateButtons()
             self.controller?.reloadJiraWindow()
             self.refresh {
-                self.editorMsg.textColor = .systemGreen
+                self.editorMsg.textColor = JC.ok
                 self.editorMsg.stringValue = "✓ Saved to config.json"
                 then?(name)
             }
@@ -1314,7 +1472,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             guard let self else { return }
             let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
             guard code == 0, r["ok"] as? Bool == true else {
-                self.editorMsg.textColor = .systemRed
+                self.editorMsg.textColor = JC.err
                 self.editorMsg.stringValue = "✗ " + (r["problems"] as? [String] ?? ["delete failed"]).joined(separator: "; ")
                 return
             }
@@ -1380,7 +1538,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-        editorMsg.textColor = .secondaryLabelColor
+        editorMsg.textColor = JC.dim
         editorMsg.stringValue = "curl copied (\(reqs.count) request\(reqs.count == 1 ? "" : "s"), includes the token)"
     }
 
@@ -1429,7 +1587,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
             guard code == 0, r["ok"] as? Bool == true else {
                 let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
-                self.editorMsg.textColor = .systemRed
+                self.editorMsg.textColor = JC.err
                 self.editorMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
                 return
             }
@@ -1437,7 +1595,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             self.updateButtons()
             self.controller?.reloadJiraWindow()
             self.refresh {
-                self.editorMsg.textColor = .systemGreen
+                self.editorMsg.textColor = JC.ok
                 self.editorMsg.stringValue = "✓ Saved to config.json"
             }
         }
@@ -1474,14 +1632,257 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         refresh()
     }
 
+    // MARK: setup (projects in scope + the one-time setup + the issue cache)
+
+    private func showSetup() {
+        scopeField.placeholderString = "e.g. SAM1, KAN"
+        scopeField.stringValue = scope.joined(separator: ", ")
+        scopeField.toolTip = "Project keys, comma or space separated — saved as team.json project_keys"
+        let saveScope = button(ThemedPushButton(title: "Save Projects", target: nil, action: nil),
+                               #selector(saveScopeClicked(_:)), tip: "Validate + write team.json project_keys")
+        runSetupButton.role = .primary
+        button(runSetupButton, #selector(runSetupAll(_:)),
+               tip: "Run every step that is not ✓ yet, one at a time (jira_poll.py --setup)")
+        rebuildButton.role = .danger
+        button(rebuildButton, #selector(rebuildClicked(_:)),
+               tip: "Delete the cached tickets and fetch everything again (jira_poll.py --rebuild)")
+        let openLog = button(ThemedPushButton(title: "Open poll.log", target: nil, action: nil),
+                             #selector(openPollLog(_:)), tip: "Every stage, page, wait and error of every poll")
+        setupSteps.orientation = .vertical
+        setupSteps.alignment = .leading
+        setupSteps.spacing = 4
+        setupIntro.font = .systemFont(ofSize: 12)
+        setupProgress.font = .systemFont(ofSize: 12, weight: .medium)
+        setupProgress.textColor = JC.warn
+        cacheText.font = .systemFont(ofSize: 12)
+        cacheText.textColor = JC.text
+        setupMsg.font = .systemFont(ofSize: 12)
+        setupMsg.stringValue = ""
+        let scopeRow = row([scopeField, saveScope])
+        scopeField.widthAnchor.constraint(greaterThanOrEqualToConstant: 340).isActive = true
+        let page = vstack([
+            sectionTitle("PROJECTS IN SCOPE"),
+            hint("Every Jira query is limited to these projects. A job's \"All projects\" means all of these — "
+                 + "never the whole site. Type the keys; they are not looked up."),
+            scopeRow,
+            sectionTitle("ONE-TIME SETUP"), setupIntro, setupSteps, setupProgress,
+            row([runSetupButton, openLog]),
+            sectionTitle("ISSUE CACHE"), cacheText, row([rebuildButton]),
+            setupMsg,
+        ], spacing: 8)
+        page.setCustomSpacing(18, after: scopeRow)
+        page.setCustomSpacing(18, after: page.arrangedSubviews[7])   // the Run Setup row
+        for v in [setupIntro, setupSteps, setupProgress, cacheText, setupMsg] as [NSView] {
+            v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
+        }
+        showPage(page)
+        updateSetup()
+    }
+
+    private func updateSetup() {
+        let busy = lockHeld || JiraPoll.running.contains("setup") || JiraPoll.running.contains("rebuild")
+        let steps = setupInfo["steps"] as? [[String: Any]] ?? []
+        setupIntro.stringValue = setupDone
+            ? "✓ Setup complete — scheduled polling is on. Rerun any step here."
+            : scope.isEmpty ? "Save the projects in scope first, then run the setup."
+            : "Each step runs and is confirmed on its own; a failed step stops the run — fix it, then Retry. "
+                + "Scheduled polling starts when every step is ✓."
+        setupIntro.textColor = setupDone ? JC.ok : JC.dim
+        setupSteps.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for s in steps {
+            let name = s["name"] as? String ?? ""
+            let state = s["state"] as? String ?? "pending"
+            let (glyph, color): (String, NSColor) = state == "ok" ? ("✓", JC.ok) : state == "error" ? ("✗", JC.err)
+                : state == "running" ? ("●", JC.warn) : state == "cancelled" ? ("◌", JC.warn) : ("○", JC.faint)
+            let g = NSTextField(labelWithString: glyph)
+            g.textColor = color
+            g.font = .systemFont(ofSize: 13, weight: .bold)
+            g.widthAnchor.constraint(equalToConstant: 16).isActive = true
+            let title = NSTextField(labelWithString: s["label"] as? String ?? name)
+            title.font = .systemFont(ofSize: 12, weight: .semibold)
+            title.textColor = JC.text
+            let err = s["error"] as? String ?? ""
+            var sub = err.isEmpty ? (s["message"] as? String ?? s["detail"] as? String ?? "") : err
+            if let at = s["at"] as? String, state == "ok" || state == "error" { sub += "  ·  \(JiraPoll.short(at))" }
+            let detail = NSTextField(labelWithString: sub)
+            detail.font = .systemFont(ofSize: 11)
+            detail.textColor = err.isEmpty ? JC.dim : JC.err
+            detail.lineBreakMode = .byTruncatingTail
+            detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            var tip = [s["detail"] as? String ?? ""]
+            if !err.isEmpty { tip.append(err) }
+            if let c = s["curl"] as? String, !c.isEmpty { tip.append("the failing request ($JIRA_TOKEN = your token):\n" + c) }
+            detail.toolTip = tip.filter { !$0.isEmpty }.joined(separator: "\n\n")
+            let text = vstack([title, detail], spacing: 1)
+            let b = ThemedPushButton(title: state == "ok" ? "Run Again" : state == "error" ? "Retry" : "Run",
+                                     target: nil, action: nil)
+            b.controlSize = .small
+            b.identifier = NSUserInterfaceItemIdentifier(name)
+            button(b, #selector(runStepClicked(_:)), tip: "Run only this step")
+            b.isEnabled = !busy && !scope.isEmpty
+            let r = NSStackView()
+            r.orientation = .horizontal
+            r.spacing = 8
+            r.setViews([g, text], in: .leading)
+            r.setViews([b], in: .trailing)
+            setupSteps.addArrangedSubview(r)
+            r.widthAnchor.constraint(equalTo: setupSteps.widthAnchor).isActive = true
+        }
+        runSetupButton.title = setupDone ? "Run Setup Again" : "Run Setup"
+        runSetupButton.isEnabled = !busy && !scope.isEmpty
+        rebuildButton.isEnabled = !JiraPoll.running.contains("rebuild") && !scope.isEmpty
+        let p = lockHeld ? progressText(info["progress"] as? [String: Any] ?? [:]) : ""
+        setupProgress.stringValue = p
+        setupProgress.isHidden = p.isEmpty
+
+        // the shared issue cache: what it holds, when, and a resume point
+        let c = info["issueCache"] as? [String: Any] ?? [:]
+        var lines: [String] = []
+        let jobs = c["jobs"] as? [String] ?? []
+        let projects = c["projects"] as? [String] ?? []
+        var head = (c["items"] as? Int).map { "\($0.formatted()) tickets" } ?? "Not synced yet"
+        if let ls = c["lastSuccess"] as? String, !ls.isEmpty { head += " · last synced \(JiraPoll.short(ls))" }
+        if !projects.isEmpty { head += " · \(projects.joined(separator: ", "))" }
+        lines.append(head)
+        if !jobs.isEmpty {
+            lines.append("One sync per tick feeds \(jobs.joined(separator: ", ")) — overlapping tabs never re-query the same tickets.")
+        }
+        if let ck = c["checkpoint"] as? [String: Any] {
+            let done = (ck["fetched"] as? Int)?.formatted() ?? "?"
+            let total = (ck["total"] as? Int).map { " / \($0.formatted())" } ?? ""
+            lines.append("⏸ An interrupted \(ck["mode"] as? String == "full" ? "full " : "")sync was saved at "
+                         + "\(done)\(total) (up to \(ck["hwmText"] as? String ?? "?")) — the next run resumes from there.")
+        }
+        if info["rebuildOnNextPoll"] as? Bool == true || info["rebuildOnNextPoll"] as? String != nil {
+            lines.append("↻ A rebuild is queued / in progress — the cache refills as it streams in.")
+        }
+        if let e = c["lastError"] as? String, !e.isEmpty { lines.append("✗ Last sync failed: \(e)") }
+        cacheText.stringValue = lines.joined(separator: "\n")
+        cacheText.toolTip = (c["jql"] as? String).map { "Next sync JQL:\n\($0)" }
+    }
+
+    private func setSetupMsg(_ s: String, _ c: NSColor) {
+        setupMsg.stringValue = s
+        setupMsg.textColor = c
+    }
+
+    @objc private func saveScopeClicked(_ sender: Any?) {
+        let r = JiraSetupWindow.parseProjectKeys(scopeField.stringValue)
+        guard r.bad.isEmpty else {
+            setSetupMsg("✗ Not a project key: \(r.bad.joined(separator: ", ")) — use keys like SAM1, KAN", JC.err)
+            return
+        }
+        guard !r.keys.isEmpty else { setSetupMsg("✗ Enter at least one project key", JC.err); return }
+        guard let data = try? JSONSerialization.data(withJSONObject: r.keys) else { return }
+        setSetupMsg("Saving…", JC.dim)
+        JiraPoll.run("jira_config.py", ["--team-set", "project_keys"], stdin: String(decoding: data, as: UTF8.self)) {
+            [weak self] code, out, err in
+            guard let self else { return }
+            let res = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+            guard code == 0, res["ok"] as? Bool == true else {
+                let probs = res["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
+                self.setSetupMsg("✗ " + probs.joined(separator: "\n✗ "), JC.err)
+                return
+            }
+            self.controller?.log("jira: projects in scope = \(r.keys.joined(separator: ", "))")
+            self.refresh {
+                self.scopeField.stringValue = r.keys.joined(separator: ", ")
+                self.setSetupMsg("✓ Projects in scope: \(r.keys.joined(separator: ", ")) — saved to team.json"
+                                 + (self.setupDone ? " (a new project gets a full sync on the next poll)" : ""), JC.ok)
+            }
+        }
+    }
+
+    @objc private func runStepClicked(_ sender: NSButton) {
+        guard let n = sender.identifier?.rawValue else { return }
+        runSetup(["--step", n], what: "step \(n)")
+    }
+
+    @objc private func runSetupAll(_ sender: Any?) { runSetup([], what: "setup") }
+
+    private func runSetup(_ extra: [String], what: String) {
+        guard !lockHeld else {
+            let a = NSAlert()
+            a.alertStyle = .warning
+            a.messageText = "A poll is running"
+            a.informativeText = "Wait for it to finish (progress above), or Stop it first. Its progress is kept either way."
+            a.addButton(withTitle: "OK")
+            ask(a) { _ in }
+            return
+        }
+        JiraPoll.running.insert("setup")
+        setSetupMsg("Running \(what)… (live progress above; details in poll.log)", JC.dim)
+        controller?.log("jira: \(what)")
+        updateSetup()
+        JiraPoll.run("jira_poll.py", ["--setup", "--quiet"] + extra) { [weak self] code, _, err in
+            JiraPoll.running.remove("setup")
+            guard let self else { return }
+            self.controller?.log("jira: \(what) finished (exit \(code))")
+            self.refresh {
+                if code == 0 {
+                    self.setSetupMsg(self.setupDone ? "✓ Setup complete — scheduled polling is on."
+                                     : "✓ \(what) done.", JC.ok)
+                    self.controller?.reloadJiraWindow()
+                } else if code == 3 {
+                    self.setSetupMsg("A poll started first — try again when it finishes.", JC.warn)
+                } else {
+                    self.setSetupMsg("✗ A step failed — its row says why (full request in the tooltip). Fix it, then Retry."
+                                     + (code == 2 ? " " + JiraPoll.errorLine(err, fallback: "") : ""), JC.err)
+                }
+            }
+        }
+        refresh()
+    }
+
+    @objc private func rebuildClicked(_ sender: Any?) {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = "Rebuild the issue cache from scratch?"
+        a.informativeText = "Deletes the cached tickets, resume points and release dates, then fetches every ticket "
+            + "of \(scope.joined(separator: ", ")) again. The tabs refill as it streams in; if it is interrupted "
+            + "the next poll continues where it stopped."
+        a.addButton(withTitle: "Rebuild")
+        a.addButton(withTitle: "Cancel")
+        ask(a) { [weak self] ok in
+            guard ok, let self else { return }
+            JiraPoll.running.insert("rebuild")
+            self.setSetupMsg("Rebuilding… (live progress above; details in poll.log)", JC.dim)
+            self.controller?.log("jira: rebuild cache from scratch")
+            self.updateSetup()
+            JiraPoll.run("jira_poll.py", ["--rebuild", "--quiet"]) { [weak self] code, _, _ in
+                JiraPoll.running.remove("rebuild")
+                guard let self else { return }
+                self.controller?.log("jira: rebuild finished (exit \(code))")
+                self.refresh {
+                    self.setSetupMsg(code == 0 ? "✓ Rebuild complete."
+                        : code == 3 ? "A poll is running — the rebuild is queued: the next poll does it."
+                        : "✗ The rebuild stopped — progress is kept and the next poll resumes it. See poll.log.",
+                        code == 0 ? JC.ok : code == 3 ? JC.warn : JC.err)
+                    self.controller?.reloadJiraWindow()
+                }
+            }
+            self.refresh()
+        }
+    }
+
+    @objc private func openPollLog(_ sender: Any?) {
+        let path = info["pollLog"] as? String ?? (JiraPoll.statusPath as NSString)
+            .deletingLastPathComponent + "/poll.log"
+        if !FileManager.default.fileExists(atPath: path) {
+            setSetupMsg("No poll.log yet — it is written by the first poll.", JC.dim)
+            return
+        }
+        controller?.openNoteFile(path)
+    }
+
     // MARK: connection
 
     private func showConnection() {
         let buttons = row([
-            button(NSButton(title: "Test Connection", target: nil, action: nil), #selector(testConnection(_:)),
+            button(ThemedPushButton(title: "Test Connection", target: nil, action: nil), #selector(testConnection(_:)),
                    tip: "GET /rest/api/2/myself with the saved config"),
-            button(NSButton(title: "Copy Login curl", target: nil, action: nil), #selector(copyLoginCurl(_:))),
-            button(NSButton(title: "Setup…", target: nil, action: nil), #selector(setup(_:))),
+            button(ThemedPushButton(title: "Copy Login curl", target: nil, action: nil), #selector(copyLoginCurl(_:))),
+            button(ThemedPushButton(title: "Setup…", target: nil, action: nil), #selector(setup(_:))),
         ])
         connResult.font = .systemFont(ofSize: 12)
         connResult.removeFromSuperview()
@@ -1510,23 +1911,21 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         LOGIN TEST (GET /myself) — full curl:
         \(s("loginCurl"))
         """
-        if let pk = info["projectKeys"] as? [String], !pk.isEmpty {
-            t += "\n\nproject_keys  \(pk.joined(separator: ", "))"
-        }
+        t += "\n\nprojects in scope  \(scope.isEmpty ? "NONE — set them in Setup" : scope.joined(separator: ", "))"
         connText.string = t
     }
 
     @objc private func testConnection(_ sender: Any?) {
         connResult.stringValue = "Testing…"
-        connResult.textColor = .secondaryLabelColor
+        connResult.textColor = JC.dim
         JiraPoll.run("jira_api.py", ["--myself", "--no-auth-check"]) { [weak self] code, out, err in
             guard let self else { return }
             if code == 0, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] {
                 self.connResult.stringValue = "✓ Connected as \(d["displayName"] as? String ?? "unknown user")"
-                self.connResult.textColor = .systemGreen
+                self.connResult.textColor = JC.ok
             } else {
                 self.connResult.stringValue = "✗ " + JiraPoll.errorLine(err, fallback: "login failed (exit \(code))")
-                self.connResult.textColor = .systemRed
+                self.connResult.textColor = JC.err
             }
         }
     }
@@ -1536,7 +1935,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(c, forType: .string)
         connResult.stringValue = "Login curl copied (includes the token)."
-        connResult.textColor = .secondaryLabelColor
+        connResult.textColor = JC.dim
     }
 
     // MARK: definitions (team.json + the directory cache)
@@ -1550,12 +1949,13 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         defSeg.trackingMode = .selectOne
         defSeg.selectedSegment = 0
         defSeg.segmentStyle = .automatic
+        defSeg.selectedSegmentBezelColor = JC.accent
         defSeg.controlSize = .small
         defSeg.target = self
         defSeg.action = #selector(defTabChanged(_:))
         defTable.dataSource = self
         defTable.delegate = self
-        defTable.usesAlternatingRowBackgroundColors = true
+        JC.table(defTable)
         defTable.rowHeight = 22
         defTable.allowsMultipleSelection = true
         defTable.target = self
@@ -1567,7 +1967,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         button(defFetch, #selector(defFetchClicked(_:)), tip: "Run the directory job now (projects, users, statuses, fields)")
         defMsg.font = .systemFont(ofSize: 12)
         defHint.font = .systemFont(ofSize: 11)
-        defHint.textColor = .secondaryLabelColor
+        defHint.textColor = JC.dim
     }
 
     private func showDefinitions() {
@@ -1575,7 +1975,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         sv.documentView = defTable
         sv.hasVerticalScroller = true
         sv.hasHorizontalScroller = true
-        sv.borderType = .bezelBorder
+        JC.well(sv)
         sv.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
         // no intrinsic height: without a floor the stack squeezed the table
         // down to its header row
@@ -1657,12 +2057,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             let names = Dictionary(dir.projects.map { ($0.key, $0.name) }, uniquingKeysWith: { a, _ in a })
             for k in team["project_keys"] as? [String] ?? [] {
                 let n = dir.users.filter { $0.projects.contains(k) }.count
-                rows.append([k, names[k] ?? (dir.isEmpty ? "" : "(not visible to the token)"), dir.isEmpty ? "" : "\(n)"])
+                rows.append([k, names[k] ?? "", dir.isEmpty ? "" : "\(n)"])
                 keys.append(k)
             }
-            defHint.stringValue = "The team's projects (team.json project_keys): the default scope of every "
-                + "job and search, and whose users the directory job caches. Add picks from the projects "
-                + "your token can see."
+            defHint.stringValue = "The projects in scope (team.json project_keys): every job and search is "
+                + "limited to them (\"All projects\" = all of these), and the directory job caches their users. "
+                + "Type the keys to add — projects are never looked up."
         case .fields:
             for c in catalog {
                 let f = str(c["field"])
@@ -1741,7 +2141,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         if i == 0 || [.api, .jql].contains(defTab) || (defTab == .fields && i == 2) {
             l.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         }
-        if i > 0 && !(defTab == .jql || defTab == .api) { l.textColor = .secondaryLabelColor }
+        if i > 0 && !(defTab == .jql || defTab == .api) { l.textColor = JC.dim }
         let cell = NSTableCellView()
         l.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(l)
@@ -1756,14 +2156,14 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     // write one team.json key (validated by jira_config.py --team-set)
     private func teamSet(_ key: String, _ value: Any, done: String, then: (() -> Void)? = nil) {
         guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return }
-        defMsg.textColor = .secondaryLabelColor
+        defMsg.textColor = JC.dim
         defMsg.stringValue = "Saving…"
         JiraPoll.run("jira_config.py", ["--team-set", key], stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
             guard let self else { return }
             let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
             guard code == 0, r["ok"] as? Bool == true else {
                 let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
-                self.defMsg.textColor = .systemRed
+                self.defMsg.textColor = JC.err
                 self.defMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
                 return
             }
@@ -1772,7 +2172,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             if ["field_labels", "custom_fields"].contains(key) { self.controller?.reloadJiraWindow() }
             if let then { then(); return }
             self.refresh {
-                self.defMsg.textColor = .systemGreen
+                self.defMsg.textColor = JC.ok
                 self.defMsg.stringValue = "✓ \(done) — saved to team.json"
             }
         }
@@ -1824,7 +2224,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                 var cf = self.own("custom_fields"), fl = self.own("field_labels")
                 let drop = keys.filter { cf[$0] != nil }, reset = keys.filter { fl[$0] != nil }
                 guard !drop.isEmpty || !reset.isEmpty else {
-                    self.defMsg.textColor = .secondaryLabelColor
+                    self.defMsg.textColor = JC.dim
                     self.defMsg.stringValue = "\(keys.joined(separator: ", ")): already the default label — Rename… to change it"
                     return
                 }
@@ -1841,7 +2241,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                 var d = self.own(tk)
                 let builtIn = keys.filter { d[$0] == nil && tk != "custom_fields" }
                 if !builtIn.isEmpty && builtIn.count == keys.count {
-                    self.defMsg.textColor = .secondaryLabelColor
+                    self.defMsg.textColor = JC.dim
                     self.defMsg.stringValue = "\(builtIn.joined(separator: ", ")): built-in default — edit it to override"
                     return
                 }
@@ -1863,7 +2263,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     @objc private func defFetchClicked(_ sender: Any?) {
         defFetch.isEnabled = false
-        defMsg.textColor = .secondaryLabelColor
+        defMsg.textColor = JC.dim
         defMsg.stringValue = "Fetching projects, users, statuses, fields… (one call per project)"
         JiraPoll.run("jira_poll.py", ["--directory", "--quiet"]) { [weak self] code, _, err in
             guard let self else { return }
@@ -1871,44 +2271,36 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             if code == 0 {
                 self.dir = JiraDirectory.load()
                 self.reloadDefinitions()
-                self.defMsg.textColor = .systemGreen
+                self.defMsg.textColor = JC.ok
                 self.defMsg.stringValue = "✓ \(self.dir.users.count) users · \(self.dir.projects.count) projects · "
                     + "\(self.dir.fields.count) fields cached"
                 self.refresh()
             } else {
-                self.defMsg.textColor = .systemRed
+                self.defMsg.textColor = JC.err
                 self.defMsg.stringValue = "✗ " + JiraPoll.errorLine(err, fallback: "directory failed (exit \(code))")
             }
         }
     }
 
-    // projects: pick from what the token can see (typed keys only when the
-    // directory has never run)
+    // projects in scope: typed keys only — projects are never looked up
     private func addProjects() {
         let have = team["project_keys"] as? [String] ?? []
-        if dir.projects.isEmpty {
-            let f = NSTextField()
-            f.placeholderString = "KEY1, KEY2 (Fetch from Jira now to pick from a list instead)"
-            jiraFormSheet(on: window, title: "Add Projects", info: "Project keys, comma separated.",
-                          rows: [("Keys", f)], ok: "Add") { [weak self] ok in
-                guard ok, let self else { return }
-                let add = f.stringValue.uppercased().split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !have.contains($0) }
-                guard !add.isEmpty else { return }
-                self.teamSet("project_keys", have + add, done: "added \(add.joined(separator: ", "))")
+        let f = NSTextField()
+        f.placeholderString = "KEY1, KEY2"
+        jiraFormSheet(on: window, title: "Add Projects in Scope",
+                      info: "Project keys, comma separated. Every query is limited to the projects in scope.",
+                      rows: [("Keys", f)], ok: "Add") { [weak self] ok in
+            guard ok, let self else { return }
+            let r = JiraSetupWindow.parseProjectKeys(f.stringValue)
+            guard r.bad.isEmpty else {
+                self.defMsg.textColor = JC.err
+                self.defMsg.stringValue = "✗ Not a project key: \(r.bad.joined(separator: ", "))"
+                return
             }
-            return
+            let add = r.keys.filter { !have.contains($0) }
+            guard !add.isEmpty else { return }
+            self.teamSet("project_keys", have + add, done: "added \(add.joined(separator: ", "))")
         }
-        let p = JiraMultiPicker(noun: "project")
-        p.options = dir.projectOptions().filter { !have.contains($0.id) }
-        p.placeholder = "Choose projects…"
-        jiraFormSheet(on: window, title: "Add Projects",
-                      info: "Projects your token can see (directory cache). Their users are cached on the next directory run.",
-                      rows: [("Projects", p)], ok: "Add", first: p) { [weak self] ok in
-            guard ok, let self, !p.selected.isEmpty else { return }
-            self.teamSet("project_keys", have + p.selected, done: "added \(p.selected.joined(separator: ", "))")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { p.togglePopover(nil) }
     }
 
     private func snakeCase(_ s: String) -> String {
@@ -1947,7 +2339,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                 fid = hit.id
             }
             guard !fid.isEmpty else {
-                self.defMsg.textColor = .systemRed
+                self.defMsg.textColor = JC.err
                 self.defMsg.stringValue = "✗ pick a Jira custom field (or type its customfield_NNNNN id)"
                 return
             }
@@ -2021,7 +2413,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                       rows: [("Value", v)], first: v) { [weak self] ok in
             guard ok, let self else { return }
             guard let n = Int(v.stringValue.trimmingCharacters(in: .whitespaces)), n >= 0 else {
-                self.defMsg.textColor = .systemRed
+                self.defMsg.textColor = JC.err
                 self.defMsg.stringValue = "✗ \(key) must be a whole number"
                 return
             }

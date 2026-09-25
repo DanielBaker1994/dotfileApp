@@ -91,12 +91,12 @@ struct JiraDirectory {
     }
 
     // directory projects + configured keys the directory doesn't know (yet)
-    func projectOptions(extra: [String] = []) -> [JiraMultiPicker.Option] {
-        var out = projects.map { JiraMultiPicker.Option(id: $0.key, title: $0.key, detail: $0.name) }
-        for k in extra where !out.contains(where: { $0.id == k }) {
-            out.append(.init(id: k, title: k, detail: ""))
+    // ONLY the projects in scope (the keys the user typed — team.json
+    // project_keys); the directory just supplies their names
+    func projectOptions(scope: [String]) -> [JiraMultiPicker.Option] {
+        scope.map { k in
+            .init(id: k, title: k, detail: projects.first { $0.key == k }?.name ?? "")
         }
-        return out
     }
 
     func userOptions(me: Bool = true) -> [JiraMultiPicker.Option] {
@@ -145,12 +145,9 @@ struct JiraDirectory {
 // MARK: - theme (the Cmd+F panel follows the Jira window's palette)
 
 enum JiraTheme {
-    // pickers in plain AppKit windows (Jira Config) follow the system look
-    static var system: PopupColors {
-        PopupColors(background: .windowBackgroundColor, border: .separatorColor, text: .labelColor,
-                    dim: .secondaryLabelColor, highlight: .selectedContentBackgroundColor,
-                    accent: .controlAccentColor)
-    }
+    // pickers outside a popup window (Jira Config) wear the Jira window's
+    // theme, like everything else in the jira family
+    static var system: PopupColors { JC.colors }
     static let height: CGFloat = 26
     static let radius: CGFloat = 6
     static let font = NSFont.systemFont(ofSize: 12)
@@ -159,8 +156,13 @@ enum JiraTheme {
     static func drawInput(_ bounds: NSRect, _ c: PopupColors, hover: Bool, focused: Bool) {
         let r = bounds.insetBy(dx: focused ? 1 : 0.5, dy: focused ? 1 : 0.5)
         let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
-        c.text.withAlphaComponent(hover ? 0.08 : 0.05).setFill()
+        // a recessed well, same as every popup input
+        ButtonStyle.inputFill(c).setFill()
         path.fill()
+        if hover {
+            c.text.withAlphaComponent(0.04).setFill()
+            path.fill()
+        }
         path.lineWidth = focused ? 1.5 : 1
         (focused ? ButtonStyle.accent(c) : ButtonStyle.inputStroke(c)).setStroke()
         path.stroke()
@@ -467,11 +469,12 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         sv.documentView = table
         sv.hasVerticalScroller = true
         sv.drawsBackground = false
-        let clear = NSButton(title: "Clear", target: self, action: #selector(clearAll(_:)))
-        let done = NSButton(title: "Done", target: self, action: #selector(togglePopover(_:)))
-        for b in [clear, done] { b.bezelStyle = .rounded; b.controlSize = .small }
+        let clear = ThemedPushButton(title: "Clear", target: self, action: #selector(clearAll(_:)))
+        let done = ThemedPushButton(title: "Done", target: self, action: #selector(togglePopover(_:)))
+        done.role = .primary
+        for b in [clear, done] { b.controlSize = .small; b.colors = colors }
         countLabel.font = .systemFont(ofSize: 11)
-        countLabel.textColor = .secondaryLabelColor
+        countLabel.textColor = colors.dim
         let footer = NSStackView(views: [countLabel, NSView(), clear, done])
         footer.orientation = .horizontal
         let stack = NSStackView(views: [search, sv, footer])
@@ -578,12 +581,13 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let o = shown[row]
         let img = NSImageView(image: NSImage(systemSymbolName: isOn(o) ? "checkmark.square.fill" : "square",
                                              accessibilityDescription: nil) ?? NSImage())
-        img.contentTintColor = isOn(o) ? ButtonStyle.accent(colors) : .tertiaryLabelColor
+        img.contentTintColor = isOn(o) ? ButtonStyle.accent(colors) : colors.dim.withAlphaComponent(0.6)
         let t = NSTextField(labelWithString: o.title)
+        t.textColor = colors.text
         t.lineBreakMode = .byTruncatingTail
         if o.id == Self.allID { t.font = .systemFont(ofSize: 13, weight: .semibold) }
         let d = NSTextField(labelWithString: o.detail)
-        d.textColor = .secondaryLabelColor
+        d.textColor = colors.dim
         d.font = .systemFont(ofSize: 11)
         d.lineBreakMode = .byTruncatingTail
         d.setContentCompressionResistancePriority(.defaultLow - 10, for: .horizontal)
@@ -763,6 +767,8 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         fetchButton = Self.themeButton("Fetch from Jira", symbol: "arrow.down.circle",
                                        tip: "Run the weekly directory job now: projects, users, statuses, releases, labels") { fetch?() }
         super.init()
+        // the primary action wears the accent (the "on" chip look)
+        searchButton.isOn = true
         run = { [weak self] in self?.run(nil) }
         fetch = { [weak self] in self?.fetchDirectory(nil) }
         panel.isReleasedWhenClosed = false
@@ -881,7 +887,8 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         panel.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
         fx.material = cfg.material
         tint.layer?.backgroundColor = colors.background.withAlphaComponent(max(cfg.tintAlpha, 0.9)).cgColor
-        tint.layer?.borderColor = colors.border.withAlphaComponent(0.25).cgColor
+        // same outline as the Jira window it docks to
+        tint.layer?.borderColor = colors.border.cgColor
         let jp = panel as? JiraKeyPanel
         jp?.selectionAttributes = ButtonStyle.selection(colors)
         jp?.caretColor = colors.text
@@ -982,7 +989,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
 
     private func reloadLists() {
         dir = JiraDirectory.load()
-        projects.options = dir.projectOptions(extra: info["projectKeys"] as? [String] ?? [])
+        projects.options = dir.projectOptions(scope: info["projectKeys"] as? [String] ?? [])
         for r in rows { fillOptions(r) }
         fetchButton.isHidden = !dir.isEmpty && !dir.versions.isEmpty
         if dir.isEmpty && status.stringValue.isEmpty {
@@ -1001,7 +1008,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         JiraPoll.run("jira_poll.py", ["--describe"]) { [weak self] _, out, _ in
             guard let self, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] else { return }
             self.info = d
-            self.projects.options = self.dir.projectOptions(extra: d["projectKeys"] as? [String] ?? [])
+            self.projects.options = self.dir.projectOptions(scope: d["projectKeys"] as? [String] ?? [])
             // first use: the team's projects (team.json project_keys), else all
             if self.projects.selected.isEmpty && !self.projects.isAll && !self.hasSavedState {
                 let pk = d["projectKeys"] as? [String] ?? []
@@ -1248,7 +1255,8 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     // .secondaryLabelColor / .labelColor map onto the theme's dim / text
     private func setStatus(_ s: String, _ c: NSColor) {
         status.stringValue = s
-        status.textColor = c == .secondaryLabelColor ? colors.dim : c == .labelColor ? colors.text : c
+        status.textColor = c == .secondaryLabelColor ? colors.dim : c == .labelColor ? colors.text
+            : c == .systemRed ? colors.tone(.danger) : c == .systemGreen ? colors.tone(.success) : c
         status.toolTip = s
     }
 

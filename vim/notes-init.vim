@@ -8,6 +8,8 @@
 " The host passes the theme in before this file runs:
 "   --cmd "let g:ws_fg='#RRGGBB'" --cmd "let g:ws_dim='#RRGGBB'"
 "   --cmd "let g:ws_sel='#RRGGBB'" --cmd "let g:ws_line='#RRGGBB'"
+"   (+ g:ws_accent / ws_accent2 / ws_ok / ws_warn / ws_err / ws_info /
+"    ws_deep: the theme palette for headings, links, code, search, menus)
 " Point commands.conf `[notes] vim-init` at your own file to replace this one.
 
 set nocompatible
@@ -81,6 +83,61 @@ function! s:WsTheme() abort
   execute 'highlight LineNr guifg=' . dim . ' guibg=NONE'
   execute 'highlight CursorLineNr guifg=' . fg . ' guibg=' . line . ' gui=bold'
   execute 'highlight Pmenu guibg=' . sel . ' guifg=' . fg
+  " the rest of the palette: each element its own role (like a themed
+  " tmux/nvim port) instead of one tint everywhere
+  let acc = get(g:, 'ws_accent', '#C6A0F6')
+  let acc2 = get(g:, 'ws_accent2', '#8AADF4')
+  let ok = get(g:, 'ws_ok', '#A6DA95')
+  let warn = get(g:, 'ws_warn', '#EED49F')
+  let err = get(g:, 'ws_err', '#ED8796')
+  let info = get(g:, 'ws_info', '#8BD5CA')
+  let deep = get(g:, 'ws_deep', '#181926')
+  execute 'highlight CursorLineNr guifg=' . acc . ' guibg=' . line . ' gui=bold'
+  execute 'highlight PmenuSel guibg=' . acc . ' guifg=' . deep . ' gui=bold'
+  execute 'highlight Search guibg=' . warn . ' guifg=' . deep
+  execute 'highlight IncSearch guibg=' . acc . ' guifg=' . deep
+  execute 'highlight CurSearch guibg=' . acc . ' guifg=' . deep
+  execute 'highlight MatchParen guifg=' . acc . ' guibg=NONE gui=bold,underline'
+  execute 'highlight Title guifg=' . acc . ' gui=bold'
+  execute 'highlight Comment guifg=' . dim . ' gui=italic'
+  execute 'highlight Constant guifg=' . warn
+  execute 'highlight String guifg=' . ok
+  execute 'highlight Identifier guifg=' . acc2
+  execute 'highlight Function guifg=' . acc2
+  execute 'highlight Statement guifg=' . acc . ' gui=NONE'
+  execute 'highlight PreProc guifg=' . info
+  execute 'highlight Type guifg=' . warn . ' gui=NONE'
+  execute 'highlight Special guifg=' . info
+  execute 'highlight Underlined guifg=' . acc2 . ' gui=underline'
+  execute 'highlight Directory guifg=' . acc2
+  execute 'highlight Todo guifg=' . deep . ' guibg=' . warn . ' gui=bold'
+  execute 'highlight Error guifg=' . err . ' guibg=NONE gui=bold'
+  execute 'highlight ErrorMsg guifg=' . err . ' guibg=NONE'
+  execute 'highlight WarningMsg guifg=' . warn
+  execute 'highlight Question guifg=' . ok
+  execute 'highlight SpellBad guisp=' . err . ' gui=undercurl'
+  " markdown: headings in the accent, links in accent2, code in green
+  for n in range(1, 6)
+    execute 'highlight markdownH' . n . ' guifg=' . acc . ' gui=bold'
+    execute 'highlight markdownH' . n . 'Delimiter guifg=' . acc
+  endfor
+  execute 'highlight markdownLinkText guifg=' . acc2 . ' gui=underline'
+  execute 'highlight markdownUrl guifg=' . dim . ' gui=underline'
+  execute 'highlight markdownCode guifg=' . ok
+  execute 'highlight markdownCodeBlock guifg=' . ok
+  execute 'highlight markdownCodeDelimiter guifg=' . dim
+  execute 'highlight markdownListMarker guifg=' . acc
+  execute 'highlight markdownOrderedListMarker guifg=' . acc
+  execute 'highlight markdownBlockquote guifg=' . dim . ' gui=italic'
+  execute 'highlight markdownBold guifg=' . fg . ' gui=bold'
+  execute 'highlight markdownItalic guifg=' . fg . ' gui=italic'
+  execute 'highlight markdownError guifg=NONE guibg=NONE'
+  highlight! link @markup.heading Title
+  highlight! link @markup.link.label markdownLinkText
+  highlight! link @markup.link.url markdownUrl
+  highlight! link @markup.raw markdownCode
+  highlight! link @markup.list markdownListMarker
+  highlight! link @markup.quote markdownBlockquote
 endfunction
 augroup ws_theme
   autocmd!

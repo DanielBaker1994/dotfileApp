@@ -348,20 +348,116 @@ public struct PopupColors {
     public var text: NSColor         // row titles + input text
     public var dim: NSColor          // secondary text (e.g. "+N")
     public var highlight: NSColor    // selected-row pill fill
-    public var accent: NSColor       // active segment fill in joined button bars
+    public var accent: NSColor       // the signature hue: active tab, focus, on-state
+    // the rest of a theme's palette, so every element can wear its own role
+    // (the catppuccin-tmux idea: one theme, many distinct hues) instead of
+    // one tint everywhere
+    public var palette: PopupPalette = PopupPalette()
 
     public init(background: NSColor = NSColor(srgbRed: 36/255, green: 39/255, blue: 58/255, alpha: 1),
                 border: NSColor = NSColor(srgbRed: 159/255, green: 200/255, blue: 232/255, alpha: 1),
                 text: NSColor = NSColor(srgbRed: 202/255, green: 211/255, blue: 245/255, alpha: 1),
                 dim: NSColor = NSColor(srgbRed: 147/255, green: 154/255, blue: 183/255, alpha: 1),
                 highlight: NSColor = NSColor(srgbRed: 63/255, green: 74/255, blue: 90/255, alpha: 1),
-                accent: NSColor = NSColor(srgbRed: 85/255, green: 104/255, blue: 130/255, alpha: 1)) {
+                accent: NSColor = NSColor(srgbRed: 85/255, green: 104/255, blue: 130/255, alpha: 1),
+                palette: PopupPalette = PopupPalette()) {
         self.background = background
         self.border = border
         self.text = text
         self.dim = dim
         self.highlight = highlight
         self.accent = accent
+        self.palette = palette
+    }
+}
+
+// Secondary hues of a theme (Theme ▸ presets carry the official ones):
+//   accent2 — links / keys / fuzzy-match highlights / folder marks
+//   success · warning · danger · info — status colors (jira statuses and
+//   priorities, poll state, the ✕ hover, the terminal's ANSI palette)
+public struct PopupPalette {
+    public var accent2: NSColor
+    public var success: NSColor
+    public var warning: NSColor
+    public var danger: NSColor
+    public var info: NSColor
+
+    // Catppuccin Macchiato — matches the default card
+    public init(accent2: NSColor = NSColor(srgbRed: 138/255, green: 173/255, blue: 244/255, alpha: 1),
+                success: NSColor = NSColor(srgbRed: 166/255, green: 218/255, blue: 149/255, alpha: 1),
+                warning: NSColor = NSColor(srgbRed: 238/255, green: 212/255, blue: 159/255, alpha: 1),
+                danger: NSColor = NSColor(srgbRed: 237/255, green: 135/255, blue: 150/255, alpha: 1),
+                info: NSColor = NSColor(srgbRed: 145/255, green: 215/255, blue: 227/255, alpha: 1)) {
+        self.accent2 = accent2
+        self.success = success
+        self.warning = warning
+        self.danger = danger
+        self.info = info
+    }
+    public var all: [NSColor] { [accent2, success, warning, danger, info] }
+    public init?(_ colors: [NSColor]) {
+        guard colors.count == 5 else { return nil }
+        self.init(accent2: colors[0], success: colors[1], warning: colors[2],
+                  danger: colors[3], info: colors[4])
+    }
+}
+
+// A table cell's semantic color (host decides per field/value; the window
+// maps it onto the live palette so a theme switch recolors it)
+public enum PopupTone { case text, dim, accent, accent2, success, warning, danger, info }
+
+// Depth + role tokens derived from the palette. Surfaces are layered like a
+// terminal theme: crust (deepest — header strip, status line) < mantle
+// (tab strip, toolbars, recessed inputs) < base (the card) < surface
+// (raised buttons). Light themes get the same order (deeper = darker).
+public extension PopupColors {
+    var isLight: Bool { ButtonStyle.luminance(background) > 0.45 }
+    var base: NSColor { ButtonStyle.opaque(background) }
+    private func deeper(_ f: CGFloat) -> NSColor {
+        isLight ? (base.blended(withFraction: f * 0.35, of: ButtonStyle.opaque(text)) ?? base)
+                : (base.blended(withFraction: f, of: .black) ?? base)
+    }
+    var mantle: NSColor { deeper(0.22) }
+    var crust: NSColor { deeper(0.42) }
+    var surface0: NSColor { base.blended(withFraction: 0.09, of: ButtonStyle.opaque(text)) ?? base }
+    var surface1: NSColor { base.blended(withFraction: 0.16, of: ButtonStyle.opaque(text)) ?? base }
+    // the accent lifted until it reads on the card
+    var accentOn: NSColor { ButtonStyle.accent(self) }
+    // text drawn ON an accent fill (the active tab): the deep crust when it
+    // contrasts, else black/white
+    var onAccent: NSColor {
+        let a = accentOn
+        return ButtonStyle.contrast(crust, a) >= 4.5 ? crust
+            : ButtonStyle.contrast(.white, a) >= ButtonStyle.contrast(.black, a) ? .white : .black
+    }
+    // a palette hue nudged toward the text until it reads on the card
+    func readable(_ c: NSColor, min ratio: CGFloat = 3) -> NSColor {
+        var out = ButtonStyle.opaque(c)
+        var step = 0
+        while ButtonStyle.contrast(out, base) < ratio, step < 6 {
+            out = out.blended(withFraction: 0.2, of: ButtonStyle.opaque(text)) ?? out
+            step += 1
+        }
+        return out
+    }
+    func tone(_ t: PopupTone) -> NSColor {
+        switch t {
+        case .text: return text
+        case .dim: return dim
+        case .accent: return accentOn
+        case .accent2: return readable(palette.accent2)
+        case .success: return readable(palette.success)
+        case .warning: return readable(palette.warning)
+        case .danger: return readable(palette.danger)
+        case .info: return readable(palette.info)
+        }
+    }
+    // hairline between regions (header/tab strip, table rows)
+    var hairline: NSColor { text.withAlphaComponent(isLight ? 0.12 : 0.08) }
+    // the card's outline: the accent sunk into the card, so every theme gets
+    // a frame in its own hue instead of one fixed color
+    var outline: NSColor {
+        (accentOn.blended(withFraction: 0.45, of: base) ?? accentOn).withAlphaComponent(0.85)
     }
 }
 
@@ -542,7 +638,7 @@ public struct PopupConfig {
     // tabs: a pill tab strip below the search field / drag header. Host sets
     // tabTitles + selectedTab; onTabChange tells it to swap content.
     public var tabs: Bool = false
-    public var tabBarHeight: CGFloat = 26
+    public var tabBarHeight: CGFloat = 30
     // a trailing "+" pill on the tab strip that fires onAddTab (e.g. create a
     // new note pad)
     public var tabsAddButton: Bool = false
@@ -578,6 +674,8 @@ public struct PopupConfig {
     // the classic preview rows. Needs scrollableRows.
     public var tableColumns: [PopupTableColumn] = []
     public var tableHeaderHeight: CGFloat = 24
+    // semantic color of one table cell (field, text) → tone; nil = plain
+    public var tableCellTone: ((String, String) -> PopupTone?)?
 
     // optional font family for row/header/search/editor text (nil = system);
     // commands.conf `font` drives it so windows can look distinct
@@ -957,22 +1055,26 @@ extension ThemeButton: PopupThemeable {
 extension FileListPane: PopupThemeable {
     func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
 }
+extension PopupTableHeaderView: PopupThemeable {
+    func applyColors(_ c: PopupColors) { config.colors = c; needsDisplay = true }
+}
 extension PopupFileBrowser: PopupThemeable {
     func applyColors(_ c: PopupColors) { config.colors = c; retheme() }
 }
 
 enum ButtonStyle {
-    // Soft, borderless surfaces: state reads from the fill alone; only the
-    // active ("on") chip gets a faint hairline so it sits slightly raised.
-    // Everything derives from the text color, so light and dark presets both
-    // get the right contrast without per-theme tuning.
+    // Soft, borderless surfaces. Idle / hover / pressed read from a ghost
+    // fill derived from the text color (right contrast on light and dark
+    // presets alike); the ACTIVE ("on") state wears the theme accent — a
+    // tinted fill with accent text — so "what's selected" reads the same in
+    // every window: pinned folder, applied filter, header toggle, sort key.
     static func fill(_ st: ButtonState, _ c: PopupColors) -> NSColor {
         switch st {
-        case .idle:    return c.text.withAlphaComponent(0.05)
-        case .hover:   return c.text.withAlphaComponent(0.10)
-        case .pressed: return c.text.withAlphaComponent(0.15)
-        case .on:      return c.text.withAlphaComponent(0.14)
-        case .onHover: return c.text.withAlphaComponent(0.18)
+        case .idle:    return c.text.withAlphaComponent(0.06)
+        case .hover:   return c.text.withAlphaComponent(0.11)
+        case .pressed: return c.text.withAlphaComponent(0.16)
+        case .on:      return c.accentOn.withAlphaComponent(c.isLight ? 0.18 : 0.22)
+        case .onHover: return c.accentOn.withAlphaComponent(c.isLight ? 0.25 : 0.30)
         }
     }
     static func stroke(_ st: ButtonState, _ c: PopupColors) -> NSColor {
@@ -997,15 +1099,21 @@ enum ButtonStyle {
         accent(c).setFill()
         NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
     }
-    // text inputs keep a faint outline so they still read as fields
+    // text inputs are RECESSED wells (the mantle tone, a hairline edge) —
+    // the opposite of the raised buttons around them, so a field never
+    // reads as a button. Focus swaps the hairline for the accent.
+    static func inputFill(_ c: PopupColors) -> NSColor {
+        c.mantle.withAlphaComponent(c.isLight ? 0.55 : 0.6)
+    }
     static func inputStroke(_ c: PopupColors) -> NSColor {
         c.text.withAlphaComponent(0.12)
     }
+    static func focusStroke(_ c: PopupColors) -> NSColor { c.accentOn }
     static func text(_ st: ButtonState, _ c: PopupColors) -> NSColor {
         switch st {
         case .idle:                  return c.dim
         case .hover, .pressed:       return c.text.withAlphaComponent(0.92)
-        case .on, .onHover:          return c.text
+        case .on, .onHover:          return c.readable(c.accent, min: 4)
         }
     }
     static func font(_ size: CGFloat, _ st: ButtonState) -> NSFont {
@@ -1052,7 +1160,7 @@ enum ButtonStyle {
     // `flat`: no surface at rest (tabs, icon buttons) — it appears on hover
     // (callers are flipped views, so the bar lands on the visual bottom)
     static func draw(_ rect: NSRect, _ st: ButtonState, _ c: PopupColors, radius: CGFloat,
-                     flat: Bool = false, indicator showBar: Bool = true) {
+                     flat: Bool = false, indicator showBar: Bool = false) {
         if flat && st == .idle { return }
         let r = rect.insetBy(dx: 0.5, dy: 0.5)
         let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
@@ -1315,7 +1423,9 @@ final class PopupTabsBar: NSView {
     var onAddTab: (() -> Void)?         // fired when the "+" pill is clicked
     var onCloseTab: ((Int) -> Void)?    // fired when a tab's ✕ badge is clicked
     var onCopyPath: ((Int) -> Void)?    // right-click a tab -> copy its path
-    private var tabH: CGFloat { 24 * zoom }
+    private var tabH: CGFloat { 22 * zoom }
+    // breathing room above/below the pills inside the (deeper) strip
+    private var vpad: CGFloat { 4 * zoom }
     private let gap: CGFloat = 6
     private var addW: CGFloat { 24 * zoom }
     // ✕ close target at each tab's right end: shown on the selected tab and
@@ -1378,7 +1488,7 @@ final class PopupTabsBar: NSView {
 
     private func tabWidth(_ title: String) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom, weight: .semibold),
+            .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom, weight: .bold),
         ]
         // 12pt lead-in + label + room for the ✕ at the right end
         return (title as NSString).size(withAttributes: attrs).width + 12 * zoom + 22 * zoom
@@ -1402,7 +1512,7 @@ final class PopupTabsBar: NSView {
 
     // Full height this bar needs so every pill is visible (wraps to rows).
     func heightNeeded(forWidth width: CGFloat) -> CGFloat {
-        CGFloat(rowCount(forWidth: width)) * (tabH + gap) - gap
+        CGFloat(rowCount(forWidth: width)) * (tabH + gap) - gap + vpad * 2
     }
 
     // Wrapped layout of every pill; the "+" add button is first. Each tab pill
@@ -1410,7 +1520,7 @@ final class PopupTabsBar: NSView {
     private func pillRects() -> [(rect: NSRect, title: String, close: NSRect?)] {
         var out: [(NSRect, String, NSRect?)] = []
         var x: CGFloat = config.padding + 4
-        var y: CGFloat = 0
+        var y: CGFloat = vpad
         if config.tabsAddButton {
             out.append((NSRect(x: x, y: y, width: addW, height: tabH), "+", nil))
             x += addW + gap
@@ -1434,8 +1544,13 @@ final class PopupTabsBar: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let c = config.colors
         let radius = config.buttonRadius * zoom
-        if let fill {
-            fill.setFill()
+        // the strip sits one level DEEPER than the card (mantle), like a
+        // terminal theme's tab line; see-through windows keep it translucent
+        if fill != nil {
+            c.mantle.setFill()
+            bounds.fill()
+        } else {
+            c.mantle.withAlphaComponent(0.45).setFill()
             bounds.fill()
         }
         for (i, (rect, title, close)) in pillRects().enumerated() {
@@ -1444,23 +1559,46 @@ final class PopupTabsBar: NSView {
             let st: ButtonState = pressedIndex == i ? .pressed
                 : isSelectedTab ? (hovered ? .onHover : .on)
                 : hovered ? .hover : .idle
-            ButtonStyle.draw(rect, st, c, radius: radius, flat: !isSelectedTab)
+            // active tab: a SOLID accent pill with deep text (the current
+            // window in a themed tmux status line); others stay flat
+            let fg: NSColor
+            if isSelectedTab {
+                let pill = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+                                        xRadius: radius, yRadius: radius)
+                (hovered ? c.accentOn.blended(withFraction: 0.12, of: c.onAccent) ?? c.accentOn
+                         : c.accentOn).setFill()
+                pill.fill()
+                fg = c.onAccent
+            } else {
+                ButtonStyle.draw(rect, st, c, radius: radius, flat: true)
+                fg = ButtonStyle.text(st, c)
+            }
             if title == "+" {
-                ButtonStyle.plus(in: rect, color: ButtonStyle.text(st, c), arm: 4.5 * zoom)
+                ButtonStyle.plus(in: rect, color: fg, arm: 4.5 * zoom)
                 continue
             }
             // label centered in the space left of the ✕ slot (so it never
             // shifts when the ✕ appears)
             let labelRect = NSRect(x: rect.minX + 6 * zoom, y: rect.minY,
                                    width: rect.width - 6 * zoom - 22 * zoom, height: rect.height)
-            ButtonStyle.label(title, in: labelRect, st, c, size: config.buttonFontSize * zoom)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom,
+                                         weight: isSelectedTab ? .bold : .medium),
+                .foregroundColor: fg,
+            ]
+            let ts = title as NSString
+            let tsz = ts.size(withAttributes: attrs)
+            ts.draw(at: NSPoint(x: labelRect.midX - tsz.width / 2, y: labelRect.midY - tsz.height / 2),
+                    withAttributes: attrs)
             // ✕ on the selected tab and the hovered one; its own hover disc
             if let close, isSelectedTab || hovered {
                 if hoverCloseIndex == i {
-                    c.text.withAlphaComponent(0.16).setFill()
+                    (isSelectedTab ? c.onAccent.withAlphaComponent(0.18)
+                                   : c.tone(.danger).withAlphaComponent(0.22)).setFill()
                     NSBezierPath(ovalIn: close).fill()
                 }
-                let xc = hoverCloseIndex == i ? c.text : c.dim.withAlphaComponent(0.8)
+                let xc = isSelectedTab ? c.onAccent.withAlphaComponent(hoverCloseIndex == i ? 1 : 0.7)
+                    : hoverCloseIndex == i ? c.tone(.danger) : c.dim.withAlphaComponent(0.8)
                 ButtonStyle.cross(in: close, color: xc, arm: 3 * zoom)
             }
         }
@@ -1568,7 +1706,7 @@ final class PopupFilterBar: NSView {
     private func currentTitle(_ dim: Int) -> String {
         let label = labels.indices.contains(dim) ? labels[dim] : "?"
         let sel = selections.indices.contains(dim) ? selections[dim] : 0
-        return "\(label): \(optionTitle(dim, sel)) ▾"
+        return "\(label): \(optionTitle(dim, sel))"
     }
 
     // Total width the bar needs with FULL (untruncated) titles — used to
@@ -1576,7 +1714,8 @@ final class PopupFilterBar: NSView {
     func naturalWidth() -> CGFloat {
         var w: CGFloat = 0
         for i in 0..<labels.count {
-            w += (currentTitle(i) as NSString).size(withAttributes: fontAttrs).width + segPad * 2
+            // + the vector chevron drawn after the label
+            w += (currentTitle(i) as NSString).size(withAttributes: fontAttrs).width + segPad * 2 + 12
         }
         w += CGFloat(max(0, labels.count - 1)) * sepW
         return w + 2 * barInset
@@ -1594,7 +1733,7 @@ final class PopupFilterBar: NSView {
         var x = inset
         var out: [(NSRect, Int, String)] = []
         for (i, t) in (0..<labels.count).map({ currentTitle($0) }).enumerated() {
-            let w = (t as NSString).size(withAttributes: fontAttrs).width + segPad * 2
+            let w = (t as NSString).size(withAttributes: fontAttrs).width + segPad * 2 + 12
             out.append((NSRect(x: x, y: (bounds.height - pillH) / 2,
                                width: w, height: pillH), i, t))
             x += w + sepW
@@ -1668,13 +1807,16 @@ final class PopupFilterBar: NSView {
 // text LEFT-aligned. (Flipping the field's alignment on the first keystroke
 // made the caret jump and dropped fast typing.)
 final class PopupSearchFieldCell: NSTextFieldCell {
+    // left/right text inset inside the well (the browser's filter bar)
+    var hInset: CGFloat = 0
     // The search bar is taller than the cell's natural height, and AppKit pins
     // a bezel-less cell's text/field-editor rect near the TOP of the control —
     // the caret and typed text then sit visibly high in the bar. Center every
     // text rect vertically so the caret lands on the bar's midline.
     private func centeredTextRect(in r: NSRect) -> NSRect {
         let h = cellSize.height
-        return NSRect(x: r.minX, y: r.midY - h / 2, width: r.width, height: h)
+        return NSRect(x: r.minX + hInset, y: r.midY - h / 2,
+                      width: max(0, r.width - hInset * 2), height: h)
     }
 
     override func titleRect(forBounds bounds: NSRect) -> NSRect {
@@ -2033,9 +2175,15 @@ final class PopupRowView: NSView {
                                  yRadius: config.buttonRadius)
             config.colors.highlight.setFill()
             p.fill()
-            config.colors.border.withAlphaComponent(0.8).setStroke()
-            p.lineWidth = 1.5
+            config.colors.accentOn.withAlphaComponent(0.45).setStroke()
+            p.lineWidth = 1
             p.stroke()
+            // accent edge on the left: the cursor mark, same as the file list
+            NSGraphicsContext.current?.saveGraphicsState()
+            p.addClip()
+            config.colors.accentOn.setFill()
+            NSRect(x: pill.minX, y: pill.minY, width: 3, height: pill.height).fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
         }
         if config.selectableRows, !row.loadMore || config.tableColumns.isEmpty {
             drawCheckBox(checkBoxRect(in: band), on: selected.contains(index))
@@ -2061,7 +2209,7 @@ final class PopupRowView: NSView {
             // highlighted (fzf-style) when config.highlightMatches is on
             let rowW = rect.width - x - (config.padding + 10)
             let blockH = titleBlockHeight(row, font: font, rowW: rowW)
-            let accent = config.colors.border
+            let accent = config.colors.tone(.accent2)
             let highlight = config.highlightMatches && !highlightQuery.isEmpty
             drawText(row.title, in: NSRect(x: x, y: y, width: tsz.width, height: lineH),
                      font: font, baseColor: config.colors.text, accent: accent,
@@ -2153,7 +2301,7 @@ final class PopupRowView: NSView {
         if row.loadMore {
             drawText(row.title, in: NSRect(x: contentX, y: y, width: band.width - 2 * contentX,
                                            height: lineH),
-                     font: font, baseColor: config.colors.dim, accent: config.colors.border,
+                     font: font, baseColor: config.colors.tone(.accent2), accent: config.colors.accentOn,
                      wrap: false, highlight: false)
             return
         }
@@ -2165,17 +2313,35 @@ final class PopupRowView: NSView {
             guard !text.isEmpty else { continue }
             // one line per cell: newlines (descriptions) collapse to spaces
             let flat = text.replacingOccurrences(of: "\n", with: " ")
-            let color = i == 0 ? config.colors.text
-                : config.colors.text.withAlphaComponent(0.92)
-            drawText(flat, in: NSRect(x: f.x + 3, y: y, width: f.w - 8, height: lineH),
-                     font: font, baseColor: color, accent: config.colors.border,
+            // semantic cell color (host: status → success/info, priority →
+            // danger/warning, key → accent2 …) mapped onto the live palette
+            let tone = config.tableCellTone?(col.field, flat)
+            let color = tone.map { config.colors.tone($0) }
+                ?? (i == 0 ? config.colors.text : config.colors.text.withAlphaComponent(0.92))
+            let cellFont = (tone == .accent2 || i == 0)
+                ? NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) : font
+            let cellRect = NSRect(x: f.x + 3, y: y, width: f.w - 8, height: lineH)
+            if let tone, [.success, .warning, .danger, .info, .accent].contains(tone) {
+                // status-ish cells get a leading dot in their hue
+                let dot: CGFloat = 6 * zoom
+                color.setFill()
+                NSBezierPath(ovalIn: NSRect(x: cellRect.minX, y: band.midY - dot / 2,
+                                            width: dot, height: dot)).fill()
+                drawText(flat, in: NSRect(x: cellRect.minX + dot + 5 * zoom, y: y,
+                                          width: max(0, cellRect.width - dot - 5 * zoom), height: lineH),
+                         font: cellFont, baseColor: color, accent: config.colors.tone(.accent2),
+                         wrap: false, highlight: highlight, align: col.align)
+                continue
+            }
+            drawText(flat, in: cellRect,
+                     font: cellFont, baseColor: color, accent: config.colors.tone(.accent2),
                      wrap: false, highlight: highlight, align: col.align)
         }
         let line = NSBezierPath()
         line.move(to: NSPoint(x: contentX, y: band.maxY - 0.5))
         line.line(to: NSPoint(x: band.maxX - config.padding - 10, y: band.maxY - 0.5))
-        config.colors.border.withAlphaComponent(0.18).setStroke()
-        line.lineWidth = 0.5
+        config.colors.hairline.setStroke()
+        line.lineWidth = 1
         line.stroke()
     }
 
@@ -2184,14 +2350,14 @@ final class PopupRowView: NSView {
     private func drawCheckBox(_ r: NSRect, on: Bool) {
         let p = NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3)
         if on {
-            config.colors.border.setFill()
+            config.colors.accentOn.setFill()
             p.fill()
             let tick = NSBezierPath()
             tick.lineWidth = 1.6
             tick.move(to: NSPoint(x: r.minX + 3, y: r.midY - 0.5))
             tick.line(to: NSPoint(x: r.midX - 0.5, y: r.maxY - 3.5))
             tick.line(to: NSPoint(x: r.maxX - 2.5, y: r.minY + 3))
-            config.colors.background.setStroke()
+            config.colors.onAccent.setStroke()
             tick.stroke()
         } else {
             config.colors.highlight.withAlphaComponent(0.5).setFill()
@@ -2277,41 +2443,42 @@ final class PopupTableHeaderView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        config.colors.background.setFill()
+        let c = config.colors
+        // one level deeper than the rows (mantle), opaque: rows scroll under it
+        c.mantle.setFill()
         bounds.fill()
-        config.colors.highlight.withAlphaComponent(0.55).setFill()
-        bounds.fill()
-        let font = NSFontManager.shared.convert(config.rowFont(config.rowFontSize * zoom * 0.92),
-                                                toHaveTrait: .boldFontMask)
+        let base = config.rowFont(config.rowFontSize * zoom * 0.86)
+        let font = NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
         let lineH = font.ascender + abs(font.descender) + font.leading
         let fs = frames
         for (i, col) in config.tableColumns.enumerated() where i < fs.count {
             let f = fs[i]
-            var title = col.title
-            if sortColumn == i { title += sortAscending ? " ▲" : " ▼" }
+            // small caps-style titles; the sorted column wears the accent
+            var title = col.title.uppercased()
+            if sortColumn == i { title += sortAscending ? " ↑" : " ↓" }
             let para = NSMutableParagraphStyle()
             para.lineBreakMode = .byTruncatingTail
             para.alignment = col.align
-            let color = sortColumn == i ? config.colors.text : config.colors.dim
+            let color = sortColumn == i ? c.accentOn : c.dim
             (title as NSString).draw(
                 with: NSRect(x: f.x + 3, y: bounds.midY - lineH / 2, width: max(0, f.w - 8), height: lineH),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
+                attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para, .kern: 0.6])
             if i < fs.count - 1 {
                 let d = NSBezierPath()
-                d.move(to: NSPoint(x: f.x + f.w - 0.5, y: 5))
-                d.line(to: NSPoint(x: f.x + f.w - 0.5, y: bounds.height - 5))
-                config.colors.dim.withAlphaComponent(0.35).setStroke()
+                d.move(to: NSPoint(x: f.x + f.w - 0.5, y: 6))
+                d.line(to: NSPoint(x: f.x + f.w - 0.5, y: bounds.height - 6))
+                c.hairline.setStroke()
                 d.lineWidth = 1
                 d.stroke()
             }
         }
-        let base = NSBezierPath()
-        base.move(to: NSPoint(x: 0, y: bounds.height - 0.5))
-        base.line(to: NSPoint(x: bounds.width, y: bounds.height - 0.5))
-        config.colors.border.withAlphaComponent(0.5).setStroke()
-        base.lineWidth = 1
-        base.stroke()
+        let rule = NSBezierPath()
+        rule.move(to: NSPoint(x: 0, y: bounds.height - 0.5))
+        rule.line(to: NSPoint(x: bounds.width, y: bounds.height - 0.5))
+        c.hairline.setStroke()
+        rule.lineWidth = 1
+        rule.stroke()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -2525,28 +2692,55 @@ final class ThemeButton: NSView {
     override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
 
+    // a trailing ▾ (vector) for buttons that open a menu
+    var chevron = false { didSet { needsDisplay = true } }
+    private static let iconW: CGFloat = 12, iconGap: CGFloat = 4, chevW: CGFloat = 12
+    static let hPad: CGFloat = 9
+
+    // symbol + label + chevron as one centered group
+    private func contentWidth(_ t: String, _ st: ButtonState) -> CGFloat {
+        let tw = t.isEmpty ? 0 : (t as NSString).size(withAttributes: [
+            .font: ButtonStyle.font(config.buttonFontSize, st)]).width
+        var w = tw
+        if symbol != nil { w += Self.iconW + (t.isEmpty ? 0 : Self.iconGap) }
+        if chevron { w += Self.chevW }
+        return w
+    }
+    // the width this button needs for `title` (layout uses it so padding is
+    // the same on every toolbar button, whatever its label)
+    func fittingWidth(for t: String? = nil) -> CGFloat {
+        let t = t ?? title
+        if t.isEmpty && !chevron { return bounds.height > 0 ? bounds.height + 4 : 28 }
+        return ceil(contentWidth(t, .on) + Self.hPad * 2)
+    }
+
     override func draw(_ dirty: NSRect) {
         let st: ButtonState = down ? .pressed
             : isOn ? (hover ? .onHover : .on)
             : hover ? .hover : .idle
         ButtonStyle.draw(bounds, st, config.colors, radius: config.buttonRadius, flat: flat)
-        guard let symbol else {
-            ButtonStyle.label(title, in: bounds, st, config.colors, size: config.buttonFontSize)
-            return
-        }
         let color = ButtonStyle.text(st, config.colors)
-        if title.isEmpty {
+        if let symbol, title.isEmpty, !chevron {
             ButtonStyle.symbol(symbol, in: bounds, color: color, size: config.buttonFontSize + 0.5)
             return
         }
-        let tw = (title as NSString).size(withAttributes: [
+        let tw = title.isEmpty ? 0 : (title as NSString).size(withAttributes: [
             .font: ButtonStyle.font(config.buttonFontSize, st)]).width
-        let iw: CGFloat = 12, gap: CGFloat = 4
-        let x0 = (bounds.midX - (iw + gap + tw) / 2).rounded()
-        ButtonStyle.symbol(symbol, in: NSRect(x: x0, y: 0, width: iw, height: bounds.height),
-                           color: color, size: config.buttonFontSize)
-        ButtonStyle.label(title, in: NSRect(x: x0 + iw + gap, y: 0, width: tw, height: bounds.height),
-                          st, config.colors, size: config.buttonFontSize)
+        var x = (bounds.midX - contentWidth(title, st) / 2).rounded()
+        if let symbol {
+            ButtonStyle.symbol(symbol, in: NSRect(x: x, y: 0, width: Self.iconW, height: bounds.height),
+                               color: color, size: config.buttonFontSize)
+            x += Self.iconW + (title.isEmpty ? 0 : Self.iconGap)
+        }
+        if !title.isEmpty {
+            ButtonStyle.label(title, in: NSRect(x: x, y: 0, width: tw, height: bounds.height),
+                              st, config.colors, size: config.buttonFontSize)
+            x += tw
+        }
+        if chevron {
+            ButtonStyle.chevron(in: NSRect(x: x + 3, y: bounds.midY - 4, width: 8, height: 8),
+                                color: color)
+        }
     }
     override func mouseDown(with e: NSEvent) { down = true; needsDisplay = true }
     override func mouseUp(with e: NSEvent) {
@@ -2554,6 +2748,162 @@ final class ThemeButton: NSView {
         down = false
         needsDisplay = true
     }
+}
+
+// AppKit push button in the popup button language, for plain AppKit forms
+// (Jira Config): ghost fill + hairline, hover lift; `.primary` = a solid
+// accent button (Save, Enable), `.danger` = danger-tinted (Delete, Stop).
+// A drop-in for NSButton(title:target:action:) — target/action unchanged.
+// palette the themed AppKit controls start with (a host window sets it
+// before building its form; live changes go through applyColors)
+enum PopupThemeDefaults {
+    static var colors = PopupColors()
+}
+
+final class ThemedPushButton: NSButton, PopupThemeable {
+    enum Role { case normal, primary, danger }
+    var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
+    var role: Role = .normal { didSet { needsDisplay = true } }
+    private var hover = false
+    private var tracking: NSTrackingArea?
+    func applyColors(_ c: PopupColors) { colors = c }
+
+    private var labelFont: NSFont {
+        .systemFont(ofSize: controlSize == .small ? 11 : 12, weight: .semibold)
+    }
+    override var intrinsicContentSize: NSSize {
+        let w = (title as NSString).size(withAttributes: [.font: labelFont]).width
+        return NSSize(width: ceil(w) + (controlSize == .small ? 20 : 26),
+                      height: controlSize == .small ? 22 : 26)
+    }
+    override var title: String { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
+    override var isEnabled: Bool { didSet { needsDisplay = true } }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let c = colors
+        let st: ButtonState = !isEnabled ? .idle : isHighlighted ? .pressed : hover ? .hover : .idle
+        let r = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
+        var fg: NSColor
+        switch role {
+        case .primary:
+            let a = c.accentOn
+            (st == .pressed ? a.blended(withFraction: 0.18, of: .black) ?? a
+             : st == .hover ? a.blended(withFraction: 0.12, of: .white) ?? a : a).setFill()
+            path.fill()
+            fg = c.onAccent
+        case .danger:
+            let d = c.tone(.danger)
+            d.withAlphaComponent(st == .pressed ? 0.32 : st == .hover ? 0.24 : 0.15).setFill()
+            path.fill()
+            fg = d
+        case .normal:
+            ButtonStyle.fill(st == .idle ? .hover : st == .hover ? .pressed : .onHover, c).setFill()
+            if st == .pressed { ButtonStyle.fill(.pressed, c).setFill() }
+            path.fill()
+            ButtonStyle.inputStroke(c).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            fg = c.text
+        }
+        if !isEnabled { fg = fg.withAlphaComponent(0.4) }
+        let attrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: fg]
+        let sz = (title as NSString).size(withAttributes: attrs)
+        (title as NSString).draw(at: NSPoint(x: (bounds.midX - sz.width / 2).rounded(),
+                                             y: (bounds.midY - sz.height / 2).rounded()),
+                                 withAttributes: attrs)
+    }
+}
+
+// NSPopUpButton drawn like ThemedPushButton + a vector chevron (the menu
+// itself stays native). Pull-downs show their first item as the title.
+final class ThemedPopUpButton: NSPopUpButton, PopupThemeable {
+    var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
+    private var hover = false
+    private var tracking: NSTrackingArea?
+    func applyColors(_ c: PopupColors) { colors = c }
+    private var labelFont: NSFont { .systemFont(ofSize: controlSize == .small ? 11 : 12, weight: .medium) }
+    private var shownTitle: String {
+        pullsDown ? (itemArray.first?.title ?? "") : (titleOfSelectedItem ?? "")
+    }
+    override var intrinsicContentSize: NSSize {
+        let titles = pullsDown ? [shownTitle] : itemTitles
+        let w = titles.map { ($0 as NSString).size(withAttributes: [.font: labelFont]).width }.max() ?? 40
+        return NSSize(width: ceil(w) + 38, height: controlSize == .small ? 22 : 26)
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        let c = colors
+        let r = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
+        ButtonStyle.fill(hover ? .pressed : .hover, c).setFill()
+        path.fill()
+        ButtonStyle.inputStroke(c).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        let fg = isEnabled ? c.text : c.text.withAlphaComponent(0.4)
+        let attrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: fg]
+        let t = shownTitle as NSString
+        let sz = t.size(withAttributes: attrs)
+        let avail = r.width - 34
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
+        t.draw(with: NSRect(x: r.minX + 11, y: (bounds.midY - sz.height / 2).rounded(),
+                            width: max(10, avail), height: sz.height),
+               options: [.usesLineFragmentOrigin],
+               attributes: attrs.merging([.paragraphStyle: para]) { $1 })
+        ButtonStyle.chevron(in: NSRect(x: r.maxX - 19, y: bounds.midY - 4, width: 8, height: 8),
+                            color: c.dim)
+    }
+}
+
+// Table/sidebar row in the popup cursor language: highlight pill with an
+// accent edge instead of the system-blue selection; group rows draw no
+// floating background.
+final class PopupTableRowView: NSTableRowView {
+    var colors = PopupThemeDefaults.colors
+    // zebra stripe (odd rows) in a faint text tint, not the system gray
+    var striped = false
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let r = bounds.insetBy(dx: 6, dy: 1)
+        let p = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
+        colors.highlight.setFill()
+        p.fill()
+        NSGraphicsContext.saveGraphicsState()
+        p.addClip()
+        colors.accentOn.setFill()
+        NSRect(x: r.minX, y: r.minY, width: 3, height: r.height).fill()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+    override func drawBackground(in dirtyRect: NSRect) {
+        if isGroupRowStyle { return }
+        if striped {
+            colors.text.withAlphaComponent(colors.isLight ? 0.04 : 0.035).setFill()
+            bounds.fill()
+        }
+    }
+    // keep cell text colors ours (no auto-inversion on the selection)
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 }
 
 // The browser's file list: custom-drawn rows (icon + name + size), click to
@@ -2630,16 +2980,27 @@ final class FileListPane: NSView {
         for i in first...last {
             let e = rows[i]
             let r = rowRect(i)
+            // the same cursor language as the list windows: a rounded
+            // highlight pill with an accent edge; hover = a quiet surface
+            let pillR = r.insetBy(dx: 4, dy: 1)
             if i == selection {
+                let p = NSBezierPath(roundedRect: pillR, xRadius: config.buttonRadius,
+                                     yRadius: config.buttonRadius)
                 config.colors.highlight.setFill()
-                r.fill()
+                p.fill()
+                NSGraphicsContext.saveGraphicsState()
+                p.addClip()
+                config.colors.accentOn.setFill()
+                NSRect(x: pillR.minX, y: pillR.minY, width: 3, height: pillR.height).fill()
+                NSGraphicsContext.restoreGraphicsState()
             } else if let h = hover, h == i {
-                config.colors.highlight.withAlphaComponent(0.4).setFill()
-                r.fill()
+                ButtonStyle.fill(.hover, config.colors).setFill()
+                NSBezierPath(roundedRect: pillR, xRadius: config.buttonRadius,
+                             yRadius: config.buttonRadius).fill()
             }
             let icon = e.icon ?? NSWorkspace.shared.icon(forFile: e.path)
             var ir = r
-            ir.origin.x += 6
+            ir.origin.x += 10
             ir.size.width = Self.iconSize
             let img = icon
             NSGraphicsContext.saveGraphicsState()
@@ -2661,14 +3022,14 @@ final class FileListPane: NSView {
                       options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
                       attributes: nameAttrs)
             if e.isDir && e.name != ".." {
-                // small folder glyph after the name (dim)
+                // folder mark after the name, in the theme's second hue
                 let dirAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-                    .foregroundColor: config.colors.dim,
+                    .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                    .foregroundColor: config.colors.tone(.accent2),
                 ]
                 let d = (e.name as NSString).size(withAttributes: nameAttrs)
                 let g = "/" as NSString
-                g.draw(at: NSPoint(x: tx + d.width + 2, y: r.minY + (rowH - 12) / 2), withAttributes: dirAttrs)
+                g.draw(at: NSPoint(x: tx + d.width + 2, y: r.minY + (rowH - 14) / 2), withAttributes: dirAttrs)
             }
             if e.trailingWidth > 0 {
                 let szAttrs: [NSAttributedString.Key: Any] = [
@@ -2955,7 +3316,6 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // preview (right). The window's border says "the browser has focus";
     // this ring (plus a bright filter-bar outline) says WHERE inside it.
     enum FocusPart { case filter, list, preview }
-    static let focusColor = NSColor(srgbRed: 100/255, green: 180/255, blue: 255/255, alpha: 1)
     private let partRing = PopupPassThroughView()
     private var focusObservation: NSKeyValueObservation?
     private var keyObservers: [NSObjectProtocol] = []
@@ -2983,14 +3343,14 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         searchField.placeholderAttributedString = NSAttributedString(
             string: "filter…",
             attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: c.dim])
-        searchField.layer?.backgroundColor = ButtonStyle.fill(.idle, c).cgColor
+        searchField.layer?.backgroundColor = ButtonStyle.inputFill(c).cgColor
         searchField.layer?.borderColor = ButtonStyle.inputStroke(c).cgColor
         updatePartFocus()
         previewText.textColor = c.text
         previewText.selectedTextAttributes = ButtonStyle.selection(c)
         previewHint.textColor = c.dim
         statusLine.textColor = c.dim
-        splitter.layer?.backgroundColor = c.border.withAlphaComponent(0.35).cgColor
+        splitter.layer?.backgroundColor = c.hairline.cgColor
         setBackground(config.fileBrowserBackground)
         listPane.needsDisplay = true
         previewList.needsDisplay = true
@@ -3010,6 +3370,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         self.sortKey = SortKey(rawValue: config.browserSort.lowercased()) ?? .name
         self.sortDescending = config.browserSortDescending
         self.sortButton = ThemeButton(config: config, title: "", symbol: "line.3.horizontal.decrease")
+        self.sortButton.chevron = true
         self.orderButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
         self.listPane = FileListPane(config: config)
         self.previewList = FileListPane(config: config)
@@ -3073,7 +3434,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: config.colors.dim])
         searchField.wantsLayer = true
         // input well in the shared button language: ghost fill + hairline
-        searchField.layer?.backgroundColor = ButtonStyle.fill(.idle, config.colors).cgColor
+        (searchField.cell as? PopupSearchFieldCell)?.hInset = 7
+        searchField.layer?.backgroundColor = ButtonStyle.inputFill(config.colors).cgColor
         searchField.layer?.cornerRadius = config.buttonRadius
         searchField.layer?.borderWidth = 1
         searchField.layer?.borderColor = ButtonStyle.inputStroke(config.colors).cgColor
@@ -3123,7 +3485,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         previewHint.isSelectable = false
 
         splitter.wantsLayer = true
-        splitter.layer?.backgroundColor = config.colors.border.withAlphaComponent(0.35).cgColor
+        splitter.layer?.backgroundColor = config.colors.hairline.cgColor
         splitter.onFractionChange = { [weak self] frac in
             guard let self else { return }
             self.splitFraction = frac
@@ -3176,7 +3538,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         addSubview(previewListScroll)
         partRing.wantsLayer = true
         partRing.layer?.borderWidth = 2
-        partRing.layer?.borderColor = Self.focusColor.withAlphaComponent(0.9).cgColor
+        partRing.layer?.borderColor = ButtonStyle.focusStroke(config.colors).withAlphaComponent(0.9).cgColor
         partRing.layer?.cornerRadius = 5
         partRing.isHidden = true
         addSubview(partRing)
@@ -3235,8 +3597,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         focusedPart = part
         let c = config.colors
         searchField.layer?.borderWidth = part == .filter ? 2 : 1
-        searchField.layer?.borderColor = (part == .filter ? Self.focusColor
+        searchField.layer?.borderColor = (part == .filter ? ButtonStyle.focusStroke(c)
                                           : ButtonStyle.inputStroke(c)).cgColor
+        partRing.layer?.borderColor = ButtonStyle.focusStroke(c).withAlphaComponent(0.9).cgColor
         var ring: NSRect?
         switch part {
         case .list: ring = listScroll.frame
@@ -3258,16 +3621,25 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         // pin first (left), then parent, then the sort pair (sort-key
         // dropdown + labelled Asc/Desc toggle — kept away from the parent
         // arrow so the two never read as one control), then the filter bar
-        starButton.frame = NSRect(x: 6, y: toolbarY, width: 72, height: toolbarH)
+        // every button is sized by its own label (equal side padding); the
+        // pin button reserves its longer "Pinned" label so toggling it never
+        // shifts the row
+        let x0: CGFloat = 8
+        starButton.frame = NSRect(x: x0, y: toolbarY,
+                                  width: max(starButton.fittingWidth(for: "Pin"),
+                                             starButton.fittingWidth(for: "Pinned")),
+                                  height: toolbarH)
         parentButton.frame = NSRect(x: starButton.frame.maxX + 4, y: toolbarY,
                                     width: toolbarH + 4, height: toolbarH)
-        let sortW = pillWidth(sortButton.title) + 16
+        let sortW = SortKey.allCases.map { sortButton.fittingWidth(for: $0.short) }.max() ?? 80
         sortButton.frame = NSRect(x: parentButton.frame.maxX + 10, y: toolbarY,
                                   width: sortW, height: toolbarH)
         orderButton.frame = NSRect(x: sortButton.frame.maxX + 4, y: toolbarY,
-                                   width: pillWidth(orderButton.title) + 8, height: toolbarH)
-        searchField.frame = NSRect(x: orderButton.frame.maxX + 6, y: toolbarY,
-                                   width: max(60, w - orderButton.frame.maxX - 12),
+                                   width: max(orderButton.fittingWidth(for: "Asc"),
+                                              orderButton.fittingWidth(for: "Desc")),
+                                   height: toolbarH)
+        searchField.frame = NSRect(x: orderButton.frame.maxX + 10, y: toolbarY,
+                                   width: max(60, w - orderButton.frame.maxX - 10 - x0),
                                    height: toolbarH)
         // favorites wrap to as many lines as their paths need
         let favY = toolbarY + toolbarH + 5
@@ -3327,25 +3699,21 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // returns the total height consumed (0 when there are no favorites)
     private func layoutFavorites(from y0: CGFloat) -> CGFloat {
         guard !favPills.isEmpty else { return 0 }
-        let pillH: CGFloat = 20
+        let pillH: CGFloat = 22
         let gap: CGFloat = 4
-        var x: CGFloat = 6
+        let x0: CGFloat = 8
+        var x = x0
         var y = y0
         for p in favPills {
-            let pw = pillWidth(p.title)
-            if x + pw > bounds.width - 6, x > 6 {
-                x = 6
+            let pw = p.fittingWidth()
+            if x + pw > bounds.width - x0, x > x0 {
+                x = x0
                 y += pillH + gap
             }
             p.frame = NSRect(x: x, y: y, width: pw, height: pillH)
             x += pw + gap
         }
         return (y - y0) + pillH
-    }
-    private func pillWidth(_ t: String) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: config.buttonFontSize, weight: .semibold)]
-        // + the leading folder glyph (12) and its gap (4)
-        return (t as NSString).size(withAttributes: attrs).width + 18 + 16
     }
     // ~/notes instead of /Users/me/notes for pinned/config paths under home
     private func displayPath(_ p: String) -> String {
@@ -3795,7 +4163,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         needsLayout = true
     }
     private func updateSortTitle() {
-        sortButton.title = sortKey.short + " ▾"
+        sortButton.title = sortKey.short
         orderButton.symbol = sortDescending ? "arrow.down" : "arrow.up"
         orderButton.title = sortDescending ? "Desc" : "Asc"
     }
@@ -4244,30 +4612,32 @@ final class PopupStatusBar: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
     override func draw(_ dirty: NSRect) {
+        // a themed status line (the tmux bottom bar): deep crust strip, a
+        // solid lead segment in the accent — danger when reporting an error
+        let c = config.colors
         let r = NSRect(x: 1, y: 1, width: bounds.width - 2, height: bounds.height - 2)
         let p = NSBezierPath(roundedRect: r, xRadius: config.buttonRadius,
                              yRadius: config.buttonRadius)
-        (isError ? NSColor.systemRed.withAlphaComponent(0.2)
-                 : config.colors.highlight.withAlphaComponent(0.5)).setFill()
+        (isError ? c.tone(.danger).withAlphaComponent(0.16) : c.crust.withAlphaComponent(0.85)).setFill()
         p.fill()
-        (isError ? NSColor.systemRed.withAlphaComponent(0.8)
-                 : config.colors.border.withAlphaComponent(0.4)).setStroke()
-        p.lineWidth = 1
-        p.stroke()
+        let lead = isError ? c.tone(.danger) : c.accentOn
+        NSGraphicsContext.current?.saveGraphicsState()
+        p.addClip()
+        lead.setFill()
+        NSRect(x: r.minX, y: r.minY, width: 4, height: r.height).fill()
+        NSGraphicsContext.current?.restoreGraphicsState()
         guard !text.isEmpty else { return }
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byTruncatingTail
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
-            .foregroundColor: isError
-                ? NSColor.systemRed.withAlphaComponent(0.95)
-                : config.colors.text,
+            .foregroundColor: isError ? c.tone(.danger) : c.text.withAlphaComponent(0.9),
             .paragraphStyle: para,
         ]
         let s = text as NSString
         let lineH = s.size(withAttributes: attrs).height
-        s.draw(with: NSRect(x: r.minX + 10, y: r.midY - lineH / 2,
-                            width: max(20, r.width - 20), height: lineH),
+        s.draw(with: NSRect(x: r.minX + 12, y: r.midY - lineH / 2,
+                            width: max(20, r.width - 22), height: lineH),
                options: [.usesLineFragmentOrigin], attributes: attrs)
     }
 }
@@ -4626,7 +4996,7 @@ private func headerButtonFont(_ label: String) -> NSFont {
         let header = NSRect(x: 0, y: 0, width: bounds.width, height: dragHeaderHeight)
         (headerColorOverride ?? config.headerColor ?? config.colors.background).setFill()
         header.fill()
-        config.colors.dim.withAlphaComponent(0.4).setStroke()
+        config.colors.hairline.setStroke()
         let line = NSBezierPath()
         line.lineWidth = 1
         line.move(to: NSPoint(x: 0, y: dragHeaderHeight - 0.5))
@@ -4695,9 +5065,10 @@ private func headerButtonFont(_ label: String) -> NSFont {
             let dot = closeRect.insetBy(dx: 3, dy: 3)
             let xColor: NSColor
             if closeHovered {
-                NSColor.systemRed.withAlphaComponent(0.9).setFill()
+                let danger = config.colors.tone(.danger)
+                danger.setFill()
                 NSBezierPath(ovalIn: dot).fill()
-                xColor = .white
+                xColor = ButtonStyle.readable(on: danger, preferred: config.colors.crust)
             } else {
                 ButtonStyle.draw(dot, .idle, config.colors, radius: dot.height / 2, flat: true)
                 xColor = config.colors.dim
@@ -5252,7 +5623,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var browserFocusBorder: NSView?
     private var terminalFocusBorder: NSView?
     // Bright blue focus indicator — thick border + subtle glow
-    private let focusBorderColor = NSColor(srgbRed: 100/255, green: 180/255, blue: 255/255, alpha: 1.0)
+    // pane focus rings wear the theme accent (was a fixed system blue)
+    private var focusBorderColor: NSColor { ButtonStyle.focusStroke(config.colors) }
     private let focusBorderWidth: CGFloat = 3
 
     // total drawer height currently folded into the window frame (baseline =
@@ -5717,21 +6089,22 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             // replacing the cell RESETS its editability/selectability (cell
             // defaults are non-editable) — restore them or the field can
             // never become first responder
-            field.cell = PopupSearchFieldCell()
+            let fieldCell = PopupSearchFieldCell()
+            fieldCell.hInset = 8
+            field.cell = fieldCell
             field.isEditable = config.enableSearch
             field.isSelectable = config.enableSearch
             // the cell swap also resets focusRingType — kill the ring AGAIN
             // or the loud blue macOS ring returns on top of our hairline
             field.focusRingType = .none
             field.wantsLayer = true
-            field.layer?.backgroundColor = config.colors.highlight.withAlphaComponent(0.4).cgColor
+            field.layer?.backgroundColor = ButtonStyle.inputFill(config.colors).cgColor
             field.layer?.cornerRadius = 6
             // themed hairline instead of the system focus ring (killed below
             // in controlTextDidBeginEditing) — the blue macOS ring reads as
             // an error state on the dark bar
             field.layer?.borderWidth = 1
-            field.layer?.borderColor =
-                config.colors.border.withAlphaComponent(0.45).cgColor
+            field.layer?.borderColor = ButtonStyle.inputStroke(config.colors).cgColor
             field.placeholderAttributedString = NSAttributedString(
                 string: "search…",
                 attributes: [
@@ -5794,7 +6167,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             efb.autoresizingMask = [.width, .height]
             efb.wantsLayer = true
             efb.layer?.borderWidth = focusBorderWidth
-            efb.layer?.borderColor = focusBorderColor.cgColor
+            efb.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
             efb.layer?.cornerRadius = 6
             efb.isHidden = true
             backdrop.addSubview(efb)
@@ -5835,15 +6208,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             // in-note find bar (Ctrl/Cmd+F): hidden until toggled; the query
             // field matches the search-field styling
             let ff = NSTextField()
-            ff.cell = PopupSearchFieldCell()
+            let ffCell = PopupSearchFieldCell()
+            ffCell.hInset = 8
+            ff.cell = ffCell
             ff.isEditable = true
             ff.isSelectable = true
             ff.focusRingType = .none
             ff.wantsLayer = true
-            ff.layer?.backgroundColor = config.colors.highlight.withAlphaComponent(0.4).cgColor
+            ff.layer?.backgroundColor = ButtonStyle.inputFill(config.colors).cgColor
             ff.layer?.cornerRadius = 6
             ff.layer?.borderWidth = 1
-            ff.layer?.borderColor = config.colors.border.withAlphaComponent(0.45).cgColor
+            ff.layer?.borderColor = ButtonStyle.focusStroke(config.colors).withAlphaComponent(0.6).cgColor
             ff.font = config.rowFont(config.inputFontSize * zoom)
             ff.textColor = config.colors.text
             ff.placeholderAttributedString = NSAttributedString(
@@ -5892,13 +6267,14 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 term.nativeForegroundColor = config.terminalForeground ?? config.colors.text
                 backdrop.addSubview(term)
                 terminalDrawer = term
+                term.installColors(PopupWindow.ansiPalette(config.colors))
                 currentTerminalHeight = config.terminalHeight
                 // focus indicator: bright 4-sided border around the terminal
                 let tfb = NSView(frame: term.frame)
                 tfb.autoresizingMask = [.width]
                 tfb.wantsLayer = true
                 tfb.layer?.borderWidth = focusBorderWidth
-                tfb.layer?.borderColor = focusBorderColor.cgColor
+                tfb.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
                 tfb.layer?.cornerRadius = 8
                 tfb.isHidden = true
                 backdrop.addSubview(tfb)
@@ -7645,9 +8021,7 @@ private func scrollSelectionIntoView() {
         let c = config.colors
         let pill = NSView()
         pill.wantsLayer = true
-        let fill = (c.background.usingColorSpace(.sRGB) ?? c.background)
-            .blended(withFraction: 0.35, of: .black) ?? c.background
-        pill.layer?.backgroundColor = fill.withAlphaComponent(0.94).cgColor
+        pill.layer?.backgroundColor = c.crust.withAlphaComponent(0.94).cgColor
         pill.layer?.borderColor = c.text.withAlphaComponent(0.10).cgColor
         pill.layer?.borderWidth = 1
         pill.layer?.shadowColor = NSColor.black.cgColor
@@ -7664,7 +8038,7 @@ private func scrollSelectionIntoView() {
         if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
             let iv = NSImageView(image: img)
             iv.symbolConfiguration = .init(pointSize: 12.5 * zoom, weight: .medium)
-            iv.contentTintColor = c.text.withAlphaComponent(0.85)
+            iv.contentTintColor = c.tone(.success)
             icon = iv
         }
         // explicit frames (no stack view): symmetric side padding and the
@@ -7941,14 +8315,16 @@ private func scrollSelectionIntoView() {
         let w = bar.bounds.width > 0 ? bar.bounds.width : config.width
         let h = bar.heightNeeded(forWidth: w)
         if abs(bar.frame.height - h) > 0.5 {
+            let oldH = bar.frame.height
             bar.frame.size.height = h
             bar.needsDisplay = true
             if config.editMode {
                 layoutEditorScroll()
             } else if config.scrollableRows, let scroll = rowScroll,
                       let backdrop = panel.contentView {
-                let base = self.chromeBottom - (config.tabBarHeight * zoom + 2)
-                let cb = base + h
+                // the strip's top edge, from its height BEFORE this change
+                let base = self.chromeBottom - (oldH + 2)
+                let cb = base + h + 2
                 self.chromeBottom = cb
                 scroll.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
                                       height: max(40, backdrop.bounds.height - cb))
@@ -8146,7 +8522,9 @@ private func scrollSelectionIntoView() {
     public func vimCommand(_ ex: String) {
         let quoted = "'" + ex.replacingOccurrences(of: "'", with: "''") + "'"
         if vimEval("execute(\(quoted))") != nil { return }
-        vimRemote("<C-\\><C-N>:\(ex)<CR>")
+        // typed fallback: `echo ''` wipes the echoed command line afterwards
+        // (it used to linger as ":silent! checktime" under the note)
+        vimRemote("<C-\\><C-N>:\(ex) | echo ''<CR>")
     }
 
     // Vim single-quoted string literal for arbitrary text
@@ -8372,6 +8750,9 @@ public enum ThemeRole: String, CaseIterable {
             // card background
             chrome?.headerColorOverride = config.headerColor ?? config.colors.background
             applyThemeAppearance()
+            // the deeper tones (tab strip, table header, wells) derive from
+            // the card: re-push them
+            pushColors()
         case .header:
             config.headerColor = c
             chrome?.headerColorOverride = c
@@ -8382,11 +8763,14 @@ public enum ThemeRole: String, CaseIterable {
     // Window-wide text palette (Theme ▸ presets, light <-> dark): the editor,
     // the vim pane, the shell drawer and every themed subview pick it up live.
     public func setTextColors(text: NSColor, dim: NSColor, highlight: NSColor,
-                              accent: NSColor? = nil) {
+                              accent: NSColor? = nil, palette: PopupPalette? = nil,
+                              border: NSColor? = nil) {
         config.colors.text = text
         config.colors.dim = dim
         config.colors.highlight = highlight
         if let accent { config.colors.accent = accent }
+        if let palette { config.colors.palette = palette }
+        if let border { config.colors.border = border }
         if let tv = editorView {
             tv.textColor = text
             tv.insertionPointColor = text
@@ -8403,16 +8787,42 @@ public enum ThemeRole: String, CaseIterable {
                               Int(round(cc.greenComponent * 255)), Int(round(cc.blueComponent * 255)))
             }
             // the bundled init re-applies its highlights on ColorScheme
-            vimCommand("let g:ws_fg='\(hex(text))' | let g:ws_dim='\(hex(dim))' | let g:ws_sel='\(hex(highlight))' | silent! doautocmd ColorScheme")
+            let lets = (["let g:ws_fg='\(hex(text))'", "let g:ws_dim='\(hex(dim))'",
+                         "let g:ws_sel='\(hex(highlight))'"] + PopupWindow.vimPaletteLets(config.colors))
+                .joined(separator: " | ")
+            vimCommand(lets + " | silent! doautocmd ColorScheme")
         }
         if config.terminalForeground == nil {
             terminalDrawer?.nativeForegroundColor = text
         }
+        applyTerminalPalette()
+        pushColors()
+    }
+
+    // hand the window palette to every themed subview + the layer-drawn
+    // chrome (card outline, focus rings, input wells)
+    func pushColors() {
+        let c = config.colors
         func walk(_ v: NSView) {
-            (v as? PopupThemeable)?.applyColors(config.colors)
+            (v as? PopupThemeable)?.applyColors(c)
             v.subviews.forEach(walk)
         }
-        if let root = panel.contentView { walk(root) }
+        if let root = panel.contentView {
+            walk(root)
+            root.layer?.borderColor = c.border.cgColor
+        }
+        for b in [editorFocusBorder, browserFocusBorder, terminalFocusBorder] {
+            b?.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
+        }
+        // only the fields drawn as wells (the list search bar, the find
+        // bar): editor windows keep an invisible `field` over the editor
+        // and painting it would cover the text
+        for f in [field, findField].compactMap({ $0 }) where (f.layer?.borderWidth ?? 0) > 0 {
+            f.layer?.backgroundColor = ButtonStyle.inputFill(c).cgColor
+            f.layer?.borderColor = f === findField
+                ? ButtonStyle.focusStroke(c).withAlphaComponent(0.6).cgColor
+                : ButtonStyle.inputStroke(c).cgColor
+        }
         panel.contentView?.needsDisplay = true
     }
 
@@ -8457,6 +8867,57 @@ public enum ThemeRole: String, CaseIterable {
     public func setFloating(_ on: Bool) {
         config.floating = on
         panel.level = on ? .popUpMenu : .normal
+    }
+
+    // `let g:ws_…` for the vim pane's palette roles (vim/notes-init.vim)
+    public static func vimPaletteLets(_ c: PopupColors) -> [String] {
+        func hex(_ x: NSColor) -> String {
+            let s = ButtonStyle.opaque(x)
+            return String(format: "#%02X%02X%02X", Int(round(s.redComponent * 255)),
+                          Int(round(s.greenComponent * 255)), Int(round(s.blueComponent * 255)))
+        }
+        return [("accent", c.tone(.accent)), ("accent2", c.tone(.accent2)), ("ok", c.tone(.success)),
+                ("warn", c.tone(.warning)), ("err", c.tone(.danger)), ("info", c.tone(.info)),
+                ("deep", c.crust)].map { "let g:ws_\($0.0)='\(hex($0.1))'" }
+    }
+
+    // The shell drawer's 16 ANSI colors from the theme (ls, git, prompts):
+    // red/green/yellow/cyan = danger/success/warning/info; blue + magenta
+    // come from accent / accent2 (whichever sits nearer the hue), shifted to
+    // the right hue when the theme has no such color; blacks/whites from the
+    // surfaces. Bright = nudged toward the text color.
+    func applyTerminalPalette() {
+        guard let term = terminalDrawer else { return }
+        term.installColors(PopupWindow.ansiPalette(config.colors))
+    }
+    static func ansiPalette(_ c: PopupColors) -> [SwiftTerm.Color] {
+        let p = c.palette
+        func hsb(_ x: NSColor) -> (CGFloat, CGFloat, CGFloat) {
+            let s = ButtonStyle.opaque(x)
+            return (s.hueComponent * 360, s.saturationComponent, s.brightnessComponent)
+        }
+        func dist(_ a: CGFloat, _ b: CGFloat) -> CGFloat { let d = abs(a - b); return min(d, 360 - d) }
+        func pick(_ target: CGFloat, _ from: [NSColor], shift base: NSColor) -> NSColor {
+            let best = from.min { dist(hsb($0).0, target) < dist(hsb($1).0, target) } ?? base
+            if dist(hsb(best).0, target) <= 50 { return best }
+            let (_, sat, bri) = hsb(base)
+            return NSColor(hue: target / 360, saturation: max(sat, 0.35), brightness: bri, alpha: 1)
+        }
+        let blue = pick(220, [c.accent, p.accent2, p.info], shift: c.accent)
+        let magenta = pick(300, [c.accent, p.accent2].filter { $0 != blue }, shift: p.accent2)
+        let black = c.isLight ? c.dim.blended(withFraction: 0.35, of: c.text) ?? c.dim : c.surface1
+        let white = c.isLight ? c.surface1 : c.dim
+        let normal = [black, p.danger, p.success, p.warning, blue, magenta, p.info, white]
+        let bright = normal.enumerated().map { i, x -> NSColor in
+            i == 0 ? (c.isLight ? c.dim : c.highlight.blended(withFraction: 0.25, of: c.text) ?? c.highlight)
+                : i == 7 ? c.text
+                : ButtonStyle.opaque(x).blended(withFraction: 0.15, of: c.isLight ? .black : .white) ?? x
+        }
+        return (normal + bright).map { x in
+            let s = ButtonStyle.opaque(x)
+            return SwiftTerm.Color(red: UInt16(s.redComponent * 65535), green: UInt16(s.greenComponent * 65535),
+                                   blue: UInt16(s.blueComponent * 65535))
+        }
     }
 
     // the shell drawer's own text color (nil = follow the window text)
@@ -8510,7 +8971,7 @@ public enum ThemeRole: String, CaseIterable {
         bfb.autoresizingMask = [.width, .height]
         bfb.wantsLayer = true
         bfb.layer?.borderWidth = focusBorderWidth
-        bfb.layer?.borderColor = focusBorderColor.cgColor
+        bfb.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
         bfb.layer?.cornerRadius = 6
         bfb.isHidden = true
         backdrop.addSubview(bfb)

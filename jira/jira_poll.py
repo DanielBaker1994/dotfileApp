@@ -8,18 +8,39 @@ endpoint in ~/.config/jira/config.json has its own `window` (10m, 1h, ...):
 an endpoint is DUE when its window has elapsed since its last run. A tick
 where nothing is due is a cheap no-op (still refreshes status.json).
 
-Per due endpoint:
-  1. window = its last SUCCESSFUL run minus pollMarginMinutes (Jira index
-     lag) - a missed tick (sleep, machine off) is covered automatically.
+SCOPE: team.json project_keys = the projects in scope, the source of truth.
+Every job is limited to them ("*" = all of them, never the whole site); with
+no scope nothing runs. SETUP: until config.json setup.state is "done"
+(`--setup`: each step run and confirmed one at a time), the scheduled tick
+does nothing.
+
+Per tick:
+  1. window = the last SUCCESSFUL run's start minus pollMarginMinutes (Jira
+     index lag) - a missed tick (sleep, machine off) is covered automatically.
      No previous run -> the legacy poll-state LAST_POLL, else 10m; no cache
-     at all -> full sync.
-  2. issues:   sync that window (projects "*" or a list, optional custom
-               `jql`) into ~/.cache/jira/jiras.json, publish <file>
+     at all (or an unfinished full sync) -> full sync.
+  2. issues:   plain issue jobs (no custom jql) share ONE sync of their
+               projects per tick (status entry "sync", the "issue cache"),
+               then each publishes its <file> from the cache - overlapping
+               jobs never re-query the same tickets. A job with its own jql
+               runs its own search. Syncs are STREAMED: the cache is written
+               every checkpointEvery issues with a resume point
+               (~/.cache/jira/checkpoints/NAME.json), so a failure at ticket
+               9,000 keeps 1-8,999 and the next run continues from there.
+               Comments come in the search itself (one request per page).
      releases: every version of the projects -> <file>
      directory: projects + assignable users + statuses / types / priorities
                / fields -> ~/.cache/jira/directory.json (the pickers' lists;
                weekly - user search is expensive; no tab)
   3. record lastRun / lastSuccess / nextRun / status / items / lastError.
+
+Rate limits: 429 / 5xx / network errors (and a 401 after the token already
+worked in this run) are waited out per REQUEST (Retry-After, else backoff)
+within rateLimitMaxWaitMinutes - a job never restarts from page 1.
+
+Log: ~/.cache/jira/poll.log (always written, --quiet only silences stderr):
+every stage, page (done / total / %, ETA), wait and error. status.json
+`progress` carries the live line the Jira Config window shows.
 
 Guarded by an flock on ~/.cache/jira/poll.lock: a second invocation while a
 poll runs exits at once (status.json lastSkipped records it). A lock held
@@ -36,6 +57,16 @@ Usage:
                                   works too unless a job is named "all")
   jira_poll.py --projects SAM1,releases   run these endpoints now
   jira_poll.py --init             full sync of the (selected/all) endpoints
+                                  (resumes an interrupted full sync)
+  jira_poll.py --rebuild          start from scratch: wipe the issue cache,
+                                  resume points and versions, re-populate
+                                  everything (config rebuildOnNextPoll: the
+                                  next tick does it; cleared when complete)
+  jira_poll.py --setup [--step NAME]   the one-time setup: connection, scope,
+                                  then every job one at a time, each recorded
+                                  in config.json setup.steps; steps already
+                                  ok are skipped; --step reruns one. All ok ->
+                                  setup.state = done (scheduled polling on)
   jira_poll.py --window 2h        explicit window override (implies now)
   jira_poll.py --dry-run          print the plan (due, windows, JQL fields);
                                   no network, no writes
@@ -76,21 +107,82 @@ import jira_status  # noqa: E402
 LEGACY_POLL_STATE = os.path.join(jira_config.CACHE_DIR, "poll-state")
 KEYS_DIR = os.path.join(jira_config.CACHE_DIR, "endpoints")
 FIELDS_SEEN = os.path.join(jira_config.CACHE_DIR, "fields_seen.json")
-MAX_TRIES = 3
-RETRY_BASE = 5          # seconds; 5, 10 between the 3 attempts
-ERROR_RETRY = 300       # a failed endpoint is retried after min(window, 5m)
+POLL_LOG = os.path.join(jira_config.CACHE_DIR, "poll.log")
+POLL_LOG_MAX = 2 * 1024 * 1024      # rotate: keep the newest half past 2MB
+ERROR_RETRY = 300       # a failed endpoint is retried (resumed) after min(window, 5m)
+SYNC = "sync"           # the shared issue-cache sync: status entry + checkpoint name
 
 QUIET = False
 
 
-def say(msg: str) -> None:
+def log(line: str) -> None:
+    """Append to poll.log (no secrets: messages never carry the token)."""
+    try:
+        os.makedirs(jira_config.CACHE_DIR, exist_ok=True)
+        if os.path.exists(POLL_LOG) and os.path.getsize(POLL_LOG) > POLL_LOG_MAX:
+            with open(POLL_LOG, "rb") as fh:
+                fh.seek(-POLL_LOG_MAX // 2, os.SEEK_END)
+                tail = fh.read()
+            with open(POLL_LOG, "wb") as fh:
+                fh.write(tail[tail.find(b"\n") + 1:])
+        with open(POLL_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()}] {line}\n")
+    except OSError:
+        pass
+
+
+def say(msg: str, tag: str = "") -> None:
+    line = f"[{tag}] {msg}" if tag else msg
+    log(line)
     if not QUIET:
-        print(f"jira-poll: {msg}", file=sys.stderr)
+        print(f"jira-poll: {line}", file=sys.stderr)
+
+
+def fmt_secs(s: float) -> str:
+    s = int(max(0, s))
+    return f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600 else f"{s // 3600}h {s % 3600 // 60}m"
+
+
+class Reporter:
+    """One job's progress -> poll.log (every page) + status.json `progress`
+    (the Jira Config window's live line) + the Client's rate-limit waits."""
+
+    def __init__(self, job: str, label: str):
+        self.job, self.label = job, label
+        self.t0 = time.time()
+        self.pages = 0
+
+    def start(self, msg: str) -> None:
+        say(msg, self.job)
+        jira_status.set_progress(job=self.job, stage=self.label, message=f"{self.label}: {msg}",
+                                 done=0, total=None, pct=None, etaSeconds=None, waitingUntil=None)
+
+    def page(self, done: int, total, hwm: float, new: int) -> None:
+        self.pages += 1
+        el = max(0.001, time.time() - self.t0)
+        pct = min(100, int(done * 100 / total)) if total else None
+        eta = (total - done) / (new / el) if total and new and total > done else None
+        msg = f"{self.label}: {done:,}" + (f" / {total:,} ({pct}%)" if total else " issues") \
+            + (f" · ~{fmt_secs(eta)} left" if eta else "")
+        say(f"page {self.pages}: {done:,}" + (f"/{total:,} ({pct}%)" if total else "")
+            + f" · {new / el:.1f}/s" + (f" · ETA {fmt_secs(eta)}" if eta else "")
+            + (f" · up to {time.strftime('%Y-%m-%d %H:%M', time.localtime(hwm))}" if hwm else ""),
+            self.job)
+        jira_status.set_progress(job=self.job, stage=self.label, done=done, total=total, pct=pct,
+                                 etaSeconds=int(eta) if eta else None, message=msg, waitingUntil=None,
+                                 reason=None)
+
+    def wait(self, msg: str, secs: float) -> None:
+        say(msg, self.job)
+        reason = msg.split(" - ")[0]
+        jira_status.set_progress(job=self.job, stage=self.label, waitingUntil=time.time() + secs,
+                                 reason=reason, message=f"{self.label}: {reason} - resuming in {fmt_secs(secs)}")
 
 
 def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
-         "force": False, "describe": False, "cancel": False, "live": False, "directory": False}
+         "force": False, "describe": False, "cancel": False, "live": False, "directory": False,
+         "rebuild": False, "setup": False, "step": ""}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -126,6 +218,12 @@ def parse_args(argv: list) -> dict:
             o["directory"] = True
         elif name == "--force":
             o["force"] = True
+        elif name == "--rebuild":
+            o["rebuild"] = True
+        elif name == "--setup":
+            o["setup"] = True
+        elif name == "--step":
+            o["step"] = val()
         elif name in ("-h", "--help"):
             print(__doc__.strip())
             sys.exit(0)
@@ -248,15 +346,18 @@ def next_run(entry: dict, window_s: int) -> float | None:
     return last + window_s
 
 
-def choose_window(ep: dict, entry: dict, o: dict, margin: int) -> str:
+def choose_window(name: str, entry: dict, o: dict, margin: int, needs_full: bool = False,
+                  fallback: str = "") -> str:
     if o["init"]:
         return "full"
     if o["window"]:
         return o["window"]
     if not os.path.exists(jira_api.CACHE_FILE):
         return "full"
-    base = entry.get("lastSuccess") or ""
-    if not base and ep.get("jql"):
+    if jira_api.load_checkpoint(name).get("mode") == "full":
+        return "full"     # finish (resume) an interrupted full sync
+    base = entry.get("lastSuccess") or fallback
+    if not base and needs_full:
         return "full"     # a custom query needs its whole key set once
     if not base:
         base = legacy_last_poll()
@@ -315,8 +416,9 @@ def keys_file(name: str) -> str:
     return os.path.join(KEYS_DIR, f"{name}.keys.json")
 
 
-def issues_for(ep: dict, cache: dict) -> list:
-    projects = ep.get("projects", "*")
+def issues_for(ep: dict, cache: dict, team: dict | None = None) -> list:
+    """A job's rows from the cache; with `team`, clamped to the scope."""
+    projects = ep.get("projects", "*") if team is None else jira_config.job_projects(ep, team)
     if ep.get("jql"):
         keys = set(jira_api.read_json(keys_file(ep["name"]), []))
         items = [v for k, v in cache.items() if k in keys]
@@ -352,39 +454,203 @@ def job_fields(ep: dict, team: dict) -> tuple:
             jira_config.publish_keys(columns=spec))
 
 
-def run_endpoint(c, ep: dict, window: str, cfg, fields: list, pkeys: list, out_dir: str,
-                 dry: bool, default_projects: bool = True) -> int:
-    """One endpoint, one attempt. Returns the published item count."""
-    projects = ep.get("projects", "*")
-    plist = None if projects == "*" else list(projects)
-    if ep.get("type", "issues") == "directory":
-        d = jira_api.directory(c, projects=plist, quiet=QUIET)
-        if dry:
-            say(f"dry-run: would write {len(d['users'])} user(s) to {jira_api.DIRECTORY_FILE}")
-        else:
-            jira_api.write_json(jira_api.DIRECTORY_FILE, d)
-            say(f"directory: {len(d['projects'])} project(s), {len(d['users'])} user(s)"
-                + (f", {len(d['warnings'])} warning(s)" if d["warnings"] else ""))
-        return len(d["users"])
-    path = os.path.join(out_dir, ep["file"])
-    if ep.get("type", "issues") == "releases":
-        items = release_items(jira_api.releases(c, projects=plist))
-        publish(path, items, dry)
-        return len(items)
-    res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""), api_fields=fields,
+def plain_issue_job(ep: dict) -> bool:
+    """An issue job without its own query: a view over the shared sync."""
+    return ep.get("type", "issues") == "issues" and not ep.get("jql")
+
+
+class Ctx:
+    """Everything one poll / setup run shares."""
+
+    def __init__(self, o: dict, cfg, team: dict, c=None):
+        self.o, self.cfg, self.team, self.c = o, cfg, team, c
+        self.out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+        self.margin = int(cfg["pollMarginMinutes"] or 5)
+        self.plain = [e for e in cfg.endpoints if plain_issue_job(e) and e.get("enabled", True)]
+
+    def sync_projects(self) -> list:
+        """The shared sync's projects: every plain job's (clamped) projects,
+        in scope order."""
+        want = {p for e in self.plain for p in jira_config.job_projects(e, self.team)}
+        return [p for p in jira_config.scope_projects(self.team) if p in want]
+
+    def sync_fields(self) -> list:
+        out: list = []
+        for e in self.plain:
+            for f in job_fields(e, self.team)[0]:
+                if f not in out:
+                    out.append(f)
+        return out or jira_config.api_fields(team=self.team)
+
+    def sync_limits(self) -> tuple:
+        pages = [e["maxResults"] for e in self.plain if e.get("maxResults")]
+        caps = [e.get("maxTotal") for e in self.plain]
+        return (max(pages) if pages else None,
+                max(caps) if caps and all(caps) else None)
+
+    def sync_wsec(self) -> int:
+        ws = [jira_config.parse_window(e.get("window", "10m")) for e in self.plain]
+        return min(ws) if ws else 600
+
+    def sync_window(self, status: dict) -> str:
+        entry = jira_status.endpoint_entry(status, SYNC)
+        # before the shared sync existed the plain jobs synced themselves:
+        # the oldest of their last successes is where it continues
+        olds = sorted(x for x in (jira_status.endpoint_entry(status, e["name"]).get("lastSuccess")
+                                  for e in self.plain) if x)
+        return choose_window(SYNC, entry, self.o, self.margin, fallback=olds[0] if olds else "")
+
+
+def synced_projects() -> list | None:
+    """The projects the issue cache holds in full (None = unknown: before
+    this was tracked every sync covered its projects)."""
+    v = jira_status.endpoint_entry(jira_status.read(), SYNC).get("syncedProjects")
+    return v if isinstance(v, list) else None
+
+
+def run_shared_sync(ctx: Ctx, window: str) -> dict:
+    """ONE streamed sync for every plain issue job, then publish them all.
+    A project added to the scope since the last sync is fully synced first
+    (an incremental window would only bring its recently updated tickets)."""
+    c, cfg = ctx.c, ctx.cfg
+    projects = ctx.sync_projects()
+    if not projects:
+        raise jira_config.ConfigError(jira_config.NO_SCOPE)
+    page, cap = ctx.sync_limits()
+    have = synced_projects()
+    added = [p for p in projects if have is not None and p not in have] if window != "full" else []
+    if added:
+        rep = Reporter(SYNC + "-added", "New projects")
+        c.on_wait = rep.wait
+        rep.start(f"full sync of the projects added to the scope: {', '.join(added)}")
+        jira_api.sync(c, "full", projects=added, api_fields=ctx.sync_fields(),
+                      fetch_comments=bool(cfg["fetchComments"]), snapshot_keep=0, quiet=True,
+                      default_projects=False, page_size=page, max_total=cap, name=SYNC + "-added",
+                      checkpoint_every=int(cfg["checkpointEvery"] or 500), progress=rep.page,
+                      flushed=lambda keys: publish_plain(ctx, quiet=True))
+    rep = Reporter(SYNC, "Issue cache")
+    c.on_wait = rep.wait
+    resumed = jira_api.load_checkpoint(SYNC)
+    rep.start(f"{'full sync' if window == 'full' else 'sync since ' + window} of "
+              f"{', '.join(projects)}" + (f" - resuming at {resumed.get('hwmText')} "
+                                          f"({resumed.get('fetched', 0):,} done)" if resumed else ""))
+    res = jira_api.sync(c, window, projects=projects, api_fields=ctx.sync_fields(),
                         fetch_comments=bool(cfg["fetchComments"]),
-                        snapshot_keep=int(cfg.get("snapshotKeep", 30)), quiet=QUIET,
-                        default_projects=default_projects, page_size=ep.get("maxResults"),
-                        max_total=ep.get("maxTotal"))
-    if ep.get("jql"):
-        kf = keys_file(ep["name"])
-        keys = set() if window == "full" else set(jira_api.read_json(kf, []))
-        keys.update(res["keys"])
-        jira_api.write_json(kf, sorted(keys))
+                        snapshot_keep=int(cfg.get("snapshotKeep", 30)), quiet=True,
+                        default_projects=False, page_size=page, max_total=cap, name=SYNC,
+                        checkpoint_every=int(cfg["checkpointEvery"] or 500), progress=rep.page,
+                        flushed=lambda keys: publish_plain(ctx, quiet=True))
+    say(f"done: {res['fetched']:,} issue(s) fetched{' (resumed)' if res['resumed'] else ''}, "
+        f"cache {res['total']:,}, {c.requests} request(s)", SYNC)
+    return res
+
+
+def publish_plain(ctx: Ctx, only: str = "", quiet: bool = False) -> dict:
+    """Publish the plain issue jobs (or one) from the cache -> {name: rows}."""
+    global QUIET
     cache = jira_api.read_json(jira_api.CACHE_FILE, {})
-    items = shape(issues_for(ep, cache), pkeys)
-    publish(path, items, dry)
+    if not isinstance(cache, dict):
+        cache = {}
+    out = {}
+    was = QUIET
+    QUIET = QUIET or quiet
+    try:
+        for ep in ctx.plain:
+            if only and ep["name"] != only:
+                continue
+            _, pkeys = job_fields(ep, ctx.team)
+            items = shape(issues_for(ep, cache, ctx.team), pkeys)
+            path = os.path.join(ctx.out_dir, ep["file"])
+            if quiet:
+                jira_api.write_json(path, items, mode=0o644)
+            else:
+                publish(path, items, False)
+            out[ep["name"]] = len(items)
+    finally:
+        QUIET = was
+    return out
+
+
+def run_job(ctx: Ctx, ep: dict, window: str) -> int:
+    """One directory / releases / custom-jql job. Returns the item count."""
+    c, cfg, team = ctx.c, ctx.cfg, ctx.team
+    plist = jira_config.job_projects(ep, team)
+    if not plist:
+        raise jira_config.ConfigError(jira_config.NO_SCOPE)
+    typ = ep.get("type", "issues")
+    rep = Reporter(ep["name"], f"{ep['name']} ({typ})")
+    c.on_wait = rep.wait
+    if typ == "directory":
+        rep.start(f"directory of {', '.join(plist)}")
+        d = jira_api.directory(c, projects=plist, quiet=True)
+        jira_api.write_json(jira_api.DIRECTORY_FILE, d)
+        say(f"{len(d['projects'])} project(s), {len(d['users'])} user(s)"
+            + (f", {len(d['warnings'])} warning(s): {'; '.join(d['warnings'])}" if d["warnings"] else ""),
+            ep["name"])
+        return len(d["users"])
+    path = os.path.join(ctx.out_dir, ep["file"])
+    if typ == "releases":
+        rep.start(f"versions of {', '.join(plist)}")
+        items = release_items(jira_api.releases(c, projects=plist))
+        publish(path, items, False)
+        return len(items)
+    # custom jql: its own streamed search (its key set = its rows)
+    kf = keys_file(ep["name"])
+    fresh = window == "full" and not jira_api.load_checkpoint(ep["name"])
+    base_keys = set() if fresh else set(jira_api.read_json(kf, []))
+    f_ep, k_ep = job_fields(ep, team)
+    rep.start(f"{'full sync' if window == 'full' else 'sync since ' + window}: {ep['jql']}")
+
+    def flushed(keys):
+        jira_api.write_json(kf, sorted(base_keys | set(keys)))
+
+    jira_api.sync(c, window, projects=plist, jql=ep["jql"], api_fields=f_ep,
+                  fetch_comments=bool(cfg["fetchComments"]),
+                  snapshot_keep=int(cfg.get("snapshotKeep", 30)), quiet=True,
+                  default_projects=False, page_size=ep.get("maxResults"),
+                  max_total=ep.get("maxTotal"), name=ep["name"],
+                  checkpoint_every=int(cfg["checkpointEvery"] or 500), progress=rep.page,
+                  flushed=flushed)
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    items = shape(issues_for(ep, cache, team), k_ep)
+    publish(path, items, False)
     return len(items)
+
+
+def record(name: str, started: str, window: str, err: str, curl: str, items, wsec: int,
+           extra: dict | None = None) -> None:
+    """One job's result -> status.json (lastSuccess = the run's START, so the
+    next window also covers what changed while a long sync ran)."""
+    ran = jira_status.now_str()
+
+    def fn(d):
+        e = jira_status.endpoint_entry(d, name)
+        e["lastRun"] = ran
+        e["lastWindow"] = window
+        e["status"] = "error" if err else "ok"
+        e["lastError"] = err
+        e["lastCurl"] = curl if err else ""   # the failing request, runnable ($JIRA_TOKEN)
+        if not err:
+            e["lastSuccess"] = started
+            e["items"] = items
+        if extra:
+            e.update(extra)
+        nx = next_run(e, wsec)
+        e["nextRun"] = jira_status.now_str(nx) if nx else "due"
+    jira_status.update(fn)
+
+
+def attempt(fn) -> tuple:
+    """Run fn() -> (result, err, curl); a failed job keeps its partial
+    progress (checkpoint) and is resumed by the next run."""
+    try:
+        return fn(), "", ""
+    except jira_api.ApiError as e:
+        return None, str(e), e.curl
+    except jira_config.ConfigError as e:
+        return None, str(e), ""
+    except (OSError, ValueError) as e:
+        return None, f"{type(e).__name__}: {e}", ""
 
 
 def columns_meta(spec: str, aliases: dict) -> list:
@@ -416,26 +682,36 @@ def describe(cfg, team: dict) -> dict:
     c = jira_api.Client.from_config(cfg, dry=True)
     aliases = jira_config.custom_field_aliases(team)
     margin = int(cfg["pollMarginMinutes"] or 5)
-    known_projects = list(team.get("project_keys") or []) or jira_config._cache_projects()
+    known_projects = jira_config.scope_projects(team)
     template = jira_config.read_section("jira").get("columns", "")
 
-    def issue_requests(ep, window, fields, default_projects=True):
-        projects = ep.get("projects", "*")
-        plist = None if projects == "*" else list(projects)
+    scope = jira_config.scope_projects(team)
+    ctx = Ctx({"init": False, "window": ""}, cfg, team, c)
+
+    def issue_requests(name, plist, jql, window, fields, page_size=None, max_total=None):
         c.captured = []
-        res = jira_api.sync(c, window, projects=plist, jql=ep.get("jql", ""), api_fields=fields,
-                            fetch_comments=False, quiet=True, default_projects=default_projects,
-                            page_size=ep.get("maxResults"), max_total=ep.get("maxTotal"))
-        reqs = [{"purpose": "search (first page; startAt / nextPageToken pages follow)", "curl": x}
+        res = jira_api.sync(c, window, projects=plist or None, jql=jql, api_fields=fields,
+                            fetch_comments=bool(cfg["fetchComments"]), quiet=True,
+                            default_projects=False, page_size=page_size, max_total=max_total,
+                            name=name)
+        reqs = [{"purpose": "search, oldest first (first page; startAt / nextPageToken pages "
+                            "follow; comments ride along in the `comment` field)", "curl": x}
                 for x in c.captured]
-        if cfg["fetchComments"]:
-            reqs.append({"purpose": "comments - one per changed issue (example key)",
-                         "curl": c.curl_cmd(c.url(c.path("issue", key="KEY-1"), "fields=comment"))})
         if "fixVersions" in fields:
             reqs.append({"purpose": "release dates - one per project in the results",
                          "curl": c.curl_cmd(c.url(c.path(
                              "project_versions", project=(plist or known_projects or ["PROJ"])[0])))})
         return res["jql"], reqs
+
+    shared = None
+    if ctx.plain and scope:
+        try:
+            page, cap = ctx.sync_limits()
+            sw = ctx.sync_window(status)
+            shared = (sw,) + issue_requests(SYNC, ctx.sync_projects(), "", sw, ctx.sync_fields(),
+                                            page, cap)
+        except (jira_config.ConfigError, jira_api.ApiError):
+            shared = None
 
     eps = []
     for ep in cfg.endpoints:
@@ -446,14 +722,16 @@ def describe(cfg, team: dict) -> dict:
         except jira_config.ConfigError:
             wsec = 0
         projects = ep.get("projects", "*")
-        plist = None if projects == "*" else list(projects)
+        plist = jira_config.job_projects(ep, team)
         spec = jira_config.job_columns(ep)
         fields, _ = job_fields(ep, team)
         reqs, jql, notes, window = [], "", [], "-"
+        if not scope:
+            notes.append(jira_config.NO_SCOPE)
         try:
             if typ == "directory":
                 # dry: /project returns nothing, so name the projects it would page
-                users_of = plist or team.get("project_keys") or known_projects or ["PROJ"]
+                users_of = plist or known_projects or ["PROJ"]
                 c.captured = []
                 jira_api.directory(c, projects=users_of)
                 purposes = ["projects"] + [f"assignable users of {p} (paginated)" for p in users_of]
@@ -462,22 +740,24 @@ def describe(cfg, team: dict) -> dict:
                 purposes += [f"labels of {p} (labelled issues, fields=labels)" for p in users_of]
                 reqs += [{"purpose": purposes[i] if i < len(purposes) else "", "curl": x}
                          for i, x in enumerate(c.captured)]
-                if plist is None and not team.get("project_keys"):
-                    notes.append('projects = "*" and no team.json project_keys: users of EVERY '
-                                 "visible project are fetched (one paginated call each)")
             elif typ == "releases":
                 c.captured = []
-                jira_api.releases(c, projects=plist)
-                reqs += [{"purpose": "list projects" if plist is None and not team.get("project_keys")
-                          else "versions", "curl": x} for x in c.captured]
-                if plist is None and not team.get("project_keys"):
-                    for p in known_projects:
-                        reqs.append({"purpose": f"versions of {p} (one per project)",
-                                     "curl": c.curl_cmd(c.url(c.path("project_versions", project=p)))})
-                    notes.append('projects = "*": every project the token can see gets one versions call')
+                jira_api.releases(c, projects=plist or ["PROJ"])
+                reqs += [{"purpose": f"versions of {p}", "curl": x}
+                         for p, x in zip(plist or ["PROJ"], c.captured)]
+            elif plain_issue_job(ep):
+                if shared:
+                    window, jql, r = shared
+                    reqs += r
+                others = [e["name"] for e in ctx.plain if e["name"] != ep["name"]]
+                notes.append("shares ONE issue-cache sync per tick"
+                             + (f" with {', '.join(others)}" if others else "")
+                             + " - this tab is published from the cache (no queries of its own)")
             else:
-                window = choose_window(ep, entry, {"init": False, "window": ""}, margin)
-                jql, r = issue_requests(ep, window, fields)
+                window = choose_window(ep["name"], entry, {"init": False, "window": ""}, margin,
+                                       needs_full=True)
+                jql, r = issue_requests(ep["name"], plist, ep["jql"], window, fields,
+                                        ep.get("maxResults"), ep.get("maxTotal"))
                 reqs += r
         except (jira_config.ConfigError, jira_api.ApiError) as err:
             notes.append(f"cannot build request: {err}")
@@ -495,7 +775,8 @@ def describe(cfg, team: dict) -> dict:
             "lastSuccess": entry.get("lastSuccess", ""), "lastWindow": entry.get("lastWindow", ""),
             "nextRun": jira_status.now_str(nx) if nx else "due",
             "items": entry.get("items"), "lastError": entry.get("lastError", ""),
-            "lastCurl": entry.get("lastCurl", ""),
+            "lastCurl": entry.get("lastCurl", ""), "scopedProjects": plist,
+            "sharedSync": plain_issue_job(ep),
         })
 
     # the live search tab (Cmd+F in the Jira window)
@@ -540,6 +821,10 @@ def describe(cfg, team: dict) -> dict:
                         "renamed": f in own_labels,
                         "custom": f in aliases, "base": f in jira_config.BASE_FIELD_LABELS})
 
+    sync_entry = jira_status.endpoint_entry(status, SYNC)
+    ck = jira_api.load_checkpoint(SYNC)
+    setup = jira_config.setup_state(cfg.data)
+    done_steps = setup.get("steps") or {}
     lock = Lock(jira_status.POLL_LOCK, 10)
     held = not lock._try()
     if not held:
@@ -559,6 +844,26 @@ def describe(cfg, team: dict) -> dict:
         "status": status.get("status", ""), "lastRun": status.get("lastRun", ""),
         "lastError": status.get("lastError", ""),
         "lock": {"held": held, **(lock.holder() if held else {})},
+        "progress": status.get("progress") if held else None,
+        "pollLog": POLL_LOG,
+        "scope": scope,
+        "setup": {"state": setup.get("state", "done"),
+                  "steps": [{**st, **(done_steps.get(st["name"]) or {"state": "pending"})}
+                            for st in setup_steps(cfg)]},
+        "rebuildOnNextPoll": cfg["rebuildOnNextPoll"] or False,
+        "issueCache": {"projects": ctx.sync_projects() if scope else [],
+                       "jobs": [e["name"] for e in ctx.plain],
+                       "status": sync_entry.get("status", "never run"),
+                       "lastRun": sync_entry.get("lastRun", ""),
+                       "lastSuccess": sync_entry.get("lastSuccess", ""),
+                       "lastError": sync_entry.get("lastError", ""),
+                       "lastCurl": sync_entry.get("lastCurl", ""),
+                       "items": sync_entry.get("items"),
+                       "nextWindow": shared[0] if shared else "",
+                       "jql": shared[1] if shared else "",
+                       "requests": shared[2] if shared else [],
+                       "checkpoint": {k: ck.get(k) for k in ("hwmText", "fetched", "total", "mode",
+                                                             "savedAt")} if ck else None},
         "projectKeys": team.get("project_keys") or [],
         "columnsTemplate": template,
         "searchDefaults": {k: c.sd(k) for k in jira_config.DEFAULT_SEARCH},
@@ -634,6 +939,147 @@ def live_search(dry: bool) -> int:
                   jql=jql, curl=curl, file=path, maxResults=cap)
 
 
+def setup_steps(cfg) -> list:
+    """The one-time setup, in order - each step is run and confirmed alone."""
+    eps = [e for e in cfg.endpoints if e.get("enabled", True)]
+    steps = [{"name": "connection", "label": "Connection", "detail": "log in (/myself) + your Jira time zone"},
+             {"name": "scope", "label": "Projects in scope", "detail": "each project you entered exists and is readable"}]
+    for e in eps:
+        if e.get("type") == "directory":
+            steps.append({"name": e["name"], "label": f"Directory ({e['name']})",
+                          "detail": "users, statuses, types, releases, labels for the pickers"})
+    for e in eps:
+        if e.get("type") == "releases":
+            steps.append({"name": e["name"], "label": f"Releases ({e['name']})",
+                          "detail": "every version of the projects in scope"})
+    if any(plain_issue_job(e) for e in eps):
+        steps.append({"name": SYNC, "label": "Issue cache (full sync)",
+                      "detail": "every ticket of the projects in scope - streamed, resumable"})
+        for e in eps:
+            if plain_issue_job(e):
+                steps.append({"name": e["name"], "label": f"Tab {e['name']}",
+                              "detail": f"publish {e.get('file')} from the cache"})
+    for e in eps:
+        if e.get("type", "issues") == "issues" and e.get("jql"):
+            steps.append({"name": e["name"], "label": f"Query job {e['name']}",
+                          "detail": "its own JQL, full sync"})
+    return steps
+
+
+def save_setup(st: dict) -> None:
+    jira_config.save({"setup": st})
+
+
+def run_setup_step(ctx: Ctx, name: str) -> tuple:
+    """-> (items, message). Raises on failure."""
+    c, team, cfg = ctx.c, ctx.team, ctx.cfg
+    if name == "connection":
+        try:
+            os.unlink(jira_api.TZ_FILE)
+        except OSError:
+            pass
+        me = c.get(c.path("myself")) or {}
+        tz = jira_api.jira_tz(c)
+        return 1, f"logged in as {me.get('displayName') or me.get('name') or '?'}" + (f" · {tz}" if tz else "")
+    if name == "scope":
+        scope = jira_config.scope_projects(team)
+        if not scope:
+            raise jira_config.ConfigError(jira_config.NO_SCOPE)
+        # only the projects the user entered - the site's list is never fetched
+        names, missing = [], []
+        for k in scope:
+            try:
+                names.append(f"{k} ({(c.get(c.path('project', project=k)) or {}).get('name') or k})")
+            except jira_api.ApiError as err:
+                if err.code not in (403, 404):
+                    raise
+                missing.append(k)
+        if missing:
+            raise jira_config.ConfigError(f"not found / not readable with this token: {', '.join(missing)} "
+                                          "- fix the projects in scope")
+        return len(scope), ", ".join(names)
+    if name == SYNC:
+        started = jira_status.now_str()
+        res = run_shared_sync(ctx, "full")
+        counts = publish_plain(ctx)
+        record(SYNC, started, "full", "", "", res["total"], ctx.sync_wsec(),
+               extra={"syncedProjects": ctx.sync_projects()})
+        for e in ctx.plain:
+            record(e["name"], started, "full", "", "", counts.get(e["name"]),
+                   jira_config.parse_window(e.get("window", "10m")))
+        return res["total"], f"{res['total']:,} issue(s) cached" + (" (resumed)" if res["resumed"] else "")
+    ep = cfg.endpoint(name)
+    if ep is None:
+        raise jira_config.ConfigError(f"unknown step '{name}'")
+    started = jira_status.now_str()
+    wsec = jira_config.parse_window(ep.get("window", "10m"))
+    if plain_issue_job(ep):
+        n = publish_plain(ctx, only=name).get(name, 0)
+        record(name, started, "-", "", "", n, wsec)
+        return n, f"{n:,} row(s) in {ep.get('file')}"
+    window = "full" if ep.get("type", "issues") == "issues" else "-"
+    n = run_job(ctx, ep, window)
+    record(name, started, window, "", "", n, wsec)
+    return n, f"{n:,} item(s)"
+
+
+def run_setup(o: dict, cfg, team: dict) -> int:
+    st = dict(jira_config.setup_state(cfg.data))
+    steps = dict(st.get("steps") or {})
+    order = [x["name"] for x in setup_steps(cfg)]
+    if o["step"] and o["step"] not in order:
+        print(f"jira-poll: unknown setup step '{o['step']}' (steps: {', '.join(order)})", file=sys.stderr)
+        return 2
+    todo = [o["step"]] if o["step"] else [n for n in order if (steps.get(n) or {}).get("state") != "ok"]
+    ctx = Ctx(o, cfg, team, jira_api.Client.from_config(cfg))
+    say(f"setup: {len(todo)} step(s) to run: {', '.join(todo) or '(none)'}", "setup")
+    code = 0
+    for name in todo:
+        steps[name] = {"state": "running", "at": jira_status.now_str()}
+        save_setup({**st, "steps": steps})
+        jira_status.set_progress(job=name, stage="setup", message=f"Setup: {name}…", done=None,
+                                 total=None, pct=None, etaSeconds=None, waitingUntil=None)
+        (res, err, curl) = attempt(lambda: run_setup_step(ctx, name))
+        if err:
+            steps[name] = {"state": "error", "at": jira_status.now_str(), "error": err, "curl": curl}
+            save_setup({**st, "steps": steps})
+            say(f"✗ {name}: {err}", "setup")
+            code = 1
+            break      # later steps build on this one: fix it, then rerun
+        items, msg = res
+        steps[name] = {"state": "ok", "at": jira_status.now_str(), "items": items, "message": msg}
+        save_setup({**st, "steps": steps})
+        say(f"✓ {name}: {msg}", "setup")
+    if all((steps.get(n) or {}).get("state") == "ok" for n in order):
+        if st.get("state") != "done":
+            say("setup complete - scheduled polling starts now", "setup")
+        st["state"] = "done"
+    save_setup({**st, "steps": steps})
+    return code
+
+
+def wipe_cache() -> None:
+    """--rebuild: the issue cache, resume points, versions and key sets go;
+    published tabs are overwritten as the rebuild streams in."""
+    for f in (jira_api.CACHE_FILE, jira_api.VERSIONS_FILE, jira_api.STATE_FILE):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+    jira_api.clear_checkpoints()
+    if os.path.isdir(KEYS_DIR):
+        for f in os.listdir(KEYS_DIR):
+            try:
+                os.unlink(os.path.join(KEYS_DIR, f))
+            except OSError:
+                pass
+
+    def fn(d):
+        for e in d.get("endpoints") or []:
+            e.pop("lastSuccess", None)
+    jira_status.update(fn)
+
+
 def main(argv: list) -> int:
     global QUIET
     o = parse_args(argv)
@@ -654,6 +1100,12 @@ def main(argv: list) -> int:
             return 2
         o["projects"] = ",".join(names)
         o["force"] = True
+    if o["rebuild"]:
+        # the flag first: if another poll holds the lock, the next tick rebuilds
+        jira_config.save({"rebuildOnNextPoll": True})
+        o["force"] = True
+    if o["setup"]:
+        o["force"] = True
     if o["describe"]:
         try:
             cfg = jira_config.load()
@@ -666,14 +1118,16 @@ def main(argv: list) -> int:
                     except jira_config.ConfigError as err:   # show the job, flag the problem
                         bad.append(f"endpoint '{ep.get('name')}': {err}")
             d = describe(cfg, team)
-            d["problems"] = cfg.problems() + bad + [f"team: {x}" for x in jira_config.team_problems(team)]
+            d["problems"] = cfg.problems() + bad + [f"team: {x}" for x in jira_config.team_problems(team)] \
+                + jira_config.scope_problems(cfg.endpoints, team) \
+                + ([] if jira_config.scope_projects(team) else [jira_config.NO_SCOPE])
         except jira_config.ConfigError as err:
             d = {"problems": [str(err)], "endpoints": [], "columns": []}
         print(json.dumps(d, indent=2))
         return 0
     enabled = jira_config.jira_enabled()
     active = jira_config.poll_active()
-    base = {"script": jira_status.POLL_SCRIPT, "curlLog": jira_api.CURL_LOG,
+    base = {"script": jira_status.POLL_SCRIPT, "curlLog": jira_api.CURL_LOG, "pollLog": POLL_LOG,
             "config": jira_config.CONFIG_JSON, "commandsConf": jira_config.COMMANDS_CONF,
             "enabled": enabled, "backgroundPoll": active and not enabled}
 
@@ -690,7 +1144,7 @@ def main(argv: list) -> int:
     except jira_config.ConfigError as err:
         jira_status.update(lambda d: set_base(d, status="error", lastError=str(err),
                                               lastCheck=jira_status.now_str()))
-        print(f"jira-poll: {err}", file=sys.stderr)
+        say(str(err))
         return 2
     base["configNotes"] = cfg.notes
     probs = cfg.problems()
@@ -708,7 +1162,19 @@ def main(argv: list) -> int:
         msg = "config: " + "; ".join(probs)
         jira_status.update(lambda d: set_base(d, status="error", lastError=msg,
                                               lastCheck=jira_status.now_str()))
-        print(f"jira-poll: {msg}", file=sys.stderr)
+        say(msg)
+        return 2
+    setup = jira_config.setup_state(cfg.data)
+    scheduled = not (o["force"] or o["projects"] or o["init"] or o["window"])
+    if setup.get("state") != "done" and scheduled and not o["dry"]:
+        jira_status.update(lambda d: set_base(d, status="setup pending", lastCheck=jira_status.now_str(),
+                                              lastError=""))
+        return 0
+    if not jira_config.scope_projects(team) and not o["setup"]:
+        msg = jira_config.NO_SCOPE
+        jira_status.update(lambda d: set_base(d, status="error", lastError=msg,
+                                              lastCheck=jira_status.now_str()))
+        say(msg)
         return 2
 
     lock = Lock(jira_status.POLL_LOCK, int(cfg["lockStaleMinutes"] or 10))
@@ -722,32 +1188,54 @@ def main(argv: list) -> int:
         return 3
     signal.signal(signal.SIGTERM, on_sigterm)
     try:
+        if o["setup"]:
+            jira_status.update(lambda d: set_base(d, lock={"held": True, "pid": os.getpid(),
+                                                           "since": lock.since}))
+            return run_setup(o, cfg, team)
         return poll(o, cfg, team, base, set_base, lock)
     except Cancelled:
         def mark(d):
             for e in d.get("endpoints") or []:
                 if e.get("status") == "running":
                     e["status"] = "cancelled"
-                    e["lastError"] = "cancelled by user"
+                    e["lastError"] = "cancelled by user (progress kept - the next run resumes)"
             set_base(d, status="cancelled", lastError="poll cancelled",
                      lastRun=jira_status.now_str())
         jira_status.update(mark)
-        say("cancelled")
+        if o["setup"]:
+            st = jira_config.setup_state(jira_config.load().data)
+            steps = {k: (dict(v, state="cancelled") if (v or {}).get("state") == "running" else v)
+                     for k, v in (st.get("steps") or {}).items()}
+            save_setup({**st, "steps": steps})
+        say("cancelled (progress kept - the next run resumes)")
         return 130
     finally:
         lock.release()
         if not o["dry"]:
-            jira_status.update(lambda d: d.update(lock={"held": False, "pid": None, "since": None}))
+            jira_status.update(lambda d: d.update(lock={"held": False, "pid": None, "since": None},
+                                                  progress=None))
 
 
 def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
     status = jira_status.read()
     now = time.time()
+    rebuild = cfg["rebuildOnNextPoll"]
+    if rebuild and not o["dry"]:
+        if rebuild is True:
+            wipe_cache()
+            jira_config.save({"rebuildOnNextPoll": "resume"})
+            say("rebuild: issue cache, resume points and versions wiped - re-populating everything",
+                "rebuild")
+            status = jira_status.read()
+        else:
+            say("rebuild: continuing the interrupted rebuild", "rebuild")
+        o["init"] = True
+        o["projects"] = "*"
     names = [n.strip() for n in o["projects"].split(",") if n.strip()] if o["projects"] else []
     forced = bool(names) or o["init"] or bool(o["window"])
     # "*" = every enabled job; "all" too, unless a job is literally named "all"
     everything = "*" in names or ("all" in names and not cfg.endpoint("all"))
-    unknown = [n for n in names if n not in ("*", "all") and not cfg.endpoint(n)]
+    unknown = [n for n in names if n not in ("*", "all", SYNC) and not cfg.endpoint(n)]
     if unknown:
         print(f"jira-poll: unknown endpoint(s): {', '.join(unknown)} "
               f"(known: {', '.join(e['name'] for e in cfg.endpoints)})", file=sys.stderr)
@@ -761,22 +1249,31 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
         due = wanted and (forced or nxt is None or now >= nxt)
         if due:
             plan.append((ep, entry, wsec))
-    margin = int(cfg["pollMarginMinutes"] or 5)
+    ctx = Ctx(o, cfg, team)
+    sync_due = SYNC in names or any(plain_issue_job(ep) for ep, _, _ in plan)
+    others = [(ep, entry, wsec) for ep, entry, wsec in plan if not plain_issue_job(ep)]
     fields = jira_config.api_fields(team=team)
     pkeys = jira_config.publish_keys()
-    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
 
     if o["dry"]:
         print(f"config:  {cfg.path} ({cfg.source})")
         print(f"enabled: {base['enabled']}  (commands.conf [jira])")
+        print(f"scope:   {', '.join(jira_config.scope_projects(team)) or '(none)'}")
+        print(f"setup:   {jira_config.setup_state(cfg.data).get('state')}")
         print(f"fields:  {','.join(fields)}")
         print(f"publish: {','.join(pkeys)}")
+        if ctx.plain:
+            print(f"  {'(sync)':<10} {'issues':<8} every {fmt_secs(ctx.sync_wsec()):<4} "
+                  f"{'DUE' if sync_due else 'not due':<8} window={ctx.sync_window(status):<17} "
+                  f"-> {jira_api.CACHE_FILE} ({', '.join(ctx.sync_projects())})")
         for ep in cfg.endpoints:
             entry = jira_status.endpoint_entry(status, ep["name"])
             hit = any(p[0] is ep for p in plan)
-            w = choose_window(ep, entry, o, margin) if ep.get("type", "issues") == "issues" else "-"
+            w = "shared" if plain_issue_job(ep) else \
+                choose_window(ep["name"], entry, o, ctx.margin, needs_full=True) \
+                if ep.get("type", "issues") == "issues" else "-"
             print(f"  {ep['name']:<10} {ep.get('type', 'issues'):<8} every {ep.get('window'):<4} "
-                  f"{'DUE' if hit else 'not due':<8} window={w:<17} -> {ep_path(ep, out_dir)}")
+                  f"{'DUE' if hit else 'not due':<8} window={w:<17} -> {ep_path(ep, ctx.out_dir)}")
         return 0
 
     def mark_running(d):
@@ -784,73 +1281,65 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
                  lastCheck=jira_status.now_str())
         # an enabled tick replaces a stale "disabled"/config-error state even
         # when nothing is due (the endpoints' own results follow below)
-        if d.get("status") in (None, "disabled") or str(d.get("lastError", "")).startswith("config"):
+        if d.get("status") in (None, "disabled", "setup pending") or \
+                str(d.get("lastError", "")).startswith("config"):
             d["status"] = "idle"
             d["lastError"] = ""
-        known = {e["name"] for e in cfg.endpoints}
+        known = {e["name"] for e in cfg.endpoints} | {SYNC}
         d["endpoints"] = [e for e in d.get("endpoints", []) if e.get("name") in known]
         for ep in cfg.endpoints:
             e = jira_status.endpoint_entry(d, ep["name"])
             wsec = jira_config.parse_window(ep.get("window", "10m"))
             e.update({"type": ep.get("type", "issues"), "window": ep.get("window"),
                       "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
-                      "path": ep_path(ep, out_dir)})
-            if any(p[0] is ep for p in plan):
+                      "path": ep_path(ep, ctx.out_dir)})
+            if any(p[0] is ep for p in plan) or (sync_due and ep in ctx.plain):
                 e["status"] = "running"
             nx = next_run(e, wsec)
             e["nextRun"] = jira_status.now_str(nx) if nx else "due"
+        if sync_due:
+            jira_status.endpoint_entry(d, SYNC).update(status="running", type="sync")
     jira_status.update(mark_running)
 
-    if not plan:
+    if not plan and not sync_due:
         say("nothing due")
         jira_status.update(lambda d: None)
         return 0
 
-    c = jira_api.Client.from_config(cfg)
+    ctx.c = c = jira_api.Client.from_config(cfg)
     failures = []
-    for ep, entry, wsec in plan:
-        window = choose_window(ep, entry, o, margin) if ep.get("type", "issues") == "issues" else "-"
-        say(f"{ep['name']}: window={window}")
-        err = ""
-        curl = ""
-        items = None
-        for attempt in range(1, MAX_TRIES + 1):
-            try:
-                f_ep, k_ep = job_fields(ep, team)
-                items = run_endpoint(c, ep, window, cfg, f_ep, k_ep, out_dir, False)
-                err = ""
-                break
-            except jira_api.ApiError as e:
-                err = str(e)
-                curl = e.curl
-                say(f"{ep['name']}: attempt {attempt}/{MAX_TRIES} failed: {err}")
-                if e.code in (401, 403) or attempt == MAX_TRIES:
-                    break   # auth errors never fix themselves on retry
-                time.sleep(RETRY_BASE * 2 ** (attempt - 1))
-            except (OSError, ValueError) as e:
-                err = f"{type(e).__name__}: {e}"
-                break
-        ran = jira_status.now_str()
-
-        def record(d, ep=ep, err=err, items=items, window=window, ran=ran, wsec=wsec, curl=curl):
-            e = jira_status.endpoint_entry(d, ep["name"])
-            e["lastRun"] = ran
-            e["lastWindow"] = window
-            e["status"] = "error" if err else "ok"
-            e["lastError"] = err
-            e["lastCurl"] = curl if err else ""   # the failing request, runnable ($JIRA_TOKEN)
-            if not err:
-                e["lastSuccess"] = ran
-                e["items"] = items
-            nx = next_run(e, wsec)
-            e["nextRun"] = jira_status.now_str(nx) if nx else "due"
-        jira_status.update(record)
+    if sync_due and ctx.plain:
+        window = ctx.sync_window(status)
+        started = jira_status.now_str()
+        res, err, curl = attempt(lambda: run_shared_sync(ctx, window))
         if err:
+            say(f"failed: {err} - progress kept; the next run resumes", SYNC)
+        counts = publish_plain(ctx)     # partial data is still better than none
+        record(SYNC, started, window, err, curl, (res or {}).get("total"), ctx.sync_wsec(),
+               extra=None if err else {"syncedProjects": ctx.sync_projects()})
+        for ep in ctx.plain:
+            record(ep["name"], started, window, err, curl, counts.get(ep["name"]),
+                   jira_config.parse_window(ep.get("window", "10m")))
+        if err:
+            failures.append(f"issue cache: {err}")
+    for ep, entry, wsec in others:
+        window = choose_window(ep["name"], entry, o, ctx.margin, needs_full=True) \
+            if ep.get("type", "issues") == "issues" else "-"
+        started = jira_status.now_str()
+        say(f"window={window}", ep["name"])
+        items, err, curl = attempt(lambda: run_job(ctx, ep, window))
+        if err:
+            say(f"failed: {err}", ep["name"])
             failures.append(f"{ep['name']}: {err}")
+        record(ep["name"], started, window, err, curl, items, wsec)
     final = "error" if failures else "ok"
     last_err = "; ".join(failures)
+    if rebuild and not failures:
+        jira_config.save({"rebuildOnNextPoll": False})
+        say("rebuild complete", "rebuild")
     jira_status.update(lambda d: set_base(d, lastRun=jira_status.now_str(), status=final,
-                                          lastError=last_err, requests=c.requests))
+                                          lastError=last_err, requests=c.requests,
+                                          retries=c.retries, rateLimitWaited=int(c.waited)))
     # the legacy poll-state keeps the old doctor / tooling working
     try:
         cache = jira_api.read_json(jira_api.CACHE_FILE, {})
@@ -859,7 +1348,8 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
                      f"ITEMS={len(cache)}\nOUTPUTS={len(plan)}\nERROR={last_err}\n")
     except OSError:
         pass
-    say(f"poll complete: {len(plan)} endpoint(s), status={final}, {c.requests} request(s)")
+    say(f"poll complete: {len(plan)} job(s), status={final}, {c.requests} request(s)"
+        + (f", {c.retries} retried, {fmt_secs(c.waited)} waited on rate limits" if c.retries else ""))
     return 1 if failures else 0
 
 

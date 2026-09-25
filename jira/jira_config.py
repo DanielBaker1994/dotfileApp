@@ -44,6 +44,9 @@ CLI (used by the menu bar + setup sheet):
   jira_config.py --team-set KEY      JSON value on stdin -> team.json KEY
                                      (project_keys, custom_fields, ...;
                                      validated; JSON result)
+  jira_config.py --scope           JSON {projects}: the projects in scope
+                                   (team.json project_keys; every job is
+                                   limited to them - "*" = all of these)
   jira_config.py --criteria-jql      criteria JSON on stdin -> the live
                                      search JQL (see criteria_jql)
 
@@ -88,6 +91,11 @@ DEFAULTS = {
     "outDir": OUT_DIR_DEFAULT,
     "endpoints": [],
     "liveSearch": {},   # {columns, maxResults}: the Jira window's search tab
+    "rateLimitMaxWaitMinutes": 30,   # total sleep one poll may spend on 429 / 5xx / mid-run 401
+    "requestDelayMs": 0,             # pause between requests (gentle throttle)
+    "checkpointEvery": 500,          # issues between cache writes + resume points
+    "rebuildOnNextPoll": False,      # one-time: wipe the cache, re-populate (cleared when done)
+    "setup": None,                   # {state: pending|done, steps: {name: {...}}} (jira_poll --setup)
 }
 
 LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
@@ -129,7 +137,7 @@ FIELD_SOURCES = {
     "updated": ["updated"],
     "reporter": ["reporter"],
     "project": ["project"],
-    "comments": [],   # separate per-issue call (fetchComments)
+    "comments": [],   # the `comment` field of the search itself (fetchComments)
 }
 # always requested: updated drives sort + windows, project drives the
 # per-project files and the versions (release date) lookup
@@ -165,6 +173,7 @@ DEFAULT_API_ENDPOINTS = {
     "search": "/search",
     "issue": "/issue/{key}",
     "projects": "/project",
+    "project": "/project/{project}",
     "project_versions": "/project/{project}/versions",
     "statuses": "/status",
     "fields": "/field",
@@ -179,9 +188,11 @@ CLOUD_SEARCH = "/rest/api/3/search/jql"   # Cloud removed v2 /search
 
 DEFAULT_SEARCH = {
     "max_results_users": 50,
-    "max_results_search": 50,     # page size of one search request
+    "max_results_search": 500,    # page size of one search request (the server may cap it:
+                                  # Cloud 100 with fields, Server/DC jira.search.views.max 1000)
     "page_size": 50,              # page size of one board request
     "timeout_seconds": 30,        # curl -m
+    "timeout_search_seconds": 120,  # curl -m for one search page (big pages are slow)
     "cache_timeout_seconds": 0,   # re-use versions.json this long (0 = always refetch)
     "versions_lookback_days": 0,  # drop releases dated older than this (0 = keep all)
     "labels_max_issues": 2000,    # directory job: labelled issues scanned per project (0 = no labels)
@@ -618,12 +629,18 @@ def criteria_jql(crit: dict, team: dict, field_types: dict | None = None) -> str
         raise ConfigError("criteria must be a JSON object")
     aliases = custom_field_aliases(team or {})
     types = field_types or {}
+    # never the whole site: the picked projects (inside the scope), else the scope
+    scope = scope_projects(team or {})
+    if not scope:
+        raise ConfigError(NO_SCOPE)
     clauses = []
     for key, fld in CRITERIA_LISTS.items():
         vals = crit.get(key) or []
         if isinstance(vals, str):
             vals = [vals]
         vals = [v for v in (str(x).strip() for x in vals if x is not None) if v and v != "*"]
+        if key == "projects":
+            vals = [v for v in vals if v in scope]
         if not vals:
             continue
         clauses.append(f"{fld} = {_jql_value(vals[0])}" if len(vals) == 1
@@ -664,6 +681,9 @@ def criteria_jql(crit: dict, team: dict, field_types: dict | None = None) -> str
         clauses.append("(" + re.sub(r"\s+ORDER\s+BY\s+.*$", "", raw, flags=re.I | re.S) + ")")
     if not clauses:
         raise ConfigError("choose at least one criterion (text, project, assignee, ...)")
+    if not any(k == "projects" and [v for v in (crit.get(k) or []) if v in scope]
+               for k in CRITERIA_LISTS):
+        clauses.insert(0, "project in (" + ", ".join(_jql_value(p) for p in scope) + ")")
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 
 
@@ -742,6 +762,79 @@ def migrate_legacy(legacy: dict) -> dict:
     eps.append(dict(DEFAULT_ENDPOINTS[1]))
     cfg["endpoints"] = eps
     return cfg
+
+
+def scope_projects(team: dict) -> list:
+    """The projects in scope: team.json project_keys - the source of truth.
+    Every poll job is limited to them ("*" = all of them, never the whole
+    site); empty = setup is not finished (jobs refuse to run)."""
+    return [p for p in team.get("project_keys") or [] if isinstance(p, str) and p]
+
+
+NO_SCOPE = "no projects in scope - set them in Jira Config ▸ Setup (team.json project_keys)"
+
+
+def job_projects(ep: dict, team: dict) -> list:
+    """A job's projects clamped to the scope ("*" = the whole scope)."""
+    scope = scope_projects(team)
+    pr = ep.get("projects", "*")
+    if pr == "*" or not isinstance(pr, list):
+        return list(scope)
+    return [p for p in pr if p in scope]
+
+
+def scope_problems(endpoints: list, team: dict) -> list:
+    scope = set(scope_projects(team))
+    out = []
+    for e in endpoints:
+        pr = e.get("projects", "*")
+        if isinstance(pr, list) and scope:
+            extra = [p for p in pr if p not in scope]
+            if extra:
+                out.append(f"endpoint '{e.get('name')}': {', '.join(extra)} not in the projects in "
+                           "scope (ignored)")
+    return out
+
+
+SETUP_STATES = ("pending", "done")
+
+
+def migrate_setup(data: dict, notes: list) -> None:
+    """One-time: existing installs whose scope is set and whose every enabled
+    job has succeeded skip the setup phase; everything else starts pending
+    (the launchd tick does nothing until Jira Config ▸ Setup is finished)."""
+    if isinstance(data.get("setup"), dict) and data["setup"].get("state") in SETUP_STATES:
+        return
+    try:
+        scope = scope_projects(load_team(data))
+    except ConfigError:
+        scope = []
+    try:
+        with open(os.path.join(CACHE_DIR, "status.json"), encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    ok = {e.get("name") for e in (st.get("endpoints") or []) if isinstance(e, dict) and e.get("lastSuccess")}
+    jobs = [e.get("name") for e in data.get("endpoints") or []
+            if isinstance(e, dict) and e.get("enabled", True)]
+    done = bool(scope) and bool(jobs) and all(n in ok for n in jobs)
+    data["setup"] = {"state": "done" if done else "pending", "steps": {}}
+    try:
+        with open(CONFIG_JSON, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["setup"] = data["setup"]
+        write_json_600(CONFIG_JSON, raw)
+    except (OSError, ValueError) as err:
+        notes.append(f"setup state not saved: {err}")
+        return
+    if not done:
+        notes.append("setup pending: pick the projects in scope and run the one-time setup "
+                     "(Jira Config ▸ Setup) - scheduled polling starts after it")
+
+
+def setup_state(data: dict) -> dict:
+    s = data.get("setup")
+    return s if isinstance(s, dict) else {"state": "done", "steps": {}}
 
 
 def write_json_600(path: str, obj) -> None:
@@ -898,6 +991,7 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
         data["endpoints"] = [dict(e) for e in DEFAULT_ENDPOINTS]
     if migrate and source == "config.json":
         migrate_v3(data, notes)
+        migrate_setup(data, notes)
         if not data.get("fieldLabels"):
             migrate_field_labels(data, notes)
     # per-job columns: jobs from before get their own copy of [jira] columns
@@ -1190,17 +1284,24 @@ def team_set(key: str) -> int:
     """--team-set KEY: replace one team.json key with the JSON value on stdin
     (validated with the rest of the schema first; other keys, and unknown
     extras, are kept). Creates team.json from the example when missing."""
+    try:
+        value = json.load(sys.stdin)
+    except ValueError as err:
+        print(json.dumps({"ok": False, "problems": [f"bad input: {err}"], "key": key, "path": TEAM_JSON}))
+        return 1
+    ok, probs = set_team_key(key, value)
+    print(json.dumps({"ok": ok, "problems": probs, "key": norm_key(key), "path": TEAM_JSON}))
+    return 0 if ok else 1
+
+
+def set_team_key(key: str, value) -> tuple:
+    """Replace one team.json key (validated) -> (ok, problems)."""
     def result(ok, problems=()):
-        print(json.dumps({"ok": ok, "problems": list(problems), "key": key, "path": TEAM_JSON}))
-        return 0 if ok else 1
+        return ok, list(problems)
 
     key = norm_key(key)
     if key not in TEAM_EDITABLE:
         return result(False, [f"'{key}' is not editable ({', '.join(TEAM_EDITABLE)})"])
-    try:
-        value = json.load(sys.stdin)
-    except ValueError as err:
-        return result(False, [f"bad input: {err}"])
     if not isinstance(value, TEAM_EDITABLE[key]):
         return result(False, [f"{key} must be a JSON {TEAM_EDITABLE[key].__name__}"])
     try:
@@ -1289,6 +1390,13 @@ def main(argv: list) -> int:
             print("jira-config: --team-set KEY  (JSON value on stdin)", file=sys.stderr)
             return 2
         return team_set(argv[1])
+    if cmd == "--scope":
+        try:
+            print(json.dumps({"projects": scope_projects(load_team(load().data))}))
+        except ConfigError as err:
+            print(f"jira-config: {err}", file=sys.stderr)
+            return 2
+        return 0
     if cmd == "--criteria-jql":
         try:
             crit = json.load(sys.stdin)
@@ -1343,6 +1451,7 @@ def main(argv: list) -> int:
         return 0
     if cmd == "--check":
         probs = cfg.problems()
+        team: dict = {}
         try:
             team = load_team(cfg.data)
             probs += [f"team: {x}" for x in team_problems(team)]
@@ -1353,6 +1462,8 @@ def main(argv: list) -> int:
             "source": cfg.source, "problems": probs, "notes": cfg.notes,
             "site": cfg.site, "auth": cfg.auth, "email": cfg["email"], "hasToken": bool(cfg["token"]),
             "defaultProject": cfg["defaultProject"], "defaultMax": cfg["defaultMax"],
+            "projectKeys": scope_projects(team),
+            "setup": setup_state(cfg.data),
             "endpoints": [{k: e.get(k) for k in ("name", "type", "window", "enabled", "file")}
                           for e in cfg.endpoints],
         }))

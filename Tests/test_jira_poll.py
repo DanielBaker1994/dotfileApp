@@ -323,7 +323,7 @@ class BearerAndTeamTests(unittest.TestCase):
                 calls = [json.loads(x) for x in fh]
             self.assertEqual(len(calls), 3)   # page size 2 -> 2+2+1
             self.assertIn("Authorization: Bearer TOK", calls[0])
-            self.assertIn("7", calls[0])      # timeout_seconds -> -m 7
+            self.assertIn("120", calls[0])    # search pages: timeout_search_seconds -> -m 120
             self.assertTrue(all("/rest/api/2/search?" in c[-1] for c in calls))
             self.assertIn("startAt=4", calls[2][-1])
 
@@ -442,28 +442,34 @@ class JobsAndLiveSearchTests(unittest.TestCase):
         self.assertIn("duedate", jira_config.publish_keys({}, columns="key:K, duedate:Due"))
 
     def test_criteria_jql(self):
-        t = jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"})
+        t = jira_config.load_team({**MESSY_TEAM, "teamConfig": "/nonexistent"})   # scope P1, P2
         cj = jira_config.criteria_jql
+        S = 'project in ("P1", "P2") AND '    # no project picked -> the whole scope, never the site
         self.assertEqual(cj({"assignee": ["ann", "bob"], "projects": ["P1"]}, t),
                          'project = "P1" AND assignee in ("ann", "bob") ORDER BY updated DESC')
         self.assertEqual(cj({"text": 'a "b"', "reporter": ["currentUser()"], "updated": "7d"}, t),
-                         'reporter = currentUser() AND text ~ "a \\"b\\"" AND updated >= -7d '
+                         S + 'reporter = currentUser() AND text ~ "a \\"b\\"" AND updated >= -7d '
                          "ORDER BY updated DESC")
         self.assertEqual(cj({"created": "today", "projects": "*"}, t),
-                         "created >= startOfDay() ORDER BY updated DESC")
+                         S + "created >= startOfDay() ORDER BY updated DESC")
+        # a picked project outside the scope is dropped
+        self.assertEqual(cj({"created": "today", "projects": ["ELSEWHERE"]}, t),
+                         S + "created >= startOfDay() ORDER BY updated DESC")
         # custom alias -> cf[]; text type (or unknown) uses ~, options use =
         self.assertEqual(cj({"fields": {"package_info": "pkg"}}, t),
-                         'cf[20214] ~ "pkg" ORDER BY updated DESC')
+                         S + 'cf[20214] ~ "pkg" ORDER BY updated DESC')
         self.assertEqual(cj({"fields": {"package_info": "pkg"}}, t, {"customfield_20214": "option"}),
-                         'cf[20214] = "pkg" ORDER BY updated DESC')
+                         S + 'cf[20214] = "pkg" ORDER BY updated DESC')
         self.assertEqual(cj({"fields": {"title": "x"}, "jql": "a = 1 ORDER BY created"}, t),
-                         'summary ~ "x" AND (a = 1) ORDER BY updated DESC')
+                         S + 'summary ~ "x" AND (a = 1) ORDER BY updated DESC')
         # labels / releases come from the pickers as lists
         self.assertEqual(cj({"labels": ["a b", "c"], "fixVersion": ["1.0"]}, t),
-                         'labels in ("a b", "c") AND fixVersion = "1.0" ORDER BY updated DESC')
+                         S + 'labels in ("a b", "c") AND fixVersion = "1.0" ORDER BY updated DESC')
         for bad in ({}, {"projects": []}, {"updated": "soon"}):
             with self.assertRaises(jira_config.ConfigError):
                 cj(bad, t)
+        with self.assertRaises(jira_config.ConfigError):     # no scope -> no search at all
+            cj({"text": "x"}, {**t, "project_keys": []})
 
     def fake_curl(self, tmp, env):
         fake = os.path.join(tmp, "curl")
@@ -482,10 +488,10 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             env = self.env(tmp, liveSearch={"columns": "key:Key, title:Title, customfield_20214:Pkg",
                                             "maxResults": 3})
             self.fake_curl(tmp, env)
-            crit = json.dumps({"text": "pkg", "projects": ["P1"]})
+            crit = json.dumps({"text": "pkg", "projects": ["P"]})
             p = self.run_py(env, "jira_poll.py", "--live-search", "--dry-run", stdin=crit)
             dry = json.loads(p.stdout)
-            self.assertEqual(dry["jql"], 'project = "P1" AND text ~ "pkg" ORDER BY updated DESC')
+            self.assertEqual(dry["jql"], 'project = "P" AND text ~ "pkg" ORDER BY updated DESC')
             self.assertIn("maxResults=3", dry["curl"])
             self.assertFalse(os.path.exists(env["FAKE_CURL_LOG"]))   # dry: no request
             p = self.run_py(env, "jira_poll.py", "--live-search", stdin=crit)
@@ -606,7 +612,7 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             ep = [e for e in d["endpoints"] if e["name"] == "all"][0]
             self.assertIn("maxResults=7", ep["requests"][0]["curl"])
             self.assertEqual(ep["maxResults"], 7)
-            self.assertEqual(d["searchDefaults"]["max_results_search"], 50)
+            self.assertEqual(d["searchDefaults"]["max_results_search"], 500)
 
     def test_team_set_validates_and_keeps_other_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -639,9 +645,11 @@ def isolated_env(tmp, token=""):
     cfgj = os.path.join(tmp, "config.json")
     with open(cfgj, "w") as fh:
         json.dump({"site": "https://sudosignup.atlassian.net", "email": "sudosignup@proton.me",
-                   "token": token, "endpoints": [
+                   "token": token, "setup": {"state": "done", "steps": {}}, "endpoints": [
                        {"name": "all", "window": "10m", "projects": "*", "type": "issues",
                         "file": "all.json", "enabled": True}]}, fh)
+    with open(os.path.join(tmp, "team.json"), "w") as fh:
+        json.dump({"project_keys": ["P"]}, fh)
     env = dict(os.environ)
     env.update({"WS_COMMANDS_CONF": conf, "JIRA_CONFIG_JSON": cfgj,
                 "JIRA_CONFIG_FILE": os.path.join(tmp, "nolegacy"),
@@ -747,6 +755,352 @@ class PollTests(unittest.TestCase):
             self.assertEqual(os.stat(log).st_mode & 0o777, 0o600)
             with open(log) as fh:
                 self.assertIn(" 200  curl ", fh.read())
+
+
+# stateful fake Jira (v2): N issues across projects, oldest-first search with
+# `updated >= / created >=` bounds, comments in the search, and injectable
+# failures (counters live in FAKE_DIR so they span curl invocations)
+FAKE_JIRA = r"""#!/usr/bin/env python3
+import datetime, json, os, re, sys, urllib.parse
+D = os.environ["FAKE_DIR"]
+def bump(name):
+    p = os.path.join(D, name)
+    n = int(open(p).read()) if os.path.exists(p) else 0
+    open(p, "w").write(str(n + 1))
+    return n
+with open(os.path.join(D, "calls.jsonl"), "a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\n")
+url = sys.argv[-1]
+u = urllib.parse.urlparse(url)
+q = urllib.parse.parse_qs(u.query)
+N = int(os.environ.get("FAKE_N", "12"))
+projs = os.environ.get("FAKE_PROJECTS", "P").split(",")
+def iso(i):
+    return (datetime.datetime(2026, 9, 1) + datetime.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:00.000+0000")
+def issue(i):
+    p = projs[i % len(projs)]
+    return {"key": f"{p}-{i}", "fields": {
+        "summary": f"s{i}", "updated": iso(i), "created": iso(i), "project": {"key": p},
+        "status": {"name": "Open"},
+        "comment": {"total": 2 if (i == 0 and os.environ.get("FAKE_TRUNC")) else 1,
+                    "comments": [{"author": {"displayName": "A"}, "body": f"c{i}"}]}}}
+code, ra, body = 200, "", None
+if u.path.endswith("/myself"):
+    body = {"displayName": "Fake", "timeZone": "UTC"}
+    if os.environ.get("FAKE_401") == "always":
+        code, body = 401, {}
+elif u.path.endswith("/project"):
+    body = [{"key": p, "name": p} for p in projs]
+elif u.path.endswith("/versions"):
+    body = []
+elif "/issue/" in u.path:
+    body = {"fields": {"comment": {"comments": [{"author": {"displayName": "A"}, "body": "x"},
+                                                {"author": {"displayName": "B"}, "body": "y"}]}}}
+elif u.path.endswith("/search"):
+    n429 = int(os.environ.get("FAKE_429", "0"))
+    if n429 and bump("429") < n429:
+        code, ra, body = 429, "0", {"errorMessages": ["slow down"]}
+    elif os.environ.get("FAKE_401_ONCE") and bump("401") == 0:
+        code, body = 401, {}
+    else:
+        jql = q["jql"][0]
+        items = [issue(i) for i in range(N)]
+        m = re.search(r'(updated|created) >= "(\d{4}-\d\d-\d\d \d\d:\d\d)"', jql)
+        if m:
+            items = [x for x in items if x["fields"][m.group(1)][:16].replace("T", " ") >= m.group(2)]
+        m = re.search(r'project in \(([^)]*)\)', jql)
+        if m:
+            keep = re.findall(r'"([^"]+)"', m.group(1))
+            items = [x for x in items if x["fields"]["project"]["key"] in keep]
+        start, n = int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
+        fail = os.environ.get("FAKE_FAIL_AT")
+        if fail and start >= int(fail) and bump("fail") == 0:
+            code, body = 400, {"errorMessages": ["boom"]}
+        else:
+            body = {"startAt": start, "total": len(items), "issues": items[start:start + n]}
+else:
+    body = {}
+sys.stdout.write(json.dumps(body) + f"\n{code} {ra}")
+"""
+
+
+class ResilientSyncTests(unittest.TestCase):
+    """Rate limits, streaming + resume, one request per page, shared sync,
+    scope, setup gate, rebuild."""
+
+    def env(self, tmp, endpoints=None, scope=("P",), setup="done", **extra):
+        env = isolated_env(tmp, token="T")
+        with open(env["JIRA_CONFIG_JSON"]) as fh:
+            cfg = json.load(fh)
+        cfg.update({"site": "https://jira.example.com", "email": "", "auth": "bearer",
+                    "outDir": os.path.join(tmp, "out"), "fetchComments": True,
+                    "checkpointEvery": 1, "setup": {"state": setup, "steps": {}},
+                    "directoryJob": True, **extra})
+        if endpoints is not None:
+            cfg["endpoints"] = endpoints
+        with open(env["JIRA_CONFIG_JSON"], "w") as fh:
+            json.dump(cfg, fh)
+        with open(env["JIRA_TEAM_JSON"], "w") as fh:
+            json.dump({"project_keys": list(scope), "search_defaults": {"max_results_search": 5}}, fh)
+        bindir = os.path.join(tmp, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "curl"), "w") as fh:
+            fh.write(FAKE_JIRA)
+        os.chmod(os.path.join(bindir, "curl"), 0o755)
+        env["PATH"] = bindir + os.pathsep + env["PATH"]
+        env["FAKE_DIR"] = tmp
+        return env
+
+    def poll(self, env, *args):
+        return subprocess.run([sys.executable, os.path.join(JIRA, "jira_poll.py"), *args], env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def calls(self, tmp):
+        p = os.path.join(tmp, "calls.jsonl")
+        if not os.path.exists(p):
+            return []
+        with open(p) as fh:
+            return [json.loads(x)[-1] for x in fh]
+
+    def cache(self, tmp):
+        with open(os.path.join(tmp, "cache", "jiras.json")) as fh:
+            return json.load(fh)
+
+    # -- Client.get
+    def client_env(self, tmp, **fake):
+        env = self.env(tmp)
+        old = {k: os.environ.get(k) for k in ["PATH", "FAKE_DIR", *fake]}
+        os.environ.update({"PATH": env["PATH"], "FAKE_DIR": tmp, **fake})
+        return old
+
+    def restore(self, old):
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def client(self):
+        c = jira_api.Client("https://jira.example.com", "T", team=jira_config.load_team({"teamConfig": "/x"}))
+        c.on_wait = lambda m, s: None
+        return c
+
+    def test_429_waits_retry_after_then_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old, slept = self.client_env(tmp, FAKE_429="2"), []
+            old_sleep, old_log = jira_api.SLEEP, jira_api.CURL_LOG
+            jira_api.SLEEP, jira_api.CURL_LOG = slept.append, os.path.join(tmp, "curl.log")
+            try:
+                res = self.client().search("project = P", "summary")
+            finally:
+                jira_api.SLEEP, jira_api.CURL_LOG = old_sleep, old_log
+                self.restore(old)
+            self.assertEqual(len(res["issues"]), 12)
+            self.assertEqual(slept, [0.0, 0.0])       # Retry-After: 0, twice
+            self.assertEqual(len(self.calls(tmp)), 2 + 1)   # the same request re-sent, one page
+
+    def test_401_first_request_fails_fast_but_mid_run_401_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.client_env(tmp, FAKE_401="always")
+            old_sleep, old_log = jira_api.SLEEP, jira_api.CURL_LOG
+            jira_api.SLEEP, jira_api.CURL_LOG = (lambda s: None), os.path.join(tmp, "curl.log")
+            try:
+                with self.assertRaises(jira_api.ApiError) as cm:
+                    self.client().get("/rest/api/2/myself")
+                self.assertEqual(cm.exception.code, 401)
+                self.assertEqual(len(self.calls(tmp)), 1)          # a bad token never loops
+                os.environ.pop("FAKE_401")
+                os.environ["FAKE_401_ONCE"] = "1"
+                c = self.client()
+                c.get("/rest/api/2/myself")                          # a 2xx first ...
+                self.assertEqual(len(c.search("project = P", "summary")["issues"]), 12)
+                self.assertEqual(c.retries, 1)                      # ... then a 401 is waited out
+            finally:
+                jira_api.SLEEP, jira_api.CURL_LOG = old_sleep, old_log
+                os.environ.pop("FAKE_401_ONCE", None)
+                self.restore(old)
+
+    # -- sync
+    def test_comments_ride_in_the_search_one_request_per_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            p = self.poll(env, "--force", "--projects", "all")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            urls = self.calls(tmp)
+            self.assertFalse([u for u in urls if "/issue/" in u])     # no per-issue calls
+            searches = [u for u in urls if "/search?" in u]
+            self.assertEqual(len(searches), 3)                        # 12 issues, pages of 5 (+overlap 0)
+            self.assertIn("comment", searches[0])
+            self.assertIn("ORDER%20BY%20created%20ASC", searches[0])  # full sync: oldest first
+            c = self.cache(tmp)
+            self.assertEqual(len(c), 12)
+            self.assertEqual(c["P-3"]["comments"][0]["body"], "c3")
+            self.assertNotIn("comment", c["P-3"])
+            with open(os.path.join(tmp, "out", "all.json")) as fh:
+                self.assertEqual(len(json.load(fh)), 12)
+            with open(os.path.join(tmp, "cache", "poll.log")) as fh:
+                log = fh.read()
+            self.assertIn("[sync] page 3: 12/12 (100%)", log)
+
+    def test_truncated_comments_fall_back_to_the_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            env["FAKE_TRUNC"] = "1"
+            self.assertEqual(self.poll(env, "--force", "--projects", "all").returncode, 0)
+            self.assertEqual(len([u for u in self.calls(tmp) if "/issue/" in u]), 1)
+            self.assertEqual(len(self.cache(tmp)["P-0"]["comments"]), 2)
+
+    def test_failure_keeps_progress_and_the_next_run_resumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            env["FAKE_FAIL_AT"] = "10"
+            p = self.poll(env, "--force", "--projects", "all")
+            self.assertEqual(p.returncode, 1)
+            self.assertEqual(len(self.cache(tmp)), 10)               # pages 1-2 kept
+            ck = os.path.join(tmp, "cache", "checkpoints", "sync.json")
+            with open(ck) as fh:
+                self.assertEqual(json.load(fh)["fetched"], 10)
+            with open(os.path.join(tmp, "out", "all.json")) as fh:
+                self.assertEqual(len(json.load(fh)), 10)             # partial tab published
+            before = len(self.calls(tmp))
+            p = self.poll(env, "--force", "--projects", "all")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            again = [u for u in self.calls(tmp)[before:] if "/search?" in u]
+            self.assertIn("created%20%3E%3D%20%222026-09-01%2008%3A", again[0])  # hwm P-9 - 1 min
+            self.assertEqual(len(again), 1)
+            self.assertEqual(len(self.cache(tmp)), 12)
+            self.assertFalse(os.path.exists(ck))
+
+    def test_overlapping_jobs_share_one_sync(self):
+        eps = [{"name": n, "window": "10m", "projects": pr, "type": "issues", "file": f"{n}.json"}
+               for n, pr in (("all", "*"), ("KAN", ["KAN"]), ("SAM1", ["SAM1"]))]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=eps, scope=("KAN", "SAM1"))
+            env["FAKE_PROJECTS"] = "KAN,SAM1"
+            p = self.poll(env, "--force", "--projects", "*")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(len([u for u in self.calls(tmp) if "/search?" in u]), 3)   # one sequence
+            rows = {}
+            for n in ("all", "KAN", "SAM1"):
+                with open(os.path.join(tmp, "out", f"{n}.json")) as fh:
+                    rows[n] = len(json.load(fh))
+            self.assertEqual(rows, {"all": 12, "KAN": 6, "SAM1": 6})
+
+    def test_a_project_added_to_the_scope_gets_a_full_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, scope=("KAN",))
+            env["FAKE_PROJECTS"] = "KAN,SAM1"
+            self.assertEqual(self.poll(env, "--force", "--projects", "all").returncode, 0)
+            self.assertEqual({v["project"] for v in self.cache(tmp).values()}, {"KAN"})
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["KAN", "SAM1"], "search_defaults": {"max_results_search": 5}}, fh)
+            before = len(self.calls(tmp))
+            p = self.poll(env, "--force", "--projects", "all")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            first = [u for u in self.calls(tmp)[before:] if "/search?" in u][0]
+            self.assertIn("project%20in%20%28%22SAM1%22%29", first)      # only the new one, in full
+            self.assertIn("ORDER%20BY%20created", first)
+            self.assertEqual(len([v for v in self.cache(tmp).values() if v["project"] == "SAM1"]), 6)
+
+    def test_scope_is_required_and_star_means_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, scope=())
+            p = self.poll(env, "--force", "--projects", "all")
+            self.assertEqual(p.returncode, 2)
+            self.assertIn("no projects in scope", p.stderr)
+            self.assertEqual(self.calls(tmp), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            env["FAKE_PROJECTS"] = "P,OTHER"
+            self.assertEqual(self.poll(env, "--force", "--projects", "all").returncode, 0)
+            self.assertIn("project%20in%20%28%22P%22%29", self.calls(tmp)[0])
+            self.assertEqual({v["project"] for v in self.cache(tmp).values()}, {"P"})
+
+    def test_setup_gates_the_tick_and_runs_steps_one_at_a_time(self):
+        eps = [{"name": "all", "window": "10m", "projects": "*", "type": "issues", "file": "all.json"},
+               {"name": "releases", "window": "1h", "projects": "*", "type": "releases",
+                "file": "releases.json"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=eps, setup="pending")
+            p = self.poll(env)
+            self.assertEqual(p.returncode, 0)
+            self.assertEqual(self.calls(tmp), [])                     # no network while pending
+            with open(os.path.join(tmp, "cache", "status.json")) as fh:
+                self.assertEqual(json.load(fh)["status"], "setup pending")
+            env["FAKE_FAIL_AT"] = "5"
+            p = self.poll(env, "--setup")
+            self.assertEqual(p.returncode, 1)
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                st = json.load(fh)["setup"]
+            self.assertEqual(st["state"], "pending")
+            self.assertEqual({k: v["state"] for k, v in st["steps"].items()},
+                             {"connection": "ok", "scope": "ok", "releases": "ok", "sync": "error"})
+            before = len(self.calls(tmp))
+            p = self.poll(env, "--setup")                              # only what is not ok
+            self.assertEqual(p.returncode, 0, p.stderr)
+            done_again = [u for u in self.calls(tmp)[before:]
+                          if u.endswith(("/myself", "/project"))]   # connection / scope: not rerun
+            self.assertFalse(done_again)
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                st = json.load(fh)["setup"]
+            self.assertEqual(st["state"], "done")
+            self.assertEqual(st["steps"]["all"]["items"], 12)
+            p = self.poll(env, "--setup", "--step", "releases")        # rerun one
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(self.poll(env, "--setup", "--step", "nope").returncode, 2)
+            # projects are never looked up: only /project/KEY for the keys the user entered
+            self.assertFalse([u for u in self.calls(tmp) if u.endswith("/project")])
+            self.assertTrue([u for u in self.calls(tmp) if u.endswith("/project/P")])
+
+    def test_setup_migration_keeps_working_installs_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                cfg = json.load(fh)
+            cfg.pop("setup")
+            with open(env["JIRA_CONFIG_JSON"], "w") as fh:
+                json.dump(cfg, fh)
+            os.makedirs(os.path.join(tmp, "cache"), exist_ok=True)
+            with open(os.path.join(tmp, "cache", "status.json"), "w") as fh:
+                json.dump({"endpoints": [{"name": "all", "lastSuccess": "2026-09-01 00:00:00"}]}, fh)
+            chk = json.loads(subprocess.run([sys.executable, os.path.join(JIRA, "jira_config.py"),
+                                             "--check"], env=env, capture_output=True, text=True).stdout)
+            self.assertEqual(chk["setup"]["state"], "done")
+            self.assertEqual(chk["projectKeys"], ["P"])
+
+    def test_rebuild_wipes_and_repopulates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.assertEqual(self.poll(env, "--force", "--projects", "all").returncode, 0)
+            c = self.cache(tmp)
+            c["GONE-1"] = {"key": "GONE-1", "project": "P"}
+            with open(os.path.join(tmp, "cache", "jiras.json"), "w") as fh:
+                json.dump(c, fh)
+            env["FAKE_FAIL_AT"] = "5"
+            self.assertEqual(self.poll(env, "--rebuild").returncode, 1)
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                self.assertEqual(json.load(fh)["rebuildOnNextPoll"], "resume")   # not re-wiped
+            self.assertEqual(len(self.cache(tmp)), 5)
+            p = self.poll(env)                                        # the next tick finishes it
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(sorted(self.cache(tmp)), sorted(f"P-{i}" for i in range(12)))
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                self.assertFalse(json.load(fh)["rebuildOnNextPoll"])
+
+    def test_describe_shows_setup_scope_and_shared_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, setup="pending")
+            env["PATH"] = tmp
+            p = self.poll(env, "--describe")
+            d = json.loads(p.stdout)
+            self.assertEqual(d["scope"], ["P"])
+            self.assertEqual(d["setup"]["state"], "pending")
+            self.assertEqual([s["name"] for s in d["setup"]["steps"]],
+                             ["connection", "scope", "sync", "all"])
+            self.assertIn("comment", d["issueCache"]["requests"][0]["curl"])
+            self.assertFalse([r for e in d["endpoints"] for r in e["requests"]
+                              if "fields=comment" in r["curl"]])
+
 
 
 if __name__ == "__main__":

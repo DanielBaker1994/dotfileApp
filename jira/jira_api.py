@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shlex
 import subprocess
@@ -101,6 +102,19 @@ CURL_DUMP = "/tmp/jira_api_dump.txt"
 TRACE_FILE = "/tmp/jira_api_trace.txt"
 
 QUERY_FIELDS = "summary,status,assignee,fixVersions,description,updated,priority,labels"
+
+CHECKPOINT_DIR = os.path.join(CACHE_DIR, "checkpoints")   # <name>.json: a sync's resume point
+TZ_FILE = os.path.join(CACHE_DIR, "tz")                    # the Jira user's timeZone (/myself)
+
+# request-level resilience (Client.get): these answers are waited out and the
+# SAME request is re-sent - a job never restarts from page 1 because of them
+SLEEP = time.sleep                     # tests swap this out
+RETRY_CODES = (429, 502, 503, 504)     # rate limited / server busy
+TRANSIENT_CURL = (6, 7, 28, 35, 52, 55, 56)   # dns, connect, timeout, tls, empty reply, send/recv
+MAX_ATTEMPTS = 8                       # per request (429 / 5xx / network)
+MAX_401_ATTEMPTS = 5                   # a 401 AFTER a 2xx in this run is treated as transient
+BACKOFF_CAP = 60                       # seconds: 2, 4, 8, ... 60 (+ jitter) without Retry-After
+PAGE_OVERLAP = 5                       # v2 startAt pages re-read this many rows (see search_pages)
 
 
 class ApiError(Exception):
@@ -143,11 +157,21 @@ class Client:
         self.mask = mask
         self.captured: list | None = None   # dry + list: collect curls instead of printing
         self.requests = 0
+        self.ok_seen = False        # a 2xx answered in this run -> a later 401 is transient
+        self.max_wait = 30 * 60     # total seconds this run may sleep on rate limits
+        self.waited = 0.0
+        self.delay = 0.0            # seconds between requests (config requestDelayMs)
+        self.retries = 0
+        # on_wait(message, seconds): the poller logs it + shows "resuming in Ns"
+        self.on_wait = lambda msg, secs: print(f"jira-api: {msg}", file=sys.stderr)
 
     @classmethod
     def from_config(cls, cfg, **kw) -> "Client":
-        return cls(cfg.site, cfg["token"], email=cfg["email"] or "", auth=cfg.auth,
-                   team=jira_config.load_team(cfg.data), **kw)
+        c = cls(cfg.site, cfg["token"], email=cfg["email"] or "", auth=cfg.auth,
+                team=jira_config.load_team(cfg.data), **kw)
+        c.max_wait = max(0, int(cfg["rateLimitMaxWaitMinutes"] or 0)) * 60
+        c.delay = max(0, int(cfg["requestDelayMs"] or 0)) / 1000.0
+        return c
 
     def sd(self, k: str) -> int:
         v = (self.team.get("search_defaults") or {}).get(k)
@@ -161,7 +185,7 @@ class Client:
         return f"{u}?{qs}" if qs else u
 
     def curl_argv(self, url: str, method: str = "GET", masked: bool = False,
-                  readable: bool = False) -> list:
+                  readable: bool = False, body: str | None = None) -> list:
         """The canonical, copy-pasteable request:
         curl -X GET -H 'Authorization: Bearer T' -H 'Accept: application/json' 'URL'
         (basic auth: -u 'EMAIL:T' instead of the Authorization header).
@@ -176,6 +200,8 @@ class Client:
         argv += ["-H", "Accept: application/json"]
         if method != "GET":
             argv += ["-H", "Content-Type: application/json"]
+        if body is not None:
+            argv += ["--data-raw", body]
         base, sep, qs = url.partition("?")
         if not (readable and sep and qs):
             return argv + [url]
@@ -186,12 +212,12 @@ class Client:
         return argv
 
     def curl_cmd(self, url: str, method: str = "GET", masked: bool = False,
-                 readable: bool = True) -> str:
+                 readable: bool = True, body: str | None = None) -> str:
         """curl_argv as one shell line (readable query by default). Masked: the
         token becomes $JIRA_TOKEN inside double quotes, so it still runs after
         `export JIRA_TOKEN=...`."""
         parts = []
-        for a in self.curl_argv(url, method, masked, readable):
+        for a in self.curl_argv(url, method, masked, readable, body):
             if masked and "$JIRA_TOKEN" in a:
                 parts.append(f'"{a}"')
             elif a == "curl" or re.match(r"^-[A-Za-z]$|^--[a-z][a-z-]+$", a) or a in ("GET", "POST"):
@@ -200,36 +226,73 @@ class Client:
                 parts.append("'" + a.replace("'", "'\\''") + "'")
         return " ".join(parts)
 
-    def get(self, path: str, qs: str = ""):
+    def get(self, path: str, qs: str = "", method: str = "GET", body: str | None = None,
+            timeout: int | None = None):
         url = self.url(path, qs)
         if self.dry:
             self.requests += 1
-            cmd = self.curl_cmd(url, masked=self.mask)
+            cmd = self.curl_cmd(url, method, masked=self.mask, body=body)
             if self.captured is not None:
                 self.captured.append(cmd)
             else:
                 print(cmd)
             return None
         if self.debug:
-            print(f"jira-api: GET {url}", file=sys.stderr)
-        base = self.curl_argv(url)
+            print(f"jira-api: {method} {url}", file=sys.stderr)
+        base = self.curl_argv(url, method, body=body)
         # run = the canonical command + silent/timeout/status-code flags
-        argv = base[:1] + ["-sS", "-m", str(self.timeout)] + base[1:-1] + ["-w", "\\n%{http_code}", url]
-        t0 = time.time()
-        try:
-            p = subprocess.run(argv, capture_output=True, text=True)
-        except FileNotFoundError:
-            die("curl is not installed (brew install curl)")
-        self.requests += 1
-        out = p.stdout
-        body, _, code_s = out.rpartition("\n")
-        code = int(code_s) if code_s.strip().isdigit() else 0
-        log_curl(argv, code if p.returncode == 0 else f"ERR{p.returncode}")
-        if self.verbose:
-            trace(f"GET {url} -> {code} ({time.time() - t0:.2f}s, {len(body)} bytes)")
-        repro = self.curl_cmd(url, masked=True)
+        # (+ the Retry-After header, so a 429 sleeps exactly as long as asked)
+        argv = base[:1] + ["-sS", "-m", str(timeout or self.timeout)] + base[1:-1] + \
+            ["-w", "\\n%{http_code} %header{retry-after}", url]
+        repro = self.curl_cmd(url, method, masked=True, body=body)
+        attempt = 0
+        while True:
+            attempt += 1
+            if self.delay and self.requests:
+                SLEEP(self.delay)
+            t0 = time.time()
+            try:
+                p = subprocess.run(argv, capture_output=True, text=True)
+            except FileNotFoundError:
+                die("curl is not installed (brew install curl)")
+            self.requests += 1
+            out, _, tail = p.stdout.rpartition("\n")
+            parts = tail.split()
+            code = int(parts[0]) if parts and parts[0].isdigit() else 0
+            retry_after = parts[1] if len(parts) > 1 else ""
+            log_curl(argv, code if p.returncode == 0 else f"ERR{p.returncode}")
+            if self.verbose:
+                trace(f"{method} {url} -> {code} ({time.time() - t0:.2f}s, {len(out)} bytes)")
+            reason, cap = "", MAX_ATTEMPTS
+            if p.returncode != 0:
+                if p.returncode in TRANSIENT_CURL:
+                    reason = f"network error (curl exit {p.returncode})"
+            elif code == 429:
+                reason = "rate limited (HTTP 429)"
+            elif code in RETRY_CODES:
+                reason = f"server busy (HTTP {code})"
+            elif code == 401 and self.ok_seen:
+                # the same token worked earlier in this run: a mid-run 401 is
+                # the server shedding load, not a bad token
+                reason, cap = "HTTP 401 mid-run (token worked earlier - treating as transient)", \
+                    MAX_401_ATTEMPTS
+            if reason and attempt < cap:
+                wait = retry_after_seconds(retry_after)
+                if wait is None:
+                    wait = min(BACKOFF_CAP, 2 ** attempt) + random.uniform(0, 1)
+                if self.waited + wait <= self.max_wait:
+                    self.waited += wait
+                    self.retries += 1
+                    src = "Retry-After" if retry_after_seconds(retry_after) is not None else "backoff"
+                    self.on_wait(f"{reason} - sleeping {wait:.0f}s ({src}; attempt {attempt}/{cap})", wait)
+                    SLEEP(wait)
+                    continue
+                reason += f" - gave up: rate-limit wait budget ({self.max_wait // 60}m) used"
+            break
+        body_out = out
         if p.returncode != 0:
-            raise ApiError(0, f"curl failed ({p.stderr.strip() or 'exit ' + str(p.returncode)}): {url}", repro)
+            raise ApiError(0, f"curl failed ({p.stderr.strip() or 'exit ' + str(p.returncode)}): {url}"
+                              + (f" [{reason}]" if reason else ""), repro)
         if code >= 400:
             who = ("email + API token (basic)" if self.auth == "basic"
                    else "personal access token (Authorization: Bearer)")
@@ -240,52 +303,87 @@ class Client:
                 raise ApiError(code, "forbidden (HTTP 403) - your account lacks permission for this "
                                      "query (or a CAPTCHA is pending - log in once in a browser)", repro)
             if code == 404:
-                raise ApiError(code, f"not found (HTTP 404): {body[:300]}", repro)
-            raise ApiError(code, f"API error HTTP {code}: {body[:300]}", repro)
+                raise ApiError(code, f"not found (HTTP 404): {body_out[:300]}", repro)
+            if code == 429:
+                raise ApiError(code, f"rate limited (HTTP 429) after {attempt} attempt(s): {body_out[:200]}",
+                               repro)
+            raise ApiError(code, f"API error HTTP {code}: {body_out[:300]}", repro)
+        self.ok_seen = True
         try:
-            return json.loads(body) if body.strip() else None
+            return json.loads(body_out) if body_out.strip() else None
         except ValueError:
             raise ApiError(code, f"non-JSON response from {url} (HTTP {code}; wrong site URL or an "
-                                 f"SSO login page?): {body[:200]}", repro)
+                                 f"SSO login page?): {body_out[:200]}", repro)
 
-    def search(self, jql: str, fields: str, max_total: int | None = None,
-               page_size: int | None = None) -> dict:
-        """All issues matching `jql` (up to max_total), paginating the way the
-        configured search endpoint expects: v2 /search (Server/DC) uses
-        startAt/total; Cloud's /search/jql uses nextPageToken. page_size =
-        maxResults of one request (default: search_defaults.max_results_search).
-        Returns {issues, isLast, total} (total: v2 only, else None)."""
+    def search_timeout(self) -> int:
+        return max(self.timeout, self.sd("timeout_search_seconds"))
+
+    def search_pages(self, jql: str, fields: str, max_total: int | None = None,
+                     page_size: int | None = None):
+        """Yields (issues, total, isLast) per page - callers persist each page
+        as it arrives. Paginates the way the configured search endpoint
+        expects: v2 /search (Server/DC) uses startAt/total; Cloud's /search/jql
+        uses nextPageToken (total: None). page_size = maxResults of one request
+        (default search_defaults.max_results_search; the server may cap it).
+        v2 pages overlap by PAGE_OVERLAP rows (de-duplicated): an issue updated
+        mid-sync jumps to the end of an `ORDER BY updated` result and shifts
+        the rest left - without the overlap that shift would skip a row."""
         path = self.path("search")
+        cloud = path.endswith("/search/jql")
         page = page_size or self.sd("max_results_search")
-        total = None
         if max_total:
             page = min(page, max_total)
-        issues: list = []
-        start, token, last = 0, "", True
+        start, token, n, seen = 0, "", 0, set()
         while True:
             qs = f"jql={qenc(jql)}&fields={fields}&maxResults={page}"
-            if path.endswith("/search/jql"):
+            if cloud:
                 if token:
                     qs += f"&nextPageToken={qenc(token)}"
             else:
                 qs += f"&startAt={start}"
-            body = self.get(path, qs) or {}
+            body = self.get(path, qs, timeout=self.search_timeout()) or {}
             got = body.get("issues") or []
-            issues.extend(got)
-            if path.endswith("/search/jql"):
+            fresh = [i for i in got if i.get("key") not in seen]
+            seen.update(i.get("key") for i in fresh)
+            total = None
+            if cloud:
                 last = body.get("isLast", True)
                 token = body.get("nextPageToken") or ""
                 if not last and not token:
                     raise ApiError(0, "pagination: no nextPageToken but isLast=false")
             else:
-                start += len(got)
                 total = int(body.get("total") or 0)
-                last = not got or start >= total
-            if last or (max_total and len(issues) >= max_total):
-                break
-        if max_total and len(issues) > max_total:
-            issues, last = issues[:max_total], False
+                last = not got or start + len(got) >= total
+                start += len(got) - (PAGE_OVERLAP if not last and len(got) > 2 * PAGE_OVERLAP else 0)
+            if max_total and n + len(fresh) > max_total:
+                fresh, last = fresh[:max_total - n], False
+            n += len(fresh)
+            yield fresh, total, last
+            if last or (max_total and n >= max_total):
+                return
+
+    def search(self, jql: str, fields: str, max_total: int | None = None,
+               page_size: int | None = None) -> dict:
+        """All issues matching `jql` (up to max_total) in one list.
+        Returns {issues, isLast, total} (total: v2 only, else None)."""
+        issues: list = []
+        total, last = None, True
+        for got, total, last in self.search_pages(jql, fields, max_total, page_size):
+            issues.extend(got)
         return {"issues": issues, "isLast": last, "total": total}
+
+    def count(self, jql: str) -> int | None:
+        """Cloud: POST /search/approximate-count (the enhanced search has no
+        `total`). v2 / failure: None (the first page's total is used)."""
+        path = self.path("search")
+        if not path.endswith("/search/jql") or self.dry:
+            return None
+        try:
+            body = self.get(path[:-len("jql")] + "approximate-count", method="POST",
+                            body=json.dumps({"jql": jql.split(" ORDER BY ")[0]})) or {}
+            return int(body.get("count")) if body.get("count") is not None else None
+        except (ApiError, ValueError, TypeError):
+            return None
 
     def board_issues(self, board_id, jql: str, fields: str, max_total: int) -> dict:
         path = self.path("board_issues", board_id=board_id)
@@ -303,6 +401,20 @@ class Client:
             if not got or start >= int(body.get("total") or 0) or len(issues) >= max_total:
                 break
         return {"issues": issues[:max_total], "isLast": len(issues) <= max_total}
+
+
+def retry_after_seconds(v: str):
+    """Retry-After: delta-seconds or an HTTP date -> seconds (None = absent)."""
+    v = (v or "").strip()
+    if not v or v.startswith("%"):     # %header{...} unsupported by an old curl
+        return None
+    if v.isdigit():
+        return float(v)
+    try:
+        import email.utils
+        return max(0.0, email.utils.parsedate_to_datetime(v).timestamp() - time.time())
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def log_curl(argv: list, code) -> None:
@@ -480,6 +592,7 @@ def cache_entry(issue: dict, vers_map: dict, comments, api_fields: list,
     if comments is not None:
         e["comments"] = comments
     known = {s for srcs in jira_config.FIELD_SOURCES.values() for s in srcs}
+    known.add("comment")     # comes back as `comments` (issue_comments), never raw
     for fld in api_fields:
         if fld not in known:
             e[fld] = stringify(f.get(fld))
@@ -643,9 +756,12 @@ def project_versions(c: Client, proj: str) -> list:
 
 
 def default_projects(c: Client) -> list:
-    """team.json project_keys, else every project the token can see."""
-    pk = c.team.get("project_keys") or []
-    return list(pk) if pk else [p.get("key") for p in (c.get(c.path("projects")) or [])]
+    """The projects in scope (team.json project_keys). Projects are never
+    looked up: with no scope there is nothing to query."""
+    pk = jira_config.scope_projects(c.team)
+    if not pk:
+        raise jira_config.ConfigError(jira_config.NO_SCOPE)
+    return pk
 
 
 def list_fields(c: Client) -> list:
@@ -693,9 +809,17 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True) -> di
     may not read is skipped (noted in `warnings`)."""
     out: dict = {"projects": [], "users": [], "statuses": [], "issueTypes": [], "priorities": [],
                  "fields": [], "versions": [], "labels": [], "warnings": []}
-    for p in c.get(c.path("projects")) or []:
-        out["projects"].append({"key": p.get("key") or "", "name": p.get("name") or ""})
-    keys = list(projects or c.team.get("project_keys") or []) or [p["key"] for p in out["projects"]]
+    # only the projects in scope - the site's project list is never fetched
+    keys = list(projects or []) or default_projects(c)
+    for k in keys:
+        try:
+            p = c.get(c.path("project", project=k)) or {}
+        except ApiError as err:
+            if err.code == 401:
+                raise
+            out["warnings"].append(f"project {k}: {err}")
+            p = {}
+        out["projects"].append({"key": k, "name": p.get("name") or k})
     page = max(1, c.sd("max_results_users"))
     users: dict = {}
     for proj in keys:
@@ -815,12 +939,124 @@ def window_since(w: str):
     die(f"invalid window: {w} (use 30m, 2h, 7d, 1w, 2026-09-10, or full)", 2)
 
 
+# ------------------------------------------------------------ checkpoints / time
+
+def checkpoint_path(name: str) -> str:
+    return os.path.join(CHECKPOINT_DIR, f"{re.sub(r'[^A-Za-z0-9_.-]', '_', name)}.json")
+
+
+def load_checkpoint(name: str) -> dict:
+    ck = read_json(checkpoint_path(name), {}) if name else {}
+    return ck if isinstance(ck, dict) else {}
+
+
+def clear_checkpoints(name: str = "") -> None:
+    """One sync's resume point, or (no name) all of them."""
+    paths = [checkpoint_path(name)] if name else \
+        [os.path.join(CHECKPOINT_DIR, f) for f in (os.listdir(CHECKPOINT_DIR)
+                                                    if os.path.isdir(CHECKPOINT_DIR) else [])]
+    for p in paths:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def jira_tz(c: Client) -> str:
+    """The Jira user's time zone (JQL dates are read in it): cached from
+    /myself.timeZone; '' = unknown (the machine's zone is used)."""
+    try:
+        with open(TZ_FILE, encoding="utf-8") as fh:
+            tz = fh.read().strip()
+        if tz:
+            return tz
+    except OSError:
+        pass
+    if c.dry:
+        return ""
+    try:
+        tz = str((c.get(c.path("myself")) or {}).get("timeZone") or "")
+    except ApiError:
+        return ""
+    if tz:
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(TZ_FILE, "w", encoding="utf-8") as fh:
+                fh.write(tz + "\n")
+        except OSError:
+            pass
+    return tz
+
+
+def parse_jira_time(v: str):
+    """'2026-09-20T10:00:00.000+0000' (any Jira timestamp) -> epoch seconds."""
+    m = re.match(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?(?:\.\d+)?(Z|[+-]\d\d:?\d\d)?$",
+                 str(v or ""))
+    if not m:
+        return None
+    import calendar
+    y, mo, d, h, mi, sec = (int(x or 0) for x in m.groups()[:6])
+    t = calendar.timegm((y, mo, d, h, mi, sec, 0, 0, 0))
+    off = m.group(7)
+    if off and off != "Z":
+        sign = -1 if off[0] == "-" else 1
+        off = off[1:].replace(":", "")
+        t -= sign * (int(off[:2]) * 3600 + int(off[2:]) * 60)
+    return t
+
+
+def jql_time(epoch: float, tz: str) -> str:
+    """epoch -> JQL 'yyyy-MM-dd HH:mm' in the Jira user's zone."""
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(tz) if tz else None
+    except Exception:      # no tzdata / unknown zone -> machine local time
+        zone = None
+    if zone is None:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch))
+    return datetime.datetime.fromtimestamp(epoch, zone).strftime("%Y-%m-%d %H:%M")
+
+
+def issue_comments(c: Client, issue: dict) -> list:
+    """Comments from the search result itself (fields=...,comment). Only when
+    Jira truncated them (total > returned) is the issue fetched on its own."""
+    cm = (issue.get("fields") or {}).get("comment")
+    lst = cm.get("comments") if isinstance(cm, dict) else None
+    if lst is None or int((cm or {}).get("total") or 0) > len(lst):
+        body = c.get(c.path("issue", key=issue.get("key")), "fields=comment") or {}
+        lst = ((body.get("fields") or {}).get("comment") or {}).get("comments") or []
+    out = []
+    for x in lst:
+        b = x.get("body")
+        out.append({"author": alt((x.get("author") or {}).get("displayName"), ""),
+                    "body": adf_text(b) if isinstance(b, dict) else alt(b, ""),
+                    "created": alt(x.get("created"), ""),
+                    "updated": alt(x.get("updated"), "")})
+    return out
+
+
 def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
          fetch_comments=True, snapshot_keep=30, quiet=False, debug=False,
-         default_projects=True, page_size=None, max_total=None) -> dict:
+         default_projects=True, page_size=None, max_total=None, name: str = "",
+         checkpoint_every: int = 500, progress=None, flushed=None) -> dict:
     """Load issues updated within `window` (optionally only `projects` / a
-    custom `jql`), merge them into the cache, return stats + matched keys."""
-    fields = api_fields or jira_config.api_fields(team=c.team)
+    custom `jql`) and merge them into the cache - STREAMED: every
+    `checkpoint_every` issues (and on any error / cancel) the cache is written
+    and a resume point saved under `name` (checkpoints/<name>.json). The
+    query is ordered oldest-first (full: by created, else by updated), so the
+    resume point is a high-water mark: a re-run of the same query continues
+    at `hwm - 1 minute` instead of page 1 (upserts are idempotent).
+
+    One request per page: comments come in the search itself (`comment`
+    field). progress(done, total, hwm, fetched_this_run) after each page; flushed(keys) after
+    each cache write (the poller republishes its tabs from it)."""
+    fields = list(api_fields or jira_config.api_fields(team=c.team))
+    full = window == "full"
+    order = "created" if full else "updated"
+    for f in [order] + (["comment"] if fetch_comments else []):
+        if f not in fields:
+            fields.append(f)
     aliases = jira_config.custom_field_aliases(c.team)
     since = window_since(window)
     clauses = []
@@ -828,69 +1064,116 @@ def sync(c: Client, window: str, projects=None, jql: str = "", api_fields=None,
         clauses.append(f"({jql})")
     if default_projects:   # an explicit JQL may already scope its projects
         projects = projects or c.team.get("project_keys") or None
-    if projects:
-        clauses.append("project in (" + ", ".join(f'"{p}"' for p in projects) + ")")
-    clauses.append(f'updated >= "{since}"' if since else "project != null")
-    q = " AND ".join(clauses)
+    if not projects:
+        # never the whole site: a sync always names its projects
+        raise jira_config.ConfigError(jira_config.NO_SCOPE)
+    clauses.append("project in (" + ", ".join(f'"{p}"' for p in projects) + ")")
+    scope = " AND ".join(clauses)
+    mode = "full" if full else "window"
+    ck = load_checkpoint(name)
+    resume = bool(ck) and ck.get("scope") == scope and ck.get("mode") == mode and ck.get("hwm")
+    tz = jira_tz(c) if resume else ""
+    if resume:
+        bound = f'{order} >= "{jql_time(float(ck["hwm"]) - 60, tz)}"'
+    else:
+        bound = f'updated >= "{since}"' if since else ""
+    q = " AND ".join(x for x in (scope, bound) if x) + f" ORDER BY {order} ASC, key ASC"
     if debug:
         print(f"jira-api: JQL: {q}", file=sys.stderr)
-    raw = c.search(q, ",".join(fields), max_total=max_total, page_size=page_size)["issues"]
     if c.dry:
-        return {"fetched": 0, "changed": 0, "total": 0, "keys": [], "snapshot": "", "jql": q}
+        next(c.search_pages(q, ",".join(fields), max_total=max_total, page_size=page_size), None)
+        return {"fetched": 0, "changed": 0, "total": 0, "keys": [], "snapshot": "", "jql": q,
+                "resumed": bool(resume)}
     # version name -> {released, date} per project: the release date + flag
-    # live on the VERSION object, not the issue's fixVersions
+    # live on the VERSION object, not the issue's fixVersions (once per
+    # project per run, as projects show up in the pages)
     vers_map = read_json(VERSIONS_FILE, {})
     if not isinstance(vers_map, dict):
         vers_map = {}
-    if "fixVersions" in fields:
-        ttl = c.sd("cache_timeout_seconds")
-        fresh = ttl > 0 and os.path.exists(VERSIONS_FILE) and \
-            time.time() - os.path.getmtime(VERSIONS_FILE) < ttl
-        for proj in sorted({((i.get("fields") or {}).get("project") or {}).get("key", "")
-                            for i in raw} - {""}):
-            if fresh and proj in vers_map:
-                continue
-            try:
-                vers_map[proj] = {v.get("name"): {"released": alt(v.get("released"), False),
-                                                  "date": alt(v.get("releaseDate"), "")}
-                                  for v in project_versions(c, proj)}
-            except ApiError:
-                continue
-        write_json(VERSIONS_FILE, vers_map)
-    entries = {}
-    for i in raw:
-        comments = None
-        if fetch_comments:
-            body = c.get(c.path("issue", key=i.get("key")), "fields=comment") or {}
-            comments = [{"author": alt((cm.get("author") or {}).get("displayName"), ""),
-                         "body": alt(cm.get("body"), ""),
-                         "created": alt(cm.get("created"), ""),
-                         "updated": alt(cm.get("updated"), "")}
-                        for cm in ((body.get("fields") or {}).get("comment") or {}).get("comments") or []]
-        entries[i.get("key")] = cache_entry(i, vers_map, comments, fields, aliases)
+    ttl = c.sd("cache_timeout_seconds")
+    vers_fresh = ttl > 0 and os.path.exists(VERSIONS_FILE) and \
+        time.time() - os.path.getmtime(VERSIONS_FILE) < ttl
+    vers_done: set = set()
     cache = read_json(CACHE_FILE, {})
     if not isinstance(cache, dict):
         cache = {}
-    if entries:
-        for k, e in entries.items():
-            merged = dict(cache.get(k) or {})
-            merged.update(e)
-            cache[k] = merged
+    started = ck.get("startedAt") if resume else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    done = int(ck.get("fetched") or 0) if resume else 0
+    hwm = float(ck["hwm"]) if resume else 0.0
+    total = c.count(q)
+    if total is not None and resume:
+        total += done
+    keys: list = []
+    state = {"pending": 0, "complete": False}
+
+    def flush():
         write_json(CACHE_FILE, cache, mode=0o600)
+        if "fixVersions" in fields and vers_done:
+            write_json(VERSIONS_FILE, vers_map)
+        if not state["complete"] and name and hwm:
+            write_json(checkpoint_path(name), {
+                "name": name, "scope": scope, "mode": mode, "window": window, "hwm": hwm,
+                "hwmText": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(hwm)),
+                "fetched": done, "total": total, "startedAt": started, "jql": q,
+                "savedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, mode=0o600)
+        state["pending"] = 0
+        if flushed:
+            flushed(keys)
+
+    try:
+        for got, page_total, _ in c.search_pages(q, ",".join(fields), max_total=max_total,
+                                                 page_size=page_size):
+            if total is None and page_total is not None:
+                total = page_total + (done if resume else 0)
+            if "fixVersions" in fields:
+                for proj in sorted({((i.get("fields") or {}).get("project") or {}).get("key", "")
+                                    for i in got} - {""} - vers_done):
+                    vers_done.add(proj)
+                    if vers_fresh and proj in vers_map:
+                        continue
+                    try:
+                        vers_map[proj] = {v.get("name"): {"released": alt(v.get("released"), False),
+                                                          "date": alt(v.get("releaseDate"), "")}
+                                          for v in project_versions(c, proj)}
+                    except ApiError as err:
+                        if err.code == 401:
+                            raise
+            for i in got:
+                comments = issue_comments(c, i) if fetch_comments else None
+                e = cache_entry(i, vers_map, comments, fields, aliases)
+                merged = dict(cache.get(i.get("key")) or {})
+                merged.update(e)
+                cache[i.get("key")] = merged
+                keys.append(i.get("key"))
+                t = parse_jira_time((i.get("fields") or {}).get(order))
+                if t and t > hwm:
+                    hwm = t
+            done += len(got)
+            state["pending"] += len(got)
+            if progress:
+                progress(done, total, hwm, len(keys))
+            if state["pending"] >= max(1, checkpoint_every):
+                flush()
+        state["complete"] = True
+    finally:
+        if state["pending"] or state["complete"]:
+            flush()       # partial progress is kept even when a page failed
+    if name:
+        clear_checkpoints(name)
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as fh:
         fh.write(f"LAST_SYNC={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
-                 f"WINDOW={window}\nUPDATED={len(entries)}\nTOTAL={len(cache)}\n")
+                 f"WINDOW={window}\nUPDATED={len(keys)}\nTOTAL={len(cache)}\n")
     if not quiet:
-        print(f"jira-api: sync {window}: fetched {len(raw)}, changed {len(entries)}, "
-              f"cache now {len(cache)}", file=sys.stderr)
+        print(f"jira-api: sync {window}: fetched {len(keys)}, cache now {len(cache)}"
+              + (" (resumed)" if resume else ""), file=sys.stderr)
     snap = ""
-    if entries and cache:
+    if keys and cache:
         snap = snapshot(cache, snapshot_keep)
         if not quiet:
             print(f"jira-api: snapshot: {snap}", file=sys.stderr)
-    return {"fetched": len(raw), "changed": len(entries), "total": len(cache),
-            "keys": list(entries), "snapshot": snap, "jql": q}
+    return {"fetched": len(keys), "changed": len(keys), "total": len(cache),
+            "keys": keys, "snapshot": snap, "jql": q, "resumed": bool(resume), "startedAt": started}
 
 
 # ------------------------------------------------------------ interactive
@@ -934,10 +1217,7 @@ def interactive(c: Client, f: Filters, default_project: str, default_max: int,
         except (ApiError, jira_config.ConfigError):
             return []
 
-    projs = [f"{p.get('key')}|{p.get('name')}" for p in quiet_get("projects")]
-    pk = c.team.get("project_keys") or []
-    if pk:
-        projs = [p for p in projs if p.split("|", 1)[0] in pk] or [f"{k}|team.json" for k in pk]
+    projs = [f"{k}|in scope" for k in jira_config.scope_projects(c.team)]
     while True:
         p = menu("Project", f.project or default_project, projs)
         if not p or not projs or any(p == o.split("|", 1)[0] for o in projs):
@@ -988,10 +1268,19 @@ def do_init() -> None:
                             "API token (https://id.atlassian.com/manage-profile/security/api-tokens): ").strip()
     if not token:
         die("token required")
-    proj = ask("Default project key (Enter for none): ").strip()
+    scope = []
+    while not scope:
+        raw = ask("Projects in scope - one or more keys, e.g. SAM1, KAN (every job is limited "
+                  "to these): ")
+        scope = [p.strip().upper() for p in re.split(r"[\s,]+", raw) if p.strip()]
+        bad = [p for p in scope if not re.match(r"^[A-Z][A-Z0-9_]*$", p)]
+        if bad:
+            print(f"  not a project key: {', '.join(bad)}")
+            scope = []
     mx = ask("Default max results [25]: ").strip() or "25"
     jira_config.save({"site": site, "auth": auth, "email": email, "token": token,
-                      "defaultProject": proj, "defaultMax": int(mx) if mx.isdigit() else 25})
+                      "defaultProject": scope[0], "defaultMax": int(mx) if mx.isdigit() else 25})
+    jira_config.set_team_key("project_keys", scope)
     print(f"Wrote {path} (chmod 600). Test with: {sys.argv[0]} --myself   "
           f"(print the curl: {sys.argv[0]} --myself --curl)")
 

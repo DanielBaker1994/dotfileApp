@@ -43,6 +43,39 @@ bin/ui-test.sh --verbose
 
 ## Jira poller (python, v2)
 
+- SCOPE = team.json `project_keys` (`jira_config.scope_projects`), typed by
+  the user (setup window "Projects in scope", Jira Config ▸ Setup,
+  Definitions ▸ Projects). NEVER look projects up (no `/project` listing) and
+  never query outside them: `"*"` = all of them (`job_projects` clamps
+  explicit lists), the live search adds `project in (scope)`
+  (`criteria_jql`), `sync()` refuses without projects, the directory job
+  GETs `/project/KEY` per key. Empty scope → every job refuses (`NO_SCOPE`).
+- Setup gate: config.json `setup` = {state pending|done, steps}. Pending →
+  the launchd tick no-ops (status "setup pending"). `jira_poll.py --setup
+  [--step NAME]` runs `setup_steps()` one at a time (connection, scope,
+  directory, releases, `sync` = full issue cache, each plain tab, query
+  jobs), stops at the first failure; UI = Jira Config ▸ Setup
+  (`showSetup`/`updateSetup`). `migrate_setup` marks working installs done.
+- Shared sync: plain issue jobs (no jql) are views over ONE `sync()` per
+  tick (status entry + checkpoint name `sync`, `Ctx.sync_projects/fields`);
+  `publish_plain` writes their tabs. Projects added to the scope since
+  `syncedProjects` get a full sync first. Custom-jql jobs sync themselves.
+- Streaming + resume: `jira_api.sync()` orders oldest-first (full: created,
+  else updated), writes jiras.json every `checkpointEvery` issues + in a
+  `finally`, and saves `~/.cache/jira/checkpoints/NAME.json` (high-water
+  mark); a rerun of the same query resumes at `hwm - 1m` (JQL time in the
+  Jira user's zone, `jira_tz` ← /myself). Comments ride in the search
+  (`comment` field; per-issue GET only when truncated). v2 pages overlap
+  `PAGE_OVERLAP` rows. `lastSuccess` = the run's START.
+- Resilience: `Client.get` retries the SAME request on 429/502-504, curl
+  network exits, and a 401 after a 2xx this run (Retry-After via `-w
+  %header{retry-after}`, else backoff) within `rateLimitMaxWaitMinutes`;
+  no whole-job retries. Tests swap `jira_api.SLEEP`.
+- Visibility: `~/.cache/jira/poll.log` (`say()`, always written) + status.json
+  `progress` (`Reporter`, per page) → the Jira Config header / Setup page
+  (1s timer reads status.json; rate-limit countdown via `waitingUntil`).
+- Start over: `jira_poll.py --rebuild` / config `rebuildOnNextPoll` (true →
+  wipe + "resume" → false when complete; an interrupted rebuild resumes).
 - Switch: `[jira] enabled` in commands.conf gates the window, the launchd
   agent (`syncJiraLaunchAgent()`, re-run on every `reloadConfig()`), and the
   poll itself (`jira_poll.py` no-ops when false unless `--force`).
@@ -77,7 +110,7 @@ bin/ui-test.sh --verbose
   after edits.
 - Poll job editor: Projects = `JiraMultiPicker` (known keys only, "All
   projects" = `*`), Page size = endpoint `maxResults` (default
-  `search_defaults.max_results_search`, the old hidden `maxResults=50`), Max
+  `search_defaults.max_results_search`, default 500; the server may cap it), Max
   issues = `maxTotal`. Types: issues / releases / `directory`.
 - Column editor: read-only rows (Header = the field's label · Field + API
   field · Width · Align · Sort · Filter); double-click / Edit… / Return opens
@@ -169,7 +202,10 @@ bin/ui-test.sh --verbose
   `table-sort`, widths back into `columns`. `columns` MUST stay on one line.
 - Tests: `python3 Tests/test_jira_poll.py` (jq parity vs the legacy bash
   transforms, lock, disabled no-op, env-token override, criteria JQL, live
-  search, directory job, page size, `--team-set`, v3 migration).
+  search, directory job, page size, `--team-set`, v3 migration) +
+  `ResilientSyncTests` (stateful fake Jira `FAKE_JIRA`: 429/401 retries,
+  comments in search, resume after failure, shared sync, scope, setup
+  gate, rebuild, added projects).
 
 # Code map
 
@@ -246,6 +282,28 @@ Line numbers drift; grep the symbol names (they're stable).
 - File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's
   absolute path (+ toast), Cmd+L focus filter bar, Tab completes, Enter opens.
 - Ctrl+J/K: move focus between editor / browser / terminal panes.
+
+## Theme system (keep every window on it)
+
+- Palette = `PopupColors` (+ `palette: PopupPalette` = accent2 / success /
+  warning / danger / info). Derived tokens in `extension PopupColors`:
+  depth `crust < mantle < base < surface0/1`, `accentOn`, `onAccent`,
+  `tone(_:)`, `hairline`, `outline`. Draw with these, never system colors.
+- Layering: header = crust (presets' `header`), tab strip / table header /
+  input wells = mantle, raised buttons = text-tinted ghost fill. Active tab =
+  SOLID accent pill; "on" buttons = accent-tinted (`ButtonStyle`); cursor
+  rows = highlight pill + 3pt accent edge (list, file list, switcher,
+  `PopupTableRowView`); focus rings = accent (`ButtonStyle.focusStroke`).
+- Host builds colors with `windowColors(cmd)` (every opener) /
+  `jiraWindowColors()` (Jira Config + pickers, `JC` in JiraDashboard.swift).
+  Per-window keys: text/dim/highlight/accent-color + `palette` (5 hex).
+- `ThemePreset` (13 colors, swatch = mini window). Live: `setTextColors(…,
+  palette:, border:)` → `pushColors()` walks `PopupThemeable` views; also
+  the shell's ANSI colors (`ansiPalette`) and vim (`vimPaletteLets` →
+  `g:ws_accent…`, ONE `--cmd`: nvim allows max 10).
+- AppKit forms: `ThemedPushButton` (`role` .primary/.danger),
+  `ThemedPopUpButton`, `PopupTableRowView`; initial colors from
+  `PopupThemeDefaults.colors`. Jira table cells: `jiraCellTone`.
 
 ## Config defaults worth knowing
 

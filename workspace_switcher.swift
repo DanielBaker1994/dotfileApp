@@ -196,6 +196,67 @@ func parseColors() -> [String: NSColor] {
     return out
 }
 
+// The Jira window's palette ([jira] per-window colors over [theme]): the
+// Jira Config window, its pickers and the Cmd+F panel wear it too, so the
+// jira family reads as one app whatever preset the Jira window uses.
+func jiraWindowColors() -> PopupColors {
+    let v = { (k: String) in hexColor(jiraConfigValue(k)) }
+    var c = PopupColors(background: v("background-color").map { ($0.usingColorSpace(.sRGB) ?? $0).withAlphaComponent(1) } ?? BAR,
+                        border: BORDER, text: v("text-color") ?? TEXT, dim: v("dim-color") ?? DIM,
+                        highlight: v("highlight-color") ?? GROUP_BG, accent: v("accent-color") ?? ACCENT,
+                        palette: parsePalette(jiraConfigValue("palette")) ?? THEME_PALETTE)
+    if v("accent-color") != nil || THEME["border"] == nil { c.border = c.outline }
+    return c
+}
+var jiraHeaderColor: NSColor { hexColor(jiraConfigValue("header-color")) ?? headerBlueSilver }
+
+// Table cells wear the theme's status hues (resolved via the live palette,
+// so a Theme ▸ preset recolors them): issue keys = accent2, statuses by
+// workflow stage, priorities by urgency, issue types, dates dim.
+func jiraCellTone(_ field: String, _ text: String) -> PopupTone? {
+    let v = text.lowercased()
+    switch field.lowercased() {
+    case "key": return .accent2
+    case "status", "statuscategory":
+        if v.isEmpty { return nil }
+        if ["done", "closed", "resolved", "released", "complete", "fixed", "shipped"].contains(where: v.contains) { return .success }
+        if ["block", "reject", "fail", "cancel", "won't", "wont"].contains(where: v.contains) { return .danger }
+        if ["progress", "review", "test", "qa", "develop", "doing", "verif"].contains(where: v.contains) { return .info }
+        if ["hold", "wait", "pending", "paused"].contains(where: v.contains) { return .warning }
+        return .dim
+    case "priority":
+        if ["highest", "blocker", "critical", "urgent", "p0", "p1"].contains(where: v.contains) { return .danger }
+        if ["high", "major", "p2"].contains(where: v.contains) { return .warning }
+        if ["low", "minor", "trivial", "p4", "p5"].contains(where: v.contains) { return .dim }
+        return v.isEmpty ? nil : .info
+    case "type", "issuetype":
+        if v.contains("bug") || v.contains("incident") { return .danger }
+        if v.contains("epic") { return .accent }
+        if v.contains("story") || v.contains("feature") { return .success }
+        return v.isEmpty ? nil : .info
+    case "releasestatus":
+        if v.contains("unreleased") { return .warning }
+        if v.contains("released") { return .success }
+        return nil
+    case "updated", "created", "duedate", "releasedate", "project": return .dim
+    default: return nil
+    }
+}
+
+// `palette = accent2, success, warning, danger, info` (5 hex colors)
+func parsePalette(_ v: String?) -> PopupPalette? {
+    guard let v, !v.isEmpty else { return nil }
+    let cs = v.split(separator: ",").compactMap { hexColor($0.trimmingCharacters(in: .whitespaces)) }
+    return PopupPalette(cs)
+}
+func paletteString(_ p: PopupPalette) -> String {
+    p.all.map { c in
+        let cc = c.usingColorSpace(.sRGB) ?? c
+        return String(format: "%02X%02X%02X", Int(round(cc.redComponent * 255)),
+                      Int(round(cc.greenComponent * 255)), Int(round(cc.blueComponent * 255)))
+    }.joined(separator: ", ")
+}
+
 // [theme] section in commands.conf: friendly hex colors that override the
 // sketchybar-derived window colors app-wide. Keys map 1:1 to the popup's
 // color roles (background border text dim highlight accent header panel).
@@ -236,6 +297,32 @@ let THEME_TERMINAL = THEME["terminal"]
 // default drag-header tint for the notes/jira windows (dark bluey silver);
 // a commands.conf `header-color` or [theme] `header` overrides it per scope
 let headerBlueSilver = THEME_HEADER ?? NSColor(srgbRed: 0.27, green: 0.31, blue: 0.36, alpha: 1)
+
+// [theme] accent2 / success / warning / danger / info: the secondary hues
+// (links + match highlights, status colors, the shell's ANSI palette).
+// Unset keys keep the built-in (Catppuccin Macchiato) values.
+let THEME_PALETTE: PopupPalette = {
+    let d = PopupPalette()
+    return PopupPalette(accent2: THEME["accent2"] ?? d.accent2, success: THEME["success"] ?? d.success,
+                        warning: THEME["warning"] ?? d.warning, danger: THEME["danger"] ?? d.danger,
+                        info: THEME["info"] ?? d.info)
+}()
+
+// One palette builder for every window: the [theme] colors, then the
+// section's per-window overrides (Theme ▸ presets write them). A window
+// with its own accent gets an outline in that hue; otherwise [theme] border.
+func windowColors(_ cmd: CommandSpec? = nil) -> PopupColors {
+    var c = PopupColors(background: BAR, border: BORDER,
+                        text: cmd?.textColor ?? TEXT, dim: cmd?.dimColor ?? DIM,
+                        highlight: cmd?.highlightColor ?? GROUP_BG,
+                        accent: cmd?.accentColor ?? ACCENT,
+                        palette: cmd?.palette ?? THEME_PALETTE)
+    if let bg = cmd?.backgroundColor {
+        c.background = (bg.usingColorSpace(.sRGB) ?? bg).withAlphaComponent(1)
+    }
+    if cmd?.accentColor != nil || THEME["border"] == nil { c.border = c.outline }
+    return c
+}
 
 // MARK: - Focus file (captured by the launcher at keypress time)
 
@@ -539,6 +626,7 @@ struct CommandSpec {
     var dimColor: NSColor? = nil
     var highlightColor: NSColor? = nil
     var accentColor: NSColor? = nil        // active tab / chip underline
+    var palette: PopupPalette? = nil       // `palette` = accent2, success, warning, danger, info
     var terminalForeground: NSColor? = nil  // shell drawer text (nil = textColor)
     var vimMode: Bool          // note: edit notes in an embedded nvim pane
     var vimBin: String         // note: vim binary path or name (default "nvim")
@@ -844,6 +932,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     spec.dimColor = hexColor(vars["dim-color"])
     spec.highlightColor = hexColor(vars["highlight-color"])
     spec.accentColor = hexColor(vars["accent-color"])
+    spec.palette = parsePalette(vars["palette"])
     spec.float = tri(vars["float"])
     spec.sort = vars["sort"]
     if let o = vars["sort-order"]?.lowercased() { spec.sortDescending = o.hasPrefix("desc") }
@@ -971,7 +1060,8 @@ private func parseAppConfig(_ vars: [String: String]) {
 // Theme menu opens so a hover preview can be undone exactly.
 struct ThemeSnapshot {
     let roles: [(PopupWindow.ThemeRole, NSColor)]
-    let text, dim, highlight, accent: NSColor
+    let text, dim, highlight, accent, border: NSColor
+    let palette: PopupPalette
     let terminalForeground: NSColor?
     init(_ w: PopupWindow) {
         roles = PopupWindow.ThemeRole.allCases.map { ($0, w.themeColor($0)) }
@@ -979,12 +1069,15 @@ struct ThemeSnapshot {
         dim = w.config.colors.dim
         highlight = w.config.colors.highlight
         accent = w.config.colors.accent
+        border = w.config.colors.border
+        palette = w.config.colors.palette
         terminalForeground = w.config.terminalForeground
     }
     func restore(_ w: PopupWindow) {
         for (role, c) in roles { w.setThemeColor(c, for: role) }
         w.setTerminalForeground(terminalForeground)
-        w.setTextColors(text: text, dim: dim, highlight: highlight, accent: accent)
+        w.setTextColors(text: text, dim: dim, highlight: highlight, accent: accent,
+                        palette: palette, border: border)
     }
 }
 
@@ -1015,46 +1108,63 @@ final class ThemePreviewDelegate: NSObject, NSMenuDelegate {
 
 struct ThemePreset {
     let name: String
-    let background: NSColor   // notepad / window card
-    let browser: NSColor      // file-explorer panel
-    let terminal: NSColor     // shell drawer
-    let header: NSColor       // drag header
+    let background: NSColor   // notepad / window card (base)
+    let browser: NSColor      // file-explorer panel (mantle)
+    let terminal: NSColor     // shell drawer (crust)
+    let header: NSColor       // drag header — the DEEPEST tone, like a tmux status bar
     let text: NSColor
     let dim: NSColor
-    let highlight: NSColor    // selection / active pills
-    let accent: NSColor       // active tab / chip underline (the theme's signature hue)
+    let highlight: NSColor    // selection / cursor-row pills
+    let accent: NSColor       // the signature hue: active tab, focus, on-state
+    let palette: PopupPalette // accent2 + status hues (jira cells, ANSI, ✕ hover)
 
     var isLight: Bool { background.relativeLuminance > 0.45 }
 
-    // commands.conf [themes]:  Name = bg, browser, terminal, header, text, dim, highlight[, accent]
+    // commands.conf [themes]:
+    //   Name = bg, browser, terminal, header, text, dim, highlight[, accent[,
+    //          accent2, success, warning, danger, info]]
     static func parse(name: String, _ value: String) -> ThemePreset? {
         let c = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard !name.isEmpty, c.count == 7 || c.count == 8 else { return nil }
+        guard !name.isEmpty, [7, 8, 13].contains(c.count) else { return nil }
         let colors = c.compactMap { hexColor($0) }
         guard colors.count == c.count else { return nil }
         return ThemePreset(name: name, background: colors[0], browser: colors[1],
                            terminal: colors[2], header: colors[3], text: colors[4],
                            dim: colors[5], highlight: colors[6],
-                           accent: colors.count == 8 ? colors[7] : colors[4])
+                           accent: colors.count >= 8 ? colors[7] : colors[4],
+                           palette: colors.count == 13 ? PopupPalette(Array(colors[8...]))!
+                                                       : ThemePreset.defaultPalette(light: colors[0].relativeLuminance > 0.45))
     }
 
-    // the stock palettes (official hex values where the theme publishes them)
+    // a palette for [themes] entries that only give the 7/8 base colors
+    static func defaultPalette(light: Bool) -> PopupPalette {
+        light ? PopupPalette(colors("1E66F5, 40A02B, DF8E1D, D20F39, 179299"))!   // Catppuccin Latte
+              : PopupPalette()                                                   // Macchiato
+    }
+    private static func colors(_ s: String) -> [NSColor] {
+        s.split(separator: ",").compactMap { hexColor($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    // the stock palettes (official hex values where the theme publishes them).
+    // Surfaces are layered like the themes' own tmux/terminal ports:
+    // header = crust (deepest), terminal = crust, explorer = mantle, card = base.
+    //                    base    mantle  crust   header  text    dim     sel     accent  accent2 green   yellow  red     cyan
     static let builtIn: [ThemePreset] = [
-        ("Tokyo Night", "1A1B26, 16161E, 13141C, 24283B, C0CAF5, 9AA5CE, 283457, 7AA2F7"),
-        ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 292E42, C0CAF5, 9AA5CE, 2E3C64, 7AA2F7"),
-        ("Catppuccin Mocha", "1E1E2E, 181825, 11111B, 313244, CDD6F4, A6ADC8, 45475A, CBA6F7"),
-        ("Catppuccin Macchiato", "24273A, 1E2030, 181926, 363A4F, CAD3F5, A5ADCB, 494D64, C6A0F6"),
-        ("Dracula", "282A36, 21222C, 191A21, 343746, F8F8F2, A4AACC, 44475A, BD93F9"),
-        ("Nord", "2E3440, 3B4252, 272C36, 434C5E, ECEFF4, A3ACBD, 4C566A, 88C0D0"),
-        ("Gruvbox Dark", "282828, 1D2021, 1D2021, 3C3836, EBDBB2, A89984, 504945, FABD2F"),
-        ("One Dark", "282C34, 21252B, 1E2127, 2C313A, ABB2BF, 7F848E, 3E4451, 61AFEF"),
-        ("Rosé Pine", "191724, 1F1D2E, 16141F, 26233A, E0DEF4, 908CAA, 403D52, EBBCBA"),
-        ("Solarized Dark", "002B36, 073642, 00212B, 073642, 93A1A1, 657B83, 0A4A5A, 268BD2"),
-        ("Graphite", "1E1E1E, 252525, 181818, 2D2D2D, E5E5E5, 9A9A9A, 3A3A3A, 0A84FF"),
-        ("Catppuccin Latte", "EFF1F5, E6E9EF, DCE0E8, CCD0DA, 4C4F69, 6C6F85, BCC0CC, 8839EF"),
-        ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C4C8DA, 3760BF, 6172B0, B7C1E3, 2E7DE9"),
-        ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1, 268BD2"),
-        ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6, 007AFF"),
+        ("Tokyo Night", "1A1B26, 16161E, 13141C, 111219, C0CAF5, 9AA5CE, 283457, 7AA2F7, BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"),
+        ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 1A1D2B, C0CAF5, 9AA5CE, 2E3C64, 7AA2F7, BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"),
+        ("Catppuccin Mocha", "1E1E2E, 181825, 11111B, 11111B, CDD6F4, A6ADC8, 45475A, CBA6F7, 89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"),
+        ("Catppuccin Macchiato", "24273A, 1E2030, 181926, 181926, CAD3F5, A5ADCB, 494D64, C6A0F6, 8AADF4, A6DA95, EED49F, ED8796, 8BD5CA"),
+        ("Dracula", "282A36, 21222C, 191A21, 191A21, F8F8F2, A4AACC, 44475A, BD93F9, FF79C6, 50FA7B, F1FA8C, FF5555, 8BE9FD"),
+        ("Nord", "2E3440, 3B4252, 272C36, 242933, ECEFF4, A3ACBD, 4C566A, 88C0D0, 81A1C1, A3BE8C, EBCB8B, BF616A, 8FBCBB"),
+        ("Gruvbox Dark", "282828, 1D2021, 1D2021, 1B1B1B, EBDBB2, A89984, 504945, FABD2F, 83A598, B8BB26, FE8019, FB4934, 8EC07C"),
+        ("One Dark", "282C34, 21252B, 1E2127, 1B1E23, ABB2BF, 7F848E, 3E4451, 61AFEF, C678DD, 98C379, E5C07B, E06C75, 56B6C2"),
+        ("Rosé Pine", "191724, 1F1D2E, 16141F, 12101A, E0DEF4, 908CAA, 403D52, EBBCBA, C4A7E7, 9CCFD8, F6C177, EB6F92, 31748F"),
+        ("Solarized Dark", "002B36, 073642, 00212B, 001E26, 93A1A1, 657B83, 0A4A5A, 268BD2, 6C71C4, 859900, B58900, DC322F, 2AA198"),
+        ("Graphite", "1E1E1E, 252525, 181818, 151515, E5E5E5, 9A9A9A, 3A3A3A, 0A84FF, BF5AF2, 30D158, FFD60A, FF453A, 64D2FF"),
+        ("Catppuccin Latte", "EFF1F5, E6E9EF, DCE0E8, DCE0E8, 4C4F69, 6C6F85, BCC0CC, 8839EF, 1E66F5, 40A02B, DF8E1D, D20F39, 179299"),
+        ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C8CCD9, 3760BF, 6172B0, B7C1E3, 2E7DE9, 9854F1, 587539, 8C6C3E, F52A65, 007197"),
+        ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1, 268BD2, D33682, 859900, B58900, DC322F, 2AA198"),
+        ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6, 007AFF, AF52DE, 248A3D, B25000, D70015, 0071A4"),
     ].compactMap { parse(name: $0.0, $0.1) }
 
     // built-ins + commands.conf [themes] entries (same name = override)
@@ -1077,23 +1187,44 @@ struct ThemePreset {
         return out
     }
 
-    // a small swatch strip for the menu item: background, terminal, text
+    // The menu preview: a miniature WINDOW in the theme — deep header strip,
+    // the solid accent tab, a text line, a selected row with its accent edge,
+    // and the palette dots (accent2, green, yellow, red) — so each preset
+    // shows how it themes the parts, not just one background color.
     func swatch() -> NSImage {
-        let size = NSSize(width: 30, height: 14)
-        return NSImage(size: size, flipped: false) { r in
+        let size = NSSize(width: 58, height: 20)
+        return NSImage(size: size, flipped: true) { r in
             let card = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
-            self.background.setFill()
+            self.background.withAlphaComponent(1).setFill()
             card.fill()
             NSGraphicsContext.current?.saveGraphicsState()
             card.addClip()
-            self.terminal.setFill()
-            NSRect(x: r.maxX - 10, y: 0, width: 10, height: r.height).fill()
-            NSGraphicsContext.current?.restoreGraphicsState()
-            self.text.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 5, y: r.midY - 3, width: 6, height: 6)).fill()
+            // header strip (crust) with the accent tab
+            self.header.withAlphaComponent(1).setFill()
+            NSRect(x: 0, y: 0, width: r.width, height: 7).fill()
             self.accent.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 12, y: r.midY - 3, width: 6, height: 6)).fill()
-            NSColor.black.withAlphaComponent(0.25).setStroke()
+            NSBezierPath(roundedRect: NSRect(x: 4, y: 1.5, width: 12, height: 4), xRadius: 1.5, yRadius: 1.5).fill()
+            self.dim.setFill()
+            NSRect(x: 19, y: 3, width: 8, height: 1.2).fill()
+            // terminal/explorer column on the right
+            self.terminal.withAlphaComponent(1).setFill()
+            NSRect(x: r.width - 14, y: 7, width: 14, height: r.height - 7).fill()
+            // text line + selected row with its accent edge
+            self.text.setFill()
+            NSRect(x: 4, y: 10, width: 18, height: 1.4).fill()
+            self.highlight.setFill()
+            NSRect(x: 3, y: 13.5, width: r.width - 20, height: 4.5).fill()
+            self.accent.setFill()
+            NSRect(x: 3, y: 13.5, width: 1.5, height: 4.5).fill()
+            // palette dots on the terminal column
+            for (k, c) in [self.palette.accent2, self.palette.success,
+                           self.palette.warning, self.palette.danger].enumerated() {
+                c.setFill()
+                NSBezierPath(ovalIn: NSRect(x: r.width - 12 + CGFloat(k % 2) * 5,
+                                            y: 9 + CGFloat(k / 2) * 5, width: 3.6, height: 3.6)).fill()
+            }
+            NSGraphicsContext.current?.restoreGraphicsState()
+            NSColor.black.withAlphaComponent(0.3).setStroke()
             card.lineWidth = 1
             card.stroke()
             return true
@@ -1180,7 +1311,7 @@ private func configValueProblem(section: String, key: String, value: String) -> 
     }
     if section == "themes" {
         return ThemePreset.parse(name: key, value) == nil
-            ? "expected 7 hex colors: background, browser, terminal, header, text, dim, highlight"
+            ? "expected 7, 8 or 13 hex colors: background, browser, terminal, header, text, dim, highlight[, accent[, accent2, success, warning, danger, info]]"
             : nil
     }
     if configBoolKeys.contains(key), tri(value) == nil {
@@ -1191,6 +1322,9 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         if !range.contains(n) {
             return "\(value) is outside \(range.lowerBound.clean)…\(range.upperBound.clean)"
         }
+    }
+    if key == "palette", parsePalette(value) == nil {
+        return "expected 5 hex colors: accent2, success, warning, danger, info"
     }
     if configColorKeys.contains(key), hexColor(value) == nil {
         return "'\(value)' is not a hex color (RRGGBB / AARRGGBB)"
@@ -2443,8 +2577,7 @@ final class SwitcherController: NSObject {
 
     override init() {
         var config = PopupConfig(name: settings.switcherWindowName)
-        config.colors = PopupColors(background: BAR, border: BORDER,
-                                    text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        config.colors = windowColors()
         config.enableResize = true
         // shrink/grow the window to fit the current row count while typing
         // (e.g. "/" with 3 commands gets a compact window, not a tall one)
@@ -2663,7 +2796,7 @@ final class SwitcherController: NSObject {
             }
             openNoteWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
         case .list:
-            focusExistingOrOpen(editMode: false) {
+            focusExistingOrOpen(named: cmd.windowName) {
                 openListWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
             }
         case .files:
@@ -2681,17 +2814,14 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // Single-instance guard: at most ONE note window and ONE list (jira)
-    // window can exist. Opening the same type again focuses the existing one
-    // instead of creating a duplicate — windows have .canJoinAllSpaces so they
+    // Single-instance guard: opening a window that exists focuses it instead
+    // of creating a duplicate — windows have .canJoinAllSpaces so they
     // appear on every workspace; ordering them forward brings them to the front.
-    private func existingWindow(editMode: Bool) -> PopupWindow? {
-        subWindows.first { $0.config.editMode == editMode }
-    }
-
-    private func focusExistingOrOpen(editMode: Bool, open: () -> Void) {
+    // matched by window NAME: the files window is also editMode=false, so an
+    // editMode match focused Files when Jira was asked for
+    private func focusExistingOrOpen(named name: String, open: () -> Void) {
         popup.hide(restore: false)
-        if let existing = existingWindow(editMode: editMode) {
+        if let existing = subWindows.first(where: { $0.config.name == name }) {
             focusSubWindow(existing)
             return
         }
@@ -2803,14 +2933,23 @@ final class SwitcherController: NSObject {
                               width: rowPillW * z, height: rowPillH * z)
             let p = NSBezierPath(roundedRect: pill, xRadius: popup.config.buttonRadius * z,
                                  yRadius: popup.config.buttonRadius * z)
-            popup.config.colors.accent.withAlphaComponent(0.5).setFill()
+            // the shared cursor look (list + file rows): highlight pill,
+            // accent hairline and an accent edge on the left
+            let c = popup.config.colors
+            c.highlight.setFill()
             p.fill()
-            BORDER.setStroke()
+            c.accentOn.withAlphaComponent(0.55).setStroke()
             p.lineWidth = rowPillBorder * z
             p.stroke()
+            NSGraphicsContext.current?.saveGraphicsState()
+            p.addClip()
+            c.accentOn.setFill()
+            NSRect(x: pill.minX, y: pill.minY, width: 3 * z, height: pill.height).fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
         }
         let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11 * z), .foregroundColor: TEXT,
+            .font: NSFont.systemFont(ofSize: 11 * z, weight: selected ? .semibold : .regular),
+            .foregroundColor: selected ? TEXT : TEXT.withAlphaComponent(0.88),
         ]
         let title = row.title as NSString
         let ts = title.size(withAttributes: titleAttrs)
@@ -2897,14 +3036,14 @@ final class SwitcherController: NSObject {
                 // editor for the file — unless one already exists
                 let wid = savedWID
                 let pid = savedPID
-                focusExistingOrOpen(editMode: true) {
+                focusExistingOrOpen(named: cr.command.windowName) {
                     openNoteWindow(cr.command, restoreWID: wid, restorePID: pid)
                 }
             case .list:
                 // same for list windows (jira etc.) — single instance
                 let wid = savedWID
                 let pid = savedPID
-                focusExistingOrOpen(editMode: false) {
+                focusExistingOrOpen(named: cr.command.windowName) {
                     openListWindow(cr.command, restoreWID: wid, restorePID: pid)
                 }
             case .output:
@@ -3025,14 +3164,17 @@ final class SwitcherController: NSObject {
         let imgFile = (socket as NSString).deletingPathExtension + ".images.json"
         a += ["--cmd", "let g:ws_img_file='\(imgFile)'",
               "--cmd", "let g:ws_img_rows=\(max(1, cmd.imageRows))"]
-        a += ["--cmd", "let g:ws_fg='\(rgb(cmd.textColor ?? TEXT))'",
-              "--cmd", "let g:ws_dim='\(rgb(cmd.dimColor ?? DIM))'",
-              "--cmd", "let g:ws_sel='\(rgb(cmd.highlightColor ?? GROUP_BG))'"]
         // cursor-line band (iTerm2-style cursor guide): the selection color
         // pulled halfway toward the card so it reads fainter than Visual
         let sel = (cmd.highlightColor ?? GROUP_BG).usingColorSpace(.sRGB) ?? GROUP_BG
         let card = (cmd.backgroundColor ?? BAR).withAlphaComponent(1).usingColorSpace(.sRGB) ?? BAR
-        a += ["--cmd", "let g:ws_line='\(rgb(sel.blended(withFraction: 0.5, of: card) ?? sel))'"]
+        // the whole theme in ONE --cmd: nvim accepts at most 10 of them
+        let lets = ["let g:ws_fg='\(rgb(cmd.textColor ?? TEXT))'",
+                    "let g:ws_dim='\(rgb(cmd.dimColor ?? DIM))'",
+                    "let g:ws_sel='\(rgb(cmd.highlightColor ?? GROUP_BG))'",
+                    "let g:ws_line='\(rgb(sel.blended(withFraction: 0.5, of: card) ?? sel))'"]
+            + PopupWindow.vimPaletteLets(windowColors(cmd))
+        a += ["--cmd", lets.joined(separator: " | ")]
         if let file { a.append(file) }
         return a
     }
@@ -3081,8 +3223,11 @@ final class SwitcherController: NSObject {
         cfg.copyToast = settings.copyToast
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
-        cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        // wears its jira window's theme (same card, header and palette)
+        cfg.colors = windowColors(cmd)
+        cfg.headerColor = cmd.headerColor ?? headerBlueSilver
+        cfg.titlePill = false
+        if let bg = cmd.backgroundColor { cfg.tintAlpha = (bg.usingColorSpace(.sRGB) ?? bg).alphaComponent }
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
         w.editorText = text
@@ -3159,8 +3304,9 @@ final class SwitcherController: NSObject {
         cfg.headerHeight = 30
         cfg.titlePill = false
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        cfg.colors = windowColors(cmd)
+        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
+        if let bg = cmd.backgroundColor { cfg.tintAlpha = (bg.usingColorSpace(.sRGB) ?? bg).alphaComponent }
         cfg.fontName = cmd.font
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
@@ -3209,8 +3355,7 @@ final class SwitcherController: NSObject {
         cfg.headerHeight = 30
         cfg.titlePill = false
         cfg.headerColor = headerBlueSilver
-        cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        cfg.colors = windowColors()
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = false
         w.editorText = ""
@@ -3520,10 +3665,7 @@ private func trimmed(_ s: String) -> String? {
         // to the app glyph / last-write line) instead of a compact right cluster
         cfg.stretchHeaderButtons = true
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: cmd.textColor ?? TEXT, dim: cmd.dimColor ?? DIM,
-                                 highlight: cmd.highlightColor ?? GROUP_BG,
-                                 accent: cmd.accentColor ?? ACCENT)
+        cfg.colors = windowColors(cmd)
         cfg.terminalForeground = cmd.terminalForeground
         if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
         if let bg = cmd.backgroundColor {
@@ -4710,12 +4852,20 @@ private func trimmed(_ s: String) -> String? {
             paint(.browser, p.background)
         }
         if scope == .window || scope == .notepad {
-            w.setTextColors(text: p.text, dim: p.dim, highlight: p.highlight, accent: p.accent)
+            var probe = w.config.colors
+            probe.accent = p.accent
+            probe.text = p.text
+            w.setTextColors(text: p.text, dim: p.dim, highlight: p.highlight, accent: p.accent,
+                            palette: p.palette, border: probe.outline)
             kv += [("text-color", p.text), ("dim-color", p.dim), ("highlight-color", p.highlight),
                    ("accent-color", p.accent)]
         }
         guard persist else { return }
         commitColors(w, section: section, kv)
+        if scope == .window || scope == .notepad {
+            if let i = commands.firstIndex(where: { $0.name == section }) { commands[i].palette = p.palette }
+            saveConfigValue(section: section, key: "palette", value: paletteString(p.palette))
+        }
         log("theme '\(p.name)' applied to [\(section)] scope=\(scope)")
     }
 
@@ -4745,7 +4895,10 @@ private func trimmed(_ s: String) -> String? {
         w.setThemeColor(BAR.withAlphaComponent(base.tintAlpha), for: .notepad)
         w.setThemeColor(headerBlueSilver, for: .header)
         w.setTerminalForeground(nil)
-        w.setTextColors(text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        if let i = commands.firstIndex(where: { $0.name == section }) { commands[i].palette = nil }
+        let base0 = windowColors()
+        w.setTextColors(text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT,
+                        palette: THEME_PALETTE, border: base0.border)
         NSColorPanel.shared.orderOut(nil)
         log("theme reset for [\(section)] — back to system defaults")
     }
@@ -5106,7 +5259,8 @@ private func trimmed(_ s: String) -> String? {
         let keys: Set<String> = ["header-color", "background-color",
                                  "browser-background", "terminal-background",
                                  "tint-alpha", "text-color", "dim-color",
-                                 "highlight-color", "accent-color", "terminal-foreground"]
+                                 "highlight-color", "accent-color", "terminal-foreground",
+                                 "palette"]
         let target = "[" + section + "]"
         var inSection = false
         var changed = false
@@ -5242,8 +5396,9 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.headerHeight = 30
         cfg.titlePill = false
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: TEXT, dim: DIM, highlight: GROUP_BG, accent: ACCENT)
+        cfg.colors = windowColors(cmd)
+        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
+        if let bg = cmd.backgroundColor { cfg.tintAlpha = (bg.usingColorSpace(.sRGB) ?? bg).alphaComponent }
         if cmd.searchWidth > 0 { cfg.searchWidthFraction = cmd.searchWidth }
         if cmd.maxStretch > 0 { cfg.maxRowStretch = cmd.maxStretch }
         cfg.fontName = cmd.font
@@ -5254,6 +5409,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             cfg.tableColumns = columns.map { $0.popup }
             cfg.rowHeight = 26
         }
+        cfg.tableCellTone = jiraCellTone
         let w = PopupWindow(config: cfg)
         // empty `title` in commands.conf = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
@@ -5736,10 +5892,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.height = cmd.height > 0 ? cmd.height : 560
         cfg.headerHeight = 30
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = PopupColors(background: BAR, border: BORDER,
-                                 text: cmd.textColor ?? TEXT, dim: cmd.dimColor ?? DIM,
-                                 highlight: cmd.highlightColor ?? GROUP_BG,
-                                 accent: cmd.accentColor ?? ACCENT)
+        cfg.colors = windowColors(cmd)
         cfg.terminalForeground = cmd.terminalForeground
         if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
         if let bg = cmd.backgroundColor {
@@ -7095,7 +7248,13 @@ extension SwitcherController {
         if on {
             JiraPoll.lastEnableError = nil
             JiraPoll.run("jira_status.py", ["--note-error"])
-            showCommand("jira")
+            // first run: the one-time setup (Jira Config ▸ Setup) before any tab has data
+            JiraPoll.run("jira_config.py", ["--check"]) { [weak self] _, out, _ in
+                let chk = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
+                let setup = chk?["setup"] as? [String: Any]
+                if setup?["state"] as? String == "pending" { self?.showJiraDashboard() }
+                else { self?.showCommand("jira") }
+            }
         } else if let w = subWindows.first(where: { $0.config.name == "jira" }) {
             w.hide(restore: false)
         }
@@ -7111,6 +7270,12 @@ extension SwitcherController {
                 self.showJiraSetup(reason: problems.isEmpty
                     ? "No Jira config yet — fill in your site and API token."
                     : problems.joined(separator: "\n"))
+                return
+            }
+            // the projects in scope are required: the user types them (never looked up)
+            if (chk?["projectKeys"] as? [String] ?? []).isEmpty {
+                self.log("jira: enable -> setup window (no projects in scope)")
+                self.showJiraSetup(reason: "Enter the projects in scope — every Jira query is limited to them.")
                 return
             }
             JiraPoll.run("jira_api.py", ["--myself"]) { [weak self] code, _, err in
@@ -7176,7 +7341,9 @@ extension SwitcherController {
 }
 
 // Jira credentials window: site, email (Cloud only — blank = Bearer token for
-// Server/Data Center), token (secure), default project, max results. "Test
+// Server/Data Center), token (secure), the projects in scope (REQUIRED, one or
+// more keys the user types — never looked up; every query is limited to them,
+// saved as team.json project_keys), max results. "Test
 // Connection" runs jira_api.py --myself against what is typed; "Copy curl"
 // copies that same request as a runnable curl (jira_api.py --curl); "Save & Enable" writes config.json (chmod 600, via jira_config.py
 // --save — the token travels on stdin), re-tests, then flips [jira] enabled.
@@ -7243,7 +7410,7 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
             ("Site URL", site, "https://jira.example.com"),
             ("Email (Cloud only)", email, "only for *.atlassian.net — blank for a personal access token"),
             ("Token", token, "personal access token / API token"),
-            ("Default project", project, "e.g. SAM1 (optional)"),
+            ("Projects in scope", project, "e.g. SAM1, KAN — required; every query stays inside these"),
             ("Max results", maxResults, "25"),
         ]
         var y = H - 88
@@ -7325,7 +7492,11 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
             if self.email.stringValue.isEmpty, d["auth"] as? String != "bearer" {
                 self.email.stringValue = d["email"] as? String ?? ""
             }
-            if self.project.stringValue.isEmpty { self.project.stringValue = d["defaultProject"] as? String ?? "" }
+            if self.project.stringValue.isEmpty {
+                let keys = d["projectKeys"] as? [String] ?? []
+                self.project.stringValue = keys.isEmpty ? (d["defaultProject"] as? String ?? "")
+                    : keys.joined(separator: ", ")
+            }
             if self.maxResults.stringValue.isEmpty, let m = d["defaultMax"] as? Int {
                 self.maxResults.stringValue = String(m)
             }
@@ -7405,6 +7576,17 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         return (t(site), t(email), t(token), t(project), t(maxResults))
     }
 
+    // "SAM1, kan  OPS" -> ["SAM1", "KAN", "OPS"]; nil + message when a key is malformed
+    static func parseProjectKeys(_ raw: String) -> (keys: [String], bad: [String]) {
+        var keys: [String] = [], bad: [String] = []
+        for part in raw.uppercased().split(whereSeparator: { $0 == "," || $0.isWhitespace }) {
+            let k = String(part)
+            if k.range(of: "^[A-Z][A-Z0-9_]*$", options: .regularExpression) == nil { bad.append(k) }
+            else if !keys.contains(k) { keys.append(k) }
+        }
+        return (keys, bad)
+    }
+
     @objc private func test(_ sender: Any?) {
         busy(true)
         setResult("Testing (detecting the auth type)…", ok: nil)
@@ -7422,6 +7604,17 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
             setResult("✗ Site URL must start with https://", ok: false)
             return
         }
+        let scope = Self.parseProjectKeys(v.project)
+        guard scope.bad.isEmpty else {
+            setResult("✗ Not a project key: \(scope.bad.joined(separator: ", ")) — use keys like SAM1, KAN", ok: false)
+            window.makeFirstResponder(project)
+            return
+        }
+        guard !scope.keys.isEmpty else {
+            setResult("✗ Enter at least one project in scope — every query is limited to these projects", ok: false)
+            window.makeFirstResponder(project)
+            return
+        }
         busy(true)
         setResult("Detecting the auth type…", ok: nil)
         detect { [weak self] auth, msg in
@@ -7429,29 +7622,52 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
             let mode = auth ?? self.detectedAuth ?? (v.email.isEmpty ? "bearer" : "basic")
             var obj: [String: Any] = ["site": v.site, "email": mode == "basic" ? v.email : "",
                                       "auth": mode,
-                                      "defaultProject": v.project, "defaultMax": Int(v.max) ?? 25]
+                                      "defaultProject": scope.keys[0], "defaultMax": Int(v.max) ?? 25]
             if !v.token.isEmpty { obj["token"] = v.token }
             guard let data = try? JSONSerialization.data(withJSONObject: obj) else { self.busy(false); return }
             self.setResult("Saving…", ok: nil)
             JiraPoll.run("jira_config.py", ["--save"], stdin: String(decoding: data, as: UTF8.self)) {
                 [weak self] code, _, err in
                 guard let self else { return }
-                self.busy(false)
                 guard code == 0 else {
+                    self.busy(false)
                     self.setResult("✗ save failed: \(JiraPoll.errorLine(err, fallback: "exit \(code)"))", ok: false)
                     return
                 }
-                guard auth != nil else {
-                    self.setResult("✗ saved, but login failed: \(msg) — polling stays off", ok: false)
-                    JiraPoll.lastEnableError = msg
-                    return
+                self.saveScope(scope.keys) { ok in
+                    if ok { self.finishSave(auth: auth, mode: mode, msg: msg) }
                 }
-                self.setResult("✓ Connected as \(msg) — \(Self.authTitle(mode)) — enabling…", ok: true)
-                let c = self.controller
-                self.close()
-                c?.setJiraEnabled(true)
             }
         }
+    }
+
+    // the projects in scope -> team.json project_keys (validated by python)
+    private func saveScope(_ keys: [String], done: @escaping (Bool) -> Void) {
+        let json = String(decoding: (try? JSONSerialization.data(withJSONObject: keys)) ?? Data("[]".utf8),
+                          as: UTF8.self)
+        JiraPoll.run("jira_config.py", ["--team-set", "project_keys"], stdin: json) { [weak self] code, out, err in
+            guard let self else { return }
+            let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+            if code == 0, r["ok"] as? Bool == true { done(true); return }
+            self.busy(false)
+            let probs = (r["problems"] as? [String] ?? []).joined(separator: "; ")
+            self.setResult("✗ projects in scope not saved: "
+                           + (probs.isEmpty ? JiraPoll.errorLine(err, fallback: "exit \(code)") : probs), ok: false)
+            done(false)
+        }
+    }
+
+    private func finishSave(auth: String?, mode: String, msg: String) {
+        busy(false)
+        guard auth != nil else {
+            setResult("✗ saved, but login failed: \(msg) — polling stays off", ok: false)
+            JiraPoll.lastEnableError = msg
+            return
+        }
+        setResult("✓ Connected as \(msg) — \(Self.authTitle(mode)) — enabling…", ok: true)
+        let c = controller
+        close()
+        c?.setJiraEnabled(true)
     }
 
     @objc private func cancel(_ sender: Any?) { close() }

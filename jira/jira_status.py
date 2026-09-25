@@ -8,6 +8,9 @@ menu bar, jira-doctor and a human with `cat` all see the same truth:
   script / config / curlLog paths, enabled, lock holder, lastRun, status,
   lastError, configNotes, lastSkipped, and per endpoint: window, lastRun,
   lastSuccess, nextRun, status, items, file, lastError.
+  `progress` (while a poll runs, else null): {job, stage, done, total, pct,
+  etaSeconds, waitingUntil, message, updatedAt} - the Jira Config window's
+  live status line. The step-by-step history is ~/.cache/jira/poll.log.
 
 Read-modify-write goes through a tiny flock on status.lock so a poll and a
 skipped (locked-out) invocation never clobber each other's fields.
@@ -99,6 +102,24 @@ def update(fn) -> dict:
         return d
 
 
+def set_progress(**kw) -> None:
+    """Merge into status.json `progress` (kw None = drop that key)."""
+    def fn(d):
+        p = d.get("progress") if isinstance(d.get("progress"), dict) else {}
+        for k, v in kw.items():
+            if v is None:
+                p.pop(k, None)
+            else:
+                p[k] = v
+        p["updatedAt"] = now_str()
+        d["progress"] = p
+    update(fn)
+
+
+def clear_progress() -> None:
+    update(lambda d: d.update(progress=None))
+
+
 def endpoint_entry(d: dict, name: str) -> dict:
     eps = d.setdefault("endpoints", [])
     for e in eps:
@@ -121,6 +142,8 @@ def summary(d: dict) -> str:
     ]
     if lock.get("held"):
         lines.append(f"lock:     held by pid {lock.get('pid')} since {lock.get('since')}")
+    if isinstance(d.get("progress"), dict) and d["progress"].get("message"):
+        lines.append(f"progress: {d['progress']['message']}")
     if d.get("lastError"):
         lines.append(f"error:    {d['lastError']}")
     if d.get("enableError"):
