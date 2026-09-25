@@ -397,9 +397,9 @@ public struct PopupConfig {
 
     // appearance
     public var tintAlpha: CGFloat = 0.78            // card fill opacity over the blur
-    // tabs strip sits on a SOLID card fill: the notepad's transparency never
-    // reaches the open-file pills (notes `tabs-opaque`, default on)
-    public var opaqueTabs: Bool = false
+    // tabs strip sits on a SOLID card fill: a window's transparency never
+    // reaches its tab pills (any section's `tabs-opaque`, default on)
+    public var opaqueTabs: Bool = true
     public var material: NSVisualEffectView.Material = .hudWindow
     public var hasShadow: Bool = true
     public var colors: PopupColors = PopupColors()
@@ -518,6 +518,9 @@ public struct PopupConfig {
     // it's hidden on titled windows (Esc closes instead); set true to show it
     // and wire it to onCloseWindow.
     public var showCloseButton: Bool = false
+    // themed ✕ glyph at the far left of the drag header (left of the app
+    // icon): closes the window the same way Esc does
+    public var headerCloseButton: Bool = true
 
     // visible search bar: the query field gets a rounded background and a
     // placeholder, so the window clearly reads as "type to filter"
@@ -904,7 +907,19 @@ public final class PopupPanel: NSPanel, EscapableWindow {
 // purely so the Accessibility API reports an AX close button — AeroSpace's
 // isWindowHeuristic excludes accessory apps whose windows have no close
 // button, which would make the popups invisible to focus navigation.
-public final class PopupPlainWindow: PopupBaseWindow {}
+public final class PopupPlainWindow: PopupBaseWindow {
+    // titled windows carry the system's own rounded frame (16pt on macOS 26):
+    // its rim + fill peeked out around our smaller rounded card. The window
+    // server asks the window for its radius — answer with the card's.
+    var cornerRadius: CGFloat = 9 { didSet { invalidateShadow() } }
+    @objc func _cornerRadius() -> CGFloat { cornerRadius }
+}
+
+// decoration overlay (focus rings) that never takes clicks
+final class PopupPassThroughView: NSView {
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
 
 // MARK: - Button style
 
@@ -2936,6 +2951,16 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "pdf"])
     private static let textLimit = 262144
 
+    // which part holds the keyboard: the filter bar, the list (left) or the
+    // preview (right). The window's border says "the browser has focus";
+    // this ring (plus a bright filter-bar outline) says WHERE inside it.
+    enum FocusPart { case filter, list, preview }
+    static let focusColor = NSColor(srgbRed: 100/255, green: 180/255, blue: 255/255, alpha: 1)
+    private let partRing = PopupPassThroughView()
+    private var focusObservation: NSKeyValueObservation?
+    private var keyObservers: [NSObjectProtocol] = []
+    private(set) var focusedPart: FocusPart?
+
     // listPane needs to be focusable from the window (drawer toggle)
     var listView: FileListPane { listPane }
     // the search field is exposed so the window can route Cmd+V/C/A etc. to
@@ -2960,6 +2985,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: c.dim])
         searchField.layer?.backgroundColor = ButtonStyle.fill(.idle, c).cgColor
         searchField.layer?.borderColor = ButtonStyle.inputStroke(c).cgColor
+        updatePartFocus()
         previewText.textColor = c.text
         previewText.selectedTextAttributes = ButtonStyle.selection(c)
         previewHint.textColor = c.dim
@@ -3148,6 +3174,12 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         addSubview(previewImage)
         addSubview(previewHint)
         addSubview(previewListScroll)
+        partRing.wantsLayer = true
+        partRing.layer?.borderWidth = 2
+        partRing.layer?.borderColor = Self.focusColor.withAlphaComponent(0.9).cgColor
+        partRing.layer?.cornerRadius = 5
+        partRing.isHidden = true
+        addSubview(partRing)
 
         loadFavorites()
         rebuildPills()
@@ -3168,6 +3200,56 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     override func layout() {
         super.layout()
         layoutPanes()
+        updatePartFocus()
+    }
+
+    // follow first-responder changes (Tab, clicks, Cmd+L, Ctrl+J/K) and key
+    // status so the ring always marks the part that receives typing
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        focusObservation = nil
+        keyObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        keyObservers = []
+        guard let win = window else { return }
+        focusObservation = win.observe(\.firstResponder, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.updatePartFocus() }
+        }
+        for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            keyObservers.append(NotificationCenter.default.addObserver(
+                forName: n, object: win, queue: .main) { [weak self] _ in self?.updatePartFocus() })
+        }
+        updatePartFocus()
+    }
+
+    private func currentPart() -> FocusPart? {
+        guard let win = window, win.isKeyWindow, !isHidden else { return nil }
+        if searchField.currentEditor() != nil { return .filter }
+        guard let v = win.firstResponder as? NSView else { return nil }
+        if v.isDescendant(of: listScroll) { return .list }
+        if v.isDescendant(of: previewScroll) || v.isDescendant(of: previewListScroll) { return .preview }
+        return nil
+    }
+
+    func updatePartFocus() {
+        let part = currentPart()
+        focusedPart = part
+        let c = config.colors
+        searchField.layer?.borderWidth = part == .filter ? 2 : 1
+        searchField.layer?.borderColor = (part == .filter ? Self.focusColor
+                                          : ButtonStyle.inputStroke(c)).cgColor
+        var ring: NSRect?
+        switch part {
+        case .list: ring = listScroll.frame
+        case .preview: ring = previewListScroll.isHidden ? previewScroll.frame : previewListScroll.frame
+        case .filter, nil: ring = nil
+        }
+        if let r = ring, r.width > 8, r.height > 8 {
+            partRing.frame = r.insetBy(dx: 3, dy: 3)
+            partRing.isHidden = false
+            addSubview(partRing, positioned: .above, relativeTo: nil)
+        } else {
+            partRing.isHidden = true
+        }
     }
     private func layoutPanes() {
         let w = bounds.width
@@ -4267,9 +4349,20 @@ var meterEnabled = false {
     private var hoveredSegment: Int?
     // app-icon menu button (header far left)
     var iconButtonRect: NSRect {
-        NSRect(x: 6, y: (dragHeaderHeight - 22) / 2, width: 40, height: 22)
+        NSRect(x: config.headerCloseButton ? 32 : 6, y: (dragHeaderHeight - 22) / 2, width: 40, height: 22)
+    }
+    // ✕ close glyph (far left, before the icon); .zero when off
+    var closeButtonRect: NSRect {
+        config.headerCloseButton && dragHeaderHeight > 0
+            ? NSRect(x: 6, y: (dragHeaderHeight - 22) / 2, width: 22, height: 22) : .zero
+    }
+    // where the dim meta line starts: just past the close glyph / icon
+    var leftInset: CGFloat {
+        if headerIcon != nil { return iconButtonRect.maxX + 8 }
+        return config.headerCloseButton ? closeButtonRect.maxX + 8 : 10
     }
     var iconHovered = false { didSet { if iconHovered != oldValue { needsDisplay = true } } }
+    var closeHovered = false { didSet { if closeHovered != oldValue { needsDisplay = true } } }
     var iconMenuOpen = false { didSet { if iconMenuOpen != oldValue { needsDisplay = true } } }
     // segment rects (fb id -> rect) set during draw, used for hover hit-testing
     private var headerSegRects: [(Int, NSRect)] = []
@@ -4319,6 +4412,7 @@ var meterEnabled = false {
     override func mouseEntered(with event: NSEvent) {}
     override func mouseExited(with event: NSEvent) {
         iconHovered = false
+        closeHovered = false
         if hoveredSegment != nil {
             hoveredSegment = nil
             needsDisplay = true
@@ -4335,6 +4429,7 @@ var meterEnabled = false {
             }
         }
         iconHovered = headerIcon != nil && dragHeaderHeight > 0 && iconButtonRect.contains(p)
+        closeHovered = closeButtonRect.contains(p)
         if hovered != hoveredSegment {
             hoveredSegment = hovered
             needsDisplay = true
@@ -4556,7 +4651,7 @@ private func headerButtonFont(_ label: String) -> NSFont {
         // compact cluster hugging the right edge
         let stretch = config.stretchHeaderButtons && !segs.isEmpty
         let leftContent: CGFloat = stretch
-            ? (headerIcon != nil ? 54 : 10) + (meta.isEmpty ? 0 : metaWidth + 8)
+            ? leftInset + (meta.isEmpty ? 0 : metaWidth + 8)
             : 0
         // the joined bar's | dividers (one less than the segment count)
         let naturalBarW = segs.map { $0.w }.reduce(0, +)
@@ -4594,6 +4689,30 @@ private func headerButtonFont(_ label: String) -> NSFont {
         // app glyph pinned to the FAR-LEFT edge of the header (drawn even
         // when the title is gone — e.g. jira/notes have no header label),
         // vertically centered to line up with the header buttons
+        let closeRect = closeButtonRect
+        if !closeRect.isEmpty {
+            // ✕ close glyph: a quiet ghost chip, red on hover (traffic-light cue)
+            let dot = closeRect.insetBy(dx: 3, dy: 3)
+            let xColor: NSColor
+            if closeHovered {
+                NSColor.systemRed.withAlphaComponent(0.9).setFill()
+                NSBezierPath(ovalIn: dot).fill()
+                xColor = .white
+            } else {
+                ButtonStyle.draw(dot, .idle, config.colors, radius: dot.height / 2, flat: true)
+                xColor = config.colors.dim
+            }
+            let r: CGFloat = 3.2
+            let x = NSBezierPath()
+            x.move(to: NSPoint(x: dot.midX - r, y: dot.midY - r))
+            x.line(to: NSPoint(x: dot.midX + r, y: dot.midY + r))
+            x.move(to: NSPoint(x: dot.midX + r, y: dot.midY - r))
+            x.line(to: NSPoint(x: dot.midX - r, y: dot.midY + r))
+            x.lineWidth = 1.6
+            x.lineCapStyle = .round
+            xColor.setStroke()
+            x.stroke()
+        }
         if let icon = headerIcon {
             // the app glyph is a MENU button (all window actions): a ghost
             // pill with the icon + a ▾ chevron, lit on hover / while open
@@ -4674,7 +4793,7 @@ private func headerButtonFont(_ label: String) -> NSFont {
         // the far-left icon — truncated so it never runs into the right-side
         // header buttons (measured above for the stretched-bar layout)
         if !meta.isEmpty {
-            let x0: CGFloat = headerIcon != nil ? 54 : 10
+            let x0: CGFloat = leftInset
             let maxW = max(60, bounds.width - buttonsWidth - x0 - 10)
             var text = meta
             if (text as NSString).size(withAttributes: metaAttrs).width > maxW {
@@ -5505,6 +5624,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 styleMask: mask,
                 backing: .buffered, defer: false)
             panel.contentMinSize = NSSize(width: 320, height: 220)
+            (panel as? PopupPlainWindow)?.cornerRadius = config.cornerRadius
             panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
             // traffic lights hidden — the close button exists only so the
@@ -5965,6 +6085,9 @@ scroll.documentView = rowView
         // gets first shot; non-chrome areas fall through to the content.
         if config.editMode || config.enableDrag {
             let chrome = PopupChrome(config: config)
+            // header clicks (incl. the ✕) route through PopupBaseWindow's
+            // click band; borderless panels have none, so no glyph there
+            if !(panel is PopupBaseWindow) { chrome.config.headerCloseButton = false }
             chrome.frame = backdrop.bounds
             chrome.autoresizingMask = [.width, .height]
             if config.editMode || config.dragHeader {
@@ -6162,7 +6285,10 @@ scroll.documentView = rowView
                 guard let self else { return }
                 // window coords (bottom-left) -> chrome coords (flipped)
                 let p = NSPoint(x: point.x, y: self.panel.frame.height - point.y)
-                if let chrome = self.chrome,
+                if let chrome = self.chrome, chrome.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
+                    // ✕ glyph: the host's close path (same as Esc)
+                    if let onCloseWindow = self.onCloseWindow { onCloseWindow() } else { self.handleEscape() }
+                } else if let chrome = self.chrome,
                    let hit = chrome.extraButtonRects.first(where: { $0.value.contains(p) }) {
                     self.onHeaderButton?(hit.key)
                     chrome.showCopiedFeedback(hit.key)
@@ -6373,7 +6499,7 @@ scroll.documentView = rowView
         chrome?.iconMenuOpen = true
         defer { chrome?.iconMenuOpen = false }
         // icon sits at x=10, y=top of window; pop down 4pts below the header
-        let pt = NSPoint(x: 10, y: panel.frame.height - config.headerHeight * zoom - 4)
+        let pt = NSPoint(x: (chrome?.iconButtonRect.minX ?? 6) + 4, y: panel.frame.height - config.headerHeight * zoom - 4)
         let screenPt = panel.convertPoint(toScreen: pt)
         menu.popUp(positioning: nil, at: screenPt, in: nil)
         isShowingMenu = false
@@ -7534,20 +7660,33 @@ private func scrollSelectionIntoView() {
         label.textColor = c.text
         label.lineBreakMode = .byTruncatingMiddle
         label.cell?.truncatesLastVisibleLine = true
-        var views: [NSView] = [label]
+        var icon: NSImageView?
         if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
             let iv = NSImageView(image: img)
             iv.symbolConfiguration = .init(pointSize: 12.5 * zoom, weight: .medium)
             iv.contentTintColor = c.text.withAlphaComponent(0.85)
-            views.insert(iv, at: 0)
+            icon = iv
         }
-        let stack = NSStackView(views: views)
-        stack.orientation = .horizontal
-        stack.spacing = 8 * zoom
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 14 * zoom, bottom: 0, right: 16 * zoom)
-        stack.frame.size = stack.fittingSize
+        // explicit frames (no stack view): symmetric side padding and the
+        // icon + text group centered on both axes of the pill
+        label.sizeToFit()
+        let padX = 16 * zoom, gap = 8 * zoom
+        let iconSize = icon?.fittingSize ?? .zero
+        let groupExtra = icon == nil ? 0 : iconSize.width + gap
         let h = 32 * zoom
-        let w = min(stack.fittingSize.width, root.bounds.width - 32)
+        let w = min(ceil(label.frame.width + groupExtra + padX * 2), root.bounds.width - 32)
+        let labelW = max(0, w - padX * 2 - groupExtra)
+        let groupW = groupExtra + labelW
+        var x = (w - groupW) / 2
+        if let icon {
+            icon.frame = NSRect(x: x, y: round((h - iconSize.height) / 2),
+                                width: iconSize.width, height: iconSize.height)
+            pill.addSubview(icon)
+            x += groupExtra
+        }
+        label.frame = NSRect(x: x, y: round((h - label.frame.height) / 2),
+                             width: labelW, height: label.frame.height)
+        pill.addSubview(label)
         // bottom-center, clear of the footer strip; the backdrop is flipped
         let inset = 30 * zoom
         let flipped = root.isFlipped
@@ -7556,9 +7695,6 @@ private func scrollSelectionIntoView() {
                             width: w, height: h)
         pill.autoresizingMask = [.minXMargin, .maxXMargin, flipped ? .minYMargin : .maxYMargin]
         pill.layer?.cornerRadius = h / 2
-        stack.frame = pill.bounds
-        stack.autoresizingMask = [.width, .height]
-        pill.addSubview(stack)
         root.addSubview(pill, positioned: .above, relativeTo: nil)
         toastView = pill
 
@@ -8450,6 +8586,7 @@ public enum ThemeRole: String, CaseIterable {
     // Update the bright focus border so it highlights whichever pane (editor /
     // browser / terminal) currently owns first responder.
     private func updateFocusIndicator() {
+        fileBrowser?.updatePartFocus()
         editorFocusBorder?.isHidden = true
         browserFocusBorder?.isHidden = true
         terminalFocusBorder?.isHidden = true

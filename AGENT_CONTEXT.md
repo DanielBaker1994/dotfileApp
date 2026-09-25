@@ -54,6 +54,11 @@ bin/ui-test.sh --verbose
   Window" (`showJiraDashboard`). No other jira menu items — everything else
   lives in that window. Socket messages `jira-poll-on/off/toggle`,
   `jira-setup`, `jira-dashboard` (CLI: `workspace-switcher jira-poll on|off|toggle|setup|dashboard`).
+- Jira Config window look: `JiraConfigNSWindow` (titled + hidden titlebar,
+  `_cornerRadius` override, header clicks caught in `sendEvent`) +
+  `themedRoot` (blur, card tint, border, a real `PopupChrome` header: ✕ ·
+  icon · title). Status lines are one sentence; details live in tooltips.
+  Job pages show "Defined in config.json › endpoints › NAME" + Open config.json.
 - Jira Config window: `JiraDashboard.swift` (`JiraDashboardWindow` +
   `JiraColumnEditor` + `jiraFormSheet`; own file, compiled by
   `bin/workspace_switcher.sh`). Master–detail: sidebar (POLL JOBS / SETTINGS:
@@ -105,7 +110,9 @@ bin/ui-test.sh --verbose
   every known value (users, status, type, priority, Release, Labels — the
   last two scoped to the picked projects) is a `JiraMultiPicker` over the
   directory, never typed text; only "… contains" rows are text; no Raw JQL;
-  last criteria in UserDefaults). Drawn in the Jira window's theme
+  last criteria in UserDefaults; filter rows live in a height-capped
+  scroll view (`rowsScroll`) so `place()` keeps the panel docked above the
+  window instead of overlapping it). Drawn in the Jira window's theme
   (`applyTheme`: appearance, blur + tint, `JiraInputBox`, `JiraChoiceButton`,
   `ThemeButton`, custom-drawn picker pills). Run = `jira_poll.py
   --live-search` (criteria JSON on stdin → `jira_config.criteria_jql`: lists
@@ -212,7 +219,10 @@ Line numbers drift; grep the symbol names (they're stable).
 | `PopupWindow.installMonitors()` | local keyDown monitor → `handleKey` |
 | `PopupWindow.handleKey(_:_:)` | ALL keyboard routing (see order below) |
 | `escStreakCloses()` | N-rapid-Esc counter (0.6 s window) |
-| `showToast(_:symbol:)` | Raycast-style bottom-center pill (fade/rise, 1.4 s); used by Cmd+K copy |
+| `showToast(_:symbol:)` | Raycast-style bottom-center pill (fade/rise, 1.4 s); used by Cmd+K copy; explicit frames, icon+text centered |
+| `PopupPlainWindow._cornerRadius` | makes the system window frame use `config.cornerRadius` (else macOS 26's 16pt frame peeks out around the card) |
+| `PopupChrome.closeButtonRect` | ✕ glyph far-left of the drag header (`PopupConfig.headerCloseButton`, default on; titled windows only); icon sits right of it (`leftInset`) |
+| `PopupFileBrowser.updatePartFocus` | which part has focus: filter bar (bright 2px outline) / list / preview (`partRing`); KVO on `firstResponder` |
 | `focusedVim()`, `vimRemote`, `vimEval`, `vimCommand` | nvim pane + RPC |
 | `browserHasFocus`, `browserActive` | file browser focus checks |
 

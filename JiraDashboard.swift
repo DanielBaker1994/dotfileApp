@@ -280,6 +280,40 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 }
 
+// The Jira Config window wears the popup windows' look: titled (sheets,
+// native resize) but with the titlebar hidden, the card's blur + tint +
+// border, and the SAME header strip (✕ close · app icon · title). The
+// invisible titlebar swallows header clicks, so they're caught here (as in
+// PopupBaseWindow); drags stay native.
+final class JiraConfigNSWindow: NSWindow {
+    var cornerRadius: CGFloat = 10
+    @objc func _cornerRadius() -> CGFloat { cornerRadius }
+    var headerBand: CGFloat = 0
+    var onHeaderClick: ((NSPoint) -> Void)?    // flipped (top-down) window coords
+    private var down: NSPoint?
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+    override func sendEvent(_ event: NSEvent) {
+        if headerBand > 0 {
+            switch event.type {
+            case .leftMouseDown where event.locationInWindow.y >= frame.height - headerBand:
+                down = NSEvent.mouseLocation
+            case .leftMouseUp:
+                if let d = down {
+                    down = nil
+                    let m = NSEvent.mouseLocation
+                    if hypot(m.x - d.x, m.y - d.y) < 4 {
+                        let l = event.locationInWindow
+                        onHeaderClick?(NSPoint(x: l.x, y: frame.height - l.y))
+                    }
+                }
+            default: break
+            }
+        }
+        super.sendEvent(event)
+    }
+}
+
 final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
                                  NSTableViewDelegate {
     private static var live: JiraDashboardWindow?
@@ -289,7 +323,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     private weak var controller: SwitcherController?
-    private let window: NSWindow
+    private let window: JiraConfigNSWindow
+    private var chrome: PopupChrome?
     private var monitor: Any?
     private var timer: Timer?
     private var describing = false
@@ -320,6 +355,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private let colEditor = JiraColumnEditor()
     private let nameField = NSTextField()
     private let fileLabel = NSTextField(labelWithString: "")
+    // where the job lives: config.json › endpoints › NAME (+ open it)
+    private let sourceLabel = NSTextField(labelWithString: "")
+    private let openConfigButton = NSButton(title: "Open config.json", target: nil, action: nil)
+    private lazy var sourceRow: NSStackView = row([sourceLabel, openConfigButton])
     private let typePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let everyBox = NSComboBox()
     private let projectsPicker = JiraMultiPicker(noun: "project", allTitle: "All projects")
@@ -380,9 +419,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         self.controller = controller
         let W = CGFloat(Double(jiraConfigValue("dashboard-width") ?? "") ?? 1080)
         let H = CGFloat(Double(jiraConfigValue("dashboard-height") ?? "") ?? 720)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
-                          styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                          backing: .buffered, defer: false)
+        window = JiraConfigNSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+                                    styleMask: [.titled, .closable, .resizable, .miniaturizable,
+                                                .fullSizeContentView],
+                                    backing: .buffered, defer: false)
         super.init()
         window.title = "Jira Config"
         window.isReleasedWhenClosed = false
@@ -391,10 +431,77 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         // float at .popUpMenu
         window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
         window.delegate = self
-        window.contentView = buildContent()
+        window.contentView = themedRoot(buildContent())
         colEditor.onChange = { [weak self] in self?.markDirty() }
         colEditor.sheetWindow = window
         installKeys()
+    }
+
+    // the popup windows' surface around `content`: blur + card tint + border,
+    // rounded like them, with their header strip on top
+    private func themedRoot(_ content: NSView) -> NSView {
+        var cfg = PopupConfig(name: "jira-config")
+        cfg.colors = PopupColors(background: BAR, border: BORDER, text: TEXT, dim: DIM,
+                                 highlight: GROUP_BG, accent: ACCENT)
+        cfg.headerHeight = 30
+        cfg.titlePill = false
+        cfg.headerColor = headerBlueSilver
+        let radius = cfg.cornerRadius + 1
+        window.cornerRadius = radius
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        for b: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(b)?.isHidden = true
+        }
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        let light = ButtonStyle.luminance(BAR) > 0.45
+        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.cornerRadius = radius
+        root.layer?.masksToBounds = true
+        let fx = NSVisualEffectView()
+        fx.material = cfg.material
+        fx.blendingMode = .behindWindow
+        fx.state = .active
+        let tint = NSView()
+        tint.wantsLayer = true
+        // denser than the list windows' card: this window is all form text
+        tint.layer?.backgroundColor = BAR.withAlphaComponent(max(cfg.tintAlpha, 0.92)).cgColor
+        tint.layer?.borderColor = BORDER.cgColor
+        tint.layer?.borderWidth = 1
+        tint.layer?.cornerRadius = radius
+        let ch = PopupChrome(config: cfg)
+        ch.dragHeaderHeight = cfg.headerHeight
+        ch.headerIcon = jiraAppIcon
+        ch.headerTitle = "Jira Config"
+        ch.copyPathLabel = ""
+        ch.copyConfigLabel = ""
+        chrome = ch
+        for v in [fx, tint, ch, content] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(v)
+        }
+        for v in [fx, tint] as [NSView] { pinned(v, in: root) }
+        NSLayoutConstraint.activate([
+            ch.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            ch.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            ch.topAnchor.constraint(equalTo: root.topAnchor),
+            ch.heightAnchor.constraint(equalToConstant: cfg.headerHeight),
+            content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 1),
+            content.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -1),
+            content.topAnchor.constraint(equalTo: ch.bottomAnchor),
+            content.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -1),
+        ])
+        window.headerBand = cfg.headerHeight
+        window.onHeaderClick = { [weak self] p in
+            guard let self, let ch = self.chrome else { return }
+            if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) { self.close() }
+        }
+        return root
     }
 
     // MARK: layout helpers
@@ -535,7 +642,20 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         return content
     }
 
+    private var configPath: String { info["configPath"] as? String ?? JiraPoll.configPath }
+    private func tilde(_ p: String) -> String { (p as NSString).abbreviatingWithTildeInPath }
+
+    @objc private func openConfigJSON(_ sender: Any?) {
+        controller?.openNoteFile(configPath)
+    }
+
     private func setupEditorControls() {
+        sourceLabel.textColor = .secondaryLabelColor
+        sourceLabel.lineBreakMode = .byTruncatingMiddle
+        sourceLabel.isSelectable = true
+        openConfigButton.controlSize = .small
+        button(openConfigButton, #selector(openConfigJSON(_:)),
+               tip: "Every poll job is one entry of \"endpoints\" in this file — this window edits it for you")
         typePopup.addItems(withTitles: ["issues", "releases", "directory"])
         everyBox.addItems(withObjectValues: JiraPoll.intervals)
         everyBox.completes = true
@@ -665,15 +785,23 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let enabled = info["enabled"] as? Bool ?? jiraEnabledInConfig()
         let bg = info["backgroundPoll"] as? Bool ?? false
         let lock = info["lock"] as? [String: Any] ?? [:]
-        var parts = [enabled ? "● Polling ON" : bg ? "◐ Jira disabled — background polling" : "○ Polling OFF"]
-        parts.append("\(eps.count) job\(eps.count == 1 ? "" : "s")")
-        parts.append("launchd tick \(info["tick"] as? String ?? "60s")")
-        if let lr = info["lastRun"] as? String, !lr.isEmpty {
-            parts.append("last run \(JiraPoll.short(lr)) \(info["status"] as? String ?? "")")
+        // one plain sentence; the plumbing (launchd tick, job count, lock pid)
+        // lives in the tooltip
+        let lr = info["lastRun"] as? String ?? ""
+        let failed = !(info["lastError"] as? String ?? "").isEmpty
+        var line = enabled ? "● Polling on" : bg ? "◐ Polling in the background (Jira window off)" : "○ Polling off"
+        if lockHeld {
+            line += " — polling now…"
+        } else if !lr.isEmpty {
+            line += failed ? " — last poll failed \(JiraPoll.short(lr))" : " — last checked \(JiraPoll.short(lr))"
         }
-        if lockHeld { parts.append("⟳ polling now (pid \(lock["pid"] ?? "?"), since \(JiraPoll.short(lock["since"] as? String)))") }
-        statusLine.stringValue = parts.joined(separator: "  ·  ")
-        statusLine.textColor = enabled ? .labelColor : .secondaryLabelColor
+        statusLine.stringValue = line
+        statusLine.textColor = !enabled ? .secondaryLabelColor : failed ? .systemOrange : .labelColor
+        var tip = ["\(eps.count) poll job\(eps.count == 1 ? "" : "s") in \(info["configPath"] as? String ?? JiraPoll.configPath)",
+                   "launchd tick: \(info["tick"] as? String ?? "60s") — each job runs when its own interval is due"]
+        if !lr.isEmpty { tip.append("last run \(lr) \(info["status"] as? String ?? "")") }
+        if lockHeld { tip.append("polling now: pid \(lock["pid"] ?? "?") since \(JiraPoll.short(lock["since"] as? String))") }
+        statusLine.toolTip = tip.joined(separator: "\n")
         var probs = info["problems"] as? [String] ?? []
         if let e = info["lastError"] as? String, !e.isEmpty { probs.append("last error: \(e)") }
         if let e = JiraPoll.lastEnableError { probs.append("enable failed: \(e)") }
@@ -918,7 +1046,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         maxTotalField.stringValue = mt > 0 ? String(mt) : ""
         maxTotalField.toolTip = "Stop after this many issues (the newest updated first)"
         let form: [(String, NSView)] = [
-            ("Name", nameField), ("Writes", fileLabel), ("Type", typePopup), ("Every", everyBox),
+            ("Name", nameField), ("Defined in", sourceRow), ("Writes", fileLabel), ("Type", typePopup), ("Every", everyBox),
             ("", enabledCheck), ("Projects", projectsPicker), ("Query", queryPopup), ("JQL", jqlField),
             ("Job args", argsField), ("Page size", pageSizeField), ("Max issues", maxTotalField),
         ]
@@ -963,9 +1091,13 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     private func updateFormVisibility() {
         let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
         let type = selectedType
+        sourceLabel.stringValue = isNew
+            ? "\(tilde(configPath)) › endpoints (added on Save)"
+            : "\(tilde(configPath)) › endpoints › \"\(name)\""
+        let outPath = (liveData?["path"] as? String).map(tilde)
         fileLabel.stringValue = type == "directory"
             ? "~/.cache/jira/directory.json — projects, users, statuses for the pickers (no tab)"
-            : name.isEmpty ? "(set a name)" : "\(name).json"
+            : name.isEmpty ? "(set a name)" : (!isNew ? outPath : nil) ?? "\(name).json"
         let issues = type == "issues"
         let q = queryPopup.indexOfSelectedItem
         setRowHidden(queryPopup, !issues)
@@ -1004,12 +1136,20 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let type = d["type"] as? String ?? "issues"
         var st = d["status"] as? String ?? ""
         if JiraPoll.running.contains(name) || JiraPoll.running.contains("*") { st = "running" }
-        var parts = ["● \(st)"]
-        parts.append("last run \(JiraPoll.short(d["lastRun"] as? String))")
+        // "● 475 items · updated 06:50 · next 07:00" — the status word only
+        // when it isn't plain ok; the fetch window goes to the tooltip
+        var parts: [String] = []
+        let items = (d["items"] as? Int).map { type == "directory" ? "\($0) users" : "\($0) items" }
+        if st == "ok", let items { parts.append("● \(items)") } else {
+            parts.append("● \(st)")
+            if let items { parts.append(items) }
+        }
+        if let lr = d["lastRun"] as? String, !lr.isEmpty { parts.append("updated \(JiraPoll.short(lr))") }
         parts.append("next \(JiraPoll.short(d["nextRun"] as? String))")
-        if type == "issues" { parts.append("next window ≥ \(d["nextWindow"] as? String ?? "?")") }
-        if let n = d["items"] as? Int { parts.append(type == "directory" ? "\(n) users" : "\(n) items") }
         editorStatus.stringValue = parts.joined(separator: "  ·  ")
+        editorStatus.toolTip = type == "issues"
+            ? "Next poll fetches issues updated since \(d["nextWindow"] as? String ?? "?") (every \(d["window"] as? String ?? "?"))"
+            : "Runs every \(d["window"] as? String ?? "?")"
         editorStatus.textColor = statusColor(st) == .tertiaryLabelColor ? .secondaryLabelColor : statusColor(st)
 
         let out = NSMutableAttributedString()

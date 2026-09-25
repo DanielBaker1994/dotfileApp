@@ -43,7 +43,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | Voice notes | red record button → dictation → text, pause/resume, live draft |
 | Menu-bar stack | sketchybar + borders (brew services) |
 | Jira window | Hyper+J (aerospace) — spreadsheet table, columns from `commands.conf [jira] columns` |
-| Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window** / **Jira Poll…** (status, Poll Now, intervals, Setup…) |
+| Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window** / **Open Jira Config Window** (poll jobs, schedules, columns, Force Poll, Setup…) |
 | Jira poll agent | launchd `com.jira.poll` (60s tick; `jira_poll.py` runs only due endpoints) |
 
 ## Development
@@ -76,10 +76,46 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | What | Where |
 | --- | --- |
 | On/off switch | `commands.conf [jira] enabled` (menu **Enable Jira** / **Disable Jira**; `poll-when-disabled = true` keeps the poller running while disabled; or `bin/workspace_switcher.sh jira-poll on\|off\|toggle\|setup`) |
-| Credentials + endpoints (schedules) | `~/.config/jira/config.json` (chmod 600; menu **Jira Poll… ▸ Setup…**) |
+| Credentials + **poll jobs** (schedules) | `~/.config/jira/config.json` → `endpoints` (chmod 600; edited by the **Jira Config** window) |
+| Team schema (custom fields, JQL templates, …) | `~/.config/jira/team.json` (optional; example `jira/team.example.json`) |
 | Live state (last/next run, errors, lock) | `~/.cache/jira/status.json` · `jira/jira_status.py` · `jira-doctor.sh` |
 | Every HTTP request, copy-pasteable | `~/.cache/jira/curl.log` (chmod 600 — contains the basic-auth token) |
 | Window data | `~/.cache/workspace-switcher/jira_json/<endpoint file>.json` |
+
+### Where the poll jobs (and their JSON files) come from
+
+Every tab in the Jira window is a JSON file written by one **poll job**, and
+every poll job is one entry of `endpoints` in `~/.config/jira/config.json`:
+
+```jsonc
+{
+  "site": "https://you.atlassian.net", "email": "…", "token": "…",
+  "outDir": "~/.cache/workspace-switcher/jira_json",
+  "endpoints": [
+    {"name": "all",      "type": "issues",   "projects": "*",     "window": "10m", "file": "all.json"},
+    {"name": "KAN",      "type": "issues",   "projects": ["KAN"], "window": "30m", "file": "KAN.json"},
+    {"name": "releases", "type": "releases", "projects": "*",     "window": "1h",  "file": "releases.json"},
+    {"name": "directory","type": "directory","projects": "*",     "window": "1w"}
+  ]
+}
+```
+
+- `name` = the job (sidebar item in the Jira Config window), `file` = what it
+  writes into `outDir` (= the Jira window tab), `window` = how often it runs,
+  `projects` = `"*"` or a list of keys, `type` = `issues` / `releases` /
+  `directory` (users + projects for the pickers; no tab). Each job also owns
+  its `columns`.
+- **Who creates them:** `jira/jira_config.py`. A fresh config gets the
+  defaults (`all`, `releases`, `directory` — `DEFAULT_ENDPOINTS`). Configs
+  migrated from the old env-style `~/.config/jira/config` got one extra job
+  per project (`KAN`, `SAM1`, …). After that the file is yours: add / edit /
+  delete jobs in **Jira Config** (each job page shows *Defined in
+  `config.json › endpoints › NAME`* and an **Open config.json** button), or
+  edit the file directly.
+- **Who runs them:** launchd `com.jira.poll` wakes `jira/jira_poll.py` every
+  60 s; it polls only the jobs whose `window` is due and writes their files.
+- CLI: `python3 jira/jira_config.py --show` (token masked), `--path`,
+  `python3 jira/jira_poll.py --describe` (every job's schedule, JQL and curl).
 
 
 ### Vendored SwiftTerm (one-time pull for the embedded terminal)

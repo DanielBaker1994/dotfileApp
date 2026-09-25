@@ -703,6 +703,11 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private let addFilter = JiraChoiceButton()
     private let searchButton: ThemeButton
     private let rowsStack = NSStackView()
+    // filter rows scroll inside a capped area so the panel stays docked
+    // above the Jira window however many rows there are
+    private let rowsScroll = NSScrollView()
+    private let rowsDoc = JiraFlippedView()
+    private var rowsHeight: NSLayoutConstraint?
     private let status = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
     private let maxChoice = JiraChoiceButton()
@@ -800,6 +805,29 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
         rowsStack.spacing = 6
+        rowsScroll.drawsBackground = false
+        rowsScroll.borderType = .noBorder
+        rowsScroll.hasVerticalScroller = true
+        rowsScroll.autohidesScrollers = true
+        rowsScroll.scrollerStyle = .overlay
+        rowsScroll.documentView = rowsDoc
+        rowsScroll.isHidden = true
+        rowsDoc.translatesAutoresizingMaskIntoConstraints = false
+        rowsStack.translatesAutoresizingMaskIntoConstraints = false
+        rowsDoc.addSubview(rowsStack)
+        let clip = rowsScroll.contentView
+        let rh = rowsScroll.heightAnchor.constraint(equalToConstant: 0)
+        rowsHeight = rh
+        NSLayoutConstraint.activate([
+            rh,
+            rowsDoc.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            rowsDoc.topAnchor.constraint(equalTo: clip.topAnchor),
+            rowsDoc.widthAnchor.constraint(equalTo: clip.widthAnchor),
+            rowsStack.leadingAnchor.constraint(equalTo: rowsDoc.leadingAnchor),
+            rowsStack.trailingAnchor.constraint(equalTo: rowsDoc.trailingAnchor),
+            rowsStack.topAnchor.constraint(equalTo: rowsDoc.topAnchor),
+            rowsStack.bottomAnchor.constraint(equalTo: rowsDoc.bottomAnchor),
+        ])
 
         status.font = .systemFont(ofSize: 11)
         status.lineBreakMode = .byTruncatingTail
@@ -825,7 +853,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         stack.alignment = .leading
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
-        for v in [top, rowsStack, footer] as [NSView] { stack.addArrangedSubview(v) }
+        for v in [top, rowsScroll, footer] as [NSView] { stack.addArrangedSubview(v) }
         stack.translatesAutoresizingMaskIntoConstraints = false
         fx.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -833,7 +861,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
             stack.trailingAnchor.constraint(equalTo: fx.trailingAnchor),
             stack.topAnchor.constraint(equalTo: fx.topAnchor),
         ])
-        for v in [top, rowsStack, footer] as [NSView] {
+        for v in [top, rowsScroll, footer] as [NSView] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
         }
     }
@@ -896,20 +924,46 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         h?.nativeWindow.makeKeyAndOrderFront(nil)
     }
 
-    // above the jira window when there is room, else below, else inside its top
+    // docked above the jira window; when the filter rows outgrow the room
+    // above, THEY scroll (the panel never jumps in front of the window).
+    // Only when not even one row fits above: below, else inside its top.
     private func place() {
         guard let hw = host?.nativeWindow else { return }
+        rowsScroll.isHidden = rows.isEmpty
+        rowsDoc.layoutSubtreeIfNeeded()
+        let natural = rows.isEmpty ? 0 : ceil(rowsStack.fittingSize.height)
+        rowsHeight?.constant = natural
         stack.layoutSubtreeIfNeeded()
-        let h = ceil(stack.fittingSize.height)
+        let full = ceil(stack.fittingSize.height)
+        let chrome = full - natural          // search row + footer + insets
+        let minRows = min(natural, 34)       // at least one filter row visible
         let f = hw.frame
         let width = max(f.width, 680)
         let vis = (hw.screen ?? NSScreen.main)?.visibleFrame ?? f
-        var y = f.maxY + 6
-        if y + h > vis.maxY {
-            y = f.minY - h - 6
-            if y < vis.minY { y = f.maxY - h - 44 }
+        let above = vis.maxY - (f.maxY + 6)
+        let below = (f.minY - 6) - vis.minY
+        var y: CGFloat, rowsH = natural
+        if above >= chrome + minRows {
+            rowsH = min(natural, above - chrome)
+            y = f.maxY + 6
+        } else if below >= chrome + minRows {
+            rowsH = min(natural, below - chrome)
+            y = f.minY - 6 - (chrome + rowsH)
+        } else {
+            rowsH = min(natural, max(minRows, f.height * 0.5 - chrome))
+            y = f.maxY - (chrome + rowsH) - 44
         }
+        rowsHeight?.constant = rowsH
+        let h = chrome + rowsH
         panel.setFrame(NSRect(x: f.minX, y: y, width: width, height: h), display: true)
+    }
+
+    // keep the newest filter row in view when the rows scroll
+    private func scrollRowsToBottom() {
+        rowsDoc.layoutSubtreeIfNeeded()
+        let clip = rowsScroll.contentView
+        clip.scroll(to: NSPoint(x: 0, y: max(0, rowsDoc.frame.height - clip.bounds.height)))
+        rowsScroll.reflectScrolledClipView(clip)
     }
 
     private func installKeys() {
@@ -1074,7 +1128,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         rowsStack.addArrangedSubview(v)
         v.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         rebuildFilterMenu()
-        if panel.isVisible { place() }
+        if panel.isVisible { place(); scrollRowsToBottom() }
         return r
     }
 
@@ -1266,4 +1320,9 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         NSPasteboard.general.setString(s, forType: .string)
         setStatus("Copied \(what).", .secondaryLabelColor)
     }
+}
+
+// top-down document view for the search panel's scrolling filter rows
+final class JiraFlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

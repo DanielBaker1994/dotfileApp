@@ -514,7 +514,7 @@ struct CommandSpec {
     var sticky: Bool          // stay visible when another app takes focus
     var float: Bool? = nil    // stay above other apps' windows (nil = [app] float)
     var label: String? = nil  // palette text for "/" commands (nil = the section name)
-    var tabsOpaque: Bool? = nil  // note: solid (never transparent) tabs strip (nil = on)
+    var tabsOpaque: Bool? = nil  // any window: solid (never transparent) tabs strip (nil = on)
     // files: browser sort (name|modified|created|size|kind) + asc/desc, the
     // recursive-search cap/excludes and the filter words that open a terminal
     var sort: String? = nil
@@ -3144,6 +3144,7 @@ final class SwitcherController: NSObject {
             return
         }
         var cfg = PopupConfig(name: cmd.windowName)
+        cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.enableToggle = false
         cfg.editMode = true
         cfg.enableDrag = cmd.drag
@@ -5222,6 +5223,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.showSearchBar = true
         cfg.dragHeader = true
         cfg.tabs = tabs.count > 1
+        cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.scrollableRows = true
         cfg.dynamicHeight = false
         cfg.clickToSelect = true
@@ -5713,6 +5715,7 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             return
         }
         var cfg = PopupConfig(name: cmd.windowName)
+        cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.enableToggle = false
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
