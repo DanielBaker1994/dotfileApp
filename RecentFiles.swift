@@ -45,7 +45,7 @@ final class RecentFiles {
     func paths() -> [String] {
         queue.sync {
             items.sorted { $0.value > $1.value }.map(\.key)
-                .filter { FileManager.default.fileExists(atPath: $0) }
+                .filter { keep($0) && FileManager.default.fileExists(atPath: $0) }
                 .prefix(limit).map { $0 }
         }
     }
@@ -172,6 +172,16 @@ final class RecentFiles {
         "node_modules", "DerivedData", "__pycache__", "site-packages", "Pods", "venv",
         "Caches", "CachedData", "logs", "xcuserdata",
     ]
+    // app libraries / bundles are packages whose insides churn constantly
+    // (Photos' database, Music's library) — and touching the Photos or Music
+    // library triggers a privacy prompt. Never look inside one.
+    private static let packageExts: Set<String> = [
+        "photoslibrary", "photolibrary", "migratedphotolibrary", "aplibrary", "musiclibrary",
+        "tvlibrary", "app", "bundle", "framework", "plugin", "kext", "xcarchive", "xcodeproj",
+        "xcworkspace", "playground", "sparsebundle", "photobooth",
+    ]
+    private static let packageNames: Set<String> = ["Photo Booth Library"]
+
     private static let noiseExts: Set<String> = [
         "crdownload", "part", "download", "partial", "swp", "swo", "swx", "tmp", "lock",
         "pid", "sock", "socket", "db-journal", "db-wal", "db-shm", "sqlite-journal",
@@ -182,8 +192,11 @@ final class RecentFiles {
         if p.hasPrefix(home + "/Library/") || p == home + "/Library" { return false }
         let comps = (p as NSString).pathComponents
         for c in comps.dropFirst() {
-            if c.hasPrefix(".") || Self.noiseDirs.contains(c) { return false }
+            if c.hasPrefix(".") || Self.noiseDirs.contains(c) || Self.packageNames.contains(c) { return false }
+            if Self.packageExts.contains((c as NSString).pathExtension.lowercased()) { return false }
         }
+        // ~/Music/Music = the Music app's media library (Media Library prompt)
+        if p.hasPrefix(home + "/Music/Music/") { return false }
         let name = comps.last ?? ""
         let ext = (name as NSString).pathExtension.lowercased()
         if Self.noiseExts.contains(ext) || name.hasSuffix("~") || name == "4913" { return false }

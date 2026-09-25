@@ -93,13 +93,30 @@ cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 # stable self-signed cert → TCC grants survive rebuilds (an ad-hoc cdhash
 # changes every build). perl alarm = portable timeout: an unapproved key ACL
 # pops a keychain dialog and would hang the build forever.
+# A codesign killed mid-run (the alarm) leaves "<binary>.cstemp" in
+# Contents/MacOS, and every later codesign of the bundle then FAILS on it
+# ("invalid or unsupported format … .cstemp") — silently leaving the
+# linker's throwaway ad-hoc signature, so macOS re-asked for every
+# permission after each build. Clear it before (and between) attempts.
+clear_cstemp() { rm -f "$APP/Contents/MacOS/"*.cstemp; }
+clear_cstemp
+signed=0
 if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
-    perl -e 'alarm 15; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1 \
-        || codesign --force --sign - --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1
-else
+    perl -e 'alarm 30; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1 \
+        && signed=1
+    clear_cstemp
+fi
+if [ "$signed" = 0 ]; then
     codesign --force --sign - --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1
+    clear_cstemp
+fi
+# say so when the stable signature didn't take: permissions then reset on
+# every rebuild (macOS keys them to the signature)
+if ! codesign -dvv "$APP" 2>&1 | grep -q "Authority=$SIGN_ID"; then
+    echo "build-app: WARNING not signed with '$SIGN_ID' (ad-hoc) — privacy grants won't survive rebuilds" >&2
 fi
 
-# fresh signature — re-grant mic + speech so voice notes keep working
-"$DIR/voice-permissions.sh" "$BUNDLE_ID" "$APP" >/dev/null 2>&1 || true
+# fresh signature — (re)grant every privacy permission the app uses (mic,
+# speech, Downloads / Desktop / Documents) so no prompt interrupts you
+"$DIR/grant-permissions.sh" "$BUNDLE_ID" "$APP" >/dev/null 2>&1 || true
 exit 0
