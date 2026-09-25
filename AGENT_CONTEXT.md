@@ -79,7 +79,11 @@ bin/ui-test.sh --verbose
   no whole-job retries. A mid-run 401 waits at least 5/10/20/40s
   (`AUTH_401_BACKOFF`; a `Retry-After: 0` is not a wait) and its final
   error names the request + the server's body ("token worked earlier"),
-  not "fix your token". Tests swap `jira_api.SLEEP`.
+  not "fix your token". A search page that breaks off (curl 18/28/52/56/
+  92/16) or 5xx after one retry is TOO BIG: `search_pages` halves
+  maxResults (floor `MIN_PAGE` 10), re-reads the same position, and stores
+  the size in `~/.cache/jira/search_page_cap.json` (per site, 7 days;
+  `Client.from_config` applies it). Tests swap `jira_api.SLEEP`.
 - Visibility: `~/.cache/jira/poll.log` (`say()`, always written) + status.json
   `progress` (`Reporter`, per page / `Reporter.step` per directory stage) →
   the Jira Config header / Setup page (1s timer reads status.json;

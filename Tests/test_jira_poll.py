@@ -10,6 +10,7 @@ json stays byte-for-byte compatible for every existing consumer.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -799,6 +800,12 @@ elif u.path.endswith("/versions"):
 elif "/issue/" in u.path:
     body = {"fields": {"comment": {"comments": [{"author": {"displayName": "A"}, "body": "x"},
                                                 {"author": {"displayName": "B"}, "body": "y"}]}}}
+elif u.path.endswith("/search") and \
+        int(q.get("maxResults", ["0"])[0]) > int(os.environ.get("FAKE_BREAK_ABOVE", "999999")):
+    # a proxy that cuts big responses off mid-body (curl exit 18)
+    sys.stdout.write('{"startAt": 0, "total": 12, "issues": [{"key": "P-')
+    sys.stderr.write("curl: (18) transfer closed with outstanding read data remaining\n")
+    sys.exit(18)
 elif u.path.endswith("/user/assignable/search"):
     proj, start, n = q["project"][0], int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
     us = [{"name": f"{proj.lower()}u{i}", "displayName": f"{proj} U{i}"} for i in range(3)]
@@ -1246,6 +1253,28 @@ class ResilientSyncTests(unittest.TestCase):
             self.assertEqual(self.poll(env, "--directory").returncode, 0)
             self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "raw")))
             self.assertTrue(os.path.exists(os.path.join(tmp, "cache", "debug.log")))
+
+    def test_a_page_that_breaks_off_is_shrunk_and_the_size_remembered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, rateLimitMaxWaitMinutes=0)
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["P"], "search_defaults": {"max_results_search": 40}}, fh)
+            env["FAKE_BREAK_ABOVE"] = "20"
+            p = self.poll(env, "--init")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(len(self.cache(tmp)), 12)            # everything, in a page of 20
+            sizes = [int(re.search(r"maxResults=(\d+)", u).group(1)) for u in self.calls(tmp)
+                     if "/search" in u]
+            self.assertEqual(sizes, [40, 20])                     # 40 broke off -> halved, same position
+            self.assertIn("re-reading the same position with 20", p.stderr)
+            with open(os.path.join(tmp, "cache", "search_page_cap.json")) as fh:
+                cap = json.load(fh)
+            self.assertEqual((cap["pageSize"], cap["why"]), (20, "curl exit 18 on a page of 40"))
+            raw = [f for r in self.raw_runs(tmp) for f in os.listdir(r) if "curl18" in f]
+            self.assertTrue(raw)                                  # the cut-off body is kept
+            os.unlink(os.path.join(tmp, "calls.jsonl"))
+            self.assertEqual(self.poll(env, "--init").returncode, 0)
+            self.assertFalse([u for u in self.calls(tmp) if "maxResults=40" in u])   # no re-probing
 
     def test_describe_shows_setup_scope_and_shared_sync(self):
         with tempfile.TemporaryDirectory() as tmp:

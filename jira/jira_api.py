@@ -113,7 +113,17 @@ TZ_FILE = os.path.join(CACHE_DIR, "tz")                    # the Jira user's tim
 # SAME request is re-sent - a job never restarts from page 1 because of them
 SLEEP = time.sleep                     # tests swap this out
 RETRY_CODES = (429, 502, 503, 504)     # rate limited / server busy
-TRANSIENT_CURL = (6, 7, 28, 35, 52, 55, 56)   # dns, connect, timeout, tls, empty reply, send/recv
+TRANSIENT_CURL = (6, 7, 16, 18, 28, 35, 52, 55, 56, 92)
+                                       # dns, connect, http2, cut off mid-body, timeout, tls,
+                                       # empty reply, send/recv, http2 stream reset
+# a search page that breaks off / times out / 5xx is usually TOO BIG (500
+# issues with descriptions + comments): search_pages halves maxResults and
+# re-reads the same position; the size that worked is remembered per site
+SHRINK_CURL = (16, 18, 28, 52, 56, 92)
+SHRINK_HTTP = (500, 502, 503, 504)
+MIN_PAGE = 10
+PAGE_CAP_FILE = os.path.join(CACHE_DIR, "search_page_cap.json")
+PAGE_CAP_DAYS = 7                      # then the configured size is tried again
 MAX_ATTEMPTS = 8                       # per request (429 / 5xx / network)
 MAX_401_ATTEMPTS = 5                   # a 401 AFTER a 2xx in this run is treated as transient
 AUTH_401_BACKOFF = 5                   # ... and waited out 5, 10, 20, 40s (a Retry-After: 0 is not a wait)
@@ -123,9 +133,10 @@ PAGE_OVERLAP = 5                       # v2 startAt pages re-read this many rows
 
 
 class ApiError(Exception):
-    def __init__(self, code: int, msg: str, curl: str = "", raw: str = ""):
+    def __init__(self, code: int, msg: str, curl: str = "", raw: str = "", curl_exit: int = 0):
         super().__init__(msg)
         self.code = code
+        self.curl_exit = curl_exit   # curl's own exit code (code 0 = no HTTP answer)
         self.curl = curl    # the failing request as a runnable curl ($JIRA_TOKEN)
         self.raw = raw      # its raw response file (jira_log.RawStore), if captured
 
@@ -172,6 +183,9 @@ class Client:
         self.retries = 0
         # on_wait(message, seconds): the poller logs it + shows "resuming in Ns"
         self.on_wait = lambda msg, secs: print(f"jira-api: {msg}", file=sys.stderr)
+        # on_note(message): a notable change of course (page size shrunk)
+        self.on_note = lambda msg: print(f"jira-api: {msg}", file=sys.stderr)
+        self.page_cap = 0           # learned search page size (0 = none; PAGE_CAP_FILE)
 
     @classmethod
     def from_config(cls, cfg, **kw) -> "Client":
@@ -179,7 +193,19 @@ class Client:
                 team=jira_config.load_team(cfg.data), **kw)
         c.max_wait = max(0, int(cfg["rateLimitMaxWaitMinutes"] or 0)) * 60
         c.delay = max(0, int(cfg["requestDelayMs"] or 0)) / 1000.0
+        cap = read_json(PAGE_CAP_FILE, {})
+        if isinstance(cap, dict) and cap.get("site") == c.site and \
+                time.time() - float(cap.get("at") or 0) < PAGE_CAP_DAYS * 86400:
+            c.page_cap = int(cap.get("pageSize") or 0)
         return c
+
+    def learn_page_cap(self, size: int, why: str) -> None:
+        self.page_cap = size
+        try:
+            write_json(PAGE_CAP_FILE, {"site": self.site, "pageSize": size, "at": time.time(),
+                                       "atText": time.strftime("%Y-%m-%d %H:%M:%S"), "why": why})
+        except OSError:
+            pass
 
     def sd(self, k: str) -> int:
         v = (self.team.get("search_defaults") or {}).get(k)
@@ -235,7 +261,9 @@ class Client:
         return " ".join(parts)
 
     def get(self, path: str, qs: str = "", method: str = "GET", body: str | None = None,
-            timeout: int | None = None):
+            timeout: int | None = None, attempts: int | None = None):
+        """attempts: cap for network / 5xx retries (search_pages passes a low
+        one: a page that keeps breaking off is shrunk, not re-sent 8 times)."""
         url = self.url(path, qs)
         if self.dry:
             self.requests += 1
@@ -292,11 +320,11 @@ class Client:
             reason, cap, floor = "", MAX_ATTEMPTS, 0.0
             if p.returncode != 0:
                 if p.returncode in TRANSIENT_CURL:
-                    reason = f"network error (curl exit {p.returncode})"
+                    reason, cap = f"network error (curl exit {p.returncode})", attempts or MAX_ATTEMPTS
             elif code == 429:
                 reason = "rate limited (HTTP 429)"
             elif code in RETRY_CODES:
-                reason = f"server busy (HTTP {code})"
+                reason, cap = f"server busy (HTTP {code})", attempts or MAX_ATTEMPTS
             elif code == 401 and self.ok_seen:
                 # the same token worked earlier in this run: a mid-run 401 is
                 # the server shedding load, not a bad token - and it is waited
@@ -325,7 +353,7 @@ class Client:
         where = f"; raw response: {raw}" if raw else ""
         if p.returncode != 0:
             raise ApiError(0, f"curl failed ({p.stderr.strip() or 'exit ' + str(p.returncode)}): {url}"
-                              + (f" [{reason}]" if reason else "") + where, repro, raw)
+                              + (f" [{reason}]" if reason else "") + where, repro, raw, p.returncode)
         if code >= 400:
             who = ("email + API token (basic)" if self.auth == "basic"
                    else "personal access token (Authorization: Bearer)")
@@ -374,6 +402,10 @@ class Client:
         path = self.path("search")
         cloud = path.endswith("/search/jql")
         page = page_size or self.sd("max_results_search")
+        if self.page_cap and page > self.page_cap:
+            LOG.info("search page size %d -> %d (learned: bigger pages broke off; %s)", page,
+                     self.page_cap, PAGE_CAP_FILE)
+            page = self.page_cap
         if max_total:
             page = min(page, max_total)
         start, token, n, seen = 0, "", 0, set()
@@ -384,7 +416,23 @@ class Client:
                     qs += f"&nextPageToken={qenc(token)}"
             else:
                 qs += f"&startAt={start}"
-            body = self.get(path, qs, timeout=self.search_timeout()) or {}
+            try:
+                body = self.get(path, qs, timeout=self.search_timeout(),
+                                attempts=2 if page > MIN_PAGE else None) or {}
+            except ApiError as err:
+                if page <= MIN_PAGE or not (err.curl_exit in SHRINK_CURL or err.code in SHRINK_HTTP):
+                    raise
+                smaller = max(MIN_PAGE, page // 2)
+                why = (f"curl exit {err.curl_exit}" if err.curl_exit else f"HTTP {err.code}") + \
+                    f" on a page of {page}"
+                msg = (f"search page of {page} issue(s) failed ({why.split(' on ')[0]}) - the response is "
+                       f"probably too big for the server/proxy: re-reading the same position with "
+                       f"{smaller} (set this job's Page size to {smaller} to skip the probing)")
+                LOG.warning("%s", msg)
+                self.on_note(msg)
+                page = smaller
+                self.learn_page_cap(page, why)
+                continue
             got = body.get("issues") or []
             fresh = [i for i in got if i.get("key") not in seen]
             seen.update(i.get("key") for i in fresh)

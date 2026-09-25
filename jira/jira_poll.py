@@ -189,6 +189,11 @@ class Reporter:
                                  etaSeconds=None, message=f"{self.label}: {msg}", waitingUntil=None,
                                  reason=None)
 
+    def note(self, msg: str) -> None:
+        say(msg, self.job)
+        jira_status.set_progress(job=self.job, stage=self.label, message=f"{self.label}: {msg}",
+                                 waitingUntil=None, reason=None)
+
     def wait(self, msg: str, secs: float) -> None:
         say(msg, self.job)
         reason = msg.split(" - ")[0]
@@ -539,6 +544,7 @@ def run_shared_sync(ctx: Ctx, window: str) -> dict:
     if added:
         rep = Reporter(SYNC + "-added", "New projects")
         c.on_wait = rep.wait
+        c.on_note = rep.note
         rep.start(f"full sync of the projects added to the scope: {', '.join(added)}")
         jira_api.sync(c, "full", projects=added, api_fields=ctx.sync_fields(),
                       fetch_comments=bool(cfg["fetchComments"]), snapshot_keep=0, quiet=True,
@@ -547,6 +553,7 @@ def run_shared_sync(ctx: Ctx, window: str) -> dict:
                       flushed=lambda keys: publish_plain(ctx, quiet=True))
     rep = Reporter(SYNC, "Issue cache")
     c.on_wait = rep.wait
+    c.on_note = rep.note
     resumed = jira_api.load_checkpoint(SYNC)
     rep.start(f"{'full sync' if window == 'full' else 'sync since ' + window} of "
               f"{', '.join(projects)}" + (f" - resuming at {resumed.get('hwmText')} "
@@ -597,6 +604,7 @@ def run_job(ctx: Ctx, ep: dict, window: str) -> int:
     typ = ep.get("type", "issues")
     rep = Reporter(ep["name"], f"{ep['name']} ({typ})")
     c.on_wait = rep.wait
+    c.on_note = rep.note
     if typ == "directory":
         rep.start(f"directory of {', '.join(plist)} - projects, users, statuses/types/priorities, "
                   "fields, releases, labels (live steps in debug.log)")
