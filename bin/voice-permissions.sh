@@ -18,10 +18,11 @@
 # Usage:  bin/voice-permissions.sh [bundle-id]
 
 set -u
-BUNDLE_ID="${1:-dev.danielbaker.workspace-switcher}"
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="${2:-$WS_ROOT/workspace-switcher.app}"
-APP_BIN="$APP_DIR/Contents/MacOS/workspace-switcher"
+. "$WS_ROOT/install.conf"   # BUNDLE_ID default
+BUNDLE_ID="${1:-$BUNDLE_ID}"
+APP_DIR="${2:-$WS_ROOT/$APP_NAME.app}"
+APP_BIN="$APP_DIR/Contents/MacOS/$APP_NAME"
 
 # sudo-safe: under sudo $HOME points at /var/root — resolve the REAL user's
 # home + TCC database so the grants land where the daemon runs

@@ -10,6 +10,11 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UID_="$(id -u)"
+# every name/path this script uses (brew deps, bundle id, launchd agent, …);
+# absent only in a standalone copy, which clones the repo and re-runs below
+[ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"
+# (not in install.conf: needed exactly when that file isn't here yet)
+REPO_URL="https://github.com/DanielBaker1994/workspace-switcher.git"
 
 # This script can run from stripped environments (curl|bash, cron) where
 # /opt/homebrew/bin is NOT on PATH — make sure brew and friends are always
@@ -65,8 +70,8 @@ if [ ! -d "$ROOT/.git" ]; then
     if [ -d "$DEST" ]; then
         printf "${YELLOW}  ! $DEST already exists — installing from there${RESET}\n"
     else
-        printf "${DIM}    git clone https://github.com/DanielBaker1994/workspace-switcher.git $DEST${RESET}\n"
-        git clone https://github.com/DanielBaker1994/workspace-switcher.git "$DEST" || {
+        printf "${DIM}    git clone $REPO_URL $DEST${RESET}\n"
+        git clone "$REPO_URL" "$DEST" || {
             printf "\n${RED}Clone failed — check your network and try again.${RESET}\n" >&2
             exit 1
         }
@@ -111,7 +116,7 @@ fi
 # ------------------------------------------------------------- 2. deps
 STEP="installing dependencies"
 step "2/7 dependencies (brew)"
-for f in aerospace sketchybar borders jq ripgrep; do
+for f in $BREW_FORMULAE; do
     if brew list "$f" >/dev/null 2>&1; then
         ok "$f already installed"
     else
@@ -120,7 +125,7 @@ for f in aerospace sketchybar borders jq ripgrep; do
         ok "$f installed"
     fi
 done
-for c in karabiner-elements font-sketchybar-app-font font-hack-nerd-font; do
+for c in $BREW_CASKS; do
     if brew list --cask "$c" >/dev/null 2>&1; then
         ok "$c already installed"
     else
@@ -137,7 +142,7 @@ step "3/7 configs (backed up if they already exist)"
 install_config() {
     local src="$1" dst="$2"
     if [ -e "$dst" ] && [ ! -L "$dst" ]; then
-        local BACKUP="/tmp/ws-backup-$(date +%s)"
+        local BACKUP="$BACKUP_PREFIX-$(date +%s)"
         mkdir -p "$BACKUP"
         mv "$dst" "$BACKUP/"
         warn "backed up existing $dst -> $BACKUP/"
@@ -147,42 +152,18 @@ install_config() {
     mkdir -p "$(dirname "$dst")"
     cp -R "$src" "$dst"
 }
-install_config "$ROOT/config/aerospace"  "$HOME/.config/aerospace"
-install_config "$ROOT/config/sketchybar" "$HOME/.config/sketchybar"
-install_config "$ROOT/config/borders"    "$HOME/.config/borders"
-ok "configs installed (aerospace / sketchybar / borders)"
+for d in $CONFIG_DIRS; do
+    install_config "$ROOT/config/$d" "$HOME/.config/$d"
+done
+ok "configs installed ($CONFIG_DIRS)"
 
 # ------------------------------------------------------------- 4. build
 STEP="building the app"
 step "4/7 building workspace-switcher.app (compiling the Swift sources)"
-# SwiftTerm (the embedded terminal) is precompiled once into a static lib
-# the daemon links against
-TERM_LIB="$ROOT/.build/SwiftTerm/libSwiftTerm.a"
-TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
-info "precompiling SwiftTerm (terminal engine)…"
-mkdir -p "$TERM_MOD_DIR"
-swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
-    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
-    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
-    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
-    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
-    "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
-    "$ROOT"/Vendor/SwiftTerm/Generated/*.swift \
-    -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
-    -o "$TERM_LIB"
-ok "SwiftTerm compiled"
-
-mkdir -p "$ROOT/workspace-switcher.app/Contents/MacOS"
-BUILD_TMP="$(mktemp "${TMPDIR:-/tmp}/ws-install.XXXXXX")"
-swiftc -O -swift-version 5 \
-    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
-    -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-    "$ROOT/PopupWindow.swift" "$ROOT/workspace_switcher.swift" "$ROOT/main.swift" \
-    -o "$BUILD_TMP"
-mv "$BUILD_TMP" "$ROOT/workspace-switcher.app/Contents/MacOS/workspace-switcher"
-cp "$ROOT/Info.plist" "$ROOT/workspace-switcher.app/Contents/Info.plist"
-codesign --force --sign - --identifier dev.danielbaker.workspace-switcher \
-    "$ROOT/workspace-switcher.app" >/dev/null 2>&1
+# the same build script ./build.sh uses (bin/build-app.sh): every top-level
+# *.swift is compiled, SwiftTerm is precompiled once, then sign + TCC re-grant
+info "compiling (first run also precompiles SwiftTerm — a few minutes)…"
+"$ROOT/bin/build-app.sh" --force
 ok "compiled + code-signed"
 
 # ------------------------------------------------------------- 5. TCC
@@ -194,9 +175,10 @@ ok "mic + speech granted to the app (no System Settings needed)"
 # ------------------------------------------------------------- 6. services
 STEP="starting menu-bar services"
 step "6/7 starting sketchybar + borders (menu-bar stack)"
-brew services start sketchybar >/dev/null 2>&1 || true
-brew services start borders >/dev/null 2>&1 || true
-ok "sketchybar + borders running"
+for svc in $BREW_SERVICES; do
+    brew services start "$svc" >/dev/null 2>&1 || true
+done
+ok "$BREW_SERVICES running"
 
 # jira poll agent: only load when [jira] enabled = true in commands.conf
 JIRA_ENABLED=""
@@ -222,9 +204,10 @@ fi
 case "${JIRA_ENABLED,,} ${JIRA_BG_POLL,,}" in
     true*|yes*|1*|on*|*" true"|*" yes"|*" 1"|*" on")
         step "6b/7 jira poll agent (launchd)"
-        PLIST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
-        sed "s|__WS_CONFIG__|$HOME/.config/workspace-switcher|g" \
-            "$ROOT/jira/com.jira.poll.plist" >"$PLIST"
+        PLIST="$JIRA_AGENT_PLIST"
+        mkdir -p "$(dirname "$PLIST")"
+        sed "s|__WS_CONFIG__|$ROOT|g" \
+            "$ROOT/jira/$JIRA_AGENT_LABEL.plist" >"$PLIST"
         launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
         launchctl bootstrap "gui/$UID_" "$PLIST" 2>/dev/null || true
         ok "poll agent loaded"
@@ -232,7 +215,7 @@ case "${JIRA_ENABLED,,} ${JIRA_BG_POLL,,}" in
     *)
         step "6b/7 jira poll agent (disabled — [jira] enabled != true)"
         # make sure any previously loaded agent is stopped
-        PLIST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
+        PLIST="$JIRA_AGENT_PLIST"
         launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
         ok "poll agent not loaded (jira disabled)"
         ;;
@@ -241,9 +224,9 @@ esac
 # ------------------------------------------------------------- 7. launch
 STEP="opening the app"
 step "7/7 opening the app"
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
 sleep 1
-open -n -g "$ROOT/workspace-switcher.app" --args voice >/dev/null 2>&1 || true
+open -n -g "$ROOT/$APP_NAME.app" --args voice >/dev/null 2>&1 || true
 ok "app launched — the voice window should be on screen"
 
 printf "\n${GREEN}══════════════════════════════════════════════════════════════${RESET}\n"

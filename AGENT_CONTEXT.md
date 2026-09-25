@@ -22,6 +22,11 @@ Read and honor `rule.md` before touching any code. Key points:
 ./build.sh --build-only
 ```
 
+ONE build: `bin/build-app.sh` (compiles every top-level `*.swift`, SwiftTerm
+lib, sign, TCC) — used by build.sh, `bin/workspace_switcher.sh` and
+INSTALL.sh. Install/uninstall/build names + paths (bundle id, brew deps,
+launchd agent, caches) live in `install.conf`.
+
 ## Tests
 
 ```bash

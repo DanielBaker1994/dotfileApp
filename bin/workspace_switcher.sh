@@ -14,35 +14,9 @@
 #                                    toggle above; needs a running daemon
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-APP="$ROOT/workspace-switcher.app"
-BIN="$APP/Contents/MacOS/workspace-switcher"
-MAIN="$ROOT/main.swift"
-SRC="$ROOT/workspace_switcher.swift"
-FRAMEWORK="$ROOT/PopupWindow.swift"
-JIRA_DASH="$ROOT/JiraDashboard.swift"
-JIRA_SEARCH="$ROOT/JiraSearch.swift"
-# SwiftTerm is precompiled ONCE into a static library + module (it is ~230
-# files); the daemon links it. Rebuilt only when a SwiftTerm source changes.
-TERM_LIB="$ROOT/.build/SwiftTerm/libSwiftTerm.a"
-TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
-TERM_SENTINEL="$ROOT/.build/.termbuilt"
-build_term_lib() {
-    # skip if already built AND no SwiftTerm source changed since
-    [ -f "$TERM_LIB" ] && [ -f "$TERM_SENTINEL" ] && \
-        [ -z "$(find "$ROOT"/Vendor/SwiftTerm/Sources "$ROOT"/Vendor/SwiftTerm/Generated \
-            -name '*.swift' -newer "$TERM_SENTINEL" 2>/dev/null | head -1)" ] && return 0
-    mkdir -p "$TERM_MOD_DIR"
-    swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Generated/*.swift \
-        -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
-        -o "$TERM_LIB" >/dev/null 2>&1
-    touch "$TERM_SENTINEL"
-}
+. "$ROOT/install.conf"
+APP="$ROOT/$APP_NAME.app"
+BIN="$APP/Contents/MacOS/$APP_NAME"
 TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/workspace-switcher-focus"
 MODE="${1:-}"
@@ -82,50 +56,15 @@ if [ -n "$WID" ]; then
     echo "$WID $APID" >"$FOCUS_FILE"
 fi
 
-# Build if the binary is missing or a source file is newer. The daemon ships
-# as a real .app bundle: TCC (mic/speech permissions) keys grants by the
-# BUNDLE ID, which is stable across rebuilds — a bare binary loses its grant
-# every time the ad-hoc signature changes.
-if [ ! -x "$BIN" ] || [ "$MAIN" -nt "$BIN" ] || [ "$SRC" -nt "$BIN" ] || [ "$FRAMEWORK" -nt "$BIN" ] \
-    || [ "$JIRA_DASH" -nt "$BIN" ] || [ "$JIRA_SEARCH" -nt "$BIN" ] || [ ! -f "$TERM_LIB" ]; then
-    build_term_lib
-    # a REBUILD means any RUNNING daemon is the OLD binary — kill it or the
-    # socket ping keeps talking to the stale, grant-less process
-    pkill -f "workspace-switcher" 2>/dev/null || true
-    mkdir -p "$(dirname "$BIN")"
-    BUILD_TMP="$(mktemp "$TMP/ws-build.XXXXXX")" || exit 1
-    if swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
-        -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-        "$FRAMEWORK" "$SRC" "$JIRA_DASH" "$JIRA_SEARCH" "$MAIN" -o "$BUILD_TMP" >/dev/null 2>&1 ||
-       swiftc -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$ROOT/Info.plist" \
-        -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-        "$FRAMEWORK" "$SRC" "$JIRA_DASH" "$JIRA_SEARCH" "$MAIN" -o "$BUILD_TMP"; then
-        mv "$BUILD_TMP" "$BIN"
-        # the bundle's on-disk Info.plist is what LaunchServices reads for
-        # Finder right-click services (NSServices) — keep it in sync or the
-        # "Copy Path" / "Open in Notes" context items never register
-        cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-        # sign with the stable self-signed cert (login keychain) so TCC
-        # grants (Desktop/Documents folders, …) survive rebuilds — an ad-hoc
-        # signature's designated requirement is its cdhash, which changes
-        # every build and re-prompts. Falls back to ad-hoc if the cert is gone.
-        SIGN_ID="workspace-switcher codesign"
-        if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
-            # perl alarm = portable timeout: an unapproved key ACL pops a
-            # keychain dialog and would hang the build forever
-            perl -e 'alarm 15; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1 \
-                || codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
-        else
-            codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$APP" >/dev/null 2>&1
-        fi
-        # fresh build = fresh signature — re-grant mic + speech silently so
-        # voice notes keep working (bundle-id grants persist across rebuilds)
-        "$DIR/voice-permissions.sh" >/dev/null 2>&1 || true
-    else
-        rm -f "$BUILD_TMP"
-    fi
+# Build if the binary is missing or a source file is newer — ONE build
+# script (bin/build-app.sh) shared with INSTALL.sh. The daemon ships as a
+# real .app bundle: TCC (mic/speech) keys grants by the BUNDLE ID, stable
+# across rebuilds; build-app.sh re-signs + re-grants after every build.
+# A failed build keeps running the previous binary (a hotkey press must not
+# go dead), except in build-only mode where the failure is the answer.
+if ! "$DIR/build-app.sh"; then
+    [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
 fi
-
 
 # Build-only mode (installer): rebuild + re-grant TCC, then stop. The window
 # is launched by the user afterwards (installer Done screen).
