@@ -30,8 +30,10 @@ Per tick:
                Comments come in the search itself (one request per page).
      releases: every version of the projects -> <file>
      directory: projects + assignable users + statuses / types / priorities
-               / fields -> ~/.cache/jira/directory.json (the pickers' lists;
-               weekly - user search is expensive; no tab)
+               / fields + releases + labels -> ~/.cache/jira/directory.json
+               (the pickers' lists; weekly - user search is expensive; no
+               tab). Checkpointed per project: a rerun resumes / retries
+               only what failed.
   3. record lastRun / lastSuccess / nextRun / status / items / lastError.
 
 Rate limits: 429 / 5xx / network errors (and a 401 after the token already
@@ -41,6 +43,9 @@ within rateLimitMaxWaitMinutes - a job never restarts from page 1.
 Log: ~/.cache/jira/poll.log (always written, --quiet only silences stderr):
 every stage, page (done / total / %, ETA), wait and error. status.json
 `progress` carries the live line the Jira Config window shows.
+~/.cache/jira/debug.log (jira_log.py): the same plus every request, retry,
+stage entry/exit and traceback, each tagged [job/stage/project];
+~/.cache/jira/raw/<run>/: every response body + headers as received.
 
 Guarded by an flock on ~/.cache/jira/poll.lock: a second invocation while a
 poll runs exits at once (status.json lastSkipped records it). A lock held
@@ -102,6 +107,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jira_api  # noqa: E402
 import jira_config  # noqa: E402
+import jira_log  # noqa: E402
 import jira_status  # noqa: E402
 
 LEGACY_POLL_STATE = os.path.join(jira_config.CACHE_DIR, "poll-state")
@@ -134,6 +140,7 @@ def log(line: str) -> None:
 def say(msg: str, tag: str = "") -> None:
     line = f"[{tag}] {msg}" if tag else msg
     log(line)
+    jira_log.LOG.info("%s", line, stacklevel=2)
     if not QUIET:
         print(f"jira-poll: {line}", file=sys.stderr)
 
@@ -170,6 +177,16 @@ class Reporter:
             self.job)
         jira_status.set_progress(job=self.job, stage=self.label, done=done, total=total, pct=pct,
                                  etaSeconds=int(eta) if eta else None, message=msg, waitingUntil=None,
+                                 reason=None)
+
+    def step(self, msg: str, done=None, total=None, log_it: bool = False) -> None:
+        """A stage of a non-issue job (directory): the live line; poll.log
+        only when log_it (per project, not per page - debug.log has pages)."""
+        if log_it:
+            say(msg, self.job)
+        pct = min(100, int(done * 100 / total)) if total and done is not None else None
+        jira_status.set_progress(job=self.job, stage=self.label, done=done, total=total, pct=pct,
+                                 etaSeconds=None, message=f"{self.label}: {msg}", waitingUntil=None,
                                  reason=None)
 
     def wait(self, msg: str, secs: float) -> None:
@@ -581,10 +598,21 @@ def run_job(ctx: Ctx, ep: dict, window: str) -> int:
     rep = Reporter(ep["name"], f"{ep['name']} ({typ})")
     c.on_wait = rep.wait
     if typ == "directory":
-        rep.start(f"directory of {', '.join(plist)}")
-        d = jira_api.directory(c, projects=plist, quiet=True)
+        rep.start(f"directory of {', '.join(plist)} - projects, users, statuses/types/priorities, "
+                  "fields, releases, labels (live steps in debug.log)")
+        last = {"key": None}
+
+        def progress(stage, msg, done=None, total=None):
+            # poll.log: the first line of each stage / project (done = the
+            # project's index); the window + debug.log: every page
+            rep.step(msg, done, total, log_it=(stage, done) != last["key"])
+            last["key"] = (stage, done)
+
+        d = jira_api.directory(c, projects=plist, quiet=True, progress=progress, name=ep["name"],
+                               resume_hours=float(cfg["directoryResumeHours"] or 24))
         jira_api.write_json(jira_api.DIRECTORY_FILE, d)
-        say(f"{len(d['projects'])} project(s), {len(d['users'])} user(s)"
+        say(f"{len(d['projects'])} project(s), {len(d['users'])} user(s), {len(d['versions'])} release(s), "
+            f"{len(d['labels'])} label(s)"
             + (f", {len(d['warnings'])} warning(s): {'; '.join(d['warnings'])}" if d["warnings"] else ""),
             ep["name"])
         return len(d["users"])
@@ -638,6 +666,15 @@ def record(name: str, started: str, window: str, err: str, curl: str, items, wse
         nx = next_run(e, wsec)
         e["nextRun"] = jira_status.now_str(nx) if nx else "due"
     jira_status.update(fn)
+
+
+def logged(name: str, c, fn):
+    """fn() as one debug.log stage (▶ / ◀ / ✗ + traceback)."""
+    with jira_log.stage(name, c=c) as st:
+        res = fn()
+        st.items = res if isinstance(res, int) else res[0] if isinstance(res, tuple) and \
+            isinstance(res[0], int) else (res or {}).get("total") if isinstance(res, dict) else None
+        return res
 
 
 def attempt(fn) -> tuple:
@@ -734,7 +771,8 @@ def describe(cfg, team: dict) -> dict:
                 users_of = plist or known_projects or ["PROJ"]
                 c.captured = []
                 jira_api.directory(c, projects=users_of)
-                purposes = ["projects"] + [f"assignable users of {p} (paginated)" for p in users_of]
+                purposes = [f"project {p}" for p in users_of]
+                purposes += [f"assignable users of {p} (paginated)" for p in users_of]
                 purposes += ["statuses", "issue types", "priorities", "fields"]
                 purposes += [f"releases of {p}" for p in users_of]
                 purposes += [f"labels of {p} (labelled issues, fields=labels)" for p in users_of]
@@ -846,6 +884,9 @@ def describe(cfg, team: dict) -> dict:
         "lock": {"held": held, **(lock.holder() if held else {})},
         "progress": status.get("progress") if held else None,
         "pollLog": POLL_LOG,
+        "debugLog": jira_log.DEBUG_LOG,
+        "rawDir": jira_log.latest_raw_dir(),
+        "rawRoot": jira_log.RAW_DIR,
         "scope": scope,
         "setup": {"state": setup.get("state", "done"),
                   "steps": [{**st, **(done_steps.get(st["name"]) or {"state": "pending"})}
@@ -1032,6 +1073,7 @@ def run_setup(o: dict, cfg, team: dict) -> int:
         return 2
     todo = [o["step"]] if o["step"] else [n for n in order if (steps.get(n) or {}).get("state") != "ok"]
     ctx = Ctx(o, cfg, team, jira_api.Client.from_config(cfg))
+    jira_log.describe_config(cfg, team)
     say(f"setup: {len(todo)} step(s) to run: {', '.join(todo) or '(none)'}", "setup")
     code = 0
     for name in todo:
@@ -1039,9 +1081,11 @@ def run_setup(o: dict, cfg, team: dict) -> int:
         save_setup({**st, "steps": steps})
         jira_status.set_progress(job=name, stage="setup", message=f"Setup: {name}…", done=None,
                                  total=None, pct=None, etaSeconds=None, waitingUntil=None)
-        (res, err, curl) = attempt(lambda: run_setup_step(ctx, name))
+        (res, err, curl) = attempt(lambda: logged(f"setup:{name}", ctx.c, lambda: run_setup_step(ctx, name)))
         if err:
-            steps[name] = {"state": "error", "at": jira_status.now_str(), "error": err, "curl": curl}
+            steps[name] = {"state": "error", "at": jira_status.now_str(), "error": err, "curl": curl,
+                           "rawDir": jira_log.RAW.dir if jira_log.RAW else "",
+                           "debugLog": jira_log.DEBUG_LOG}
             save_setup({**st, "steps": steps})
             say(f"✗ {name}: {err}", "setup")
             code = 1
@@ -1128,6 +1172,7 @@ def main(argv: list) -> int:
     enabled = jira_config.jira_enabled()
     active = jira_config.poll_active()
     base = {"script": jira_status.POLL_SCRIPT, "curlLog": jira_api.CURL_LOG, "pollLog": POLL_LOG,
+            "debugLog": jira_log.DEBUG_LOG,
             "config": jira_config.CONFIG_JSON, "commandsConf": jira_config.COMMANDS_CONF,
             "enabled": enabled, "backgroundPoll": active and not enabled}
 
@@ -1147,6 +1192,11 @@ def main(argv: list) -> int:
         say(str(err))
         return 2
     base["configNotes"] = cfg.notes
+    if not o["dry"]:
+        label = "setup" + (f"-{o['step']}" if o["step"] else "") if o["setup"] else \
+            ("rebuild" if o["rebuild"] else o["projects"].replace(",", "+") if o["projects"] else "tick")
+        jira_log.setup(label, ["jira_poll.py", *argv], cfg)
+        base["rawDir"] = jira_log.RAW.dir if jira_log.RAW else ""
     probs = cfg.problems()
     try:
         team = jira_config.load_team(cfg.data)
@@ -1307,11 +1357,12 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
         return 0
 
     ctx.c = c = jira_api.Client.from_config(cfg)
+    jira_log.describe_config(cfg, team)
     failures = []
     if sync_due and ctx.plain:
         window = ctx.sync_window(status)
         started = jira_status.now_str()
-        res, err, curl = attempt(lambda: run_shared_sync(ctx, window))
+        res, err, curl = attempt(lambda: logged(SYNC, c, lambda: run_shared_sync(ctx, window)))
         if err:
             say(f"failed: {err} - progress kept; the next run resumes", SYNC)
         counts = publish_plain(ctx)     # partial data is still better than none
@@ -1327,7 +1378,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
             if ep.get("type", "issues") == "issues" else "-"
         started = jira_status.now_str()
         say(f"window={window}", ep["name"])
-        items, err, curl = attempt(lambda: run_job(ctx, ep, window))
+        items, err, curl = attempt(lambda: logged(ep["name"], c, lambda: run_job(ctx, ep, window)))
         if err:
             say(f"failed: {err}", ep["name"])
             failures.append(f"{ep['name']}: {err}")

@@ -89,6 +89,9 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jira_config  # noqa: E402
+import jira_log  # noqa: E402
+
+LOG = jira_log.LOG
 
 CACHE_DIR = jira_config.CACHE_DIR
 CACHE_FILE = os.path.join(CACHE_DIR, "jiras.json")
@@ -113,15 +116,18 @@ RETRY_CODES = (429, 502, 503, 504)     # rate limited / server busy
 TRANSIENT_CURL = (6, 7, 28, 35, 52, 55, 56)   # dns, connect, timeout, tls, empty reply, send/recv
 MAX_ATTEMPTS = 8                       # per request (429 / 5xx / network)
 MAX_401_ATTEMPTS = 5                   # a 401 AFTER a 2xx in this run is treated as transient
+AUTH_401_BACKOFF = 5                   # ... and waited out 5, 10, 20, 40s (a Retry-After: 0 is not a wait)
+MAX_401_IN_ROW = 3                     # requests failing 401 in a row = the token really died
 BACKOFF_CAP = 60                       # seconds: 2, 4, 8, ... 60 (+ jitter) without Retry-After
 PAGE_OVERLAP = 5                       # v2 startAt pages re-read this many rows (see search_pages)
 
 
 class ApiError(Exception):
-    def __init__(self, code: int, msg: str, curl: str = ""):
+    def __init__(self, code: int, msg: str, curl: str = "", raw: str = ""):
         super().__init__(msg)
         self.code = code
         self.curl = curl    # the failing request as a runnable curl ($JIRA_TOKEN)
+        self.raw = raw      # its raw response file (jira_log.RawStore), if captured
 
 
 def die(msg: str, code: int = 1):
@@ -158,6 +164,8 @@ class Client:
         self.captured: list | None = None   # dry + list: collect curls instead of printing
         self.requests = 0
         self.ok_seen = False        # a 2xx answered in this run -> a later 401 is transient
+        self.ok_count = 0           # 2xx answers this run
+        self.auth_fails_in_row = 0  # requests that ended 401 (after retries) since the last 2xx
         self.max_wait = 30 * 60     # total seconds this run may sleep on rate limits
         self.waited = 0.0
         self.delay = 0.0            # seconds between requests (config requestDelayMs)
@@ -245,25 +253,43 @@ class Client:
         argv = base[:1] + ["-sS", "-m", str(timeout or self.timeout)] + base[1:-1] + \
             ["-w", "\\n%{http_code} %header{retry-after}", url]
         repro = self.curl_cmd(url, method, masked=True, body=body)
+        short = f"{method} {urllib.parse.urlsplit(url).path}"
         attempt = 0
+        raw = ""
         while True:
             attempt += 1
             if self.delay and self.requests:
                 SLEEP(self.delay)
             t0 = time.time()
+            # raw capture: -D dumps the response headers (url stays LAST)
+            hdr = jira_log.RAW.next_headers() if jira_log.RAW else None
+            run = argv[:-1] + ["-D", hdr, url] if hdr else argv
             try:
-                p = subprocess.run(argv, capture_output=True, text=True)
+                p = subprocess.run(run, capture_output=True, text=True)
             except FileNotFoundError:
                 die("curl is not installed (brew install curl)")
+            el = time.time() - t0
             self.requests += 1
             out, _, tail = p.stdout.rpartition("\n")
             parts = tail.split()
             code = int(parts[0]) if parts and parts[0].isdigit() else 0
             retry_after = parts[1] if len(parts) > 1 else ""
             log_curl(argv, code if p.returncode == 0 else f"ERR{p.returncode}")
+            if jira_log.RAW:
+                raw = jira_log.RAW.save(method=method, url=url, attempt=attempt, code=code,
+                                        curl_exit=p.returncode, stderr=p.stderr, elapsed=el, body=out,
+                                        headers_file=hdr, repro=repro)
+            LOG.debug("%s %s -> %s %.2fs %sB%s%s", method, url,
+                      code if p.returncode == 0 else f"curl exit {p.returncode} ({p.stderr.strip()})",
+                      el, f"{len(out):,}", f" attempt={attempt}" if attempt > 1 else "",
+                      f" raw={os.path.basename(raw)}" if raw else "")
             if self.verbose:
-                trace(f"{method} {url} -> {code} ({time.time() - t0:.2f}s, {len(out)} bytes)")
-            reason, cap = "", MAX_ATTEMPTS
+                trace(f"{method} {url} -> {code} ({el:.2f}s, {len(out)} bytes)")
+            if p.returncode == 0 and code >= 400:
+                LOG.warning("HTTP %s on %s (attempt %d)%s: %s", code, short, attempt,
+                            f" Retry-After={retry_after}" if retry_after_seconds(retry_after) is not None
+                            else "", out[:500].replace("\n", " ") or "(empty body)")
+            reason, cap, floor = "", MAX_ATTEMPTS, 0.0
             if p.returncode != 0:
                 if p.returncode in TRANSIENT_CURL:
                     reason = f"network error (curl exit {p.returncode})"
@@ -273,47 +299,64 @@ class Client:
                 reason = f"server busy (HTTP {code})"
             elif code == 401 and self.ok_seen:
                 # the same token worked earlier in this run: a mid-run 401 is
-                # the server shedding load, not a bad token
-                reason, cap = "HTTP 401 mid-run (token worked earlier - treating as transient)", \
+                # the server shedding load, not a bad token - and it is waited
+                # out for real (a Retry-After: 0 would re-send it at once)
+                reason, cap = "HTTP 401 mid-run (token worked earlier; treating as transient)", \
                     MAX_401_ATTEMPTS
+                floor = float(min(BACKOFF_CAP, AUTH_401_BACKOFF * 2 ** (attempt - 1)))
             if reason and attempt < cap:
-                wait = retry_after_seconds(retry_after)
-                if wait is None:
-                    wait = min(BACKOFF_CAP, 2 ** attempt) + random.uniform(0, 1)
+                asked = retry_after_seconds(retry_after)
+                wait = asked if asked is not None else min(BACKOFF_CAP, 2 ** attempt) + random.uniform(0, 1)
+                src = "Retry-After" if asked is not None else "backoff"
+                if wait < floor:
+                    wait, src = floor, "backoff" + (f", Retry-After {asked:.0f}s ignored" if asked is not None
+                                                    else "")
                 if self.waited + wait <= self.max_wait:
                     self.waited += wait
                     self.retries += 1
-                    src = "Retry-After" if retry_after_seconds(retry_after) is not None else "backoff"
-                    self.on_wait(f"{reason} - sleeping {wait:.0f}s ({src}; attempt {attempt}/{cap})", wait)
+                    msg = f"{reason} - {short} - sleeping {wait:.0f}s ({src}; attempt {attempt}/{cap})"
+                    LOG.warning("%s", msg)
+                    self.on_wait(msg, wait)
                     SLEEP(wait)
                     continue
                 reason += f" - gave up: rate-limit wait budget ({self.max_wait // 60}m) used"
             break
         body_out = out
+        where = f"; raw response: {raw}" if raw else ""
         if p.returncode != 0:
             raise ApiError(0, f"curl failed ({p.stderr.strip() or 'exit ' + str(p.returncode)}): {url}"
-                              + (f" [{reason}]" if reason else ""), repro)
+                              + (f" [{reason}]" if reason else "") + where, repro, raw)
         if code >= 400:
             who = ("email + API token (basic)" if self.auth == "basic"
                    else "personal access token (Authorization: Bearer)")
             if code == 401:
+                self.auth_fails_in_row += 1
+                if self.ok_seen:
+                    raise ApiError(code, f"HTTP 401 on {short} after {self.ok_count} successful request(s) "
+                                         f"this run, {attempt} attempt(s) - the token worked earlier, so "
+                                         f"the server (or a proxy / SSO gateway) refused this request; "
+                                         f"response: {body_out[:300].strip() or '(empty)'}{where}", repro, raw)
                 raise ApiError(code, f"authentication failed (HTTP 401) - the {who} was rejected by "
-                                     f"{self.site}; fix it in the setup sheet or 'jira_api.py --init'", repro)
+                                     f"{self.site}; fix it in the setup sheet or 'jira_api.py --init'"
+                               + where, repro, raw)
             if code == 403:
                 raise ApiError(code, "forbidden (HTTP 403) - your account lacks permission for this "
-                                     "query (or a CAPTCHA is pending - log in once in a browser)", repro)
+                                     "query (or a CAPTCHA is pending - log in once in a browser)" + where,
+                               repro, raw)
             if code == 404:
-                raise ApiError(code, f"not found (HTTP 404): {body_out[:300]}", repro)
+                raise ApiError(code, f"not found (HTTP 404): {body_out[:300]}{where}", repro, raw)
             if code == 429:
-                raise ApiError(code, f"rate limited (HTTP 429) after {attempt} attempt(s): {body_out[:200]}",
-                               repro)
-            raise ApiError(code, f"API error HTTP {code}: {body_out[:300]}", repro)
+                raise ApiError(code, f"rate limited (HTTP 429) after {attempt} attempt(s): {body_out[:200]}"
+                               + where, repro, raw)
+            raise ApiError(code, f"API error HTTP {code}: {body_out[:300]}{where}", repro, raw)
         self.ok_seen = True
+        self.ok_count += 1
+        self.auth_fails_in_row = 0
         try:
             return json.loads(body_out) if body_out.strip() else None
         except ValueError:
             raise ApiError(code, f"non-JSON response from {url} (HTTP {code}; wrong site URL or an "
-                                 f"SSO login page?): {body_out[:200]}", repro)
+                                 f"SSO login page?): {body_out[:200]}{where}", repro, raw)
 
     def search_timeout(self) -> int:
         return max(self.timeout, self.sd("timeout_search_seconds"))
@@ -799,130 +842,242 @@ def releases(c: Client, project: str = "", projects: list | None = None) -> list
     return out
 
 
-def directory(c: Client, projects: list | None = None, quiet: bool = True) -> dict:
-    """The pickers' lists (the weekly `directory` job): every visible project,
-    the assignable users of `projects` (else team.json project_keys, else every
-    project - one paginated call each), statuses, issue types, priorities,
-    fields, and per project its releases (unarchived fix versions) and labels
-    (Jira has no per-project label list: the labels of its newest
-    search_defaults.labels_max_issues labelled issues). A project the token
-    may not read is skipped (noted in `warnings`)."""
-    out: dict = {"projects": [], "users": [], "statuses": [], "issueTypes": [], "priorities": [],
-                 "fields": [], "versions": [], "labels": [], "warnings": []}
-    # only the projects in scope - the site's project list is never fetched
+def directory(c: Client, projects: list | None = None, quiet: bool = True, progress=None,
+              name: str = "", resume_hours: float = 24) -> dict:
+    """The pickers' lists (the weekly `directory` job), in stages:
+      projects   GET /project/KEY per project in scope (the site's list is never fetched)
+      users      assignable users per project (paginated, merged by id)
+      statuses / issueTypes / priorities / fields   one call each
+      versions   per project: unarchived fix versions (releases)
+      labels     per project: the labels of its newest search_defaults.labels_max_issues
+                 labelled issues (Jira has no per-project label list; fields=labels)
+    progress(stage, message, done, total) reports each step (poll.log + the
+    Jira Config window). With a `name`, every finished project / section is
+    checkpointed (checkpoints/directory-NAME.json): a rerun within
+    resume_hours continues where the last one stopped, and a run that ended
+    with warnings keeps the failed parts to retry. A 401 after the token
+    worked this run skips that part (warning) - only MAX_401_IN_ROW failing
+    requests in a row (the token really died) abort the job."""
     keys = list(projects or []) or default_projects(c)
-    for k in keys:
+    report = progress or (lambda stage, msg, done=None, total=None:
+                          None if quiet else print(f"jira-api: directory: {msg}", file=sys.stderr))
+    ck_name = f"directory-{name}" if name and not c.dry else ""
+    ck = load_checkpoint(ck_name)
+    fresh = {"projects": {}, "users": {}, "statuses": [], "issueTypes": [], "priorities": [],
+             "fields": [], "versions": {}, "labels": {}, "warnings": {}, "done": {}}
+    if ck and ck.get("forProjects") == keys and time.time() - float(ck.get("at") or 0) < resume_hours * 3600 \
+            and isinstance(ck.get("state"), dict):
+        st = {**fresh, **ck["state"]}
+        dn = st["done"]
+        summary = ", ".join(f"{k} {len(v)}/{len(keys)}" if isinstance(v, list) else f"{k} ✓"
+                            for k, v in dn.items())
+        LOG.info("resuming the directory from %s (%s)", ck.get("savedAt"), summary or "nothing done")
+        report("resume", f"resuming ({summary})" if summary else "resuming")
+    else:
+        if ck:
+            LOG.info("directory checkpoint ignored (other projects or older than %sh) - starting over",
+                     resume_hours)
+        st = fresh
+    done = st["done"]
+
+    def save():
+        if ck_name:
+            write_json(checkpoint_path(ck_name), {"forProjects": keys, "at": time.time(),
+                                                  "savedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                                  "state": st}, indent=None)
+
+    def fatal(err: ApiError) -> bool:
+        # a 401 before any 2xx = a bad token; many in a row = it died mid-run
+        return err.code == 401 and (not c.ok_seen or c.auth_fails_in_row >= MAX_401_IN_ROW)
+
+    def warn(key: str, msg: str):
+        st["warnings"][key] = msg
+        LOG.warning("skipped %s", msg)
+
+    def per_project(section: str, label: str, fetch):
+        finished = done.setdefault(section, [])
+        todo = [p for p in keys if p not in finished]
+        if not todo:
+            return
+        with jira_log.stage(section, f"{label}: {len(todo)} of {len(keys)} project(s) to do", c):
+            for i, proj in enumerate(keys, 1):
+                if proj in finished:
+                    continue
+                report(section, f"{label} {i}/{len(keys)} · {proj}", i - 1, len(keys))
+                with jira_log.stage(proj, c=c) as s:
+                    try:
+                        s.items = fetch(proj, i)
+                    except ApiError as err:
+                        if fatal(err):
+                            raise
+                        warn(f"{section}:{proj}", f"{label} of {proj}: {err}")
+                        s.note = "skipped (warning)"
+                        continue
+                st["warnings"].pop(f"{section}:{proj}", None)
+                finished.append(proj)
+                save()
+
+    def once(section: str, label: str, fetch):
+        if done.get(section):
+            return
+        report(section, label)
+        with jira_log.stage(section, c=c) as s:
+            try:
+                s.items = fetch()
+            except ApiError as err:
+                if fatal(err):
+                    raise
+                warn(section, f"{label}: {err}")
+                return
+        st["warnings"].pop(section, None)
+        done[section] = True
+        save()
+
+    def project(proj, i):
         try:
-            p = c.get(c.path("project", project=k)) or {}
+            p = c.get(c.path("project", project=proj)) or {}
         except ApiError as err:
             if err.code == 401:
                 raise
-            out["warnings"].append(f"project {k}: {err}")
+            # 403 / 404: permanent - noted, not retried
+            st["warnings"][f"project:{proj}"] = f"project {proj}: {err}"
             p = {}
-        out["projects"].append({"key": k, "name": p.get("name") or k})
+        st["projects"][proj] = p.get("name") or proj
+        return 1
+
     page = max(1, c.sd("max_results_users"))
-    users: dict = {}
-    for proj in keys:
-        start = 0
+
+    def users(proj, i):
+        start, pages, mine = 0, 0, set()
         while True:
-            try:
-                got = c.get(c.path("assignable_users"),
-                            f"project={qenc(proj)}&startAt={start}&maxResults={page}")
-            except ApiError as err:
-                if err.code in (401,):
-                    raise
-                out["warnings"].append(f"users of {proj}: {err}")
-                break
+            got = c.get(c.path("assignable_users"),
+                        f"project={qenc(proj)}&startAt={start}&maxResults={page}")
             if not isinstance(got, list):
                 break
+            pages += 1
+            ids = []
             for u in got:
                 # Server/DC: `name` is what JQL takes; Cloud: accountId
                 uid = u.get("accountId") or u.get("name") or u.get("key")
                 if not uid:
                     continue
-                e = users.setdefault(uid, {"id": uid, "name": u.get("displayName") or uid,
-                                           "username": u.get("name") or "",
-                                           "email": u.get("emailAddress") or "",
-                                           "active": u.get("active", True) is not False,
-                                           "projects": []})
+                ids.append(uid)
+                e = st["users"].setdefault(uid, {"id": uid, "name": u.get("displayName") or uid,
+                                                 "username": u.get("name") or "",
+                                                 "email": u.get("emailAddress") or "",
+                                                 "active": u.get("active", True) is not False,
+                                                 "projects": []})
                 if proj not in e["projects"]:
                     e["projects"].append(proj)
+            new = [x for x in ids if x not in mine]
+            mine.update(ids)
+            LOG.debug("users of %s: page %d startAt=%d -> %d user(s), %d new", proj, pages, start,
+                      len(got), len(new))
+            report("users", f"users {i}/{len(keys)} · {proj} page {pages} ({len(mine):,} users)",
+                   i - 1, len(keys))
+            if got and not new:
+                # the server ignored startAt and sent the same page again
+                st["warnings"][f"users-paging:{proj}"] = (
+                    f"users of {proj}: page {pages} (startAt={start}) repeated earlier users - the "
+                    f"server ignores startAt; stopped at {len(mine)} user(s)")
+                LOG.warning("%s", st["warnings"][f"users-paging:{proj}"])
+                break
             start += len(got)
             if len(got) < page or start >= 50000:
                 break
-        if not quiet:
-            print(f"jira-api: directory: {proj}: {sum(proj in u['projects'] for u in users.values())} "
-                  "user(s)", file=sys.stderr)
-    out["users"] = sorted(users.values(), key=lambda u: u["name"].lower())
-    for key, name in (("statuses", "statuses"), ("issueTypes", "issue_types"),
-                      ("priorities", "priorities")):
-        try:
-            vals = c.get(c.path(name)) or []
-        except ApiError as err:
-            out["warnings"].append(f"{name}: {err}")
-            continue
-        out[key] = sorted({v.get("name") for v in vals if isinstance(v, dict) and v.get("name")},
+        return len(mine)
+
+    def names_of(path_name):
+        def fetch():
+            vals = c.get(c.path(path_name)) or []
+            return sorted({v.get("name") for v in vals if isinstance(v, dict) and v.get("name")},
                           key=str.lower)
-    try:
+        return fetch
+
+    def lists(key, path_name):
+        def fetch():
+            st[key] = names_of(path_name)()
+            return len(st[key])
+        return fetch
+
+    def fields():
         flds = c.get(c.path("fields")) or []
-    except ApiError as err:
-        flds = []
-        out["warnings"].append(f"fields: {err}")
-    out["fields"] = sorted(({"id": f.get("id"), "name": f.get("name") or f.get("id"),
-                             "custom": bool(f.get("custom")),
-                             "type": ((f.get("schema") or {}).get("type") or "")}
-                            for f in flds if isinstance(f, dict) and f.get("id")),
-                           key=lambda f: (not f["custom"], (f["name"] or "").lower()))
-    out["versions"] = project_releases(c, keys, out["warnings"])
-    out["labels"] = project_labels(c, keys, out["warnings"])
-    out["fetchedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    out["forProjects"] = keys
+        st["fields"] = sorted(({"id": f.get("id"), "name": f.get("name") or f.get("id"),
+                                "custom": bool(f.get("custom")),
+                                "type": ((f.get("schema") or {}).get("type") or "")}
+                               for f in flds if isinstance(f, dict) and f.get("id")),
+                              key=lambda f: (not f["custom"], (f["name"] or "").lower()))
+        return len(st["fields"])
+
+    def versions(proj, i):
+        got = c.get(c.path("project_versions", project=proj)) or []
+        st["versions"][proj] = [{"name": v["name"], "project": proj,
+                                 "releaseDate": v.get("releaseDate") or "",
+                                 "released": bool(v.get("released"))}
+                                for v in (got if isinstance(got, list) else [])
+                                if isinstance(v, dict) and v.get("name") and not v.get("archived")]
+        return len(st["versions"][proj])
+
+    cap = max(0, c.sd("labels_max_issues"))
+
+    def labels(proj, i):
+        jql = f"project = \"{jira_config.jql_quote(proj)}\" AND labels is not EMPTY ORDER BY updated DESC"
+        seen, n = set(), 0
+        for got, total, last in c.search_pages(jql, "labels", max_total=cap,
+                                               page_size=min(cap, c.sd("max_results_search"))):
+            n += len(got)
+            for iss in got:
+                for lab in (iss.get("fields") or {}).get("labels") or []:
+                    if isinstance(lab, str) and lab:
+                        seen.add(lab)
+            of = min(cap, total) if total else cap
+            report("labels", f"labels {i}/{len(keys)} · {proj} {n:,}/{of:,} issues ({len(seen)} labels)",
+                   i - 1, len(keys))
+        st["labels"][proj] = sorted(seen)
+        return len(seen)
+
+    per_project("projects", "project", project)
+    per_project("users", "users", users)
+    once("statuses", "statuses", lists("statuses", "statuses"))
+    once("issueTypes", "issue types", lists("issueTypes", "issue_types"))
+    once("priorities", "priorities", lists("priorities", "priorities"))
+    once("fields", "fields", fields)
+    per_project("versions", "releases", versions)
+    if cap:
+        per_project("labels", "labels", labels)
+
+    out = directory_result(st, keys)
+    complete = not any(k.split(":")[0] in ("projects", "users", "statuses", "issueTypes", "priorities",
+                                           "fields", "versions", "labels") for k in st["warnings"])
+    if ck_name:
+        if complete:
+            clear_checkpoints(ck_name)
+        else:
+            LOG.info("directory finished with skipped parts - checkpoint kept: a rerun within %sh "
+                     "retries only those", resume_hours)
     return out
 
 
-def project_releases(c: Client, keys: list, warnings: list) -> list:
-    """Unarchived versions of each project: unreleased first (soonest date
-    first), then released (newest first)."""
-    got_all: list = []
-    for proj in keys:
-        try:
-            got = c.get(c.path("project_versions", project=proj)) or []
-        except ApiError as err:
-            if err.code == 401:
-                raise
-            warnings.append(f"releases of {proj}: {err}")
-            continue
-        for v in got if isinstance(got, list) else []:
-            if isinstance(v, dict) and v.get("name") and not v.get("archived"):
-                got_all.append({"name": v["name"], "project": proj,
-                                "releaseDate": v.get("releaseDate") or "",
-                                "released": bool(v.get("released"))})
-    todo = sorted((v for v in got_all if not v["released"]),
+def directory_result(st: dict, keys: list) -> dict:
+    """The checkpointed state -> directory.json's shape."""
+    vers = [v for p in keys for v in st["versions"].get(p, [])]
+    todo = sorted((v for v in vers if not v["released"]),
                   key=lambda v: (v["releaseDate"] or "9999", v["name"].lower()))
-    done = sorted((v for v in got_all if v["released"]),
+    done = sorted((v for v in vers if v["released"]),
                   key=lambda v: (v["releaseDate"], v["name"].lower()), reverse=True)
-    return todo + done
-
-
-def project_labels(c: Client, keys: list, warnings: list) -> list:
-    """[{name, projects}] - every label on the newest labels_max_issues
-    labelled issues of each project (fields=labels only; 0 = skip)."""
-    cap = max(0, c.sd("labels_max_issues"))
-    seen: dict = {}
-    for proj in keys if cap else []:
-        jql = f"project = \"{jira_config.jql_quote(proj)}\" AND labels is not EMPTY ORDER BY updated DESC"
-        try:
-            res = c.search(jql, "labels", max_total=cap, page_size=min(cap, 100))
-        except ApiError as err:
-            if err.code == 401:
-                raise
-            warnings.append(f"labels of {proj}: {err}")
-            continue
-        for i in res["issues"]:
-            for lab in (i.get("fields") or {}).get("labels") or []:
-                if isinstance(lab, str) and lab:
-                    seen.setdefault(lab, set()).add(proj)
-    return [{"name": k, "projects": sorted(v)} for k, v in sorted(seen.items(), key=lambda kv: kv[0].lower())]
+    labs: dict = {}
+    for p in keys:
+        for lab in st["labels"].get(p, []):
+            labs.setdefault(lab, []).append(p)
+    return {"projects": [{"key": k, "name": st["projects"].get(k) or k} for k in keys],
+            "users": sorted(st["users"].values(), key=lambda u: u["name"].lower()),
+            "statuses": st["statuses"], "issueTypes": st["issueTypes"], "priorities": st["priorities"],
+            "fields": st["fields"], "versions": todo + done,
+            "labels": [{"name": k, "projects": sorted(v)} for k, v in sorted(labs.items(),
+                                                                             key=lambda kv: kv[0].lower())],
+            "warnings": list(st["warnings"].values()),
+            "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "forProjects": keys}
 
 
 def window_since(w: str):
@@ -1453,6 +1608,9 @@ def main(argv: list) -> int:
     if o["jobs"]:
         list_jobs(team)
         return 0
+    if not o["curl"]:
+        jira_log.setup("jira_api", ["jira_api.py", *[a if a != o["token"] or not a else "***" for a in argv]],
+                       cfg)
     if o["detect_auth"]:
         return detect_auth(cfg, team, o["email"] if o["email_set"] else (cfg["email"] or ""))
     need = ["site", "token"] + (["email"] if cfg.auth == "basic" else [])

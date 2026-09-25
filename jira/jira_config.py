@@ -95,6 +95,11 @@ DEFAULTS = {
     "requestDelayMs": 0,             # pause between requests (gentle throttle)
     "checkpointEvery": 500,          # issues between cache writes + resume points
     "rebuildOnNextPoll": False,      # one-time: wipe the cache, re-populate (cleared when done)
+    "logLevel": "DEBUG",             # ~/.cache/jira/debug.log level (DEBUG / INFO / WARNING)
+    "rawCapture": True,              # every response body + headers -> ~/.cache/jira/raw/<run>/
+    "rawKeepDays": 3,                # raw run folders older than this are pruned
+    "rawMaxMB": 2048,                # ... and the oldest go until raw/ fits in this
+    "directoryResumeHours": 24,      # a failed / partial directory job resumes within this
     "setup": None,                   # {state: pending|done, steps: {name: {...}}} (jira_poll --setup)
 }
 

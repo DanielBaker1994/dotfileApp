@@ -195,6 +195,9 @@ if url.endswith("/myself"):
     body = {"displayName": "Fake User", "name": "fake"}
 elif path.endswith("/project"):
     body = [{"key": "P1", "name": "Proj One"}, {"key": "P2", "name": "Proj Two"}]
+elif "/project/" in path and not path.endswith("/versions"):
+    k = path.rsplit("/", 1)[-1]
+    body = {"key": k, "name": {"P1": "Proj One", "P2": "Proj Two"}.get(k, k)}
 elif path.endswith("/user/assignable/search"):
     # 3 users per project, served in pages; "bob" is in both projects
     proj, start, n = q["project"][0], int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
@@ -796,12 +799,25 @@ elif u.path.endswith("/versions"):
 elif "/issue/" in u.path:
     body = {"fields": {"comment": {"comments": [{"author": {"displayName": "A"}, "body": "x"},
                                                 {"author": {"displayName": "B"}, "body": "y"}]}}}
+elif u.path.endswith("/user/assignable/search"):
+    proj, start, n = q["project"][0], int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
+    us = [{"name": f"{proj.lower()}u{i}", "displayName": f"{proj} U{i}"} for i in range(3)]
+    # FAKE_USERS_SAME: a server that ignores startAt (the same page forever)
+    body = us[:n] if os.environ.get("FAKE_USERS_SAME") else us[start:start + n]
+elif u.path.endswith("/search") and "labels is not EMPTY" in q.get("jql", [""])[0]:
+    proj = re.search(r'project = "([^"]+)"', q["jql"][0]).group(1)
+    if proj in os.environ.get("FAKE_LABELS_401", "").split(","):
+        code, ra, body = 401, "0", {"message": "Client must be authenticated to access this resource."}
+    else:
+        body = {"startAt": 0, "total": 1, "issues": [{"key": f"{proj}-1", "fields": {"labels": [f"l{proj}"]}}]}
 elif u.path.endswith("/search"):
     n429 = int(os.environ.get("FAKE_429", "0"))
     if n429 and bump("429") < n429:
         code, ra, body = 429, "0", {"errorMessages": ["slow down"]}
     elif os.environ.get("FAKE_401_ONCE") and bump("401") == 0:
-        code, body = 401, {}
+        code, ra, body = 401, os.environ.get("FAKE_401_RA", ""), {}
+    elif os.environ.get("FAKE_SEARCH_401"):
+        code, ra, body = 401, "0", {"message": "shed"}
     else:
         jql = q["jql"][0]
         items = [issue(i) for i in range(N)]
@@ -820,6 +836,9 @@ elif u.path.endswith("/search"):
             body = {"startAt": start, "total": len(items), "issues": items[start:start + n]}
 else:
     body = {}
+if "-D" in sys.argv:     # raw capture: the response headers
+    with open(sys.argv[sys.argv.index("-D") + 1], "w") as fh:
+        fh.write(f"HTTP/1.1 {code} X\r\nRetry-After: {ra}\r\nX-Fake: yes\r\n\r\n")
 sys.stdout.write(json.dumps(body) + f"\n{code} {ra}")
 """
 
@@ -1086,6 +1105,147 @@ class ResilientSyncTests(unittest.TestCase):
             self.assertEqual(sorted(self.cache(tmp)), sorted(f"P-{i}" for i in range(12)))
             with open(env["JIRA_CONFIG_JSON"]) as fh:
                 self.assertFalse(json.load(fh)["rebuildOnNextPoll"])
+
+    def test_mid_run_401_really_waits_and_names_the_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old, slept = self.client_env(tmp, FAKE_401_ONCE="1", FAKE_401_RA="0"), []
+            old_sleep, old_log = jira_api.SLEEP, jira_api.CURL_LOG
+            jira_api.SLEEP, jira_api.CURL_LOG = slept.append, os.path.join(tmp, "curl.log")
+            try:
+                c, waits = self.client(), []
+                c.on_wait = lambda m, s: waits.append(m)
+                c.get("/rest/api/2/myself")
+                self.assertEqual(len(c.search("project = P", "summary")["issues"]), 12)
+                self.assertEqual(slept, [5.0])          # Retry-After: 0 is not a wait for a 401
+                self.assertIn("GET /rest/api/2/search", waits[0])
+                self.assertIn("Retry-After 0s ignored", waits[0])
+                os.environ.pop("FAKE_401_ONCE")
+                os.environ["FAKE_SEARCH_401"] = "1"
+                slept.clear()
+                with self.assertRaises(jira_api.ApiError) as cm:
+                    c.search("project = P", "summary")
+                self.assertEqual(slept, [5.0, 10.0, 20.0, 40.0])
+                msg = str(cm.exception)
+                self.assertIn("token worked earlier", msg)
+                self.assertIn("/rest/api/2/search", msg)
+                self.assertIn("shed", msg)               # the server's own words
+                self.assertNotIn("fix it in the setup sheet", msg)
+            finally:
+                jira_api.SLEEP, jira_api.CURL_LOG = old_sleep, old_log
+                os.environ.pop("FAKE_SEARCH_401", None)
+                self.restore(old)
+
+    DIR_EP = [{"name": "directory", "window": "1w", "projects": "*", "type": "directory", "enabled": True}]
+
+    def raw_runs(self, tmp):
+        root = os.path.join(tmp, "cache", "raw")
+        return sorted(os.path.join(root, d) for d in os.listdir(root))
+
+    def test_directory_late_401_is_a_warning_raw_and_debug_log_show_it_rerun_retries_only_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=self.DIR_EP, scope=("P1", "P2"), token="SEKRETTOKEN42",
+                           rateLimitMaxWaitMinutes=0)
+            env["FAKE_LABELS_401"] = "P2"
+            p = self.poll(env, "--directory")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(os.path.join(tmp, "cache", "directory.json")) as fh:
+                d = json.load(fh)
+            self.assertEqual(len(d["users"]), 6)
+            self.assertEqual(d["labels"], [{"name": "lP1", "projects": ["P1"]}])
+            self.assertEqual(len(d["warnings"]), 1)
+            self.assertIn("labels of P2", d["warnings"][0])
+            self.assertIn("token worked earlier", d["warnings"][0])
+            ck = os.path.join(tmp, "cache", "checkpoints", "directory-directory.json")
+            self.assertTrue(os.path.exists(ck))          # the failed part is kept to retry
+            # raw: every request, the 401 with its body + headers
+            run = self.raw_runs(tmp)[-1]
+            with open(os.path.join(run, "manifest.jsonl")) as fh:
+                man = [json.loads(x) for x in fh]
+            self.assertEqual(len(man), len(self.calls(tmp)))
+            bad = [m for m in man if m["httpCode"] == 401]
+            self.assertEqual(len(bad), 1)
+            self.assertEqual(bad[0]["stage"], "directory/labels/P2")
+            with open(os.path.join(run, bad[0]["body"])) as fh:
+                self.assertIn("Client must be authenticated", fh.read())
+            with open(os.path.join(run, bad[0]["body"].replace(".json", ".meta.json"))) as fh:
+                meta = json.load(fh)
+            self.assertIn(["X-Fake", "yes"], meta["headers"])
+            self.assertIn("$JIRA_TOKEN", meta["repro"])
+            self.assertEqual(oct(os.stat(run).st_mode & 0o777), "0o700")
+            with open(os.path.join(tmp, "cache", "debug.log")) as fh:
+                log = fh.read()
+            for want in ("▶ directory", "▶ users", "◀ users done", "▶ labels", "[directory/labels/P2]",
+                         "HTTP 401 on GET /rest/api/2/search", "skipped labels of P2"):
+                self.assertIn(want, log)
+            for root, _, files in os.walk(os.path.join(tmp, "cache")):
+                for f in files:
+                    if f != "curl.log":                  # curl.log is the runnable one (0600)
+                        with open(os.path.join(root, f), errors="replace") as fh:
+                            self.assertNotIn("SEKRETTOKEN42", fh.read(), f)
+            # rerun: only the failed part is fetched again
+            os.unlink(os.path.join(tmp, "calls.jsonl"))
+            env.pop("FAKE_LABELS_401")
+            p = self.poll(env, "--directory")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(len(self.calls(tmp)), 1, self.calls(tmp))
+            self.assertIn("P2", self.calls(tmp)[0])
+            with open(os.path.join(tmp, "cache", "directory.json")) as fh:
+                d = json.load(fh)
+            self.assertEqual((len(d["users"]), d["warnings"], len(d["labels"])), (6, [], 2))
+            self.assertFalse(os.path.exists(ck))
+
+    def test_directory_aborts_on_401s_in_a_row_and_resumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=self.DIR_EP, scope=("P1", "P2", "P3"), rateLimitMaxWaitMinutes=0)
+            env["FAKE_LABELS_401"] = "P1,P2,P3"
+            p = self.poll(env, "--directory")
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "directory.json")))
+            with open(os.path.join(tmp, "cache", "debug.log")) as fh:
+                log = fh.read()
+            self.assertIn("✗ P3 failed", log)
+            self.assertIn("Traceback", log)
+            os.unlink(os.path.join(tmp, "calls.jsonl"))
+            env.pop("FAKE_LABELS_401")
+            p = self.poll(env, "--directory")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            calls = self.calls(tmp)
+            self.assertEqual(len(calls), 3)                   # labels of P1..P3 only
+            self.assertTrue(all("labels" in u for u in calls))
+            with open(os.path.join(tmp, "cache", "directory.json")) as fh:
+                self.assertEqual(len(json.load(fh)["users"]), 9)
+
+    def test_directory_users_stop_when_the_server_ignores_startat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=self.DIR_EP, scope=("P1",))
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["P1"], "search_defaults": {"max_results_users": 2}}, fh)
+            env["FAKE_USERS_SAME"] = "1"
+            p = self.poll(env, "--directory")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(len([u for u in self.calls(tmp) if "assignable" in u]), 2)
+            with open(os.path.join(tmp, "cache", "directory.json")) as fh:
+                d = json.load(fh)
+            self.assertEqual(len(d["users"]), 2)
+            self.assertIn("ignores startAt", d["warnings"][0])
+
+    def test_raw_runs_are_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=self.DIR_EP, scope=("P1",), rawKeepDays=1)
+            root = os.path.join(tmp, "cache", "raw")
+            os.makedirs(os.path.join(root, "old"))
+            os.utime(os.path.join(root, "old"), (0, 0))
+            os.makedirs(os.path.join(root, "recent"))
+            self.assertEqual(self.poll(env, "--directory").returncode, 0)
+            names = [os.path.basename(r) for r in self.raw_runs(tmp)]
+            self.assertNotIn("old", names)
+            self.assertIn("recent", names)
+            self.assertEqual(len(names), 2)
+        with tempfile.TemporaryDirectory() as tmp:     # rawCapture false: no folder at all
+            env = self.env(tmp, endpoints=self.DIR_EP, scope=("P1",), rawCapture=False)
+            self.assertEqual(self.poll(env, "--directory").returncode, 0)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "raw")))
+            self.assertTrue(os.path.exists(os.path.join(tmp, "cache", "debug.log")))
 
     def test_describe_shows_setup_scope_and_shared_sync(self):
         with tempfile.TemporaryDirectory() as tmp:

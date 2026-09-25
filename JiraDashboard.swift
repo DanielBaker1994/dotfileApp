@@ -959,7 +959,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             ("Poll status (status.json)", info["statusPath"] as? String ?? JiraPoll.statusPath),
             ("Directory cache (directory.json)", JiraPoll.directoryPath),
             ("Poll log (poll.log)", info["pollLog"] as? String),
+            ("Debug log (debug.log)", info["debugLog"] as? String),
             ("curl log", info["curlLog"] as? String ?? JiraPoll.curlLogPath),
+            ("Raw responses — latest run (Finder)", (info["rawDir"] as? String).flatMap { $0.isEmpty ? nil : $0 }),
         ]
         for (title, path) in files {
             guard let path else { continue }
@@ -1621,6 +1623,11 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     @objc private func openFile(_ sender: NSPopUpButton) {
         guard let path = sender.selectedItem?.representedObject as? String else { return }
         let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))     // raw/<run>: a folder of files
+            return
+        }
         if !fm.fileExists(atPath: path) {
             // team.json: start from the shipped example
             let example = JiraPoll.dir + "/team.example.json"
@@ -1648,6 +1655,14 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                tip: "Delete the cached tickets and fetch everything again (jira_poll.py --rebuild)")
         let openLog = button(ThemedPushButton(title: "Open poll.log", target: nil, action: nil),
                              #selector(openPollLog(_:)), tip: "Every stage, page, wait and error of every poll")
+        let openDebug = button(ThemedPushButton(title: "Open debug.log", target: nil, action: nil),
+                               #selector(openDebugLog(_:)),
+                               tip: "Where the poller is: every stage (▶ / ◀ / ✗ + traceback), request, "
+                                   + "HTTP code, timing and retry")
+        let openRaw = button(ThemedPushButton(title: "Raw Responses", target: nil, action: nil),
+                             #selector(openRawDir(_:)),
+                             tip: "The newest run's folder: every response exactly as Jira sent it "
+                                 + "(body + headers), manifest.jsonl lists them")
         setupSteps.orientation = .vertical
         setupSteps.alignment = .leading
         setupSteps.spacing = 4
@@ -1666,7 +1681,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                  + "never the whole site. Type the keys; they are not looked up."),
             scopeRow,
             sectionTitle("ONE-TIME SETUP"), setupIntro, setupSteps, setupProgress,
-            row([runSetupButton, openLog]),
+            row([runSetupButton, openLog, openDebug, openRaw]),
             sectionTitle("ISSUE CACHE"), cacheText, row([rebuildButton]),
             setupMsg,
         ], spacing: 8)
@@ -1712,6 +1727,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             var tip = [s["detail"] as? String ?? ""]
             if !err.isEmpty { tip.append(err) }
             if let c = s["curl"] as? String, !c.isEmpty { tip.append("the failing request ($JIRA_TOKEN = your token):\n" + c) }
+            if let r = s["rawDir"] as? String, !r.isEmpty, !err.isEmpty {
+                tip.append("raw responses of that run (Raw Responses button):\n" + r
+                           + "\nstage by stage: " + (s["debugLog"] as? String ?? "debug.log"))
+            }
             detail.toolTip = tip.filter { !$0.isEmpty }.joined(separator: "\n\n")
             let text = vstack([title, detail], spacing: 1)
             let b = ThemedPushButton(title: state == "ok" ? "Run Again" : state == "error" ? "Retry" : "Run",
@@ -1865,6 +1884,27 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         }
     }
 
+    @objc private func openDebugLog(_ sender: Any?) {
+        let path = info["debugLog"] as? String ?? (JiraPoll.statusPath as NSString)
+            .deletingLastPathComponent + "/debug.log"
+        if !FileManager.default.fileExists(atPath: path) {
+            setSetupMsg("No debug.log yet — it is written by the first poll or setup step.", JC.dim)
+            return
+        }
+        controller?.openNoteFile(path)
+    }
+
+    // the newest raw/<run> folder in Finder (else raw/ itself)
+    @objc private func openRawDir(_ sender: Any?) {
+        let fm = FileManager.default
+        let candidates = [info["rawDir"] as? String, info["rawRoot"] as? String].compactMap { $0 }
+        guard let path = candidates.first(where: { !$0.isEmpty && fm.fileExists(atPath: $0) }) else {
+            setSetupMsg("No raw responses yet — they are saved by the next poll or setup step.", JC.dim)
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
     @objc private func openPollLog(_ sender: Any?) {
         let path = info["pollLog"] as? String ?? (JiraPoll.statusPath as NSString)
             .deletingLastPathComponent + "/poll.log"
@@ -1906,6 +1946,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         status      \(s("statusPath"))
         directory   \(JiraPoll.directoryPath)
         curl log    \(s("curlLog"))
+        poll log    \(s("pollLog"))
+        debug log   \(s("debugLog"))  (stages, requests, retries — python logging)
+        raw dumps   \(s("rawRoot"))  (every response as received, per run)
         poller      \(s("pollScript"))
 
         LOGIN TEST (GET /myself) — full curl:

@@ -42,7 +42,8 @@ bin/ui-test.sh --verbose
 - `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
 - `JiraSearch.swift` — Cmd+F live search (`JiraSearchPanel`), `JiraMultiPicker`, `JiraDirectory`
 - `commands.conf` — config (windows, commands, colors, paths)
-- `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller");
+- `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller";
+  `jira_log.py` = debug.log + raw response dumps);
   tests: `python3 Tests/test_jira_poll.py`
 - `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
 
@@ -75,10 +76,27 @@ bin/ui-test.sh --verbose
 - Resilience: `Client.get` retries the SAME request on 429/502-504, curl
   network exits, and a 401 after a 2xx this run (Retry-After via `-w
   %header{retry-after}`, else backoff) within `rateLimitMaxWaitMinutes`;
-  no whole-job retries. Tests swap `jira_api.SLEEP`.
+  no whole-job retries. A mid-run 401 waits at least 5/10/20/40s
+  (`AUTH_401_BACKOFF`; a `Retry-After: 0` is not a wait) and its final
+  error names the request + the server's body ("token worked earlier"),
+  not "fix your token". Tests swap `jira_api.SLEEP`.
 - Visibility: `~/.cache/jira/poll.log` (`say()`, always written) + status.json
-  `progress` (`Reporter`, per page) → the Jira Config header / Setup page
-  (1s timer reads status.json; rate-limit countdown via `waitingUntil`).
+  `progress` (`Reporter`, per page / `Reporter.step` per directory stage) →
+  the Jira Config header / Setup page (1s timer reads status.json;
+  rate-limit countdown via `waitingUntil`).
+- Debug log + raw dumps (`jira/jira_log.py`, opened by `jira_log.setup()` in
+  both mains, not for `--describe`/`--curl`): `~/.cache/jira/debug.log`
+  (python `logging`, 10MB×5, config `logLevel`) — every line tagged
+  `run=… [job/stage/project]`; `jira_log.stage(name, c=client)` logs ▶ /
+  ◀ (time, requests, items) / ✗ + traceback; `Client.get` logs every
+  attempt; `say()` forwards. `~/.cache/jira/raw/<run>-<label>/` (0700):
+  `NNNN-<endpoint>-<code>.json|.body` = the body as received,
+  `.meta.json` = url, stage, attempt, curl exit, timing, ALL response
+  headers (`curl -D`), masked repro; `manifest.jsonl`. `ApiError.raw` =
+  the failing body's file. Config `rawCapture`, `rawKeepDays` (3),
+  `rawMaxMB` (2048). The token is scrubbed (`jira_log.secret`). Jira
+  Config: Setup ▸ "Open debug.log" / "Raw Responses", Open… menu, the
+  Connection page; a failed setup step stores `rawDir` + `debugLog`.
 - Start over: `jira_poll.py --rebuild` / config `rebuildOnNextPoll` (true →
   wipe + "resume" → false when complete; an interrupted rebuild resumes).
 - Switch: `[jira] enabled` in commands.conf gates the window, the launchd
@@ -133,7 +151,15 @@ bin/ui-test.sh --verbose
   Defaults (editable → `--team-set`), plus read-only Users, Statuses & Types
   (directory cache). Label edits call `reloadJiraWindow()`.
 - Directory job (endpoint `type: directory`, weekly `1w`, no tab; added once
-  by `migrate_v3`, flag `directoryJob`): `jira_api.directory()` → projects,
+  by `migrate_v3`, flag `directoryJob`). Staged (`per_project` / `once`,
+  each a `jira_log.stage`, progress callback → `Reporter.step`) and
+  checkpointed per project/section in `checkpoints/directory-NAME.json`: a
+  rerun within `directoryResumeHours` (24) resumes; a run that ends with
+  skipped parts writes directory.json AND keeps the checkpoint so the
+  rerun retries only those. A 401 after the token worked = a warning,
+  `MAX_401_IN_ROW` (3) failing requests in a row abort. Users paging stops
+  when a page brings no new ids (server ignoring startAt). Labels pages =
+  `max_results_search`. `jira_api.directory()` → projects,
   assignable users of `project_keys` (paginated, merged by id: Server `name`,
   Cloud `accountId`), statuses, issue types, priorities, fields, per-project
   releases (`project_releases`: unarchived versions) and labels
