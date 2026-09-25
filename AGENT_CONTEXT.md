@@ -203,6 +203,34 @@ bin/ui-test.sh --verbose
   browser (+ copies `KEY<TAB>URL`); actions are matched by title. No "copy
   selected" header button (`PopupConfig.copyRowsButton = false`); icon menu
   is window chrome + "Search Jira…" + "Open Jira Config Window".
+- Jira window filters: every `filter`-flagged column has a ▾ in its header
+  (`PopupTableHeaderView.onFilter` → `PopupWindow.onTableFilter`) that opens
+  a searchable multi-select `JiraMultiPicker` (popover `anchor`, Sort ↑/↓
+  `extraButtons`); OR within a field, AND across fields, "a, b" cells match
+  any part (`colFilters`, `cellValues`). `[jira] filters` fields that are
+  not columns (labels, reporter…) stay in the filter bar, same popover
+  (`PopupWindow.onFilterOpen`). Users show full name + username from the
+  directory. Enter on a row = the detail window (same as double-click).
+  "fit columns" header button → `PopupWindow.fitTableColumns()`.
+- Tab freshness badges: `JiraPoll.tabBadge` (status.json per job) →
+  `PopupWindow.tabBadges` (dot + age; green fresh+ok, yellow stale or a
+  failed run, red stale+failed; tooltip = details).
+- Favorites: ☆ beside each issue row's checkbox (`PopupConfig.rowStars`,
+  `PopupRow.starred`, nil = no star) or Cmd+K → `jira_poll.py --favorite
+  add|remove KEY…` (config.json `favorites`, favorites.json rewritten at
+  once from the cache / stdin rows). Endpoint type `favorites` (added once
+  by `migrate_v3`, flag `favoritesJob`; not a setup step) re-queries `key in
+  (…)` in scope every run; a key Jira rejects (400) is skipped.
+- Release blacklist: Cmd+K on releases.json rows → `jira_poll.py
+  --blacklist-release add|remove KEY…` (config.json `releaseBlacklist`); the
+  releases job splits into releases.json + `blacklist_release.json`. Release
+  rows carry `versionId`; "open in browser" = `jiraBrowseURL` (release →
+  /projects/P/versions/ID, else a fixVersion JQL search; never /browse). The
+  release detail window lists its issues (from jiras.json).
+- Voice (notes): dictation goes to the CURSOR. vim pane: extmark region via
+  `vimVoiceBegin/Update/End` (luaeval over RPC, throttled 0.2s); native
+  editor: `replaceRange`. `voice-live` (default true) = text appears as you
+  speak; false = held, inserted on stop.
 - `jira_poll.py --projects '*'` = every job (`all` only when no job is named
   "all" — the default job IS named "all").
 - Setup window: `JiraSetupWindow` (plain NSWindow above `.popUpMenu`, own key

@@ -866,7 +866,7 @@ def list_fields(c: Client) -> list:
 
 
 def releases(c: Client, project: str = "", projects: list | None = None) -> list:
-    """Every release (version): [{project,name,released,releaseDate,description}].
+    """Every release (version): [{project,name,id,released,releaseDate,description}].
     One versions call per project - the date lives on the version object."""
     if project:
         keys = [project]
@@ -883,7 +883,7 @@ def releases(c: Client, project: str = "", projects: list | None = None) -> list
                 raise
             continue
         for v in vs:
-            out.append({"project": p, "name": v.get("name"),
+            out.append({"project": p, "name": v.get("name"), "id": str(v.get("id") or ""),
                         "released": alt(v.get("released"), False),
                         "releaseDate": alt(v.get("releaseDate"), ""),
                         "description": alt(v.get("description"), "")})

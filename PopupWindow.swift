@@ -659,6 +659,14 @@ public struct PopupConfig {
     // false = keep the checkboxes but drop the header "copy selected" button
     // (the host offers the copy through an action picker, e.g. Cmd+K)
     public var copyRowsButton: Bool = true
+    // a ☆ bookmark toggle right of each row's checkbox (filled when
+    // PopupRow.starred); a click fires PopupWindow.onToggleStar
+    public var rowStars: Bool = false
+    // where row content starts: padding + the checkbox / ☆ columns (rows,
+    // table header and hit-testing all share it)
+    public var rowLeadInset: CGFloat {
+        padding + 10 + (selectableRows ? 22 : 0) + (rowStars ? 20 : 0)
+    }
 
     // cap on how much a single row may stretch when the window is resized
     // larger than its content: filling a tall window with few rows would
@@ -713,6 +721,7 @@ public protocol PopupRow {
     var body: String? { get }      // with wrapContent: wrapped multi-line text
                                    // under line 2 (capped at 2 lines)
     var loadMore: Bool { get }     // synthetic "load next page" row
+    var starred: Bool? { get }     // config.rowStars: filled ☆ / empty ☆ / nil = none
     // table mode: the text of one cell (config.tableColumns field)
     func cellText(_ field: String) -> String?
 }
@@ -724,6 +733,7 @@ public extension PopupRow {
     var detail: String? { nil }
     var body: String? { nil }
     var loadMore: Bool { false }
+    var starred: Bool? { nil }
     func cellText(_ field: String) -> String? { nil }
 }
 
@@ -736,13 +746,17 @@ public struct PopupTableColumn {
     public var width: CGFloat
     public var align: NSTextAlignment
     public var sortable: Bool
+    // the header shows a ▾ that fires PopupWindow.onTableFilter
+    public var filterable: Bool
     public init(field: String, title: String, width: CGFloat = 0,
-                align: NSTextAlignment = .left, sortable: Bool = false) {
+                align: NSTextAlignment = .left, sortable: Bool = false,
+                filterable: Bool = false) {
         self.field = field
         self.title = title
         self.width = width
         self.align = align
         self.sortable = sortable
+        self.filterable = filterable
     }
 }
 
@@ -1408,11 +1422,37 @@ final class PopupBackdrop: NSView {
 // Horizontal pill tab bar (notepad-style). Titles are drawn as pills; the
 // selected tab is highlighted. With many tabs the pills WRAP to the next row
 // (never hidden); the "+" add button comes first. Clicking fires onSelect.
+// A tab's status badge (e.g. jira poll freshness): a colored dot before the
+// title, short dim text after it ("12m"), and a hover tooltip.
+public struct PopupTabBadge {
+    public var tone: PopupTone
+    public var text: String
+    public var tip: String
+    public init(tone: PopupTone, text: String, tip: String) {
+        self.tone = tone
+        self.text = text
+        self.tip = tip
+    }
+}
+
 final class PopupTabsBar: NSView {
     var config: PopupConfig
     var zoom: CGFloat = 1.0
     var titles: [String] = [] {
         didSet { needsDisplay = true }
+    }
+    // parallel to titles (nil = no badge)
+    var badges: [PopupTabBadge?] = [] {
+        didSet { needsDisplay = true }
+    }
+    private func badge(_ i: Int) -> PopupTabBadge? { badges.indices.contains(i) ? badges[i] : nil }
+    private var badgeFont: NSFont { .systemFont(ofSize: max(9, config.buttonFontSize * zoom - 1.5), weight: .medium) }
+    private var dotW: CGFloat { 7 * zoom }
+    // extra width a badge adds to its pill: dot + gap, and " text"
+    private func badgeWidth(_ i: Int) -> CGFloat {
+        guard let b = badge(i) else { return 0 }
+        let tw = b.text.isEmpty ? 0 : (b.text as NSString).size(withAttributes: [.font: badgeFont]).width + 5 * zoom
+        return dotW + 5 * zoom + tw
     }
     var selected = 0 {
         didSet { needsDisplay = true }
@@ -1479,6 +1519,11 @@ final class PopupTabsBar: NSView {
             if title != "+", let close, close.insetBy(dx: -2, dy: -2).contains(p) { overClose = i }
             break
         }
+        let tip = over.flatMap { i -> String? in
+            let t = pillRects()[i].title
+            return titles.firstIndex(of: t).flatMap { badge($0)?.tip }
+        }
+        if toolTip != tip { toolTip = tip }
         if over != hoverIndex || overClose != hoverCloseIndex {
             hoverIndex = over
             hoverCloseIndex = overClose
@@ -1486,20 +1531,21 @@ final class PopupTabsBar: NSView {
         }
     }
 
-    private func tabWidth(_ title: String) -> CGFloat {
+    private func tabWidth(_ title: String, _ index: Int = -1) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: config.buttonFontSize * zoom, weight: .bold),
         ]
         // 12pt lead-in + label + room for the ✕ at the right end
         return (title as NSString).size(withAttributes: attrs).width + 12 * zoom + 22 * zoom
+            + badgeWidth(index)
     }
 
     // Number of wrapped rows the pills occupy at `width` (the "+" first).
     private func rowCount(forWidth width: CGFloat) -> Int {
         var x: CGFloat = config.padding + 4 + (config.tabsAddButton ? addW + gap : 0)
         var rows = 1
-        for t in titles {
-            let tw = tabWidth(t) + gap
+        for (i, t) in titles.enumerated() {
+            let tw = tabWidth(t, i) + gap
             if x + tw > width - config.padding {
                 rows += 1
                 x = config.padding + 4 + tw
@@ -1525,8 +1571,8 @@ final class PopupTabsBar: NSView {
             out.append((NSRect(x: x, y: y, width: addW, height: tabH), "+", nil))
             x += addW + gap
         }
-        for t in titles {
-            let tw = tabWidth(t)
+        for (i, t) in titles.enumerated() {
+            let tw = tabWidth(t, i)
             if x + tw + gap > bounds.width - config.padding {
                 y += tabH + gap
                 x = config.padding + 4
@@ -1588,8 +1634,35 @@ final class PopupTabsBar: NSView {
             ]
             let ts = title as NSString
             let tsz = ts.size(withAttributes: attrs)
-            ts.draw(at: NSPoint(x: labelRect.midX - tsz.width / 2, y: labelRect.midY - tsz.height / 2),
-                    withAttributes: attrs)
+            let ti = titles.firstIndex(of: title) ?? -1
+            if let b = badge(ti) {
+                // [● title age]: centered as one group in the label slot
+                let battrs: [NSAttributedString.Key: Any] = [
+                    .font: badgeFont, .foregroundColor: fg.withAlphaComponent(isSelectedTab ? 0.75 : 0.65)]
+                let bs = b.text as NSString
+                let bsz = b.text.isEmpty ? .zero : bs.size(withAttributes: battrs)
+                let groupW = dotW + 5 * zoom + tsz.width + (b.text.isEmpty ? 0 : 5 * zoom + bsz.width)
+                var x = labelRect.midX - groupW / 2
+                let dot = NSRect(x: x, y: labelRect.midY - dotW / 2, width: dotW, height: dotW)
+                c.tone(b.tone).setFill()
+                NSBezierPath(ovalIn: dot).fill()
+                if isSelectedTab {
+                    // keep the hue readable on the solid accent pill
+                    c.onAccent.withAlphaComponent(0.55).setStroke()
+                    let ring = NSBezierPath(ovalIn: dot.insetBy(dx: -0.5, dy: -0.5))
+                    ring.lineWidth = 1
+                    ring.stroke()
+                }
+                x += dotW + 5 * zoom
+                ts.draw(at: NSPoint(x: x, y: labelRect.midY - tsz.height / 2), withAttributes: attrs)
+                x += tsz.width + 5 * zoom
+                if !b.text.isEmpty {
+                    bs.draw(at: NSPoint(x: x, y: labelRect.midY - bsz.height / 2), withAttributes: battrs)
+                }
+            } else {
+                ts.draw(at: NSPoint(x: labelRect.midX - tsz.width / 2, y: labelRect.midY - tsz.height / 2),
+                        withAttributes: attrs)
+            }
             // ✕ on the selected tab and the hovered one; its own hover disc
             if let close, isSelectedTab || hovered {
                 if hoverCloseIndex == i {
@@ -1672,6 +1745,13 @@ final class PopupFilterBar: NSView {
     var valueLabels: [[String]] = []
     var selections: [Int] = []       // selected value index per dimension
     var onSelect: ((Int, Int) -> Void)?
+    // host-driven mode (e.g. a searchable multi-select popover): a pill
+    // click fires onOpen(dimension, pill rect) instead of the value menu;
+    // summaries[dim] (non-empty) replaces the "label: value" text and
+    // `active` marks the pills that narrow the rows
+    var onOpen: ((Int, NSRect) -> Void)?
+    var summaries: [String] = []
+    var active: Set<Int> = []
     private var pillH: CGFloat { 22 * zoom }
     // joined segmented bar: segments touch (no gap) with thin | dividers
     private let sepW: CGFloat = 1
@@ -1705,6 +1785,7 @@ final class PopupFilterBar: NSView {
 
     private func currentTitle(_ dim: Int) -> String {
         let label = labels.indices.contains(dim) ? labels[dim] : "?"
+        if summaries.indices.contains(dim), !summaries[dim].isEmpty { return "\(label): \(summaries[dim])" }
         let sel = selections.indices.contains(dim) ? selections[dim] : 0
         return "\(label): \(optionTitle(dim, sel))"
     }
@@ -1743,7 +1824,8 @@ final class PopupFilterBar: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         for (rect, dim, title) in pillRects() {
-            let active = selections.indices.contains(dim) && selections[dim] > 0
+            let active = self.active.contains(dim)
+                || (selections.indices.contains(dim) && selections[dim] > 0)
             let st: ButtonState = flashDim == dim ? .pressed : active ? .on : .idle
             let r = rect.insetBy(dx: 1, dy: 0)
             ButtonStyle.draw(r, st, config.colors, radius: config.buttonRadius * zoom)
@@ -1765,6 +1847,10 @@ final class PopupFilterBar: NSView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         for (rect, dim, _) in pillRects() where rect.contains(p) {
+            if let open = onOpen {
+                open(dim, rect)
+                return
+            }
             let menu = NSMenu()
             let opts = values.indices.contains(dim) ? values[dim] : ["All"]
             for (vi, _) in opts.enumerated() {
@@ -1901,6 +1987,7 @@ final class PopupRowView: NSView {
     // this through PopupWindow.selectedIndices
     var selected: Set<Int> = []
     var onToggleSelect: ((Int) -> Void)?
+    var onToggleStar: ((Int) -> Void)?
 
     override var isFlipped: Bool { true }
 
@@ -1913,19 +2000,24 @@ final class PopupRowView: NSView {
 
     // left inset of row text: the checkbox column is reserved when present,
     // so height measurement and drawing always agree
-    private var contentX: CGFloat {
-        config.padding + 10 + (config.selectableRows ? 22 : 0)
-    }
+    private var contentX: CGFloat { config.rowLeadInset }
 
     // table geometry for a given view width (the header view uses the same)
     static func tableFrames(_ config: PopupConfig, width: CGFloat) -> [(x: CGFloat, w: CGFloat)] {
-        let x0 = config.padding + 10 + (config.selectableRows ? 22 : 0)
+        let x0 = config.rowLeadInset
         return config.tableColumns.frames(x0: x0, usable: width - x0 - (config.padding + 10))
     }
 
     private func checkBoxRect(in band: NSRect) -> NSRect {
         let s: CGFloat = 13
         return NSRect(x: config.padding + 2, y: band.midY - s / 2, width: s, height: s)
+    }
+
+    // the ☆ right of the checkbox (config.rowStars)
+    private func starRect(in band: NSRect) -> NSRect {
+        let s: CGFloat = 14
+        return NSRect(x: config.padding + 2 + (config.selectableRows ? 22 : 0) - 1,
+                      y: band.midY - s / 2, width: s, height: s)
     }
 
     // the row's natural-height band inside its (possibly stretched) rect —
@@ -2091,6 +2183,15 @@ final class PopupRowView: NSView {
                 return
             }
         }
+        if config.rowStars {
+            let i = rowIndex(at: p)
+            if i >= 0, rows.indices.contains(i), !rows[i].loadMore, rows[i].starred != nil,
+               starRect(in: band(for: i)).insetBy(dx: -3, dy: -3).contains(p) {
+                onToggleStar?(i)
+                downIndex = -1
+                return
+            }
+        }
         guard config.clickToSelect else {
             super.mouseDown(with: event)
             return
@@ -2187,6 +2288,9 @@ final class PopupRowView: NSView {
         }
         if config.selectableRows, !row.loadMore || config.tableColumns.isEmpty {
             drawCheckBox(checkBoxRect(in: band), on: selected.contains(index))
+        }
+        if config.rowStars, !row.loadMore, let on = row.starred {
+            drawStar(starRect(in: band), on: on)
         }
         if !config.tableColumns.isEmpty {
             drawTableRow(row, band: band)
@@ -2345,6 +2449,31 @@ final class PopupRowView: NSView {
         line.stroke()
     }
 
+    // ☆ bookmark: a faint outline until pinned, then a solid star in the
+    // palette's warning (gold) hue
+    private func drawStar(_ r: NSRect, on: Bool) {
+        let p = NSBezierPath()
+        let c = NSPoint(x: r.midX, y: r.midY + 0.5)
+        let outer = r.width / 2, inner = outer * 0.45
+        for k in 0..<10 {
+            // flipped view: start at the top point (-90°)
+            let a = (-90 + CGFloat(k) * 36) * .pi / 180
+            let rad = k % 2 == 0 ? outer : inner
+            let pt = NSPoint(x: c.x + cos(a) * rad, y: c.y + sin(a) * rad)
+            if k == 0 { p.move(to: pt) } else { p.line(to: pt) }
+        }
+        p.close()
+        p.lineJoinStyle = .round
+        if on {
+            config.colors.tone(.warning).setFill()
+            p.fill()
+        } else {
+            config.colors.dim.withAlphaComponent(0.55).setStroke()
+            p.lineWidth = 1.1
+            p.stroke()
+        }
+    }
+
     // Rounded checkbox: dim outline when unticked, filled + check mark when in
     // the copy selection.
     private func drawCheckBox(_ r: NSRect, on: Bool) {
@@ -2408,6 +2537,11 @@ final class PopupTableHeaderView: NSView {
     var sortColumn: Int? { didSet { needsDisplay = true } }
     var sortAscending = true { didSet { needsDisplay = true } }
     var onSort: ((Int) -> Void)?
+    // filterable columns: the ▾ at a title's right end (or a right-click on
+    // the title) fires onFilter(column, its rect); filtered columns wear
+    // the accent
+    var activeFilters: Set<Int> = [] { didSet { needsDisplay = true } }
+    var onFilter: ((Int, NSRect) -> Void)?
     // effective percent widths after a drag; final = true on mouseUp
     var onResize: (([CGFloat], Bool) -> Void)?
     private var drag: (divider: Int, startX: CGFloat, start: [CGFloat])?
@@ -2426,8 +2560,17 @@ final class PopupTableHeaderView: NSView {
         PopupRowView.tableFrames(config, width: bounds.width)
     }
     private var usable: CGFloat {
-        let x0 = config.padding + 10 + (config.selectableRows ? 22 : 0)
+        let x0 = config.rowLeadInset
         return max(1, bounds.width - x0 - (config.padding + 10))
+    }
+
+    // the ▾ filter target at the right end of a filterable column
+    private func filterRect(_ i: Int) -> NSRect? {
+        guard config.tableColumns.indices.contains(i), config.tableColumns[i].filterable,
+              frames.indices.contains(i), frames[i].w > 30 else { return nil }
+        let f = frames[i]
+        let s: CGFloat = 16
+        return NSRect(x: f.x + f.w - s - 5, y: bounds.midY - s / 2, width: s, height: s)
     }
 
     // the grab zone of the divider after column i (every column but the last)
@@ -2438,8 +2581,46 @@ final class PopupTableHeaderView: NSView {
 
     override func resetCursorRects() {
         let n = config.tableColumns.count
+        for i in 0..<n {
+            if let fr = filterRect(i) { addCursorRect(fr, cursor: .pointingHand) }
+        }
         guard n > 1 else { return }
         for i in 0..<(n - 1) { addCursorRect(dividerRect(i), cursor: .resizeLeftRight) }
+    }
+
+    private var hoverFilter: Int?
+    private var tracking: NSTrackingArea?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited,
+                                                      .activeInKeyWindow, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let over = config.tableColumns.indices.first { filterRect($0)?.contains(p) == true }
+        if over != hoverFilter {
+            hoverFilter = over
+            toolTip = over.map { "Filter \(config.tableColumns[$0].title)" }
+            needsDisplay = true
+        }
+    }
+    override func mouseExited(with event: NSEvent) {
+        if hoverFilter != nil { hoverFilter = nil; needsDisplay = true }
+    }
+
+    // right-click a filterable title = its filter
+    override func rightMouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let i = frames.firstIndex(where: { p.x >= $0.x && p.x < $0.x + $0.w }),
+           let fr = filterRect(i) {
+            onFilter?(i, fr)
+            return
+        }
+        super.rightMouseDown(with: event)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -2459,11 +2640,26 @@ final class PopupTableHeaderView: NSView {
             let para = NSMutableParagraphStyle()
             para.lineBreakMode = .byTruncatingTail
             para.alignment = col.align
-            let color = sortColumn == i ? c.accentOn : c.dim
+            let filtered = activeFilters.contains(i)
+            let color = sortColumn == i || filtered ? c.accentOn : c.dim
+            let fr = filterRect(i)
+            let titleW = max(0, f.w - 8 - (fr.map { $0.width + 2 } ?? 0))
             (title as NSString).draw(
-                with: NSRect(x: f.x + 3, y: bounds.midY - lineH / 2, width: max(0, f.w - 8), height: lineH),
+                with: NSRect(x: f.x + 3, y: bounds.midY - lineH / 2, width: titleW, height: lineH),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para, .kern: 0.6])
+            if let fr {
+                // ▾: solid accent chip while a filter narrows this column
+                if filtered {
+                    c.accentOn.setFill()
+                    NSBezierPath(roundedRect: fr, xRadius: 4, yRadius: 4).fill()
+                } else if hoverFilter == i {
+                    c.text.withAlphaComponent(0.12).setFill()
+                    NSBezierPath(roundedRect: fr, xRadius: 4, yRadius: 4).fill()
+                }
+                ButtonStyle.chevron(in: fr.insetBy(dx: 4, dy: 4),
+                                    color: filtered ? c.onAccent : c.dim.withAlphaComponent(0.9))
+            }
             if i < fs.count - 1 {
                 let d = NSBezierPath()
                 d.move(to: NSPoint(x: f.x + f.w - 0.5, y: 6))
@@ -2523,9 +2719,17 @@ final class PopupTableHeaderView: NSView {
             return
         }
         guard abs(p.x - downX) < 5 else { return }
-        if let i = frames.firstIndex(where: { p.x >= $0.x && p.x < $0.x + $0.w }),
-           config.tableColumns[i].sortable {
-            onSort?(i)
+        if let i = config.tableColumns.indices.first(where: {
+            filterRect($0)?.insetBy(dx: -2, dy: -3).contains(p) == true }) {
+            onFilter?(i, filterRect(i)!)
+            return
+        }
+        if let i = frames.firstIndex(where: { p.x >= $0.x && p.x < $0.x + $0.w }) {
+            if config.tableColumns[i].sortable {
+                onSort?(i)
+            } else if let fr = filterRect(i) {
+                onFilter?(i, fr)
+            }
         }
     }
 }
@@ -5676,6 +5880,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
     // a sortable column title was clicked (index into config.tableColumns)
     public var onTableSort: ((Int) -> Void)?
+    // a filterable column's ▾ was clicked: (column, header view, the ▾'s
+    // rect in it) — the host anchors its filter popover there
+    public var onTableFilter: ((Int, NSView, NSRect) -> Void)?
+    // columns with an active filter (their ▾ turns into an accent chip)
+    public var tableFilterActive: Set<Int> = [] {
+        didSet { tableHeader?.activeFilters = tableFilterActive }
+    }
+    // config.rowStars: the ☆ of row i was clicked
+    public var onToggleStar: ((Int) -> Void)?
     // a divider drag changed the column widths (percent); final = mouseUp
     public var onTableColumnsResized: (([CGFloat], Bool) -> Void)?
     private var chrome: PopupChrome?
@@ -5796,6 +6009,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             relayoutTabs()
         }
     }
+    // per-tab status badges, parallel to tabTitles (nil = none)
+    public var tabBadges: [PopupTabBadge?] = [] {
+        didSet {
+            tabsBar?.badges = tabBadges
+            relayoutTabs()
+        }
+    }
     public var selectedTab = 0 {
         didSet {
             guard oldValue != selectedTab else { return }
@@ -5854,6 +6074,24 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // empty = show the raw value). Matching always uses filterValues.
     public var filterValueLabels: [[String]] = [] {
         didSet { filterBar?.valueLabels = filterValueLabels; filterBar?.needsDisplay = true }
+    }
+    // multi-select mode (see PopupFilterBar.onOpen): pill click → host
+    // popover anchored at (bar, pill rect); summaries + active drive the look
+    public var onFilterOpen: ((Int, NSView, NSRect) -> Void)? {
+        didSet {
+            filterBar?.onOpen = onFilterOpen.map { cb in
+                { [weak self] dim, r in
+                    guard let bar = self?.filterBar else { return }
+                    cb(dim, bar, r)
+                }
+            }
+        }
+    }
+    public var filterSummaries: [String] = [] {
+        didSet { filterBar?.summaries = filterSummaries; filterBar?.needsDisplay = true; growWidthToContent() }
+    }
+    public var filterActive: Set<Int> = [] {
+        didSet { filterBar?.active = filterActive; filterBar?.needsDisplay = true }
     }
     public var filterSelections: [Int] = [] {
         didSet {
@@ -6619,6 +6857,11 @@ scroll.documentView = rowView
             updateCopyRowsLabel()
         }
         tableHeader?.onSort = { [weak self] i in self?.onTableSort?(i) }
+        tableHeader?.onFilter = { [weak self] i, r in
+            guard let self, let h = self.tableHeader else { return }
+            self.onTableFilter?(i, h, r)
+        }
+        rowView.onToggleStar = { [weak self] i in self?.onToggleStar?(i) }
         tableHeader?.onResize = { [weak self] pcts, final in
             guard let self else { return }
             var cols = self.config.tableColumns
@@ -6831,6 +7074,9 @@ scroll.documentView = rowView
     public func releaseHooks() {
         onShow = nil
         onFilter = nil
+        onTableFilter = nil
+        onToggleStar = nil
+        onFilterOpen = nil
         onAccept = nil
         onRowClick = nil
         onRowDoubleClick = nil
@@ -7059,6 +7305,29 @@ private func scrollSelectionIntoView() {
         editorText = tv.string
         restyleEditor()
         tv.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
+    }
+
+    // the editor's caret / selection (UTF-16 offsets into the display string)
+    public var editorSelection: NSRange {
+        editorView?.selectedRange() ?? NSRange(location: (editorText as NSString).length, length: 0)
+    }
+
+    // replace `range` (clamped) with `s`, keep the styling, put the caret
+    // after the new text minus `caretBack` characters and keep it visible.
+    // Voice dictation's live region at the cursor. Returns the new length.
+    @discardableResult
+    public func replaceRange(_ range: NSRange, with s: String, caretBack: Int = 0) -> Int {
+        guard let tv = editorView, let storage = tv.textStorage else { return 0 }
+        let loc = max(0, min(range.location, storage.length))
+        let len = max(0, min(range.length, storage.length - loc))
+        storage.replaceCharacters(in: NSRange(location: loc, length: len), with: s)
+        editorText = tv.string
+        restyleEditor()
+        let n = (s as NSString).length
+        let caret = NSRange(location: loc + max(0, n - caretBack), length: 0)
+        tv.setSelectedRange(caret)
+        tv.scrollRangeToVisible(caret)
+        return n
     }
 
     public func tailText(from offset: Int) -> String {
@@ -8295,6 +8564,72 @@ private func scrollSelectionIntoView() {
 
     // new column widths/titles for a table-mode list (live divider drags,
     // config reloads): header + rows re-measure and redraw together
+    // "Fit columns": size every column to its widest cell (header title
+    // included, sampled over the first rows) and widen the window so the
+    // whole table fits — capped at the visible screen, where the widest
+    // columns give up room first. Returns the new percent widths (the host
+    // persists them) or nil when nothing could be measured.
+    @discardableResult
+    public func fitTableColumns(sample: Int = 400) -> [CGFloat]? {
+        let cols = config.tableColumns
+        guard !cols.isEmpty else { return nil }
+        let font = config.rowFont(config.rowFontSize * zoom)
+        let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        let hfont = NSFontManager.shared.convert(config.rowFont(config.rowFontSize * zoom * 0.86),
+                                                 toHaveTrait: .boldFontMask)
+        let rowsToMeasure = rows.filter { !$0.loadMore }.prefix(sample)
+        var need: [CGFloat] = cols.enumerated().map { i, col in
+            // header: small caps + kerning + sort arrow + the ▾ slot
+            var w = (col.title.uppercased() + " ↑" as NSString)
+                .size(withAttributes: [.font: hfont, .kern: 0.6]).width + 12
+            if col.filterable { w += 22 }
+            for r in rowsToMeasure {
+                guard let t = r.cellText(col.field), !t.isEmpty else { continue }
+                let flat = t.replacingOccurrences(of: "\n", with: " ")
+                let f = i == 0 ? bold : font
+                // + the status dot some cells draw
+                w = max(w, (flat as NSString).size(withAttributes: [.font: f]).width + 11 + 11 * zoom)
+            }
+            return ceil(w)
+        }
+        // one runaway cell (a huge title) must not make a 4000pt window
+        let screenW = (panel.screen ?? NSScreen.main)?.visibleFrame.width ?? 1400
+        let lead = config.rowLeadInset, trail = config.padding + 10 + 16   // + scroller
+        let cap = screenW - 40 - lead - trail
+        need = need.map { min($0, max(160, cap * 0.45)) }
+        var total = need.reduce(0, +)
+        if total > cap {
+            // trim the widest columns down toward each other until it fits
+            var over = total - cap
+            while over > 0.5 {
+                let maxW = need.max() ?? 0
+                let idx = need.indices.filter { need[$0] >= maxW - 0.5 }
+                let next = need.filter { $0 < maxW - 0.5 }.max() ?? 40
+                let step = min(over / CGFloat(idx.count), maxW - max(next, 40))
+                guard step > 0.5 else { break }
+                for i in idx { need[i] -= step }
+                over -= step * CGFloat(idx.count)
+            }
+            total = need.reduce(0, +)
+        }
+        let width = min(screenW - 40, lead + total + trail)
+        var f = panel.frame
+        if let vis = (panel.screen ?? NSScreen.main)?.visibleFrame {
+            f.origin.x = max(vis.minX + 20, min(f.origin.x - (width - f.width) / 2, vis.maxX - width - 20))
+        }
+        f.size.width = width
+        panel.setFrame(f, display: true, animate: false)
+        layoutSearchField()
+        layoutScrollDocument()
+        relayoutTabs()
+        let usable = max(1, rowView.bounds.width - lead - (config.padding + 10))
+        let pcts = need.map { (($0 / usable * 100) * 10).rounded() / 10 }
+        var newCols = cols
+        for i in newCols.indices { newCols[i].width = pcts[i] }
+        setTableColumns(newCols)
+        return pcts
+    }
+
     public func setTableColumns(_ cols: [PopupTableColumn]) {
         config.tableColumns = cols
         rowView.config.tableColumns = cols
@@ -8559,6 +8894,81 @@ private func scrollSelectionIntoView() {
         let expr = "\(buf) > 0 ? [appendbufline(\(buf), '$', \(list)), execute('silent! wall')][0] : -1"
         guard let r = vimEval(expr) else { return false }
         return r.trimmingCharacters(in: .whitespacesAndNewlines) == "0"
+    }
+
+    // Voice dictation in the vim pane: a live region AT THE CURSOR, tracked
+    // by two extmarks (left / right gravity) so typing elsewhere never
+    // shifts it. Begin anchors it (Normal mode: after the character under
+    // the cursor, like `a`; Insert mode: at the caret) and remembers
+    // whether a space is needed before / after; update replaces the
+    // region's text and moves the cursor to its end; end drops the marks
+    // and saves. All false when the editor has no RPC socket (plain vim).
+    private static func vimLua(_ lines: [String]) -> String {
+        lines.map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: " ")
+    }
+    // Vim double-quoted string literal (newlines survive as \n)
+    private static func vimDQ(_ s: String) -> String {
+        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n") + "\""
+    }
+    @discardableResult
+    public func vimVoiceBegin() -> Bool {
+        let lua = PopupWindow.vimLua([
+            "(function()",
+            "local ns = vim.api.nvim_create_namespace('ws_voice')",
+            "local buf = vim.api.nvim_get_current_buf()",
+            "local pos = vim.api.nvim_win_get_cursor(0)",
+            "local row, col = pos[1] - 1, pos[2]",
+            "local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''",
+            "if vim.api.nvim_get_mode().mode:sub(1, 1) ~= 'i' and #line > 0 then",
+            "col = col + #vim.fn.matchstr(line, '.', col) end",
+            "vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)",
+            "local s = vim.api.nvim_buf_set_extmark(buf, ns, row, col, {right_gravity = false})",
+            "local e = vim.api.nvim_buf_set_extmark(buf, ns, row, col, {right_gravity = true})",
+            "local pre = line:sub(1, col):match('%S$') and ' ' or ''",
+            "local post = line:sub(col + 1):match('^%S') and ' ' or ''",
+            "vim.g.ws_voice = {buf = buf, s = s, e = e, pre = pre, post = post}",
+            "return 1 end)()",
+        ])
+        return vimEval("luaeval(\(PopupWindow.vimString(lua)))")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+    }
+    @discardableResult
+    public func vimVoiceUpdate(_ text: String) -> Bool {
+        let lua = PopupWindow.vimLua([
+            "(function(t)",
+            "local v = vim.g.ws_voice",
+            "if not v or not vim.api.nvim_buf_is_loaded(v.buf) then return 0 end",
+            "local ns = vim.api.nvim_create_namespace('ws_voice')",
+            "local sp = vim.api.nvim_buf_get_extmark_by_id(v.buf, ns, v.s, {})",
+            "local ep = vim.api.nvim_buf_get_extmark_by_id(v.buf, ns, v.e, {})",
+            "if #sp == 0 or #ep == 0 then return 0 end",
+            "local body = t == '' and '' or (v.pre .. t .. v.post)",
+            "local ok = pcall(vim.api.nvim_buf_set_text, v.buf, sp[1], sp[2], ep[1], ep[2],",
+            "vim.split(body, '\\n', {plain = true}))",
+            "if not ok then return 0 end",
+            "if t ~= '' and vim.api.nvim_get_current_buf() == v.buf then",
+            "local e2 = vim.api.nvim_buf_get_extmark_by_id(v.buf, ns, v.e, {})",
+            "local c = e2[2] - #v.post",
+            "if vim.api.nvim_get_mode().mode:sub(1, 1) ~= 'i' then c = math.max(0, c - 1) end",
+            "pcall(vim.api.nvim_win_set_cursor, 0, {e2[1] + 1, c}) end",
+            "return 1 end)(_A)",
+        ])
+        return vimEval("luaeval(\(PopupWindow.vimString(lua)), \(PopupWindow.vimDQ(text)))")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+    }
+    public func vimVoiceEnd() {
+        let lua = PopupWindow.vimLua([
+            "(function()",
+            "local v = vim.g.ws_voice",
+            "vim.g.ws_voice = nil",
+            "if v and vim.api.nvim_buf_is_valid(v.buf) then",
+            "vim.api.nvim_buf_clear_namespace(v.buf, vim.api.nvim_create_namespace('ws_voice'), 0, -1) end",
+            "vim.cmd('silent! wall')",
+            "return 1 end)()",
+        ])
+        _ = vimEval("luaeval(\(PopupWindow.vimString(lua)))")
     }
 
     // Visual-mode copy/cut into the system clipboard. Returns false when no

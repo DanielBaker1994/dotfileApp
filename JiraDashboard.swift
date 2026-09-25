@@ -754,7 +754,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         openConfigButton.controlSize = .small
         button(openConfigButton, #selector(openConfigJSON(_:)),
                tip: "Every poll job is one entry of \"endpoints\" in this file — this window edits it for you")
-        typePopup.addItems(withTitles: ["issues", "releases", "directory"])
+        typePopup.addItems(withTitles: ["issues", "releases", "favorites", "directory"])
         everyBox.addItems(withObjectValues: JiraPoll.intervals)
         everyBox.completes = true
         jqlField.placeholderString = "extra JQL, ANDed with the time window (e.g. assignee = currentUser())"
@@ -1256,7 +1256,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         let outPath = (liveData?["path"] as? String).map(tilde)
         fileLabel.stringValue = type == "directory"
             ? "~/.cache/jira/directory.json — projects, users, statuses for the pickers (no tab)"
-            : name.isEmpty ? "(set a name)" : (!isNew ? outPath : nil) ?? "\(name).json"
+            : name.isEmpty ? "(set a name)" : ((!isNew ? outPath : nil) ?? "\(name).json")
+                + (type == "favorites" ? " — the issues pinned with ☆ in the Jira window" : "")
         let issues = type == "issues"
         let q = queryPopup.indexOfSelectedItem
         setRowHidden(queryPopup, !issues)

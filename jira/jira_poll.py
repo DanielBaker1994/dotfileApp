@@ -28,7 +28,11 @@ Per tick:
                (~/.cache/jira/checkpoints/NAME.json), so a failure at ticket
                9,000 keeps 1-8,999 and the next run continues from there.
                Comments come in the search itself (one request per page).
-     releases: every version of the projects -> <file>
+     releases: every version of the projects -> <file>; the ones in
+               config.json releaseBlacklist -> blacklist_release.json
+     favorites: re-query the pinned issues (config.json favorites, the ☆
+               in the Jira window; key in (...), clamped to the scope) ->
+               favorites.json. No pins = no request.
      directory: projects + assignable users + statuses / types / priorities
                / fields + releases + labels -> ~/.cache/jira/directory.json
                (the pickers' lists; weekly - user search is expensive; no
@@ -72,6 +76,10 @@ Usage:
                                   in config.json setup.steps; steps already
                                   ok are skipped; --step reruns one. All ok ->
                                   setup.state = done (scheduled polling on)
+  jira_poll.py --favorite add|remove KEY...          pin / unpin issues
+  jira_poll.py --blacklist-release add|remove KEY... hide / restore releases
+                                  (both: config.json + the tabs rewritten
+                                  from local data at once; no request, no lock)
   jira_poll.py --window 2h        explicit window override (implies now)
   jira_poll.py --dry-run          print the plan (due, windows, JQL fields);
                                   no network, no writes
@@ -100,6 +108,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import select
 import signal
 import sys
 import time
@@ -204,7 +213,7 @@ class Reporter:
 def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
          "force": False, "describe": False, "cancel": False, "live": False, "directory": False,
-         "rebuild": False, "setup": False, "step": ""}
+         "rebuild": False, "setup": False, "step": "", "favorite": None, "blacklist": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -246,6 +255,11 @@ def parse_args(argv: list) -> dict:
             o["setup"] = True
         elif name == "--step":
             o["step"] = val()
+        elif name in ("--favorite", "--blacklist-release"):
+            # --favorite add|remove KEY...  (the rest of argv = the keys)
+            op = val()
+            o["favorite" if name == "--favorite" else "blacklist"] = (op, argv[i + 1:])
+            return o
         elif name in ("-h", "--help"):
             print(__doc__.strip())
             sys.exit(0)
@@ -469,6 +483,85 @@ def release_items(rels: list) -> list:
     return sorted(out, key=lambda e: (e["releaseDate"], e["title"]))[::-1]
 
 
+def release_rows(rels: list) -> list:
+    """release_items + each version's id (versionId: the app's "open in
+    browser" goes to /projects/KEY/versions/ID - a release has no /browse)."""
+    ids = {f"{r.get('project')}-{r.get('name')}": str(r.get("id") or "") for r in rels}
+    return [dict(it, versionId=ids.get(it["key"], "")) for it in release_items(rels)]
+
+
+def release_sort(rows: list) -> list:
+    """release_items' order (newest date first) for rows moved between tabs."""
+    return sorted(rows, key=lambda e: (e.get("releaseDate", ""), e.get("title", "")))[::-1]
+
+
+def split_blacklist(rows: list, blacklist: list) -> tuple:
+    """(shown, hidden): hidden = the rows whose key is blacklisted."""
+    bl = set(blacklist or [])
+    return [r for r in rows if r.get("key") not in bl], [r for r in rows if r.get("key") in bl]
+
+
+def config_list(cfg, key: str) -> list:
+    v = cfg.data.get(key) if hasattr(cfg, "data") else (cfg or {}).get(key)
+    return [x for x in v if isinstance(x, str) and x] if isinstance(v, list) else []
+
+
+def favorites_endpoint(cfg) -> dict:
+    return next((e for e in cfg.endpoints if e.get("type") == "favorites"),
+                dict(jira_config.FAVORITES_ENDPOINT))
+
+
+def favorite_rows(cfg, team: dict, out_dir: str, extra: list | None = None) -> list:
+    """favorites.json: the pinned keys (pin order, newest first) from the issue
+    cache; a key the cache lacks (e.g. pinned from the live search, not
+    polled yet) keeps the row the app passed or the row already published."""
+    ep = favorites_endpoint(cfg)
+    _, pkeys = job_fields(ep, team)
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    cache = cache if isinstance(cache, dict) else {}
+    path = os.path.join(out_dir, ep.get("file") or jira_config.FAVORITES_FILE)
+    old = jira_api.read_json(path, [])
+    known = {r.get("key"): r for r in (old if isinstance(old, list) else []) if isinstance(r, dict)}
+    known.update({r.get("key"): r for r in (extra or []) if isinstance(r, dict)})
+    rows = []
+    for k in config_list(cfg, "favorites"):
+        if k in cache:
+            rows.append(shape([cache[k]], pkeys)[0])
+        elif k in known:
+            rows.append({p: str(known[k].get(p) or "") for p in pkeys})
+    return rows
+
+
+def run_favorites(ctx: "Ctx", ep: dict, rep) -> int:
+    """Re-query the pinned issues (key in (...), clamped to the scope) into
+    the cache, then publish favorites.json. A key Jira rejects (deleted /
+    moved issue) is left out of the query and the search retried once."""
+    c, cfg, team = ctx.c, ctx.cfg, ctx.team
+    keys = config_list(cfg, "favorites")
+    path = os.path.join(ctx.out_dir, ep["file"])
+    if keys:
+        f_ep, _ = job_fields(ep, team)
+        plist = jira_config.job_projects(ep, team)
+        ask = list(keys)
+        for tries in (1, 2):
+            rep.start(f"re-query {len(ask)} pinned issue(s)")
+            try:
+                jira_api.sync(c, "full", projects=plist, jql="key in (" + ", ".join(ask) + ")",
+                              api_fields=f_ep, fetch_comments=bool(cfg["fetchComments"]),
+                              snapshot_keep=0, quiet=True, default_projects=False, name=ep["name"],
+                              checkpoint_every=int(cfg["checkpointEvery"] or 500), progress=rep.page)
+                break
+            except jira_api.ApiError as err:
+                bad = [k for k in ask if k in str(err)]
+                if err.code != 400 or not bad or tries == 2 or len(bad) == len(ask):
+                    raise
+                say(f"skipping pinned key(s) Jira rejects: {', '.join(bad)}", ep["name"])
+                ask = [k for k in ask if k not in bad]
+    rows = favorite_rows(cfg, team, ctx.out_dir)
+    publish(path, rows, False)
+    return len(rows)
+
+
 def job_fields(ep: dict, team: dict) -> tuple:
     """(api fields, publish keys) from THIS job's own columns."""
     spec = jira_config.job_columns(ep)
@@ -627,9 +720,13 @@ def run_job(ctx: Ctx, ep: dict, window: str) -> int:
     path = os.path.join(ctx.out_dir, ep["file"])
     if typ == "releases":
         rep.start(f"versions of {', '.join(plist)}")
-        items = release_items(jira_api.releases(c, projects=plist))
+        items, hidden = split_blacklist(release_rows(jira_api.releases(c, projects=plist)),
+                                        config_list(cfg, "releaseBlacklist"))
         publish(path, items, False)
+        publish(os.path.join(ctx.out_dir, jira_config.BLACKLIST_RELEASE_FILE), hidden, False)
         return len(items)
+    if typ == "favorites":
+        return run_favorites(ctx, ep, rep)
     # custom jql: its own streamed search (its key set = its rows)
     kf = keys_file(ep["name"])
     fresh = window == "full" and not jira_api.load_checkpoint(ep["name"])
@@ -791,6 +888,19 @@ def describe(cfg, team: dict) -> dict:
                 jira_api.releases(c, projects=plist or ["PROJ"])
                 reqs += [{"purpose": f"versions of {p}", "curl": x}
                          for p, x in zip(plist or ["PROJ"], c.captured)]
+                hidden = config_list(cfg, "releaseBlacklist")
+                if hidden:
+                    notes.append(f"{len(hidden)} blacklisted release(s) go to "
+                                 f"{jira_config.BLACKLIST_RELEASE_FILE} instead (Cmd+K in the Jira window)")
+            elif typ == "favorites":
+                favs = config_list(cfg, "favorites")
+                notes.append(f"re-queries the {len(favs)} pinned issue(s) (☆ in the Jira window) every run"
+                             if favs else "no pinned issues yet (☆ next to a row's checkbox) - no request")
+                if favs:
+                    window = "full"
+                    jql, r = issue_requests(ep["name"], plist, "key in (" + ", ".join(favs) + ")",
+                                            window, fields, None, None)
+                    reqs += r
             elif plain_issue_job(ep):
                 if shared:
                     window, jql, r = shared
@@ -1132,10 +1242,81 @@ def wipe_cache() -> None:
     jira_status.update(fn)
 
 
+def edit_pins(kind: str, op: str, keys: list) -> int:
+    """--favorite / --blacklist-release add|remove KEY...: update config.json
+    and republish the affected tabs from local data at once (no request, no
+    lock) - the next poll refreshes them. stdin (optional, favorites): JSON
+    rows the app already shows, for keys the issue cache doesn't hold.
+    Prints {ok, keys, count, files}."""
+    def result(ok, **kw):
+        print(json.dumps({"ok": ok, **kw}))
+        return 0 if ok else 1
+    if op not in ("add", "remove") or not keys:
+        return result(False, problems=[f"{kind} add|remove KEY..."])
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        return result(False, problems=[str(err)])
+    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+    field = "favorites" if kind == "favorites" else "releaseBlacklist"
+    cur = config_list(cfg, field)
+    if op == "add":
+        new = [k for k in keys if k not in cur] + cur     # newest first
+    else:
+        new = [k for k in cur if k not in keys]
+    jira_config.save({field: new})
+    cfg.data[field] = new
+    if kind == "favorites":
+        extra = []
+        # the app pipes the rows it shows (then EOF); an inherited open
+        # stdin with nothing coming must not block
+        if op == "add" and not sys.stdin.isatty() and select.select([sys.stdin], [], [], 1)[0]:
+            try:
+                got = json.loads(sys.stdin.read() or "[]")
+                extra = got if isinstance(got, list) else []
+            except ValueError:
+                extra = []
+        ep = favorites_endpoint(cfg)
+        path = os.path.join(out_dir, ep.get("file") or jira_config.FAVORITES_FILE)
+        rows = favorite_rows(cfg, team, out_dir, extra)
+        jira_api.write_json(path, rows, mode=0o644)
+        return result(True, keys=new, count=len(rows), files=[path])
+    # releases: every releases tab + the blacklist tab re-split; a restored
+    # release goes back to the first releases tab (the next poll re-sorts)
+    bl_path = os.path.join(out_dir, jira_config.BLACKLIST_RELEASE_FILE)
+    tabs = [os.path.join(out_dir, e["file"]) for e in cfg.endpoints
+            if e.get("type") == "releases" and e.get("file")]
+    if not tabs:
+        return result(False, problems=["no releases job in config.json"])
+    hidden_rows = jira_api.read_json(bl_path, [])
+    hidden_rows = hidden_rows if isinstance(hidden_rows, list) else []
+    moved_back = []
+    all_hidden = []
+    for i, t in enumerate(tabs):
+        rows = jira_api.read_json(t, [])
+        rows = rows if isinstance(rows, list) else []
+        if i == 0:
+            moved_back = [r for r in hidden_rows if r.get("key") not in set(new)]
+            rows = rows + [r for r in moved_back if r.get("key") not in {x.get("key") for x in rows}]
+        shown, hid = split_blacklist(rows, new)
+        all_hidden += hid
+        jira_api.write_json(t, release_sort(shown), mode=0o644)
+    keep = [r for r in hidden_rows if r.get("key") in set(new)]
+    seen = {r.get("key") for r in all_hidden}
+    hidden = all_hidden + [r for r in keep if r.get("key") not in seen]
+    jira_api.write_json(bl_path, release_sort(hidden), mode=0o644)
+    return result(True, keys=new, count=len(hidden), files=tabs + [bl_path])
+
+
 def main(argv: list) -> int:
     global QUIET
     o = parse_args(argv)
     QUIET = o["quiet"]
+    if o["favorite"]:
+        return edit_pins("favorites", *o["favorite"])
+    if o["blacklist"]:
+        return edit_pins("releases", *o["blacklist"])
     if o["cancel"]:
         return cancel_running()
     if o["live"]:

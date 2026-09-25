@@ -101,10 +101,14 @@ DEFAULTS = {
     "rawMaxMB": 2048,                # ... and the oldest go until raw/ fits in this
     "directoryResumeHours": 24,      # a failed / partial directory job resumes within this
     "setup": None,                   # {state: pending|done, steps: {name: {...}}} (jira_poll --setup)
+    "favorites": [],                 # pinned issue keys, newest first (the favorites job re-queries them)
+    "releaseBlacklist": [],          # release row keys (PROJECT-NAME) hidden from the releases tab
 }
 
 LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
 LIVE_SEARCH_MAX = 100                # default max results of one live search
+FAVORITES_FILE = "favorites.json"    # the pinned issues' tab (the favorites job)
+BLACKLIST_RELEASE_FILE = "blacklist_release.json"   # releases hidden from the releases tab
 
 # the directory job: projects + assignable users + statuses / types /
 # priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).
@@ -112,15 +116,22 @@ LIVE_SEARCH_MAX = 100                # default max results of one live search
 DIRECTORY_ENDPOINT = {"name": "directory", "window": "1w", "projects": "*", "type": "directory",
                       "enabled": True}
 
+# the favorites job: re-queries the pinned issues (config.json `favorites`,
+# the ☆ next to each row's checkbox in the Jira window) every tick ->
+# favorites.json. No favorites = no request.
+FAVORITES_ENDPOINT = {"name": "favorites", "window": "10m", "projects": "*", "type": "favorites",
+                      "file": FAVORITES_FILE, "enabled": True}
+
 DEFAULT_ENDPOINTS = [
     {"name": "all", "window": "10m", "projects": "*", "type": "issues",
      "file": "all.json", "enabled": True},
     {"name": "releases", "window": "1h", "projects": "*", "type": "releases",
      "file": "releases.json", "enabled": True},
+    FAVORITES_ENDPOINT,
     DIRECTORY_ENDPOINT,
 ]
 
-ENDPOINT_TYPES = ("issues", "releases", "directory")
+ENDPOINT_TYPES = ("issues", "releases", "favorites", "directory")
 WINDOW_RE = re.compile(r"^(\d+)([smhdw])$")
 WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -820,8 +831,9 @@ def migrate_setup(data: dict, notes: list) -> None:
     except (OSError, ValueError):
         st = {}
     ok = {e.get("name") for e in (st.get("endpoints") or []) if isinstance(e, dict) and e.get("lastSuccess")}
+    # the favorites job needs no setup (no pins yet = no request)
     jobs = [e.get("name") for e in data.get("endpoints") or []
-            if isinstance(e, dict) and e.get("enabled", True)]
+            if isinstance(e, dict) and e.get("enabled", True) and e.get("type") != "favorites"]
     done = bool(scope) and bool(jobs) and all(n in ok for n in jobs)
     data["setup"] = {"state": "done" if done else "pending", "steps": {}}
     try:
@@ -942,6 +954,8 @@ class Config:
                 p.append(f"endpoint '{n}': file missing")
             if e.get("file") == LIVE_SEARCH_FILE:
                 p.append(f"endpoint '{n}': file {LIVE_SEARCH_FILE} is the live search's tab")
+            if e.get("file") == BLACKLIST_RELEASE_FILE:
+                p.append(f"endpoint '{n}': file {BLACKLIST_RELEASE_FILE} holds the hidden releases")
             if isinstance(e.get("columns"), str) and columns_problem(e["columns"]):
                 p.append(f"endpoint '{n}': {columns_problem(e['columns'])}")
             for k, lo in (("maxResults", 1), ("maxTotal", 0)):
@@ -1126,6 +1140,16 @@ def migrate_v3(data: dict, notes: list) -> None:
             notes.append("added the weekly 'directory' job (projects + users for the pickers)")
         data["directoryJob"] = True
         raw_changes["directoryJob"] = True
+    if not data.get("favoritesJob"):
+        eps = [e for e in data["endpoints"] if isinstance(e, dict)]
+        taken = any(e.get("name") == FAVORITES_ENDPOINT["name"] or e.get("file") == FAVORITES_FILE
+                    for e in eps)
+        if not any(e.get("type") == "favorites" for e in eps) and not taken:
+            data["endpoints"].append(dict(FAVORITES_ENDPOINT))
+            raw_changes["endpoints"] = data["endpoints"]
+            notes.append("added the 'favorites' job (re-polls the issues you pin with ☆)")
+        data["favoritesJob"] = True
+        raw_changes["favoritesJob"] = True
     if not raw_changes:
         return
     try:
@@ -1149,7 +1173,7 @@ def save(updates: dict) -> str:
             base.update(json.load(fh))
     elif os.path.exists(LEGACY_CONFIG):
         base = migrate_legacy(parse_legacy(LEGACY_CONFIG))
-    allowed = set(DEFAULTS) | {"endpoints", "teamConfig", "directoryJob"}
+    allowed = set(DEFAULTS) | {"endpoints", "teamConfig", "directoryJob", "favoritesJob"}
     for k, v in updates.items():
         if k in allowed and v is not None:
             base[k] = v
@@ -1233,7 +1257,7 @@ def edit_jobs(cmd: str, args: list) -> int:
         keep = [x for x in eps if x.get("name") != args[0]]
         if len(keep) == len(eps):
             return result(False, [f"unknown name '{args[0]}'"])
-        if not any(x.get("type", "issues") != "directory" for x in keep):
+        if not any(x.get("type", "issues") not in ("directory", "favorites") for x in keep):
             return result(False, ["the last poll job cannot be deleted (disable it instead)"])
         save({"endpoints": keep})
         return result(True, name=args[0])

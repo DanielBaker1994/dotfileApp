@@ -557,7 +557,7 @@ struct ListColumn {
     var popup: PopupTableColumn {
         PopupTableColumn(field: field, title: title, width: width,
                          align: align == "right" ? .right : align == "center" ? .center : .left,
-                         sortable: sortable)
+                         sortable: sortable, filterable: filterable)
     }
 }
 
@@ -617,6 +617,9 @@ struct CommandSpec {
     var fontSize: CGFloat     // note: editor point size (0 = default 13)
     var headerColor: NSColor? // drag-header tint (nil = window background)
     var voice: Bool           // note: record + transcribe button in the header
+    // note: dictation appears at the cursor AS YOU SPEAK (true, default);
+    // false = held until stop, then inserted at the cursor in one go
+    var voiceLive = true
     let terminal: Bool        // note: embedded shell drawer at the bottom
     let terminalHeight: CGFloat
     let terminalDir: String?  // note: starting directory for the embedded shell
@@ -943,6 +946,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     spec.table = tri(vars["table"]) ?? false
     spec.columns = ListColumn.parse(vars["columns"])
     spec.tableSort = vars["table-sort"]
+    spec.voiceLive = tri(vars["voice-live"]) ?? true
     return spec
 }
 
@@ -1278,7 +1282,7 @@ private func configLog(_ s: String) {
 }
 
 private let configBoolKeys: Set<String> = [
-    "enabled", "resize", "drag", "sticky", "voice", "terminal", "vim-mode",
+    "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode",
     "checkbox", "hide-on-focus-loss", "float", "table",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
@@ -2129,6 +2133,44 @@ var jiraSite: String {
     return ""
 }
 
+// A row of the releases job (releases.json / blacklist_release.json): its
+// key is "PROJECT-NAME", which is NOT an issue key — /browse/<key> 404s.
+func jiraIsReleaseRow(_ r: FieldRow) -> Bool {
+    let f = r.fields
+    if f["versionId"] != nil { return true }
+    let rel = f["release"] ?? "", proj = f["project"] ?? ""
+    return !rel.isEmpty && !proj.isEmpty && f["key"] == "\(proj)-\(rel)" && r.title == rel
+}
+
+// "open in browser" for a jira row: an issue -> /browse/KEY; a release ->
+// its version page (/projects/KEY/versions/ID), or, before the poll has
+// recorded the version id, the issue search of that fix version
+func jiraBrowseURL(_ r: FieldRow, site: String = jiraSite) -> URL? {
+    guard !site.isEmpty, let key = r.fields["key"], !key.isEmpty else { return nil }
+    guard jiraIsReleaseRow(r) else { return URL(string: site + "/browse/" + key) }
+    let proj = r.fields["project"] ?? "", name = r.fields["release"] ?? r.title
+    if let id = r.fields["versionId"], !id.isEmpty {
+        return URL(string: "\(site)/projects/\(proj)/versions/\(id)")
+    }
+    var c = URLComponents(string: site + "/issues/")
+    c?.queryItems = [URLQueryItem(name: "jql", value: "project = \"\(proj)\" AND fixVersion = \"\(name)\"")]
+    return c?.url
+}
+
+// the issues of one release (project + fix version name) from the poller's
+// issue cache (~/.cache/jira/jiras.json, every issue of the scope), newest
+// update first
+func jiraReleaseIssues(project: String, release: String) -> [[String: Any]] {
+    let path = NSHomeDirectory() + "/.cache/jira/jiras.json"
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let cache = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
+    return cache.values.compactMap { $0 as? [String: Any] }.filter { e in
+        (e["project"] as? String) == project
+            && ((e["release"] as? String) ?? "").split(separator: ",")
+                .contains { $0.trimmingCharacters(in: .whitespaces) == release }
+    }.sorted { ($0["updated"] as? String ?? "") > ($1["updated"] as? String ?? "") }
+}
+
 func iconForApp(_ app: AppInfo) -> NSImage {
     // config-driven overrides (commands.conf [icons]): an app's windows get a
     // custom glyph when their title matches a configured substring
@@ -2201,6 +2243,8 @@ struct FieldRow: PopupRow {
     let body: String?
     let searchText: String
     let fields: [String: String]   // raw field values (dropdown filter dims)
+    // jira favorites: the ☆ next to the checkbox (nil = not an issue row)
+    var starred: Bool? = nil
 
     var loadMore: Bool { fields["__loadmore"] != nil }
     // list/table cells show ISO timestamps trimmed to local minutes; the raw
@@ -2548,6 +2592,8 @@ final class SwitcherController: NSObject {
     // search panel calls it after a run (see openListWindow)
     var jiraShowTab: ((String) -> Void)?
     var pendingJiraTab: String?
+    // the row the jira detail window shows (it is reused across rows)
+    var detailRow: FieldRow?
     // When the user clicks another app, aerospace's on-focus-changed can fire
     // with a lag and write a STALE bridge entry naming one of our windows;
     // the poller would then yank focus back off the app the user just clicked.
@@ -3206,6 +3252,7 @@ final class SwitcherController: NSObject {
     private func showDetail(_ row: FieldRow, cmd: CommandSpec) {
         let key = row.fields["key"] ?? row.title
         let text = detailText(for: row, cmd: cmd)
+        detailRow = row
         if let existing = subWindows.first(where: { $0.config.name == settings.detailWindowName }) {
             existing.setEditorText(text)
             existing.chromeHeaderTitle = key
@@ -3223,6 +3270,8 @@ final class SwitcherController: NSObject {
         cfg.copyToast = settings.copyToast
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
+        // the list's font (monospaced for jira): the release issue table lines up
+        cfg.fontName = cmd.font
         // wears its jira window's theme (same card, header and palette)
         cfg.colors = windowColors(cmd)
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
@@ -3243,10 +3292,10 @@ final class SwitcherController: NSObject {
         }
         w.onHeaderButton = { [weak self] id in
             guard id == 10, let self else { return }
-            let url = URL(string: jiraSite + "/browse/" + key)
-            if let url {
+            // the row shown NOW (a reused detail window swaps rows)
+            if let url = jiraBrowseURL(self.detailRow ?? row) {
                 NSWorkspace.shared.open(url)
-                self.log("detail: opened \(key) in browser")
+                self.log("detail: opened \(url.absoluteString) in browser")
             }
         }
         w.onHide = { [weak self] restore in
@@ -3274,6 +3323,26 @@ final class SwitcherController: NSObject {
         for (k, v) in row.fields.sorted(by: { $0.key < $1.key })
         where !k.hasPrefix("__") && !shown.contains(k) && !v.isEmpty {
             out.append("\(k): \(v)")
+        }
+        // a release: every issue with that fix version, under the fields
+        if jiraIsReleaseRow(row) {
+            let name = row.fields["release"] ?? row.title
+            let issues = jiraReleaseIssues(project: row.fields["project"] ?? "", release: name)
+            out.append("")
+            out.append("--- issues in \(name) (\(issues.count)) ---")
+            if issues.isEmpty {
+                out.append("(none in the issue cache — it holds every issue of the projects in scope)")
+            }
+            func cell(_ e: [String: Any], _ k: String, _ w: Int) -> String {
+                let v = (e[k] as? String ?? "").replacingOccurrences(of: "\n", with: " ")
+                let t = v.count > w ? String(v.prefix(w - 1)) + "…" : v
+                return t.padding(toLength: w, withPad: " ", startingAt: 0)
+            }
+            let keyW = min(16, max(4, issues.map { ($0["key"] as? String ?? "").count }.max() ?? 4))
+            for e in issues {
+                out.append([cell(e, "key", keyW), cell(e, "status", 14), cell(e, "priority", 8),
+                            cell(e, "assignee", 18), e["title"] as? String ?? ""].joined(separator: "  "))
+            }
         }
         return out.joined(separator: "\n")
     }
@@ -4146,23 +4215,32 @@ private func trimmed(_ s: String) -> String? {
         // recognizer and appends a dated block to the current note. The
         // header keeps its copy-path / copy-config buttons (notes + voice
         // share this window).
+        // native editor: the note's normal save (assigned below, once
+        // commitSave exists) — dictation inserted mid-note saves the same way
+        var voiceSave: (() -> Void)?
         if cmd.voice {
-            self.log("voice '\(cmd.name)': voice controls enabled")
+            self.log("voice '\(cmd.name)': voice controls enabled (\(cmd.voiceLive ? "live" : "insert on stop"))")
             let voice = VoiceRecorder()
             // record bar starts OFF (meterEnabled stays false) — the user
-            // toggles it on via the header mic button when they want it
-            // Bulletproof session model: while recording, the editor and the
-            // file are ALWAYS rebuilt as
-            //     immutable + committedStr + liveDraft
-            // from parts that only ever GROW. Nothing slices disk prefixes,
-            // nothing prefix-matches strings, and offsets are UTF-16-safe —
-            // so committed text cannot vanish no matter how the recognizer
-            // batches, pauses, errors or races.
-            var immutable = ""        // editor text captured at record start
-            var immutableDisk = ""    // file content captured at record start
-            var committedStr = ""     // finalized batches this session (grown)
+            // toggles it on via the header mic button when they want it.
+            // Dictation lands AT THE CURSOR (vim: after the character under
+            // it in Normal mode). One region per session = finalized batches
+            // + the live draft, rewritten in place:
+            //   voice-live = true  (default) the words appear as you speak
+            //   voice-live = false everything is held (draft in the footer)
+            //                      and inserted at the cursor on stop
+            // vim: the region is tracked by extmarks (vimVoiceBegin/Update),
+            // so typing elsewhere never shifts it; native editor: a range.
+            let live = cmd.voiceLive
+            var committedStr = ""     // finalized batches this session
             var draft = ""            // live partial hypothesis (transient)
+            var sessionActive = false
+            var vimAnchored = false
+            var anchor: NSRange?      // native: region start + current length
+            var pre = "", post = ""   // native: spaces around the region
             var liveWrite: Timer?
+            var pendingDraw: DispatchWorkItem?
+            var lastDraw = Date.distantPast
             let dbgPath = NSString(string: "~/.cache/ws-voice-debug.log")
                 .expandingTildeInPath
             func dbg(_ s: String) {
@@ -4176,47 +4254,109 @@ private func trimmed(_ s: String) -> String? {
                                                    contents: line.data(using: .utf8))
                 }
             }
-            func sep0() -> String { immutable.isEmpty ? "" : "\n\n" }
-            func immLen() -> Int { (immutable as NSString).length }
-            func committedLen() -> Int { (committedStr as NSString).length }
-            // committed + live draft, with separators
             func regionText() -> String {
-                var s = committedStr
-                if !draft.isEmpty {
-                    s += (s.isEmpty ? sep0() : "\n\n") + draft
-                }
-                return s
+                [committedStr, draft].filter { !$0.isEmpty }.joined(separator: " ")
             }
-            func persist() {
-                var new = immutableDisk + regionText()
-                if !new.hasSuffix("\n") { new += "\n" }
-                try? new.write(toFile: currentPath, atomically: true, encoding: .utf8)
-                immutableDisk = new
+            func beginRegion() {
+                committedStr = ""
+                draft = ""
+                sessionActive = true
+                if cmd.vimMode {
+                    vimAnchored = w.vimVoiceBegin()
+                    dbg("record start vim anchored=\(vimAnchored) live=\(live)")
+                    return
+                }
+                // after the selection (never replaces selected text)
+                let sel = w.editorSelection
+                let text = w.editorText as NSString
+                let loc = min(sel.location + sel.length, text.length)
+                func isText(_ i: Int) -> Bool {
+                    guard i >= 0, i < text.length else { return false }
+                    return !(Character(UnicodeScalar(text.character(at: i)) ?? " ").isWhitespace)
+                }
+                pre = isText(loc - 1) ? " " : ""
+                post = isText(loc) ? " " : ""
+                anchor = NSRange(location: loc, length: 0)
+                dbg("record start at \(loc) of \(text.length) live=\(live)")
+            }
+            // write the region's current text (committed + draft) in place
+            func drawRegion() {
+                pendingDraw?.cancel()
+                pendingDraw = nil
+                lastDraw = Date()
+                let body = regionText()
+                if cmd.vimMode {
+                    if vimAnchored && !w.vimVoiceUpdate(body) {
+                        vimAnchored = false
+                        dbg("vim region lost (buffer unloaded?) - falling back to append")
+                    }
+                    return
+                }
+                guard var a = anchor else { return }
+                let full = body.isEmpty ? "" : pre + body + post
+                a.length = w.replaceRange(a, with: full,
+                                          caretBack: body.isEmpty ? 0 : (post as NSString).length)
+                anchor = a
+            }
+            // partials arrive several times a second: at most one editor
+            // update per 0.2s (each vim update is an RPC round trip)
+            func scheduleDraw() {
+                guard pendingDraw == nil else { return }
+                let item = DispatchWorkItem { drawRegion() }
+                pendingDraw = item
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + max(0, 0.2 - Date().timeIntervalSince(lastDraw)), execute: item)
+            }
+            // no RPC (plain vim) / region lost: the old path — append the
+            // text at the end of the note
+            func vimAppendFallback(_ text: String) {
+                guard !text.isEmpty else { return }
+                if !w.vimAppend("\n" + text, to: currentPath) {
+                    let old = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+                    var new = old
+                    if !new.isEmpty && !new.hasSuffix("\n") { new += "\n" }
+                    new += "\n" + text + "\n"
+                    try? new.write(toFile: currentPath, atomically: true, encoding: .utf8)
+                    w.vimCommand("silent! checktime")
+                }
+            }
+            func save() {
+                if cmd.vimMode { w.vimFlush() } else { voiceSave?() }
+            }
+            // the session is over (final batch, stop timeout or error): the
+            // draft counts as said, the region is written once more, saved
+            func finishSession() {
+                guard sessionActive else { return }
+                sessionActive = false
+                liveWrite?.invalidate()
+                liveWrite = nil
+                committedStr = regionText()
+                draft = ""
+                if cmd.vimMode && !vimAnchored {
+                    vimAppendFallback(committedStr)
+                } else {
+                    drawRegion()
+                }
+                if cmd.vimMode { w.vimVoiceEnd() } else { save() }
+                anchor = nil
+                dbg("session done +\(committedStr.count) chars")
+                if committedStr.isEmpty { self.log("voice '\(cmd.name)': no speech detected") }
+                committedStr = ""
+                w.tabFooterText = lastWriteLabel(currentPath)
             }
             w.onMeterRecord = {
                 switch voice.state {
-                case .idle where cmd.vimMode:
-                    // vim mode: batches append straight into the editor's
-                    // buffer (vimAppend) — no text-view tail math needed
-                    draft = ""
-                    voice.start()
                 case .idle:
-                    // anchor on the EDITOR's DISPLAY string so the tail math
-                    // (immLen + committedLen) matches the text storage exactly
-                    // — currentEditorText is markdown-serialized and would
-                    // misalign offsets (and flatten images) on image notes
-                    immutable = w.editorText
-                    immutableDisk = (try? String(contentsOfFile: currentPath,
-                                                 encoding: .utf8)) ?? ""
-                    committedStr = ""
-                    draft = ""
-                    dbg("record start immutable=\(immLen()) disk=\(immutableDisk.count)")
-                    liveWrite = Timer.scheduledTimer(withTimeInterval: 1.5,
-                                                     repeats: true) { _ in
-                        guard !draft.isEmpty else { return }
-                        persist()
+                    beginRegion()
+                    w.tabFooterText = live ? "🎙 dictating at the cursor" : "🎙 listening — inserted at the cursor on stop"
+                    if !cmd.vimMode && live {
+                        liveWrite = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+                            if !regionText().isEmpty { voiceSave?() }
+                        }
                     }
                     voice.start()
+                    // start() failing (permissions) reports via onError
+                    if voice.state == .idle { finishSession() }
                 case .recording, .paused: voice.stop()
                 case .transcribing: break
                 }
@@ -4228,84 +4368,49 @@ private func trimmed(_ s: String) -> String? {
                     voice.resume()
                 }
             }
-            voice.onStateChange = { [weak w] _ in
+            voice.onStateChange = { [weak w] state in
                 guard let w else { return }
                 w.recordingState = voice.state.rawValue
                 w.recordingElapsed = voice.elapsed
+                // the stop timeout (no final batch) ends here too
+                if state == .idle { finishSession() }
             }
             voice.onLevel = { [weak w] level in
                 guard let w else { return }
                 w.recordingLevel = level
                 w.recordingElapsed = voice.elapsed
             }
-            // live draft: rebuild ONLY the region after the immutable prefix
             voice.onPartial = { [weak w] text in
-                guard let w, !text.isEmpty else { return }
-                if cmd.vimMode {
-                    // the live draft shows in the footer; only finalized
-                    // batches touch the note
-                    draft = text
-                    w.tabFooterText = "🎙 " + String(text.suffix(80))
-                    return
-                }
+                guard let w, !text.isEmpty, sessionActive else { return }
                 draft = text
-                w.replaceTail(from: immLen() + committedLen(), with: regionText())
-                // follow the draft: the dictated text lives at the end of the
-                // note, so pin the view to the bottom as it streams in
-                w.scrollEditorToEnd()
-            }
-            // finalized batch: grow committedStr, persist, drop the draft
-            voice.onBatch = { [weak self, weak w] text in
-                guard let self, let w else { return }
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if cmd.vimMode {
-                    if !trimmed.isEmpty {
-                        // blank separator line + the batch, appended IN the
-                        // editor (then :wall) so it never races typing
-                        if !w.vimAppend("\n" + trimmed, to: currentPath) {
-                            // no RPC (plain vim): append on disk, reload
-                            let old = (try? String(contentsOfFile: currentPath,
-                                                   encoding: .utf8)) ?? ""
-                            var new = old
-                            if !new.isEmpty && !new.hasSuffix("\n") { new += "\n" }
-                            new += "\n" + trimmed + "\n"
-                            try? new.write(toFile: currentPath, atomically: true, encoding: .utf8)
-                            w.vimCommand("silent! checktime")
-                        }
-                        dbg("vim batch +\(trimmed.count)")
-                    } else if voice.state == .transcribing {
-                        self.log("voice '\(cmd.name)': no speech detected")
-                    }
-                    draft = ""
-                    w.tabFooterText = lastWriteLabel(currentPath)
-                    if voice.state == .transcribing { voice.resetSession() }
-                    return
+                if live && (!cmd.vimMode || vimAnchored) {
+                    scheduleDraw()
+                } else {
+                    w.tabFooterText = "🎙 " + String(regionText().suffix(80))
                 }
-                if !trimmed.isEmpty {
-                    committedStr += (committedStr.isEmpty ? sep0() : "\n\n") + trimmed
+            }
+            // finalized batch: it joins the committed text of the region
+            voice.onBatch = { text in
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && sessionActive {
+                    committedStr += (committedStr.isEmpty ? "" : " ") + trimmed
                     draft = ""
-                    persist()
-                    w.replaceTail(from: immLen(), with: regionText())
-                    w.scrollEditorToEnd()
-                    dbg("batch +\(trimmed.count) committed=\(committedLen())")
-                    if voice.state == .transcribing {
-                        liveWrite?.invalidate()
-                        liveWrite = nil
-                        // fold the session into the immutable base (display
-                        // string; the file already holds the persisted text)
-                        immutable = w.editorText
-                        immutableDisk = (try? String(contentsOfFile: currentPath,
-                                                     encoding: .utf8)) ?? immutableDisk
-                        committedStr = ""
-                        voice.resetSession()
+                    dbg("batch +\(trimmed.count) committed=\(committedStr.count)")
+                    if live {
+                        if cmd.vimMode && !vimAnchored {
+                            vimAppendFallback(trimmed)
+                            committedStr = ""
+                        } else {
+                            drawRegion()
+                            save()
+                        }
                     }
-                } else if voice.state == .transcribing {
-                    liveWrite?.invalidate()
-                    liveWrite = nil
-                    draft = ""
-                    w.replaceTail(from: immLen() + committedLen(), with: regionText())
+                } else if !sessionActive {
+                    dbg("batch after the session ended dropped (+\(trimmed.count))")
+                }
+                if voice.state == .transcribing {
+                    finishSession()
                     voice.resetSession()
-                    self.log("voice '\(cmd.name)': no speech detected")
                 }
             }
             voice.onError = { [weak self, weak w] err in
@@ -4313,11 +4418,8 @@ private func trimmed(_ s: String) -> String? {
                 dbg("error: \(err)")
                 // visible feedback WITHOUT polluting the note: the footer
                 // line shows the problem; the note keeps only dictated text
-                if let w {
-                    w.tabFooterText = "⚠️ \(err)"
-                    w.scrollEditorToEnd()
-                }
                 voice.resetSession()
+                w?.tabFooterText = "⚠️ \(err)"
             }
             w.onHideVoiceStop = {
                 liveWrite?.invalidate()
@@ -4373,6 +4475,10 @@ private func trimmed(_ s: String) -> String? {
         }
         w.onEditorCommit = commitSave
         w.onEditorClose = commitSave
+        voiceSave = { [weak w] in
+            guard let w else { return }
+            commitSave(w.currentEditorText)
+        }
         w.onHide = { [weak self] restore in
             guard let self else { return }
             // if the color panel is open on this window, don't leave it
@@ -5312,58 +5418,113 @@ private func trimmed(_ s: String) -> String? {
                 return (path, loadListItems(path, cmd: cmd, columns: tabColumns(path)))
             }
         var currentTab = 0
-        // filter dimensions that actually exist in the current tab (parallel
-        // to the window's filterValues/selections)
+        // filter-bar dimensions that exist in the current tab: `filters`
+        // fields that are NOT table columns (e.g. labels) — a column filters
+        // from its own header ▾ instead, so filters live with their columns
         var activeDims: [String] = []
         func currentItems() -> [FieldRow] { tabs[currentTab].items }
-
-        // refresh the dropdown dimensions for the current tab; dims with no
-        // values in this tab disappear from the bar entirely
-        func applyFilterData() {
-            let fd = filterData(currentItems())
-            activeDims = fd.dims
-            w.filterLabels = fd.dims
-            w.filterValues = fd.values
-            w.filterValueLabels = fd.labels
-            w.filterSelections = Array(repeating: 0, count: fd.dims.count)
-            w.growWidthToContent()
+        // multi-select filters: field -> picked values (OR within a field,
+        // AND across fields); reset on tab change, kept across reloads
+        var colFilters: [String: Set<String>] = [:]
+        let emptyValue = "\u{0}none"
+        // fields whose cells hold "a, b" lists: a row matches any part
+        let multiValued: Set<String> = ["labels", "release", "releaseLabel", "releaseDate", "components",
+                                        "fixVersions"]
+        func cellValues(_ field: String, _ row: FieldRow) -> [String] {
+            let v = (row.fields[field] ?? "").trimmingCharacters(in: .whitespaces)
+            guard !v.isEmpty else { return [emptyValue] }
+            guard multiValued.contains(field) else { return [v] }
+            let parts = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return parts.isEmpty ? [emptyValue] : parts
         }
+        let fieldLabels = cmd.name == "jira" ? JiraPoll.fieldLabels() : [:]
+        func label(_ field: String) -> String { fieldLabels[field] ?? field }
 
-        // unique dropdown values per filter dimension for a tab ("All" first), plus
-// display titles: the release dropdown shows "name (date)" (from the parallel
-// releaseLabel field) while still MATCHING on the raw release name — filter
-// logic uses `values`, labels are display-only.
-func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], labels: [[String]]) {
-    var dims: [String] = []
-    var values: [[String]] = []
-    var labels: [[String]] = []
-    for key in cmd.filters {
-        var seen = Set<String>()
-        var vals = items.compactMap { $0.fields[key] }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
-        vals.sort()
-        var labelByValue: [String: String] = [:]
-        if key == "release" {
-            for row in items {
-                let names = (row.fields["release"] ?? "")
-                    .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                let ls = (row.fields["releaseLabel"] ?? "")
-                    .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                for (i, n) in names.enumerated() where !n.isEmpty && labelByValue[n] == nil {
-                    labelByValue[n] = i < ls.count && !ls[i].isEmpty ? ls[i] : n
-                }
+        func barDims() -> [String] {
+            let colFields = Set(columns.filter(\.filterable).map(\.field))
+            return cmd.filters.filter { f in
+                !colFields.contains(f)
+                    // Release (label) and Fix versions (name) are one filter
+                    && !(f == "release" && colFields.contains("releaseLabel"))
+                    && !(f == "releaseLabel" && colFields.contains("release"))
             }
         }
-        // a dimension with no values in THIS tab is hidden entirely — showing
-        // "releaseStatus: All" over all.json (which has no releaseStatus) was
-        // a dead control that only added noise to the bar
-        guard !vals.isEmpty else { continue }
-        dims.append(key)
-        values.append(["All"] + vals)
-        labels.append(["All"] + vals.map { labelByValue[$0] ?? $0 })
-    }
-    return (dims, values, labels)
-}
+
+        // one option per distinct value in the current tab, most common
+        // first; users carry their full name / username from the directory
+        func filterOptions(_ field: String) -> [JiraMultiPicker.Option] {
+            var counts: [String: Int] = [:]
+            var order: [String] = []
+            for row in currentItems() {
+                for v in cellValues(field, row) {
+                    if counts[v] == nil { order.append(v) }
+                    counts[v, default: 0] += 1
+                }
+            }
+            var people: [String: (title: String, detail: String)] = [:]
+            if ["assignee", "reporter", "creator"].contains(field) {
+                let dir = JiraDirectory.load()
+                for u in dir.users {
+                    let who = [u.username, u.email].filter { !$0.isEmpty && $0 != u.name }
+                        .joined(separator: " · ")
+                    for k in [u.username, u.name, u.id] where !k.isEmpty && people[k] == nil {
+                        // Server rows hold the username: show the person's
+                        // full name, keep the username beside it
+                        people[k] = (u.name, k == u.name ? who : ([k] + [u.email].filter { !$0.isEmpty })
+                                        .joined(separator: " · "))
+                    }
+                }
+            }
+            let sorted = order.enumerated().sorted { a, b in
+                let ca = counts[a.element] ?? 0, cb = counts[b.element] ?? 0
+                if (a.element == emptyValue) != (b.element == emptyValue) { return b.element == emptyValue }
+                return ca != cb ? ca > cb : a.element.localizedStandardCompare(b.element) == .orderedAscending
+            }.map(\.element)
+            return sorted.map { v in
+                let n = counts[v] ?? 0
+                let count = "\(n) row\(n == 1 ? "" : "s")"
+                if v == emptyValue {
+                    return .init(id: v, title: field == "assignee" ? "(unassigned)" : "(empty)", detail: count)
+                }
+                if let p = people[v] {
+                    return .init(id: v, title: p.title, detail: ([p.detail, count].filter { !$0.isEmpty })
+                                    .joined(separator: " · "))
+                }
+                return .init(id: v, title: v, detail: count)
+            }
+        }
+
+        func filterSummary(_ field: String) -> String {
+            let picked = colFilters[field] ?? []
+            if picked.isEmpty { return "All" }
+            if picked.count == 1, let v = picked.first {
+                return v == emptyValue ? "(empty)" : v
+            }
+            return "\(picked.count) selected"
+        }
+
+        // the ▾ chips on the header + the bar pills' text / on state
+        func updateFilterIndicators() {
+            w.tableFilterActive = Set(columns.indices.filter { !(colFilters[columns[$0].field] ?? []).isEmpty })
+            w.filterSummaries = activeDims.map(filterSummary)
+            w.filterActive = Set(activeDims.indices.filter { !(colFilters[activeDims[$0]] ?? []).isEmpty })
+        }
+
+        // refresh the bar dimensions for the current tab; dims with no
+        // values in this tab disappear from the bar entirely
+        func applyFilterData() {
+            let items = currentItems()
+            activeDims = barDims().filter { f in items.contains { !($0.fields[f] ?? "").isEmpty } }
+            colFilters = colFilters.filter { f, _ in
+                columns.contains { $0.field == f } || activeDims.contains(f) }
+            w.filterLabels = activeDims.map(label)
+            w.filterValues = activeDims.map { _ in ["All"] }
+            w.filterValueLabels = []
+            w.filterSelections = Array(repeating: 0, count: activeDims.count)
+            updateFilterIndicators()
+            w.growWidthToContent()
+        }
 
         var cfg = PopupConfig(name: cmd.windowName)
         cfg.enableToggle = false
@@ -5385,6 +5546,8 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         cfg.highlightMatches = true
         cfg.filters = !cmd.filters.isEmpty
         cfg.selectableRows = cmd.checkbox ?? !cmd.copyFields.isEmpty
+        // jira: a ☆ beside the checkbox pins an issue to favorites.json
+        cfg.rowStars = cmd.name == "jira"
         // jira: rows are acted on through Cmd+K (copy / open in browser),
         // so the header's "copy selected" button goes
         cfg.copyRowsButton = cmd.name != "jira"
@@ -5411,6 +5574,9 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         }
         cfg.tableCellTone = jiraCellTone
         let w = PopupWindow(config: cfg)
+        let cap = cmd.maxRows > 0 ? cmd.maxRows : Int.max
+        var visibleOffset = 0
+        var reloadWatcher: Timer?
         // empty `title` in commands.conf = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
         w.headerIcon = jiraAppIcon
@@ -5440,8 +5606,71 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 }
                 .joined(separator: "\n")
         }
+        // jira favorites (config.json `favorites`): the ☆ of each issue row
+        var favKeys: Set<String> = cmd.name == "jira" ? JiraPoll.favorites() : []
+        // after a pin / blacklist edit: a tab file the window doesn't have
+        // yet appears by rebuilding the window (the current tab stays)
+        func ensureTab(_ file: String) {
+            guard !tabs.contains(where: { ($0.path as NSString).lastPathComponent == file }),
+                  tabs.indices.contains(currentTab) else { return }
+            pendingJiraTab = (tabs[currentTab].path as NSString).lastPathComponent
+            reloadJiraWindow()
+        }
+        func setFavorite(_ rows: [FieldRow], on: Bool) {
+            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
+            guard !keys.isEmpty else { return }
+            let before = favKeys
+            if on { favKeys.formUnion(keys) } else { favKeys.subtract(keys) }
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            let s = keys.count == 1 ? keys[0] : "\(keys.count) issues"
+            w.showToast(on ? "Pinned \(s) to favorites" : "Unpinned \(s)", symbol: on ? "star.fill" : "star")
+            // the rows as shown: favorites.json gets them at once even when
+            // the issue cache doesn't hold them (live search results)
+            let json = (try? JSONSerialization.data(withJSONObject: rows.map { $0.fields.filter { !$0.key.hasPrefix("__") } }))
+                .map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+            JiraPoll.run("jira_poll.py", ["--favorite", on ? "add" : "remove"] + keys, stdin: json) {
+                [weak self, weak w] code, _, err in
+                guard let self else { return }
+                self.log("jira: favorite \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
+                         + (code == 0 ? "" : " " + err))
+                guard code == 0 else {
+                    favKeys = before
+                    w?.setRows(filteredRows(query: w?.currentQuery ?? ""), resetScroll: false)
+                    w?.showToast("Favorites not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
+                                 symbol: "exclamationmark.triangle")
+                    return
+                }
+                ensureTab(JiraPoll.favoritesFile)
+            }
+        }
+        func setBlacklisted(_ rows: [FieldRow], on: Bool) {
+            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
+            guard !keys.isEmpty else { return }
+            JiraPoll.run("jira_poll.py", ["--blacklist-release", on ? "add" : "remove"] + keys) {
+                [weak self, weak w] code, _, err in
+                guard let self else { return }
+                self.log("jira: blacklist \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
+                         + (code == 0 ? "" : " " + err))
+                let s = keys.count == 1 ? "release \(rows[0].title)" : "\(keys.count) releases"
+                guard code == 0 else {
+                    w?.showToast("Not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
+                                 symbol: "exclamationmark.triangle")
+                    return
+                }
+                w?.selectedIndices = []
+                w?.showToast(on ? "Hid \(s) → \(JiraPoll.blacklistFile)" : "Restored \(s)",
+                             symbol: on ? "eye.slash" : "eye")
+                ensureTab(JiraPoll.blacklistFile)
+            }
+        }
+        w.onToggleStar = { [weak self] i in
+            guard self != nil, w.rows.indices.contains(i), let row = w.rows[i] as? FieldRow,
+                  let on = row.starred else { return }
+            setFavorite([row], on: !on)
+        }
+
         // Cmd+K: act on the ticked rows (else the highlighted one) — copy,
-        // and for jira open every issue in the browser
+        // open in the browser, pin to favorites, hide / restore releases
         w.onCommandK = { [weak self, weak w] in
             guard let self, let w else { return }
             let rows = w.actionRows.compactMap { $0 as? FieldRow }.filter { !$0.loadMore }
@@ -5451,11 +5680,29 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
             let site = cmd.name == "jira" ? jiraSite : ""
             let keyed = rows.filter { !($0.fields["key"] ?? "").isEmpty }
-            let keys = keyed.compactMap { $0.fields["key"] }
-            let s = keys.count == 1 ? "" : "s"
-            if !site.isEmpty && !keys.isEmpty {
-                items.append(("Copy URL and title", "\(keys.count) issue\(s) · one “URL Title” line each"))
-                items.append(("Open all in browser", "opens \(keys.count) issue\(s) · copies KEY + URL"))
+            let issues = keyed.filter { !jiraIsReleaseRow($0) }
+            let releases = keyed.filter { jiraIsReleaseRow($0) }
+            let urls = keyed.compactMap { r in jiraBrowseURL(r, site: site).map { (r, $0) } }
+            let s = urls.count == 1 ? "" : "s"
+            let noun = releases.isEmpty ? "issue" : issues.isEmpty ? "release" : "item"
+            if !site.isEmpty && !urls.isEmpty {
+                items.append(("Copy URL and title", "\(urls.count) \(noun)\(s) · one “URL Title” line each"))
+                items.append(("Open all in browser", "opens \(urls.count) \(noun)\(s) · copies KEY + URL"))
+            }
+            let tabFile = tabs.indices.contains(currentTab)
+                ? (tabs[currentTab].path as NSString).lastPathComponent : ""
+            if cmd.name == "jira" && !issues.isEmpty {
+                let pinned = issues.allSatisfy { favKeys.contains($0.fields["key"] ?? "") }
+                let k = issues.count == 1 ? issues[0].fields["key"] ?? "" : "\(issues.count) issues"
+                items.append(pinned
+                    ? ("Remove from favorites", "unpin \(k) · \(JiraPoll.favoritesFile)")
+                    : ("Add to favorites", "pin \(k) → \(JiraPoll.favoritesFile) · re-polled every run"))
+            }
+            if cmd.name == "jira" && !releases.isEmpty {
+                let k = releases.count == 1 ? releases[0].title : "\(releases.count) releases"
+                items.append(tabFile == JiraPoll.blacklistFile
+                    ? ("Restore release", "show \(k) in the releases tab again")
+                    : ("Blacklist release", "hide \(k) → \(JiraPoll.blacklistFile)"))
             }
             w.showActionPicker(title: "Actions for \(what)", items: items) { [weak self, weak w] i in
                 guard let self, let w, items.indices.contains(i) else { return }
@@ -5465,20 +5712,28 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                     self.copy(text, "\(n) row(s)")
                     w.showToast("Copied \(what)", symbol: "doc.on.clipboard")
                 case "Copy URL and title":
-                    let lines = keyed.map { r -> String in
+                    let lines = urls.map { r, u -> String in
                         let t = (r.fields["title"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                        return "\(site)/browse/\(r.fields["key"] ?? "")" + (t.isEmpty ? "" : " \(t)")
+                        return u.absoluteString + (t.isEmpty ? "" : " \(t)")
                     }
-                    self.copy(lines.joined(separator: "\n"), "\(keys.count) jira URL(s) + titles")
-                    w.showToast("Copied \(keys.count) URL\(s) + title\(s)", symbol: "link")
+                    self.copy(lines.joined(separator: "\n"), "\(urls.count) jira URL(s) + titles")
+                    w.showToast("Copied \(urls.count) URL\(s) + title\(s)", symbol: "link")
+                case "Open all in browser":
+                    let lines = urls.map { "\($0.0.fields["key"] ?? "")\t\($0.1.absoluteString)" }
+                    for (_, u) in urls { NSWorkspace.shared.open(u) }
+                    self.copy(lines.joined(separator: "\n"), "\(urls.count) jira key(s) + URLs")
+                    w.showToast("Opened \(urls.count) · copied keys + URLs", symbol: "safari")
+                    self.log("list '\(cmd.name)': opened \(urls.map { $0.1.absoluteString }.joined(separator: " "))")
+                case "Add to favorites":
+                    setFavorite(issues, on: true)
+                case "Remove from favorites":
+                    setFavorite(issues, on: false)
+                case "Blacklist release":
+                    setBlacklisted(releases, on: true)
+                case "Restore release":
+                    setBlacklisted(releases, on: false)
                 default:
-                    let lines = keys.map { "\($0)\t\(site)/browse/\($0)" }
-                    for k in keys {
-                        if let u = URL(string: site + "/browse/" + k) { NSWorkspace.shared.open(u) }
-                    }
-                    self.copy(lines.joined(separator: "\n"), "\(keys.count) jira key(s) + URLs")
-                    w.showToast("Opened \(keys.count) · copied keys + URLs", symbol: "safari")
-                    self.log("list '\(cmd.name)': opened \(keys.joined(separator: ","))")
+                    break
                 }
             }
         }
@@ -5500,9 +5755,6 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         w.onChromeConfigClick = { [weak self] in
             self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
         }
-        let cap = cmd.maxRows > 0 ? cmd.maxRows : Int.max
-        var visibleOffset = 0
-        var reloadWatcher: Timer?
         // the copy-path / copy-config actions live in the top-left icon menu
         // (below), not as header buttons — keep the header bar uncluttered
         func refreshPathLabel() {
@@ -5566,15 +5818,13 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         func filteredRows(query: String) -> [FieldRow] {
             let byQuery = PopupFuzzy.filter(currentItems(), query: query) { $0.searchText }
             var matched: [FieldRow]
-            if activeDims.isEmpty {
+            let active = colFilters.filter { !$0.value.isEmpty }
+            if active.isEmpty {
                 matched = byQuery
             } else {
-                let opts = w.filterValues
                 matched = byQuery.filter { row in
-                    for (i, sel) in w.filterSelections.enumerated() where sel > 0 {
-                        guard i < activeDims.count, opts.indices.contains(i),
-                              opts[i].indices.contains(sel) else { continue }
-                        if row.fields[activeDims[i]] != opts[i][sel] { return false }
+                    for (f, picked) in active where !cellValues(f, row).contains(where: picked.contains) {
+                        return false
                     }
                     return true
                 }
@@ -5607,7 +5857,60 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
             }
             // live header count: current items in the list (updates with search)
             w.itemCount = paged.count == 1 ? "1 item" : "\(paged.count) items"
+            // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
+            if cmd.name == "jira" {
+                paged = paged.map { r in
+                    guard !r.loadMore, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty else { return r }
+                    var r = r
+                    r.starred = favKeys.contains(k)
+                    return r
+                }
+            }
             return paged
+        }
+
+        // header sort (title click, or the filter popover's Sort buttons);
+        // persisted as table-sort so the window reopens the same way
+        func setSort(_ f: String, ascending: Bool) {
+            sortKey = (f, ascending)
+            syncSortArrow()
+            visibleOffset = 0
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            let v = "\(f):\(ascending ? "asc" : "desc")"
+            if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
+                self.commands[ci].tableSort = v
+            }
+            saveConfigValue(section: cmd.name, key: "table-sort", value: v)
+            self.log("list '\(cmd.name)': sort -> \(v)")
+        }
+
+        // the searchable multi-select popover for one field, anchored at a
+        // header ▾ or a filter-bar pill
+        var openPicker: JiraMultiPicker?
+        func showFilterPicker(_ field: String, anchor: NSView, rect: NSRect) {
+            openPicker?.closePopover()
+            let opts = filterOptions(field)
+            let p = JiraMultiPicker(noun: label(field).lowercased())
+            p.applyColors(w.config.colors)
+            p.options = opts
+            p.set((colFilters[field] ?? []).filter { v in opts.contains { $0.id == v } }.sorted())
+            p.anchor = (anchor, rect)
+            if let col = columns.first(where: { $0.field == field }), col.sortable {
+                p.extraButtons = [
+                    ("Sort ↑", { [weak p] in setSort(field, ascending: true); p?.closePopover() }),
+                    ("Sort ↓", { [weak p] in setSort(field, ascending: false); p?.closePopover() }),
+                ]
+            }
+            p.onChange = { [weak p] in
+                guard let p else { return }
+                colFilters[field] = p.selected.isEmpty ? nil : Set(p.selected)
+                visibleOffset = 0
+                updateFilterIndicators()
+                w.setRows(filteredRows(query: w.currentQuery))
+            }
+            p.onClose = { openPicker = nil }
+            openPicker = p
+            p.togglePopover(nil)
         }
 
         applyFilterData()
@@ -5637,6 +5940,8 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 syncSortArrow()
             }
             w.clearInput()
+            openPicker?.closePopover()
+            colFilters = [:]
             applyFilterData()
             w.setRows(filteredRows(query: ""))
             w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
@@ -5656,8 +5961,10 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 self.log("list '\(cmd.name)': load more -> offset \(visibleOffset)")
                 return
             }
-            self.log("list '\(cmd.name)': picked '\(row.title)'")
-            w.hide(restore: true)
+            // Enter = the same "more details" window as a double-click
+            guard let row = row as? FieldRow else { return }
+            self.log("list '\(cmd.name)': details for '\(row.title)'")
+            self.showDetail(row, cmd: cmd)
         }
         w.onRowClick = { [weak self] index in
             guard let self, index >= 0, index < w.rows.count else { return }
@@ -5676,18 +5983,18 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         // table header: click = sort (again = flip), divider drag = resize;
         // both persist to commands.conf so the window reopens the same way
         w.onTableSort = { [weak self] i in
-            guard let self, columns.indices.contains(i) else { return }
+            guard self != nil, columns.indices.contains(i) else { return }
             let f = columns[i].field
-            sortKey = sortKey?.field == f ? (f, !(sortKey?.ascending ?? true)) : (f, true)
-            syncSortArrow()
-            visibleOffset = 0
-            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
-            let v = "\(f):\(sortKey!.ascending ? "asc" : "desc")"
-            if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
-                self.commands[ci].tableSort = v
-            }
-            saveConfigValue(section: cmd.name, key: "table-sort", value: v)
-            self.log("list '\(cmd.name)': sort -> \(v)")
+            setSort(f, ascending: sortKey?.field == f ? !(sortKey?.ascending ?? true) : true)
+        }
+        // header ▾ / filter-bar pill: the field's searchable multi-select
+        w.onTableFilter = { [weak self] i, view, rect in
+            guard self != nil, columns.indices.contains(i) else { return }
+            showFilterPicker(columns[i].field, anchor: view, rect: rect)
+        }
+        w.onFilterOpen = { [weak self] dim, view, rect in
+            guard self != nil, activeDims.indices.contains(dim) else { return }
+            showFilterPicker(activeDims[dim], anchor: view, rect: rect)
         }
         // persisted on a short debounce after the LAST live drag update (not
         // only on mouseUp — the header's mouseUp isn't guaranteed to arrive)
@@ -5729,8 +6036,21 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         // reload a tab when its source file changes on disk (e.g. the poll
         // wrote fresh json) so an open window never shows stale rows
         var tabMtimes = tabs.map { mtime(of: $0.path) }
+        // jira: each tab's poll freshness (dot + age) from status.json —
+        // re-read when it changes, and every 30s so the ages stay current
+        var badgeStamp: (status: Date?, at: Date) = (nil, .distantPast)
+        func refreshBadges(force: Bool = false) {
+            guard cmd.name == "jira" else { return }
+            let st = mtime(of: JiraPoll.statusPath)
+            guard force || st != badgeStamp.status || Date().timeIntervalSince(badgeStamp.at) > 30 else { return }
+            badgeStamp = (st, Date())
+            let status = JiraPoll.status, config = JiraPoll.readJSON(JiraPoll.configPath)
+            w.tabBadges = tabs.map { JiraPoll.tabBadge(path: $0.path, status: status, config: config) }
+        }
+        refreshBadges(force: true)
         let watcher = Timer(timeInterval: listWatchInterval, repeats: true) { [weak self, weak w] _ in
             guard let self, let w, w.isShown else { return }
+            refreshBadges()
             var changed: [Int] = []
             for (i, t) in tabs.enumerated() {
                 let mt = mtime(of: t.path)
@@ -5744,6 +6064,9 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
                 tabs[i].items = loadListItems(tabs[i].path, cmd: cmd, columns: tabColumns(tabs[i].path))
                 self.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
             }
+            // pins edited elsewhere (or by the poll) show on the ☆ too
+            if cmd.name == "jira" { favKeys = JiraPoll.favorites() }
+            refreshBadges(force: true)
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
             refreshPathLabel()
             // only re-filter when the tab on screen is one that changed
@@ -5758,6 +6081,16 @@ func filterData(_ items: [FieldRow]) -> (dims: [String], values: [[String]], lab
         RunLoop.main.add(watcher, forMode: .common)
         reloadWatcher = watcher
         w.copyConfigButtonLabel = ""
+        // "fit columns": every column as wide as its content, the window
+        // widened to hold them (saved like a divider drag)
+        if cmd.table && !columns.isEmpty {
+            w.headerButtons = [("fit columns", 20)]
+            w.onHeaderButton = { [weak self, weak w] id in
+                guard self != nil, id == 20, let w, let pcts = w.fitTableColumns() else { return }
+                w.onTableColumnsResized?(pcts, true)
+                w.showToast("Columns fitted to their content", symbol: "arrow.left.and.right")
+            }
+        }
         refreshPathLabel()
         subWindows.append(w)
         w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
@@ -6973,6 +7306,10 @@ extension SwitcherController {
             let v = !cmd.voice
             self?.updateNoteSetting("voice", v ? "true" : "false", rebuild: true) { $0.voice = v }
         })
+        menu.addItem(menuItem("Voice: Type As You Speak", state: cmd.voiceLive) { [weak self] in
+            let v = !cmd.voiceLive
+            self?.updateNoteSetting("voice-live", v ? "true" : "false", rebuild: true) { $0.voiceLive = v }
+        })
         menu.addItem(menuItem("Keep Visible When Unfocused (Sticky)", state: cmd.sticky) { [weak self] in
             let v = !cmd.sticky
             self?.updateNoteSetting("sticky", v ? "true" : "false", rebuild: false) { $0.sticky = v }
@@ -7065,6 +7402,86 @@ enum JiraPoll {
     static let directoryPath = NSHomeDirectory() + "/.cache/jira/directory.json"
     // the live search's tab (jira_config.LIVE_SEARCH_FILE, in outDir)
     static let liveSearchFile = "search.json"
+    // the pinned issues' tab / the hidden releases' tab (jira_config
+    // FAVORITES_FILE / BLACKLIST_RELEASE_FILE)
+    static let favoritesFile = "favorites.json"
+    static let blacklistFile = "blacklist_release.json"
+
+    // config.json favorites: the issue keys pinned with the ☆
+    static func favorites() -> Set<String> {
+        Set(readJSON(configPath)?["favorites"] as? [String] ?? [])
+    }
+
+    // "10m" / "1h" / "1w" -> seconds (jira_config.parse_window)
+    static func windowSeconds(_ w: String?) -> TimeInterval? {
+        guard let w, let unit = w.last, let n = Double(w.dropLast()) else { return nil }
+        let mult: [Character: Double] = ["s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800]
+        return mult[unit].map { n * $0 }
+    }
+
+    private static let stampParser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+    static func parseStamp(_ s: String?) -> Date? {
+        guard let s, !s.isEmpty else { return nil }
+        return stampParser.date(from: s)
+    }
+
+    // 42s / 12m / 3h / 2d
+    static func age(_ secs: TimeInterval) -> String {
+        let s = max(0, Int(secs))
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h" }
+        return "\(s / 86400)d"
+    }
+
+    // A jira tab's poll freshness for the tab strip: green = polled
+    // recently and the last run succeeded, yellow = out of date (or the
+    // last run failed while the data is still fresh), red = out of date AND
+    // the last run failed. Out of date = older than the job's window + half
+    // a window (min 5 min). The live search tab shows its age, no verdict.
+    static func tabBadge(path: String, status: [String: Any]?, config: [String: Any]?) -> PopupTabBadge? {
+        let file = (path as NSString).lastPathComponent
+        let now = Date()
+        if file == liveSearchFile {
+            guard let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            else { return nil }
+            return PopupTabBadge(tone: .dim, text: age(now.timeIntervalSince(m)),
+                                 tip: "\(file): live search results from \(age(now.timeIntervalSince(m))) ago "
+                                    + "(Cmd+F runs a new search) — not polled")
+        }
+        let eps = config?["endpoints"] as? [[String: Any]] ?? []
+        let ep = eps.first { ($0["file"] as? String ?? "\($0["name"] as? String ?? "").json") == file }
+            ?? (file == blacklistFile ? eps.first { ($0["type"] as? String) == "releases" } : nil)
+        guard let ep, let name = ep["name"] as? String else { return nil }
+        let entry = (status?["endpoints"] as? [[String: Any]] ?? []).first { ($0["name"] as? String) == name } ?? [:]
+        let window = ep["window"] as? String ?? "10m"
+        let wsec = windowSeconds(window) ?? 600
+        let ok = parseStamp(entry["lastSuccess"] as? String)
+        let failed = (entry["status"] as? String) == "error"
+        let running = (entry["status"] as? String) == "running"
+        let stale = ok.map { now.timeIntervalSince($0) > wsec + max(300, wsec / 2) } ?? true
+        let tone: PopupTone = !stale && !failed ? .success : stale && failed ? .danger : .warning
+        var tip = [ok.map { "\(file) · last polled \(age(now.timeIntervalSince($0))) ago (\(short(entry["lastSuccess"] as? String)))" }
+                    ?? "\(file) · never polled successfully",
+                   "job “\(name)” runs every \(window)"
+                    + (stale ? " — out of date" : "") + (running ? " — polling now…" : "")]
+        if failed, let e = entry["lastError"] as? String, !e.isEmpty {
+            tip.append("last run failed (\(short(entry["lastRun"] as? String))): \(e)")
+        }
+        if file == blacklistFile { tip.append("releases hidden with Cmd+K ▸ Blacklist release") }
+        switch status?["status"] as? String {
+        case "setup pending"?: tip.append("scheduled polling is paused: setup pending (Jira Config ▸ Setup)")
+        case "disabled"?: tip.append("polling is off: Jira is disabled")
+        default: break
+        }
+        return PopupTabBadge(tone: tone, text: ok.map { age(now.timeIntervalSince($0)) } ?? "never",
+                             tip: tip.joined(separator: "\n"))
+    }
 
     // a column field's built-in name — mirror of jira_config.BASE_FIELD_LABELS
     static let baseFieldLabels: [String: String] = [

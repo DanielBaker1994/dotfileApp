@@ -9,6 +9,7 @@ old bash scripts ran (jira-api.sh sync / jira-poll.sh publish), so the window
 json stays byte-for-byte compatible for every existing consumer.
 """
 import json
+import urllib.parse
 import os
 import re
 import shutil
@@ -405,7 +406,8 @@ class JobsAndLiveSearchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.env(tmp)
             p = self.run_py(env, "jira_config.py", "--check")
-            self.assertIn("gave 1 job(s) their own copy of [jira] columns", p.stdout)
+            # all + the favorites job the upgrade adds
+            self.assertIn("gave 2 job(s) their own copy of [jira] columns", p.stdout)
             self.assertEqual(self.cfgjson(env)["endpoints"][0]["columns"], self.COLS)
             p = self.run_py(env, "jira_config.py", "--check")
             self.assertNotIn("own copy", p.stdout)   # once only
@@ -599,12 +601,13 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             cfg = self.cfgjson(env)
             self.assertNotIn("searches", cfg)
             self.assertFalse(os.path.exists(stale))
-            self.assertEqual([e["type"] for e in cfg["endpoints"]], ["issues", "directory"])
+            self.assertEqual([e["type"] for e in cfg["endpoints"]], ["issues", "directory", "favorites"])
             self.assertNotIn("columns", cfg["endpoints"][1])
             r = json.loads(self.run_py(env, "jira_config.py", "--delete-endpoint", "directory").stdout)
             self.assertTrue(r["ok"])
             self.run_py(env, "jira_config.py", "--check")
-            self.assertEqual(len(self.cfgjson(env)["endpoints"]), 1)   # not re-added
+            self.assertEqual([e["type"] for e in self.cfgjson(env)["endpoints"]],
+                             ["issues", "favorites"])   # directory not re-added
 
     def test_page_size_reaches_the_curl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,7 +799,7 @@ if u.path.endswith("/myself"):
 elif u.path.endswith("/project"):
     body = [{"key": p, "name": p} for p in projs]
 elif u.path.endswith("/versions"):
-    body = []
+    body = json.loads(os.environ.get("FAKE_VERSIONS", "[]"))
 elif "/issue/" in u.path:
     body = {"fields": {"comment": {"comments": [{"author": {"displayName": "A"}, "body": "x"},
                                                 {"author": {"displayName": "B"}, "body": "y"}]}}}
@@ -835,9 +838,16 @@ elif u.path.endswith("/search"):
         if m:
             keep = re.findall(r'"([^"]+)"', m.group(1))
             items = [x for x in items if x["fields"]["project"]["key"] in keep]
+        m = re.search(r'key in \(([^)]*)\)', jql)
+        bad = [k for k in os.environ.get("FAKE_BAD_KEYS", "").split(",") if k and m and k in m.group(1)]
+        if m:
+            keys = [k.strip() for k in m.group(1).split(",")]
+            items = [x for x in items if x["key"] in keys]
         start, n = int(q.get("startAt", ["0"])[0]), int(q["maxResults"][0])
         fail = os.environ.get("FAKE_FAIL_AT")
-        if fail and start >= int(fail) and bump("fail") == 0:
+        if bad:
+            code, body = 400, {"errorMessages": [f"An issue with key '{bad[0]}' does not exist for field 'key'."]}
+        elif fail and start >= int(fail) and bump("fail") == 0:
             code, body = 400, {"errorMessages": ["boom"]}
         else:
             body = {"startAt": start, "total": len(items), "issues": items[start:start + n]}
@@ -996,6 +1006,76 @@ class ResilientSyncTests(unittest.TestCase):
             self.assertEqual(len(again), 1)
             self.assertEqual(len(self.cache(tmp)), 12)
             self.assertFalse(os.path.exists(ck))
+
+    def out(self, tmp, name):
+        with open(os.path.join(tmp, "out", name)) as fh:
+            return json.load(fh)
+
+    def test_favorites_job_requeries_the_pinned_keys(self):
+        eps = [{"name": "all", "window": "10m", "projects": "*", "type": "issues", "file": "all.json"},
+               {"name": "favorites", "window": "10m", "projects": "*", "type": "favorites",
+                "file": "favorites.json"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=eps, favoritesJob=True)
+            p = self.poll(env, "--force", "--projects", "favorites")      # nothing pinned
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(self.out(tmp, "favorites.json"), [])
+            self.assertEqual([u for u in self.calls(tmp) if "/search?" in u], [])   # no request
+            r = subprocess.run([sys.executable, os.path.join(JIRA, "jira_poll.py"), "--favorite",
+                                "add", "P-3", "P-1"], env=env, input='[{"key": "P-3", "title": "seen"}]',
+                               capture_output=True, text=True, timeout=60)
+            self.assertTrue(json.loads(r.stdout)["ok"], r.stdout + r.stderr)
+            # at once, from the row the app passed (the cache doesn't hold it yet)
+            self.assertEqual([x["key"] for x in self.out(tmp, "favorites.json")], ["P-3"])
+            p = self.poll(env, "--force", "--projects", "favorites")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            rows = self.out(tmp, "favorites.json")
+            self.assertEqual([(x["key"], x["title"]) for x in rows], [("P-3", "s3"), ("P-1", "s1")])
+            jql = urllib.parse.unquote_plus([u for u in self.calls(tmp) if "/search?" in u][0])
+            self.assertIn("key in (P-3, P-1)", jql)
+            self.assertIn('project in ("P")', jql)                        # clamped to the scope
+            r = subprocess.run([sys.executable, os.path.join(JIRA, "jira_poll.py"), "--favorite",
+                                "remove", "P-3"], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(json.loads(r.stdout)["keys"], ["P-1"])
+            self.assertEqual([x["key"] for x in self.out(tmp, "favorites.json")], ["P-1"])
+
+    def test_favorites_skip_a_key_jira_rejects(self):
+        eps = [{"name": "favorites", "window": "10m", "projects": "*", "type": "favorites",
+                "file": "favorites.json"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=eps, favoritesJob=True, favorites=["P-99", "P-2"])
+            env["FAKE_BAD_KEYS"] = "P-99"
+            p = self.poll(env, "--force", "--projects", "favorites")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual([x["key"] for x in self.out(tmp, "favorites.json")], ["P-2"])
+
+    def test_release_blacklist_splits_the_tab_and_restores(self):
+        eps = [{"name": "releases", "window": "1h", "projects": "*", "type": "releases",
+                "file": "releases.json"}]
+        vers = [{"id": "101", "name": "1.0", "released": True, "releaseDate": "2026-01-01"},
+                {"id": "102", "name": "2.0", "released": False}]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=eps, favoritesJob=True, releaseBlacklist=["P-1.0"])
+            env["FAKE_VERSIONS"] = json.dumps(vers)
+            p = self.poll(env, "--force", "--projects", "releases")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            shown = self.out(tmp, "releases.json")
+            self.assertEqual([(x["key"], x["versionId"]) for x in shown], [("P-2.0", "102")])
+            self.assertEqual([x["key"] for x in self.out(tmp, "blacklist_release.json")], ["P-1.0"])
+            run = lambda *a: json.loads(subprocess.run(  # noqa: E731
+                [sys.executable, os.path.join(JIRA, "jira_poll.py"), "--blacklist-release", *a],
+                env=env, capture_output=True, text=True, timeout=60).stdout)
+            self.assertEqual(run("remove", "P-1.0")["keys"], [])
+            # release_items' order: dated newest first, undated last
+            self.assertEqual([x["key"] for x in self.out(tmp, "releases.json")], ["P-1.0", "P-2.0"])
+            self.assertEqual(self.out(tmp, "blacklist_release.json"), [])
+            self.assertEqual(run("add", "P-2.0")["keys"], ["P-2.0"])
+            self.assertEqual([x["key"] for x in self.out(tmp, "releases.json")], ["P-1.0"])
+            self.assertEqual([x["key"] for x in self.out(tmp, "blacklist_release.json")], ["P-2.0"])
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                self.assertEqual(json.load(fh)["releaseBlacklist"], ["P-2.0"])
+            p = self.poll(env, "--force", "--projects", "releases")    # the poll keeps it hidden
+            self.assertEqual([x["key"] for x in self.out(tmp, "releases.json")], ["P-1.0"])
 
     def test_overlapping_jobs_share_one_sync(self):
         eps = [{"name": n, "window": "10m", "projects": pr, "type": "issues", "file": f"{n}.json"}

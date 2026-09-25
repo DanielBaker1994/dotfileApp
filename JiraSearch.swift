@@ -316,6 +316,14 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var noun = "value"
     var onChange: (() -> Void)?
     var placeholder = "Choose…" { didSet { updateDisplay() } }
+    // show the popover off another view (e.g. a table header's ▾) instead of
+    // this control — the picker then needs no place in a view hierarchy
+    var anchor: (view: NSView, rect: NSRect)?
+    // extra footer buttons left of Clear (e.g. a column's sort)
+    var extraButtons: [(title: String, action: () -> Void)] = []
+    private var extraTargets: [MenuActionTarget] = []
+    var onClose: (() -> Void)?
+    var isOpen: Bool { popover != nil }
     // palette: the Jira window's theme in the Cmd+F panel, else the system's
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     func applyColors(_ c: PopupColors) { colors = c }
@@ -472,10 +480,14 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let clear = ThemedPushButton(title: "Clear", target: self, action: #selector(clearAll(_:)))
         let done = ThemedPushButton(title: "Done", target: self, action: #selector(togglePopover(_:)))
         done.role = .primary
-        for b in [clear, done] { b.controlSize = .small; b.colors = colors }
+        extraTargets = extraButtons.map { MenuActionTarget(action: $0.action) }
+        let extras = zip(extraButtons, extraTargets).map { b, t in
+            ThemedPushButton(title: b.title, target: t, action: #selector(MenuActionTarget.run))
+        }
+        for b in extras + [clear, done] { b.controlSize = .small; b.colors = colors }
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = colors.dim
-        let footer = NSStackView(views: [countLabel, NSView(), clear, done])
+        let footer = NSStackView(views: [countLabel, NSView()] + extras + [clear, done])
         footer.orientation = .horizontal
         let stack = NSStackView(views: [search, sv, footer])
         stack.orientation = .vertical
@@ -486,7 +498,7 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
             v.translatesAutoresizingMaskIntoConstraints = false
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
         }
-        let w = max(340, bounds.width)
+        let w = max(extraButtons.isEmpty ? 340 : 440, bounds.width)
         // list height fits the options (4 … 12 rows visible)
         let listH = CGFloat(min(12, max(4, options.count + (allTitle == nil ? 0 : 1)))) * 24 + 4
         let h = listH + 80
@@ -495,6 +507,8 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let vc = NSViewController()
         vc.view = stack
         let p = NSPopover()
+        // the popover's own material follows the theme (light / dark card)
+        p.appearance = NSAppearance(named: colors.isLight ? .aqua : .darkAqua)
         p.behavior = .transient
         p.contentViewController = vc
         p.contentSize = NSSize(width: w, height: h)
@@ -502,7 +516,11 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         popover = p
         needsDisplay = true
         refilter()
-        p.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
+        if let a = anchor {
+            p.show(relativeTo: a.rect, of: a.view, preferredEdge: a.view.isFlipped ? .maxY : .minY)
+        } else {
+            p.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
+        }
         search.window?.makeFirstResponder(search)
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self, let win = self.search.window, win.isKeyWindow else { return e }
@@ -516,7 +534,11 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
         window?.makeFirstResponder(self)
+        onClose?()
     }
+
+    // close the list (e.g. a footer action that is done with it)
+    func closePopover() { popover?.close() }
 
     private func refilter() {
         let q = search.stringValue.lowercased().split(separator: " ").map(String.init)
