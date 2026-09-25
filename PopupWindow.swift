@@ -2542,6 +2542,19 @@ final class PopupTableHeaderView: NSView {
     // the accent
     var activeFilters: Set<Int> = [] { didSet { needsDisplay = true } }
     var onFilter: ((Int, NSRect) -> Void)?
+    // drag a title sideways to move its column: onReorder(from, to), where
+    // `to` is the column's index after the move
+    var onReorder: ((Int, Int) -> Void)?
+    private var reorder: (from: Int, x: CGFloat, target: Int)?
+    private var pressCol: Int?
+
+    // the slot (0...n) a column dropped at x lands in, as a final index
+    private func reorderTarget(from: Int, x: CGFloat) -> Int {
+        let fs = frames
+        var slot = fs.indices.filter { fs[$0].x + fs[$0].w / 2 < x }.count
+        if slot > from { slot -= 1 }
+        return max(0, min(fs.count - 1, slot))
+    }
     // effective percent widths after a drag; final = true on mouseUp
     var onResize: (([CGFloat], Bool) -> Void)?
     private var drag: (divider: Int, startX: CGFloat, start: [CGFloat])?
@@ -2669,6 +2682,19 @@ final class PopupTableHeaderView: NSView {
                 d.stroke()
             }
         }
+        if let r = reorder, fs.indices.contains(r.from) {
+            // the column being moved, lifted; an accent bar where it lands
+            let f = fs[r.from]
+            c.accentOn.withAlphaComponent(0.18).setFill()
+            NSBezierPath(roundedRect: NSRect(x: f.x + r.x - downX, y: 2, width: f.w, height: bounds.height - 4),
+                         xRadius: 4, yRadius: 4).fill()
+            if r.target != r.from {
+                let t = fs[r.target]
+                let edge = r.target > r.from ? t.x + t.w : t.x
+                c.accentOn.setFill()
+                NSRect(x: edge - 1.5, y: 3, width: 3, height: bounds.height - 6).fill()
+            }
+        }
         let rule = NSBezierPath()
         rule.move(to: NSPoint(x: 0, y: bounds.height - 0.5))
         rule.line(to: NSPoint(x: bounds.width, y: bounds.height - 0.5))
@@ -2682,16 +2708,29 @@ final class PopupTableHeaderView: NSView {
         downX = p.x
         moved = false
         let n = config.tableColumns.count
+        reorder = nil
+        pressCol = nil
         if n > 1, let i = (0..<(n - 1)).first(where: { dividerRect($0).contains(p) }) {
             drag = (i, p.x, frames.map { $0.w / usable * 100 })
         } else {
             drag = nil
+            // a title press may become a column move once it drags
+            if n > 1, !config.tableColumns.indices.contains(where: { filterRect($0)?.contains(p) == true }) {
+                pressCol = frames.firstIndex { p.x >= $0.x && p.x < $0.x + $0.w }
+            }
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let d = drag else { return }
         let p = convert(event.locationInWindow, from: nil)
+        if let from = pressCol, drag == nil {
+            if reorder == nil && abs(p.x - downX) < 6 { return }
+            reorder = (from, p.x, reorderTarget(from: from, x: p.x))
+            NSCursor.closedHand.set()
+            needsDisplay = true
+            return
+        }
+        guard let d = drag else { return }
         moved = true
         var pcts = d.start
         let minPct: CGFloat = 3
@@ -2704,6 +2743,16 @@ final class PopupTableHeaderView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        pressCol = nil
+        if let r = reorder {
+            reorder = nil
+            NSCursor.arrow.set()
+            needsDisplay = true
+            let to = reorderTarget(from: r.from, x: p.x)
+            if to != r.from { onReorder?(r.from, to) }
+            window?.invalidateCursorRects(for: self)
+            return
+        }
         if let d = drag {
             drag = nil
             if moved {
@@ -5889,6 +5938,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
     // config.rowStars: the ☆ of row i was clicked
     public var onToggleStar: ((Int) -> Void)?
+    // a header title was dragged to another slot: the columns are already
+    // moved (config.tableColumns); the host mirrors + persists (from, to)
+    public var onTableColumnsReordered: ((Int, Int) -> Void)?
     // a divider drag changed the column widths (percent); final = mouseUp
     public var onTableColumnsResized: (([CGFloat], Bool) -> Void)?
     private var chrome: PopupChrome?
@@ -6862,6 +6914,14 @@ scroll.documentView = rowView
             self.onTableFilter?(i, h, r)
         }
         rowView.onToggleStar = { [weak self] i in self?.onToggleStar?(i) }
+        tableHeader?.onReorder = { [weak self] from, to in
+            guard let self else { return }
+            var cols = self.config.tableColumns
+            guard cols.indices.contains(from), cols.indices.contains(to) else { return }
+            cols.insert(cols.remove(at: from), at: to)
+            self.setTableColumns(cols)
+            self.onTableColumnsReordered?(from, to)
+        }
         tableHeader?.onResize = { [weak self] pcts, final in
             guard let self else { return }
             var cols = self.config.tableColumns
@@ -7076,6 +7136,7 @@ scroll.documentView = rowView
         onFilter = nil
         onTableFilter = nil
         onToggleStar = nil
+        onTableColumnsReordered = nil
         onFilterOpen = nil
         onAccept = nil
         onRowClick = nil

@@ -566,13 +566,13 @@ struct ListColumn {
 struct CommandSpec {
     enum Kind { case shell, note, list, output, files }
 
-    let name: String
+    var name: String
     let kind: Kind
-    let windowName: String   // PopupConfig.name -> window title / identity
-    let chromeTitle: String  // drag-header label
+    var windowName: String   // PopupConfig.name -> window title / identity
+    var chromeTitle: String  // drag-header label
     let script: String?    // shell: command to run
     let paths: [String]    // note: files edited in-window (tabs when > 1)
-    let sources: [String]  // list: JSON array (or TSV) data files (tabs when > 1)
+    var sources: [String]  // list: JSON array (or TSV) data files (tabs when > 1)
     let root: String?     // files: starting directory for the file browser
     let favorites: [String]  // files: static favorite dirs (commands.conf, tilde ok)
     let zoxideTop: Int       // files: include the top-N dirs from zoxide as favorites
@@ -666,7 +666,7 @@ struct CommandSpec {
          terminalDir: String? = nil,
          terminalBackground: NSColor? = nil,
          vimMode: Bool = false, vimBin: String = "nvim",
-         vimInit: String? = nil, startDrawer: String = "browser",
+         vimInit: String? = nil, startDrawer: String = "none",
          fontSize: CGFloat = 0,
          escClose: Int? = nil, imageRows: Int = 10,
          maxHeight: CGFloat = 0,
@@ -921,7 +921,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         vimMode: tri(vars["vim-mode"]) ?? false,
         vimBin: vars["vim-bin"]?.trimmingCharacters(in: .whitespaces) ?? "nvim",
         vimInit: (vars["vim-init"] ?? "").isEmpty ? nil : vars["vim-init"],
-        startDrawer: (vars["start-drawer"] ?? "").isEmpty ? "browser"
+        startDrawer: (vars["start-drawer"] ?? "").isEmpty ? "none"
             : vars["start-drawer"]!.lowercased(),
         fontSize: num(vars["font-size"]),
         escClose: Int(vars["esc-close"] ?? vars["vim-esc-close"] ?? ""),
@@ -2133,6 +2133,9 @@ var jiraSite: String {
     return ""
 }
 
+// the release view window (one tab per release; see showJiraReleaseView)
+let jiraReleasesWindow = "jira-releases"
+
 // A row of the releases job (releases.json / blacklist_release.json): its
 // key is "PROJECT-NAME", which is NOT an issue key — /browse/<key> 404s.
 func jiraIsReleaseRow(_ r: FieldRow) -> Bool {
@@ -2149,26 +2152,19 @@ func jiraBrowseURL(_ r: FieldRow, site: String = jiraSite) -> URL? {
     guard !site.isEmpty, let key = r.fields["key"], !key.isEmpty else { return nil }
     guard jiraIsReleaseRow(r) else { return URL(string: site + "/browse/" + key) }
     let proj = r.fields["project"] ?? "", name = r.fields["release"] ?? r.title
-    if let id = r.fields["versionId"], !id.isEmpty {
-        return URL(string: "\(site)/projects/\(proj)/versions/\(id)")
+    // the version's numeric id: the row (releases job), else the directory
+    let id = (r.fields["versionId"] ?? "").isEmpty
+        ? JiraDirectory.load().versions.first { $0.project == proj && $0.name == name }?.id ?? ""
+        : r.fields["versionId"] ?? ""
+    if !id.isEmpty {
+        // the release page with ALL its issues (Cloud: the issues tab;
+        // Server / DC: the version page lists them)
+        let tab = site.contains(".atlassian.net") ? "/tab/release-report-all-issues" : ""
+        return URL(string: "\(site)/projects/\(proj)/versions/\(id)\(tab)")
     }
     var c = URLComponents(string: site + "/issues/")
     c?.queryItems = [URLQueryItem(name: "jql", value: "project = \"\(proj)\" AND fixVersion = \"\(name)\"")]
     return c?.url
-}
-
-// the issues of one release (project + fix version name) from the poller's
-// issue cache (~/.cache/jira/jiras.json, every issue of the scope), newest
-// update first
-func jiraReleaseIssues(project: String, release: String) -> [[String: Any]] {
-    let path = NSHomeDirectory() + "/.cache/jira/jiras.json"
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-          let cache = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
-    return cache.values.compactMap { $0 as? [String: Any] }.filter { e in
-        (e["project"] as? String) == project
-            && ((e["release"] as? String) ?? "").split(separator: ",")
-                .contains { $0.trimmingCharacters(in: .whitespaces) == release }
-    }.sorted { ($0["updated"] as? String ?? "") > ($1["updated"] as? String ?? "") }
 }
 
 func iconForApp(_ app: AppInfo) -> NSImage {
@@ -2594,6 +2590,8 @@ final class SwitcherController: NSObject {
     var pendingJiraTab: String?
     // the row the jira detail window shows (it is reused across rows)
     var detailRow: FieldRow?
+    // the release view's tab to select once it opens (a release file name)
+    var pendingReleaseTab: String?
     // When the user clicks another app, aerospace's on-focus-changed can fire
     // with a lag and write a STALE bridge entry naming one of our windows;
     // the poller would then yank focus back off the app the user just clicked.
@@ -3246,6 +3244,48 @@ final class SwitcherController: NSObject {
         }
     }
 
+    // Enter / double-click on a list row: a jira release opens the release
+    // view (its issues, one tab per release); anything else the details
+    private func openRow(_ row: FieldRow, cmd: CommandSpec, isJira: Bool) {
+        if isJira && jiraIsReleaseRow(row) {
+            showJiraReleaseView(row)
+        } else {
+            showDetail(row, cmd: cmd)
+        }
+    }
+
+    // The release view: a jira table window with one tab per release
+    // (releases.json order; a blacklisted release only when it is the one
+    // opened), each holding that release's issues — same columns, filters,
+    // Cmd+K, ☆ and details as all.json. The tab files come from the issue
+    // cache (jira_poll.py --release-view); reopening rebuilds the window.
+    func showJiraReleaseView(_ release: FieldRow) {
+        guard var rc = commands.first(where: { $0.name == "jira" }) else { return }
+        let key = release.fields["key"] ?? ""
+        JiraPoll.run("jira_poll.py", ["--release-view", key]) { [weak self] code, out, err in
+            guard let self else { return }
+            guard code == 0, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any],
+                  let dir = d["dir"] as? String else {
+                self.log("jira: release view failed (exit \(code)) \(err)")
+                return
+            }
+            let rels = d["releases"] as? [[String: Any]] ?? []
+            if let old = self.subWindows.first(where: { $0.config.name == jiraReleasesWindow }) {
+                old.hide(restore: false)
+                self.subWindows.removeAll { $0 === old }
+                old.releaseHooks()
+                old.nativeWindow.orderOut(nil)
+            }
+            rc.name = jiraReleasesWindow
+            rc.windowName = jiraReleasesWindow
+            rc.chromeTitle = "Releases"
+            rc.sources = [dir]
+            self.pendingReleaseTab = rels.first { ($0["key"] as? String) == key }?["file"] as? String
+            self.log("jira: release view -> \(key) (\(rels.count) release(s))")
+            self.openListWindow(rc, restoreWID: nil, restorePID: nil)
+        }
+    }
+
     // "more details": a minimal read-only floating window that renders ONE
     // jira blown up — every field, nothing truncated or wrapped to 2 lines.
     // Esc dismisses. Re-invoking refreshes the single existing detail window.
@@ -3323,26 +3363,6 @@ final class SwitcherController: NSObject {
         for (k, v) in row.fields.sorted(by: { $0.key < $1.key })
         where !k.hasPrefix("__") && !shown.contains(k) && !v.isEmpty {
             out.append("\(k): \(v)")
-        }
-        // a release: every issue with that fix version, under the fields
-        if jiraIsReleaseRow(row) {
-            let name = row.fields["release"] ?? row.title
-            let issues = jiraReleaseIssues(project: row.fields["project"] ?? "", release: name)
-            out.append("")
-            out.append("--- issues in \(name) (\(issues.count)) ---")
-            if issues.isEmpty {
-                out.append("(none in the issue cache — it holds every issue of the projects in scope)")
-            }
-            func cell(_ e: [String: Any], _ k: String, _ w: Int) -> String {
-                let v = (e[k] as? String ?? "").replacingOccurrences(of: "\n", with: " ")
-                let t = v.count > w ? String(v.prefix(w - 1)) + "…" : v
-                return t.padding(toLength: w, withPad: " ", startingAt: 0)
-            }
-            let keyW = min(16, max(4, issues.map { ($0["key"] as? String ?? "").count }.max() ?? 4))
-            for e in issues {
-                out.append([cell(e, "key", keyW), cell(e, "status", 14), cell(e, "priority", 8),
-                            cell(e, "assignee", 18), e["title"] as? String ?? ""].joined(separator: "  "))
-            }
         }
         return out.joined(separator: "\n")
     }
@@ -5399,6 +5419,12 @@ private func trimmed(_ s: String) -> String? {
             log("list '\(cmd.name)': no source configured")
             return
         }
+        // the jira window, or its release view (one tab per release, built
+        // from the [jira] section — see showJiraReleaseView)
+        let isJira = cmd.name == "jira" || cmd.name == jiraReleasesWindow
+        let isReleaseView = cmd.name == jiraReleasesWindow
+        // commands.conf section behind this window (the release view wears [jira])
+        let configSection = isReleaseView ? "jira" : cmd.name
         // each source: { path, rows }
         // a source may be a single file OR a directory — a directory expands
         // to all matching files (sorted), so adding a file to a folder needs
@@ -5407,7 +5433,7 @@ private func trimmed(_ s: String) -> String? {
         // in config.json with its OWN columns; [jira] columns is the fallback
         func tabColumns(_ path: String?) -> [ListColumn] {
             guard cmd.table else { return [] }
-            guard cmd.name == "jira" else { return cmd.columns }
+            guard isJira else { return cmd.columns }
             if let path, let own = JiraPoll.owner(ofTab: path), !own.columns.isEmpty {
                 return JiraPoll.labeled(own.columns)
             }
@@ -5438,7 +5464,7 @@ private func trimmed(_ s: String) -> String? {
                 .filter { !$0.isEmpty }
             return parts.isEmpty ? [emptyValue] : parts
         }
-        let fieldLabels = cmd.name == "jira" ? JiraPoll.fieldLabels() : [:]
+        let fieldLabels = isJira ? JiraPoll.fieldLabels() : [:]
         func label(_ field: String) -> String { fieldLabels[field] ?? field }
 
         func barDims() -> [String] {
@@ -5449,6 +5475,24 @@ private func trimmed(_ s: String) -> String? {
                     && !(f == "release" && colFields.contains("releaseLabel"))
                     && !(f == "releaseLabel" && colFields.contains("release"))
             }
+        }
+
+        // people fields: a cell value (Server: the username; Cloud: the
+        // display name) -> "Full Name (username)" + detail, from the
+        // directory (users of the projects in scope; loaded once)
+        let personFields: Set<String> = ["assignee", "reporter", "creator"]
+        var peopleCache: [String: (title: String, detail: String)]?
+        func peopleByValue() -> [String: (title: String, detail: String)] {
+            if let c = peopleCache { return c }
+            var people: [String: (title: String, detail: String)] = [:]
+            for u in JiraDirectory.load().users {
+                for k in [u.username, u.name, u.id] where !k.isEmpty && people[k] == nil {
+                    let handle = [u.username, u.email].filter { !$0.isEmpty && $0 != u.name && $0 != k }
+                    people[k] = (k == u.name ? u.name : "\(u.name) (\(k))", handle.joined(separator: " · "))
+                }
+            }
+            peopleCache = people
+            return people
         }
 
         // one option per distinct value in the current tab, most common
@@ -5462,20 +5506,7 @@ private func trimmed(_ s: String) -> String? {
                     counts[v, default: 0] += 1
                 }
             }
-            var people: [String: (title: String, detail: String)] = [:]
-            if ["assignee", "reporter", "creator"].contains(field) {
-                let dir = JiraDirectory.load()
-                for u in dir.users {
-                    let who = [u.username, u.email].filter { !$0.isEmpty && $0 != u.name }
-                        .joined(separator: " · ")
-                    for k in [u.username, u.name, u.id] where !k.isEmpty && people[k] == nil {
-                        // Server rows hold the username: show the person's
-                        // full name, keep the username beside it
-                        people[k] = (u.name, k == u.name ? who : ([k] + [u.email].filter { !$0.isEmpty })
-                                        .joined(separator: " · "))
-                    }
-                }
-            }
+            let people = personFields.contains(field) ? peopleByValue() : [:]
             let sorted = order.enumerated().sorted { a, b in
                 let ca = counts[a.element] ?? 0, cb = counts[b.element] ?? 0
                 if (a.element == emptyValue) != (b.element == emptyValue) { return b.element == emptyValue }
@@ -5499,7 +5530,8 @@ private func trimmed(_ s: String) -> String? {
             let picked = colFilters[field] ?? []
             if picked.isEmpty { return "All" }
             if picked.count == 1, let v = picked.first {
-                return v == emptyValue ? "(empty)" : v
+                if v == emptyValue { return "(empty)" }
+                return personFields.contains(field) ? peopleByValue()[v]?.title ?? v : v
             }
             return "\(picked.count) selected"
         }
@@ -5547,10 +5579,10 @@ private func trimmed(_ s: String) -> String? {
         cfg.filters = !cmd.filters.isEmpty
         cfg.selectableRows = cmd.checkbox ?? !cmd.copyFields.isEmpty
         // jira: a ☆ beside the checkbox pins an issue to favorites.json
-        cfg.rowStars = cmd.name == "jira"
+        cfg.rowStars = isJira
         // jira: rows are acted on through Cmd+K (copy / open in browser),
         // so the header's "copy selected" button goes
-        cfg.copyRowsButton = cmd.name != "jira"
+        cfg.copyRowsButton = !isJira
         cfg.bodyMaxLines = cmd.bodyLines > 0 ? cmd.bodyLines : 5
         cfg.height = cmd.height > 0 ? cmd.height : defaultListSize.height
         cfg.width = cmd.width > 0 ? cmd.width : defaultListSize.width
@@ -5607,11 +5639,11 @@ private func trimmed(_ s: String) -> String? {
                 .joined(separator: "\n")
         }
         // jira favorites (config.json `favorites`): the ☆ of each issue row
-        var favKeys: Set<String> = cmd.name == "jira" ? JiraPoll.favorites() : []
+        var favKeys: Set<String> = isJira ? JiraPoll.favorites() : []
         // after a pin / blacklist edit: a tab file the window doesn't have
         // yet appears by rebuilding the window (the current tab stays)
         func ensureTab(_ file: String) {
-            guard !tabs.contains(where: { ($0.path as NSString).lastPathComponent == file }),
+            guard cmd.name == "jira", !tabs.contains(where: { ($0.path as NSString).lastPathComponent == file }),
                   tabs.indices.contains(currentTab) else { return }
             pendingJiraTab = (tabs[currentTab].path as NSString).lastPathComponent
             reloadJiraWindow()
@@ -5678,7 +5710,7 @@ private func trimmed(_ s: String) -> String? {
             let n = rows.count, what = n == 1 ? (rows[0].fields["key"] ?? "1 row") : "\(n) rows"
             var items: [(title: String, detail: String)] = [
                 ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
-            let site = cmd.name == "jira" ? jiraSite : ""
+            let site = isJira ? jiraSite : ""
             let keyed = rows.filter { !($0.fields["key"] ?? "").isEmpty }
             let issues = keyed.filter { !jiraIsReleaseRow($0) }
             let releases = keyed.filter { jiraIsReleaseRow($0) }
@@ -5691,14 +5723,17 @@ private func trimmed(_ s: String) -> String? {
             }
             let tabFile = tabs.indices.contains(currentTab)
                 ? (tabs[currentTab].path as NSString).lastPathComponent : ""
-            if cmd.name == "jira" && !issues.isEmpty {
+            if isJira && !issues.isEmpty {
                 let pinned = issues.allSatisfy { favKeys.contains($0.fields["key"] ?? "") }
                 let k = issues.count == 1 ? issues[0].fields["key"] ?? "" : "\(issues.count) issues"
                 items.append(pinned
                     ? ("Remove from favorites", "unpin \(k) · \(JiraPoll.favoritesFile)")
                     : ("Add to favorites", "pin \(k) → \(JiraPoll.favoritesFile) · re-polled every run"))
             }
-            if cmd.name == "jira" && !releases.isEmpty {
+            if isJira && releases.count == 1 {
+                items.append(("Show release issues", "every issue in \(releases[0].title) · one tab per release"))
+            }
+            if isJira && !releases.isEmpty {
                 let k = releases.count == 1 ? releases[0].title : "\(releases.count) releases"
                 items.append(tabFile == JiraPoll.blacklistFile
                     ? ("Restore release", "show \(k) in the releases tab again")
@@ -5732,6 +5767,8 @@ private func trimmed(_ s: String) -> String? {
                     setBlacklisted(releases, on: true)
                 case "Restore release":
                     setBlacklisted(releases, on: false)
+                case "Show release issues":
+                    self.showJiraReleaseView(releases[0])
                 default:
                     break
                 }
@@ -5751,7 +5788,7 @@ private func trimmed(_ s: String) -> String? {
         }
         // header "config" button: copy the commands.conf path (not on jira:
         // its config lives in the Jira Config window)
-        if cmd.name == "jira" { w.copyConfigButtonLabel = "" }
+        if isJira { w.copyConfigButtonLabel = "" }
         w.onChromeConfigClick = { [weak self] in
             self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
         }
@@ -5795,14 +5832,14 @@ private func trimmed(_ s: String) -> String? {
                 })
             }
             menu.addItem(.separator())
-            menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
-            menu.addItem(self.floatMenuItem(for: w, section: cmd.name))
+            menu.addItem(self.focusLossMenuItem(for: w, section: configSection))
+            menu.addItem(self.floatMenuItem(for: w, section: configSection))
             menu.addItem(.separator())
-            self.addThemeMenus(to: menu, window: w, section: cmd.name)
+            self.addThemeMenus(to: menu, window: w, section: configSection)
             menu.addItem(.separator())
             menu.addItem(self.menuItem("Reset Default Size") { w.resetToDefaultSize() })
             menu.addItem(self.menuItem("Reset Default Colors") { [weak self] in
-                self?.resetWindowTheme(w, section: cmd.name)
+                self?.resetWindowTheme(w, section: configSection)
             })
             if cmd.name == "jira" {
                 menu.addItem(.separator())
@@ -5858,7 +5895,7 @@ private func trimmed(_ s: String) -> String? {
             // live header count: current items in the list (updates with search)
             w.itemCount = paged.count == 1 ? "1 item" : "\(paged.count) items"
             // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
-            if cmd.name == "jira" {
+            if isJira {
                 paged = paged.map { r in
                     guard !r.loadMore, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty else { return r }
                     var r = r
@@ -5877,6 +5914,7 @@ private func trimmed(_ s: String) -> String? {
             visibleOffset = 0
             w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
             let v = "\(f):\(ascending ? "asc" : "desc")"
+            guard !isReleaseView else { return }
             if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
                 self.commands[ci].tableSort = v
             }
@@ -5964,7 +6002,7 @@ private func trimmed(_ s: String) -> String? {
             // Enter = the same "more details" window as a double-click
             guard let row = row as? FieldRow else { return }
             self.log("list '\(cmd.name)': details for '\(row.title)'")
-            self.showDetail(row, cmd: cmd)
+            self.openRow(row, cmd: cmd, isJira: isJira)
         }
         w.onRowClick = { [weak self] index in
             guard let self, index >= 0, index < w.rows.count else { return }
@@ -5978,7 +6016,7 @@ private func trimmed(_ s: String) -> String? {
         w.onRowDoubleClick = { [weak self] index in
             guard let self, index >= 0, index < w.rows.count,
                   let row = w.rows[index] as? FieldRow, !row.loadMore else { return }
-            self.showDetail(row, cmd: cmd)
+            self.openRow(row, cmd: cmd, isJira: isJira)
         }
         // table header: click = sort (again = flip), divider drag = resize;
         // both persist to commands.conf so the window reopens the same way
@@ -6005,9 +6043,9 @@ private func trimmed(_ s: String) -> String? {
             resizeSave?.cancel()
             let item = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let spec = ListColumn.serialize(columns, titles: cmd.name != "jira")
+                let spec = ListColumn.serialize(columns, titles: !isJira)
                 // a jira tab owned by a poll job / search saves into THAT job
-                if cmd.name == "jira", tabs.indices.contains(currentTab),
+                if isJira, tabs.indices.contains(currentTab),
                    let own = JiraPoll.owner(ofTab: tabs[currentTab].path) {
                     JiraPoll.run("jira_config.py", ["--set-columns", own.kind, own.name, spec]) { [weak self] code, _, err in
                         self?.log("jira: \(own.kind) \(own.name) columns -> \(spec) (exit \(code))"
@@ -6023,6 +6061,15 @@ private func trimmed(_ s: String) -> String? {
             }
             resizeSave = item
             DispatchQueue.main.asyncAfter(deadline: .now() + (final ? 0.05 : 0.6), execute: item)
+        }
+        // a header title dragged to another slot: same order here, the ▾ /
+        // sort marks follow their fields, saved like a divider drag
+        w.onTableColumnsReordered = { [weak self, weak w] from, to in
+            guard self != nil, columns.indices.contains(from), columns.indices.contains(to) else { return }
+            columns.insert(columns.remove(at: from), at: to)
+            syncSortArrow()
+            updateFilterIndicators()
+            w?.onTableColumnsResized?(columns.map(\.width), true)
         }
         w.onEscape = { w.hide(restore: true) }
         w.onHide = { [weak self] restore in
@@ -6048,9 +6095,16 @@ private func trimmed(_ s: String) -> String? {
             w.tabBadges = tabs.map { JiraPoll.tabBadge(path: $0.path, status: status, config: config) }
         }
         refreshBadges(force: true)
+        // release view: its tab files are rebuilt from the issue cache
+        // whenever a poll changes it (the mtime check below reloads them)
+        var cacheStamp = mtime(of: JiraPoll.issueCachePath)
         let watcher = Timer(timeInterval: listWatchInterval, repeats: true) { [weak self, weak w] _ in
             guard let self, let w, w.isShown else { return }
             refreshBadges()
+            if isReleaseView, mtime(of: JiraPoll.issueCachePath) != cacheStamp {
+                cacheStamp = mtime(of: JiraPoll.issueCachePath)
+                JiraPoll.run("jira_poll.py", ["--release-view"])
+            }
             var changed: [Int] = []
             for (i, t) in tabs.enumerated() {
                 let mt = mtime(of: t.path)
@@ -6065,7 +6119,7 @@ private func trimmed(_ s: String) -> String? {
                 self.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
             }
             // pins edited elsewhere (or by the poll) show on the ☆ too
-            if cmd.name == "jira" { favKeys = JiraPoll.favorites() }
+            if isJira { favKeys = JiraPoll.favorites() }
             refreshBadges(force: true)
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
             refreshPathLabel()
@@ -6095,6 +6149,12 @@ private func trimmed(_ s: String) -> String? {
         subWindows.append(w)
         w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
         w.show()
+        if isReleaseView, let f = pendingReleaseTab {
+            pendingReleaseTab = nil
+            if let i = tabs.firstIndex(where: { ($0.path as NSString).lastPathComponent == f }), i != currentTab {
+                w.selectedTab = i
+            }
+        }
         guard cmd.name == "jira" else { return }
         // live search results: reload that tab from disk and select it (a
         // tab the window doesn't have yet = rebuild the window, then select)
@@ -7405,6 +7465,9 @@ enum JiraPoll {
     // the pinned issues' tab / the hidden releases' tab (jira_config
     // FAVORITES_FILE / BLACKLIST_RELEASE_FILE)
     static let favoritesFile = "favorites.json"
+    static let issueCachePath = NSHomeDirectory() + "/.cache/jira/jiras.json"
+    // the release view's tab files (jira_config.RELEASE_VIEW_DIR, next to outDir)
+    static let releaseViewDir = "jira_releases"
     static let blacklistFile = "blacklist_release.json"
 
     // config.json favorites: the issue keys pinned with the ☆
@@ -7583,6 +7646,17 @@ enum JiraPoll {
         if file == liveSearchFile {
             let ls = d["liveSearch"] as? [String: Any] ?? [:]
             return ("live", "search", ListColumn.parse(ls["columns"] as? String))
+        }
+        // a release view tab = issue rows: the main issue job's columns
+        // (column edits there save into that job)
+        if (path as NSString).deletingLastPathComponent.hasSuffix("/" + releaseViewDir) {
+            let plain = (d["endpoints"] as? [[String: Any]] ?? []).filter {
+                ($0["type"] as? String ?? "issues") == "issues" && ($0["jql"] as? String ?? "").isEmpty }
+            if let e = plain.first(where: { ($0["name"] as? String) == "all" }) ?? plain.first,
+               let name = e["name"] as? String {
+                return ("endpoint", name, ListColumn.parse(e["columns"] as? String))
+            }
+            return nil
         }
         for e in d["endpoints"] as? [[String: Any]] ?? [] {
             guard let name = e["name"] as? String, (e["type"] as? String) != "directory" else { continue }

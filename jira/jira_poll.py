@@ -77,6 +77,8 @@ Usage:
                                   ok are skipped; --step reruns one. All ok ->
                                   setup.state = done (scheduled polling on)
   jira_poll.py --favorite add|remove KEY...          pin / unpin issues
+  jira_poll.py --release-view [KEY...]   one tab file per release (its issues,
+                                  from the cache) for the release view window
   jira_poll.py --blacklist-release add|remove KEY... hide / restore releases
                                   (both: config.json + the tabs rewritten
                                   from local data at once; no request, no lock)
@@ -213,7 +215,8 @@ class Reporter:
 def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
          "force": False, "describe": False, "cancel": False, "live": False, "directory": False,
-         "rebuild": False, "setup": False, "step": "", "favorite": None, "blacklist": None}
+         "rebuild": False, "setup": False, "step": "", "favorite": None, "blacklist": None,
+         "release_view": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -255,6 +258,11 @@ def parse_args(argv: list) -> dict:
             o["setup"] = True
         elif name == "--step":
             o["step"] = val()
+        elif name == "--release-view":
+            # --release-view [KEY...]: the keys = releases to include even if
+            # blacklisted (the one double-clicked in blacklist_release.json)
+            o["release_view"] = argv[i + 1:]
+            return o
         elif name in ("--favorite", "--blacklist-release"):
             # --favorite add|remove KEY...  (the rest of argv = the keys)
             op = val()
@@ -1309,10 +1317,73 @@ def edit_pins(kind: str, op: str, keys: list) -> int:
     return result(True, keys=new, count=len(hidden), files=tabs + [bl_path])
 
 
+def release_view_file(project: str, name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in f"{project}-{name}")
+    return safe.strip() + ".json"
+
+
+def release_view(extra_keys: list) -> int:
+    """--release-view [KEY...]: the Jira window's release view - one tab file
+    per release (releases.json rows + the given blacklisted keys) holding the
+    issues whose fix versions name it, from the issue cache, shaped with the
+    main issue job's columns. Local only (no request, no lock). Stale files
+    are removed. Prints {ok, dir, releases: [{key, file, count}]}."""
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+    view_dir = os.path.join(os.path.dirname(out_dir.rstrip("/")), jira_config.RELEASE_VIEW_DIR)
+    os.makedirs(view_dir, exist_ok=True)
+    rels = []
+    for e in cfg.endpoints:
+        if e.get("type") == "releases" and e.get("file"):
+            got = jira_api.read_json(os.path.join(out_dir, e["file"]), [])
+            rels += [r for r in (got if isinstance(got, list) else []) if isinstance(r, dict)]
+    hidden = jira_api.read_json(os.path.join(out_dir, jira_config.BLACKLIST_RELEASE_FILE), [])
+    rels += [r for r in (hidden if isinstance(hidden, list) else [])
+             if isinstance(r, dict) and r.get("key") in set(extra_keys)]
+    main_ep = next((e for e in cfg.endpoints if plain_issue_job(e) and e.get("name") == "all"),
+                   next((e for e in cfg.endpoints if plain_issue_job(e)), {}))
+    _, pkeys = job_fields(main_ep, team)
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    cache = cache if isinstance(cache, dict) else {}
+    by_release: dict = {}
+    for e in cache.values():
+        if not isinstance(e, dict):
+            continue
+        for n in str(e.get("release") or "").split(","):
+            by_release.setdefault((e.get("project") or "", n.strip()), []).append(e)
+    out, written, seen = [], set(), set()
+    for r in rels:
+        key = r.get("key") or ""
+        if key in seen:
+            continue
+        seen.add(key)
+        proj, name = r.get("project") or "", r.get("release") or r.get("title") or ""
+        items = shape(sort_updated_desc(by_release.get((proj, name), [])), pkeys)
+        f = release_view_file(proj, name)
+        jira_api.write_json(os.path.join(view_dir, f), items, mode=0o644)
+        written.add(f)
+        out.append({"key": key, "file": f, "count": len(items)})
+    for f in os.listdir(view_dir):
+        if f.endswith(".json") and f not in written:
+            try:
+                os.unlink(os.path.join(view_dir, f))
+            except OSError:
+                pass
+    print(json.dumps({"ok": True, "dir": view_dir, "releases": out}))
+    return 0
+
+
 def main(argv: list) -> int:
     global QUIET
     o = parse_args(argv)
     QUIET = o["quiet"]
+    if o["release_view"] is not None:
+        return release_view(o["release_view"])
     if o["favorite"]:
         return edit_pins("favorites", *o["favorite"])
     if o["blacklist"]:

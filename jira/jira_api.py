@@ -1059,7 +1059,7 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
 
     def versions(proj, i):
         got = c.get(c.path("project_versions", project=proj)) or []
-        st["versions"][proj] = [{"name": v["name"], "project": proj,
+        st["versions"][proj] = [{"name": v["name"], "project": proj, "id": str(v.get("id") or ""),
                                  "releaseDate": v.get("releaseDate") or "",
                                  "released": bool(v.get("released"))}
                                 for v in (got if isinstance(got, list) else [])

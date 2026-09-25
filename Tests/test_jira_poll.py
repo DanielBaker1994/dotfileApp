@@ -1077,6 +1077,34 @@ class ResilientSyncTests(unittest.TestCase):
             p = self.poll(env, "--force", "--projects", "releases")    # the poll keeps it hidden
             self.assertEqual([x["key"] for x in self.out(tmp, "releases.json")], ["P-1.0"])
 
+    def test_release_view_writes_one_tab_per_release(self):
+        eps = [{"name": "all", "window": "10m", "projects": "*", "type": "issues", "file": "all.json"},
+               {"name": "releases", "window": "1h", "projects": "*", "type": "releases",
+                "file": "releases.json"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp, endpoints=eps, favoritesJob=True, releaseBlacklist=["P-2.0"])
+            env["FAKE_VERSIONS"] = json.dumps([{"id": "7", "name": "1.0"}, {"id": "8", "name": "2.0"}])
+            self.assertEqual(self.poll(env, "--force", "--projects", "*").returncode, 0)
+            cache_p = os.path.join(tmp, "cache", "jiras.json")
+            with open(cache_p) as fh:
+                cache = json.load(fh)
+            cache["P-1"]["release"] = "1.0, 2.0"
+            cache["P-2"]["release"] = "2.0"
+            with open(cache_p, "w") as fh:
+                json.dump(cache, fh)
+            run = lambda *a: json.loads(subprocess.run(  # noqa: E731
+                [sys.executable, os.path.join(JIRA, "jira_poll.py"), "--release-view", *a],
+                env=env, capture_output=True, text=True, timeout=60).stdout)
+            r = run()
+            self.assertEqual([(x["key"], x["count"]) for x in r["releases"]], [("P-1.0", 1)])
+            with open(os.path.join(r["dir"], "P-1.0.json")) as fh:
+                self.assertEqual([x["key"] for x in json.load(fh)], ["P-1"])
+            r = run("P-2.0")      # a blacklisted release opened from its tab
+            self.assertEqual(sorted(x["key"] for x in r["releases"]), ["P-1.0", "P-2.0"])
+            self.assertEqual(sorted(os.listdir(r["dir"])), ["P-1.0.json", "P-2.0.json"])
+            run()                 # stale tab files go
+            self.assertEqual(os.listdir(r["dir"]), ["P-1.0.json"])
+
     def test_overlapping_jobs_share_one_sync(self):
         eps = [{"name": n, "window": "10m", "projects": pr, "type": "issues", "file": f"{n}.json"}
                for n, pr in (("all", "*"), ("KAN", ["KAN"]), ("SAM1", ["SAM1"]))]

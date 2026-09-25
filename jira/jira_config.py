@@ -109,6 +109,7 @@ LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
 LIVE_SEARCH_MAX = 100                # default max results of one live search
 FAVORITES_FILE = "favorites.json"    # the pinned issues' tab (the favorites job)
 BLACKLIST_RELEASE_FILE = "blacklist_release.json"   # releases hidden from the releases tab
+RELEASE_VIEW_DIR = "jira_releases"  # next to outDir: one <PROJECT>-<release>.json per release
 
 # the directory job: projects + assignable users + statuses / types /
 # priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).

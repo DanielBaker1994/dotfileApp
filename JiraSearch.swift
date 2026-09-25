@@ -46,7 +46,7 @@ enum JiraEditKeys {
 struct JiraDirectory {
     struct User { let id, name, username, email: String; let projects: [String] }
     struct Field { let id, name: String; let custom: Bool; let type: String }
-    struct Version { let name, project, releaseDate: String; let released: Bool }
+    struct Version { let name, project, releaseDate: String; let released: Bool; var id = "" }
     var projects: [(key: String, name: String)] = []
     var users: [User] = []
     var statuses: [String] = []
@@ -82,7 +82,8 @@ struct JiraDirectory {
         d.versions = (o["versions"] as? [[String: Any]] ?? []).compactMap { v in
             guard let n = v["name"] as? String else { return nil }
             return Version(name: n, project: v["project"] as? String ?? "",
-                           releaseDate: v["releaseDate"] as? String ?? "", released: v["released"] as? Bool ?? false)
+                           releaseDate: v["releaseDate"] as? String ?? "", released: v["released"] as? Bool ?? false,
+                           id: v["id"] as? String ?? "")
         }
         d.labels = (o["labels"] as? [[String: Any]] ?? []).compactMap { l in
             (l["name"] as? String).map { ($0, l["projects"] as? [String] ?? []) }
