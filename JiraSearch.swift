@@ -2,8 +2,10 @@ import AppKit
 
 // MARK: - Jira live search (Cmd+F in the Jira window) + the value pickers
 //
-// JiraSearchPanel: a bar docked to the Jira window (child window, above it
-// when there is room, else below). Free text (Jira `text ~`: title,
+// JiraSearchPanel: a strip INSIDE the Jira window, docked under its header
+// (PopupWindow.setTopAccessory; the list moves down, filter rows scroll past
+// ~40% of the window). It parks / unparks with the window; Esc or Cmd+F from
+// the strip closes it, Cmd+F from the list focuses it. Free text (Jira `text ~`: title,
 // description, comments) + Projects + "+ Filter" rows (assignee / reporter /
 // status / type / priority / release / labels / dates / "… contains"). Every
 // value Jira knows up front (users, releases, labels …) is a PICKER over the
@@ -522,15 +524,42 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         } else {
             p.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
         }
-        search.window?.makeFirstResponder(search)
+        // the list takes the keyboard AT ONCE (typing filters, Ctrl+N/P / ↑↓
+        // move, Esc closes): make the popover's window key, not just its
+        // first responder — else every key still went to the window below
+        // (Esc closed the whole jira window). Again after the show animation.
+        focusSearch()
+        DispatchQueue.main.async { [weak self] in self?.focusSearch() }
+        // rule: Esc closes a transient overlay, never the window under it
+        PopupWindow.transientEscape = { [weak self] in self?.closePopover() }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self, let win = self.search.window, win.isKeyWindow else { return e }
+            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if mods == .control, e.keyCode == 45 || e.keyCode == 35 {   // Ctrl+N / Ctrl+P
+                self.moveHighlight(e.keyCode == 45 ? 1 : -1)
+                return nil
+            }
             return JiraEditKeys.route(e, in: win) ? nil : e
         }
     }
 
+    private func focusSearch() {
+        guard popover != nil, let win = search.window else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKey()
+        win.makeFirstResponder(search)
+    }
+
+    private func moveHighlight(_ d: Int) {
+        guard !shown.isEmpty else { return }
+        let n = max(0, min(shown.count - 1, table.selectedRow + d))
+        table.selectRowIndexes(IndexSet(integer: n), byExtendingSelection: false)
+        table.scrollRowToVisible(n)
+    }
+
     func popoverDidClose(_ notification: Notification) {
         popover = nil
+        PopupWindow.transientEscape = nil
         needsDisplay = true
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
@@ -654,53 +683,37 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
 // MARK: - JiraSearchPanel
 
-private final class JiraKeyPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-    // text selection + caret in the theme's colors (not the Mac's accent)
-    var selectionAttributes: [NSAttributedString.Key: Any]?
-    var caretColor: NSColor?
-    override func fieldEditor(_ createFlag: Bool, for object: Any?) -> NSText? {
-        let ed = super.fieldEditor(createFlag, for: object)
-        if let tv = ed as? NSTextView {
-            if let a = selectionAttributes { tv.selectedTextAttributes = a }
-            if let c = caretColor { tv.insertionPointColor = c }
-        }
-        return ed
-    }
-}
-
 final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private static var live: JiraSearchPanel?
     private static var parkedAt: Date?     // detached by a window rebuild (reattach soon after)
     private static let stateKey = "jiraLiveSearch.state"
 
     static func toggle(on w: PopupWindow, controller: SwitcherController) {
-        if let p = live, p.panel.isVisible, p.host === w { p.close(); return }
+        if let p = live, p.attached, p.host === w {
+            // Cmd+F from the list focuses the search; from the search, closes it
+            if w.topAccessoryHasFocus { p.close() } else { p.win?.makeFirstResponder(p.textField) }
+            return
+        }
         let p = live ?? JiraSearchPanel(controller: controller)
         live = p
         p.attach(to: w)
     }
 
-    // the jira window is hiding / being rebuilt: park the panel
+    // the jira window is being rebuilt / torn down: take the strip out
     static func detach(from w: PopupWindow) {
-        guard let p = live, p.host === w, p.panel.isVisible else { return }
+        guard let p = live, p.host === w, p.attached else { return }
         parkedAt = Date()
         p.unhook()
     }
 
     // the shared window switched away from / back to the jira list: the
-    // panel hides with it and comes back docked when the list returns
-    private static weak var parkedHost: PopupWindow?
-    static func park(from w: PopupWindow) {
-        guard let p = live, p.host === w, p.panel.isVisible else { return }
-        parkedHost = w
-        p.unhook()
-    }
+    // strip lives INSIDE the jira window, so it parks with it — only the
+    // theme / lists are refreshed when it comes back
+    static func park(from w: PopupWindow) {}
     static func unpark(to w: PopupWindow) {
-        guard let p = live, parkedHost === w else { return }
-        parkedHost = nil
-        p.attach(to: w)
+        guard let p = live, p.host === w, p.attached else { return }
+        p.applyTheme(w.config)
+        p.reloadLists()
     }
 
     // the rebuilt jira window: bring a panel parked moments ago back
@@ -724,7 +737,11 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
 
     private weak var controller: SwitcherController?
     fileprivate weak var host: PopupWindow?
-    let panel: NSPanel
+    // the strip docked under the jira window's header (was a floating panel)
+    let container = NSView()
+    private let hairline = NSView()
+    fileprivate var win: NSWindow? { host?.nativeWindow }
+    fileprivate var attached: Bool { container.superview != nil && host?.hasTopAccessory == true }
     private var monitor: Any?
     private var dir = JiraDirectory()
     private var info: [String: Any] = [:]
@@ -735,11 +752,9 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private var searching = false
     private var colors = PopupColors()
 
-    private let fx = NSVisualEffectView()
-    private let tint = NSView()
     private let textBox = JiraInputBox(placeholder: "Search text — matches title, description and comments · Return searches",
                                        font: .systemFont(ofSize: 14))
-    private var textField: NSTextField { textBox.field }
+    fileprivate var textField: NSTextField { textBox.field }
     private let projects = JiraMultiPicker(noun: "project", allTitle: "All projects")
     private let addFilter = JiraChoiceButton()
     private let searchButton: ThemeButton
@@ -797,8 +812,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
 
     private init(controller: SwitcherController) {
         self.controller = controller
-        panel = JiraKeyPanel(contentRect: NSRect(x: 0, y: 0, width: 760, height: 90),
-                             styleMask: [.borderless], backing: .buffered, defer: false)
         var run: (() -> Void)?, fetch: (() -> Void)?
         searchButton = Self.themeButton("Search", symbol: "magnifyingglass", tip: "Search (Return / ⌘Return)") { run?() }
         fetchButton = Self.themeButton("Fetch from Jira", symbol: "arrow.down.circle",
@@ -808,29 +821,17 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         searchButton.isOn = true
         run = { [weak self] in self?.run(nil) }
         fetch = { [weak self] in self?.fetchDirectory(nil) }
-        panel.isReleasedWhenClosed = false
-        panel.hasShadow = true
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hidesOnDeactivate = false
-        panel.autorecalculatesKeyViewLoop = true
         build()
     }
 
     private func build() {
-        // surface = the Jira window's own: its blur material + its card tint
-        fx.state = .active
-        fx.blendingMode = .behindWindow
-        fx.wantsLayer = true
-        fx.layer?.cornerRadius = 10
-        fx.layer?.masksToBounds = true
-        panel.contentView = fx
-        tint.wantsLayer = true
-        tint.layer?.cornerRadius = 10
-        tint.layer?.borderWidth = 1
-        tint.frame = fx.bounds
-        tint.autoresizingMask = [.width, .height]
-        fx.addSubview(tint)
+        // surface = a mantle well under the jira window's header (the same
+        // layer as its tab strip / table header), a hairline below it
+        container.wantsLayer = true
+        hairline.wantsLayer = true
+        hairline.frame = NSRect(x: 0, y: 0, width: 100, height: 1)
+        hairline.autoresizingMask = [.width, .maxYMargin]
+        container.addSubview(hairline)
 
         textField.delegate = self
         textField.target = self
@@ -898,11 +899,11 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
         for v in [top, rowsScroll, footer] as [NSView] { stack.addArrangedSubview(v) }
         stack.translatesAutoresizingMaskIntoConstraints = false
-        fx.addSubview(stack)
+        container.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: fx.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: fx.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: fx.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
         ])
         for v in [top, rowsScroll, footer] as [NSView] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
@@ -918,22 +919,18 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     }
 
     // the Jira window's palette on every surface, control and label
-    private func applyTheme(_ cfg: PopupConfig) {
+    fileprivate func applyTheme(_ cfg: PopupConfig) {
         colors = cfg.colors
         let light = ButtonStyle.luminance(colors.background) > 0.45
-        panel.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
-        fx.material = cfg.material
-        tint.layer?.backgroundColor = colors.background.withAlphaComponent(max(cfg.tintAlpha, 0.9)).cgColor
-        // same outline as the Jira window it docks to
-        tint.layer?.borderColor = colors.border.cgColor
-        let jp = panel as? JiraKeyPanel
-        jp?.selectionAttributes = ButtonStyle.selection(colors)
-        jp?.caretColor = colors.text
+        container.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        container.layer?.backgroundColor = colors.mantle.withAlphaComponent(0.6).cgColor
+        hairline.layer?.backgroundColor = colors.hairline.cgColor
+        textField.textColor = colors.text
         func walk(_ v: NSView) {
             (v as? PopupThemeable)?.applyColors(colors)
             v.subviews.forEach(walk)
         }
-        walk(fx)
+        walk(container)
         for l in labels { l.textColor = colors.dim }
         status.textColor = colors.dim
     }
@@ -941,22 +938,20 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     // MARK: attach / detach
 
     private func attach(to w: PopupWindow) {
-        if let old = host, old !== w { old.nativeWindow.removeChildWindow(panel) }
+        if let old = host, old !== w { old.setTopAccessory(nil); old.onAccessoryEscape = nil }
         host = w
         applyTheme(w.config)
         reloadLists()
-        panel.level = w.nativeWindow.level
+        w.onAccessoryEscape = { [weak self] in self?.close() }
         place()
-        w.nativeWindow.addChildWindow(panel, ordered: .above)
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(textField)
+        w.nativeWindow.makeFirstResponder(textField)
         installKeys()
         loadInfo()
     }
 
     private func unhook() {
-        host?.nativeWindow.removeChildWindow(panel)
-        panel.orderOut(nil)
+        host?.onAccessoryEscape = nil
+        host?.setTopAccessory(nil)
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
     }
@@ -968,38 +963,21 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         h?.nativeWindow.makeKeyAndOrderFront(nil)
     }
 
-    // docked above the jira window; when the filter rows outgrow the room
-    // above, THEY scroll (the panel never jumps in front of the window).
-    // Only when not even one row fits above: below, else inside its top.
+    // docked under the jira window's header, full width; when the filter
+    // rows outgrow ~40% of the window THEY scroll, so the list always keeps
+    // most of the room
     private func place() {
-        guard let hw = host?.nativeWindow else { return }
+        guard let w = host else { return }
         rowsScroll.isHidden = rows.isEmpty
         rowsDoc.layoutSubtreeIfNeeded()
         let natural = rows.isEmpty ? 0 : ceil(rowsStack.fittingSize.height)
         rowsHeight?.constant = natural
         stack.layoutSubtreeIfNeeded()
-        let full = ceil(stack.fittingSize.height)
-        let chrome = full - natural          // search row + footer + insets
-        let minRows = min(natural, 34)       // at least one filter row visible
-        let f = hw.frame
-        let width = max(f.width, 680)
-        let vis = (hw.screen ?? NSScreen.main)?.visibleFrame ?? f
-        let above = vis.maxY - (f.maxY + 6)
-        let below = (f.minY - 6) - vis.minY
-        var y: CGFloat, rowsH = natural
-        if above >= chrome + minRows {
-            rowsH = min(natural, above - chrome)
-            y = f.maxY + 6
-        } else if below >= chrome + minRows {
-            rowsH = min(natural, below - chrome)
-            y = f.minY - 6 - (chrome + rowsH)
-        } else {
-            rowsH = min(natural, max(minRows, f.height * 0.5 - chrome))
-            y = f.maxY - (chrome + rowsH) - 44
-        }
+        let chrome = ceil(stack.fittingSize.height) - natural   // search row + footer + insets
+        let room = max(min(natural, 34), w.nativeWindow.frame.height * 0.4 - chrome)
+        let rowsH = min(natural, room)
         rowsHeight?.constant = rowsH
-        let h = chrome + rowsH
-        panel.setFrame(NSRect(x: f.minX, y: y, width: width, height: h), display: true)
+        w.setTopAccessory(container, height: chrome + rowsH)
     }
 
     // keep the newest filter row in view when the rows scroll
@@ -1013,18 +991,19 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private func installKeys() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self, self.panel.isKeyWindow else { return e }
+            // only while the strip holds focus in the key jira window (Esc and
+            // Cmd+F reach it through the window: onAccessoryEscape / toggle)
+            guard let self, let w = self.host, w.nativeWindow.isKeyWindow,
+                  w.topAccessoryHasFocus else { return e }
             let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if e.keyCode == 53 { self.close(); return nil }                             // Esc
-            if mods.contains(.command) && e.keyCode == 3 { self.close(); return nil }   // Cmd+F
             if mods.contains(.command) && e.keyCode == 36 { self.run(nil); return nil } // Cmd+Return
-            return JiraEditKeys.route(e, in: self.panel) ? nil : e
+            return JiraEditKeys.route(e, in: w.nativeWindow) ? nil : e
         }
     }
 
     // MARK: data
 
-    private func reloadLists() {
+    fileprivate func reloadLists() {
         dir = JiraDirectory.load()
         projects.options = dir.projectOptions(scope: info["projectKeys"] as? [String] ?? [])
         for r in rows { fillOptions(r) }
@@ -1121,7 +1100,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         if let p = r.control as? JiraMultiPicker {
             DispatchQueue.main.async { p.togglePopover(nil) }
         } else if r.control is NSTextField {
-            panel.makeFirstResponder(r.control)
+            win?.makeFirstResponder(r.control)
         }
         saveState()
     }
@@ -1172,7 +1151,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         rowsStack.addArrangedSubview(v)
         v.widthAnchor.constraint(equalTo: rowsStack.widthAnchor).isActive = true
         rebuildFilterMenu()
-        if panel.isVisible { place(); scrollRowsToBottom() }
+        if attached { place(); scrollRowsToBottom() }
         return r
     }
 
@@ -1331,7 +1310,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
                 self.controller?.pendingJiraTab = file
                 self.controller?.reloadJiraWindow()
             }
-            self.panel.makeKeyAndOrderFront(nil)
+            self.win?.makeFirstResponder(self.textField)
         }
     }
 

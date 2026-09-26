@@ -57,3 +57,15 @@ It is precompiled once into a static lib (`.build/SwiftTerm/libSwiftTerm.a`).
 - The build script auto-rebuilds it only when a SwiftTerm source file changes —
   do not touch those files, and it won't trigger.
 - If SwiftTerm is missing or broken, ask the user before rebuilding.
+## 6. Transient overlays own the keyboard, and Esc closes only them
+
+Every popover / picker / dropdown opened from a window (the jira column
+filters, `JiraMultiPicker`, the search pickers, …):
+
+- takes keyboard focus the moment it opens — its window is made KEY (not
+  just a first responder), so typing filters and `Ctrl+N` / `Ctrl+P` / ↑↓
+  move without a click first;
+- closes on `Esc` WITHOUT closing the window under it. While one is up it
+  sets `PopupWindow.transientEscape`; the popup windows' key monitor and
+  `cancelOperation` call that instead of their own Esc handling. Clear it
+  when the overlay closes.

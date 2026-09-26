@@ -971,6 +971,8 @@ public class PopupBaseWindow: NSWindow, EscapableWindow {
     }
 
     public override func cancelOperation(_ sender: Any?) {
+        // a transient overlay (popover / picker) up: Esc closes only that
+        if let dismiss = PopupWindow.transientEscape { dismiss(); return }
         onEscape?()  // Esc even when the input field isn't first responder
     }
 
@@ -1003,6 +1005,8 @@ public final class PopupPanel: NSPanel, EscapableWindow {
     public override var canBecomeMain: Bool { true }
 
     public override func cancelOperation(_ sender: Any?) {
+        // a transient overlay (popover / picker) up: Esc closes only that
+        if let dismiss = PopupWindow.transientEscape { dismiss(); return }
         onEscape?()  // Esc even when the input field isn't first responder
     }
 
@@ -2785,14 +2789,14 @@ final class PopupTableHeaderView: NSView {
 
 // Helper for drawing NSImages in a flipped (row) context — NSImage.draw(in:)
 // mirrors vertically there, so flip the CTM around the rect's center first.
-public func popupDrawImage(_ img: NSImage, in rect: NSRect) {
+public func popupDrawImage(_ img: NSImage, in rect: NSRect, fraction: CGFloat = 1) {
     guard let ctx = NSGraphicsContext.current else { return }
     ctx.saveGraphicsState()
     let t = NSAffineTransform()
     t.translateX(by: 0, yBy: rect.origin.y * 2 + rect.height)
     t.scaleX(by: 1, yBy: -1)
     t.concat()
-    img.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+    img.draw(in: rect, from: .zero, operation: .sourceOver, fraction: fraction)
     ctx.restoreGraphicsState()
 }
 
@@ -5040,6 +5044,21 @@ var meterEnabled = false {
     // extra host-defined buttons (ids >= 10), drawn leftmost; clicks route
     // through PopupWindow.onHeaderButton with the button's id
     var extraButtons: [(label: String, id: Int)] = []
+    // view switcher (shared window: notes / files / jira): icon buttons just
+    // right of the icon menu, the current view's on an accent chip. Clicks
+    // route like extra buttons (extraButtonRects -> onHeaderButton).
+    var navIcons: [(image: NSImage, id: Int, tip: String)] = [] {
+        didSet { needsDisplay = true }
+    }
+    var navOn: Int? { didSet { if navOn != oldValue { needsDisplay = true } } }
+    private let navSize: CGFloat = 26
+    private var navTipRects: [NSRect] = []
+    func navRect(_ i: Int) -> NSRect {
+        let x0 = headerIcon != nil ? iconButtonRect.maxX + 6
+            : config.headerCloseButton ? closeButtonRect.maxX + 6 : 6
+        return NSRect(x: x0 + CGFloat(i) * (navSize + 2), y: (dragHeaderHeight - navSize) / 2,
+                      width: navSize, height: navSize)
+    }
     // left-to-right segment order by button id (copy path=1, copy config=2,
     // copy rows=3, host buttons = their id). nil = default (copy buttons
     // first, then host buttons); unlisted ids trail in that default order.
@@ -5075,6 +5094,7 @@ var meterEnabled = false {
     }
     // where the dim meta line starts: just past the close glyph / icon
     var leftInset: CGFloat {
+        if !navIcons.isEmpty, dragHeaderHeight > 0 { return navRect(navIcons.count - 1).maxX + 10 }
         if headerIcon != nil { return iconButtonRect.maxX + 8 }
         return config.headerCloseButton ? closeButtonRect.maxX + 8 : 10
     }
@@ -5143,6 +5163,9 @@ var meterEnabled = false {
             for (fb, rect) in headerSegRects where rect.contains(p) {
                 hovered = fb
                 break
+            }
+            for (i, n) in navIcons.enumerated() where navRect(i).contains(p) {
+                hovered = n.id
             }
         }
         iconHovered = headerIcon != nil && dragHeaderHeight > 0 && iconButtonRect.contains(p)
@@ -5320,7 +5343,7 @@ private func headerButtonFont(_ label: String) -> NSFont {
     // full width the header needs (left icon + meta + title pill + every
     // button at full label): the window grows to this rather than clip text
     func neededWidth() -> CGFloat {
-        var w: CGFloat = 34
+        var w: CGFloat = 34 + CGFloat(navIcons.count) * (navSize + 2) + (navIcons.isEmpty ? 0 : 10)
         let metaAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10),
         ]
@@ -5443,6 +5466,38 @@ private func headerButtonFont(_ label: String) -> NSFont {
                                             width: isz, height: isz))
             ButtonStyle.chevron(in: NSRect(x: badge.maxX - 13, y: badge.midY - 4, width: 8, height: 8),
                                 color: ButtonStyle.text(st, config.colors))
+        }
+        // rects are rebuilt every draw: a button that moved (or went away)
+        // must not keep catching clicks at its old spot
+        extraButtonRects = [:]
+        if !navIcons.isEmpty {
+            // view switcher: one quiet well, a solid chip under the current
+            // view, a hover chip under the pointer; icons keep their colors
+            let first = navRect(0), last = navRect(navIcons.count - 1)
+            let well = NSRect(x: first.minX - 2, y: first.minY - 2,
+                              width: last.maxX - first.minX + 4, height: first.height + 4)
+            ButtonStyle.draw(well, .idle, config.colors, radius: config.buttonRadius + 1, flat: true)
+            var tips: [NSRect] = []
+            for (i, n) in navIcons.enumerated() {
+                let r = navRect(i)
+                let on = navOn == n.id, hov = hoveredSegment == n.id
+                if on || hov {
+                    ButtonStyle.draw(r, on ? (hov ? .onHover : .on) : .hover, config.colors,
+                                     radius: config.buttonRadius)
+                }
+                // the other views read a touch quieter than the current one
+                let isz: CGFloat = 18
+                popupDrawImage(n.image, in: NSRect(x: r.midX - isz / 2, y: r.midY - isz / 2,
+                                                   width: isz, height: isz),
+                               fraction: on || hov ? 1 : 0.7)
+                extraButtonRects[n.id] = r
+                tips.append(r)
+            }
+            if tips != navTipRects {
+                navTipRects = tips
+                removeAllToolTips()
+                for (i, r) in tips.enumerated() { addToolTip(r, owner: navIcons[i].tip as NSString, userData: nil) }
+            }
         }
         // header buttons (right side): "copy config" (copy the config file
         // path) and "copy path" (copy the open file path); each flips to
@@ -5869,6 +5924,55 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         }
     }
     public var onHeaderButton: ((Int) -> Void)?
+    // set while a transient overlay (popover / picker) is up: Esc in any
+    // popup window closes the overlay instead of the window (rule.md #6)
+    public static var transientEscape: (() -> Void)?
+    // a host strip docked INSIDE the window, right under the header (list
+    // windows: the jira live search, Cmd+F). The list moves down to make
+    // room; it parks / unparks with the window (no floating child panel).
+    private var topAccessory: NSView?
+    private var topAccessoryHeight: CGFloat = 0
+    // Esc while a top accessory is up: the host closes it (never the window)
+    public var onAccessoryEscape: (() -> Void)?
+    public func setTopAccessory(_ v: NSView?, height: CGFloat = 0) {
+        let hadFocus = topAccessoryHasFocus
+        if let old = topAccessory, old !== v { old.removeFromSuperview() }
+        topAccessory = v
+        topAccessoryHeight = v == nil ? 0 : ceil(height)
+        if let v, let backdrop = panel.contentView {
+            if v.superview !== backdrop {
+                if let chrome { backdrop.addSubview(v, positioned: .below, relativeTo: chrome) }
+                else { backdrop.addSubview(v) }
+            }
+            v.autoresizingMask = [.width]
+            v.frame = NSRect(x: 0, y: config.dragHeader ? config.headerHeight * zoom : 0,
+                             width: backdrop.bounds.width, height: topAccessoryHeight)
+        }
+        layoutForZoom()
+        layoutSearchField()
+        // the strip went away holding the keyboard: hand it to the window's
+        // own field / editor (not nowhere)
+        if v == nil, hadFocus || panel.firstResponder === panel {
+            panel.makeFirstResponder(primaryEditor ?? field)
+        }
+    }
+    public var hasTopAccessory: Bool { topAccessory != nil }
+    // keyboard focus is inside the accessory (a field's editor counts)
+    public var topAccessoryHasFocus: Bool {
+        guard let acc = topAccessory, let fr = panel.firstResponder else { return false }
+        if let v = fr as? NSView, v.isDescendant(of: acc) { return true }
+        if let t = fr as? NSText, let d = t.delegate as? NSView, d.isDescendant(of: acc) { return true }
+        return false
+    }
+
+    // shared-window view switcher: icon buttons right of the icon menu
+    // (PopupChrome.navIcons); clicks go to onHeaderButton with the id
+    public var navIcons: [(image: NSImage, id: Int, tip: String)] = [] {
+        didSet { chrome?.navIcons = navIcons }
+    }
+    public var navOn: Int? {
+        didSet { chrome?.navOn = navOn }
+    }
 
     // mark an extra header button as ON (its feature/drawer is open) so it
     // renders darker — the host flips this when toggling the terminal / file
@@ -6269,7 +6373,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             if let tv = editorView {
                 tv.font = editorFont(config.fontName, zoom, size: config.editorFontSize)
             }
-            vimView?.font = PopupWindow.vimFont(config)
+            applyVimFont()
             refreshVimImageRows()
             if let chrome {
                 chrome.dragHeaderHeight = config.headerHeight * zoom
@@ -6303,7 +6407,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             layoutFileBrowser()
         } else {
             if config.scrollableRows {
-                let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
+                let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
                 let fieldFrame = NSRect(x: config.padding + 10,
                                         y: headerOffset + config.padding + 2,
                                         width: config.width - 2 * (config.padding + 10),
@@ -6323,7 +6427,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 chromeBottom = cb
                 layoutScrollDocument()
             } else {
-                let headerOffset = (config.dragHeader) ? config.headerHeight * z + 4 : 0
+                let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
                 let fieldFrame = NSRect(x: config.padding + 10,
                                         y: headerOffset + config.padding + 2,
                                         width: config.width - 2 * (config.padding + 10),
@@ -7135,7 +7239,7 @@ scroll.documentView = rowView
         panel.orderOut(nil)
     }
     public func unpark(frame: NSRect?) {
-        if let f = frame { panel.setFrame(f, display: false) }
+        if let f = frame { setBaseFrame(f) }
         if isShown {
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
@@ -7164,7 +7268,7 @@ scroll.documentView = rowView
             editorView?.isEditable = !editorReadOnly
             wireEditorTextChange()
             if let f = initialFrame {
-                panel.setFrame(f, display: false)
+                setBaseFrame(f)
                 initialFrame = nil
             } else {
                 let h = min(config.height, maxPanelHeight())
@@ -7831,6 +7935,25 @@ private func scrollSelectionIntoView() {
                 // a sheet steals the key-window flag from the panel, but its
                 // text field still needs our Ctrl+V / Cmd+V routing
                 || self.panel.attachedSheet != nil else { return event }
+            // Esc with a transient overlay up (a filter popover, a picker)
+            // closes THAT, never this window (rule.md #6)
+            if event.keyCode == 53, let dismiss = PopupWindow.transientEscape {
+                dismiss()
+                return nil
+            }
+            // a docked strip (jira search) is up: Esc closes it first, and
+            // while it has focus its own keys are its own (arrows / Return /
+            // Tab / typing must not drive the list underneath)
+            if self.topAccessory != nil {
+                if event.keyCode == 53, let esc = self.onAccessoryEscape {
+                    esc()
+                    return nil
+                }
+                if self.topAccessoryHasFocus,
+                   !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
+                    return event
+                }
+            }
             if self.handleKey(event.keyCode, event.modifierFlags) {
                 return nil  // consumed
             }
@@ -8604,12 +8727,18 @@ private func scrollSelectionIntoView() {
     private func resizeBy(_ delta: CGFloat) {
         rowView.stretchToFill = true
         var f = panel.frame
+        let oldW = f.width
         f.size.width = max(120, f.width + delta)
         f.size.height = max(140, f.height + delta)
         panel.setFrame(clampToScreen(f), display: true)
-        // scale the UI proportionally with the resize: zoom tracks the
-        // width relative to the config's base width
-        zoom = min(3, max(0.6, f.width / config.width))
+        // scale the UI with the resize that REALLY happened: relative to the
+        // old width (the shared window's width is not config.width — the
+        // first press jumped the font), and not at all when the screen
+        // clamp stopped the window growing (the font kept growing, then
+        // snapped back on the next shrink)
+        if oldW > 0 {
+            zoom = min(3, max(0.6, zoom * panel.frame.width / oldW))
+        }
         rowView.sizingRowCount = rows.count
         layoutScrollDocument()
         rowView.needsDisplay = true
@@ -8696,7 +8825,11 @@ private func scrollSelectionIntoView() {
             }
         }
         fitDrawersToWindow()
-        drawerInsetNow = (terminalShown ? currentTerminalHeight : 0) + (fileBrowserShown ? currentBrowserHeight : 0)
+        // a resize never ADDS drawer growth (a clamped open grew the window
+        // less than the drawer's height; resetting to the full height made
+        // the close shrink too much, the base frame too small) — it can only
+        // take some back when the drawers had to shrink
+        drawerInsetNow = min(drawerInsetNow, drawerInsetTotal())
         rowView.sizingRowCount = rows.count
         layoutScrollDocument()
         relayoutTabs()
@@ -8944,6 +9077,19 @@ private func scrollSelectionIntoView() {
         if let fb = fileBrowser, fileBrowserShown, v.isDescendant(of: fb) { return true }
         if let ff = findField, !ff.isHidden, v === ff || ff.currentEditor() === v { return true }
         return false
+    }
+
+    // swap the vim pane's font (zoom, font menu). SwiftTerm keeps its old
+    // cols x rows after a font swap until its frame SIZE changes, so nvim
+    // went on laying text out for the previous font (lines ran off the right
+    // edge, then the grid snapped on some later resize): nudge the size so
+    // the grid is recomputed now and nvim gets its SIGWINCH.
+    private func applyVimFont() {
+        guard let vv = vimView else { return }
+        vv.font = PopupWindow.vimFont(config)
+        let size = vv.frame.size
+        vv.setFrameSize(NSSize(width: size.width + 1, height: size.height))
+        vv.setFrameSize(size)
     }
 
     // monospace font for the vim pane: the window font when it is fixed
@@ -9316,7 +9462,7 @@ private func scrollSelectionIntoView() {
            let f = NSFont(name: config.terminalFont, size: config.terminalFontSize) {
             term.font = f
         }
-        if let vv = vimView { vv.font = PopupWindow.vimFont(config) }
+        applyVimFont()
         vimImageOverlay?.cell = PopupWindow.cellSize(PopupWindow.vimFont(config))
         refreshVimImageRows()
         layoutForZoom()
@@ -9575,7 +9721,13 @@ public enum ThemeRole: String, CaseIterable {
         fileBrowser = fb
         fileBrowserDrawerMode = drawer
         guard let backdrop = panel.contentView else { return }
-        fb.autoresizingMask = [.width, .height]
+        // drawer: bottom-anchored, FIXED height (layoutFileBrowser sizes it).
+        // With a flexible height its autoresizing constraints kept the
+        // margins of the last layout: after the terminal closed, a closed
+        // browser still 'needed' the terminal's 240pt below it, and the
+        // next layout pass grew the window straight back (the "terminal
+        // closed but the window stayed big" bug)
+        fb.autoresizingMask = drawer ? [.width, .minYMargin] : [.width, .height]
         currentBrowserHeight = preferredBrowserHeight
         // right-click "Open in Notes" -> host hook
         fb.onOpenInNotes = { [weak self] p in
@@ -9601,7 +9753,7 @@ public enum ThemeRole: String, CaseIterable {
         fb.isHidden = drawer ? !fileBrowserShown : false
         // focus indicator: bright 4-sided border around the browser
         let bfb = NSView(frame: fb.frame)
-        bfb.autoresizingMask = [.width, .height]
+        bfb.autoresizingMask = fb.autoresizingMask
         bfb.wantsLayer = true
         bfb.layer?.borderWidth = focusBorderWidth
         bfb.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
@@ -9639,6 +9791,27 @@ public enum ThemeRole: String, CaseIterable {
         (terminalShown ? currentTerminalHeight : 0)
             + (fileBrowserShown ? currentBrowserHeight : 0)
     }
+    // the frame WITHOUT the drawer growth (the drawers grow the window by
+    // its top edge, origin fixed): what the other shared-window views use,
+    // so the notes terminal never leaks its height into files / jira
+    public var baseFrame: NSRect {
+        var f = panel.frame
+        f.size.height = max(minEditorH, f.height - drawerInsetNow)
+        return f
+    }
+
+    // place the window at a drawer-less frame, re-growing it by the drawers
+    // open now; drawerInsetNow = what it REALLY grew (clamped at the screen)
+    private func setBaseFrame(_ f: NSRect) {
+        let want = config.editMode ? drawerInsetTotal() : 0
+        let grown = clampToScreen(NSRect(x: f.minX, y: f.minY, width: f.width,
+                                         height: f.height + want))
+        drawerInsetNow = 0
+        panel.setFrame(grown, display: false)
+        drawerInsetNow = max(0, min(want, grown.height - f.height))
+        panel.invalidateShadow()
+    }
+
     private func syncDrawerLayout() {
         let want = drawerInsetTotal()
         if abs(want - drawerInsetNow) > 0.5 {
@@ -9650,6 +9823,9 @@ public enum ThemeRole: String, CaseIterable {
             // grow is clamped (the drawer eats editor space instead), and
             // closing it must not then shrink the window by the full height
             drawerInsetNow = max(0, was + panel.frame.height - f.height)
+            // the window server keeps the old outline otherwise (a ghost of
+            // the terminal band under a closed drawer)
+            panel.invalidateShadow()
         }
         layoutTerminal()
         layoutFileBrowser()
@@ -9939,7 +10115,7 @@ public enum ThemeRole: String, CaseIterable {
         let inset = config.padding + 10
         let fieldW = max(50, (w - 2 * inset) * config.searchWidthFraction)
         let x = inset
-        let headerOffset = (config.dragHeader) ? config.headerHeight * zoom + 4 : 0
+        let headerOffset = ((config.dragHeader) ? config.headerHeight * zoom + 4 : 0) + topAccessoryHeight
         let y = headerOffset + config.padding + 2
         field.frame = NSRect(x: x, y: y, width: fieldW, height: 24)
     }

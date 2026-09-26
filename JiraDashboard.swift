@@ -494,9 +494,12 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     // the shared window's header: home / back / notes | jira
-    func setSlotNav(_ buttons: [(String, Int)], on: Set<Int>, click: @escaping (Int) -> Void) {
+    func setSlotNav(_ buttons: [(String, Int)], icons: [(image: NSImage, id: Int, tip: String)],
+                    icon: NSImage, on: Int, click: @escaping (Int) -> Void) {
         chrome?.extraButtons = buttons
-        chrome?.activeButtonIDs = on
+        chrome?.navIcons = icons
+        chrome?.navOn = on
+        chrome?.headerIcon = icon
         chrome?.needsDisplay = true
         slotNavClick = click
     }
@@ -620,6 +623,8 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
                 self.closeOrHide()
             } else if let hit = ch.extraButtonRects.first(where: { $0.value.contains(p) }) {
                 self.slotNavClick?(hit.key)
+            } else if ch.headerIcon != nil, ch.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
+                self.showIconMenu()
             }
         }
         return root
@@ -1662,6 +1667,33 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     @objc private func openFile(_ sender: NSPopUpButton) {
         guard let path = sender.selectedItem?.representedObject as? String else { return }
+        openPath(path)
+    }
+
+    @objc private func openFileItem(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        openPath(path)
+    }
+
+    // the kitchen sink (header icon menu): the same files as Open…
+    private func showIconMenu() {
+        guard let ch = chrome else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for it in (openMenu.menu?.items ?? []).dropFirst() {
+            let item = NSMenuItem(title: it.title, action: #selector(openFileItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = it.representedObject
+            item.isEnabled = it.isEnabled
+            item.toolTip = it.toolTip
+            menu.addItem(item)
+        }
+        ch.iconMenuOpen = true
+        menu.popUp(positioning: nil, at: NSPoint(x: ch.iconButtonRect.minX, y: ch.iconButtonRect.maxY + 4), in: ch)
+        ch.iconMenuOpen = false
+    }
+
+    private func openPath(_ path: String) {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
@@ -2539,6 +2571,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 extension JiraDashboardWindow: SlotMember {
     var slotWindow: NSWindow { window }
     var slotShown: Bool { window.isVisible }
+    var slotBaseFrame: NSRect { window.frame }
     func slotPark(stopVoice: Bool) {
         timer?.invalidate()
         timer = nil

@@ -58,6 +58,12 @@ set belloff=all
 
 " --- prose-friendly editing -------------------------------------------------
 set wrap linebreak breakindent
+" wrap is window-local: a filetype plugin / modeline / :set nowrap in one
+" buffer must not leave the notes pane scrolling sideways
+augroup ws_wrap
+  autocmd!
+  autocmd BufWinEnter,WinEnter,FileType * setlocal wrap linebreak breakindent
+augroup END
 set scrolloff=3
 set expandtab shiftwidth=2 tabstop=2
 set ignorecase smartcase

@@ -36,6 +36,8 @@ enum SlotView: String {
 protocol SlotMember: AnyObject {
     var slotWindow: NSWindow { get }
     var slotShown: Bool { get }
+    // the frame the other views share: notes leaves its drawer growth out
+    var slotBaseFrame: NSRect { get }
     func slotPark(stopVoice: Bool)
     func slotShow(frame: NSRect?)
 }
@@ -43,6 +45,7 @@ protocol SlotMember: AnyObject {
 extension PopupWindow: SlotMember {
     var slotWindow: NSWindow { nativeWindow }
     var slotShown: Bool { isShown }
+    var slotBaseFrame: NSRect { baseFrame }
     func slotPark(stopVoice: Bool) { park(stopVoice: stopVoice) }
     func slotShow(frame: NSRect?) { unpark(frame: frame) }
 }
@@ -161,7 +164,7 @@ final class SharedWindow {
 
     // the visible view's frame, else the remembered one
     func currentFrame() -> NSRect {
-        if let cur = current, let m = controller.slotMember(cur), m.slotShown { return m.slotWindow.frame }
+        if let cur = current, let m = controller.slotMember(cur), m.slotShown { return m.slotBaseFrame }
         return frame
     }
 
@@ -175,9 +178,14 @@ final class SharedWindow {
             returnPID = controller.savedPID
         }
         var f = currentFrame()
+        // the old view is parked only AFTER the new one is up: parked first,
+        // aerospace sees its focused window vanish and focuses the next
+        // window on the workspace (a terminal raised over the slower jira
+        // window = "Hyper+J closed it")
+        var outgoing: SlotMember?
         if let cur = current, let old = controller.slotMember(cur), old !== m, old.slotShown {
-            f = old.slotWindow.frame
-            old.slotPark(stopVoice: false)
+            f = old.slotBaseFrame
+            outgoing = old
         }
         // a window with a larger minimum (Jira Config) grows the frame
         let min = m.slotWindow.minSize
@@ -186,6 +194,7 @@ final class SharedWindow {
         frame = f
         decorate(m, v)
         m.slotShow(frame: f)
+        outgoing?.slotPark(stopVoice: false)
         current = v
         last = v
         if v.isJira { lastJira = v }
@@ -199,7 +208,7 @@ final class SharedWindow {
         guard let cur = current else { return }
         current = nil
         if let m = controller.slotMember(cur) {
-            if m.slotShown { frame = m.slotWindow.frame }
+            if m.slotShown { frame = m.slotBaseFrame }
             m.slotPark(stopVoice: true)
         }
         controller.restoreFocus(wid: returnWID, pid: returnPID)
@@ -216,7 +225,7 @@ final class SharedWindow {
         if lastJira == v { lastJira = .jira }
     }
 
-    // MARK: header (notes | jira, home, back)
+    // MARK: header (notes / files / jira icons; back, home)
 
     func navClicked(_ id: Int) {
         switch id {
@@ -229,31 +238,49 @@ final class SharedWindow {
         }
     }
 
-    // the nav buttons for a view: jira sub-views get home + back, output
-    // views back
+    // the view switcher: notes / files / jira as icons just right of the
+    // kitchen sink (the app's icon menu), top-left in every view
+    static var navIcons: [(image: NSImage, id: Int, tip: String)] {
+        [(notesNavIcon, navNotes, "Notes (Hyper+N)"),
+         (filesNavIcon, navFiles, "Files (Hyper+F)"),
+         (jiraNavIcon, navJira, "Jira (Hyper+J)")]
+    }
+
+    // the view's own nav words (right-hand bar, never beside the switcher):
+    // jira sub-views get home + back, output views back
     static func navButtons(for v: SlotView) -> [(String, Int)] {
-        (v.isJira && v.isSub ? [("home", navHome)] : [])
-            + (v.isSub ? [("back", navBack)] : [])
-            + [("notes", navNotes), ("files", navFiles), ("jira", navJira)]
+        (v.isSub ? [("back", navBack)] : [])
+            + (v.isJira && v.isSub ? [("home", navHome)] : [])
+    }
+
+    static func navOn(_ v: SlotView) -> Int? {
+        switch v {
+        case .notes: return navNotes
+        case .files: return navFiles
+        case _ where v.isJira: return navJira
+        default: return nil
+        }
     }
 
     private func decorate(_ m: SlotMember, _ v: SlotView) {
         if let w = m as? PopupWindow {
-            if !w.headerButtons.contains(where: { $0.1 == Self.navNotes }) {
+            if w.navIcons.isEmpty {
+                w.navIcons = Self.navIcons
                 let nav = Self.navButtons(for: v)
-                w.headerButtons = nav + w.headerButtons
-                w.headerOrder = nav.map(\.1) + (w.headerOrder ?? [])
+                w.headerButtons = w.headerButtons + nav
+                if let order = w.headerOrder { w.headerOrder = order + nav.map(\.1) }
                 let prev = w.onHeaderButton
                 w.onHeaderButton = { [weak self] id in
                     if Self.navIDs.contains(id) { self?.navClicked(id) } else { prev?(id) }
                 }
                 w.onCloseWindow = { [weak self] in self?.hide() }
             }
-            w.setHeaderButtonOn(Self.navNotes, v == .notes)
-            w.setHeaderButtonOn(Self.navFiles, v == .files)
-            w.setHeaderButtonOn(Self.navJira, v.isJira)
+            // the kitchen sink, whatever the view (its menu stays the view's)
+            w.headerIcon = appIcon
+            w.navOn = Self.navOn(v)
         } else if let c = m as? JiraDashboardWindow {
-            c.setSlotNav(Self.navButtons(for: v), on: [Self.navJira]) { [weak self] id in
+            c.setSlotNav(Self.navButtons(for: v), icons: Self.navIcons, icon: appIcon,
+                         on: Self.navJira) { [weak self] id in
                 self?.navClicked(id)
             }
         }

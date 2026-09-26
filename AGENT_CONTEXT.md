@@ -44,7 +44,13 @@ bin/ui-test.sh --verbose
 - `SharedWindow.swift` — ONE window for notes + jira (`SharedWindow`, `SlotView`,
   `SlotMember`): members are the existing windows, swapped in place
   (`PopupWindow.park()` / `unpark(frame:)`); jira back stack (detail /
-  releases / config) with home + back header buttons (ids 60-63); hotkey
+  releases / config) with back + home in the RIGHT header bar (ids 63/62,
+  after the view's own buttons). Header, every view: ✕ · kitchen sink (the
+  app's icon menu, `appIcon`, `[app] app-icon`) · view switcher ICONS
+  notes / files / jira (`PopupChrome.navIcons` / `navOn`, ids 60/64/61,
+  `[app] notes-icon` / `files-icon` / `jira-icon`) — set in `decorate`.
+  Views share the DRAWER-LESS frame (`slotBaseFrame` = `PopupWindow.baseFrame`;
+  `unpark(frame:)` re-grows notes by its open drawers). Hotkey
   toggle uses the launcher's focus file (`toggleCommand` → `slot.hotkey`);
   focus hand-back only when the whole window hides. `[app] shared-window`.
   Esc: notes never (`escCloseCount 0`, Cmd+W / ✕ / hotkey hide), jira = back.
@@ -193,15 +199,18 @@ bin/ui-test.sh --verbose
 - Live search (replaced saved searches; `migrate_v3` drops `searches` and
   their `search-*.json` tabs): Cmd+F in the Jira window (`PopupWindow.onCommandF`,
   list mode only) or icon menu "Search Jira…" → `JiraSearchPanel`
-  (`JiraSearch.swift`: child panel docked above/below the Jira window; free
+  (`JiraSearch.swift`: a strip INSIDE the Jira window under its header —
+  `PopupWindow.setTopAccessory` (list moves down; parks with the window),
+  Esc = `onAccessoryEscape` closes it, Cmd+F from the list focuses it, from
+  the strip closes it; while it has focus, plain keys bypass list nav; free
   text (`text ~`: title, description, comments) + Projects + "+ Filter" rows;
   every known value (users, status, type, priority, Release, Labels — the
   last two scoped to the picked projects) is a `JiraMultiPicker` over the
   directory, never typed text; only "… contains" rows are text; no Raw JQL;
   last criteria in UserDefaults; filter rows live in a height-capped
-  scroll view (`rowsScroll`) so `place()` keeps the panel docked above the
-  window instead of overlapping it). Drawn in the Jira window's theme
-  (`applyTheme`: appearance, blur + tint, `JiraInputBox`, `JiraChoiceButton`,
+  scroll view (`rowsScroll`, capped at ~40% of the window by `place()`).
+  Drawn in the Jira window's theme (`applyTheme`: mantle well + hairline,
+  `JiraInputBox`, `JiraChoiceButton`,
   `ThemeButton`, custom-drawn picker pills). Run = `jira_poll.py
   --live-search` (criteria JSON on stdin → `jira_config.criteria_jql`: lists
   ORed with `in (…)`, criteria ANDed, custom aliases → `cf[N]`) → writes
@@ -375,7 +384,16 @@ Line numbers drift; grep the symbol names (they're stable).
   elsewhere → notes + terminal drawer focused; in it → drawer toggles (close
   = editor focused). `PopupWindow.setTerminalDrawer(_:)`.
 - Drawer bookkeeping: `drawerInsetNow` counts only what the window really
-  grew (clamped at screen height), so closing a drawer never shrinks it more.
+  grew (clamped at screen height), so closing a drawer never shrinks it more;
+  a resize only ever lowers it. Drawer-mode file browser is bottom-anchored,
+  FIXED height (`[.width, .minYMargin]`): with a flexible height its stale
+  autoresizing constraints made Auto Layout re-grow the window after the
+  terminal closed.
+- Vim pane font changes go through `applyVimFont()` (nudges the frame so
+  SwiftTerm recomputes cols/rows → SIGWINCH). Cmd+± zoom is relative to the
+  width change that actually happened (clamped = no zoom change).
+- Rule 6 (rule.md): popovers take key focus on open; Esc closes only them
+  (`PopupWindow.transientEscape`).
 
 ## Keyboard shortcuts (user-facing)
 

@@ -86,7 +86,12 @@ struct AppSettings {
                    "/System/Library/CoreServices",
                    NSHomeDirectory() + "/Applications"]
     var jiraIconName = "jira_icon.png"
+    // the app's own mark (the kitchen sink): every shared-window view's
+    // top-left icon menu
+    var appIconName = "app_icon.png"
+    // the notes view's nav icon (notepad); files: empty = the system folder
     var notesIconName = "notes_icon.png"
+    var filesIconName = ""
     var notesSocketName = "ws-notes.sock"
     var focusFileName = "workspace-switcher-focus"
     var focusBridgeName = "ws-aerospace-focus"
@@ -124,6 +129,10 @@ struct AppSettings {
     var focusFilePath: String { popupTmpDir() + focusFileName }
     var jiraIconPath: String { binDir + "/" + jiraIconName }
     var notesIconPath: String { binDir + "/" + notesIconName }
+    var appIconPath: String { binDir + "/" + appIconName }
+    var filesIconPath: String {
+        filesIconName.isEmpty || filesIconName.hasPrefix("/") ? filesIconName : binDir + "/" + filesIconName
+    }
 }
 var settings = AppSettings()
 
@@ -1046,6 +1055,8 @@ private func parseAppConfig(_ vars: [String: String]) {
     if !dirs.isEmpty { settings.appDirs = dirs }
     if let v = str("jira-icon"), !v.isEmpty { settings.jiraIconName = v }
     if let v = str("notes-icon"), !v.isEmpty { settings.notesIconName = v }
+    if let v = str("app-icon"), !v.isEmpty { settings.appIconName = v }
+    if let v = str("files-icon") { settings.filesIconName = v }
     if let v = str("notes-socket"), !v.isEmpty { settings.notesSocketName = v }
     if let v = str("focus-file"), !v.isEmpty { settings.focusFileName = v }
     if let v = str("focus-bridge"), !v.isEmpty { settings.focusBridgeName = v }
@@ -1674,6 +1685,7 @@ private func resolveIconName(_ name: String) -> NSImage? {
     switch name.lowercased() {
     case "jira": return jiraAppIcon
     case "notes", "note": return notesAppIcon
+    case "app": return appIcon
     case "heart": return heartIcon
     case "mic", "voice": return micIcon
     default:
@@ -2088,6 +2100,15 @@ let notesAppIcon = fileIconTile(settings.notesIconPath, size: appIconSize)
     ?? notepadIcon(size: appIconSize)
 let jiraAppIcon = fileIconTile(settings.jiraIconPath, size: appIconSize)
     ?? glyphIcon("ticket", fallback: "J", tint: jiraAccent)
+// the app itself (the kitchen sink): the top-left icon menu of every
+// shared-window view — notes / files / jira are the nav icons beside it
+let appIcon = fileIconTile(settings.appIconPath, size: appIconSize)
+    ?? notepadIcon(size: appIconSize)
+// shared-window nav icons, full resolution (drawn at ~16pt, crisp on Retina)
+let notesNavIcon: NSImage = NSImage(contentsOfFile: settings.notesIconPath) ?? notepadIcon(size: 32)
+let jiraNavIcon: NSImage = NSImage(contentsOfFile: settings.jiraIconPath) ?? jiraAppIcon
+let filesNavIcon: NSImage = (settings.filesIconPath.isEmpty ? nil : NSImage(contentsOfFile: settings.filesIconPath))
+    ?? NSImage(named: NSImage.folderName) ?? notepadIcon(size: 32)
 // health checks window glyph: a red heart — plain symbol, no tile (the tile
 // read as a square box around the icon in the 16px header)
 let heartIcon = glyphIcon("heart.fill", fallback: "♥",
@@ -6616,8 +6637,13 @@ private func trimmed(_ s: String) -> String? {
         }
         cfg.fontName = cmd.font
         let w = PopupWindow(config: cfg)
-        w.headerIcon = NSWorkspace.shared.icon(forFile: root)
-        w.chromeHeaderTitle = root
+        // a clean header: the icon menu (+ the shared window's view
+        // switcher), no path title, no copy buttons (right-click a row for
+        // its path; Cmd+K copies it)
+        w.headerIcon = settings.sharedWindow ? appIcon : filesNavIcon
+        w.chromeHeaderTitle = nil
+        w.copyPathButtonLabel = ""
+        w.copyConfigButtonLabel = ""
         // Top-left icon opens a dropdown menu (color picker, reset, config)
         // — no scattered header buttons.
         w.onChromeIconClick = { [weak self, weak w] in
@@ -6679,14 +6705,6 @@ private func trimmed(_ s: String) -> String? {
         fb.onCopyPath = { [weak self] p in
             self?.copy(p, "path: \(p)")
         }
-        // keep the window title + copy button following the browser's cwd
-        fb.onDirChange = { [weak self, weak w] dir in
-            guard let self, let w else { return }
-            w.chromeHeaderTitle = dir
-            w.copyPathButtonLabel = "copy \(URL(fileURLWithPath: dir).lastPathComponent) path"
-            w.headerIcon = NSWorkspace.shared.icon(forFile: dir)
-            w.growWidthToContent()
-        }
         fb.onCopyDir = { [weak self] dir in
             self?.copy(dir, "directory path: \(dir)")
         }
@@ -6705,19 +6723,6 @@ private func trimmed(_ s: String) -> String? {
         // [files] start = root keeps the old folder start
         if cmd.startRecent { fb.showRecent() }
 
-        w.copyPathButtonLabel = "copy \(URL(fileURLWithPath: root).lastPathComponent) path"
-        w.copyConfigButtonLabel = "copy config path"
-        // clicking the drag header copies the current directory's absolute path
-        w.onChromeHeaderClick = { [weak fb] in
-            fb?.copyDir()
-        }
-        // header "config" button: copy the commands.conf path
-        w.onChromeConfigClick = { [weak self] in
-            let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.conf"
-            let p = FileManager.default.fileExists(atPath: canonical)
-                ? canonical : settings.commandsConfPath
-            self?.copy(p, "config path: \(p)")
-        }
         w.onEscape = { [weak self] in
             if settings.sharedWindow { self?.slot.hide() } else { w.hide(restore: true) }
         }
@@ -7746,7 +7751,7 @@ extension SwitcherController {
         if wasShown {
             if settings.sharedWindow {
                 slot.memberGone(.notes)
-                if ensureSlotMember(.notes, frame: w.nativeWindow.frame) { slot.present(.notes) }
+                if ensureSlotMember(.notes, frame: w.baseFrame) { slot.present(.notes) }
                 return
             }
             openNoteWindow(commands[i], restoreWID: restoreWID, restorePID: restorePID)
