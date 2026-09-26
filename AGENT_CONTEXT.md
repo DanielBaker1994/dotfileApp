@@ -80,10 +80,15 @@ bin/ui-test.sh --verbose
 
 - `Confluence.swift` — `ConfluenceWindow` (a `JiraConfigNSWindow` + the Jira
   Config window's themed root; `SlotMember`, view `.confluence`, nav id 65,
-  `[app] confluence-icon` = `confluence_icon.png`). Strip: Search | ★
-  Favorites (`ConfSegmented`), `JiraInputBox`, All words / Phrase / Any word,
-  Title only, Spaces `JiraMultiPicker`, Type / Modified / Sort
-  `JiraChoiceButton`, Mine. Results = `ConfTableView` + drawn
+  `[app] confluence-icon` = `confluence_icon.png`; no header setup button —
+  Setup = icon menu, menu bar, and the "Set Up Confluence…" button in the
+  empty preview). Strip, 3 rows: Search | ★ Favorites · All words / Phrase /
+  Any word · Title only · Search (top-left); the search box (full width);
+  Spaces + Contributor `JiraMultiPicker`s, Type / Modified / Sort
+  `JiraChoiceButton`s. Esc closes an open picker first. Search and Favorites
+  never mix: an empty Search shows a hint; Favorites = pinned pages for
+  opening (typing filters, Return opens, the Search button searches inside
+  them). Filter changes are debounced (0.35s), previews 0.25s. Results = `ConfTableView` + drawn
   `ConfResultCell` (hit ranges are UTF-16 from python). Preview = `WKWebView`
   (first WebKit use): page HTML in a themed template + a JS highlighter (hits
   bar "1 of N", Cmd+G; the title is marked but not a stop); page images go
@@ -105,8 +110,20 @@ bin/ui-test.sh --verbose
   dropped, spaces clamped to scope, empty scope = whole site).
   `/rest/api/search` 404 → `/rest/api/content/search` (no excerpts). DC's
   "anonymous" 200 on /user/current counts as an auth failure.
+- Contributor: `--users` = people (creator + last editor) on the newest
+  `usersScanItems` items in the scope, paced `usersScanDelayMs`, cached in
+  `~/.cache/confluence/users.json` for `usersMaxAgeHours` (partial = 1h);
+  ids = Cloud accountId / DC username → `contributor in (…)`, "me" →
+  `currentUser()`. Icon menu ▸ Refresh Contributor List.
+- Rate limits: `Client.last_retry_after`; a 429 (or 5xx + Retry-After) not
+  waited out within `rateLimitMaxWaitSeconds` (20) → `api_fail` writes the
+  cooldown `~/.cache/confluence/ratelimit.json` (Retry-After else
+  `cooldownSeconds`); meanwhile every command answers `{rateLimited,
+  retryIn}` with NO request. Swift (`rateLimited` / `tickCooldown`): status
+  countdown, then the pending search / preview reruns. Favorites refresh ≤
+  every 10 min.
 - Favorites: ☆ gutter / Cmd+D / right-click / preview ★ → `--favorite`;
-  Cmd+2 view filters locally, Return searches inside them (`id in (…)`);
+  Cmd+2 view filters locally, the Search button searches inside them (`id in (…)`);
   `--favorites` refreshes in ONE request, vanished pages stay flagged
   `missing`; kitchen sink "Import My Saved Pages" = `favourite = currentUser()`.
 - Fake site: `confluence/fake_confluence.py` (`handle()` = REST + a browsable

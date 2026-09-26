@@ -192,6 +192,7 @@ class Client:
         # on_note(message): a notable change of course (page size shrunk)
         self.on_note = lambda msg: print(f"jira-api: {msg}", file=sys.stderr)
         self.page_cap = 0           # learned search page size (0 = none; PAGE_CAP_FILE)
+        self.last_retry_after = None  # seconds the server last asked for (429 / 5xx), None = unsaid
 
     @classmethod
     def from_config(cls, cfg, **kw) -> "Client":
@@ -324,6 +325,8 @@ class Client:
                             f" Retry-After={retry_after}" if retry_after_seconds(retry_after) is not None
                             else "", out[:500].replace("\n", " ") or "(empty body)")
             reason, cap, floor = "", MAX_ATTEMPTS, 0.0
+            if p.returncode == 0 and code in RETRY_CODES:
+                self.last_retry_after = retry_after_seconds(retry_after)
             if p.returncode != 0:
                 if p.returncode in TRANSIENT_CURL:
                     reason, cap = f"network error (curl exit {p.returncode})", attempts or MAX_ATTEMPTS

@@ -67,9 +67,18 @@ class CQLTests(unittest.TestCase):
     def test_filters_and_sort(self):
         q = self.cql(query="x", modified="30d", mine=True, sort="recent", types=["page", "bogus"])
         self.assertIn('lastmodified >= now("-30d")', q)
-        self.assertIn("(creator = currentUser() OR contributor = currentUser())", q)
+        self.assertIn("contributor = currentUser()", q)
         self.assertIn("type in (page)", q)
         self.assertTrue(q.endswith("ORDER BY lastmodified DESC"))
+
+    def test_contributors(self):
+        self.assertIn("contributor = currentUser()", self.cql(query="x", contributors=["me"]))
+        self.assertIn('(contributor = currentUser() OR contributor in ("acc-1", "bob"))',
+                      self.cql(query="x", contributors=["me", "acc-1", "bob"]))
+        self.assertIn('contributor in ("bob")', self.cql(query="x", contributors=["bob"]))
+        # the old Mine toggle still means me; people alone make a query
+        self.assertIn("contributor = currentUser()", self.cql(query="x", mine=True))
+        self.assertTrue(self.cql(contributors=["bob"]).endswith("ORDER BY lastmodified DESC"))
 
     def test_empty(self):
         with self.assertRaises(cc.ConfigError):
@@ -260,6 +269,58 @@ class CLITests(unittest.TestCase):
         self.assertTrue(self.read()["favorites"][-1]["missing"])
         code, out = self.run_api("--favorite", "remove", "999999", ids[0])
         self.assertEqual([f["id"] for f in self.read()["favorites"]], ids[1:])
+
+    def test_users_scan_cached_and_scoped(self):
+        self.write({**self.read(), "spaces": [{"key": "HR", "name": "People & HR"}], "usersScanDelayMs": 0})
+        code, out = self.run_api("--users")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(out["fromCache"])
+        names = {u["name"] for u in out["users"]}
+        self.assertIn("Maria Rossi", names)
+        self.assertTrue(all(u["id"] for u in out["users"]))
+        # the ids work as contributor filters
+        uid = next(u["id"] for u in out["users"] if u["name"] == "Maria Rossi")
+        code, res = self.run_api("--search", stdin={"contributors": [uid]})
+        self.assertEqual(code, 0, res)
+        self.assertTrue(res["results"])
+        n = len(self.calls())
+        code, again = self.run_api("--users")
+        self.assertTrue(again["fromCache"])
+        self.assertEqual(len(self.calls()), n)          # no request
+        # a scope change rebuilds
+        self.write({**self.read(), "spaces": [{"key": "ENG", "name": "Engineering"}]})
+        _, other = self.run_api("--users")
+        self.assertFalse(other["fromCache"])
+
+    def test_rate_limit_cooldown(self):
+        # a Retry-After longer than rateLimitMaxWaitSeconds: give up, cool down
+        self.write({**self.read(), "rateLimitMaxWaitSeconds": 5})
+        code, out = self.run_api("--search", stdin={"query": "deploy"}, FAKE_CONF_429="9", FAKE_CONF_429_RA="90")
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out["rateLimited"])
+        self.assertEqual(out["retryIn"], 90)
+        n = len(self.calls())
+        # every call during the cooldown refuses WITHOUT a request
+        for args in (["--search"], ["--page", "1002"]):
+            code, out = self.run_api(*args, stdin={"query": "deploy"})
+            self.assertTrue(out["rateLimited"], out)
+            self.assertGreater(out["retryIn"], 80)
+        code, out = self.run_api("--favorites")
+        self.assertEqual(code, 0)
+        self.assertFalse(out["refreshed"])
+        self.assertEqual(len(self.calls()), n)
+        # a short Retry-After is simply waited out
+        os.unlink(os.path.join(self.tmp, "cache", "ratelimit.json"))
+        os.unlink(os.path.join(self.tmp, "fakeconf-429"))
+        code, out = self.run_api("--search", stdin={"query": "deploy"}, FAKE_CONF_429="1", FAKE_CONF_429_RA="1")
+        self.assertEqual(code, 0, out)
+
+    def calls(self):
+        p = os.path.join(self.tmp, "calls.jsonl")
+        if not os.path.exists(p):
+            return []
+        with open(p) as fh:
+            return fh.read().splitlines()
 
     def test_import_saved(self):
         code, out = self.run_api("--import-saved")

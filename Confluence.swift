@@ -12,11 +12,19 @@ import WebKit
 // each search / page with JSON on stdout; the last 20 pages and their
 // images stay in memory only.
 //
-//   Return (search box)   search           ↑↓ / Ctrl+N/P   move (preview follows)
-//   Cmd+Return / Return   open in browser  Cmd+C / ⇧Cmd+C  copy link / title + link
+//   Return (search box)   search (Favorites: open the highlighted page)
+//   ↑↓ / Ctrl+N/P         move (preview follows)   Cmd+Return  open in browser
+//   Cmd+C / ⇧Cmd+C        copy link / title + link
 //   Cmd+D                 ☆ favorite       Cmd+1 / Cmd+2   Search / Favorites
 //   Cmd+L / Cmd+F         search box       Cmd+G / ⇧Cmd+G  next / previous hit
-//   Esc                   popover, else clear the query (never closes)
+//   Esc                   an open filter, else clear the query (never closes)
+//
+// Search and Favorites are separate: Search starts empty; Favorites is the
+// pinned list for one-click opening (typing filters it, the Search button
+// looks inside their text). Contributor = people seen editing the scope's
+// spaces (confluence_api.py --users, cached a day). Rate limits: a long
+// Retry-After pauses EVERY request (python's shared cooldown) with a
+// countdown here, then the pending search / preview resumes by itself.
 //
 // Config: commands.conf [confluence] (enabled, width, height, colors);
 // credentials + spaces + favorites: ~/.config/confluence/config.json (the
@@ -169,7 +177,7 @@ final class ConfSegmented: NSView, PopupThemeable {
     }
 }
 
-// on / off button (Title only, Mine)
+// on / off button (Title only)
 final class ConfToggle: NSView, PopupThemeable {
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     let title: String
@@ -382,7 +390,6 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private var monitor: Any?
     var onSlotHide: (() -> Void)?
     private var slotNavClick: ((Int) -> Void)?
-    private static let setupID = 70
 
     // strip
     private let scopeSeg = ConfSegmented(["Search", "★ Favorites"])
@@ -394,7 +401,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private let spaces = JiraMultiPicker(noun: "space", allTitle: "All spaces")
     private let typeChoice = JiraChoiceButton()
     private let modChoice = JiraChoiceButton()
-    private let mineToggle = ConfToggle("Mine", tip: "Pages you created or edited")
+    private let people = JiraMultiPicker(noun: "contributor", allTitle: "Any contributor")
     private let sortChoice = JiraChoiceButton()
     private let strip = ConfPane()
 
@@ -421,6 +428,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private let hitNext = ThemedPushButton(title: "›", target: nil, action: nil)
     private let hitLabel = NSTextField(labelWithString: "")
     private let hint = NSTextField(wrappingLabelWithString: "")
+    private let setupButton = ThemedPushButton(title: "Set Up Confluence…", target: nil, action: nil)
     private var web: WKWebView!
     private let images = ConfluenceImageLoader()
 
@@ -441,6 +449,14 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private var previewID = ""
     private var pageCache: [String: [String: Any]] = [:]
     private var pageOrder: [String] = []
+    private var criteriaTimer: Timer?
+    private var lastFavRefresh: Date?
+    // rate limit: every request waits for this (python refuses meanwhile)
+    private var cooldownUntil: Date?
+    private var cooldownTimer: Timer?
+    private var pendingSearch: (() -> Void)?
+    private var pendingPreview = false
+    private var coolingDown: Bool { (cooldownUntil?.timeIntervalSinceNow ?? 0) > 0 }
     private static let criteriaKey = "confluenceCriteria"
     private static let splitKey = "confluenceSplit"
 
@@ -521,7 +537,6 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         ch.headerTitle = "Confluence"
         ch.copyPathLabel = ""
         ch.copyConfigLabel = ""
-        ch.extraButtons = [("setup", Self.setupID)]
         chrome = ch
         for v in [fx, tint, ch, content] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -556,7 +571,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
                 self.closeOrHide()
             } else if let hit = ch.extraButtonRects.first(where: { $0.value.contains(p) }) {
-                if hit.key == Self.setupID { self.showSetup() } else { self.slotNavClick?(hit.key) }
+                self.slotNavClick?(hit.key)
             } else if ch.headerIcon != nil, ch.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
                 self.showIconMenu()
             }
@@ -570,7 +585,6 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         chrome?.navIcons = icons
         chrome?.navOn = on
         chrome?.headerIcon = icon
-        chrome?.extraButtons = [("setup", Self.setupID)]
         chrome?.needsDisplay = true
         slotNavClick = click
     }
@@ -614,7 +628,9 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
                         "At least one of the words (OR)"]
         modeSeg.onChange = { [weak self] _ in self?.criteriaChanged() }
         titleToggle.onChange = { [weak self] _ in self?.criteriaChanged() }
-        mineToggle.onChange = { [weak self] _ in self?.criteriaChanged() }
+        people.onChange = { [weak self] in self?.criteriaChanged() }
+        people.placeholder = "Any contributor"
+        people.options = [JiraMultiPicker.Option(id: "me", title: "Me", detail: "pages you created or edited")]
         textBox.field.delegate = self
         hook(searchButton, #selector(searchClicked(_:)), tip: "Search (Return)")
         searchButton.role = .primary
@@ -635,12 +651,14 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         sortChoice.value = "relevance"
         sortChoice.prefix = "Sort: "
         sortChoice.onPick = { [weak self] _ in self?.criteriaChanged() }
-        let top = row([scopeSeg, textBox, modeSeg, titleToggle, searchButton])
+        // how to search, top-left; the box under it, full width; filters below
+        let top = row([scopeSeg, modeSeg, titleToggle, searchButton, NSView()])
+        let middle = row([textBox])
         textBox.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        textBox.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        let bottom = row([spaces, typeChoice, modChoice, mineToggle, sortChoice, NSView()])
-        spaces.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        for s in [top, bottom] {
+        let bottom = row([spaces, people, typeChoice, modChoice, sortChoice, NSView()])
+        spaces.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        people.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        for s in [top, middle, bottom] {
             s.translatesAutoresizingMaskIntoConstraints = false
             strip.addSubview(s)
             NSLayoutConstraint.activate([
@@ -650,7 +668,8 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         }
         NSLayoutConstraint.activate([
             top.topAnchor.constraint(equalTo: strip.topAnchor, constant: 10),
-            bottom.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 8),
+            middle.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 8),
+            bottom.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 8),
         ])
         strip.fill = colors.mantle.withAlphaComponent(0.55)
         root.addSubview(strip)
@@ -716,7 +735,10 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         hint.font = .systemFont(ofSize: 13)
         hint.textColor = colors.dim
         hint.alignment = .center
-        for v in [pTitle, pMeta, pStar, pOpen, pCopy, hitsBar, web, hint] as [NSView] { preview.addSubview(v) }
+        hook(setupButton, #selector(setupClicked), tip: "Site, email, token and the spaces to search")
+        setupButton.role = .primary
+        setupButton.controlSize = .regular
+        for v in [pTitle, pMeta, pStar, pOpen, pCopy, hitsBar, web, hint, setupButton] as [NSView] { preview.addSubview(v) }
         root.addSubview(preview)
 
         // --- layout
@@ -726,7 +748,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     }
 
     private func layoutAll(_ b: NSRect) {
-        let stripH: CGFloat = 10 + JiraTheme.height + 8 + JiraTheme.height + 10
+        let stripH: CGFloat = 10 + JiraTheme.height * 3 + 8 * 2 + 10
         strip.frame = NSRect(x: 0, y: 0, width: b.width, height: stripH)
         let bodyY = stripH
         let bodyH = b.height - stripH
@@ -764,7 +786,9 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         hitNext.frame = NSRect(x: 38, y: 3, width: 26, height: 22)
         hitLabel.frame = NSRect(x: 72, y: 6, width: pw - 84, height: 16)
         web.frame = NSRect(x: 0, y: 84, width: pw, height: max(0, preview.bounds.height - 84))
-        hint.frame = NSRect(x: 40, y: preview.bounds.height / 2 - 40, width: max(0, pw - 80), height: 80)
+        hint.frame = NSRect(x: 40, y: preview.bounds.height / 2 - 60, width: max(0, pw - 80), height: 60)
+        let sw = setupButton.intrinsicContentSize.width + 24
+        setupButton.frame = NSRect(x: (pw - sw) / 2, y: preview.bounds.height / 2 + 8, width: sw, height: 30)
     }
 
     // MARK: config / setup
@@ -786,17 +810,18 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             if let path = j["configPath"] as? String { self.loadAuth(path) }
             if !self.configured {
                 let probs = (j["problems"] as? [String] ?? []).joined(separator: "; ")
-                self.setStatus("Not set up yet: \(probs). Click setup (top right) to connect.", tone: .warning)
-                self.showPreviewHint("Connect a Confluence site to start searching.\nsetup ▸ site + API token")
-            } else if self.rows.isEmpty {
-                self.setStatus("\(self.site)" + (sp.isEmpty ? "" : " · \(sp.count) space\(sp.count == 1 ? "" : "s") in scope"))
+                self.setStatus("Not set up yet: \(probs)", tone: .warning)
+            } else {
+                self.loadPeople(refresh: false)
             }
-            // back with a restored query: show its results again
-            if self.configured, self.rows.isEmpty, self.scope == .search, !self.query.isEmpty {
-                self.loadFavorites(show: false)
-                self.runSearch()
-            } else if self.rows.isEmpty {
-                self.loadFavorites(show: self.scope == .favorites || self.query.isEmpty)
+            if self.rows.isEmpty {
+                if self.scope == .favorites {
+                    self.loadFavorites(show: true)
+                } else if self.configured && self.hasCriteria {
+                    self.runSearch()             // back with a restored query
+                } else {
+                    self.showSearchEmpty()
+                }
             }
             then?()
         }
@@ -914,7 +939,8 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             "query": query, "mode": ["all", "phrase", "any"][modeSeg.selected], "titleOnly": titleToggle.isOn,
             "spaces": spaces.isAll ? [] : spaces.selected,
             "types": (typeChoice.value ?? "page,blogpost").split(separator: ",").map(String.init),
-            "modified": modChoice.value ?? "", "mine": mineToggle.isOn, "sort": sortChoice.value ?? "relevance",
+            "modified": modChoice.value ?? "", "contributors": people.isAll ? [] : people.selected,
+            "sort": sortChoice.value ?? "relevance",
         ]
         if scope == .favorites { c["favorites"] = true }
         return c
@@ -934,7 +960,9 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         textBox.field.stringValue = c["query"] as? String ?? ""
         modeSeg.selected = ["all", "phrase", "any"].firstIndex(of: c["mode"] as? String ?? "all") ?? 0
         titleToggle.isOn = c["titleOnly"] as? Bool ?? false
-        mineToggle.isOn = c["mine"] as? Bool ?? false
+        var who = c["contributors"] as? [String] ?? []
+        if who.isEmpty, c["mine"] as? Bool == true { who = ["me"] }
+        people.set(who, all: false)
         let sp = c["spaces"] as? [String] ?? []
         spaces.set(sp, all: sp.isEmpty)
         if let t = c["types"] as? [String], !t.isEmpty { typeChoice.value = t.joined(separator: ",") }
@@ -942,27 +970,57 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         sortChoice.value = c["sort"] as? String ?? "relevance"
     }
 
-    // a filter changed: re-run what's on screen
+    // anything to search for (a query, or a filter that narrows on its own)
+    private var hasCriteria: Bool {
+        !query.isEmpty || !(modChoice.value ?? "").isEmpty || (!people.isAll && !people.selected.isEmpty)
+            || (!spaces.isAll && !spaces.selected.isEmpty)
+    }
+
+    // a filter changed: re-run what's on screen - debounced, so clicking
+    // through a few filters sends ONE request (rate limits)
     private func criteriaChanged() {
         saveCriteria()
-        if scope == .favorites {
-            query.isEmpty ? showFavorites() : runSearch()
-        } else if !query.isEmpty || !lastCQL.isEmpty {
-            runSearch()
+        criteriaTimer?.invalidate()
+        criteriaTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if self.scope == .favorites {
+                self.showingFavorites ? self.showFavorites() : self.runSearch()
+            } else if self.hasCriteria {
+                self.runSearch()
+            }
         }
     }
 
     private func setScope(_ s: Scope) {
         scope = s
         scopeSeg.selected = s == .search ? 0 : 1
+        searchButton.toolTip = s == .search ? "Search (Return)" : "Search inside your favorites' text"
         if s == .favorites {
             loadFavorites(show: true)
-        } else if !query.isEmpty {
+        } else if hasCriteria {
             runSearch()
         } else {
-            showFavorites()
+            showSearchEmpty()
         }
         focusSearch()
+    }
+
+    // Search with nothing typed: an empty list + how to start (never the
+    // favorites - they live under ★ Favorites)
+    private func showSearchEmpty() {
+        showingFavorites = false
+        lastCQL = ""
+        nextLink = ""
+        terms = []
+        if configured {
+            setRows([], empty: "Type to search \(site.isEmpty ? "Confluence" : site), then Return.\n"
+                        + "★ Favorites (Cmd+2) keeps the pages you open often.")
+            setStatus(coolingDown ? status.stringValue : "Ready")
+        } else {
+            rows = []
+            table.reloadData()
+            showPreviewHint("Connect a Confluence site to start searching.", setup: true)
+        }
     }
 
     // MARK: search
@@ -972,9 +1030,13 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private func runSearch(more: Bool = false) {
         guard configured else { showSetup(); return }
         var crit = criteria()
-        if crit["query"] as? String == "" && scope == .search && modChoice.value == "" && !mineToggle.isOn
-            && spaces.selected.isEmpty {
-            showFavorites()
+        if scope == .search && !hasCriteria && !more {
+            showSearchEmpty()
+            return
+        }
+        if coolingDown {
+            pendingSearch = { [weak self] in self?.runSearch(more: more) }
+            tickCooldown()
             return
         }
         if more {
@@ -994,6 +1056,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             self.lastCQL = j["cql"] as? String ?? self.lastCQL
             self.lastCurl = j["curl"] as? String ?? self.lastCurl
             guard j["ok"] as? Bool == true else {
+                if self.rateLimited(j, retry: { [weak self] in self?.runSearch(more: more) }) { return }
                 if j["setup"] as? Bool == true { self.configured = false }
                 self.setStatus(j["error"] as? String ?? "search failed", tone: .danger)
                 if !more { self.setRows([]) }
@@ -1048,7 +1111,10 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             guard let self else { return }
             self.favorites = ((j["results"] as? [[String: Any]]) ?? []).map(ConfluenceRow.init)
             if show { self.showFavorites() }
-            guard self.configured, !self.favorites.isEmpty else { return }
+            // the live refresh (one request) at most every 10 minutes
+            guard self.configured, !self.favorites.isEmpty, !self.coolingDown,
+                  (self.lastFavRefresh.map { Date().timeIntervalSince($0) > 600 } ?? true) else { return }
+            self.lastFavRefresh = Date()
             ConfluenceAPI.run(["--favorites"]) { [weak self] j in
                 guard let self, j["ok"] as? Bool == true, j["refreshed"] as? Bool == true else { return }
                 self.favorites = ((j["results"] as? [[String: Any]]) ?? []).map(ConfluenceRow.init)
@@ -1071,16 +1137,14 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         lastCQL = ""
         nextLink = ""
         terms = words.map { ["text": $0, "phrase": false, "prefix": true] }
-        let empty = !favorites.isEmpty ? "No favorites match “\(query)”.\nReturn searches their full text."
-            : scope == .favorites ? "No favorites yet.\nStar a result (☆ or Cmd+D) to keep it here."
-            : configured ? "Type to search Confluence.\nStarred pages show up here when the box is empty."
-            : "Connect a Confluence site to start searching.\nsetup (top right) ▸ site + API token"
+        let empty = !favorites.isEmpty ? "No favorites match “\(query)”.\nThe Search button looks inside their text."
+            : "No favorites yet.\nStar a search result (☆ or Cmd+D) to pin it here for one-click opening."
         setRows(list, empty: empty)
         if let sel, let i = rows.firstIndex(where: { $0.id == sel }) { select(i) }
-        let head = scope == .favorites ? "★ \(list.count) favorite\(list.count == 1 ? "" : "s")"
-            + (words.isEmpty ? "" : " matching — Return searches inside them")
-            : "★ Favorites — type to search Confluence"
-        setStatus(favorites.isEmpty && scope == .search ? (configured ? "Type to search \(site)" : status.stringValue) : head)
+        if !coolingDown {
+            setStatus("★ \(list.count)" + (words.isEmpty ? "" : " of \(favorites.count)")
+                      + " favorite\(favorites.count == 1 ? "" : "s") — Return opens, type to filter")
+        }
     }
 
     private func toggleFavorite(row i: Int) {
@@ -1156,7 +1220,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         let i = table.selectedRow
         guard rows.indices.contains(i) else { return }
         showHeader(rows[i])
-        previewTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+        previewTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
             self?.loadPreview(i)
         }
         // near the end: fetch the next page
@@ -1214,9 +1278,12 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
 
     // MARK: preview
 
-    private func showPreviewHint(_ text: String) {
+    @objc private func setupClicked() { showSetup() }
+
+    private func showPreviewHint(_ text: String, setup: Bool = false) {
         hint.stringValue = text
         hint.isHidden = text.isEmpty
+        setupButton.isHidden = !setup
         web.isHidden = true
         hitsBar.isHidden = true
         for v in [pTitle, pMeta, pStar, pOpen, pCopy] as [NSView] { v.isHidden = true }
@@ -1225,6 +1292,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private func showHeader(_ r: ConfluenceRow) {
         for v in [pTitle, pMeta, pStar, pOpen, pCopy] as [NSView] { v.isHidden = false }
         hint.isHidden = true
+        setupButton.isHidden = true
         pTitle.stringValue = r.title
         pTitle.toolTip = r.title
         var meta = [r.spaceName.isEmpty ? r.space : r.spaceName]
@@ -1256,11 +1324,24 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             return
         }
         if let page = pageCache[r.id] { render(page, r); return }
+        if coolingDown {
+            pendingPreview = true
+            web.isHidden = true
+            hitsBar.isHidden = true
+            hint.stringValue = "Paused for Confluence's rate limit — the preview loads when it lifts."
+            hint.isHidden = false
+            return
+        }
         hitsBar.isHidden = false
         hitLabel.stringValue = "Loading page…"
         ConfluenceAPI.run(["--page", r.id]) { [weak self] j in
             guard let self, gen == self.previewGen else { return }
             guard j["ok"] as? Bool == true else {
+                if self.rateLimited(j, retry: nil) {
+                    self.pendingPreview = true
+                    self.loadPreview(i)
+                    return
+                }
                 self.web.isHidden = true
                 self.hint.stringValue = "Couldn't load the page:\n" + (j["error"] as? String ?? "failed")
                 self.hint.isHidden = false
@@ -1466,6 +1547,61 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
 
     // MARK: status + keys
 
+    // a {rateLimited, retryIn} answer: pause everything, count down, resume
+    private func rateLimited(_ j: [String: Any], retry: (() -> Void)?) -> Bool {
+        guard j["rateLimited"] as? Bool == true else { return false }
+        let secs = max(3, (j["retryIn"] as? Int) ?? 30)
+        cooldownUntil = Date().addingTimeInterval(TimeInterval(secs))
+        if let retry { pendingSearch = retry }
+        cooldownTimer?.invalidate()
+        cooldownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tickCooldown() }
+        tickCooldown()
+        return true
+    }
+
+    private func tickCooldown() {
+        guard let until = cooldownUntil else { return }
+        let left = Int(ceil(until.timeIntervalSinceNow))
+        if left > 0 {
+            setStatus("Confluence rate limit — requests paused, resuming in \(left)s", tone: .warning)
+            spinner.stopAnimation(nil)
+            return
+        }
+        cooldownTimer?.invalidate()
+        cooldownTimer = nil
+        cooldownUntil = nil
+        setStatus("Resuming…")
+        let search = pendingSearch
+        pendingSearch = nil
+        search?()
+        if pendingPreview {
+            pendingPreview = false
+            if rows.indices.contains(table.selectedRow) { loadPreview(table.selectedRow) }
+        }
+    }
+
+    // the Contributor picker: Me + people seen in the scope (cached a day)
+    private func loadPeople(refresh: Bool) {
+        ConfluenceAPI.run(["--users"] + (refresh ? ["--refresh"] : [])) { [weak self] j in
+            guard let self else { return }
+            if self.rateLimited(j, retry: nil) { return }
+            let users = (j["users"] as? [[String: Any]]) ?? []
+            self.people.options = [JiraMultiPicker.Option(id: "me", title: "Me", detail: "pages you created or edited")]
+                + users.compactMap { u in
+                    guard let id = u["id"] as? String, !id.isEmpty else { return nil }
+                    return JiraMultiPicker.Option(id: id, title: u["name"] as? String ?? id,
+                                                  detail: u["username"] as? String ?? "")
+                }
+            self.people.set(self.people.selected, all: self.people.isAll)
+            if refresh {
+                let partial = j["partial"] as? Bool == true ? " (partial — some pages were skipped)" : ""
+                self.setStatus(j["ok"] as? Bool == true ? "\(users.count) people\(partial)"
+                               : (j["error"] as? String ?? "people list failed"),
+                               tone: j["ok"] as? Bool == true ? .success : .danger)
+            }
+        }
+    }
+
     private func setStatus(_ s: String, tone: PopupTone = .dim) {
         status.stringValue = s
         status.toolTip = s
@@ -1486,7 +1622,12 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         switch sel {
         case #selector(NSResponder.insertNewline(_:)):
-            runSearch()
+            // Favorites are for opening: Return opens the highlighted one
+            if scope == .favorites && showingFavorites {
+                openSelected()
+            } else {
+                runSearch()
+            }
             return true
         case #selector(NSResponder.moveDown(_:)):
             move(1)
@@ -1499,13 +1640,9 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         }
     }
 
-    // favorites: typing filters them; search: clearing the box brings them back
+    // favorites: typing filters them (back from a search inside them too)
     func controlTextDidChange(_ obj: Notification) {
-        if scope == .favorites {
-            if showingFavorites { showFavorites() }
-        } else if query.isEmpty, !showingFavorites {
-            showFavorites()
-        }
+        if scope == .favorites { showFavorites() }
     }
 
     private func move(_ d: Int) {
@@ -1518,7 +1655,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private func escape() {
         if !query.isEmpty {
             textBox.field.stringValue = ""
-            showFavorites()
+            if scope == .favorites { showFavorites() } else if !hasCriteria { showSearchEmpty() }
             focusSearch()
         } else if window.firstResponder !== textBox.field.currentEditor() {
             focusSearch()
@@ -1528,6 +1665,11 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private func installKeys() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self else { return e }
+            // Esc closes an open filter (and only it), wherever the keys are
+            if e.keyCode == 53, let open = [self.spaces, self.people].first(where: { $0.isOpen }) {
+                open.closePopover()
+                return nil
+            }
             if let sheet = self.window.attachedSheet {
                 return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
             }
@@ -1590,6 +1732,10 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         }
         add("Confluence Setup…") { [weak self] in self?.showSetup() }
         add("Import My Saved Pages as Favorites") { [weak self] in self?.importSaved() }
+        add("Refresh Contributor List") { [weak self] in
+            self?.setStatus("Refreshing people…")
+            self?.loadPeople(refresh: true)
+        }
         menu.addItem(.separator())
         add("Open config.json") {
             ConfluenceAPI.run(["--check"]) { j in
@@ -1609,9 +1755,10 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             Return (in the list) / Cmd+Return / double-click — open in browser
             Cmd+C / Shift+Cmd+C — copy link / title + link
             Cmd+D or click ☆ — favorite · Cmd+1 / Cmd+2 — Search / Favorites
+            Favorites: type to filter, Return opens, Search looks inside them
             Cmd+G / Shift+Cmd+G — next / previous match in the page
             Cmd+L / Cmd+F — search box · Cmd+R — search again
-            Esc — close a picker, else clear the query
+            Esc — close an open filter, else clear the query
             Cmd+W / ✕ — hide the window
             """, buttons: ["OK"]) { _ in }
         }

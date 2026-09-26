@@ -27,6 +27,15 @@ to stdout.
                            (missing pages are flagged, never dropped)
   --import-saved           merge Confluence's own "saved for later"
                            (favourite = currentUser()) into the favorites
+  --users [--refresh]      the Contributor picker's people: everyone seen as
+                           creator / last editor on the newest usersScanItems
+                           items in the scope (~/.cache/confluence/users.json,
+                           rebuilt after usersMaxAgeHours; paced)
+
+Rate limits: a 429 (or 503 + Retry-After) the request can't wait out within
+rateLimitMaxWaitSeconds starts a cooldown (~/.cache/confluence/ratelimit.json,
+Retry-After else cooldownSeconds): until it ends every command answers
+{ok: false, rateLimited: true, retryIn: N} WITHOUT a request.
 
 Errors: {ok: false, error, curl?} and exit 1 (2 = bad input / config).
 """
@@ -46,6 +55,8 @@ import jira_api  # type: ignore  # noqa: E402  (path set up by confluence_config
 import jira_log  # type: ignore  # noqa: E402
 
 jira_api.CURL_LOG = os.path.join(cc.CACHE_DIR, "curl.log")
+COOLDOWN_FILE = os.path.join(cc.CACHE_DIR, "ratelimit.json")
+USERS_FILE = os.path.join(cc.CACHE_DIR, "users.json")
 HL_OPEN, HL_CLOSE = "@@@hl@@@", "@@@endhl@@@"
 SEARCH_EXPAND = "content.space,content.version,content.ancestors,content.container"
 
@@ -60,7 +71,7 @@ def client(cfg: cc.Config, site=None, token=None, email=None, auth=None) -> Conf
     c = ConfluenceClient(cc.norm_site(site) if site else cfg.site, token if token is not None else cfg["token"],
                          email=email if email is not None else (cfg["email"] or ""),
                          auth=auth or cfg.auth, team={}, timeout=int(cfg["timeoutSeconds"] or 20))
-    c.max_wait = max(0, float(cfg["rateLimitMaxWaitMinutes"] or 0)) * 60
+    c.max_wait = max(0, float(cfg["rateLimitMaxWaitSeconds"] or 0))
     c.delay = max(0, int(cfg["requestDelayMs"] or 0)) / 1000.0
     c.on_wait = lambda msg, secs: print(f"confluence-api: {msg}", file=sys.stderr)
     c.on_note = lambda msg: print(f"confluence-api: {msg}", file=sys.stderr)
@@ -74,6 +85,37 @@ def emit(obj: dict, code: int = 0) -> int:
 
 def fail(msg: str, code: int = 1, **kw) -> int:
     return emit({"ok": False, "error": msg, **kw}, code)
+
+
+# ------------------------------------------------------------ rate limits
+
+def cooldown_left(site: str) -> float:
+    j = jira_api.read_json(COOLDOWN_FILE, {})
+    if not isinstance(j, dict) or j.get("site") != site:
+        return 0.0
+    return max(0.0, float(j.get("until") or 0) - time.time())
+
+
+def start_cooldown(c: "ConfluenceClient", cfg: cc.Config, why: str) -> float:
+    secs = c.last_retry_after if c.last_retry_after else float(cfg["cooldownSeconds"] or 60)
+    secs = max(5.0, min(secs, 3600.0))
+    try:
+        os.makedirs(cc.CACHE_DIR, exist_ok=True)
+        jira_api.write_json(COOLDOWN_FILE, {"site": c.site, "until": time.time() + secs, "seconds": secs,
+                                            "why": why, "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    except OSError:
+        pass
+    return secs
+
+
+def api_fail(err, c: "ConfluenceClient", cfg: cc.Config, **kw) -> int:
+    """An ApiError as JSON; a rate limit (429, or 5xx with Retry-After) the
+    request couldn't wait out starts the shared cooldown."""
+    if err.code == 429 or (err.code in jira_api.RETRY_CODES and c.last_retry_after):
+        secs = start_cooldown(c, cfg, str(err)[:200])
+        return fail(f"Confluence is rate limiting requests - pausing {secs:.0f}s, then it retries",
+                    1, rateLimited=True, retryIn=round(secs), curl=err.curl, **kw)
+    return fail(str(err), 1, curl=err.curl, **kw)
 
 
 def qs(**kw) -> str:
@@ -203,7 +245,7 @@ def do_search(cfg: cc.Config, crit: dict) -> int:
                    expand="space,version,ancestors,container")
             data = c.get(path, q) or {}
     except jira_api.ApiError as err:
-        return fail(str(err), 1, cql=cql, curl=err.curl)
+        return api_fail(err, c, cfg, cql=cql)
     rows = [shape(r, cfg.site, terms, favs) for r in data.get("results") or []]
     total = data.get("totalSize", data.get("size", len(rows)))
     nlink = (data.get("_links") or {}).get("next") or ""
@@ -221,7 +263,7 @@ def do_page(cfg: cc.Config, pid: str) -> int:
         j = c.get(f"/rest/api/content/{pid}",
                   qs(expand="body.view,space,version,ancestors,history,container,metadata.labels")) or {}
     except jira_api.ApiError as err:
-        return fail(str(err), 1, curl=err.curl)
+        return api_fail(err, c, cfg)
     row = shape(j, cfg.site, [], set())
     labels = [x.get("name") for x in ((j.get("metadata") or {}).get("labels") or {}).get("results") or []]
     return emit({"ok": True, **row, "html": ((j.get("body") or {}).get("view") or {}).get("value") or "",
@@ -342,6 +384,8 @@ def do_favorites(cfg: cc.Config, refresh: bool = True) -> int:
         data = c.get("/rest/api/content/search", qs(cql=cql, limit=min(200, len(favs)),
                                                     expand="space,version,ancestors,container")) or {}
     except jira_api.ApiError as err:
+        if err.code == 429 or (err.code in jira_api.RETRY_CODES and c.last_retry_after):
+            start_cooldown(c, cfg, str(err)[:200])
         return emit({"ok": True, "results": rows, "total": len(rows), "refreshed": False,
                      "warning": f"could not refresh favorites: {err}", "curl": err.curl})
     live = {r["id"]: r for r in (shape(x, cfg.site, [], set()) for x in data.get("results") or [])}
@@ -379,7 +423,7 @@ def do_import_saved(cfg: cc.Config) -> int:
             nxt = (data.get("_links") or {}).get("next") or ""
             path, _, q = nxt.partition("?")
     except jira_api.ApiError as err:
-        return fail(str(err), 1, curl=err.curl)
+        return api_fail(err, c, cfg)
     have = {str(f.get("id")) for f in cfg["favorites"] if isinstance(f, dict)}
     new = [r for r in rows if r["id"] not in have]
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -387,6 +431,65 @@ def do_import_saved(cfg: cc.Config) -> int:
         [{**{k: r.get(k, "") for k in FAV_KEYS}, "added": now} for r in new]
     cfg.save()
     return emit({"ok": True, "found": len(rows), "added": len(new)})
+
+
+def user_id(u: dict) -> str:
+    """What CQL's contributor takes: Cloud accountId, else the DC username."""
+    return str(u.get("accountId") or u.get("username") or u.get("userKey") or "")
+
+
+def do_users(cfg: cc.Config, refresh: bool) -> int:
+    scope = sorted(cfg.scope())
+    have = jira_api.read_json(USERS_FILE, {})
+    fresh_for = (1 if have.get("partial") else float(cfg["usersMaxAgeHours"] or 24)) * 3600
+    if (not refresh and isinstance(have, dict) and have.get("site") == cfg.site and have.get("scope") == scope
+            and time.time() - float(have.get("builtAt") or 0) < fresh_for):
+        return emit({"ok": True, "users": have.get("users") or [], "built": have.get("built"),
+                     "partial": bool(have.get("partial")), "fromCache": True})
+    if cooldown_left(cfg.site):
+        return emit({"ok": True, "users": have.get("users") or [] if isinstance(have, dict) else [],
+                     "fromCache": True, "warning": "rate limited - people list not refreshed"})
+    c = client(cfg)
+    c.delay = max(0, int(cfg["usersScanDelayMs"] or 0)) / 1000.0
+    cap = max(100, int(cfg["usersScanItems"] or 1000))
+    where = f"space in ({', '.join(cc.cql_str(k) for k in scope)}) AND " if scope else ""
+    path, q = "/rest/api/content/search", qs(cql=where + "type in (page, blogpost, comment) ORDER BY lastmodified DESC",
+                                              limit=100, expand="version,history")
+    users: dict = {}
+    seen, partial, warning = 0, False, ""
+    try:
+        while path and seen < cap:
+            data = c.get(path, q) or {}
+            res = data.get("results") or []
+            seen += len(res)
+            for x in res:
+                for u in ((x.get("version") or {}).get("by"), (x.get("history") or {}).get("createdBy")):
+                    if not isinstance(u, dict) or u.get("type") == "anonymous":
+                        continue
+                    uid = user_id(u)
+                    if uid and uid not in users:
+                        users[uid] = {"id": uid, "name": u.get("displayName") or u.get("publicName") or uid,
+                                      "username": u.get("username") or u.get("email") or ""}
+            nxt = (data.get("_links") or {}).get("next") or ""
+            path, _, q = nxt.partition("?")
+            if not res:
+                break
+    except jira_api.ApiError as err:
+        partial = True
+        warning = f"people list is partial: {err}"
+        if err.code == 429 or (err.code in jira_api.RETRY_CODES and c.last_retry_after):
+            start_cooldown(c, cfg, str(err)[:200])
+        if not users:
+            return api_fail(err, c, cfg)
+    out = sorted(users.values(), key=lambda u: u["name"].lower())
+    try:
+        jira_api.write_json(USERS_FILE, {"site": cfg.site, "scope": scope, "builtAt": time.time(),
+                                         "built": time.strftime("%Y-%m-%d %H:%M:%S"), "scanned": seen,
+                                         "partial": partial, "users": out})
+    except OSError:
+        pass
+    return emit({"ok": True, "users": out, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "scanned": seen,
+                 "partial": partial, "fromCache": False, **({"warning": warning} if warning else {})})
 
 
 def read_stdin_json(default=None):
@@ -430,6 +533,14 @@ def main(argv: list) -> int:
         return fail("Confluence is not set up: " + "; ".join(cfg.problems()), 2, setup=True)
     jira_log.setup("confluence " + cmd, argv, cfg, cache_dir=cc.CACHE_DIR)
     jira_log.secret(cfg["token"] or "")
+    if cmd == "--users":
+        return do_users(cfg, "--refresh" in rest)
+    left = cooldown_left(cfg.site)
+    if left and cmd in ("--search", "--page", "--myself", "--add-space", "--import-saved"):
+        return fail(f"Confluence asked us to slow down - resuming in {left:.0f}s", 1,
+                    rateLimited=True, retryIn=round(left))
+    if left and cmd == "--favorites":
+        return do_favorites(cfg, refresh=False)
     if cmd == "--myself":
         try:
             me = me_of(client(cfg))

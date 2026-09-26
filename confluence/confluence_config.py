@@ -50,8 +50,18 @@ DEFAULTS = {
     "favorites": [],
     "search": {"limit": 25, "types": ["page", "blogpost"]},
     "timeoutSeconds": 20,
-    "rateLimitMaxWaitMinutes": 1,   # a search is interactive: wait out a 429 briefly, then say so
+    # rate limits (Confluence Cloud answers 429 + Retry-After): a short ask is
+    # waited out inside the request; a longer one starts a COOLDOWN
+    # (~/.cache/confluence/ratelimit.json) during which every call refuses
+    # up front, so previews / searches / refreshes never pile on
+    "rateLimitMaxWaitSeconds": 20,
+    "cooldownSeconds": 60,          # when the server gives no Retry-After
     "requestDelayMs": 0,
+    # the Contributor picker: people seen on recent content in the scope
+    # (~/.cache/confluence/users.json), rebuilt when older than this
+    "usersMaxAgeHours": 24,
+    "usersScanItems": 1000,         # newest items read to find them
+    "usersScanDelayMs": 300,        # pause between those pages (gentle)
     "logLevel": "INFO",             # ~/.cache/confluence/debug.log
     "rawCapture": False,            # raw response dumps (off: nothing is cached)
     "rawKeepDays": 1,
@@ -264,8 +274,16 @@ def criteria_cql(crit: dict, cfg: Config) -> str:
         raise ConfigError(f"unknown modified window {crit['modified']!r}")
     if mod:
         ands.append(f'lastmodified >= now("{mod}")')
-    if crit.get("mine"):
-        ands.append("(creator = currentUser() OR contributor = currentUser())")
+    # contributor = created or edited; "me" = currentUser(); old "mine" = me
+    people = [str(u) for u in (crit.get("contributors") or []) if str(u).strip()]
+    if crit.get("mine") and "me" not in people:
+        people.append("me")
+    if people:
+        parts = (["contributor = currentUser()"] if "me" in people else [])
+        others = [u for u in people if u != "me"]
+        if others:
+            parts.append(f"contributor in ({', '.join(cql_str(u) for u in others)})")
+        ands.append(parts[0] if len(parts) == 1 else "(" + " OR ".join(parts) + ")")
     ids = [str(i) for i in (crit.get("ids") or []) if str(i).isdigit()]
     if crit.get("ids") is not None:
         if not ids:
@@ -273,7 +291,7 @@ def criteria_cql(crit: dict, cfg: Config) -> str:
         ands.append(f"id in ({', '.join(ids)})")
     if crit.get("saved"):
         ands.append("favourite = currentUser()")
-    if not text and not (crit.get("modified") or crit.get("mine") or crit.get("ids") or crit.get("saved")
+    if not text and not (crit.get("modified") or people or crit.get("ids") or crit.get("saved")
                          or crit.get("spaces")):
         raise ConfigError("type something to search for")
     cql = " AND ".join(ands)

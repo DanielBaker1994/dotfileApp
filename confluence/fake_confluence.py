@@ -29,7 +29,8 @@ NOT / parentheses, ORDER BY field [ASC|DESC] (else relevance).
 
 Auth: `Authorization: Bearer <token>` or basic `-u any:<token>`; token =
 $FAKE_CONF_TOKEN (default "fake-token").
-Failure switches (env): FAKE_CONF_429=N (first N searches answer 429),
+Failure switches (env): FAKE_CONF_429=N (first N searches answer 429,
+Retry-After $FAKE_CONF_429_RA or 0),
 FAKE_CONF_401=1 (every API call 401), FAKE_CONF_SLOW_MS=N (sleep per
 request), FAKE_CONF_NO_SEARCH=1 (/rest/api/search 404s, like an old DC).
 Counters live in $FAKE_DIR when set (they span curl invocations).
@@ -282,7 +283,7 @@ def _slug(t):
 
 class Page:
     __slots__ = ("id", "type", "space", "title", "parent", "author", "modified", "created", "labels",
-                 "body", "images", "text", "contributors")
+                 "body", "images", "text", "contributors", "editor")
 
     def webui(self):
         if self.type == "blogpost":
@@ -306,6 +307,7 @@ def _build():
         p.created = p.modified - dt.timedelta(days=30 + nid % 50)
         p.labels, p.body, p.images = lb, b, im
         p.contributors = {p.author, AUTHORS[(a + 1) % len(AUTHORS)]}
+        p.editor = AUTHORS[(a + 1) % len(AUTHORS)] if nid % 2 else p.author   # the last edit
         pages[p.id] = p
         by_title[(s, t)] = p
         nid += 1
@@ -316,7 +318,7 @@ def _build():
             a = Page()
             a.id, a.type, a.space, a.title, a.parent = str(nid), "attachment", p.space, name, p.id
             a.author, a.modified, a.created, a.labels = p.author, p.modified, p.modified, []
-            a.body, a.images, a.contributors = "", [], {p.author}
+            a.body, a.images, a.contributors, a.editor = "", [], {p.author}, p.author
             pages[a.id] = a
             nid += 1
     for p in pages.values():
@@ -553,7 +555,7 @@ def matches(node, p):
         return not hit if op in ("!=", "not in") else hit
     if field in ("creator", "contributor"):
         who = {p.author} if field == "creator" else p.contributors
-        hit = any((_is_me(v) and CURRENT_USER["displayName"] in who) or v in who for v in vals)
+        hit = any(_who(v, who) for v in vals)
         return not hit if op in ("!=", "not in") else hit
     if field in ("lastmodified", "created"):
         d = p.modified if field == "lastmodified" else p.created
@@ -624,14 +626,23 @@ def iso(d):
 
 
 def user_json(name):
+    if name == CURRENT_USER["displayName"]:
+        return {"type": "known", **CURRENT_USER}
     return {"type": "known", "displayName": name, "username": name.split()[0].lower(),
-            "accountId": "acc-" + str(abs(hash(name)) % 100000)}
+            "accountId": f"acc-{zlib.crc32(name.encode()) % 100000:05d}"}
+
+
+def _who(v, names):
+    """a CQL user value (currentUser(), accountId, username, display name) vs people"""
+    if isinstance(v, tuple):
+        return _is_me(v) and CURRENT_USER["displayName"] in names
+    return any(v in (n, user_json(n)["username"], user_json(n)["accountId"]) for n in names)
 
 
 def content_json(p, base, expand=()):
     j = {"id": p.id, "type": p.type, "status": "current", "title": p.title,
          "space": {"key": p.space, "name": SPACES[p.space], "_links": {"webui": f"/spaces/{p.space}"}},
-         "version": {"number": 1 + int(p.id) % 5, "when": iso(p.modified), "by": user_json(p.author)},
+         "version": {"number": 1 + int(p.id) % 5, "when": iso(p.modified), "by": user_json(p.editor)},
          "history": {"createdDate": iso(p.created), "createdBy": user_json(p.author)},
          "metadata": {"labels": {"results": [{"name": x} for x in p.labels]}},
          "_links": {"webui": p.webui(), "self": f"{base}/rest/api/content/{p.id}"}}
@@ -828,7 +839,8 @@ def handle(method: str, url: str, headers: dict, context: str | None = None):
             return _html(404, "<html><body>Page Not Found</body></html>")
         n429 = int(os.environ.get("FAKE_CONF_429", "0") or 0)
         if n429 and _counter("429") < n429:
-            return _json(429, {"message": "Rate limit exceeded"}, {"Retry-After": "0"})
+            return _json(429, {"message": "Rate limit exceeded"},
+                         {"Retry-After": os.environ.get("FAKE_CONF_429_RA", "0")})
         cql = qs.get("cql", [""])[0]
         if not cql.strip():
             return _json(400, {"statusCode": 400, "message": "cql is required"})
