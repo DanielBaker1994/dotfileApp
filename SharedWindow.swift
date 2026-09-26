@@ -1,19 +1,23 @@
 import AppKit
 
-// MARK: - Shared window (one place on screen for notes + jira)
+// MARK: - Shared window (one place on screen for notes, files + jira)
 //
-// Notes, the jira list and everything jira opens (a ticket's details, the
-// release view, Jira Config) share ONE on-screen window: exactly one of them
+// Notes, the file browser, the jira list and everything jira opens (a
+// ticket's details, the release view, Jira Config) — plus command output
+// windows (/health-checks) — share ONE on-screen window: exactly one of them
 // is visible, in one frame, and switching swaps them in place. The windows
 // themselves stay separate objects — a hidden view is PARKED (ordered out
 // but alive), so the vim session, the jira tab / filters / scroll and an
 // in-progress Jira Config edit all survive a switch.
 //
-//   Hyper+N / Hyper+J   hidden -> show that view; showing the other ->
-//                       switch; already showing it -> hide the window
-//   header              notes | jira switch; jira sub-views add home + back
+//   Hyper+N / F / J     hidden -> show that view; showing another ->
+//                       switch; already in it -> hide the window
+//   header              notes | files | jira switch; jira sub-views add
+//                       home + back, output views add back
 //   Esc                 jira: Back (clears a search first), at the list =
-//                       hide; notes: never (vim / the shell own Esc)
+//                       hide; files: hide; output: back; notes: never
+//                       (vim / the shell own Esc; the notes terminal drawer
+//                       is part of the notes view)
 //   Cmd+W / ✕           hide the whole window
 //
 // Focus goes back to what was focused when the window was SUMMONED, and only
@@ -22,8 +26,10 @@ import AppKit
 // [app] shared-window = false brings back separate windows.
 
 enum SlotView: String {
-    case notes, jira, detail, releases, config
-    var isJira: Bool { self != .notes }
+    case notes, files, jira, detail, releases, config, output
+    var isJira: Bool { [.jira, .detail, .releases, .config].contains(self) }
+    // a view you step back out of (Esc / back): jira's sub-views, output
+    var isSub: Bool { [.detail, .releases, .config, .output].contains(self) }
 }
 
 // a window that can live in the shared window
@@ -43,12 +49,13 @@ extension PopupWindow: SlotMember {
 
 final class SharedWindow {
     // header button ids (every member's chrome)
-    static let navNotes = 60, navJira = 61, navHome = 62, navBack = 63
-    static let navIDs: Set<Int> = [navNotes, navJira, navHome, navBack]
+    static let navNotes = 60, navJira = 61, navHome = 62, navBack = 63, navFiles = 64
+    static let navIDs: Set<Int> = [navNotes, navJira, navHome, navBack, navFiles]
 
     private unowned let controller: SwitcherController
     private(set) var current: SlotView?     // the visible view (nil = hidden)
     private var last: SlotView = .notes     // what a hotkey re-opens
+    private var lastJira: SlotView = .jira  // where Hyper+J comes back to
     private var stack: [SlotView] = []      // jira views under `current` (Back)
     private var returnWID: String?
     private var returnPID: pid_t?
@@ -106,8 +113,8 @@ final class SharedWindow {
             }
         }
         // jira comes back where you left it (a ticket, a release, Config)
-        if v == .jira, last.isJira, last != .jira, controller.slotMember(last) != nil {
-            present(last)
+        if v == .jira, lastJira != .jira, controller.slotMember(lastJira) != nil {
+            present(lastJira)
         } else {
             open(v)
         }
@@ -116,6 +123,7 @@ final class SharedWindow {
     // show a top-level view, creating its window when needed
     func open(_ v: SlotView) {
         if v == .jira && current?.isJira == true { stack = [] }
+        if !v.isJira { stack.removeAll { $0 == v } }
         guard controller.ensureSlotMember(v, frame: currentFrame()) else { return }
         present(v)
     }
@@ -123,10 +131,10 @@ final class SharedWindow {
     // a jira sub-view whose window is ready (detail / releases / config):
     // show it, remembering where Back goes
     func push(_ v: SlotView) {
-        if let cur = current, isVisible, cur.isJira {
+        if let cur = current, isVisible {
             if cur != v { stack.append(cur) }
         } else {
-            stack = [.jira]
+            stack = v.isJira ? [.jira] : []
         }
         stack.removeAll { $0 == v }
         present(v)
@@ -180,6 +188,7 @@ final class SharedWindow {
         m.slotShow(frame: f)
         current = v
         last = v
+        if v.isJira { lastJira = v }
         controller.log("shared window: \(v.rawValue)" + (stack.isEmpty ? "" : " (back: \(stack.map(\.rawValue).joined(separator: " > ")))"))
     }
 
@@ -204,6 +213,7 @@ final class SharedWindow {
         stack.removeAll { $0 == v }
         if current == v { current = nil }
         if last == v { last = v.isJira ? .jira : .notes }
+        if lastJira == v { lastJira = .jira }
     }
 
     // MARK: header (notes | jira, home, back)
@@ -211,6 +221,7 @@ final class SharedWindow {
     func navClicked(_ id: Int) {
         switch id {
         case Self.navNotes: current == .notes ? () : open(.notes)
+        case Self.navFiles: current == .files ? () : controller.slotShowFiles()
         case Self.navJira: current?.isJira == true ? home() : hotkey(.jira)
         case Self.navHome: home()
         case Self.navBack: back()
@@ -218,10 +229,12 @@ final class SharedWindow {
         }
     }
 
-    // the nav buttons for a view: sub-views get home + back
+    // the nav buttons for a view: jira sub-views get home + back, output
+    // views back
     static func navButtons(for v: SlotView) -> [(String, Int)] {
-        (v.isJira && v != .jira ? [("home", navHome), ("back", navBack)] : [])
-            + [("notes", navNotes), ("jira", navJira)]
+        (v.isJira && v.isSub ? [("home", navHome)] : [])
+            + (v.isSub ? [("back", navBack)] : [])
+            + [("notes", navNotes), ("files", navFiles), ("jira", navJira)]
     }
 
     private func decorate(_ m: SlotMember, _ v: SlotView) {
@@ -237,6 +250,7 @@ final class SharedWindow {
                 w.onCloseWindow = { [weak self] in self?.hide() }
             }
             w.setHeaderButtonOn(Self.navNotes, v == .notes)
+            w.setHeaderButtonOn(Self.navFiles, v == .files)
             w.setHeaderButtonOn(Self.navJira, v.isJira)
         } else if let c = m as? JiraDashboardWindow {
             c.setSlotNav(Self.navButtons(for: v), on: [Self.navJira]) { [weak self] id in

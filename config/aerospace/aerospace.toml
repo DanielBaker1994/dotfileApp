@@ -120,7 +120,8 @@ on-window-detected = [
 { if = 'test %{app-bundle-id} = com.microsoft.Outlook', run = ['move-node-to-workspace M'] },
 { if = 'test %{app-bundle-id} = com.apple.MobileSMS', run = ['move-node-to-workspace M'] },
 { if = 'test %{app-bundle-id} = Cisco-Systems.Spark', run = ['move-node-to-workspace W'] },
-{ if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace W'] }
+{ if = 'test %{app-bundle-id} = com.citrix.receiver.nomas', run = ['move-node-to-workspace W'] },
+{ if = 'test %{app-bundle-id} = com.spotify.client', run = ['move-node-to-workspace W'] }
 ]
 
 
@@ -167,15 +168,21 @@ W = ['DELL', 'main']
 
     # Workspace switcher popup: Hyper+S (caps_lock = Hyper via Karabiner;
     # AeroSpace has no `hyper` keyword, so it's spelled out as
-    # alt-cmd-ctrl-shift). Notes window: Hyper+N — workspace_switcher.sh moves
+    # alt-cmd-ctrl-shift). Hyper+N/F/J/T run the app BINARY directly (a ~20ms
+    # socket ping; no bash) — the running daemon records the focused window
+    # and moves our window onto the current workspace itself. Notes window:
+    # Hyper+N — moves
     # the notes window onto the CURRENT workspace if it is already open, then
     # focuses it (never spawns a duplicate). Jira window: Hyper+J.
     alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
-    alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh notes'
-    alt-cmd-ctrl-shift-f = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh files'
+    alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher notes'
+    alt-cmd-ctrl-shift-f = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher files'
     # Jira window: Hyper+J — opens/focuses the jira list (moved onto the current
     # workspace like notes); a no-op when [jira] enabled = false.
-    alt-cmd-ctrl-shift-j = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh jira'
+    alt-cmd-ctrl-shift-j = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher jira'
+    # Notes terminal: Hyper+T — notes + its terminal drawer, focused; in the
+    # terminal already -> close the drawer, focus the notes editor.
+    alt-cmd-ctrl-shift-t = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher terminal'
 
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
     # window that closes itself after you pick one. Works from any app.

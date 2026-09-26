@@ -48,10 +48,19 @@ bin/ui-test.sh --verbose
   toggle uses the launcher's focus file (`toggleCommand` → `slot.hotkey`);
   focus hand-back only when the whole window hides. `[app] shared-window`.
   Esc: notes never (`escCloseCount 0`, Cmd+W / ✕ / hotkey hide), jira = back.
-- `RecentFiles.swift` — the file browser's pinned "Recent" view: FSEvents on
-  ~ + /private/tmp, Spotlight seed, noise filter, `recent.json`;
-  `PopupFileBrowser.recentProvider` / `showRecent()` / `recentChanged()`;
-  `[files] recent*`, `start = recent`. Zoxide favorites were removed.
+- `RecentFiles.swift` — the file browser's pinned "Recent" + "Arrived" views:
+  ONE FSEvents stream on / (`inScope` prefix filter first), origin from the
+  quarantine xattr + kMDItemWhereFroms (`origin`), Spotlight seed,
+  `recent.json`; `PopupFileBrowser.virtualLists` / `showVirtual` /
+  `recentChanged()`; `[files] recent*`, `recent-scope`, `start = recent`.
+  Zoxide favorites were removed.
+- Shared window members: notes, files, jira (+ detail / releases / config),
+  output windows (`currentOutputName`). Only the notes terminal drawer and
+  JiraSetupWindow live outside it.
+- Signing: `bin/build-app.sh` clears stray `*.cstemp` (a killed codesign
+  leaves one and every later sign fails → ad-hoc → TCC re-prompts);
+  `bin/grant-permissions.sh` pre-grants mic, speech, Downloads, Desktop,
+  Documents (TCC.db rows with the stable cert's csreq) after every build.
 - `commands.conf` — config (windows, commands, colors, paths)
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller";
   `jira_log.py` = debug.log + raw response dumps);
@@ -347,6 +356,27 @@ Line numbers drift; grep the symbol names (they're stable).
    bar (single Esc closes bar), Esc (streak), Cmd+S, Cmd+O.
 4. list navigation (Up/Down/Tab/C-n/C-p/Return), then Esc (streak).
 
+## Hotkey fast path (Hyper+N / F / J / T)
+
+- aerospace runs the app BINARY (`workspace-switcher notes|files|jira|terminal`),
+  not the script: `main.swift` pings the socket (~20 ms) and exits. No
+  daemon (ppid != 1) → it execs `bin/workspace_switcher.sh MODE` (cold start:
+  build-if-stale + LaunchServices `open -n -g`; a launchd-parented process
+  never re-execs).
+- The daemon's socket thread runs `SwitcherController.hotkeyPrep()` before the
+  main thread sees the message: `list-windows --focused` (→ focus file) and
+  `list-windows --all` IN PARALLEL (aerospace ≈ 20-25 ms per query — the
+  floor), then `move-node-to-workspace` only for our windows on another
+  workspace. No sleeps. Log: `/tmp/ws-debug.log` `hotkey X: prep N ms, M ms
+  to shown`.
+- The script builds only when no daemon answers / `WS_BUILD_ONLY`;
+  `./build.sh` runs `build-app.sh` itself. `WS_DEBUG=1` → `$TMPDIR/ws-launch.log`.
+- Hyper+T (`terminal` → `slotToggleTerminal`): notes hidden / you're
+  elsewhere → notes + terminal drawer focused; in it → drawer toggles (close
+  = editor focused). `PopupWindow.setTerminalDrawer(_:)`.
+- Drawer bookkeeping: `drawerInsetNow` counts only what the window really
+  grew (clamped at screen height), so closing a drawer never shrinks it more.
+
 ## Keyboard shortcuts (user-facing)
 
 - Esc: `esc-close` rapid presses (default 2, `[app]` or per section; 1 =
@@ -356,6 +386,7 @@ Line numbers drift; grep the symbol names (they're stable).
 - File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's
   absolute path (+ toast), Cmd+L focus filter bar, Tab completes, Enter opens.
 - Ctrl+J/K: move focus between editor / browser / terminal panes.
+- Hyper+T: notes terminal drawer (show + focus / close → editor).
 
 ## Theme system (keep every window on it)
 

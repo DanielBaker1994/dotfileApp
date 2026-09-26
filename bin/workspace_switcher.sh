@@ -8,6 +8,7 @@
 #   workspace_switcher.sh notes      open ONLY the notes window (no popup)
 #   workspace_switcher.sh jira       open ONLY the jira window (no popup)
 #   workspace_switcher.sh voice      open ONLY the voice-to-text window
+#   workspace_switcher.sh terminal   notes + its terminal drawer (Hyper+T)
 #   workspace_switcher.sh jira-poll [on|off|toggle|setup]
 #                                    THE jira switch ([jira] enabled + the
 #                                    launchd poll agent) — NOT the window
@@ -48,22 +49,30 @@ fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 # Record the focused window (wid + app-pid) at keypress time so the switcher
-# can hand focus back when dismissed.
-LINE=$(aerospace list-windows --focused --format '%{window-id} %{app-pid}')
-WID=${LINE%% *}
-APID=${LINE##* }
+# can hand focus back when dismissed. ONE aerospace call also gives the
+# focused workspace (used by the window modes below).
+LINE=$(aerospace list-windows --focused --format '%{window-id} %{app-pid} %{workspace}')
+read -r WID APID CUR <<<"$LINE"
 if [ -n "$WID" ]; then
     echo "$WID $APID" >"$FOCUS_FILE"
 fi
 
-# Build if the binary is missing or a source file is newer — ONE build
-# script (bin/build-app.sh) shared with INSTALL.sh. The daemon ships as a
-# real .app bundle: TCC (mic/speech) keys grants by the BUNDLE ID, stable
-# across rebuilds; build-app.sh re-signs + re-grants after every build.
-# A failed build keeps running the previous binary (a hotkey press must not
-# go dead), except in build-only mode where the failure is the answer.
-if ! "$DIR/build-app.sh"; then
-    [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
+# Build-if-stale — ONE build script (bin/build-app.sh) shared with
+# INSTALL.sh. Only when the binary is missing, in build-only mode, or when
+# no daemon answers: a hotkey press on a running daemon never pays for it
+# (./build.sh rebuilds + relaunches during development). The daemon ships
+# as a real .app bundle: TCC (mic/speech) keys grants by the BUNDLE ID,
+# stable across rebuilds; build-app.sh re-signs + re-grants after every
+# build. A failed build keeps running the previous binary (a hotkey press
+# must not go dead), except in build-only mode where the failure is the
+# answer.
+build() {
+    if ! "$DIR/build-app.sh"; then
+        [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
+    fi
+}
+if [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ]; then
+    build
 fi
 
 # Build-only mode (installer): rebuild + re-grant TCC, then stop. The window
@@ -72,48 +81,29 @@ if [ "${WS_BUILD_ONLY:-}" = "1" ]; then
     exit 0
 fi
 
-if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ] || [ "$MODE" = "files" ]; then
-    DEBUG_LOG="${TMP}/ws-launch.log"
-    LOG(){ echo "$(date '+%H:%M:%S.%3N') $*" >>"$DEBUG_LOG"; }
-    LOG "== invoke MODE=$MODE =="
-    LOG "focused-window line: [$LINE]"
-    # If the window is already open (possibly on ANOTHER workspace), move it
-    # onto the CURRENT workspace FIRST — done here in bash, not in the daemon,
-    # so the daemon's main thread never blocks on aerospace IPC while focusing.
-    WS_LIST=$(aerospace list-windows --all --format '%{window-id}|%{app-name}|%{window-title}' 2>/dev/null)
-    LOG "list-windows (switcher):"
-    echo "$WS_LIST" | grep 'workspace-switcher' | while IFS= read -r l; do LOG "  $l"; done
-    # notes + jira share ONE window ([app] shared-window, default on): its
-    # visible view may be any of them (the others are ordered out), so move
-    # whichever one is on screen
-    if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ]; then
-        EXISTING=$(echo "$WS_LIST" \
-            | awk -F'|' '$2=="workspace-switcher" && ($3=="notes" || $3=="jira" || $3=="jira-detail" || $3=="jira-releases" || $3=="Jira Config") {print $1; exit}')
-    else
-        EXISTING=$(echo "$WS_LIST" \
-            | awk -F'|' -v t="$MODE" '$2=="workspace-switcher" && $3==t {print $1; exit}')
-    fi
-    LOG "existing id for '$MODE': [${EXISTING:-NONE}]"
-    if [ -n "$EXISTING" ]; then
-        CUR=$(aerospace list-workspaces --focused 2>/dev/null)
-        LOG "current workspace: [${CUR:-EMPTY}]"
-        if [ -n "$CUR" ]; then
-            BEFORE=$(aerospace list-windows --all --format '%{window-id}|%{workspace}' 2>/dev/null \
-                | awk -F'|' -v w="$EXISTING" '$1==w {print $2; exit}')
-            LOG "window '$EXISTING' workspace BEFORE move: [${BEFORE:-UNKNOWN}]"
-            MOVEOUT=$(aerospace move-node-to-workspace --window-id "$EXISTING" "$CUR" 2>&1)
-            MOVERC=$?
-            LOG "move-node-to-workspace rc=$MOVERC out=[$MOVEOUT]"
-            sleep 0.5
-            AFTER=$(aerospace list-windows --all --format '%{window-id}|%{workspace}' 2>/dev/null \
-                | awk -F'|' -v w="$EXISTING" '$1==w {print $2; exit}')
-            LOG "window '$EXISTING' workspace AFTER move: [${AFTER:-UNKNOWN}]"
-        fi
+# WS_DEBUG=1 logs the launch steps to $TMPDIR/ws-launch.log
+LOG(){ [ "${WS_DEBUG:-}" = "1" ] && echo "$(date '+%H:%M:%S') $*" >>"$TMP/ws-launch.log"; }
+
+case "$MODE" in notes|jira|voice|files|terminal)
+    LOG "== invoke MODE=$MODE focused=[$LINE] =="
+    # notes, files, jira and output windows are all views of ONE shared
+    # window: move ours (not the Hyper+S palette, titled like the app) onto
+    # the CURRENT workspace — only the ones on another workspace, and no
+    # wait: aerospace answers once the move is done. (A warm daemon's
+    # hotkey path does this itself; see hotkeyPrep.)
+    if [ -n "$CUR" ]; then
+        aerospace list-windows --all --format '%{window-id}|%{app-name}|%{window-title}|%{workspace}' 2>/dev/null \
+            | awk -F'|' -v c="$CUR" '$2=="workspace-switcher" && $3!="workspace-switcher" && $4!=c {print $1}' \
+            | while read -r W; do
+                LOG "move $W -> $CUR"
+                aerospace move-node-to-workspace --window-id "$W" "$CUR" >/dev/null 2>&1
+            done
     fi
     # ping the running daemon; launch a command-first daemon if there is none
     if WS_PING_ONLY=1 "$BIN" "$MODE" >/dev/null 2>&1; then
-        LOG "daemon ping: delivered (daemon will focus)"
+        LOG "daemon ping: delivered"
     else
+        build
         # LaunchServices launch: macOS then attributes microphone/speech TCC
         # to the APP BUNDLE. A nohup child of karabiner's shell inherits that
         # shell as its responsible process, so the bundle's mic grant never
@@ -122,17 +112,19 @@ if [ "$MODE" = "notes" ] || [ "$MODE" = "jira" ] || [ "$MODE" = "voice" ] || [ "
         # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
         # Karabiner attribution and would answer future pings forever)
         pkill -f "workspace-switcher.app/Contents/MacOS" 2>/dev/null || true
+        [ "$MODE" = "terminal" ] && MODE=notes
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
             LOG "LaunchServices launch FAILED — voice permissions will be broken"
         fi
     fi
     exit 0
-fi
+esac
 
 # Toggle the daemon if it's running; otherwise launch it with "show" so the
 # popup appears immediately (no retry loop needed). Same LaunchServices rule
 # as above so a cold start from Hyper+S still gets the mic grant.
 if ! "$BIN" toggle >/dev/null 2>&1; then
+    build
     pkill -f "workspace-switcher.app/Contents/MacOS" 2>/dev/null || true
     if ! open -n -g "$APP" --args show >/dev/null 2>&1; then
         LOG "LaunchServices launch FAILED — voice permissions will be broken"

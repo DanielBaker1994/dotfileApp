@@ -1,57 +1,73 @@
 import AppKit
 import CoreServices
 
-// MARK: - Recent files (the file browser's pinned "Recent" view)
+// MARK: - Recent files (the file browser's pinned "Recent" + "Arrived" views)
 //
-// "Where did that download / screenshot / tool output just land?" — without
-// a list of folders to maintain. Two sources:
-//   live   an FSEvents stream (file-level events) on $HOME and /private/tmp:
-//          every file created, renamed in or modified is recorded with the
-//          time it happened
-//   seed   at launch, Spotlight (mdfind) for what changed in the last
-//          `recent-days` while the app wasn't running, plus a shallow scan
-//          of /private/tmp (not indexed)
-// Noise is filtered out: hidden paths, ~/Library, build / dependency trees,
-// in-progress downloads, editor swap files, our own writes (IgnoreSelf),
-// plus [files] recent-exclude patterns. The newest `recent-limit` entries
-// persist in ~/.cache/workspace-switcher/recent.json.
+// "Where did that download / AirDrop / scp / screenshot just land?" — with
+// no list of folders to maintain:
+//   live   ONE FSEvents stream on "/" (file-level events; the kernel journal
+//          makes this cheap). System trees are dropped by a prefix check
+//          before any syscall; what's left — your home, /tmp, /Users/Shared,
+//          anywhere else you can write — is recorded with the time it
+//          happened. [files] recent-scope = home watches only ~ and /tmp.
+//   origin a file created / renamed in carrying macOS's quarantine flag came
+//          from OUTSIDE: a browser download, AirDrop, Messages, Mail — the
+//          "Arrived" view lists only those, wherever they were saved, with
+//          the app (and site) they came from. (scp / curl set no flag: those
+//          show in Recent.)
+//   seed   at launch, Spotlight for what changed in ~ in the last
+//          `recent-days`, every downloaded file on the disk (kMDItemWhereFroms)
+//          in that time, and a shallow scan of /tmp (not indexed).
+// Noise is skipped: system trees, hidden paths, ~/Library, app libraries
+// (Photos / Music — touching them triggers privacy prompts), build and
+// dependency trees, in-progress downloads, swap files, our own writes
+// (IgnoreSelf), plus [files] recent-exclude. Stored in
+// ~/.cache/workspace-switcher/recent.json.
 final class RecentFiles {
     static let shared = RecentFiles()
     static let changed = Notification.Name("RecentFilesChanged")
 
+    struct Item {
+        var at: Double          // last activity (epoch s)
+        var source: String?     // where it came from ("Safari · github.com", "AirDrop")
+    }
+
     private(set) var enabled = false
     private var limit = 200
     private var days = 7
+    private var everywhere = true
     private var excludes: [String] = []      // user globs (path or name)
     private let queue = DispatchQueue(label: "recent-files")
-    private var items: [String: Double] = [:]   // path -> last activity (epoch s)
+    private var items: [String: Item] = [:]
     private var stream: FSEventStreamRef?
     private var saveWork: DispatchWorkItem?
     private var notifyWork: DispatchWorkItem?
     private let home = NSHomeDirectory()
     private let store = NSHomeDirectory() + "/.cache/workspace-switcher/recent.json"
 
-    // [files] recent / recent-days / recent-limit / recent-exclude
-    func configure(enabled on: Bool, days: Int, limit: Int, excludes: [String]) {
+    // [files] recent / recent-days / recent-limit / recent-exclude / recent-scope
+    func configure(enabled on: Bool, days: Int, limit: Int, excludes: [String], everywhere all: Bool) {
+        let rescope = enabled && all != everywhere
         queue.sync {
             self.days = max(1, days)
             self.limit = max(20, limit)
+            self.everywhere = all
             self.excludes = excludes.map { ($0 as NSString).expandingTildeInPath }
         }
+        if rescope { stop() }
         if on && !enabled { start() } else if !on && enabled { stop() }
     }
 
-    // newest first; only paths that still exist
-    func paths() -> [String] {
+    // newest first; only paths that still exist. arrivedOnly: files that
+    // came from outside (quarantine flag)
+    func entries(arrivedOnly: Bool = false) -> [(path: String, at: Date, source: String?)] {
         queue.sync {
-            items.sorted { $0.value > $1.value }.map(\.key)
-                .filter { keep($0) && FileManager.default.fileExists(atPath: $0) }
-                .prefix(limit).map { $0 }
+            items.filter { !arrivedOnly || $0.value.source != nil }
+                .sorted { $0.value.at > $1.value.at }
+                .filter { keep($0.key) && FileManager.default.fileExists(atPath: $0.key) }
+                .prefix(limit)
+                .map { ($0.key, Date(timeIntervalSince1970: $0.value.at), $0.value.source) }
         }
-    }
-
-    func activity(of path: String) -> Date? {
-        queue.sync { items[path].map { Date(timeIntervalSince1970: $0) } }
     }
 
     // MARK: lifecycle
@@ -59,25 +75,37 @@ final class RecentFiles {
     private func start() {
         enabled = true
         queue.async { [self] in
+            // ask for the protected folders UP FRONT, at launch: if a grant
+            // is missing, macOS prompts now (nothing on screen to disturb)
+            // instead of mid-use when a row is listed. Normally the build
+            // pre-grants them (bin/grant-permissions.sh) and this is silent.
+            for d in ["Downloads", "Desktop", "Documents"] {
+                _ = try? FileManager.default.contentsOfDirectory(atPath: home + "/" + d)
+            }
             load()
             seed()
+            // entries stored before origins were tracked: read them once
+            for (p, it) in items where it.source == nil {
+                if let o = Self.origin(p) { items[p]?.source = o }
+            }
             publish()
         }
         let ctx = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         var context = FSEventStreamContext(version: 0, info: ctx, retain: nil, release: nil,
                                            copyDescription: nil)
         let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes
-                           | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagIgnoreSelf)
+                           | kFSEventStreamCreateFlagIgnoreSelf)
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let me = Unmanaged<RecentFiles>.fromOpaque(info).takeUnretainedValue()
             let arr = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
             me.handle(arr, Array(UnsafeBufferPointer(start: flags, count: count)))
         }
-        guard let s = FSEventStreamCreate(nil, callback, &context,
-                                          [home, "/private/tmp"] as CFArray,
+        let roots = queue.sync { everywhere } ? ["/"] : [home, "/private/tmp"]
+        // 1s latency: the kernel batches a busy disk into one callback
+        guard let s = FSEventStreamCreate(nil, callback, &context, roots as CFArray,
                                           FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-                                          0.5, FSEventStreamCreateFlags(flags)) else { return }
+                                          1.0, FSEventStreamCreateFlags(flags)) else { return }
         FSEventStreamSetDispatchQueue(s, queue)
         FSEventStreamStart(s)
         stream = s
@@ -98,8 +126,11 @@ final class RecentFiles {
         let now = Date().timeIntervalSince1970
         var touched = false
         for (i, raw) in paths.enumerated() where i < flags.count {
-            let f = Int(flags[i])
             let p = raw.hasPrefix("/tmp/") ? "/private" + raw : raw
+            // the cheap string check first: a busy disk sends thousands of
+            // system-tree events that must cost nothing
+            guard inScope(p) else { continue }
+            let f = Int(flags[i])
             if f & kFSEventStreamEventFlagItemRemoved != 0, !FileManager.default.fileExists(atPath: p) {
                 if items.removeValue(forKey: p) != nil { touched = true }
                 continue
@@ -110,13 +141,57 @@ final class RecentFiles {
             let renamed = f & kFSEventStreamEventFlagItemRenamed != 0
             let modified = f & kFSEventStreamEventFlagItemModified != 0
             // files that appear or change; folders only when they appear
-            // (an unzipped archive, a new project)
+            // (an unzipped archive, an AirDropped folder)
             guard (isFile && (created || renamed || modified)) || (isDir && (created || renamed)),
                   keep(p), FileManager.default.fileExists(atPath: p) else { continue }
-            items[p] = now
+            var item = items[p] ?? Item(at: now, source: nil)
+            item.at = now
+            // a download finishes by RENAMING foo.crdownload -> foo: read
+            // the origin when the file appears under its final name
+            if created || renamed || item.source == nil { item.source = Self.origin(p) ?? item.source }
+            items[p] = item
             touched = true
         }
         if touched { trim(); publish() }
+    }
+
+    // MARK: origin (quarantine + where-from)
+
+    // "Safari · github.com", "AirDrop", "Messages" — nil when the file carries
+    // no quarantine flag (made here, or copied in by scp / cp / curl)
+    static func origin(_ p: String) -> String? {
+        guard let q = xattrString(p, "com.apple.quarantine") else { return nil }
+        // flags;hex-time;agent;uuid
+        let parts = q.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+        var agent = parts.count > 2 ? parts[2] : ""
+        switch agent.lowercased() {
+        case "sharingd", "airdrop": agent = "AirDrop"
+        case "": agent = "downloaded"
+        default: break
+        }
+        if let host = whereFromHost(p), agent != "AirDrop" { return "\(agent) · \(host)" }
+        return agent
+    }
+
+    private static func xattrData(_ p: String, _ name: String) -> Data? {
+        let n = getxattr(p, name, nil, 0, 0, XATTR_NOFOLLOW)
+        guard n > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: n)
+        guard getxattr(p, name, &buf, n, 0, XATTR_NOFOLLOW) == n else { return nil }
+        return Data(buf)
+    }
+
+    private static func xattrString(_ p: String, _ name: String) -> String? {
+        xattrData(p, name).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    // the site a download came from (kMDItemWhereFroms: [url, referrer])
+    private static func whereFromHost(_ p: String) -> String? {
+        guard let d = xattrData(p, "com.apple.metadata:kMDItemWhereFroms"),
+              let arr = try? PropertyListSerialization.propertyList(from: d, format: nil) as? [String],
+              let first = arr.first(where: { $0.hasPrefix("http") }), let host = URL(string: first)?.host
+        else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
 
     // MARK: seed (what happened while the app wasn't running)
@@ -125,9 +200,16 @@ final class RecentFiles {
         let since = Date().timeIntervalSince1970 - Double(days) * 86400
         var found: [String: Double] = [:]
         let secs = days * 86400
-        let q = "kMDItemFSContentChangeDate >= $time.now(-\(secs)) || kMDItemDateAdded >= $time.now(-\(secs))"
-        for p in run("/usr/bin/mdfind", ["-onlyin", home, q]) where keep(p) {
+        let changed = "kMDItemFSContentChangeDate >= $time.now(-\(secs)) || kMDItemDateAdded >= $time.now(-\(secs))"
+        for p in run("/usr/bin/mdfind", ["-onlyin", home, changed]) where keep(p) {
             if let t = stamp(p), t >= since { found[p] = t }
+        }
+        // every file DOWNLOADED in that time, wherever it was saved
+        if everywhere {
+            let downloaded = "kMDItemDateAdded >= $time.now(-\(secs)) && kMDItemWhereFroms == \"*\""
+            for p in run("/usr/bin/mdfind", [downloaded]) where inScope(p) && keep(p) {
+                if let t = stamp(p), t >= since { found[p] = t }
+            }
         }
         // /private/tmp: not Spotlight-indexed — two levels deep
         let fm = FileManager.default
@@ -142,7 +224,9 @@ final class RecentFiles {
             }
         }
         scan("/private/tmp", depth: 1)
-        for (p, t) in found where (items[p] ?? 0) < t { items[p] = t }
+        for (p, t) in found where (items[p]?.at ?? 0) < t {
+            items[p] = Item(at: t, source: items[p]?.source ?? Self.origin(p))
+        }
         trim()
     }
 
@@ -168,6 +252,25 @@ final class RecentFiles {
 
     // MARK: noise filter
 
+    // system trees (and other volumes: network / removable drives prompt
+    // for access) — never user drop zones
+    private static let systemRoots = [
+        "/System/", "/Library/", "/private/var/", "/private/etc/", "/var/", "/etc/", "/usr/",
+        "/bin/", "/sbin/", "/opt/", "/cores/", "/dev/", "/Volumes/", "/Applications/", "/nix/",
+        "/private/preboot/", "/private/xarts/", "/.",
+    ]
+
+    // where a user file can land: not a system tree, and under /Users only
+    // your home + /Users/Shared
+    private func inScope(_ p: String) -> Bool {
+        if p.hasPrefix(home + "/") { return !p.hasPrefix(home + "/Library/") }
+        if p.hasPrefix("/private/tmp/") { return true }
+        if !everywhere { return false }
+        if p.hasPrefix("/Users/") { return p.hasPrefix("/Users/Shared/") }
+        for r in Self.systemRoots where p.hasPrefix(r) { return false }
+        return true
+    }
+
     private static let noiseDirs: Set<String> = [
         "node_modules", "DerivedData", "__pycache__", "site-packages", "Pods", "venv",
         "Caches", "CachedData", "logs", "xcuserdata",
@@ -189,7 +292,7 @@ final class RecentFiles {
     ]
 
     private func keep(_ p: String) -> Bool {
-        if p.hasPrefix(home + "/Library/") || p == home + "/Library" { return false }
+        guard inScope(p) else { return false }
         let comps = (p as NSString).pathComponents
         for c in comps.dropFirst() {
             if c.hasPrefix(".") || Self.noiseDirs.contains(c) || Self.packageNames.contains(c) { return false }
@@ -217,7 +320,7 @@ final class RecentFiles {
 
     private func trim() {
         guard items.count > limit * 2 else { return }
-        let keepPaths = items.sorted { $0.value > $1.value }.prefix(limit * 2)
+        let keepPaths = items.sorted { $0.value.at > $1.value.at }.prefix(limit * 2)
         items = Dictionary(uniqueKeysWithValues: keepPaths.map { ($0.key, $0.value) })
     }
 
@@ -226,8 +329,9 @@ final class RecentFiles {
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
         let since = Date().timeIntervalSince1970 - Double(days) * 86400
         for d in arr {
-            if let p = d["path"] as? String, let t = d["at"] as? Double, t >= since, keep(p) {
-                items[p] = max(items[p] ?? 0, t)
+            if let p = d["path"] as? String, let t = d["at"] as? Double, t >= since, keep(p),
+               t > (items[p]?.at ?? 0) {
+                items[p] = Item(at: t, source: d["source"] as? String)
             }
         }
     }
@@ -245,7 +349,11 @@ final class RecentFiles {
     }
 
     private func save() {
-        let arr = items.sorted { $0.value > $1.value }.prefix(limit).map { ["path": $0.key, "at": $0.value] }
+        let arr = items.sorted { $0.value.at > $1.value.at }.prefix(limit).map { kv -> [String: Any] in
+            var d: [String: Any] = ["path": kv.key, "at": kv.value.at]
+            if let s = kv.value.source { d["source"] = s }
+            return d
+        }
         try? FileManager.default.createDirectory(atPath: (store as NSString).deletingLastPathComponent,
                                                  withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: Array(arr)) {

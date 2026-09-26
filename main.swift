@@ -36,13 +36,28 @@ if cliArgs.count > 1 {
         if sendLaunchMessage(msg) { exit(0) }
         FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
         exit(1)
-    case "notes", "jira", "voice", "files":
-        // a running daemon opens the window on a socket ping; otherwise
-        // launch a daemon that starts straight into that window
+    case "notes", "jira", "voice", "files", "terminal":
+        // THE hotkey path (aerospace runs this binary directly): a running
+        // daemon gets a socket ping and does the rest (~20 ms). No daemon ->
+        // hand off to the launcher script (build-if-stale + LaunchServices
+        // launch, so mic/speech TCC attribute to the bundle)
         if sendLaunchMessage(cliArgs[1]) {
             exit(0)
         }
-        openCommand = cliArgs[1]
+        // (a LaunchServices launch — the script's own `open -n -g`, INSTALL.sh
+        // — has launchd as parent: that IS the daemon starting, never re-exec)
+        if getppid() != 1 {
+            let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+            // <root>/<app>.app/Contents/MacOS/<bin> -> <root>/bin/workspace_switcher.sh
+            let root = exe.deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+            let script = root.appendingPathComponent("bin/workspace_switcher.sh").path
+            if FileManager.default.isExecutableFile(atPath: script) {
+                let argv: [UnsafeMutablePointer<CChar>?] = [strdup(script), strdup(cliArgs[1]), nil]
+                execv(script, argv)
+            }
+        }
+        openCommand = cliArgs[1] == "terminal" ? "notes" : cliArgs[1]
     default:
         break
     }

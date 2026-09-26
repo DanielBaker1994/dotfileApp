@@ -3532,12 +3532,28 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // starred dirs (persisted to favURL) + commands.conf [files] favorites
     private var pinnedFavorites: [String] = []
     private let staticFavorites: [String]
-    // the pinned "Recent" view: the host's newest created / modified files
-    // from anywhere (nil = no Recent pill). recentChanged() refreshes it.
-    public var recentProvider: (() -> [(path: String, at: Date)])? {
+    // pinned virtual lists (first in the pill bar): files from ANYWHERE,
+    // newest first — e.g. "Recent" (created / changed) and "Arrived"
+    // (downloads, AirDrop). `note` rides in the dim trailing text (where it
+    // came from). recentChanged() refreshes the one on screen.
+    public struct VirtualList {
+        public var title: String
+        public var symbol: String
+        public var status: String       // the status line while it's shown
+        public var provider: () -> [(path: String, at: Date, note: String?)]
+        public init(title: String, symbol: String, status: String,
+                    provider: @escaping () -> [(path: String, at: Date, note: String?)]) {
+            self.title = title
+            self.symbol = symbol
+            self.status = status
+            self.provider = provider
+        }
+    }
+    public var virtualLists: [VirtualList] = [] {
         didSet { rebuildPills() }
     }
-    private(set) var inRecent = false
+    private(set) var virtualIndex: Int?
+    var inRecent: Bool { virtualIndex != nil }
     private var shownFavorites: [String] = []
     private(set) var cwd: String
     private var all: [Entry] = []
@@ -4433,11 +4449,13 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
     // MARK: Recent
 
-    // the newest created / modified files from anywhere (recentProvider),
+    // a pinned virtual list (virtualLists): files from anywhere,
     // newest first; the dim trailing text says where + how long ago
-    public func showRecent() {
-        guard recentProvider != nil else { return }
-        inRecent = true
+    public func showRecent() { showVirtual(0) }
+
+    public func showVirtual(_ i: Int) {
+        guard virtualLists.indices.contains(i) else { return }
+        virtualIndex = i
         query = ""
         selection = 0
         cancelSearch()
@@ -4462,14 +4480,16 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
 
     private func recentEntries() -> [Entry] {
         let now = Date()
-        return (recentProvider?() ?? []).compactMap { item in
+        guard let vi = virtualIndex, virtualLists.indices.contains(vi) else { return [] }
+        return virtualLists[vi].provider().compactMap { item in
             let name = (item.path as NSString).lastPathComponent
             guard var e = Self.makeEntry(name: name, path: item.path) else { return nil }
             e.icon = Self.iconCache[item.path] ?? NSWorkspace.shared.icon(forFile: item.path)
             Self.iconCache[item.path] = e.icon
             var dir = displayPath((item.path as NSString).deletingLastPathComponent)
             if dir.hasPrefix("/private/tmp") { dir.removeFirst("/private".count) }
-            e.trailingText = "\(dir) · \(Self.ago(now.timeIntervalSince(item.at)))"
+            e.trailingText = ([dir] + [item.note].compactMap { $0 }.map { "↓ " + $0 }
+                              + [Self.ago(now.timeIntervalSince(item.at))]).joined(separator: " · ")
             e.trailingWidth = (e.trailingText as NSString)
                 .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
             return e
@@ -4485,7 +4505,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
 
     func cd(_ dir: String) {
-        inRecent = false
+        virtualIndex = nil
         cwd = (dir as NSString).standardizingPath
         query = ""
         selection = 0
@@ -4506,9 +4526,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // directory; clicking it (select-all) lets you type a filter or a path
     func showCwdInFilter() {
         guard searchField.currentEditor() == nil else { return }
-        if inRecent {
+        if let vi = virtualIndex, virtualLists.indices.contains(vi) {
             searchField.stringValue = ""
-            searchField.placeholderString = "Recent — newest files anywhere · type to filter"
+            searchField.placeholderString = "\(virtualLists[vi].title) · type to filter"
             return
         }
         searchField.stringValue = cwd
@@ -4794,10 +4814,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         for p in favPills { p.removeFromSuperview() }
         favPills = []
         shownFavorites = mergedFavorites()
-        if recentProvider != nil {
-            let r = ThemeButton(config: config, title: "Recent", symbol: "clock")
-            r.isOn = inRecent
-            r.onClick = { [weak self] in self?.showRecent() }
+        for (i, v) in virtualLists.enumerated() {
+            let r = ThemeButton(config: config, title: v.title, symbol: v.symbol)
+            r.isOn = virtualIndex == i
+            r.onClick = { [weak self] in self?.showVirtual(i) }
             addSubview(r)
             favPills.append(r)
         }
@@ -4845,7 +4865,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let count = "\(items) item\(items == 1 ? "" : "s")"
         switch mode {
         case .all where inRecent:
-            setStatus("\(count) · newest first · created or changed anywhere in ~ or /tmp")
+            let vi = virtualIndex ?? 0
+            setStatus("\(count) · " + (virtualLists.indices.contains(vi) ? virtualLists[vi].status : "newest first"))
         case .all:
             setStatus("\(count) · sorted by \(sortKey.label.lowercased())")
         case .terminal(let dir):
@@ -6384,6 +6405,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         panel.level = config.floating ? .popUpMenu : .normal
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
+        // hotkey show/hide must be instant: no system order-in/out animation
+        panel.animationBehavior = .none
         panel.title = config.name
 
         // Wire the close button when shown (e.g. vim mode): onClick calls
@@ -8865,15 +8888,23 @@ private func scrollSelectionIntoView() {
     // Embedded terminal drawer: grows/shrinks with it, and the editor stops
     // above it while shown.
     public func toggleTerminalDrawer() {
+        setTerminalDrawer(!terminalShown)
+    }
+
+    // show (and focus) or hide the terminal drawer; showing a shown drawer
+    // just refocuses it (Hyper+T)
+    public func setTerminalDrawer(_ show: Bool) {
         guard let drawer = terminalDrawer else { return }
         // manual recreate: if the drawer is coming back up with a dead shell
         // (exit/ctrl-d left it hung), respawn it so the user never gets stuck
-        if !terminalShown, let p = drawer.process, !p.running, !p.windingDown {
+        if show, let p = drawer.process, !p.running, !p.windingDown {
             drawer.startProcess(executable: config.shell, args: config.shellArgs)
         }
-        terminalShown.toggle()
-        if terminalShown { currentTerminalHeight = preferredTerminalHeight }
-        syncDrawerLayout()
+        if show != terminalShown {
+            terminalShown = show
+            if show { currentTerminalHeight = preferredTerminalHeight }
+            syncDrawerLayout()
+        }
         if terminalShown {
             panel.makeFirstResponder(drawer)
             focusedPane = .terminal
@@ -9611,11 +9642,14 @@ public enum ThemeRole: String, CaseIterable {
     private func syncDrawerLayout() {
         let want = drawerInsetTotal()
         if abs(want - drawerInsetNow) > 0.5 {
-            let f = panel.frame
+            let f = panel.frame, was = drawerInsetNow
             panel.setFrame(NSRect(x: f.origin.x, y: f.origin.y,
                                   width: f.width, height: f.height + (want - drawerInsetNow)),
                            display: true)
-            drawerInsetNow = want
+            // count only what the window REALLY grew: at screen height the
+            // grow is clamped (the drawer eats editor space instead), and
+            // closing it must not then shrink the window by the full height
+            drawerInsetNow = max(0, was + panel.frame.height - f.height)
         }
         layoutTerminal()
         layoutFileBrowser()
@@ -10043,3 +10077,4 @@ public final class PopupStack {
         FileHandle.standardError.write(Data("popup-stack: popped all\n".utf8))
     }
 }
+

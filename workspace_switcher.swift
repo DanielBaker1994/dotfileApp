@@ -462,9 +462,9 @@ func aerospaceFallback(_ args: [String]) -> String {
 
 func aerospaceCall(_ args: [String]) -> String {
     // TEMP DEBUG: time every IPC call, logged while ~/.cache/aero-debug exists
-    let t0 = DispatchTime.now().rawValue
+    let t0 = DispatchTime.now().uptimeNanoseconds
     let r = aerospaceSocket(args) ?? aerospaceFallback(args)
-    let ms = Double(DispatchTime.now().rawValue - t0) / 1_000_000
+    let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
     if FileManager.default.fileExists(atPath: settings.aeroDebugFlag) {
         let line = String(format: "%.1fms %@ -> [%@]\n", ms, args.joined(separator: " "), r)
         if let fh = FileHandle(forWritingAtPath: settings.aeroLog) {
@@ -587,6 +587,7 @@ struct CommandSpec {
     var recentLimit = 200
     var recentExclude: [String] = []
     var startRecent = true    // files window opens on Recent (`start = recent`)
+    var recentEverywhere = true  // `recent-scope = everywhere | home`
     var browserBackground: NSColor?  // files: panel background (default silvery blue)
     var backgroundColor: NSColor?  // note/files: window card fill (the notepad)
     var tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
@@ -961,6 +962,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     spec.recentLimit = Int(vars["recent-limit"] ?? "") ?? 200
     spec.recentExclude = csv(vars["recent-exclude"])
     spec.startRecent = (vars["start"] ?? "recent").lowercased() != "root"
+    spec.recentEverywhere = (vars["recent-scope"] ?? "everywhere").lowercased() != "home"
     return spec
 }
 
@@ -2789,11 +2791,16 @@ final class SwitcherController: NSObject {
     lazy var slot = SharedWindow(controller: self)
     // the frame the NEXT slot window opens at (consumed by the openers)
     var pendingSlotFrame: NSRect?
+    // the output window (type = output) the shared window shows
+    var currentOutputName: String?
+    private var filesCommand: CommandSpec? { commands.first { $0.kind == .files } }
 
     // the window behind a view (nil = not open)
     func slotMember(_ v: SlotView) -> SlotMember? {
         switch v {
         case .notes: return noteWindow
+        case .files: return subWindows.first { $0.config.name == filesCommand?.windowName }
+        case .output: return subWindows.first { $0.config.name == currentOutputName }
         case .jira: return subWindows.first { $0.config.name == "jira" }
         case .detail: return subWindows.first { $0.config.name == settings.detailWindowName }
         case .releases: return subWindows.first { $0.config.name == jiraReleasesWindow }
@@ -2806,6 +2813,8 @@ final class SwitcherController: NSObject {
         guard settings.sharedWindow else { return nil }
         let n = w.config.name
         if n == commands.first(where: { $0.kind == .note })?.windowName { return .notes }
+        if n == filesCommand?.windowName { return .files }
+        if commands.contains(where: { $0.kind == .output && $0.windowName == n }) { return .output }
         if n == "jira" { return .jira }
         if n == settings.detailWindowName { return .detail }
         if n == jiraReleasesWindow { return .releases }
@@ -2824,11 +2833,46 @@ final class SwitcherController: NSObject {
             guard let cmd = commands.first(where: { $0.name == "jira" }) else { return false }
             pendingSlotFrame = frame
             openListWindow(cmd, restoreWID: nil, restorePID: nil)
+        case .files:
+            guard let cmd = filesCommand else { return false }
+            pendingSlotFrame = frame
+            openFilesWindow(cmd, restoreWID: nil, restorePID: nil)
         default:
             return false
         }
         pendingSlotFrame = nil
         return slotMember(v) != nil
+    }
+
+    // the files view, landing on Recent when it wasn't already on screen
+    // ([files] start = recent): that's what Hyper+F is for
+    func slotShowFiles(hotkey: Bool = false, userInIt: Bool? = nil) {
+        let wasShown = slot.current == .files && slot.isVisible
+        if hotkey { slot.hotkey(.files, userInIt: userInIt) } else { slot.open(.files) }
+        if !wasShown, slot.current == .files, slot.isVisible, filesCommand?.startRecent ?? true,
+           let w = slotMember(.files) as? PopupWindow {
+            w.fileBrowser?.showRecent()
+        }
+    }
+
+    // Hyper+T: the notes terminal drawer. Notes not on screen (or you're in
+    // another app) -> notes with the terminal up + focused; terminal up and
+    // you're in it -> close it, focus the editor; else open + focus it.
+    func slotToggleTerminal(userInIt: Bool?) {
+        let notesUp = slot.current == .notes && slot.isVisible
+        if !notesUp {
+            slot.open(.notes)
+            noteWindow?.setTerminalDrawer(true)
+            return
+        }
+        guard let w = noteWindow else { return }
+        let inIt = userInIt ?? (w.nativeWindow.isKeyWindow && NSApp.isActive)
+        if !inIt {
+            w.unpark(frame: nil)
+            w.setTerminalDrawer(true)
+        } else {
+            w.setTerminalDrawer(!w.terminalShown)
+        }
     }
 
     // an opener about to show a slot window: place it at the shared frame
@@ -2901,7 +2945,9 @@ final class SwitcherController: NSObject {
             log("openNoteFile: no note command configured in \(commandsConfName)")
             return
         }
-        if let w = subWindows.first(where: { $0.config.name == cmd.windowName }) {
+        if settings.sharedWindow {
+            slot.open(.notes)          // the shared window switches to notes
+        } else if let w = subWindows.first(where: { $0.config.name == cmd.windowName }) {
             focusSubWindow(w)
         } else {
             openNoteWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
@@ -2928,6 +2974,10 @@ final class SwitcherController: NSObject {
         }
         if settings.sharedWindow && (cmd.kind == .note || cmd.name == "jira") {
             slot.open(cmd.kind == .note ? .notes : .jira)
+            return
+        }
+        if settings.sharedWindow && cmd.kind == .files {
+            slotShowFiles()
             return
         }
         switch cmd.kind {
@@ -2992,6 +3042,52 @@ final class SwitcherController: NSObject {
         log("focused existing '\(w.config.name)' window")
     }
 
+    // the hotkey messages (Hyper+N / F / J / T) that show the shared window
+    static let hotkeyModes: Set<String> = ["notes", "voice", "jira", "files", "terminal"]
+
+    // Runs on the socket thread BEFORE the hotkey reaches the main thread
+    // (the binary is the hotkey, no launcher script): record the window
+    // aerospace has focused at the keypress (the focus file toggleCommand
+    // reads) and pull our windows onto the focused workspace. Direct
+    // aerospace socket, a few ms, never on the main thread; no sleep — the
+    // move is done when aerospace replies.
+    static func hotkeyPrep() -> String {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        // aerospace answers each query in ~20-25 ms: ask both at once
+        var focused = "", rows = ""
+        let g = DispatchGroup()
+        DispatchQueue.global(qos: .userInteractive).async(group: g) {
+            focused = aerospaceCall(["list-windows", "--focused", "--format", "%{window-id} %{app-pid}"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        rows = aerospaceCall(["list-windows", "--all", "--format",
+                              "%{window-id}|%{app-pid}|%{workspace}|%{workspace-is-focused}|%{window-title}"])
+        g.wait()
+        if focused.split(separator: " ").count == 2 {
+            try? focused.write(toFile: settings.focusFilePath, atomically: true, encoding: .utf8)
+        } else {
+            // nothing focused (empty workspace): not "in our window"
+            try? FileManager.default.removeItem(atPath: settings.focusFilePath)
+        }
+        let table = rows.split(separator: "\n").map {
+            $0.split(separator: "|", maxSplits: 4, omittingEmptySubsequences: false).map(String.init)
+        }.filter { $0.count == 5 }
+        var cur = table.first { $0[3] == "true" }?[2] ?? ""
+        if cur.isEmpty {
+            // an empty workspace has no rows
+            cur = aerospaceCall(["list-workspaces", "--focused"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var moved: [String] = []
+        let me = String(getpid())
+        for f in table where !cur.isEmpty && f[1] == me && f[2] != cur && f[4] != settings.switcherWindowName {
+            _ = aerospaceCall(["move-node-to-workspace", "--window-id", f[0], cur])
+            moved.append(f[0])
+        }
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+        return String(format: "prep %.1f ms (ws %@%@)", ms, cur,
+                      moved.isEmpty ? "" : ", moved " + moved.joined(separator: ","))
+    }
+
     // Unix socket for the isolated command launcher: a message naming a
     // commands.conf section ("notes", "jira", …) opens that window in the
     // running daemon (no second process needed).
@@ -3024,7 +3120,16 @@ final class SwitcherController: NSObject {
                 if n > 0 {
                     let msg = String(bytes: buf[..<n], encoding: .utf8) ?? ""
                     let name = msg.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let t0 = DispatchTime.now().uptimeNanoseconds
+                    let prep = settings.sharedWindow && Self.hotkeyModes.contains(name)
+                        ? Self.hotkeyPrep() : ""
                     DispatchQueue.main.async { [weak self] in
+                        defer {
+                            if Self.hotkeyModes.contains(name) {
+                                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+                                self?.log(String(format: "hotkey %@: %@, %.1f ms to shown", name, prep, ms))
+                            }
+                        }
                         if name == "reset-size" {
                             self?.noteWindow?.resetToDefaultSize()
                         } else if name == "toggle-terminal" || name == "toggle-browser" {
@@ -3036,8 +3141,8 @@ final class SwitcherController: NSObject {
                             // notes tab (same as Finder's "Open in Notes")
                             let path = String(name.dropFirst(5))
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
-                        } else if settings.sharedWindow && (name == "notes" || name == "voice" || name == "jira") {
-                            // Hyper+N / Hyper+J: toggle / switch the shared window
+                        } else if settings.sharedWindow && Self.hotkeyModes.contains(name) {
+                            // Hyper+N / F / J / T: toggle / switch the shared window
                             self?.toggleCommand(name)
                         } else if name == "notes" {
                             self?.showNotes()
@@ -3186,6 +3291,11 @@ final class SwitcherController: NSObject {
                 // editor for the file — unless one already exists
                 let wid = savedWID
                 let pid = savedPID
+                if settings.sharedWindow {
+                    popup.hide(restore: false)
+                    slot.open(.notes)
+                    break
+                }
                 focusExistingOrOpen(named: cr.command.windowName) {
                     openNoteWindow(cr.command, restoreWID: wid, restorePID: pid)
                 }
@@ -3193,6 +3303,11 @@ final class SwitcherController: NSObject {
                 // same for list windows (jira etc.) — single instance
                 let wid = savedWID
                 let pid = savedPID
+                if settings.sharedWindow && cr.command.name == "jira" {
+                    popup.hide(restore: false)
+                    slot.open(.jira)
+                    break
+                }
                 focusExistingOrOpen(named: cr.command.windowName) {
                     openListWindow(cr.command, restoreWID: wid, restorePID: pid)
                 }
@@ -3201,6 +3316,10 @@ final class SwitcherController: NSObject {
                 openOutputWindow(cr.command)
             case .files:
                 popup.hide(restore: false)
+                if settings.sharedWindow {
+                    slotShowFiles()
+                    break
+                }
                 let wid = savedWID
                 let pid = savedPID
                 if let existing = subWindows.first(where: {
@@ -3258,12 +3377,29 @@ final class SwitcherController: NSObject {
     func toggleCommand(_ name: String) {
         // "voice" aliases the merged notes+voice window (see showCommand)
         let name = name == "voice" ? "notes" : name
-        if settings.sharedWindow, name == "jira" || commands.first(where: { $0.name == name })?.kind == .note {
+        if name == "terminal" {
+            guard settings.sharedWindow else {
+                showNotes()
+                noteWindow?.setTerminalDrawer(true)
+                return
+            }
+            let (wid, pid) = readFocusFile()
+            if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
+            slotToggleTerminal(userInIt: pid.map { $0 == getpid() })
+            return
+        }
+        let kind = commands.first(where: { $0.name == name })?.kind
+        if settings.sharedWindow, name == "jira" || kind == .note || kind == .files {
             // the launcher recorded the window aerospace had focused at the
             // keypress: THE answer to "is the user in our window right now?"
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
-            slot.hotkey(name == "jira" ? .jira : .notes, userInIt: pid.map { $0 == getpid() })
+            let inIt = pid.map { $0 == getpid() }
+            if kind == .files {
+                slotShowFiles(hotkey: true, userInIt: inIt)
+            } else {
+                slot.hotkey(name == "jira" ? .jira : .notes, userInIt: inIt)
+            }
             return
         }
         if let w = subWindows.first(where: { $0.config.name == name }),
@@ -3504,7 +3640,21 @@ final class SwitcherController: NSObject {
     // floating window (the /health-checks palette entry). Re-invoking
     // re-runs into the same window; Esc dismisses.
     private func openOutputWindow(_ cmd: CommandSpec) {
+        if settings.sharedWindow {
+            // one output view at a time in the shared window: another
+            // command's output window goes away
+            if let old = currentOutputName, old != cmd.windowName,
+               let ow = subWindows.first(where: { $0.config.name == old }) {
+                closeSlotWindow(ow)
+            }
+            currentOutputName = cmd.windowName
+        }
         if let existing = subWindows.first(where: { $0.config.name == cmd.windowName }) {
+            if settings.sharedWindow {
+                slot.push(.output)
+                runOutput(cmd, into: existing)
+                return
+            }
             existing.nativeWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             runOutput(cmd, into: existing)
@@ -3517,7 +3667,7 @@ final class SwitcherController: NSObject {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
-        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
         cfg.height = cmd.height > 0 ? cmd.height : defaultOutputSize.height
@@ -3548,7 +3698,14 @@ final class SwitcherController: NSObject {
                                      restoreWID: nil, restorePID: nil)
         }
         subWindows.append(w)
-        w.show()
+        if settings.sharedWindow {
+            w.onEscape = { [weak self] in self?.slot.back() }
+            placeSlotWindow(w)
+            w.show()
+            slot.push(.output)
+        } else {
+            w.show()
+        }
         runOutput(cmd, into: w)
     }
 
@@ -6388,11 +6545,16 @@ private func trimmed(_ s: String) -> String? {
     private var recentObservers: [NSObjectProtocol] = []
     func attachRecent(_ fb: PopupFileBrowser) {
         guard RecentFiles.shared.enabled else { return }
-        fb.recentProvider = {
-            RecentFiles.shared.paths().map { p in
-                (p, RecentFiles.shared.activity(of: p) ?? Date.distantPast)
-            }
-        }
+        let everywhere = filesCommand?.recentEverywhere ?? true
+        fb.virtualLists = [
+            .init(title: "Recent", symbol: "clock",
+                  status: "newest first · created or changed anywhere "
+                      + (everywhere ? "on this Mac (outside system folders)" : "in ~ or /tmp"),
+                  provider: { RecentFiles.shared.entries().map { ($0.path, $0.at, $0.source) } }),
+            .init(title: "Arrived", symbol: "arrow.down.circle",
+                  status: "downloads, AirDrop, Messages / Mail saves — wherever they were saved",
+                  provider: { RecentFiles.shared.entries(arrivedOnly: true).map { ($0.path, $0.at, $0.source) } }),
+        ]
         let o = NotificationCenter.default.addObserver(forName: RecentFiles.changed, object: nil,
                                                        queue: .main) { [weak fb] _ in
             fb?.recentChanged()
@@ -6404,7 +6566,8 @@ private func trimmed(_ s: String) -> String? {
     func configureRecentFiles() {
         let cmd = commands.first(where: { $0.kind == .files })
         RecentFiles.shared.configure(enabled: cmd?.recent ?? true, days: cmd?.recentDays ?? 7,
-                                     limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [])
+                                     limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [],
+                                     everywhere: cmd?.recentEverywhere ?? true)
     }
 
     // Read-only file browser ("files" commands): a keyboard-driven directory
@@ -6425,7 +6588,8 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = cmd.float ?? settings.float
-        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
+        // shared window: one Esc hides it (the filter bar clears itself first)
+        cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.enableNavigation = false   // the browser owns up/down/return
         cfg.enableSearch = false       // the browser has its own search field
@@ -6554,7 +6718,9 @@ private func trimmed(_ s: String) -> String? {
                 ? canonical : settings.commandsConfPath
             self?.copy(p, "config path: \(p)")
         }
-        w.onEscape = { w.hide(restore: true) }
+        w.onEscape = { [weak self] in
+            if settings.sharedWindow { self?.slot.hide() } else { w.hide(restore: true) }
+        }
         w.onHide = { [weak self] restore in
             guard let self else { return }
             self.dismissPickerIfOpen(for: w)
@@ -6562,6 +6728,7 @@ private func trimmed(_ s: String) -> String? {
                                      restoreWID: restoreWID, restorePID: restorePID)
         }
         subWindows.append(w)
+        placeSlotWindow(w)
         w.show()
         // give the browser's list keyboard focus (the window's own hidden
         // search field would otherwise take it)

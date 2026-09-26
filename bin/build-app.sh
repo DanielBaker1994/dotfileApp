@@ -112,7 +112,10 @@ if [ "$signed" = 0 ]; then
 fi
 # say so when the stable signature didn't take: permissions then reset on
 # every rebuild (macOS keys them to the signature)
-if ! codesign -dvv "$APP" 2>&1 | grep -q "Authority=$SIGN_ID"; then
+# (captured first: under pipefail, `codesign | grep -q` reports a failure
+# when grep stops reading early and codesign gets SIGPIPE)
+SIGINFO="$(codesign -dvv "$APP" 2>&1)"
+if [[ "$SIGINFO" != *"Authority=$SIGN_ID"* ]]; then
     echo "build-app: WARNING not signed with '$SIGN_ID' (ad-hoc) — privacy grants won't survive rebuilds" >&2
 fi
 
