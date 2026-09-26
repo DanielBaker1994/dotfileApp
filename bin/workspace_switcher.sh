@@ -84,7 +84,7 @@ fi
 # WS_DEBUG=1 logs the launch steps to $TMPDIR/ws-launch.log
 LOG(){ [ "${WS_DEBUG:-}" = "1" ] && echo "$(date '+%H:%M:%S') $*" >>"$TMP/ws-launch.log"; }
 
-case "$MODE" in notes|jira|voice|files|terminal)
+case "$MODE" in notes|jira|voice|files|terminal|confluence)
     LOG "== invoke MODE=$MODE focused=[$LINE] =="
     # notes, files, jira and output windows are all views of ONE shared
     # window: move ours (not the Hyper+S palette, titled like the app) onto

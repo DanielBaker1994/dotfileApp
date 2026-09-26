@@ -76,6 +76,46 @@ bin/ui-test.sh --verbose
   tests: `python3 Tests/test_jira_poll.py`
 - `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
 
+## Confluence search (Hyper+C)
+
+- `Confluence.swift` — `ConfluenceWindow` (a `JiraConfigNSWindow` + the Jira
+  Config window's themed root; `SlotMember`, view `.confluence`, nav id 65,
+  `[app] confluence-icon` = `confluence_icon.png`). Strip: Search | ★
+  Favorites (`ConfSegmented`), `JiraInputBox`, All words / Phrase / Any word,
+  Title only, Spaces `JiraMultiPicker`, Type / Modified / Sort
+  `JiraChoiceButton`, Mine. Results = `ConfTableView` + drawn
+  `ConfResultCell` (hit ranges are UTF-16 from python). Preview = `WKWebView`
+  (first WebKit use): page HTML in a themed template + a JS highlighter (hits
+  bar "1 of N", Cmd+G; the title is marked but not a stop); page images go
+  through `wsconf://` (`ConfluenceImageLoader`, URLSession + the auth header
+  read from the config file); links open in the browser. In-memory only: 20
+  pages + 80 images. Esc = clear the query, never closes.
+- The ONE view with its own frame: `SharedWindow.bigFrame`
+  (`sharedWindowFrame.confluence`, default `[confluence] width/height`, never
+  smaller than the shared frame); `targetFrame(for:)` / `setFrame(_:for:)`.
+- Python: `confluence/confluence_api.py` (one JSON object on stdout; `--check
+  --save --detect-auth --add-space --remove-space --search --page --favorite
+  --favorites --import-saved`) on `jira_api.Client` (`ConfluenceClient`:
+  `product`, `token_env` CONFLUENCE_TOKEN, `setup_hint`; `jira_log.setup(...,
+  cache_dir=)` → `~/.cache/confluence/`). `confluence_config.py`:
+  config.json (`$CONFLUENCE_CONFIG_JSON` › `[confluence] config` ›
+  `~/.config/confluence/config.json`; OWN site + token, not Jira's; `spaces`
+  scope typed by the user, never listed; `favorites` = bookmarks), and
+  `criteria_cql` (quoted parts = phrases, trailing `*` kept, Lucene junk
+  dropped, spaces clamped to scope, empty scope = whole site).
+  `/rest/api/search` 404 → `/rest/api/content/search` (no excerpts). DC's
+  "anonymous" 200 on /user/current counts as an auth failure.
+- Favorites: ☆ gutter / Cmd+D / right-click / preview ★ → `--favorite`;
+  Cmd+2 view filters locally, Return searches inside them (`id in (…)`);
+  `--favorites` refreshes in ONE request, vanished pages stay flagged
+  `missing`; kitchen sink "Import My Saved Pages" = `favourite = currentUser()`.
+- Fake site: `confluence/fake_confluence.py` (`handle()` = REST + a browsable
+  HTML site; CQL evaluator; 60 seeded items; `serve` on 127.0.0.1; `curl`
+  shim for tests). `bin/fake-confluence.sh start|stop|status` (writes
+  `~/.config/confluence/fake.json`, flips `[confluence] config`).
+  Info.plist `NSAllowsLocalNetworking` lets image loads reach it.
+- Tests: `python3 Tests/test_confluence.py`.
+
 ## Jira poller (python, v2)
 
 - SCOPE = team.json `project_keys` (`jira_config.scope_projects`), typed by

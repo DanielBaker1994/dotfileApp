@@ -74,18 +74,22 @@ class _Formatter(logging.Formatter):
         return out
 
 
-def setup(label: str, argv: list | None = None, cfg=None) -> str:
-    """Open debug.log (+ the raw store) for this process. Idempotent."""
-    global RUN_ID, RAW
+def setup(label: str, argv: list | None = None, cfg=None, cache_dir: str | None = None) -> str:
+    """Open debug.log (+ the raw store) for this process. Idempotent.
+    cache_dir: another product's cache (confluence/) instead of ~/.cache/jira."""
+    global RUN_ID, RAW, DEBUG_LOG, RAW_DIR
     if RUN_ID:
         return RUN_ID
+    if cache_dir:
+        DEBUG_LOG = os.path.join(cache_dir, "debug.log")
+        RAW_DIR = os.path.join(cache_dir, "raw")
     RUN_ID = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     level = "DEBUG"
     if cfg is not None:
         level = str(cfg["logLevel"] or "DEBUG").upper()
         secret(cfg["token"] or "")
     try:
-        os.makedirs(jira_config.CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(DEBUG_LOG), exist_ok=True)
         h = logging.handlers.RotatingFileHandler(DEBUG_LOG, maxBytes=DEBUG_LOG_MAX,
                                                  backupCount=DEBUG_LOG_BACKUPS, encoding="utf-8")
         os.chmod(DEBUG_LOG, 0o600)

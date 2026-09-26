@@ -19,6 +19,10 @@ import AppKit
 //                       (vim / the shell own Esc; the notes terminal drawer
 //                       is part of the notes view)
 //   Cmd+W / ✕           hide the whole window
+//   confluence          the one view with its OWN, larger frame ([confluence]
+//                       width x height, remembered separately): switching
+//                       in grows the window, switching out restores the
+//                       shared size
 //
 // Focus goes back to what was focused when the window was SUMMONED, and only
 // when the whole window hides — never on a view switch (per-window restore
@@ -26,7 +30,7 @@ import AppKit
 // [app] shared-window = false brings back separate windows.
 
 enum SlotView: String {
-    case notes, files, jira, detail, releases, config, output
+    case notes, files, jira, detail, releases, config, output, confluence
     var isJira: Bool { [.jira, .detail, .releases, .config].contains(self) }
     // a view you step back out of (Esc / back): jira's sub-views, output
     var isSub: Bool { [.detail, .releases, .config, .output].contains(self) }
@@ -52,8 +56,8 @@ extension PopupWindow: SlotMember {
 
 final class SharedWindow {
     // header button ids (every member's chrome)
-    static let navNotes = 60, navJira = 61, navHome = 62, navBack = 63, navFiles = 64
-    static let navIDs: Set<Int> = [navNotes, navJira, navHome, navBack, navFiles]
+    static let navNotes = 60, navJira = 61, navHome = 62, navBack = 63, navFiles = 64, navConfluence = 65
+    static let navIDs: Set<Int> = [navNotes, navJira, navHome, navBack, navFiles, navConfluence]
 
     private unowned let controller: SwitcherController
     private(set) var current: SlotView?     // the visible view (nil = hidden)
@@ -87,6 +91,46 @@ final class SharedWindow {
             return NSRect(x: vis.midX - w / 2, y: vis.midY - h / 2, width: w, height: h)
         }
         set { UserDefaults.standard.set(NSStringFromRect(newValue), forKey: Self.frameKey) }
+    }
+
+    // the Confluence view's own frame: search + results + a page preview
+    // need more room than notes. Default [confluence] width x height
+    // (1400 x 900), centered on the shared frame, kept on its screen
+    private static let bigFrameKey = "sharedWindowFrame.confluence"
+    var bigFrame: NSRect {
+        get {
+            if let s = UserDefaults.standard.string(forKey: Self.bigFrameKey) {
+                let r = NSRectFromString(s)
+                if r.width > 400, r.height > 300,
+                   NSScreen.screens.contains(where: { $0.visibleFrame.intersects(r) }) { return r }
+            }
+            let base = frame
+            let vis = (NSScreen.screens.first { $0.visibleFrame.intersects(base) } ?? NSScreen.main)?.visibleFrame
+                ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
+            // never smaller than the shared frame it grows out of
+            let w = min(max(confluenceSetting("width", 1400), base.width), vis.width - 24)
+            let h = min(max(confluenceSetting("height", 900), base.height), vis.height - 24)
+            let x = min(max(base.midX - w / 2, vis.minX + 12), vis.maxX - w - 12)
+            let y = min(max(base.midY - h / 2, vis.minY + 12), vis.maxY - h - 12)
+            return NSRect(x: x, y: y, width: w, height: h)
+        }
+        set { UserDefaults.standard.set(NSStringFromRect(newValue), forKey: Self.bigFrameKey) }
+    }
+
+    private func usesBigFrame(_ v: SlotView) -> Bool { v == .confluence }
+
+    func storedFrame(for v: SlotView) -> NSRect { usesBigFrame(v) ? bigFrame : frame }
+
+    func setFrame(_ f: NSRect, for v: SlotView) {
+        if usesBigFrame(v) { bigFrame = f } else { frame = f }
+    }
+
+    // where `v` shows: the visible view's frame when both share a frame,
+    // else `v`'s own remembered one
+    func targetFrame(for v: SlotView) -> NSRect {
+        if let cur = current, let m = controller.slotMember(cur), m.slotShown,
+           usesBigFrame(cur) == usesBigFrame(v) { return m.slotBaseFrame }
+        return storedFrame(for: v)
     }
 
     var isVisible: Bool {
@@ -127,7 +171,7 @@ final class SharedWindow {
     func open(_ v: SlotView) {
         if v == .jira && current?.isJira == true { stack = [] }
         if !v.isJira { stack.removeAll { $0 == v } }
-        guard controller.ensureSlotMember(v, frame: currentFrame()) else { return }
+        guard controller.ensureSlotMember(v, frame: targetFrame(for: v)) else { return }
         present(v)
     }
 
@@ -177,21 +221,22 @@ final class SharedWindow {
             returnWID = controller.savedWID
             returnPID = controller.savedPID
         }
-        var f = currentFrame()
+        var f = targetFrame(for: v)
         // the old view is parked only AFTER the new one is up: parked first,
         // aerospace sees its focused window vanish and focuses the next
         // window on the workspace (a terminal raised over the slower jira
         // window = "Hyper+J closed it")
         var outgoing: SlotMember?
         if let cur = current, let old = controller.slotMember(cur), old !== m, old.slotShown {
-            f = old.slotBaseFrame
+            // its size stays with its own frame (confluence vs the rest)
+            setFrame(old.slotBaseFrame, for: cur)
             outgoing = old
         }
         // a window with a larger minimum (Jira Config) grows the frame
         let min = m.slotWindow.minSize
         if f.width < min.width { f.size.width = min.width }
         if f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
-        frame = f
+        setFrame(f, for: v)
         decorate(m, v)
         m.slotShow(frame: f)
         outgoing?.slotPark(stopVoice: false)
@@ -209,7 +254,7 @@ final class SharedWindow {
         guard let cur = current else { return }
         current = nil
         if let m = controller.slotMember(cur) {
-            if m.slotShown { frame = m.slotBaseFrame }
+            if m.slotShown { setFrame(m.slotBaseFrame, for: cur) }
             m.slotPark(stopVoice: true)
         }
         controller.restoreFocus(wid: returnWID, pid: returnPID)
@@ -233,6 +278,7 @@ final class SharedWindow {
         case Self.navNotes: current == .notes ? () : open(.notes)
         case Self.navFiles: current == .files ? () : controller.slotShowFiles()
         case Self.navJira: current?.isJira == true ? home() : hotkey(.jira)
+        case Self.navConfluence: current == .confluence ? () : open(.confluence)
         case Self.navHome: home()
         case Self.navBack: back()
         default: break
@@ -245,6 +291,7 @@ final class SharedWindow {
         [(notesNavIcon, navNotes, "Notes (Hyper+N)"),
          (filesNavIcon, navFiles, "Files (Hyper+F)"),
          (jiraNavIcon, navJira, "Jira (Hyper+J)")]
+            + (confluenceEnabled() ? [(confluenceNavIcon, navConfluence, "Confluence (Hyper+C)")] : [])
     }
 
     // the view's own nav words (right-hand bar, never beside the switcher):
@@ -258,6 +305,7 @@ final class SharedWindow {
         switch v {
         case .notes: return navNotes
         case .files: return navFiles
+        case .confluence: return navConfluence
         case _ where v.isJira: return navJira
         default: return nil
         }
@@ -266,7 +314,6 @@ final class SharedWindow {
     private func decorate(_ m: SlotMember, _ v: SlotView) {
         if let w = m as? PopupWindow {
             if w.navIcons.isEmpty {
-                w.navIcons = Self.navIcons
                 let nav = Self.navButtons(for: v)
                 w.headerButtons = w.headerButtons + nav
                 if let order = w.headerOrder { w.headerOrder = order + nav.map(\.1) }
@@ -276,6 +323,8 @@ final class SharedWindow {
                 }
                 w.onCloseWindow = { [weak self] in self?.hide("✕ / Cmd+W") }
             }
+            // [confluence] enabled may have changed since the last show
+            w.navIcons = Self.navIcons
             // the kitchen sink, whatever the view (its menu stays the view's)
             w.headerIcon = appIcon
             w.navOn = Self.navOn(v)
@@ -284,6 +333,11 @@ final class SharedWindow {
                          on: Self.navJira) { [weak self] id in
                 self?.navClicked(id)
             }
+        } else if let c = m as? ConfluenceWindow {
+            c.setSlotNav(icons: Self.navIcons, icon: appIcon, on: Self.navConfluence) { [weak self] id in
+                self?.navClicked(id)
+            }
+            c.onSlotHide = { [weak self] in self?.hide("✕ / Cmd+W") }
         }
     }
 }

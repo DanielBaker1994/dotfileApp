@@ -156,7 +156,13 @@ class Client:
       bearer  -H 'Authorization: Bearer TOKEN'   (Server / Data Center PAT)
       basic   -u 'EMAIL:TOKEN'                   (Cloud)
     `dry` (--curl): print each request as a curl command instead of running it.
+    Other Atlassian products (confluence/) reuse it: `product` names the
+    server in errors, `token_env` is the masked curls' $VARIABLE.
     """
+
+    product = "Jira"
+    token_env = "JIRA_TOKEN"
+    setup_hint = "fix it in the setup sheet or 'jira_api.py --init'"
 
     def __init__(self, site: str, token: str, email: str = "", auth: str = "bearer",
                  team: dict | None = None, debug=False, verbose=False, timeout=None,
@@ -225,7 +231,7 @@ class Client:
         (basic auth: -u 'EMAIL:T' instead of the Authorization header).
         readable: the query string is split into `-G --data-urlencode 'k=v'`
         so the JQL reads as written (curl sends the identical request)."""
-        tok = "$JIRA_TOKEN" if masked else self.token
+        tok = f"${self.token_env}" if masked else self.token
         argv = ["curl", "-X", method]
         if self.auth == "basic":
             argv += ["-u", f"{self.email}:{tok}"]
@@ -252,7 +258,7 @@ class Client:
         `export JIRA_TOKEN=...`."""
         parts = []
         for a in self.curl_argv(url, method, masked, readable, body):
-            if masked and "$JIRA_TOKEN" in a:
+            if masked and f"${self.token_env}" in a:
                 parts.append(f'"{a}"')
             elif a == "curl" or re.match(r"^-[A-Za-z]$|^--[a-z][a-z-]+$", a) or a in ("GET", "POST"):
                 parts.append(a)
@@ -365,7 +371,7 @@ class Client:
                                          f"the server (or a proxy / SSO gateway) refused this request; "
                                          f"response: {body_out[:300].strip() or '(empty)'}{where}", repro, raw)
                 raise ApiError(code, f"authentication failed (HTTP 401) - the {who} was rejected by "
-                                     f"{self.site}; fix it in the setup sheet or 'jira_api.py --init'"
+                                     f"{self.site}; {self.setup_hint}"
                                + where, repro, raw)
             if code == 403:
                 raise ApiError(code, "forbidden (HTTP 403) - your account lacks permission for this "
@@ -513,7 +519,7 @@ def log_curl(argv: list, code) -> None:
     holds the real token (that's what makes it re-runnable), so it is kept
     chmod 600 inside ~/.cache/jira."""
     try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(CURL_LOG), exist_ok=True)
         if os.path.exists(CURL_LOG) and os.path.getsize(CURL_LOG) > CURL_LOG_MAX:
             with open(CURL_LOG, "rb") as fh:
                 fh.seek(-2 * 1024 * 1024, os.SEEK_END)

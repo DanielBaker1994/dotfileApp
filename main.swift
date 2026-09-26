@@ -36,7 +36,7 @@ if cliArgs.count > 1 {
         if sendLaunchMessage(msg) { exit(0) }
         FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
         exit(1)
-    case "notes", "jira", "voice", "files", "terminal":
+    case "notes", "jira", "voice", "files", "terminal", "confluence":
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->
         // hand off to the launcher script (build-if-stale + LaunchServices

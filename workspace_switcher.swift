@@ -86,6 +86,7 @@ struct AppSettings {
                    "/System/Library/CoreServices",
                    NSHomeDirectory() + "/Applications"]
     var jiraIconName = "jira_icon.png"
+    var confluenceIconName = "confluence_icon.png"
     // the app's own mark (the kitchen sink): every shared-window view's
     // top-left icon menu
     var appIconName = "app_icon.png"
@@ -128,6 +129,7 @@ struct AppSettings {
     var commandsConfPath: String { binDir + "/" + commandsConfName }
     var focusFilePath: String { popupTmpDir() + focusFileName }
     var jiraIconPath: String { binDir + "/" + jiraIconName }
+    var confluenceIconPath: String { binDir + "/" + confluenceIconName }
     var notesIconPath: String { binDir + "/" + notesIconName }
     var appIconPath: String { binDir + "/" + appIconName }
     var filesIconPath: String {
@@ -777,6 +779,10 @@ func loadCommands() -> [CommandSpec] {
         case "app":
             // already applied by applyAppConfigFromDisk() — nothing to do
             break
+        case "confluence":
+            // the Confluence view (Confluence.swift) reads it directly
+            // (configSectionValue) - never a palette command
+            break
         default:
             // enabled = true is required: no key, no command. Nothing shows
             // unless the section says enabled = true explicitly.
@@ -844,16 +850,19 @@ func jiraConfigFlag(_ key: String) -> Bool {
 }
 
 // raw value of a [jira] key straight from commands.conf (nil when absent)
-func jiraConfigValue(_ key: String) -> String? {
+func jiraConfigValue(_ key: String) -> String? { configSectionValue("jira", key) }
+
+// raw value of `key` in `[section]` straight from commands.conf (nil when absent)
+func configSectionValue(_ section: String, _ key: String) -> String? {
     guard let content = readConfigText() else { return nil }
-    var inJira = false
+    var inSection = false
     for line in content.split(separator: "\n") {
         let s = line.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("[") && s.hasSuffix("]") {
-            inJira = s == "[jira]"
+            inSection = s == "[\(section)]"
             continue
         }
-        guard inJira, !s.hasPrefix("#"), let eq = s.firstIndex(of: "=") else { continue }
+        guard inSection, !s.hasPrefix("#"), let eq = s.firstIndex(of: "=") else { continue }
         if s[..<eq].trimmingCharacters(in: .whitespaces) == key {
             return s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
         }
@@ -1001,7 +1010,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
 // hex color from commands.conf: "7d8fa6", "0x7d8fa6" or "#7d8fa6" (opaque),
 // or 8-digit "aa7d8fa6" / "0xaa7d8fa6" where the leading AA is the ALPHA
 // (0x00-0xFF) — the picker's opacity slider is stored that way
-private func hexColor(_ s: String?) -> NSColor? {
+func hexColor(_ s: String?) -> NSColor? {
     guard let s, !s.isEmpty else { return nil }
     var hex = s
     if hex.hasPrefix("0x") { hex = String(hex.dropFirst(2)) }
@@ -1077,6 +1086,7 @@ private func parseAppConfig(_ vars: [String: String]) {
     let dirs = list("app-dirs")
     if !dirs.isEmpty { settings.appDirs = dirs }
     if let v = str("jira-icon"), !v.isEmpty { settings.jiraIconName = v }
+    if let v = str("confluence-icon"), !v.isEmpty { settings.confluenceIconName = v }
     if let v = str("notes-icon"), !v.isEmpty { settings.notesIconName = v }
     if let v = str("app-icon"), !v.isEmpty { settings.appIconName = v }
     if let v = str("files-icon") { settings.filesIconName = v }
@@ -2130,6 +2140,9 @@ let appIcon = fileIconTile(settings.appIconPath, size: appIconSize)
 // shared-window nav icons, full resolution (drawn at ~16pt, crisp on Retina)
 let notesNavIcon: NSImage = NSImage(contentsOfFile: settings.notesIconPath) ?? notepadIcon(size: 32)
 let jiraNavIcon: NSImage = NSImage(contentsOfFile: settings.jiraIconPath) ?? jiraAppIcon
+let confluenceAppIcon = fileIconTile(settings.confluenceIconPath, size: appIconSize)
+    ?? glyphIcon("book.pages", fallback: "C", tint: jiraAccent)
+let confluenceNavIcon: NSImage = NSImage(contentsOfFile: settings.confluenceIconPath) ?? confluenceAppIcon
 let filesNavIcon: NSImage = (settings.filesIconPath.isEmpty ? nil : NSImage(contentsOfFile: settings.filesIconPath))
     ?? NSImage(named: NSImage.folderName) ?? notepadIcon(size: 32)
 // health checks window glyph: a red heart — plain symbol, no tile (the tile
@@ -2849,6 +2862,7 @@ final class SwitcherController: NSObject {
         case .detail: return subWindows.first { $0.config.name == settings.detailWindowName }
         case .releases: return subWindows.first { $0.config.name == jiraReleasesWindow }
         case .config: return JiraDashboardWindow.current
+        case .confluence: return ConfluenceWindow.current
         }
     }
 
@@ -2881,6 +2895,9 @@ final class SwitcherController: NSObject {
             guard let cmd = filesCommand else { return false }
             pendingSlotFrame = frame
             openFilesWindow(cmd, restoreWID: nil, restorePID: nil)
+        case .confluence:
+            guard confluenceEnabled() else { return false }
+            ConfluenceWindow.create(controller: self, frame: frame)
         default:
             return false
         }
@@ -2922,7 +2939,7 @@ final class SwitcherController: NSObject {
     // an opener about to show a slot window: place it at the shared frame
     func placeSlotWindow(_ w: PopupWindow) {
         guard settings.sharedWindow, slotView(of: w) != nil else { return }
-        w.initialFrame = pendingSlotFrame ?? slot.currentFrame()
+        w.initialFrame = pendingSlotFrame ?? slotView(of: w).map { slot.targetFrame(for: $0) } ?? slot.currentFrame()
         pendingSlotFrame = nil
     }
 
@@ -3087,7 +3104,7 @@ final class SwitcherController: NSObject {
     }
 
     // the hotkey messages (Hyper+N / F / J / T) that show the shared window
-    static let hotkeyModes: Set<String> = ["notes", "voice", "jira", "files", "terminal"]
+    static let hotkeyModes: Set<String> = ["notes", "voice", "jira", "files", "terminal", "confluence"]
 
     // Runs on the socket thread BEFORE the hotkey reaches the main thread
     // (the binary is the hotkey, no launcher script): record the window
@@ -3192,6 +3209,8 @@ final class SwitcherController: NSObject {
                             self?.showNotes()
                         } else if name == "jira-dashboard" {
                             self?.showJiraDashboard()
+                        } else if name == "confluence" || name == "confluence-setup" {
+                            self?.showConfluence(setup: name == "confluence-setup")
                         } else if name.hasPrefix("jira-poll-") || name == "jira-setup" {
                             // THE jira switch (menu-bar "Enable Jira"/"Disable Jira")
                             guard let self else { return }
@@ -3430,6 +3449,17 @@ final class SwitcherController: NSObject {
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
             slotToggleTerminal(userInIt: userInOurWindow(pid, name))
+            return
+        }
+        if name == "confluence" {
+            guard confluenceEnabled() else {
+                log("hotkey confluence: [confluence] enabled is not true — ignored")
+                return
+            }
+            guard settings.sharedWindow else { showConfluence(); return }
+            let (wid, pid) = readFocusFile()
+            if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
+            slot.hotkey(.confluence, userInIt: userInOurWindow(pid, name))
             return
         }
         let kind = commands.first(where: { $0.name == name })?.kind
@@ -7012,6 +7042,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let name = openCommand {
             if name == "notes" {
                 c.showNotes()
+            } else if name == "confluence" {
+                c.showConfluence()
             } else {
                 c.showCommand(name)
             }
@@ -7062,6 +7094,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addMenuItem(menu, "Enable Jira", #selector(MenuTarget.toggleJiraPoll(_:)), key: "")
         addMenuItem(menu, "Toggle Jira Window", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         addMenuItem(menu, "Open Jira Config Window", #selector(MenuTarget.openJiraDashboard(_:)), key: "")
+        menu.addItem(.separator())
+
+        // Confluence search ([confluence] enabled; hidden while off)
+        addMenuItem(menu, "Confluence Search", #selector(MenuTarget.openConfluence(_:)), key: "")
+        addMenuItem(menu, "Confluence Setup…", #selector(MenuTarget.openConfluenceSetup(_:)), key: "")
         menu.addItem(.separator())
 
         // Settings submenu with toggleable config options
@@ -7212,6 +7249,8 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 item.isHidden = !jiraEnabledInConfig()
             case #selector(toggleJiraPoll(_:)):
                 item.title = jiraEnabledInConfig() ? "Disable Jira" : "Enable Jira"
+            case #selector(openConfluence(_:)), #selector(openConfluenceSetup(_:)):
+                item.isHidden = !confluenceEnabled()
             case #selector(toggleHealthChecks(_:)):
                 item.state = windowState(for: "health-checks", controller: controller)
             case #selector(toggleHideOnFocusLoss(_:)):
@@ -7313,6 +7352,14 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     @objc func openJiraDashboard(_ sender: Any?) {
         MenuTarget.controller?.showJiraDashboard()
+    }
+
+    @objc func openConfluence(_ sender: Any?) {
+        MenuTarget.controller?.showConfluence()
+    }
+
+    @objc func openConfluenceSetup(_ sender: Any?) {
+        MenuTarget.controller?.showConfluence(setup: true)
     }
 
     @objc func toggleHealthChecks(_ sender: Any?) {
@@ -8002,13 +8049,14 @@ enum JiraPoll {
 
     // Run a jira/*.py script off the main thread; `done` gets (exit code,
     // stdout, stderr) on the main thread. stdin carries secrets (the token)
-    // so they never show up in `ps`.
-    static func run(_ script: String, _ args: [String], stdin: String? = nil,
+    // so they never show up in `ps`. `folder`: another scripts dir
+    // (confluence/).
+    static func run(_ script: String, _ args: [String], stdin: String? = nil, folder: String? = nil,
                     done: ((Int32, String, String) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            p.arguments = ["python3", dir + "/" + script] + args
+            p.arguments = ["python3", (folder ?? dir) + "/" + script] + args
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
             p.environment = env
@@ -8079,7 +8127,7 @@ enum JiraPoll {
     static func errorLine(_ err: String, fallback: String) -> String {
         let line = err.split(separator: "\n").map(String.init)
             .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? fallback
-        for p in ["jira-api: ", "jira-poll: ", "jira-config: "] where line.hasPrefix(p) {
+        for p in ["jira-api: ", "jira-poll: ", "jira-config: ", "confluence-api: "] where line.hasPrefix(p) {
             return String(line.dropFirst(p.count))
         }
         return line
@@ -8204,6 +8252,20 @@ extension SwitcherController {
 
     func showJiraSetup(reason: String? = nil) {
         JiraSetupWindow.show(controller: self, reason: reason)
+    }
+
+    // the Confluence search view (Hyper+C, menu, `workspace-switcher
+    // confluence`); setup = open its Setup sheet too
+    func showConfluence(setup: Bool = false) {
+        guard confluenceEnabled() else { return }
+        if settings.sharedWindow {
+            if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
+            slot.open(.confluence)
+        } else {
+            ConfluenceWindow.create(controller: self, frame: nil)
+            ConfluenceWindow.current?.showStandalone()
+        }
+        if setup { ConfluenceWindow.current?.showSetup() }
     }
 
     func showJiraDashboard() {

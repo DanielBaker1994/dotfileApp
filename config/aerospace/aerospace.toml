@@ -183,6 +183,9 @@ W = ['DELL', 'main']
     # Notes terminal: Hyper+T — notes + its terminal drawer, focused; in the
     # terminal already -> close the drawer, focus the notes editor.
     alt-cmd-ctrl-shift-t = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher terminal'
+    # Confluence search: Hyper+C — the shared window's Confluence view (its own,
+    # larger frame); a no-op when [confluence] enabled = false.
+    alt-cmd-ctrl-shift-c = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher confluence'
 
     # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
     # window that closes itself after you pick one. Works from any app.
