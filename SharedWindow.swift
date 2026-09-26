@@ -108,7 +108,7 @@ final class SharedWindow {
                 let inIt = userInIt ?? (m.slotWindow.isKeyWindow && NSApp.isActive
                     && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid())
                 if inIt {
-                    hide()
+                    hide("hotkey pressed while in it")
                 } else {
                     m.slotShow(frame: nil)
                 }
@@ -153,7 +153,7 @@ final class SharedWindow {
         if let cur = current, cur.isJira, cur != .jira {
             open(.jira)
         } else {
-            hide()
+            hide("back from the first view")
         }
     }
 
@@ -203,7 +203,8 @@ final class SharedWindow {
 
     // hide the whole window; focus returns to what was focused when it was
     // summoned. The view stays parked: the next hotkey brings it back as is.
-    func hide() {
+    // `reason` rides in the log: a hide the user didn't expect can be traced
+    func hide(_ reason: String = "") {
         summoned = false
         guard let cur = current else { return }
         current = nil
@@ -214,7 +215,7 @@ final class SharedWindow {
         controller.restoreFocus(wid: returnWID, pid: returnPID)
         returnWID = nil
         returnPID = nil
-        controller.log("shared window: hidden (\(cur.rawValue))")
+        controller.log("shared window: hidden (\(cur.rawValue))" + (reason.isEmpty ? "" : " — \(reason)"))
     }
 
     // a member window went away on its own (rebuilt / closed): forget it
@@ -273,7 +274,7 @@ final class SharedWindow {
                 w.onHeaderButton = { [weak self] id in
                     if Self.navIDs.contains(id) { self?.navClicked(id) } else { prev?(id) }
                 }
-                w.onCloseWindow = { [weak self] in self?.hide() }
+                w.onCloseWindow = { [weak self] in self?.hide("✕ / Cmd+W") }
             }
             // the kitchen sink, whatever the view (its menu stays the view's)
             w.headerIcon = appIcon

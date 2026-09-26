@@ -42,6 +42,12 @@ final class RecentFiles {
     private var stream: FSEventStreamRef?
     private var saveWork: DispatchWorkItem?
     private var notifyWork: DispatchWorkItem?
+    // what entries() hands out: rebuilt on `queue` by publish(), read under
+    // a lock — the main thread never waits on `queue` (busy with a burst of
+    // file events or the launch-time Spotlight seed, it stalled every
+    // arrow press in the Recent view)
+    private let snapLock = NSLock()
+    private var snapshot: [(path: String, at: Date, source: String?)] = []
     private let home = NSHomeDirectory()
     private let store = NSHomeDirectory() + "/.cache/workspace-switcher/recent.json"
 
@@ -56,18 +62,17 @@ final class RecentFiles {
         }
         if rescope { stop() }
         if on && !enabled { start() } else if !on && enabled { stop() }
+        // excludes / limit may have changed what the snapshot holds
+        if enabled { queue.async { [self] in publish() } }
     }
 
     // newest first; only paths that still exist. arrivedOnly: files that
     // came from outside (quarantine flag)
     func entries(arrivedOnly: Bool = false) -> [(path: String, at: Date, source: String?)] {
-        queue.sync {
-            items.filter { !arrivedOnly || $0.value.source != nil }
-                .sorted { $0.value.at > $1.value.at }
-                .filter { keep($0.key) && FileManager.default.fileExists(atPath: $0.key) }
-                .prefix(limit)
-                .map { ($0.key, Date(timeIntervalSince1970: $0.value.at), $0.value.source) }
-        }
+        snapLock.lock()
+        let all = snapshot
+        snapLock.unlock()
+        return Array(all.filter { !arrivedOnly || $0.source != nil }.prefix(limit))
     }
 
     // MARK: lifecycle
@@ -336,8 +341,15 @@ final class RecentFiles {
         }
     }
 
-    // on `queue`: tell the browsers (debounced) and save (debounced)
+    // on `queue`: rebuild the snapshot, tell the browsers (debounced) and
+    // save (debounced)
     private func publish() {
+        let snap = items.sorted { $0.value.at > $1.value.at }
+            .filter { keep($0.key) && FileManager.default.fileExists(atPath: $0.key) }
+            .map { ($0.key, Date(timeIntervalSince1970: $0.value.at), $0.value.source) }
+        snapLock.lock()
+        snapshot = snap
+        snapLock.unlock()
         notifyWork?.cancel()
         let n = DispatchWorkItem { NotificationCenter.default.post(name: Self.changed, object: nil) }
         notifyWork = n

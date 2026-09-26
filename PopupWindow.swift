@@ -2549,6 +2549,10 @@ final class PopupTableHeaderView: NSView {
     // drag a title sideways to move its column: onReorder(from, to), where
     // `to` is the column's index after the move
     var onReorder: ((Int, Int) -> Void)?
+    // "fit columns": an icon in the corner cell (the gutter over the rows'
+    // checkbox / star column) + right-click ▸ Fit Columns to Content
+    var onFit: (() -> Void)? { didSet { needsDisplay = true } }
+    private var hoverFit = false
     private var reorder: (from: Int, x: CGFloat, target: Int)?
     private var pressCol: Int?
 
@@ -2590,6 +2594,14 @@ final class PopupTableHeaderView: NSView {
         return NSRect(x: f.x + f.w - s - 5, y: bounds.midY - s / 2, width: s, height: s)
     }
 
+    // the corner cell's fit button (nil: no fit action / no room)
+    private var fitRect: NSRect? {
+        guard onFit != nil, config.rowLeadInset >= 20 else { return nil }
+        let s: CGFloat = 18
+        return NSRect(x: ((config.rowLeadInset - s) / 2).rounded(), y: bounds.midY - s / 2,
+                      width: s, height: s)
+    }
+
     // the grab zone of the divider after column i (every column but the last)
     private func dividerRect(_ i: Int) -> NSRect {
         let f = frames[i]
@@ -2601,6 +2613,7 @@ final class PopupTableHeaderView: NSView {
         for i in 0..<n {
             if let fr = filterRect(i) { addCursorRect(fr, cursor: .pointingHand) }
         }
+        if let fr = fitRect { addCursorRect(fr, cursor: .pointingHand) }
         guard n > 1 else { return }
         for i in 0..<(n - 1) { addCursorRect(dividerRect(i), cursor: .resizeLeftRight) }
     }
@@ -2619,14 +2632,17 @@ final class PopupTableHeaderView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let over = config.tableColumns.indices.first { filterRect($0)?.contains(p) == true }
-        if over != hoverFilter {
+        let fit = fitRect?.contains(p) == true
+        if over != hoverFilter || fit != hoverFit {
             hoverFilter = over
-            toolTip = over.map { "Filter \(config.tableColumns[$0].title)" }
+            hoverFit = fit
+            toolTip = fit ? "Fit columns to their content"
+                : over.map { "Filter \(config.tableColumns[$0].title)" }
             needsDisplay = true
         }
     }
     override func mouseExited(with event: NSEvent) {
-        if hoverFilter != nil { hoverFilter = nil; needsDisplay = true }
+        if hoverFilter != nil || hoverFit { hoverFilter = nil; hoverFit = false; needsDisplay = true }
     }
 
     // right-click a filterable title = its filter
@@ -2635,6 +2651,17 @@ final class PopupTableHeaderView: NSView {
         if let i = frames.firstIndex(where: { p.x >= $0.x && p.x < $0.x + $0.w }),
            let fr = filterRect(i) {
             onFilter?(i, fr)
+            return
+        }
+        if let fit = onFit {
+            let menu = NSMenu()
+            let item = NSMenuItem(title: "Fit Columns to Content", action: #selector(MenuActionTarget.run),
+                                  keyEquivalent: "")
+            let t = MenuActionTarget(action: fit)
+            item.target = t
+            item.representedObject = t   // keep the target alive with the menu
+            menu.addItem(item)
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
             return
         }
         super.rightMouseDown(with: event)
@@ -2698,6 +2725,14 @@ final class PopupTableHeaderView: NSView {
                 c.accentOn.setFill()
                 NSRect(x: edge - 1.5, y: 3, width: 3, height: bounds.height - 6).fill()
             }
+        }
+        if let fr = fitRect {
+            if hoverFit {
+                c.text.withAlphaComponent(0.12).setFill()
+                NSBezierPath(roundedRect: fr, xRadius: 4, yRadius: 4).fill()
+            }
+            ButtonStyle.symbol("arrow.left.and.right", in: fr,
+                               color: hoverFit ? c.text : c.dim.withAlphaComponent(0.9), size: 9)
         }
         let rule = NSBezierPath()
         rule.move(to: NSPoint(x: 0, y: bounds.height - 0.5))
@@ -2772,6 +2807,10 @@ final class PopupTableHeaderView: NSView {
             return
         }
         guard abs(p.x - downX) < 5 else { return }
+        if fitRect?.insetBy(dx: -3, dy: -3).contains(p) == true {
+            onFit?()
+            return
+        }
         if let i = config.tableColumns.indices.first(where: {
             filterRect($0)?.insetBy(dx: -2, dy: -3).contains(p) == true }) {
             onFilter?(i, filterRect(i)!)
@@ -3588,6 +3627,25 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private var favPills: [ThemeButton] = []
     private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "pdf"])
     private static let textLimit = 262144
+    // previews load OFF the main thread (a Recent list is mostly screenshots
+    // and downloads: decoding a 4K PNG / rendering a PDF per arrow press made
+    // stepping through it lag). previewGen drops a result the selection has
+    // moved past; previewLatest lets a queued load skip itself entirely.
+    private enum PreviewContent { case image(NSImage), text(String), hint(String) }
+    private var previewGen = 0
+    private let previewLatest = PreviewGen()
+    private final class PreviewGen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var v = 0
+        var value: Int {
+            get { lock.lock(); defer { lock.unlock() }; return v }
+            set { lock.lock(); v = newValue; lock.unlock() }
+        }
+    }
+    private static let previewQueue = DispatchQueue(label: "file-preview", qos: .userInitiated)
+    // recent results (path|mtime|size): stepping back is instant
+    private static var previewCache: [String: PreviewContent] = [:]
+    private static var previewCacheOrder: [String] = []
 
     // which part holds the keyboard: the filter bar, the list (left) or the
     // preview (right). The window's border says "the browser has focus";
@@ -4473,7 +4531,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     public func recentChanged() {
         guard inRecent, query.isEmpty else { return }
         let keep = rows.indices.contains(selection) ? rows[selection].path : nil
-        all = recentEntries()
+        let fresh = recentEntries()
+        // file events arrive constantly: nothing visible changed = no relayout
+        guard fresh.map({ $0.path + $0.trailingText }) != all.map({ $0.path + $0.trailingText }) else { return }
+        all = fresh
         rows = all
         selection = keep.flatMap { k in rows.firstIndex { $0.path == k } } ?? 0
         listPane.rows = rows
@@ -4493,6 +4554,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             var dir = displayPath((item.path as NSString).deletingLastPathComponent)
             if dir.hasPrefix("/private/tmp") { dir.removeFirst("/private".count) }
             e.trailingText = ([dir] + [item.note].compactMap { $0 }.map { "↓ " + $0 }
+                              + (e.isDir ? [] : [Self.humanSize(e.size)])
                               + [Self.ago(now.timeIntervalSince(item.at))]).joined(separator: " · ")
             e.trailingWidth = (e.trailingText as NSString)
                 .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
@@ -4594,9 +4656,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // MARK: preview
 
     private func previewSelection() {
+        previewGen += 1
+        previewLatest.value = previewGen
         guard rows.indices.contains(selection) else { return showHint(""); }
         let e = rows[selection]
-        let ext = (e.path as NSString).pathExtension.lowercased()
         if e.isDir {
             // show the folder's CONTENTS as a real file list on the right
             // (icons, sizes, hover, right-click Open in Notes / Copy Path)
@@ -4604,37 +4667,81 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             previewList.selection = 0
             layoutPreviewListDocument()
             showFolderList()
-        } else if Self.imageExts.contains(ext) {
-            let img: NSImage?
-            if ext == "pdf" {
-                // NSImage renders PDFs transparent — composite onto white so
-                // the blue drawer doesn't show through the page
-                img = Self.pdfPreviewImage(e.path)
-            } else {
-                img = NSImage(contentsOfFile: e.path)
+            return
+        }
+        let key = "\(e.path)|\(e.modified.timeIntervalSince1970)|\(e.size)"
+        if let hit = Self.previewCache[key] { return applyPreview(hit) }
+        // decode images at the preview's pixel size, not the file's
+        let scale = window?.backingScaleFactor ?? 2
+        let px = max(800, max(previewImage.bounds.width, previewImage.bounds.height) * scale)
+        let gen = previewGen, latest = previewLatest, path = e.path
+        Self.previewQueue.async { [weak self] in
+            // the selection already moved on: skip the work
+            guard latest.value == gen else { return }
+            let content = Self.loadPreview(path, maxPixels: px)
+            DispatchQueue.main.async {
+                Self.cachePreview(key, content)
+                guard let self, self.previewGen == gen else { return }
+                self.applyPreview(content)
             }
-            if let img {
-                previewImage.image = img
-                showImage()
-            } else {
-                showHint("unable to preview")
-            }
-        } else if ext == "rtf", let img = Self.rtfPreviewImage(e.path) {
-            // render the rich text onto white (same white-backed treatment)
+        }
+    }
+    private func applyPreview(_ content: PreviewContent) {
+        switch content {
+        case .image(let img):
             previewImage.image = img
             showImage()
-        } else if ext == "docx", let text = Self.docxText(e.path), !text.isEmpty {
-            // extract the text out of the zip's document.xml
+        case .text(let text):
             previewText.string = text
             previewText.scrollRangeToVisible(NSRange(location: 0, length: 0))
             showText()
-        } else if let text = textPreview(e.path) {
-            previewText.string = text
-            previewText.scrollRangeToVisible(NSRange(location: 0, length: 0))
-            showText()
-        } else {
-            showHint("no preview")
+        case .hint(let h):
+            showHint(h)
         }
+    }
+    private static func cachePreview(_ key: String, _ content: PreviewContent) {
+        if previewCache[key] == nil { previewCacheOrder.append(key) }
+        previewCache[key] = content
+        while previewCacheOrder.count > 24 {
+            previewCache.removeValue(forKey: previewCacheOrder.removeFirst())
+        }
+    }
+    // runs on previewQueue: everything here is thread-safe (no views)
+    private static func loadPreview(_ path: String, maxPixels: CGFloat) -> PreviewContent {
+        let ext = (path as NSString).pathExtension.lowercased()
+        if imageExts.contains(ext) {
+            // NSImage renders PDFs transparent — composite onto white so
+            // the blue drawer doesn't show through the page
+            let img = ext == "pdf" ? pdfPreviewImage(path)
+                : ext == "gif" ? NSImage(contentsOfFile: path)      // keeps the animation
+                : downsampledImage(path, maxPixels: maxPixels) ?? NSImage(contentsOfFile: path)
+            return img.map { .image($0) } ?? .hint("unable to preview")
+        }
+        if ext == "rtf", let img = rtfPreviewImage(path) {
+            // render the rich text onto white (same white-backed treatment)
+            return .image(img)
+        }
+        if ext == "docx", let text = docxText(path), !text.isEmpty {
+            // extract the text out of the zip's document.xml
+            return .text(text)
+        }
+        if let text = textPreview(path) { return .text(text) }
+        return .hint("no preview")
+    }
+    // a big photo / screenshot decoded straight to preview size (ImageIO
+    // thumbnail, EXIF rotation applied) instead of the full bitmap
+    private static func downsampledImage(_ path: String, maxPixels: CGFloat) -> NSImage? {
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL,
+                                                   [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixels),
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
     private func showHint(_ s: String) {
         previewScroll.isHidden = true
@@ -4667,8 +4774,12 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         let e = previewList.rows[i]
         if e.isDir { cd(e.path) } else { onOpen?(e.path) }
     }
-    private func textPreview(_ path: String) -> String? {
-        guard let sz = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.intValue else { return nil }
+    private static func textPreview(_ path: String) -> String? {
+        // plain stat(2): attributesOfItem also reads xattrs (blocks on a
+        // stale network mount — see makeEntry)
+        var st = Darwin.stat()
+        guard stat(path, &st) == 0 else { return nil }
+        let sz = Int(st.st_size)
         if sz > Self.textLimit {
             guard let h = FileHandle(forReadingAtPath: path) else { return nil }
             defer { try? h.close() }
@@ -4754,9 +4865,11 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         p.standardOutput = pipe
         p.standardError = Pipe()
         do { try p.run() } catch { return nil }
+        // drain BEFORE waiting: a document.xml over the pipe buffer (64 KB)
+        // would block unzip forever, and the preview queue with it
+        let xmlData = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { return nil }
-        let xmlData = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let xml = String(data: xmlData, encoding: .utf8) else { return nil }
         let parser = XMLParser(data: Data(xml.utf8))
         let ex = DocxTextExtractor()
@@ -6127,6 +6240,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
     // a sortable column title was clicked (index into config.tableColumns)
     public var onTableSort: ((Int) -> Void)?
+    // set = the table header's corner cell shows a "fit columns" button
+    public var onTableFit: (() -> Void)? {
+        didSet {
+            tableHeader?.onFit = onTableFit == nil ? nil : { [weak self] in self?.onTableFit?() }
+            if let h = tableHeader { h.window?.invalidateCursorRects(for: h) }
+        }
+    }
     // a filterable column's ▾ was clicked: (column, header view, the ▾'s
     // rect in it) — the host anchors its filter popover there
     public var onTableFilter: ((Int, NSView, NSRect) -> Void)?
@@ -8077,6 +8197,13 @@ private func scrollSelectionIntoView() {
         // an open action picker owns the keyboard (its Esc never counts
         // toward the window's Esc-streak close)
         if actionPicker != nil { return actionPickerKey(code, mods) }
+        if shortcutsSheet != nil { return shortcutsKey(code, mods) }
+        // Cmd+/ : the keyboard shortcuts list (before the vim / terminal
+        // branches, which would take it)
+        if code == 44, mods.contains(.command), panel.attachedSheet == nil, let hook = onShowShortcuts {
+            hook()
+            return true
+        }
         // an Esc streak (N rapid Esc close the window) only counts
         // CONSECUTIVE presses — any other key starts it over
         if code != 53 { escStreak = 0 }
@@ -8614,6 +8741,196 @@ private func scrollSelectionIntoView() {
         }
         root.addSubview(v, positioned: .above, relativeTo: nil)
         actionPicker = v
+    }
+
+    // MARK: Keyboard shortcuts sheet
+
+    // "Keyboard Shortcuts…" (kitchen sink menu / Cmd+/): a themed card over
+    // the window, one group per section; keys drawn as key caps. Esc /
+    // Return / a click outside closes just the card; ↑↓ / Ctrl+N/P scroll.
+    public typealias ShortcutGroup = (title: String, items: [(keys: String, what: String)])
+    public var onShowShortcuts: (() -> Void)?
+    private var shortcutsSheet: NSView?
+    private weak var shortcutsScroll: NSScrollView?
+
+    private final class ShortcutsBackdrop: NSView {
+        var onClick: (() -> Void)?
+        override func mouseDown(with e: NSEvent) { onClick?() }
+    }
+    // clicks on the card itself must not reach the backdrop (= close)
+    private final class ShortcutsCard: NSView {
+        override func mouseDown(with e: NSEvent) {}
+    }
+
+    private final class ShortcutsListView: NSView {
+        let groups: [ShortcutGroup]
+        let c: PopupColors
+        let z: CGFloat
+        override var isFlipped: Bool { true }
+        init(groups: [ShortcutGroup], colors: PopupColors, zoom: CGFloat, width: CGFloat) {
+            self.groups = groups
+            c = colors
+            z = zoom
+            super.init(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+            frame.size.height = contentHeight
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+        private var rowH: CGFloat { 27 * z }
+        private var headH: CGFloat { 30 * z }
+        var contentHeight: CGFloat {
+            groups.reduce(6 * z) { $0 + headH + CGFloat($1.items.count) * rowH } + 8 * z
+        }
+        private var capFont: NSFont { .monospacedSystemFont(ofSize: 11 * z, weight: .medium) }
+        private func capsWidth(_ keys: String) -> CGFloat {
+            let parts = keys.components(separatedBy: " / ")
+            let slash = ("/" as NSString).size(withAttributes: [.font: capFont]).width + 8 * z
+            return parts.reduce(0) { $0 + ($1 as NSString).size(withAttributes: [.font: capFont]).width + 12 * z }
+                + CGFloat(max(0, parts.count - 1)) * slash
+        }
+        override func draw(_ dirtyRect: NSRect) {
+            let pad = 14 * z
+            // one key column for every group: the widest caps, at most ~half
+            let keyCol = min(bounds.width * 0.5,
+                             groups.flatMap(\.items).map { capsWidth($0.keys) }.max() ?? 0) + pad + 16 * z
+            let headFont = NSFont.systemFont(ofSize: 10 * z, weight: .bold)
+            let textFont = NSFont.systemFont(ofSize: 12.5 * z)
+            let trunc = NSMutableParagraphStyle()
+            trunc.lineBreakMode = .byTruncatingTail
+            var y = 6 * z
+            for g in groups {
+                (g.title.uppercased() as NSString).draw(
+                    at: NSPoint(x: pad, y: y + headH - 18 * z),
+                    withAttributes: [.font: headFont, .foregroundColor: c.accentOn, .kern: 0.8])
+                y += headH
+                for it in g.items {
+                    var x = pad
+                    let capH = 19 * z
+                    let capY = y + (rowH - capH) / 2
+                    for (i, part) in it.keys.components(separatedBy: " / ").enumerated() {
+                        if i > 0 {
+                            let a: [NSAttributedString.Key: Any] = [.font: capFont, .foregroundColor: c.dim]
+                            let sz = ("/" as NSString).size(withAttributes: a)
+                            ("/" as NSString).draw(at: NSPoint(x: x + 4 * z, y: capY + (capH - sz.height) / 2),
+                                                   withAttributes: a)
+                            x += sz.width + 8 * z
+                        }
+                        let a: [NSAttributedString.Key: Any] = [.font: capFont, .foregroundColor: c.text]
+                        let sz = (part as NSString).size(withAttributes: a)
+                        let cap = NSRect(x: x, y: capY, width: sz.width + 12 * z, height: capH)
+                        let path = NSBezierPath(roundedRect: cap, xRadius: 5 * z, yRadius: 5 * z)
+                        c.mantle.setFill()
+                        path.fill()
+                        c.hairline.setStroke()
+                        path.lineWidth = 1
+                        path.stroke()
+                        (part as NSString).draw(at: NSPoint(x: cap.minX + 6 * z, y: cap.midY - sz.height / 2),
+                                                withAttributes: a)
+                        x = cap.maxX
+                    }
+                    let tx = max(keyCol, x + 12 * z)
+                    let lineH = textFont.ascender - textFont.descender
+                    (it.what as NSString).draw(
+                        with: NSRect(x: tx, y: y + (rowH - lineH) / 2, width: bounds.width - tx - pad, height: lineH),
+                        options: [.usesLineFragmentOrigin],
+                        attributes: [.font: textFont, .foregroundColor: c.text, .paragraphStyle: trunc])
+                    y += rowH
+                }
+            }
+        }
+    }
+
+    public func showShortcuts(_ groups: [ShortcutGroup]) {
+        guard let root = panel.contentView, !groups.isEmpty else { return }
+        closeShortcuts()
+        closeActionPicker()
+        let c = config.colors
+        let z = zoom
+        let back = ShortcutsBackdrop(frame: root.bounds)
+        back.autoresizingMask = [.width, .height]
+        back.wantsLayer = true
+        back.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
+        back.onClick = { [weak self] in self?.closeShortcuts() }
+
+        let titleH = 40 * z
+        let w = min(640 * z, root.bounds.width - 40)
+        let list = ShortcutsListView(groups: groups, colors: c, zoom: z, width: w)
+        let h = min(titleH + list.contentHeight, root.bounds.height - 60)
+        let card = ShortcutsCard(frame: NSRect(x: ((root.bounds.width - w) / 2).rounded(),
+                                        y: ((root.bounds.height - h) / 2).rounded(), width: w, height: h))
+        card.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        card.wantsLayer = true
+        let fill = (c.background.usingColorSpace(.sRGB) ?? c.background)
+            .blended(withFraction: 0.25, of: .black) ?? c.background
+        card.layer?.backgroundColor = fill.withAlphaComponent(0.98).cgColor
+        card.layer?.cornerRadius = 12 * z
+        card.layer?.borderColor = c.text.withAlphaComponent(0.15).cgColor
+        card.layer?.borderWidth = 1
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.4
+        card.layer?.shadowRadius = 18
+        back.addSubview(card)
+
+        // title (top of the card; the card itself isn't flipped)
+        let t = NSTextField(labelWithString: "Keyboard Shortcuts")
+        t.font = .systemFont(ofSize: 14 * z, weight: .semibold)
+        t.textColor = c.text
+        t.sizeToFit()
+        t.frame.origin = NSPoint(x: 14 * z, y: h - titleH / 2 - t.frame.height / 2)
+        card.addSubview(t)
+        let hint = NSTextField(labelWithString: "esc to close")
+        hint.font = .systemFont(ofSize: 11 * z)
+        hint.textColor = c.dim
+        hint.sizeToFit()
+        hint.frame.origin = NSPoint(x: w - hint.frame.width - 14 * z, y: h - titleH / 2 - hint.frame.height / 2)
+        card.addSubview(hint)
+        let rule = NSView(frame: NSRect(x: 0, y: h - titleH, width: w, height: 1))
+        rule.wantsLayer = true
+        rule.layer?.backgroundColor = c.hairline.cgColor
+        card.addSubview(rule)
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: w, height: h - titleH))
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        scroll.documentView = list
+        card.addSubview(scroll)
+        list.scroll(.zero)
+
+        root.addSubview(back, positioned: .above, relativeTo: nil)
+        shortcutsSheet = back
+        shortcutsScroll = scroll
+        escStreak = 0
+    }
+
+    public func closeShortcuts() {
+        shortcutsSheet?.removeFromSuperview()
+        shortcutsSheet = nil
+        escStreak = 0
+    }
+
+    private func shortcutsKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        let ctrl = mods.contains(.control)
+        var dy: CGFloat = 0
+        switch (code, ctrl) {
+        case (53, _), (36, _), (76, _), (49, false), (12, false):   // Esc Return Space q
+            closeShortcuts()
+            return true
+        case (44, _) where mods.contains(.command):                 // Cmd+/ again
+            closeShortcuts()
+            return true
+        case (125, _), (45, true), (38, true): dy = 60 * zoom      // ↓ / C-n / C-j
+        case (126, _), (35, true), (40, true): dy = -60 * zoom     // ↑ / C-p / C-k
+        default: return true   // swallowed while the card is up
+        }
+        if let sv = shortcutsScroll, let doc = sv.documentView {
+            let clip = sv.contentView
+            let maxY = max(0, doc.frame.height - clip.bounds.height)
+            clip.scroll(to: NSPoint(x: 0, y: min(maxY, max(0, clip.bounds.origin.y + dy))))
+            sv.reflectScrolledClipView(clip)
+        }
+        return true
     }
 
     // MARK: Toast

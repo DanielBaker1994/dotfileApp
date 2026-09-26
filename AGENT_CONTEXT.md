@@ -59,6 +59,9 @@ bin/ui-test.sh --verbose
   quarantine xattr + kMDItemWhereFroms (`origin`), Spotlight seed,
   `recent.json`; `PopupFileBrowser.virtualLists` / `showVirtual` /
   `recentChanged()`; `[files] recent*`, `recent-scope`, `start = recent`.
+  `entries()` reads a lock-guarded snapshot built in `publish()` — never
+  `queue.sync` from main. Previews load on `previewQueue` (ImageIO
+  downsampled images, `previewGen` drops stale results, 24-entry cache).
   Zoxide favorites were removed.
 - Shared window members: notes, files, jira (+ detail / releases / config),
   output windows (`currentOutputName`). Only the notes terminal drawer and
@@ -240,7 +243,9 @@ bin/ui-test.sh --verbose
   not columns (labels, reporter…) stay in the filter bar, same popover
   (`PopupWindow.onFilterOpen`). Users show full name + username from the
   directory. Enter on a row = the detail window (same as double-click).
-  "fit columns" header button → `PopupWindow.fitTableColumns()`.
+  "fit columns" = the table header's corner cell icon (over the checkbox /
+  star gutter) + header right-click (`PopupWindow.onTableFit` →
+  `PopupTableHeaderView.onFit` → `fitTableColumns()`).
 - Tab freshness badges: `JiraPoll.tabBadge` (status.json per job) →
   `PopupWindow.tabBadges` (dot + age; green fresh+ok, yellow stale or a
   failed run, red stale+failed; tooltip = details).
@@ -392,6 +397,12 @@ Line numbers drift; grep the symbol names (they're stable).
 - Vim pane font changes go through `applyVimFont()` (nudges the frame so
   SwiftTerm recomputes cols/rows → SIGWINCH). Cmd+± zoom is relative to the
   width change that actually happened (clamped = no zoom change).
+- Hotkey hide needs BOTH signals (`userInOurWindow`): focus file says our
+  window AND `NSApp.isActive && keyWindow`; else show + focus. Every
+  `SharedWindow.hide(_ reason:)` logs its reason in /tmp/ws-debug.log.
+- Keyboard Shortcuts…: `[shortcuts]` in commands.conf (`view: keys = what`,
+  parsed in order into `shortcutEntries`), every view's kitchen sink menu +
+  Cmd+/ → `PopupWindow.showShortcuts` (card overlay, Esc closes only it).
 - Rule 6 (rule.md): popovers take key focus on open; Esc closes only them
   (`PopupWindow.transientEscape`).
 

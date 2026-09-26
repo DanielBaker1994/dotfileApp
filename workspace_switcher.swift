@@ -746,6 +746,15 @@ struct CommandSpec {
     }
 }
 
+// [shortcuts] in file order: the "Keyboard Shortcuts…" list (view = all /
+// notes / files / jira)
+struct ShortcutEntry {
+    let view: String
+    let keys: String
+    let what: String
+}
+var shortcutEntries: [ShortcutEntry] = []
+
 func loadCommands() -> [CommandSpec] {
     // app-level settings first — [app] may sit anywhere in the file
     applyAppConfigFromDisk()
@@ -754,6 +763,8 @@ func loadCommands() -> [CommandSpec] {
         return []
     }
     var cmds: [CommandSpec] = []
+    var shortcuts: [ShortcutEntry] = []
+    defer { shortcutEntries = shortcuts }
     var section: (name: String, vars: [String: String])?
     func flushSection() {
         guard let s = section else { return }
@@ -761,6 +772,8 @@ func loadCommands() -> [CommandSpec] {
         case "icons":
             // icon overrides for the workspace-switcher rows ([icons] section)
             iconRules = parseIconRules(s.vars)
+        case "shortcuts":
+            break   // collected line by line below (order matters)
         case "app":
             // already applied by applyAppConfigFromDisk() — nothing to do
             break
@@ -787,6 +800,16 @@ func loadCommands() -> [CommandSpec] {
         guard let eq = s.firstIndex(of: "=") else { continue }
         let key = s[..<eq].trimmingCharacters(in: .whitespaces)
         let val = s[s.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+        if section?.name == "shortcuts" {
+            // "view: keys = what it does"
+            if let colon = key.firstIndex(of: ":") {
+                let view = key[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let keys = key[key.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: "Plus", with: "=").replacingOccurrences(of: "Minus", with: "-")
+                if !keys.isEmpty { shortcuts.append(ShortcutEntry(view: view, keys: keys, what: val)) }
+            }
+            continue
+        }
         if section != nil {
             section?.vars[key] = val
         } else if !key.isEmpty && !val.isEmpty {
@@ -3406,7 +3429,7 @@ final class SwitcherController: NSObject {
             }
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
-            slotToggleTerminal(userInIt: pid.map { $0 == getpid() })
+            slotToggleTerminal(userInIt: userInOurWindow(pid, name))
             return
         }
         let kind = commands.first(where: { $0.name == name })?.kind
@@ -3415,7 +3438,7 @@ final class SwitcherController: NSObject {
             // keypress: THE answer to "is the user in our window right now?"
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
-            let inIt = pid.map { $0 == getpid() }
+            let inIt = userInOurWindow(pid, name)
             if kind == .files {
                 slotShowFiles(hotkey: true, userInIt: inIt)
             } else {
@@ -3429,6 +3452,23 @@ final class SwitcherController: NSObject {
             return
         }
         showCommand(name)
+    }
+
+    // "Is the user in our window right now?" for a hotkey toggle — true only
+    // when BOTH agree: aerospace (the focus file) says our window is focused
+    // AND AppKit says we really hold the keyboard. aerospace alone says yes
+    // when it raised our window but macOS refused to activate us (keys still
+    // go to the previous app): pressing the hotkey again to get focus then
+    // HID the window — the "it randomly closed" bug. AppKit alone can say yes
+    // while the user types elsewhere. Disagreement = not in it = show + focus.
+    private func userInOurWindow(_ focusPID: pid_t?, _ name: String) -> Bool? {
+        let keyed = NSApp.isActive && NSApp.keyWindow?.isVisible == true
+        guard let focusPID else { return nil }
+        let inIt = focusPID == getpid() && keyed
+        if focusPID == getpid() && !keyed {
+            log("hotkey \(name): aerospace says our window is focused but AppKit has no key window — focusing, not hiding")
+        }
+        return inIt
     }
 
     // Toggle vim mode for the notes window: updates the command spec, persists
@@ -4329,22 +4369,8 @@ private func trimmed(_ s: String) -> String? {
                     w.meterEnabled = shown
                 }
             }
-            // Jira: "Enable Jira" flips [jira] enabled through the checked
-            // path (config check, login test, setup window) and opens the
-            // window; once enabled it becomes a window toggle like the drawers
-            if jiraEnabledInConfig() {
-                let shown = self.subWindows.first(where: { $0.config.name == "jira" })?.isShown ?? false
-                toggleItem("Toggle Jira", shown) {
-                    self.toggleCommand("jira")
-                }
-                menu.addItem(self.menuItem("Open Jira Config Window") { [weak self] in
-                    self?.showJiraDashboard()
-                })
-            } else {
-                toggleItem("Enable Jira", false) {
-                    self.enableJiraChecked()
-                }
-            }
+            // (no jira items: this menu is the notes view's own — Jira Config
+            // lives on the jira view's menu, Enable Jira in the menu bar)
             // Vim mode toggle — reads the LIVE spec (cmd is this window's
             // launch snapshot)
             if cmd.kind == .note {
@@ -4406,8 +4432,13 @@ private func trimmed(_ s: String) -> String? {
             configItem.action = #selector(MenuActionTarget.run)
             menuActionTargets.append(cfgTarget)
             menu.addItem(configItem)
+            menu.addItem(self.shortcutsMenuItem(for: w, view: "notes"))
 
             w.showHeaderMenu(menu)
+        }
+        w.onShowShortcuts = { [weak self, weak w] in
+            guard let self, let w else { return }
+            self.showShortcuts(on: w, view: "notes")
         }
         // "+" pill: choose to open an EXISTING file as a tab (open panel) or
         // create a NEW note in the default dir (next to the first note). Both
@@ -4961,7 +4992,7 @@ private func trimmed(_ s: String) -> String? {
         subWindows.append(w)
         if settings.sharedWindow {
             // Cmd+W: hide the shared window (Esc never does, see above)
-            w.onEscape = { [weak self] in self?.slot.hide() }
+            w.onEscape = { [weak self] in self?.slot.hide("Cmd+W") }
             placeSlotWindow(w)
         }
         w.show()
@@ -5377,6 +5408,34 @@ private func trimmed(_ s: String) -> String? {
     // "Hide When Focus Is Lost" (header icon menu): the per-window inverse of
     // `sticky`. Esc always dismisses; this adds hiding when another app takes
     // focus. Turning it on also re-enables the global [app] switch.
+    // "Keyboard Shortcuts…" (every view's kitchen sink menu; Cmd+/ too):
+    // commands.conf [shortcuts] — this view's first, then "Everywhere"
+    func shortcutsMenuItem(for w: PopupWindow, view: String) -> NSMenuItem {
+        let item = menuItem("Keyboard Shortcuts…") { [weak self, weak w] in
+            guard let self, let w else { return }
+            self.showShortcuts(on: w, view: view)
+        }
+        item.keyEquivalent = "/"
+        item.keyEquivalentModifierMask = .command
+        return item
+    }
+
+    func showShortcuts(on w: PopupWindow, view: String) {
+        let titles = ["notes": "Notes", "files": "Files", "jira": "Jira"]
+        func items(_ v: String) -> [(keys: String, what: String)] {
+            shortcutEntries.filter { $0.view == v }.map { ($0.keys, $0.what) }
+        }
+        var groups: [PopupWindow.ShortcutGroup] = []
+        if let t = titles[view], !items(view).isEmpty { groups.append((t, items(view))) }
+        if !items("all").isEmpty { groups.append(("Everywhere", items("all"))) }
+        guard !groups.isEmpty else {
+            w.showToast("No shortcuts listed — add a [shortcuts] section to commands.conf",
+                        symbol: "keyboard")
+            return
+        }
+        w.showShortcuts(groups)
+    }
+
     func focusLossMenuItem(for w: PopupWindow, section: String) -> NSMenuItem {
         let on = !w.config.sticky && settings.hideOnFocusLoss
         return menuItem("Hide When Focus Is Lost", state: on) { [weak self, weak w] in
@@ -6169,7 +6228,13 @@ private func trimmed(_ s: String) -> String? {
                     self?.disableJiraAsking()
                 })
             }
+            menu.addItem(.separator())
+            menu.addItem(self.shortcutsMenuItem(for: w, view: cmd.name == "jira" ? "jira" : ""))
             w.showHeaderMenu(menu)
+        }
+        w.onShowShortcuts = { [weak self, weak w] in
+            guard let self, let w else { return }
+            self.showShortcuts(on: w, view: cmd.name == "jira" ? "jira" : "")
         }
 
         // combined filter: search (fuzzy) + dropdown selections, then the
@@ -6471,12 +6536,12 @@ private func trimmed(_ s: String) -> String? {
         RunLoop.main.add(watcher, forMode: .common)
         reloadWatcher = watcher
         w.copyConfigButtonLabel = ""
-        // "fit columns": every column as wide as its content, the window
-        // widened to hold them (saved like a divider drag)
+        // "fit columns" (the table header's corner cell / right-click): every
+        // column as wide as its content, the window widened to hold them
+        // (saved like a divider drag)
         if cmd.table && !columns.isEmpty {
-            w.headerButtons = [("fit columns", 20)]
-            w.onHeaderButton = { [weak self, weak w] id in
-                guard self != nil, id == 20, let w, let pcts = w.fitTableColumns() else { return }
+            w.onTableFit = { [weak w] in
+                guard let w, let pcts = w.fitTableColumns() else { return }
                 w.onTableColumnsResized?(pcts, true)
                 w.showToast("Columns fitted to their content", symbol: "arrow.left.and.right")
             }
@@ -6689,8 +6754,13 @@ private func trimmed(_ s: String) -> String? {
             configItem.action = #selector(MenuActionTarget.run)
             menuActionTargets.append(cfgTarget)
             menu.addItem(configItem)
+            menu.addItem(self.shortcutsMenuItem(for: w, view: "files"))
 
             w.showHeaderMenu(menu)
+        }
+        w.onShowShortcuts = { [weak self, weak w] in
+            guard let self, let w else { return }
+            self.showShortcuts(on: w, view: "files")
         }
 
         let favs = fileBrowserFavorites()
@@ -6724,7 +6794,7 @@ private func trimmed(_ s: String) -> String? {
         if cmd.startRecent { fb.showRecent() }
 
         w.onEscape = { [weak self] in
-            if settings.sharedWindow { self?.slot.hide() } else { w.hide(restore: true) }
+            if settings.sharedWindow { self?.slot.hide("Esc (files)") } else { w.hide(restore: true) }
         }
         w.onHide = { [weak self] restore in
             guard let self else { return }
@@ -8145,7 +8215,7 @@ extension SwitcherController {
         if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
         JiraDashboardWindow.show(controller: self, present: false)
         JiraDashboardWindow.current?.onSlotBack = { [weak self] in self?.slot.back() }
-        JiraDashboardWindow.current?.onSlotHide = { [weak self] in self?.slot.hide() }
+        JiraDashboardWindow.current?.onSlotHide = { [weak self] in self?.slot.hide("✕ / Cmd+W (Jira Config)") }
         slot.push(.config)
     }
 
