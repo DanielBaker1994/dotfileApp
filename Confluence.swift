@@ -1727,6 +1727,11 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
     private func showIconMenu() {
         guard let ch = chrome else { return }
         let menu = NSMenu()
+        menu.autoenablesItems = false   // keeps a greyed global item greyed
+        if let c = controller {
+            c.addGlobalWindowItems(to: menu)
+            menu.addItem(.separator())
+        }
         func add(_ t: String, _ f: @escaping () -> Void) {
             let target = MenuActionTarget(action: f)
             menuActionTargets.append(target)

@@ -6131,6 +6131,32 @@ final class PopupStatusBar: NSView {
     }
 }
 
+// MARK: - Header style
+
+// The drag header's LOOK, app-wide ([app] header-style; every view's icon
+// menu ▸ Header Style): each PopupChrome reads `current`, so notes / files /
+// jira / confluence / ai headers change together and stand apart from the
+// card, the tab strip and the panes below them. Every style is built from
+// the window's own theme (header color, accent, accent2), never fixed hues.
+public enum HeaderStyle: String, CaseIterable {
+    case flat, edge, stripe, tinted, glow, aurora
+
+    public var label: String {
+        switch self {
+        case .flat: return "Flat"
+        case .edge: return "Accent Edge"
+        case .stripe: return "Accent Stripe"
+        case .tinted: return "Tinted"
+        case .glow: return "Glow"
+        case .aurora: return "Aurora"
+        }
+    }
+
+    public static var current: HeaderStyle = .flat {
+        didSet { if current != oldValue { PopupChrome.redrawAll() } }
+    }
+}
+
 // MARK: - Chrome (drag + resize overlay)
 
 // Transparent overlay above the content that owns the window chrome: resize
@@ -6191,6 +6217,9 @@ var meterEnabled = false {
     var navOn: Int? { didSet { if navOn != oldValue { needsDisplay = true } } }
     private let navSize: CGFloat = 26
     private var navTipRects: [NSRect] = []
+    // addToolTip does NOT retain its owner: a temporary NSString was freed
+    // and the tooltip timer crashed messaging it — keep them alive here
+    private var navTipOwners: [NSString] = []
     func navRect(_ i: Int) -> NSRect {
         let x0 = headerIcon != nil ? iconButtonRect.maxX + 6
             : config.headerCloseButton ? closeButtonRect.maxX + 6 : 6
@@ -6481,18 +6510,65 @@ private func headerButtonFont(_ label: String) -> NSFont {
         return w + 20
     }
 
-    // Slim drag header for editors: solid background + hairline + title.
+    // every chrome on screen (a header style change restyles them all)
+    static func redrawAll() {
+        func walk(_ v: NSView) {
+            if let c = v as? PopupChrome { c.needsDisplay = true }
+            v.subviews.forEach(walk)
+        }
+        for w in NSApp.windows { if let v = w.contentView { walk(v) } }
+    }
+
+    // the header strip in HeaderStyle.current: the fill, then its bottom edge
+    private func drawHeaderBackground(_ header: NSRect) {
+        let base = headerColorOverride ?? config.headerColor ?? config.colors.background
+        let alpha = (base.usingColorSpace(.sRGB) ?? base).alphaComponent
+        let accent = config.colors.accent, accent2 = config.colors.palette.accent2
+        // `base` pulled toward a theme hue, keeping the header's transparency
+        func mix(_ c: NSColor, _ t: CGFloat) -> NSColor {
+            let b = base.withAlphaComponent(1)
+            return (b.blended(withFraction: t, of: c.withAlphaComponent(1)) ?? b).withAlphaComponent(alpha)
+        }
+        func bottomLine(_ c: NSColor, _ width: CGFloat) {
+            c.setFill()
+            NSRect(x: 0, y: header.maxY - width, width: header.width, height: width).fill()
+        }
+        switch HeaderStyle.current {
+        case .flat:
+            base.setFill(); header.fill()
+            bottomLine(config.colors.hairline, 1)
+        case .edge:
+            // a crisp accent rule under the bar: the header reads as its own band
+            base.setFill(); header.fill()
+            bottomLine(accent.withAlphaComponent(0.9), 2)
+        case .stripe:
+            // a thin accent → accent2 ribbon along the top edge
+            base.setFill(); header.fill()
+            bottomLine(config.colors.hairline, 1)
+            NSGradient(colors: [accent, accent2])?
+                .draw(in: NSRect(x: 0, y: 0, width: header.width, height: 3), angle: 0)
+        case .tinted:
+            // the whole bar washed in the accent, edged in it
+            mix(accent, 0.20).setFill(); header.fill()
+            bottomLine(accent.withAlphaComponent(0.35), 1)
+        case .glow:
+            // accent light falling from the top edge into the header color
+            // (flipped view: angle 90 runs top → bottom)
+            NSGradient(starting: mix(accent, 0.40), ending: base)?.draw(in: header, angle: 90)
+            bottomLine(accent.withAlphaComponent(0.55), 1)
+        case .aurora:
+            // accent → accent2 → the header color, left to right
+            NSGradient(colors: [mix(accent, 0.36), mix(accent2, 0.26), base],
+                       atLocations: [0, 0.45, 1], colorSpace: .sRGB)?.draw(in: header, angle: 0)
+            bottomLine(accent2.withAlphaComponent(0.35), 1)
+        }
+    }
+
+    // Slim drag header for editors: styled background + edge + title.
     override func draw(_ dirtyRect: NSRect) {
         guard dragHeaderHeight > 0 else { return }
         let header = NSRect(x: 0, y: 0, width: bounds.width, height: dragHeaderHeight)
-        (headerColorOverride ?? config.headerColor ?? config.colors.background).setFill()
-        header.fill()
-        config.colors.hairline.setStroke()
-        let line = NSBezierPath()
-        line.lineWidth = 1
-        line.move(to: NSPoint(x: 0, y: dragHeaderHeight - 0.5))
-        line.line(to: NSPoint(x: bounds.width, y: dragHeaderHeight - 0.5))
-        line.stroke()
+        drawHeaderBackground(header)
         // button cluster first: the centered title must avoid it when a window
         // carries many header buttons (e.g. the doctor's poll targets)
         let segs = headerSegs()
@@ -6617,7 +6693,8 @@ private func headerButtonFont(_ label: String) -> NSFont {
             if tips != navTipRects {
                 navTipRects = tips
                 removeAllToolTips()
-                for (i, r) in tips.enumerated() { addToolTip(r, owner: navIcons[i].tip as NSString, userData: nil) }
+                navTipOwners = navIcons.map { $0.tip as NSString }
+                for (i, r) in tips.enumerated() { addToolTip(r, owner: navTipOwners[i], userData: nil) }
             }
         }
         // header buttons (right side): "copy config" (copy the config file

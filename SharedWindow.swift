@@ -109,7 +109,11 @@ final class SharedWindow {
             return
         }
         guard settings.hideOnFocusLoss else { return }
-        if let p = m as? PopupWindow, p.config.sticky || p.isShowingMenu { return }
+        // float off = the window is an AeroSpace TILE: alt-hjkl to the tile
+        // beside it is moving around the layout, not leaving — never hide
+        guard settings.float else { return }
+        // one global switch for every view (no per-view `sticky` here)
+        if let p = m as? PopupWindow, p.isShowingMenu { return }
         hide("focus loss → \(front)", restoreFocus: false)
     }
 

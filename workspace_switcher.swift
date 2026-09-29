@@ -1127,6 +1127,7 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
     if let v = str("focus-loss-delay"), let n = Double(v), n >= 0 { settings.focusLossDelay = min(n, 5) }
     if let v = tri(str("float")) { settings.float = v }
+    HeaderStyle.current = str("header-style").flatMap { HeaderStyle(rawValue: $0.lowercased()) } ?? .flat
     if let v = tri(str("shared-window")) { settings.sharedWindow = v }
     if let v = tri(str("preload")) { settings.preload = v }
     if let v = str("shared-width"), let n = Double(v), n >= 400 { settings.sharedWidth = CGFloat(n) }
@@ -1180,8 +1181,8 @@ final class ThemePreviewDelegate: NSObject, NSMenuDelegate {
         self.onClose = onClose
     }
     func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
-        // only preset rows carry a submenu; Custom/Reset rows restore
-        let tag = (item?.submenu != nil) ? item?.tag : nil
+        // only preset rows carry their index; Custom/Reset rows restore
+        let tag = item?.representedObject as? Int
         guard tag != current else { return }
         current = tag
         onHighlight(tag)
@@ -1189,6 +1190,23 @@ final class ThemePreviewDelegate: NSObject, NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) {
         current = nil
         if !committed { onClose() }
+    }
+}
+
+// Header Style ▸ hover preview: the highlighted style shows on every window
+// at once; closing the menu without a pick restores the saved one
+final class HeaderStylePreviewDelegate: NSObject, NSMenuDelegate {
+    private let original: HeaderStyle
+    var committed = false
+    init(original: HeaderStyle) { self.original = original }
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        guard !committed else { return }
+        let all = HeaderStyle.allCases
+        if let t = item?.tag, all.indices.contains(t) { HeaderStyle.current = all[t] }
+        else { HeaderStyle.current = original }
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        if !committed { HeaderStyle.current = original }
     }
 }
 
@@ -1205,6 +1223,12 @@ struct ThemePreset {
     let palette: PopupPalette // accent2 + status hues (jira cells, ANSI, ✕ hover)
 
     var isLight: Bool { background.relativeLuminance > 0.45 }
+    // Theme menu group: mid-tone cards (slate / dusk: Nord, Frappé,
+    // Everforest…) vs the deep ones vs light
+    enum Tone: Int { case mid, dark, light }
+    var tone: Tone {
+        isLight ? .light : background.relativeLuminance >= 0.017 ? .mid : .dark
+    }
 
     // commands.toml [themes]:
     //   Name = bg, browser, terminal, header, text, dim, highlight[, accent[,
@@ -1247,6 +1271,20 @@ struct ThemePreset {
         ("Rosé Pine", "191724, 1F1D2E, 16141F, 12101A, E0DEF4, 908CAA, 403D52, EBBCBA, C4A7E7, 9CCFD8, F6C177, EB6F92, 31748F"),
         ("Solarized Dark", "002B36, 073642, 00212B, 001E26, 93A1A1, 657B83, 0A4A5A, 268BD2, 6C71C4, 859900, B58900, DC322F, 2AA198"),
         ("Graphite", "1E1E1E, 252525, 181818, 151515, E5E5E5, 9A9A9A, 3A3A3A, 0A84FF, BF5AF2, 30D158, FFD60A, FF453A, 64D2FF"),
+        ("Catppuccin Frappé", "303446, 292C3C, 232634, 232634, C6D0F5, A5ADCE, 51576D, CA9EE6, 8CAAEE, A6D189, E5C890, E78284, 81C8BE"),
+        ("Tokyo Night Moon", "222436, 1E2030, 191B29, 171927, C8D3F5, 9AA5CE, 2D3F76, 82AAFF, C099FF, C3E88D, FFC777, FF757F, 86E1FC"),
+        ("Rosé Pine Moon", "232136, 2A273F, 1D1B2E, 19172A, E0DEF4, 908CAA, 44415A, EA9A97, C4A7E7, 9CCFD8, F6C177, EB6F92, 3E8FB0"),
+        ("Everforest Dark", "2D353B, 272E33, 232A2E, 1E2326, D3C6AA, 9DA9A0, 475258, A7C080, D699B6, 83C092, DBBC7F, E67E80, 7FBBB3"),
+        ("Palenight", "292D3E, 232635, 1E2130, 1B1E2B, A6ACCD, 8087A2, 444267, C792EA, 82AAFF, C3E88D, FFCB6B, F07178, 89DDFF"),
+        ("GitHub Dark Dimmed", "22272E, 1C2128, 1A1E24, 161B22, ADBAC7, 8B98A5, 373E47, 539BF5, DCBDFB, 57AB5A, C69026, E5534B, 96D0FF"),
+        ("Ayu Mirage", "1F2430, 1C212B, 171B24, 141820, CCCAC2, 8A9199, 33415E, FFCC66, DFBFFF, D5FF80, FFD173, F28779, 5CCFE6"),
+        ("Monokai Pro", "2D2A2E, 221F22, 19181A, 171517, FCFCFA, 939293, 403E41, FFD866, AB9DF2, A9DC76, FC9867, FF6188, 78DCE8"),
+        ("Synthwave '84", "262335, 241B2F, 1E1A29, 171520, F0EFF5, 9D98C4, 463465, FF7EDB, 36F9F6, 72F1B8, FEDE5D, FE4450, 03EDF9"),
+        ("Kanagawa Wave", "1F1F28, 1A1A22, 16161D, 131318, DCD7BA, C8C093, 2D4F67, 7E9CD8, 957FB8, 98BB6C, E6C384, E46876, 7FB4CA"),
+        ("Nightfox", "192330, 131A24, 111720, 0F141C, CDCECF, AEAFB0, 2B3B51, 719CD6, 9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"),
+        ("Poimandres", "1B1E28, 171922, 13151D, 111219, E4F0FB, A6ACCD, 303340, 5DE4C7, FCC5E9, 5FB3A1, FFFAC2, D0679D, 89DDFF"),
+        ("Night Owl", "011627, 01111D, 010E17, 000C14, D6DEEB, 8BA1B7, 1D3B53, 82AAFF, C792EA, ADDB67, ECC48D, EF5350, 7FDBCA"),
+        ("Kanagawa Dragon", "181616, 12120F, 0D0C0C, 0B0A0A, C5C9C5, A6A69C, 2D4F67, 8BA4B0, A292A3, 87A987, C4B28A, C4746E, 8EA4A2"),
         ("Catppuccin Latte", "EFF1F5, E6E9EF, DCE0E8, DCE0E8, 4C4F69, 6C6F85, BCC0CC, 8839EF, 1E66F5, 40A02B, DF8E1D, D20F39, 179299"),
         ("Tokyo Night Day", "E1E2E7, D5D6DB, D0D5E3, C8CCD9, 3760BF, 6172B0, B7C1E3, 2E7DE9, 9854F1, 587539, 8C6C3E, F52A65, 007197"),
         ("Solarized Light", "FDF6E3, EEE8D5, EEE8D5, E4DDC8, 586E75, 839496, DDD6C1, 268BD2, D33682, 859900, B58900, DC322F, 2AA198"),
@@ -1379,6 +1417,7 @@ private let configEnumKeys: [String: Set<String>] = [
     "sort": ["name", "modified", "created", "size", "kind"],
     "sort-order": ["asc", "desc", "ascending", "descending"],
     "copy-format": ["tsv"],
+    "header-style": Set(HeaderStyle.allCases.map(\.rawValue)),
 ]
 
 // why `value` is invalid for `key` in [section], or nil when it's fine.
@@ -3091,6 +3130,12 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"unknown view\"}"
                 }
                 slot.open(v)
+            case _ where a.hasPrefix("header-style:"):
+                // live only (not written to commands.toml)
+                guard let st = HeaderStyle(rawValue: String(a.dropFirst(13))) else {
+                    return "{\"error\":\"unknown header style\"}"
+                }
+                HeaderStyle.current = st
             default: return "{\"error\":\"unknown action \(a)\"}"
             }
         }
@@ -3110,6 +3155,8 @@ final class SwitcherController: NSObject {
             "active": NSApp.isActive, "keyWindow": NSApp.keyWindow?.title ?? "",
             "windows": NSApp.windows.filter(\.isVisible).count,
             "palette": popup.isShown, "views": views,
+            "float": settings.float, "hideOnFocusLoss": settings.hideOnFocusLoss,
+            "headerStyle": HeaderStyle.current.rawValue,
         ]
         guard let d = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) else { return "{}" }
         return String(decoding: d, as: UTF8.self)
@@ -4317,7 +4364,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = settings.float   // global switch (floatMenuItem)
+        cfg.floating = settings.float   // global switch (addGlobalWindowItems)
         // shared window: Esc belongs to vim / the shell — never closes notes
         // (hide with the hotkey, Cmd+W or ✕)
         cfg.escCloseCount = settings.sharedWindow ? 0 : max(0, cmd.escClose ?? settings.escClose)
@@ -4475,6 +4522,7 @@ private func trimmed(_ s: String) -> String? {
     }
     // the open Theme menu's hover-preview delegate (NSMenu holds it weakly)
     private var themePreviewDelegate: ThemePreviewDelegate?
+    private var headerStylePreviewDelegate: HeaderStylePreviewDelegate?
 
     // surfaces this window can style: notes = all four, files = the explorer
     private func themeScopes(for w: PopupWindow) -> [(ThemeScope, String)] {
@@ -4511,12 +4559,36 @@ private func trimmed(_ s: String) -> String? {
             onClose: { [weak w] in if let w { snapshot.restore(w) } })
         themeMenu.delegate = preview
         themePreviewDelegate = preview
-        for (i, p) in presets.enumerated() {
-            if i > 0, p.isLight, !presets[i - 1].isLight {
-                themeMenu.addItem(.separator())
+        // grouped Mid Tones / Dark / Light, brightest first inside a group
+        let order = presets.indices.sorted {
+            let a = presets[$0], b = presets[$1]
+            if a.tone != b.tone { return a.tone.rawValue < b.tone.rawValue }
+            return a.background.relativeLuminance > b.background.relativeLuminance
+        }
+        let toneTitles: [ThemePreset.Tone: String] = [.mid: "Mid Tones", .dark: "Dark", .light: "Light"]
+        var lastTone: ThemePreset.Tone?
+        for i in order {
+            let p = presets[i]
+            if p.tone != lastTone {
+                if lastTone != nil { themeMenu.addItem(.separator()) }
+                themeMenu.addItem(.sectionHeader(title: toneTitles[p.tone] ?? ""))
+                lastTone = p.tone
             }
-            let item = NSMenuItem(title: p.name, action: nil, keyEquivalent: "")
+            // one surface (Whole Window only): the row itself applies the
+            // preset; several: a Whole Window / per-surface submenu
+            let item: NSMenuItem
+            if scopes.count == 1 {
+                item = menuItem(p.name) { [weak self, weak w] in
+                    guard let self, let w else { return }
+                    preview.committed = true
+                    snapshot.restore(w)
+                    self.applyThemePreset(p, scope: .window, to: w, section: section)
+                }
+            } else {
+                item = NSMenuItem(title: p.name, action: nil, keyEquivalent: "")
+            }
             item.tag = i
+            item.representedObject = i   // a preset row (hover previews it)
             item.image = p.swatch()
             let matches = w.config.editMode ? currentBg == hexString(p.background)
                                             : currentBrowser == hexString(p.background)
@@ -4539,7 +4611,7 @@ private func trimmed(_ s: String) -> String? {
                 sub.addItem(si)
                 if scope == .window && scopes.count > 1 { sub.addItem(.separator()) }
             }
-            item.submenu = sub
+            if scopes.count > 1 { item.submenu = sub }
             themeMenu.addItem(item)
         }
         themeMenu.addItem(.separator())
@@ -4584,6 +4656,33 @@ private func trimmed(_ s: String) -> String? {
         let tItem = NSMenuItem(title: "Transparency", action: nil, keyEquivalent: "")
         tItem.submenu = tMenu
         menu.addItem(tItem)
+    }
+
+    // Header Style ▸ (app-wide [app] header-style): hovering a style previews
+    // it on every open window, closing without a pick puts it back
+    func headerStyleMenuItem() -> NSMenuItem {
+        let sub = NSMenu(title: "Header Style")
+        let original = HeaderStyle.current
+        let preview = HeaderStylePreviewDelegate(original: original)
+        sub.delegate = preview
+        headerStylePreviewDelegate = preview
+        for (i, style) in HeaderStyle.allCases.enumerated() {
+            let item = menuItem(style.label, state: style == original) { [weak self] in
+                preview.committed = true
+                self?.setHeaderStyle(style)
+            }
+            item.tag = i
+            sub.addItem(item)
+        }
+        let item = NSMenuItem(title: "Header Style", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
+    func setHeaderStyle(_ style: HeaderStyle) {
+        HeaderStyle.current = style
+        saveConfigValue(section: "app", key: "header-style", value: style.rawValue)
+        log("[app] header-style = \(style.rawValue)")
     }
 
     private func themeRoles(for scope: ThemeScope, window w: PopupWindow) -> [PopupWindow.ThemeRole] {
@@ -4720,14 +4819,57 @@ private func trimmed(_ s: String) -> String? {
         log("theme reset for [\(section)] — back to system defaults")
     }
 
-    // "Float Above Other Windows" (header icon menu): the GLOBAL `[app] float`
-    // — one switch for every app in the shared window (notes, files, jira,
-    // confluence, ai). On = above every app + AeroSpace floating; off = a
-    // normal window that AeroSpace tiles.
-    func floatMenuItem(for w: PopupWindow, section: String) -> NSMenuItem {
-        menuItem("Float Above Other Windows", state: settings.float) { [weak self] in
-            self?.setGlobalFloat(!settings.float)
+    // The GLOBAL window mode — "Global Window Options ▸", the FIRST item of every view's icon menu
+    // (notes, files, jira, confluence, ai) and of the menu-bar menu; it
+    // changes every app in the shared window at once. ONE choice of three
+    // (float + focus loss bundled, so the impossible "tiled but hides on
+    // focus loss" can't be picked — a tile's alt-hjkl away is layout
+    // navigation, not leaving):
+    //   Float, Hide When Focus Is Lost       float = true,  hide-on-focus-loss = true
+    //   Float, Stay Open When Focus Is Lost  float = true,  hide-on-focus-loss = false
+    //   Tile, Stay Open When Focus Is Lost   float = false  (a tile never hides)
+    // plus Header Style ▸ (`[app] header-style`).
+    func addGlobalWindowItems(to parent: NSMenu) {
+        let menu = NSMenu(title: "Global Window Options")
+        menu.autoenablesItems = false
+        let group = NSMenuItem(title: "Global Window Options", action: nil, keyEquivalent: "")
+        group.submenu = menu
+        parent.addItem(group)
+        let modes: [(String, Bool, Bool)] = [
+            ("Float, Hide When Focus Is Lost", true, true),
+            ("Float, Stay Open When Focus Is Lost", true, false),
+            ("Tile, Stay Open When Focus Is Lost", false, settings.hideOnFocusLoss),
+        ]
+        for (title, float, hide) in modes {
+            let on = settings.float == float && (!float || settings.hideOnFocusLoss == hide)
+            let item = menuItem(title, state: on) { [weak self] in
+                guard let self else { return }
+                if float && settings.hideOnFocusLoss != hide { self.setGlobalHideOnFocusLoss(hide) }
+                if settings.float != float { self.setGlobalFloat(float) }
+            }
+            item.toolTip = float
+                ? (hide ? "Above every app; hides when you switch to another app"
+                        : "Above every app; stays until Esc / ✕ / the hotkey")
+                : "A normal window AeroSpace tiles; stays open when you switch apps"
+            menu.addItem(item)
         }
+        menu.addItem(headerStyleMenuItem())
+    }
+
+    // global switch: every shared-window app follows it, so their per-window
+    // `sticky` is dropped (it would silently override the switch)
+    func setGlobalHideOnFocusLoss(_ on: Bool) {
+        settings.hideOnFocusLoss = on
+        saveConfigValue(section: "app", key: "hide-on-focus-loss", value: on ? "true" : "false")
+        for v in Self.floatSwitchViews {
+            guard let p = slotMember(v) as? PopupWindow, p.config.sticky else { continue }
+            p.config.sticky = false
+            if let i = commands.firstIndex(where: { $0.windowName == p.config.name }) {
+                commands[i].sticky = false
+                removeConfigValue(section: commands[i].name, key: "sticky")
+            }
+        }
+        log("[app] hide-on-focus-loss = \(on)")
     }
 
     // the apps the float switch owns. NOT the Hyper+S popup or the "/"
@@ -4793,9 +4935,6 @@ private func trimmed(_ s: String) -> String? {
         }
     }
 
-    // "Hide When Focus Is Lost" (header icon menu): the per-window inverse of
-    // `sticky`. Esc always dismisses; this adds hiding when another app takes
-    // focus. Turning it on also re-enables the global [app] switch.
     // "Keyboard Shortcuts…" (every view's kitchen sink menu; Cmd+/ too):
     // commands.toml [shortcuts] — this view's first, then "Everywhere"
     func shortcutsMenuItem(for w: PopupWindow, view: String) -> NSMenuItem {
@@ -4822,24 +4961,6 @@ private func trimmed(_ s: String) -> String? {
             return
         }
         w.showShortcuts(groups)
-    }
-
-    func focusLossMenuItem(for w: PopupWindow, section: String) -> NSMenuItem {
-        let on = !w.config.sticky && settings.hideOnFocusLoss
-        return menuItem("Hide When Focus Is Lost", state: on) { [weak self, weak w] in
-            guard let self, let w else { return }
-            let hide = !on
-            w.config.sticky = !hide
-            if let i = self.commands.firstIndex(where: { $0.name == section }) {
-                self.commands[i].sticky = !hide
-            }
-            saveConfigValue(section: section, key: "sticky", value: hide ? "false" : "true")
-            if hide && !settings.hideOnFocusLoss {
-                settings.hideOnFocusLoss = true
-                saveConfigValue(section: "app", key: "hide-on-focus-loss", value: "true")
-            }
-            self.log("[\(section)] hide on focus loss = \(hide)")
-        }
     }
 
     // MARK: Interactive color picker (header paint-brush button)
@@ -5321,7 +5442,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = settings.float   // global switch (floatMenuItem)
+        cfg.floating = settings.float   // global switch (addGlobalWindowItems)
         // shared window: one Esc hides it (the filter bar clears itself first)
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
@@ -5353,7 +5474,8 @@ private func trimmed(_ s: String) -> String? {
             guard let self, let w else { return }
             let menu = NSMenu()
             menu.autoenablesItems = false
-
+            self.addGlobalWindowItems(to: menu)
+            menu.addItem(.separator())
             self.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
             // open config in the notes window
@@ -5628,6 +5750,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "workspace-switcher"
         let menu = NSMenu()
         menu.delegate = MenuTarget.shared  // for checkmark updates
+        menu.autoenablesItems = false      // the tiled-greyed focus-loss item
         // shown only while commands.toml has validation findings
         let issues = NSMenuItem(title: "Config Issues…",
                                 action: #selector(MenuTarget.showConfigIssues(_:)),
@@ -5636,7 +5759,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         issues.tag = MenuTarget.configIssuesTag
         issues.isHidden = configIssues.isEmpty
         menu.addItem(issues)
-        menu.addItem(.separator())
+        // the global window switches (float / tile, hide on focus loss,
+        // header style) — the same group that leads every view's icon menu,
+        // rebuilt on every open by menuNeedsUpdate (MenuTarget.globalGroupTag)
+        let globalEnd = NSMenuItem.separator()
+        globalEnd.tag = MenuTarget.globalGroupTag
+        menu.addItem(globalEnd)
 
         // File-like section: resets and close
         addMenuItem(menu, "Reset Default Size", #selector(MenuTarget.resetWindowSize(_:)), key: "0", modifiers: .command)
@@ -5682,8 +5810,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsItem.submenu = settingsMenu
         menu.addItem(settingsItem)
 
-        addMenuItem(settingsMenu, "Hide on Focus Loss", #selector(MenuTarget.toggleHideOnFocusLoss(_:)), key: "")
-        addMenuItem(settingsMenu, "Float Windows Above Others", #selector(MenuTarget.toggleFloat(_:)), key: "")
         // Vim Mode toggle — only when a note command is configured
         if c.commands.contains(where: { $0.kind == .note }) {
             addMenuItem(settingsMenu, "Vim Mode (Notes)", #selector(MenuTarget.toggleVimMode(_:)), key: "")
@@ -5791,6 +5917,7 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     // MARK: NSMenuDelegate — update checkmarks before the menu opens
     static let configIssuesTag = 7401
+    static let globalGroupTag = 7402
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         if let item = menu.item(withTag: MenuTarget.configIssuesTag) {
@@ -5801,6 +5928,20 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 : "⚠ Config Warnings (\(configIssues.count))…"
         }
         guard let controller = MenuTarget.controller else { return }
+        // the global group sits right above its tagged separator: drop the
+        // old copy, insert a fresh one (current checkmarks + greying)
+        if let end = menu.items.firstIndex(where: { $0.tag == MenuTarget.globalGroupTag }) {
+            var start = end
+            while start > 0, menu.items[start - 1].tag == MenuTarget.globalGroupTag + 1 { start -= 1 }
+            for _ in start..<end { menu.removeItem(at: start) }
+            let group = NSMenu()
+            controller.addGlobalWindowItems(to: group)
+            for (k, it) in group.items.enumerated() {
+                group.removeItem(it)
+                it.tag = MenuTarget.globalGroupTag + 1
+                menu.insertItem(it, at: start + k)
+            }
+        }
         // Find the key PopupWindow (the one currently focused)
         let keyWindow = NSApp.keyWindow
         var keyPopup: PopupWindow?
@@ -5830,8 +5971,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 item.isHidden = !aiEnabled()
             case #selector(toggleHealthChecks(_:)):
                 item.state = windowState(for: "health-checks", controller: controller)
-            case #selector(toggleHideOnFocusLoss(_:)):
-                item.state = settings.hideOnFocusLoss ? .on : .off
             case #selector(toggleVimMode(_:)):
                 item.state = vimModeEnabled ? .on : .off
             default:
@@ -5843,10 +5982,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
             if let submenu = item.submenu {
                 for subItem in submenu.items {
                     switch subItem.action {
-                    case #selector(toggleHideOnFocusLoss(_:)):
-                        subItem.state = settings.hideOnFocusLoss ? .on : .off
-                    case #selector(toggleFloat(_:)):
-                        subItem.state = settings.float ? .on : .off
                     case #selector(toggleVimMode(_:)):
                         subItem.state = vimModeEnabled ? .on : .off
                     default:
@@ -6000,15 +6135,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     // MARK: Settings toggles
 
-    @objc func toggleHideOnFocusLoss(_ sender: Any?) {
-        settings.hideOnFocusLoss.toggle()
-        saveConfigValue(section: "app", key: "hide-on-focus-loss", value: settings.hideOnFocusLoss ? "true" : "false")
-    }
-
-    @objc func toggleFloat(_ sender: Any?) {
-        MenuTarget.controller?.setGlobalFloat(!settings.float)
-    }
-
     @objc func toggleVimMode(_ sender: Any?) {
         MenuTarget.controller?.toggleVimModeForNotes()
     }
@@ -6017,8 +6143,10 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         // Reset to defaults: remove custom values from commands.toml
         settings.hideOnFocusLoss = true
         removeConfigValue(section: "app", key: "hide-on-focus-loss")
-        MenuTarget.controller?.setGlobalFloat(true)
+        MenuTarget.controller?.setGlobalFloat(false)   // the [app] float default
         removeConfigValue(section: "app", key: "float")
+        HeaderStyle.current = .flat
+        removeConfigValue(section: "app", key: "header-style")
         removeConfigValue(section: "notes", key: "vim-mode")
         removeConfigValue(section: "notes", key: "vim-bin")
     }
@@ -6057,12 +6185,10 @@ extension SwitcherController {
     }
 
     // closure-backed menu item (targets retained in menuActionTargets)
-    // the window-settings block of every view's icon menu: focus loss, float,
-    // theme presets + transparency, reset size / colors
+    // the window-settings block of every view's icon menu: theme presets,
+    // transparency, reset size / colors (the global float / focus-loss /
+    // header-style switches lead the menu: addGlobalWindowItems)
     func addWindowSettingsItems(to menu: NSMenu, window w: PopupWindow, section: String) {
-        menu.addItem(focusLossMenuItem(for: w, section: section))
-        menu.addItem(floatMenuItem(for: w, section: section))
-        menu.addItem(.separator())
         addThemeMenus(to: menu, window: w, section: section)
         menu.addItem(.separator())
         menu.addItem(menuItem("Reset Default Size") { w.resetToDefaultSize() })
@@ -6793,6 +6919,8 @@ extension SwitcherController {
         private func showIconMenu() {
             let menu = NSMenu()
             menu.autoenablesItems = false
+            host.addGlobalWindowItems(to: menu)
+            menu.addItem(.separator())
 
             // — toggles (checkmark shows state) —
             func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
@@ -8036,6 +8164,8 @@ extension SwitcherController {
         private func showIconMenu() {
             let menu = NSMenu()
             menu.autoenablesItems = false
+            host.addGlobalWindowItems(to: menu)
+            menu.addItem(.separator())
             if cmd.name == "jira" {
                 // jira: config, paths, jobs, queries, curls, columns — all
                 // live in the Jira Config window; this menu is window chrome

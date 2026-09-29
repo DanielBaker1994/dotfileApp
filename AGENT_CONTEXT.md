@@ -120,7 +120,9 @@ bin/ui-test.sh --verbose
   Esc: notes never (`escCloseCount 0`, Cmd+W / ✕ / hotkey hide), jira = back.
   Focus loss: ONE path for every view (`checkFocusLoss`, popups set
   `hostHandlesFocusLoss`): after `[app] focus-loss-delay` (0.3s) and
-  `focusLeft(w)` → `hide(…, restoreFocus: false)` (parks, never tears down);
+  `focusLeft(w)` → `hide(…, restoreFocus: false)` (parks, never tears down;
+  NEVER with `[app] float = false` — the window is a tile, alt-hjkl away
+  is layout navigation);
   within 1s of a view swap it was stolen (aerospace focusing the next
   window) → the view is re-shown instead.
 - `RecentFiles.swift` — the file browser's pinned "Recent" + "Arrived" views:
@@ -721,7 +723,21 @@ Line numbers drift; grep the symbol names (they're stable).
 - Host builds colors with `windowColors(cmd)` (every opener) /
   `jiraWindowColors()` (Jira Config + pickers, `JC` in JiraDashboard.swift).
   Per-window keys: text/dim/highlight/accent-color + `palette` (5 hex).
-- `ThemePreset` (13 colors, swatch = mini window). Live: `setTextColors(…,
+- Global window switches (`addGlobalWindowItems`, ONE "Global Window
+  Options ▸" submenu): the FIRST item of every
+  view's icon menu (notes, files, jira/detail, confluence, ai) and of the
+  menu-bar menu (re-inserted by `MenuTarget.menuNeedsUpdate` above the
+  `globalGroupTag` separator): ONE mode of three — Float, Hide When Focus
+  Is Lost / Float, Stay Open When Focus Is Lost / Tile, Stay Open When
+  Focus Is Lost (`[app] float` +
+  `hide-on-focus-loss` bundled: tiled never hides;
+  `setGlobalHideOnFocusLoss` drops the views' `sticky`), Header Style ▸.
+- `HeaderStyle` (PopupWindow.swift, `[app] header-style`: flat / edge /
+  stripe / tinted / glow / aurora): `PopupChrome.drawHeaderBackground`, built
+  from the header color + accent + accent2; setting `current` redraws every
+  chrome; the submenu previews on hover (`HeaderStylePreviewDelegate`).
+- `ThemePreset` (13 colors, swatch = mini window; Theme menu grouped Mid
+  Tones / Dark / Light by `tone`, brightest first). Live: `setTextColors(…,
   palette:, border:)` → `pushColors()` walks `PopupThemeable` views; also
   the shell's ANSI colors (`ansiPalette`) and vim (`vimPaletteLets` →
   `g:ws_accent…`, ONE `--cmd`: nvim allows max 10).
