@@ -16,6 +16,9 @@ ROOT="$(cd "$DIR/.." && pwd)"
 
 APP="$ROOT/$APP_NAME.app"
 BIN="$APP/Contents/MacOS/$APP_NAME"
+# SwiftTerm is fetched OUTSIDE the repo (SWIFTTERM_DIR, default ../SwiftTerm);
+# this is the only place the checkout path is spelled.
+TERM_SRC="$ROOT/$SWIFTTERM_DIR"
 TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
 TERM_LIB="$TERM_MOD_DIR/libSwiftTerm.a"
 TERM_SENTINEL="$ROOT/.build/.termbuilt"
@@ -35,8 +38,8 @@ stale() {
     [ "$(cat "$TERM_SENTINEL" 2>/dev/null)" = "$TERM_TARGET" ] || return 0
     # SwiftTerm is fetched at build time (bin/ensure-swiftterm.sh) — missing or
     # a different pin means this build needs to run.
-    [ -f "$ROOT/$SWIFTTERM_DIR/.ws-pinned" ] || return 0
-    [ "$(cat "$ROOT/$SWIFTTERM_DIR/.ws-pinned" 2>/dev/null)" = "$SWIFTTERM_PIN" ] || return 0
+    [ -f "$TERM_SRC/.ws-pinned" ] || return 0
+    [ "$(cat "$TERM_SRC/.ws-pinned" 2>/dev/null)" = "$SWIFTTERM_PIN" ] || return 0
     local f
     for f in "${SOURCES[@]}" "$ROOT/Info.plist"; do
         [ "$f" -nt "$BIN" ] && return 0
@@ -50,16 +53,16 @@ stale() {
 build_term_lib() {
     [ -f "$TERM_LIB" ] && [ -f "$TERM_SENTINEL" ] && \
         [ "$(cat "$TERM_SENTINEL" 2>/dev/null)" = "$TERM_TARGET" ] && \
-        [ -z "$(find "$ROOT"/Vendor/SwiftTerm/Sources "$ROOT"/Vendor/SwiftTerm/Generated \
+        [ -z "$(find "$TERM_SRC"/Sources "$TERM_SRC"/Generated \
             -name '*.swift' -newer "$TERM_SENTINEL" 2>/dev/null | head -1)" ] && return 0
     mkdir -p "$TERM_MOD_DIR"
     swiftc -O -swift-version 5 -target "$TERM_TARGET" -parse-as-library -emit-library -static -module-name SwiftTerm \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
-        "$ROOT"/Vendor/SwiftTerm/Generated/*.swift \
+        "$TERM_SRC"/Sources/SwiftTerm/*.swift \
+        "$TERM_SRC"/Sources/SwiftTerm/Apple/*.swift \
+        "$TERM_SRC"/Sources/SwiftTerm/Apple/Metal/*.swift \
+        "$TERM_SRC"/Sources/SwiftTerm/Mac/*.swift \
+        "$TERM_SRC"/Sources/SwiftTerm/Portable/*.swift \
+        "$TERM_SRC"/Generated/*.swift \
         -emit-module -emit-module-path "$TERM_MOD_DIR/SwiftTerm.swiftmodule" \
         -o "$TERM_LIB" >"$TERM_MOD_DIR/build.log" 2>&1 || {
             cat "$TERM_MOD_DIR/build.log" >&2

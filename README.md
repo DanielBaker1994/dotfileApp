@@ -126,9 +126,11 @@ The embedded terminal drawer (`config.terminal` in commands.toml) uses
 committed** — `bin/ensure-swiftterm.sh` shallow-clones the pinned upstream
 commit from `install.conf` (`SWIFTTERM_PIN`), applies
 `patches/swiftterm-cellstorage-cache.patch` (the perf fix the app was tested
-with) and generates the two `Generated/*.swift` files upstream builds, all
-into `Vendor/SwiftTerm/` (gitignored). It runs automatically before the
-SwiftTerm compile in `bin/build-app.sh`, so a normal build just works:
+with) and generates the two `Generated/*.swift` files upstream builds. It
+fetches into `install.conf`'s `SWIFTTERM_DIR` — by default **`../SwiftTerm`, a
+sibling of this repo, so the checkout never lives in the git tree**. It runs
+automatically before the SwiftTerm compile in `bin/build-app.sh`, so a normal
+build just works:
 
 ```bash
 ./build.sh            # first run fetches + precompiles SwiftTerm, then builds
@@ -137,7 +139,7 @@ bin/ensure-swiftterm.sh   # fetch/refresh it alone (no-op when already pinned)
 
 Needs network only when the pinned checkout is missing or the pin changed.
 `PopupWindow.swift` imports SwiftTerm; `bin/build-app.sh` compiles
-`Vendor/SwiftTerm/Sources` + `Generated` into a static lib (see `build_term_lib`).
+`$SWIFTTERM_DIR/Sources` + `Generated` into a static lib (see `build_term_lib`).
 
 ### Nerd font
 

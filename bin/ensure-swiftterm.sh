@@ -6,9 +6,10 @@
 # install.conf, applies patches/swiftterm-cellstorage-cache.patch (the perf
 # fix that makes up the copy this app was tested with) and runs upstream's
 # own generator for Generated/{GenBuildInfo,GenTerminfo}.swift — the two
-# files bin/build-app.sh compiles. The result lands in Vendor/SwiftTerm/
-# (gitignored) with a .ws-pinned marker; a run that finds the marker matching
-# SWIFTTERM_PIN is a no-op.
+# files bin/build-app.sh compiles. The result lands in install.conf's
+# SWIFTTERM_DIR — by default ../SwiftTerm, a sibling of this repo, so the
+# checkout lives OUTSIDE the git tree — with a .ws-pinned marker; a run that
+# finds the marker matching SWIFTTERM_PIN is a no-op.
 #
 # Called by bin/build-app.sh (and jira-doctor.sh) before the SwiftTerm build.
 # Needs network only when the pinned checkout is missing/wrong.
@@ -36,9 +37,11 @@ command -v git >/dev/null 2>&1 || { echo "ensure-swiftterm: git not found" >&2; 
 
 echo "ensure-swiftterm: fetching SwiftTerm $SWIFTTERM_PIN …" >&2
 
-TMP="$ROOT/Vendor/.swiftterm.tmp.$$"
+# build beside DEST (same filesystem) so the final mv is atomic; DEST may be
+# outside the repo, so never create it before the checkout is ready
+TMP="$(dirname "$DEST")/.swiftterm.tmp.$$"
 rm -rf "$TMP"
-mkdir -p "$ROOT/Vendor"
+mkdir -p "$(dirname "$TMP")"
 
 if ! git init -q "$TMP" \
     || ! git -C "$TMP" remote add origin "$SWIFTTERM_URL" \

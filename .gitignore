@@ -3,8 +3,9 @@ workspace-switcher.app/
 .build/
 .agents/
 
-# SwiftTerm (embedded terminal) is fetched at build time, pinned + patched
-# by bin/ensure-swiftterm.sh — never commit it
+# SwiftTerm (embedded terminal) is fetched at build time by
+# bin/ensure-swiftterm.sh into install.conf SWIFTTERM_DIR (../SwiftTerm, outside
+# this repo) — these catch a stray in-repo checkout so it can never be committed
 Vendor/SwiftTerm/
 Vendor/.swiftterm.tmp.*
 

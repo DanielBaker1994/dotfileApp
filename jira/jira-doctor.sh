@@ -19,6 +19,10 @@ FIX=0
 [ "${1:-}" = "--fix" ] && FIX=1
 
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../install.conf
+. "$WS_ROOT/install.conf"
+# SwiftTerm checkout lives outside the repo (install.conf SWIFTTERM_DIR)
+SWIFTTERM_SRC="$WS_ROOT/$SWIFTTERM_DIR"
 WS_APP="$WS_ROOT/workspace-switcher.app"
 WS_BIN="$WS_APP/Contents/MacOS/workspace-switcher"
 CONF_JSON="$HOME/.config/jira/config.json"
@@ -140,12 +144,12 @@ if [ -x "$WS_BIN" ]; then
             if [ ! -f "$WS_ROOT/.build/SwiftTerm/libSwiftTerm.a" ]; then
                 mkdir -p "$WS_ROOT/.build/SwiftTerm"
                 (cd "$WS_ROOT" && swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
-                    Vendor/SwiftTerm/Sources/SwiftTerm/*.swift \
-                    Vendor/SwiftTerm/Sources/SwiftTerm/Apple/*.swift \
-                    Vendor/SwiftTerm/Sources/SwiftTerm/Apple/Metal/*.swift \
-                    Vendor/SwiftTerm/Sources/SwiftTerm/Mac/*.swift \
-                    Vendor/SwiftTerm/Sources/SwiftTerm/Portable/*.swift \
-                    Vendor/SwiftTerm/Generated/*.swift \
+                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/*.swift \
+                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Apple/*.swift \
+                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Apple/Metal/*.swift \
+                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Mac/*.swift \
+                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Portable/*.swift \
+                    "$SWIFTTERM_SRC"/Generated/*.swift \
                     -emit-module -emit-module-path .build/SwiftTerm/SwiftTerm.swiftmodule \
                     -o .build/SwiftTerm/libSwiftTerm.a >/dev/null 2>&1)
             fi

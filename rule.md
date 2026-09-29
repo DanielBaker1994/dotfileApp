@@ -47,15 +47,16 @@ When working on this repo, ALWAYS verify you are in the real repo directory
 in a different repo or workspace. The install script is for installing the
 app — not for modifying git history anywhere.
 
-## 5. NEVER rebuild SwiftTerm (Vendor/SwiftTerm/) unless explicitly told to
+## 5. NEVER rebuild SwiftTerm (the fetched checkout) unless explicitly told to
 
-SwiftTerm in `Vendor/SwiftTerm/` is a third-party embedded terminal library.
-It is **not committed**: `bin/ensure-swiftterm.sh` fetches it at the pinned
-upstream commit from `install.conf` and applies
+SwiftTerm is a third-party embedded terminal library. It is **not committed**
+and does not live in this repo: `bin/ensure-swiftterm.sh` fetches it at the
+pinned upstream commit from `install.conf` into `SWIFTTERM_DIR` (default
+`../SwiftTerm`, outside the git tree) and applies
 `patches/swiftterm-cellstorage-cache.patch`. It is precompiled once into a
 static lib (`.build/SwiftTerm/libSwiftTerm.a`).
 
-- NEVER modify, edit, or refactor any code under `Vendor/SwiftTerm/` — it is
+- NEVER modify, edit, or refactor any code under the SwiftTerm checkout — it is
   fetched, so edits are lost; carry needed changes as a patch in `patches/`.
 - NEVER rebuild it (`build_term_lib`) unless the user explicitly requests it.
 - The build script auto-rebuilds it only when a SwiftTerm source file changes —
