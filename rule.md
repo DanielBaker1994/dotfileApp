@@ -50,13 +50,18 @@ app — not for modifying git history anywhere.
 ## 5. NEVER rebuild SwiftTerm (Vendor/SwiftTerm/) unless explicitly told to
 
 SwiftTerm in `Vendor/SwiftTerm/` is a third-party embedded terminal library.
-It is precompiled once into a static lib (`.build/SwiftTerm/libSwiftTerm.a`).
+It is **not committed**: `bin/ensure-swiftterm.sh` fetches it at the pinned
+upstream commit from `install.conf` and applies
+`patches/swiftterm-cellstorage-cache.patch`. It is precompiled once into a
+static lib (`.build/SwiftTerm/libSwiftTerm.a`).
 
-- NEVER modify, edit, or refactor any code under `Vendor/SwiftTerm/`.
+- NEVER modify, edit, or refactor any code under `Vendor/SwiftTerm/` — it is
+  fetched, so edits are lost; carry needed changes as a patch in `patches/`.
 - NEVER rebuild it (`build_term_lib`) unless the user explicitly requests it.
 - The build script auto-rebuilds it only when a SwiftTerm source file changes —
   do not touch those files, and it won't trigger.
-- If SwiftTerm is missing or broken, ask the user before rebuilding.
+- If SwiftTerm is missing or broken, ask the user before rebuilding (the build
+  fetches it automatically, so a missing directory is normally fine).
 ## 6. Transient overlays own the keyboard, and Esc closes only them
 
 Every popover / picker / dropdown opened from a window (the jira column

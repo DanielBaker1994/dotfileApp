@@ -119,22 +119,25 @@ every poll job is one entry of `endpoints` in `~/.config/jira/config.json`:
   `python3 jira/jira_poll.py --describe` (every job's schedule, JQL and curl).
 
 
-### Vendored SwiftTerm (one-time pull for the embedded terminal)
+### SwiftTerm (fetched at build time for the embedded terminal)
 
 The embedded terminal drawer (`config.terminal` in commands.toml) uses
-[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). The tested copy
-is vendored at `Vendor/SwiftTerm` — the one-time pull:
+[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) (MIT). It is **not
+committed** — `bin/ensure-swiftterm.sh` shallow-clones the pinned upstream
+commit from `install.conf` (`SWIFTTERM_PIN`), applies
+`patches/swiftterm-cellstorage-cache.patch` (the perf fix the app was tested
+with) and generates the two `Generated/*.swift` files upstream builds, all
+into `Vendor/SwiftTerm/` (gitignored). It runs automatically before the
+SwiftTerm compile in `bin/build-app.sh`, so a normal build just works:
 
 ```bash
-git clone https://github.com/migueldeicaza/SwiftTerm.git Vendor/SwiftTerm
-# pin to the commit the vendored copy was tested with (see git log there if
-# re-vendoring), or keep the checked-in copy — it builds as-is via:
-./build.sh
+./build.sh            # first run fetches + precompiles SwiftTerm, then builds
+bin/ensure-swiftterm.sh   # fetch/refresh it alone (no-op when already pinned)
 ```
 
-`PopupWindow.swift` imports SwiftTerm; the build script compiles
-`Vendor/SwiftTerm/Sources` implicitly through the `@_spi`/module import
-(see `bin/workspace_switcher.sh` for the exact swiftc invocation).
+Needs network only when the pinned checkout is missing or the pin changed.
+`PopupWindow.swift` imports SwiftTerm; `bin/build-app.sh` compiles
+`Vendor/SwiftTerm/Sources` + `Generated` into a static lib (see `build_term_lib`).
 
 ### Nerd font
 

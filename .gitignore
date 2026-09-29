@@ -3,6 +3,11 @@ workspace-switcher.app/
 .build/
 .agents/
 
+# SwiftTerm (embedded terminal) is fetched at build time, pinned + patched
+# by bin/ensure-swiftterm.sh — never commit it
+Vendor/SwiftTerm/
+Vendor/.swiftterm.tmp.*
+
 # generated docs
 README.html
 README.pdf

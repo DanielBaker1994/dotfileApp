@@ -12,7 +12,10 @@ Read and honor `rule.md` before touching any code. Key points:
 - Right-click menus in file browsers/terminal must offer obvious actions.
 - Config over code: user-facing strings/sizes/paths live in `commands.toml`.
 - NEVER run git commands in a backup workspace — verify you're in the real repo first.
-- NEVER rebuild or modify `Vendor/SwiftTerm/` unless explicitly told to. Don't ever read this  either, too expensive.
+- NEVER rebuild or modify `Vendor/SwiftTerm/` unless explicitly told to. It is
+  fetched (not committed) by `bin/ensure-swiftterm.sh` at the `install.conf`
+  `SWIFTTERM_PIN` + `patches/swiftterm-cellstorage-cache.patch`; don't read it
+  either, too expensive.
 
 ## Build
 

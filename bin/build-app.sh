@@ -33,6 +33,10 @@ shopt -u nullglob
 stale() {
     [ -x "$BIN" ] && [ -f "$TERM_LIB" ] || return 0
     [ "$(cat "$TERM_SENTINEL" 2>/dev/null)" = "$TERM_TARGET" ] || return 0
+    # SwiftTerm is fetched at build time (bin/ensure-swiftterm.sh) — missing or
+    # a different pin means this build needs to run.
+    [ -f "$ROOT/$SWIFTTERM_DIR/.ws-pinned" ] || return 0
+    [ "$(cat "$ROOT/$SWIFTTERM_DIR/.ws-pinned" 2>/dev/null)" = "$SWIFTTERM_PIN" ] || return 0
     local f
     for f in "${SOURCES[@]}" "$ROOT/Info.plist"; do
         [ "$f" -nt "$BIN" ] && return 0
@@ -40,7 +44,8 @@ stale() {
     return 1
 }
 
-# SwiftTerm (~230 files) is precompiled ONCE into a static lib + module;
+# SwiftTerm (~230 files) is fetched at the pinned upstream commit + patch by
+# bin/ensure-swiftterm.sh, then precompiled ONCE into a static lib + module;
 # rebuilt only when one of its sources changes OR the build target changes.
 build_term_lib() {
     [ -f "$TERM_LIB" ] && [ -f "$TERM_SENTINEL" ] && \
@@ -69,6 +74,7 @@ case "${1:-}" in
     *) echo "usage: build-app.sh [--force|--stale]" >&2; exit 2 ;;
 esac
 
+"$DIR/ensure-swiftterm.sh" || exit 1
 build_term_lib || exit 1
 
 mkdir -p "$(dirname "$BIN")"

@@ -133,8 +133,10 @@ if [ -x "$WS_BIN" ]; then
     done
     if [ "$STALE" = 1 ]; then
         if [ "$FIX" = 1 ]; then
-            # SwiftTerm is precompiled once (like bin/workspace_switcher.sh does) — build
-            # it here too if a repair is the first build on this machine.
+            # SwiftTerm is fetched at build time (bin/ensure-swiftterm.sh) and
+            # precompiled once (like bin/workspace_switcher.sh does) — build it
+            # here too if a repair is the first build on this machine.
+            "$WS_ROOT/bin/ensure-swiftterm.sh" >/dev/null 2>&1 || true
             if [ ! -f "$WS_ROOT/.build/SwiftTerm/libSwiftTerm.a" ]; then
                 mkdir -p "$WS_ROOT/.build/SwiftTerm"
                 (cd "$WS_ROOT" && swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
