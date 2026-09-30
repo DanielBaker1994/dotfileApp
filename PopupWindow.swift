@@ -341,6 +341,23 @@ public func makeUnixSockAddr(_ path: String) -> sockaddr_un {
     return addr
 }
 
+// a listening Unix-domain server socket at `path` (a stale file there is
+// replaced); nil when it can't be created or bound
+public func listenUnixSocket(_ path: String) -> Int32? {
+    unlink(path)
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    var addr = makeUnixSockAddr(path)
+    let bound = withUnsafePointer(to: &addr) { ptr -> Bool in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+        }
+    }
+    guard bound else { close(fd); return nil }
+    listen(fd, 4)
+    return fd
+}
+
 // MARK: - Colors
 
 public struct PopupColors {
@@ -484,9 +501,6 @@ public struct PopupConfig {
     // fill, and the active item marked by an accent underline (no capsules)
     public var buttonRadius: CGFloat = 4
     public var buttonFontSize: CGFloat = 10.5
-    // hover/pressed shading applied over the normal fill (0 = none)
-    public var buttonHoverAlpha: CGFloat = 0.18
-    public var buttonPressedAlpha: CGFloat = 0.32
 
     // UI zoom: scales fonts, row heights and chrome sizes proportionally
     // (Ctrl/Cmd+± drives it alongside the window resize)
@@ -1264,6 +1278,26 @@ final class PopupBackdrop: NSView {
         static let right = Edge(rawValue: 1 << 1)
         static let top = Edge(rawValue: 1 << 2)
         static let bottom = Edge(rawValue: 1 << 3)
+
+        // `start` after a drag of (dx, dy) on these edges: a dragged edge
+        // follows the mouse, the opposite one stays put, min size kept
+        func resized(_ start: NSRect, dx: CGFloat, dy: CGFloat,
+                     minW: CGFloat, minH: CGFloat) -> NSRect {
+            var f = start
+            if contains(.right) {
+                f.size.width = max(minW, start.width + dx)
+            } else if contains(.left) {
+                f.size.width = max(minW, start.width - dx)
+                f.origin.x += start.width - f.width
+            }
+            if contains(.top) {
+                f.size.height = max(minH, start.height + dy)
+            } else if contains(.bottom) {
+                f.size.height = max(minH, start.height - dy)
+                f.origin.y += start.height - f.height
+            }
+            return f
+        }
     }
 
     let config: PopupConfig
@@ -1373,24 +1407,7 @@ final class PopupBackdrop: NSView {
         let dy = m.y - startPoint.y     // deltas collapse once the window
                                         // catches up with the mouse (jitter)
         if !dragEdges.isEmpty {
-            var f = startFrame
-            var w = f.width
-            var h = f.height
-            if dragEdges.contains(.right) {
-                w = max(minW, startFrame.width + dx)
-            } else if dragEdges.contains(.left) {
-                let nw = max(minW, startFrame.width - dx)
-                f.origin.x += startFrame.width - nw
-                w = nw
-            }
-            if dragEdges.contains(.top) {
-                h = max(minH, startFrame.height + dy)
-            } else if dragEdges.contains(.bottom) {
-                let nh = max(minH, startFrame.height - dy)
-                f.origin.y += startFrame.height - nh
-                h = nh
-            }
-            f.size = NSSize(width: w, height: h)
+            let f = dragEdges.resized(startFrame, dx: dx, dy: dy, minW: minW, minH: minH)
             win.setFrame(clampToScreen(f), display: true)
             win.invalidateShadow()
         } else if draggingWindow {
@@ -2779,13 +2796,20 @@ final class PopupTableHeaderView: NSView {
         }
         guard let d = drag else { return }
         moved = true
+        onResize?(dividerPercents(d, x: p.x), false)
+    }
+
+    // column widths (%) with divider `d.divider` dragged to `x`: the two
+    // columns beside it trade width, each kept ≥ 3%, rounded to 0.1
+    private func dividerPercents(_ d: (divider: Int, startX: CGFloat, start: [CGFloat]),
+                                 x: CGFloat) -> [CGFloat] {
         var pcts = d.start
         let minPct: CGFloat = 3
-        var delta = (p.x - d.startX) / usable * 100
+        var delta = (x - d.startX) / usable * 100
         delta = max(minPct - pcts[d.divider], min(delta, pcts[d.divider + 1] - minPct))
         pcts[d.divider] += delta
         pcts[d.divider + 1] -= delta
-        onResize?(pcts.map { ($0 * 10).rounded() / 10 }, false)
+        return pcts.map { ($0 * 10).rounded() / 10 }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -2803,13 +2827,7 @@ final class PopupTableHeaderView: NSView {
         if let d = drag {
             drag = nil
             if moved {
-                var pcts = d.start
-                let minPct: CGFloat = 3
-                var delta = (p.x - d.startX) / usable * 100
-                delta = max(minPct - pcts[d.divider], min(delta, pcts[d.divider + 1] - minPct))
-                pcts[d.divider] += delta
-                pcts[d.divider + 1] -= delta
-                onResize?(pcts.map { ($0 * 10).rounded() / 10 }, true)
+                onResize?(dividerPercents(d, x: p.x), true)
                 window?.invalidateCursorRects(for: self)
             }
             return
@@ -3234,7 +3252,6 @@ final class FileListPane: NSView, NSDraggingSource {
     var selectedRows: [Int] {
         marked.isEmpty ? (rows.indices.contains(selection) ? [selection] : []) : marked.sorted()
     }
-    func clearMarks() { marked = [] }
     func selectAll() {
         let all = rows.indices.filter { rows[$0].name != ".." }
         guard !all.isEmpty else { return }
@@ -4030,7 +4047,6 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     var config: PopupConfig
     var onOpen: ((String) -> Void)?          // open a FILE in its default app
     var onDirChange: ((String) -> Void)?     // cwd changed (host labels)
-    var onCopyDir: ((String) -> Void)?       // copy current dir path
     var onCopyPath: ((String) -> Void)?      // copy an arbitrary path (hover/right-click)
     var onOpenInNotes: ((String) -> Void)?   // right-click "Open in Notes"
     var onStatus: ((String) -> Void)?        // transient feedback line
@@ -5161,9 +5177,6 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         }
         searchField.stringValue = cwd
         searchField.placeholderString = nil
-    }
-    func copyDir() {
-        onCopyDir?(cwd)
     }
     // MARK: rename
 
@@ -6372,24 +6385,7 @@ var meterEnabled = false {
         let dx = m.x - startPoint.x
         let dy = m.y - startPoint.y
         if !dragEdges.isEmpty {
-            var f = startFrame
-            var w = f.width
-            var h = f.height
-            if dragEdges.contains(.right) {
-                w = max(minW, startFrame.width + dx)
-            } else if dragEdges.contains(.left) {
-                let nw = max(minW, startFrame.width - dx)
-                f.origin.x += startFrame.width - nw
-                w = nw
-            }
-            if dragEdges.contains(.top) {
-                h = max(minH, startFrame.height + dy)
-            } else if dragEdges.contains(.bottom) {
-                let nh = max(minH, startFrame.height - dy)
-                f.origin.y += startFrame.height - nh
-                h = nh
-            }
-            f.size = NSSize(width: w, height: h)
+            let f = dragEdges.resized(startFrame, dx: dx, dy: dy, minW: minW, minH: minH)
             win.setFrame(clampToScreen(f), display: true)
             win.invalidateShadow()
         } else if draggingWindow {
@@ -6826,7 +6822,7 @@ private func headerButtonFont(_ label: String) -> NSFont {
 // this tiny adapter forwards it so the window can respawn the shell (the
 // drawer must never be left dead after `exit` / Ctrl-D).
 final class TerminalAutoRestart: NSObject,
-                                 @preconcurrency LocalProcessTerminalViewDelegate {
+                                 LocalProcessTerminalViewDelegate {
     nonisolated(unsafe) var onTerminated: (() -> Void)?
     nonisolated override init() { super.init() }
     nonisolated func sizeChanged(source: LocalProcessTerminalView,
@@ -7218,9 +7214,6 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var editorFocusBorder: NSView?
     private var browserFocusBorder: NSView?
     private var terminalFocusBorder: NSView?
-    // Bright blue focus indicator — thick border + subtle glow
-    // pane focus rings wear the theme accent (was a fixed system blue)
-    private var focusBorderColor: NSColor { ButtonStyle.focusStroke(config.colors) }
     private let focusBorderWidth: CGFloat = 3
 
     // total drawer height currently folded into the window frame (baseline =
@@ -7558,44 +7551,27 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             layoutTerminal()
             layoutFileBrowser()
         } else {
+            let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
+            let fieldFrame = NSRect(x: config.padding + 10,
+                                    y: headerOffset + config.padding + 2,
+                                    width: config.width - 2 * (config.padding + 10),
+                                    height: 24 * z)
+            field.frame = fieldFrame
+            var cb = fieldFrame.maxY + 4
+            if let bar = filterBar {
+                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                                   height: config.filterBarHeight * z)
+                cb += config.filterBarHeight * z + 2
+            }
+            if let bar = tabsBar {
+                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                                   height: config.tabBarHeight * z)
+                cb += config.tabBarHeight * z + 2
+            }
             if config.scrollableRows {
-                let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
-                let fieldFrame = NSRect(x: config.padding + 10,
-                                        y: headerOffset + config.padding + 2,
-                                        width: config.width - 2 * (config.padding + 10),
-                                        height: 24 * z)
-                field.frame = fieldFrame
-                var cb = fieldFrame.maxY + 4
-                if let bar = filterBar {
-                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                       height: config.filterBarHeight * z)
-                    cb += config.filterBarHeight * z + 2
-                }
-                if let bar = tabsBar {
-                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                       height: config.tabBarHeight * z)
-                    cb += config.tabBarHeight * z + 2
-                }
                 chromeBottom = cb
                 layoutScrollDocument()
             } else {
-                let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
-                let fieldFrame = NSRect(x: config.padding + 10,
-                                        y: headerOffset + config.padding + 2,
-                                        width: config.width - 2 * (config.padding + 10),
-                                        height: 24 * z)
-                field.frame = fieldFrame
-                var cb = fieldFrame.maxY + 4
-                if let bar = filterBar {
-                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                       height: config.filterBarHeight * z)
-                    cb += config.filterBarHeight * z + 2
-                }
-                if let bar = tabsBar {
-                    bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
-                                       height: config.tabBarHeight * z)
-                    cb += config.tabBarHeight * z + 2
-                }
                 rowView.topInset = cb
             }
         }
@@ -8014,30 +7990,41 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                                     width: (config.width - 2 * (config.padding + 10))
                                         * config.searchWidthFraction,
                                     height: fieldH)
+            // the filter bar + tab strip stacked under the search field from
+            // `y` (subviews of `host`); returns both + the chrome's new bottom
+            func addListBars(to host: NSView, from y: CGFloat, zoom: CGFloat)
+                -> (filter: PopupFilterBar?, tabs: PopupTabsBar?, bottom: CGFloat) {
+                var bottom = y
+                var filter: PopupFilterBar?
+                var tabs: PopupTabsBar?
+                if config.filters {
+                    let bar = PopupFilterBar(config: config)
+                    bar.frame = NSRect(x: 0, y: bottom, width: config.width,
+                                       height: config.filterBarHeight * zoom)
+                    bar.autoresizingMask = [.width]
+                    host.addSubview(bar)
+                    filter = bar
+                    bottom += config.filterBarHeight * zoom + 2
+                }
+                if config.tabs {
+                    let bar = PopupTabsBar(config: config)
+                    bar.frame = NSRect(x: 0, y: bottom, width: config.width,
+                                       height: config.tabBarHeight * zoom)
+                    bar.autoresizingMask = [.width]
+                    host.addSubview(bar)
+                    tabs = bar
+                    bottom += config.tabBarHeight * zoom + 2
+                }
+                return (filter, tabs, bottom)
+            }
             var chromeBottom: CGFloat = fieldFrame.maxY + 4
             let scrollable = config.scrollableRows
             if scrollable {
                 field.frame = fieldFrame
                 field.autoresizingMask = [.width]
                 backdrop.addSubview(field)
-                if config.filters {
-                    let bar = PopupFilterBar(config: config)
-                    bar.frame = NSRect(x: 0, y: chromeBottom, width: config.width,
-                                       height: config.filterBarHeight * zoom)
-                    bar.autoresizingMask = [.width]
-                    backdrop.addSubview(bar)
-                    filterBar = bar
-                    chromeBottom += config.filterBarHeight * zoom + 2
-                }
-                if config.tabs {
-                    let bar = PopupTabsBar(config: config)
-                    bar.frame = NSRect(x: 0, y: chromeBottom, width: config.width,
-                                       height: config.tabBarHeight * zoom)
-                    bar.autoresizingMask = [.width]
-                    backdrop.addSubview(bar)
-                    tabsBar = bar
-                    chromeBottom += config.tabBarHeight * zoom + 2
-                }
+                let bars = addListBars(to: backdrop, from: chromeBottom, zoom: zoom)
+                (filterBar, tabsBar, chromeBottom) = (bars.filter, bars.tabs, bars.bottom)
                 // IMPORTANT: the scroll view's height must always equal
                 // windowHeight - chromeBottom. The autoresizing mask alone
                 // grows it by the FULL window delta, so once the window is
@@ -8080,24 +8067,8 @@ scroll.documentView = rowView
                 field.frame = fieldFrame
                 field.autoresizingMask = [.width]
                 rowView.addSubview(field)
-                if config.filters {
-                    let bar = PopupFilterBar(config: config)
-                    bar.frame = NSRect(x: 0, y: chromeBottom, width: config.width,
-                                       height: config.filterBarHeight * zoom)
-                    bar.autoresizingMask = [.width]
-                    rowView.addSubview(bar)
-                    filterBar = bar
-                    chromeBottom += config.filterBarHeight * zoom + 2
-                }
-                if config.tabs {
-                    let bar = PopupTabsBar(config: config)
-                    bar.frame = NSRect(x: 0, y: chromeBottom, width: config.width,
-                                       height: config.tabBarHeight * zoom)
-                    bar.autoresizingMask = [.width]
-                    rowView.addSubview(bar)
-                    tabsBar = bar
-                    chromeBottom += config.tabBarHeight * zoom + 2
-                }
+                let bars = addListBars(to: rowView, from: chromeBottom, zoom: zoom)
+                (filterBar, tabsBar, chromeBottom) = (bars.filter, bars.tabs, bars.bottom)
                 rowView.topInset = chromeBottom
                 backdrop.addSubview(rowView)
             }
@@ -8374,6 +8345,18 @@ scroll.documentView = rowView
     // this way, unpark(frame:) puts it on screen
     public var quietShow = false
 
+    // a show's bookkeeping once it is laid out: shown + key monitors, unless
+    // quiet (the one-shot quietShow is consumed either way)
+    private func beginShown() {
+        let quiet = quietShow
+        quietShow = false
+        if !quiet {
+            isShown = true
+            installMonitors()
+        }
+        focusRetries = 0
+    }
+
     // MARK: Shared window (park / unpark)
 
     // Parked = ordered out but ALIVE and still registered with the host
@@ -8437,13 +8420,7 @@ scroll.documentView = rowView
             // (otherwise the browser stretches to fill the window on first
             // paint and the editor is left at its tiny init frame)
             layoutForZoom()
-            let quiet = quietShow
-            quietShow = false
-            if !quiet {
-                isShown = true
-                installMonitors()
-            }
-            focusRetries = 0
+            beginShown()
             // vim pane: start the editor NOW that it has its final size
             startVimIfNeeded()
             // initial focus: editor (or the vim pane) gets the highlight
@@ -8491,13 +8468,7 @@ scroll.documentView = rowView
         rowView.sizingRowCount = rows.count
         rowView.needsDisplay = true
 
-        let quiet = quietShow
-        quietShow = false
-        if !quiet {
-            isShown = true
-            installMonitors()
-        }
-        focusRetries = 0
+        beginShown()
         relayoutTabs()          // wrap the tab strip at the final window width
         layoutSearchField()     // search field ~80% width, centered
         growWidthToContent()    // never show a clipped label on first paint
@@ -8777,19 +8748,6 @@ private func scrollSelectionIntoView() {
         tv.typingAttributes = attrs
     }
 
-    // replace everything from `offset` to the end with `s` (the live draft
-    // region). Range-based on purpose: a stale anchor can never wipe the
-    // committed text above it (prefix-matching drafts did exactly that).
-    public func replaceTail(from offset: Int, with s: String) {
-        guard let tv = editorView, let storage = tv.textStorage else { return }
-        let loc = max(0, min(offset, storage.length))
-        storage.replaceCharacters(
-            in: NSRange(location: loc, length: storage.length - loc), with: s)
-        editorText = tv.string
-        restyleEditor()
-        tv.scrollRangeToVisible(NSRange(location: storage.length, length: 0))
-    }
-
     // the editor's caret / selection (UTF-16 offsets into the display string)
     public var editorSelection: NSRange {
         editorView?.selectedRange() ?? NSRange(location: (editorText as NSString).length, length: 0)
@@ -8811,13 +8769,6 @@ private func scrollSelectionIntoView() {
         tv.setSelectedRange(caret)
         tv.scrollRangeToVisible(caret)
         return n
-    }
-
-    public func tailText(from offset: Int) -> String {
-        guard let tv = editorView else { return "" }
-        let s = tv.string as NSString
-        let loc = max(0, min(offset, s.length))
-        return s.substring(from: loc)
     }
 
     // MARK: Markdown images
@@ -10455,11 +10406,6 @@ private func scrollSelectionIntoView() {
         if let vv = vimView, vimPaneActive { return vv }
         return editorView
     }
-    // hand keyboard focus to the editor (hosts with a docked field use it)
-    public func focusEditor() {
-        if let ed = primaryEditor { panel.makeFirstResponder(ed) }
-    }
-
     // the vim pane, but only while it is active AND holds keyboard focus
     private func focusedVim() -> LocalProcessTerminalView? {
         guard let vv = vimView, vimPaneActive else { return nil }
@@ -10525,9 +10471,6 @@ private func scrollSelectionIntoView() {
         env.removeValue(forKey: "NVIM_LISTEN_ADDRESS")
         return env.map { "\($0.key)=\($0.value)" }
     }
-
-    // whether this window edits through the embedded vim pane
-    public var isVimEditor: Bool { vimView != nil }
 
     // PID-free liveness check of the editor process
     public var vimRunning: Bool { vimView?.process?.running ?? false }
@@ -11551,17 +11494,7 @@ public enum ThemeRole: String, CaseIterable {
     private func startToggleServer() {
         let socketPath = popupTmpDir() + config.name + ".sock"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            unlink(socketPath)
-            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard fd >= 0 else { return }
-            var addr = makeUnixSockAddr(socketPath)
-            let bound = withUnsafePointer(to: &addr) { ptr -> Bool in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
-                }
-            }
-            guard bound else { close(fd); return }
-            listen(fd, 4)
+            guard let fd = listenUnixSocket(socketPath) else { return }
             var lastToggle: TimeInterval = 0
             while true {
                 let cfd = accept(fd, nil, nil)
@@ -11610,50 +11543,4 @@ public func sendToggle(name: String) -> Bool {
     return true
 }
 
-// MARK: - PopupStack (breadcrumb trail of open popups)
-
-// LIFO stack of PopupWindows: push() hides the current top and shows the new
-// one; pop() hides the top and restores the previous — so nested popups
-// remember where they came from (breadcrumbs), e.g. /command -> sub-window ->
-// Esc -> back to the main switcher.
-public final class PopupStack {
-    private var stack: [PopupWindow] = []
-
-    public var top: PopupWindow? { stack.last }
-    public var depth: Int { stack.count }
-    public var names: [String] { stack.map { $0.config.name } }
-
-    public init() {}
-
-    public func push(_ w: PopupWindow) {
-        if let top = stack.last, top.isShown {
-            top.hide(restore: false)
-        }
-        stack.append(w)
-        w.show()
-        FileHandle.standardError.write(
-            Data("popup-stack: push '\(w.config.name)' -> \(names.joined(separator: " / "))\n".utf8))
-    }
-
-    @discardableResult
-    public func pop() -> PopupWindow? {
-        guard let top = stack.last else { return nil }
-        top.hide(restore: false)
-        stack.removeLast()
-        if let prev = stack.last {
-            prev.show()
-        }
-        FileHandle.standardError.write(
-            Data("popup-stack: pop '\(top.config.name)' -> \(names.joined(separator: " / "))\n".utf8))
-        return top
-    }
-
-    public func popAll() {
-        while stack.count > 0 {
-            stack.last?.hide(restore: false)
-            stack.removeLast()
-        }
-        FileHandle.standardError.write(Data("popup-stack: popped all\n".utf8))
-    }
-}
 

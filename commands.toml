@@ -160,7 +160,7 @@
 [app]
 # off: whichever window has focus is on top — alt-hjkl (AeroSpace) raises
 # the popup it focuses, and focusing another app puts that app in front
-float = false
+float = true
 # shell used to run palette commands (persistent runner + output windows)
 shell = "/opt/homebrew/bin/bash"
 # args for the embedded terminal's shell (--login -i sources ~/.bash_profile

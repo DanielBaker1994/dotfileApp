@@ -139,7 +139,6 @@ struct AppSettings {
     var crashLogPath = NSString(string: "~/.cache/ws-crash.log").expandingTildeInPath
     var aeroDebugFlag = NSString(string: "~/.cache/aero-debug").expandingTildeInPath
     var aeroLog = NSString(string: "~/.cache/ws-aero.log").expandingTildeInPath
-    var authDebugFlag = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInPath
     var voiceLocale = "en-US"
     // bundle ids of screenshot tools whose capture overlay is an ordinary
     // window: while one is frontmost our floating windows step down so the
@@ -323,14 +322,7 @@ func paletteString(_ p: PopupPalette) -> String {
 func parseTheme() -> [String: NSColor] {
     var out: [String: NSColor] = [:]
     guard let content = readConfigText() else { return out }
-    var inTheme = false
-    for line in content.split(separator: "\n") {
-        let s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("[") && s.hasSuffix("]") {
-            inTheme = s == "[theme]"
-            continue
-        }
-        guard inTheme, let e = configEntry(s) else { continue }
+    for e in configSectionEntries(configLines(content), "theme") {
         if let c = hexColor(e.value) { out[e.key.lowercased()] = c }
     }
     return out
@@ -379,6 +371,17 @@ func windowColors(_ cmd: CommandSpec? = nil) -> PopupColors {
     }
     if cmd?.accentColor != nil || THEME["border"] == nil { c.border = c.outline }
     return c
+}
+
+// a section's look on its window config: header strip, palette (with the
+// card hue opaque — windowColors) and card opacity = `tint-alpha`, else the
+// background color's alpha (so the picker's opacity slider survives), + font
+func applyWindowTheme(_ cfg: inout PopupConfig, _ cmd: CommandSpec) {
+    cfg.headerColor = cmd.headerColor ?? headerBlueSilver
+    cfg.colors = windowColors(cmd)
+    if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
+    if let bg = cmd.backgroundColor { cfg.tintAlpha = (bg.usingColorSpace(.sRGB) ?? bg).alphaComponent }
+    cfg.fontName = cmd.font
 }
 
 // MARK: - Focus file (captured by the launcher at keypress time)
@@ -841,9 +844,8 @@ func loadCommands() -> [CommandSpec] {
     for line in content.split(separator: "\n") {
         let s = line.trimmingCharacters(in: .whitespaces)
         if s.isEmpty || s.hasPrefix("#") { continue }
-        if s.hasPrefix("[") && s.hasSuffix("]") {
+        if let name = configSectionHeader(s) {
             flushSection()
-            let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
             if !name.isEmpty {
                 section = (name, [:])
             }
@@ -899,17 +901,7 @@ func jiraConfigValue(_ key: String) -> String? { configSectionValue("jira", key)
 // raw value of `key` in `[section]` straight from commands.toml (nil when absent)
 func configSectionValue(_ section: String, _ key: String) -> String? {
     guard let content = readConfigText() else { return nil }
-    var inSection = false
-    for line in content.split(separator: "\n") {
-        let s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("[") && s.hasSuffix("]") {
-            inSection = s == "[\(section)]"
-            continue
-        }
-        guard inSection, let e = configEntry(s) else { continue }
-        if e.key == key { return e.value }
-    }
-    return nil
+    return configSectionEntries(configLines(content), section).first(where: { $0.key == key })?.value
 }
 
 // launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
@@ -1084,15 +1076,8 @@ private func tri(_ s: String?) -> Bool? {
 func applyAppConfigFromDisk() {
     guard let content = readConfigText() else { return }
     var vars: [String: String] = [:]
-    var inApp = false
-    for line in content.split(separator: "\n") {
-        let s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("[") && s.hasSuffix("]") {
-            inApp = s == "[app]"
-            continue
-        }
-        guard inApp, let e = configEntry(s) else { continue }
-        if !e.key.isEmpty { vars[e.key] = e.value }
+    for e in configSectionEntries(configLines(content), "app") where !e.key.isEmpty {
+        vars[e.key] = e.value
     }
     parseAppConfig(vars)
 }
@@ -1281,16 +1266,8 @@ struct ThemePreset {
     static func all() -> [ThemePreset] {
         var out = builtIn
         guard let content = readConfigText() else { return out }
-        var inThemes = false
-        for line in content.split(separator: "\n") {
-            let s = line.trimmingCharacters(in: .whitespaces)
-            if s.isEmpty || s.hasPrefix("#") { continue }
-            if s.hasPrefix("[") && s.hasSuffix("]") {
-                inThemes = s == "[themes]"
-                continue
-            }
-            guard inThemes, let (name, value) = configEntry(s),
-                  let p = parse(name: name, value) else { continue }
+        for (_, name, value) in configSectionEntries(configLines(content), "themes") {
+            guard let p = parse(name: name, value) else { continue }
             if let i = out.firstIndex(where: { $0.name == name }) { out[i] = p } else { out.append(p) }
         }
         return out
@@ -1563,6 +1540,33 @@ func configEntry(_ line: String) -> (key: String, value: String)? {
     return (key, tomlValue(rest.trimmingCharacters(in: .whitespaces)))
 }
 
+// the name of a `[section]` header line (inner spaces trimmed), else nil
+func configSectionHeader(_ line: String) -> String? {
+    let s = line.trimmingCharacters(in: .whitespaces)
+    guard s.hasPrefix("[") && s.hasSuffix("]") else { return nil }
+    return String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+}
+
+// commands.toml text as editable lines (empty lines kept, so a join restores it)
+func configLines(_ text: String) -> [String] {
+    text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+}
+
+// every `key = value` entry of [section] in file order, with its index in `lines`
+func configSectionEntries(_ lines: [String], _ section: String)
+    -> [(index: Int, key: String, value: String)] {
+    var out: [(index: Int, key: String, value: String)] = []
+    var inSection = false
+    for (i, line) in lines.enumerated() {
+        if let name = configSectionHeader(line) {
+            inSection = name == section
+        } else if inSection, let e = configEntry(line) {
+            out.append((i, e.key, e.value))
+        }
+    }
+    return out
+}
+
 // `key = value` as a TOML line (strings quoted, bools/numbers bare)
 func configLine(_ key: String, _ value: String) -> String {
     let bare = !key.isEmpty && key.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
@@ -1752,74 +1756,35 @@ func restoreConfigFromBackup() -> Bool {
     return writeConfigText(bak)
 }
 
-// Persist a config value back to commands.toml. Finds the target section,
-// updates the key if it exists, or appends it after the section header.
-// Preserves all comments, formatting, and other sections untouched.
+// Persist a config value back to commands.toml: updates the key where it is,
+// else adds it after the section's last entry (or appends the section).
+// Comments, formatting and other sections are left untouched.
 func saveConfigValue(section: String, key: String, value: String) {
-    guard let content = readConfigText() else { return }
-    var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-    var inTarget = false
-    var keyFound = false
-    var insertAfter = -1
-
-    for i in 0..<lines.count {
-        let s = lines[i].trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("[") && s.hasSuffix("]") {
-            let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-            inTarget = name == section
-            if inTarget { insertAfter = i }
-            continue
-        }
-        guard inTarget, let e = configEntry(s) else { continue }
-        if e.key == key {
-            lines[i] = configLine(key, value)
-            keyFound = true
-            break
-        }
-        insertAfter = i
-    }
-
-    if !keyFound, insertAfter >= 0 {
-        lines.insert(configLine(key, value), at: insertAfter + 1)
-    } else if !keyFound {
-        // section not found — append it at the end
-        lines.append("")
-        lines.append("[\(section)]")
-        lines.append(configLine(key, value))
-    }
-
-    let newContent = lines.joined(separator: "\n")
-    writeConfigText(newContent)
+    saveConfigValues(section: section, [(key, value)])
 }
 
 // Set (or, for a nil value, remove) several keys of one [section] in a single
-// validated write — a theme preset touches up to 8 keys at once.
+// validated write — a theme preset touches up to 8 keys at once. A key listed
+// twice is edited where it takes effect: the last one (validateConfig).
 func saveConfigValues(section: String, _ kv: [(String, String?)]) {
     guard let content = readConfigText() else { return }
-    var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    var lines = configLines(content)
     for (key, value) in kv {
-        var header = -1
-        var lastInSection = -1
-        var found = -1
-        var inTarget = false
-        for i in 0..<lines.count {
-            let s = lines[i].trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("[") && s.hasSuffix("]") {
-                inTarget = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces) == section
-                if inTarget { header = i; lastInSection = i }
-                continue
+        let entries = configSectionEntries(lines, section)
+        let found = entries.last(where: { $0.key == key })?.index
+        // the new line's slot: after the section's last entry, else its header
+        let header = lines.indices.last(where: { configSectionHeader(lines[$0]) == section })
+        let lastInSection = entries.last.map { max($0.index, header ?? -1) } ?? header
+        switch (found, value) {
+        case (let i?, let v?): lines[i] = configLine(key, v)
+        case (let i?, nil): lines.remove(at: i)
+        case (nil, let v?):
+            if let at = lastInSection {
+                lines.insert(configLine(key, v), at: at + 1)
+            } else {
+                lines += ["", "[\(section)]", configLine(key, v)]
             }
-            guard inTarget, let e = configEntry(s) else { continue }
-            lastInSection = i
-            if e.key == key { found = i }
-        }
-        switch (found >= 0, value) {
-        case (true, let v?): lines[found] = configLine(key, v)
-        case (true, nil): lines.remove(at: found)
-        case (false, let v?) where header >= 0: lines.insert(configLine(key, v), at: lastInSection + 1)
-        case (false, let v?):
-            lines += ["", "[\(section)]", configLine(key, v)]
-        case (false, nil): break
+        case (nil, nil): break
         }
     }
     writeConfigText(lines.joined(separator: "\n"))
@@ -1827,36 +1792,7 @@ func saveConfigValues(section: String, _ kv: [(String, String?)]) {
 
 // Remove a config key from commands.toml (for reset-to-default).
 func removeConfigValue(section: String, key: String) {
-    guard let content = readConfigText() else { return }
-    var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-    var inTarget = false
-    var toRemove: [Int] = []
-
-    for i in 0..<lines.count {
-        let s = lines[i].trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("[") && s.hasSuffix("]") {
-            let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-            inTarget = name == section
-            continue
-        }
-        guard inTarget, let e = configEntry(s) else { continue }
-        if e.key == key {
-            toRemove.append(i)
-            break
-        }
-    }
-
-    for idx in toRemove.sorted(by: >) {
-        lines.remove(at: idx)
-    }
-
-    // also remove any trailing empty lines we may have created
-    while lines.last?.isEmpty ?? false, lines.count > 1 {
-        lines.removeLast()
-    }
-
-    let newContent = lines.joined(separator: "\n")
-    writeConfigText(newContent)
+    saveConfigValues(section: section, [(key, nil)])
 }
 
 // [icons] section -> IconRule list. Line format per app:
@@ -1924,21 +1860,6 @@ private func csv(_ s: String?) -> [String] {
     (s ?? "").split(separator: ",")
         .map { $0.trimmingCharacters(in: .whitespaces) }
         .filter { !$0.isEmpty }
-}
-
-// "Last File Write: YYYY-MM-DD HH:MM:SS" for a file, shown under the header
-// title as the drag-header's dim metadata line
-private let lastWriteFormatter: DateFormatter = {
-    let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    return f
-}()
-
-private func lastWriteLabel(_ path: String) -> String {
-    // "Last File Write: …" was removed from the header per request — the
-    // footer slot stays for transient messages (e.g. voice errors), so this
-    // label is intentionally empty.
-    ""
 }
 
 private func mtime(of path: String) -> Date? {
@@ -2216,7 +2137,6 @@ let missingIcon: NSImage = {
 // tile, menu-bar status items get a template silhouette. Each app has its own
 // symbol AND accent tint, so the two are never confusable in the picker.
 let jiraAccent = NSColor(red: 0.36, green: 0.62, blue: 0.95, alpha: 1)   // ticket blue
-let notesAccent = NSColor(red: 0.55, green: 0.80, blue: 0.52, alpha: 1)  // notepad green
 
 func glyphIcon(_ symbol: String, fallback: String, tint: NSColor,
                size: CGFloat = appIconSize, template: Bool = false,
@@ -2330,18 +2250,6 @@ let heartIcon = glyphIcon("heart.fill", fallback: "♥",
 let micIcon = glyphIcon("mic.fill", fallback: "🎙",
                         tint: NSColor.systemRed.withAlphaComponent(0.9),
                         tile: false)
-// menu-bar glyphs: the Jira mark and the notepad keep their color so they
-// pop against the bar; SF Symbol fallbacks stay template-monochrome
-let notesMenuGlyph = fileIconTile(settings.notesIconPath, size: 18) ?? notepadIcon(size: 18)
-let jiraMenuGlyph = fileIconTile(settings.jiraIconPath, size: 18)
-    ?? glyphIcon("ticket", fallback: "J", tint: jiraAccent)
-// menu glyphs for the remaining windows (18pt so they fit menu rows)
-let micMenuGlyph = glyphIcon("mic.fill", fallback: "🎙",
-                             tint: NSColor.systemRed.withAlphaComponent(0.9),
-                             size: 18, tile: false)
-let heartMenuGlyph = glyphIcon("heart.fill", fallback: "♥",
-                               tint: NSColor.systemRed.withAlphaComponent(0.9),
-                               size: 18, tile: false)
 // single utility glyph for the consolidated menu-bar item
 let utilityMenuGlyph: NSImage = {
     let sym = NSImage(systemSymbolName: "wrench.and.screwdriver",
@@ -3372,17 +3280,7 @@ final class SwitcherController: NSObject {
     private func startCommandServer() {
         let socketPath = popupTmpDir() + settings.notesSocketName
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            unlink(socketPath)
-            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard fd >= 0 else { return }
-            var addr = makeUnixSockAddr(socketPath)
-            let bound = withUnsafePointer(to: &addr) { ptr -> Bool in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
-                }
-            }
-            guard bound else { close(fd); return }
-            listen(fd, 4)
+            guard let fd = listenUnixSocket(socketPath) else { return }
             while true {
                 let cfd = Darwin.accept(fd, nil, nil)
                 guard cfd >= 0 else { continue }
@@ -4029,11 +3927,7 @@ final class SwitcherController: NSObject {
         // title pill, jira glyph at the far left
         cfg.headerHeight = 30
         cfg.titlePill = false
-        cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = windowColors(cmd)
-        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
-        if let bg = cmd.backgroundColor { cfg.tintAlpha = (bg.usingColorSpace(.sRGB) ?? bg).alphaComponent }
-        cfg.fontName = cmd.font
+        applyWindowTheme(&cfg, cmd)
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
         w.editorText = "running \(cmd.name)…"
@@ -4573,18 +4467,8 @@ private func trimmed(_ s: String) -> String? {
         // to the app glyph / last-write line) instead of a compact right cluster
         // shared window: the notes | jira switch stays a compact pill pair
         cfg.stretchHeaderButtons = !settings.sharedWindow
-        cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = windowColors(cmd)
+        applyWindowTheme(&cfg, cmd)
         cfg.terminalForeground = cmd.terminalForeground
-        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
-        if let bg = cmd.backgroundColor {
-            let cc = bg.usingColorSpace(.sRGB) ?? bg
-            // the card hue stays opaque; the color's alpha becomes the card
-            // opacity (tintAlpha) so the picker's opacity slider survives
-            cfg.colors.background = cc.withAlphaComponent(1)
-            cfg.tintAlpha = cc.alphaComponent
-        }
-        cfg.fontName = cmd.font
         cfg.markdownImages = true
 
         // vim mode: an embedded nvim pane replaces the text view (tabs,
@@ -4673,7 +4557,7 @@ private func trimmed(_ s: String) -> String? {
         w.copyPathButtonLabel = ""          // copy path moved to right-click (tab/editor)
         w.copyConfigButtonLabel = ""        // config is opened via the icon click
         w.tabTitles = titles
-        w.tabFooterText = lastWriteLabel(currentPath)
+        w.tabFooterText = ""
         // generic label in the drag header — the tab strip already shows the
         // individual note names; clicking the header still copies the path
         w.chromeHeaderTitle = cmd.chromeTitle
@@ -4734,14 +4618,14 @@ private func trimmed(_ s: String) -> String? {
                 lastSynced = loaded
             }
             lastMtime = mtime(of: currentPath)
-            w.tabFooterText = lastWriteLabel(currentPath)
+            w.tabFooterText = ""
             w.copyPathButtonLabel = ""          // path lives on the right-click
             w.onChromeHeaderClick = {
                 self.copy(currentPath, "note path: \(currentPath)")
             }
         }
         w.onTabChange = { [weak self] index in
-            guard let self else { return }
+            guard self != nil else { return }
             loadTab(index)
         }
         // tab "✕": close the note at `index`. It is dropped from the tab list
@@ -4794,7 +4678,7 @@ private func trimmed(_ s: String) -> String? {
         }
         // "✕" on a tab pill closes that note (removes it from the list)
         w.onCloseTab = { [weak self] index in
-            guard let self else { return }
+            guard self != nil else { return }
             closeNote(index)
         }
         // Top-left icon opens a dropdown menu with all window actions —
@@ -4806,18 +4690,7 @@ private func trimmed(_ s: String) -> String? {
 
             // — toggles (checkmark shows state) —
             func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
-                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-                item.state = state ? .on : .off
-                item.target = nil
-                item.action = nil
-                // Use a closure-based approach: NSMenuItem can't hold closures
-                // directly, so we use a target/action pair
-                let t = MenuActionTarget(action: action)
-                item.target = t
-                item.action = #selector(MenuActionTarget.run)
-                // Retain the target so it survives the menu dismiss
-                menuActionTargets.append(t)
-                menu.addItem(item)
+                menu.addItem(self.menuItem(title, state: state, action))
             }
 
             if cmd.terminal {
@@ -4860,44 +4733,9 @@ private func trimmed(_ s: String) -> String? {
             menu.addItem(notesItem)
             menu.addItem(.separator())
 
-            menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
-            menu.addItem(self.floatMenuItem(for: w, section: cmd.name))
+            self.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
-            // — theme presets + transparency —
-            self.addThemeMenus(to: menu, window: w, section: cmd.name)
-            menu.addItem(.separator())
-
-            // — reset actions —
-            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "")
-            let rsTarget = MenuActionTarget { w.resetToDefaultSize() }
-            resetSizeItem.target = rsTarget
-            resetSizeItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(rsTarget)
-            menu.addItem(resetSizeItem)
-
-            let resetColorItem = NSMenuItem(title: "Reset Default Colors", action: nil, keyEquivalent: "")
-            let rcTarget = MenuActionTarget { self.resetWindowTheme(w, section: cmd.name) }
-            resetColorItem.target = rcTarget
-            resetColorItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(rcTarget)
-            menu.addItem(resetColorItem)
-            menu.addItem(.separator())
-
-            // — open config —
-            let configItem = NSMenuItem(title: "Open Config", action: nil, keyEquivalent: "")
-            let cfgTarget = MenuActionTarget {
-                let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.toml"
-                let p = FileManager.default.fileExists(atPath: canonical)
-                    ? canonical
-                    : settings.commandsConfPath
-                if FileManager.default.fileExists(atPath: p) {
-                    w.onOpenExternalPath?(p)
-                }
-            }
-            configItem.target = cfgTarget
-            configItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(cfgTarget)
-            menu.addItem(configItem)
+            menu.addItem(self.openConfigMenuItem { w.onOpenExternalPath?($0) })
             menu.addItem(self.shortcutsMenuItem(for: w, view: "notes"))
 
             w.showHeaderMenu(menu)
@@ -5192,7 +5030,7 @@ private func trimmed(_ s: String) -> String? {
                 dbg("session done +\(committedStr.count) chars")
                 if committedStr.isEmpty { self.log("voice '\(cmd.name)': no speech detected") }
                 committedStr = ""
-                w.tabFooterText = lastWriteLabel(currentPath)
+                w.tabFooterText = ""
             }
             w.onMeterRecord = {
                 switch voice.state {
@@ -5289,14 +5127,14 @@ private func trimmed(_ s: String) -> String? {
             if cmd.vimMode {
                 w.vimFlush()
                 lastMtime = mtime(of: currentPath)
-                w.tabFooterText = lastWriteLabel(currentPath)
+                w.tabFooterText = ""
                 return
             }
             if FileManager.default.fileExists(atPath: currentPath) {
                 self.saveNote(text, to: currentPath, cmd: cmd)
                 lastSynced = text
                 lastMtime = mtime(of: currentPath)
-                w.tabFooterText = lastWriteLabel(currentPath)
+                w.tabFooterText = ""
                 return
             }
             let deadPath = currentPath
@@ -5321,7 +5159,7 @@ private func trimmed(_ s: String) -> String? {
             currentPath = fallback
             lastSynced = text
             lastMtime = mtime(of: fallback)
-            w.tabFooterText = lastWriteLabel(fallback)
+            w.tabFooterText = ""
         }
         w.onEditorCommit = commitSave
         w.onEditorClose = commitSave
@@ -5371,7 +5209,7 @@ private func trimmed(_ s: String) -> String? {
                     currentPath = fallback
                     lastSynced = text
                     lastMtime = mtime(of: fallback)
-                    w.tabFooterText = lastWriteLabel(fallback)
+                    w.tabFooterText = ""
                     w.setEditorMarkdown(text, baseDir: noteDir(fallback))
                     w.imageBaseDir = noteDir(fallback)
                     if cmd.vimMode {
@@ -5421,7 +5259,7 @@ private func trimmed(_ s: String) -> String? {
                 // an unmodified buffer reloads silently
                 if let last = lastMtime, mt != last {
                     w.vimCommand("silent! checktime")
-                    w.tabFooterText = lastWriteLabel(currentPath)
+                    w.tabFooterText = ""
                 }
                 lastMtime = mt
             } else if let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
@@ -5431,7 +5269,7 @@ private func trimmed(_ s: String) -> String? {
                         if newText != lastSynced {
                             w.setEditorMarkdown(newText, baseDir: noteDir(currentPath))
                             lastSynced = newText
-                            w.tabFooterText = lastWriteLabel(currentPath)
+                            w.tabFooterText = ""
                             self.log("note '\(cmd.name)': reloaded \(currentPath) after external write")
                         }
                     } else {
@@ -5444,31 +5282,8 @@ private func trimmed(_ s: String) -> String? {
         RunLoop.main.add(t, forMode: .common)
         // embedded file browser drawer (header "▤" toggles it): starts in the
         // note directory, favorites shared with the floating "files" window
-        let favs = fileBrowserFavorites()
-        var browserCfg = cfg
-        applyBrowserSettings(&browserCfg)
-        let fb = PopupFileBrowser(config: browserCfg, startDir: noteDir(currentPath),
-                                  staticFavorites: favs)
-        fb.onOpen = { [weak self] path in
-            self?.log("note '\(cmd.name)': browser opened \(path)")
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-        }
-        fb.onCopyPath = { [weak self] p in
-            self?.copy(p, "path: \(p)")
-        }
-        fb.onCopyDir = { [weak self] dir in
-            self?.copy(dir, "directory path: \(dir)")
-        }
-        fb.onSortChange = { [weak self] key, desc in self?.saveBrowserSort(key, desc) }
-        w.onOpenExternalTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
-        fb.onStatus = { [weak self] s in
-            if !s.isEmpty { self?.log("note '\(cmd.name)': \(s)") }
-        }
-        // file-browser right-click "Open in Notes": open the row as a note tab
-        w.onFileBrowserOpenInNotes = { [weak self] p in
-            self?.openNoteFile(p)
-        }
-        attachRecent(fb)
+        let fb = makeFileBrowser(cfg, startDir: noteDir(currentPath), in: w,
+                                 tag: "note '\(cmd.name)'", opened: "browser opened")
         w.installFileBrowser(fb, drawer: true)
         // mirror the post-install drawer state onto the header buttons
         // (browser is the default pane, so it's on and the terminal is off)
@@ -5513,81 +5328,66 @@ private func trimmed(_ s: String) -> String? {
         }
     }
 
-    // keep commands.toml in sync: append a newly created note to the [notes]
-    // section's paths= line, using the tilde form for paths under $HOME
-    private func addNotePathToConfig(_ path: String, section: String) {
-        let confPath = settings.commandsConfPath
+    // commands.toml as editable lines + `path` in its ~ form (how paths= lists
+    // notes under $HOME); nil (logged) when the file can't be read
+    private func notePathConfig(_ path: String) -> (lines: [String], display: String)? {
         guard let content = readConfigText() else {
-            log("commands.toml: cannot read \(confPath)")
-            return
+            log("commands.toml: cannot read \(settings.commandsConfPath)")
+            return nil
         }
         let home = NSHomeDirectory()
         let display = path.hasPrefix(home + "/")
             ? "~" + path.dropFirst(home.count)
             : path
-        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let target = "[" + section + "]"
-        // is this note already listed? (e.g. + re-created with an existing name)
-        // — compare EXPANDED forms so ~/notes/x.md == /Users/me/notes/x.md
-        let isListed = { (value: String) -> Bool in
-            value.split(separator: ",").contains { entry in
-                let e = entry.trimmingCharacters(in: .whitespaces)
-                return (e as NSString).expandingTildeInPath == path
-            }
-        }
-        var inSection = false
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
-                inSection = trimmed == target
-                continue
-            }
-            guard inSection, let (key, value) = configEntry(trimmed),
-                  key == "paths" || key == "path" else { continue }
-            if isListed(value) {
-                log("commands.toml: \(display) already listed — no change")
-                return
-            }
-            lines[i] = configLine("paths", value.isEmpty ? display : value + ", " + display)
-            writeConfigText(lines.joined(separator: "\n"))
-            log("commands.toml: added note \(display)")
+        return (configLines(content), display)
+    }
+
+    // the paths= / path= entries of [section] — the note lists
+    private func notePathEntries(_ lines: [String], _ section: String)
+        -> [(index: Int, key: String, value: String)] {
+        configSectionEntries(lines, section).filter { $0.key == "paths" || $0.key == "path" }
+    }
+
+    // keep commands.toml in sync: append a newly created note to the [notes]
+    // section's paths= line, using the tilde form for paths under $HOME
+    private func addNotePathToConfig(_ path: String, section: String) {
+        guard let (read, display) = notePathConfig(path) else { return }
+        var lines = read
+        guard let e = notePathEntries(lines, section).first else {
+            log("commands.toml: no [\(section)] section to update")
             return
         }
-        log("commands.toml: no [\(section)] section to update")
+        // is this note already listed? (e.g. + re-created with an existing name)
+        // — compare EXPANDED forms so ~/notes/x.md == /Users/me/notes/x.md
+        let isListed = e.value.split(separator: ",").contains { entry in
+            let s = entry.trimmingCharacters(in: .whitespaces)
+            return (s as NSString).expandingTildeInPath == path
+        }
+        if isListed {
+            log("commands.toml: \(display) already listed — no change")
+            return
+        }
+        lines[e.index] = configLine("paths", e.value.isEmpty ? display : e.value + ", " + display)
+        writeConfigText(lines.joined(separator: "\n"))
+        log("commands.toml: added note \(display)")
     }
 
     // drop a deleted note from commands.toml so it never gets listed again
     // (paths= entries that no longer exist on disk are removed)
     private func removeNotePathFromConfig(_ path: String, section: String) {
-        let confPath = settings.commandsConfPath
-        guard let content = readConfigText() else {
-            log("commands.toml: cannot read \(confPath)")
-            return
-        }
-        let home = NSHomeDirectory()
-        let display = path.hasPrefix(home + "/")
-            ? "~" + path.dropFirst(home.count)
-            : path
-        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let target = "[" + section + "]"
-        var inSection = false
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
-                inSection = trimmed == target
-                continue
+        guard let (read, display) = notePathConfig(path) else { return }
+        var lines = read
+        for e in notePathEntries(lines, section) {
+            let all = e.value.split(separator: ",")
+            let kept = all.compactMap { entry -> String? in
+                let s = String(entry).trimmingCharacters(in: .whitespaces)
+                return (s as NSString).expandingTildeInPath == path ? nil : s
             }
-            guard inSection, let (key, value) = configEntry(trimmed),
-                  key == "paths" || key == "path" else { continue }
-            let kept = value.split(separator: ",").compactMap { entry -> String? in
-                let e = String(entry).trimmingCharacters(in: .whitespaces)
-                return (e as NSString).expandingTildeInPath == path ? nil : e
-            }
-            guard kept.count != value.split(separator: ",").count else { continue }
+            guard kept.count != all.count else { continue }
             if kept.isEmpty {
-                lines.remove(at: i)
+                lines.remove(at: e.index)
             } else {
-                lines[i] = configLine("paths", kept.joined(separator: ", "))
+                lines[e.index] = configLine("paths", kept.joined(separator: ", "))
             }
             writeConfigText(lines.joined(separator: "\n"))
             log("commands.toml: removed \(display) from [\(section)]")
@@ -6208,7 +6008,7 @@ private func trimmed(_ s: String) -> String? {
         case .notepad: key = "background-color"
         case .header: key = "header-color"
         }
-        updateColorKeyInConfig(hex, key: key, section: pickerSection)
+        saveConfigValue(section: pickerSection, key: key, value: hex)
         updateSpecColors(section: pickerSection, [(key, color)])
         log("commands.toml [\(pickerSection)]: \(key) -> #\(hex)")
     }
@@ -6226,47 +6026,6 @@ private func trimmed(_ s: String) -> String? {
             : String(format: "%02X%02X%02X", r, g, b)
     }
 
-    // rewrite (or insert) a KEY = VALUE line in a [section] of commands.toml,
-    // preserving comments/order; the app reads colors at startup so a restart
-    // picks up the persisted pick
-    private func updateColorKeyInConfig(_ value: String, key: String, section: String) {
-        let confPath = settings.commandsConfPath
-        guard let content = readConfigText() else {
-            log("commands.toml: cannot read \(confPath)")
-            return
-        }
-        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let target = "[" + section + "]"
-        var inSection = false
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
-                inSection = trimmed == target
-                continue
-            }
-            guard inSection, let e = configEntry(trimmed) else { continue }
-            if e.key == key {
-                lines[i] = configLine(key, value)
-                writeConfigText(lines.joined(separator: "\n"))
-                return
-            }
-        }
-        // no existing key: insert right after the section header (or append a
-        // fresh section when the section doesn't exist yet)
-        var insertion: Int
-        if let idx = lines.firstIndex(where: {
-            $0.trimmingCharacters(in: .whitespaces) == target
-        }) {
-            insertion = idx + 1
-        } else {
-            lines.append("")
-            lines.append(target)
-            insertion = lines.count
-        }
-        lines.insert(configLine(key, value), at: insertion)
-        writeConfigText(lines.joined(separator: "\n"))
-    }
-
     // drop every color-override key from a [section] so the [theme] defaults
     // apply again ("Reset to system defaults" in the picker menu)
     private func removeColorKeysFromConfig(section: String) {
@@ -6280,28 +6039,14 @@ private func trimmed(_ s: String) -> String? {
                                  "tint-alpha", "text-color", "dim-color",
                                  "highlight-color", "accent-color", "terminal-foreground",
                                  "palette"]
-        let target = "[" + section + "]"
-        var inSection = false
-        var changed = false
-        var out: [String] = []
-        out.reserveCapacity(64)
-        for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
-                inSection = trimmed == target
-            } else if inSection, let e = configEntry(trimmed) {
-                if keys.contains(e.key) {
-                    changed = true
-                    continue
-                }
-            }
-            out.append(String(line))
-        }
-        guard changed else {
+        var lines = configLines(content)
+        let overrides = configSectionEntries(lines, section).filter { keys.contains($0.key) }
+        guard !overrides.isEmpty else {
             log("commands.toml [\(section)]: no color overrides to reset")
             return
         }
-        writeConfigText(out.joined(separator: "\n"))
+        for e in overrides.reversed() { lines.remove(at: e.index) }
+        writeConfigText(lines.joined(separator: "\n"))
         log("commands.toml [\(section)]: reset color overrides to defaults")
     }
 
@@ -6485,13 +6230,9 @@ private func trimmed(_ s: String) -> String? {
         // bluey-silver strip, app glyph far left with the meta line beside it
         cfg.headerHeight = 30
         cfg.titlePill = false
-        cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = windowColors(cmd)
-        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
-        if let bg = cmd.backgroundColor { cfg.tintAlpha = (bg.usingColorSpace(.sRGB) ?? bg).alphaComponent }
+        applyWindowTheme(&cfg, cmd)
         if cmd.searchWidth > 0 { cfg.searchWidthFraction = cmd.searchWidth }
         if cmd.maxStretch > 0 { cfg.maxRowStretch = cmd.maxStretch }
-        cfg.fontName = cmd.font
         // table mode (`table = true` + `columns`): spreadsheet rows under a
         // sticky, sortable, resizable header; absent columns = preview rows
         var columns = tabColumns(tabs.first?.path)
@@ -6698,7 +6439,6 @@ private func trimmed(_ s: String) -> String? {
             guard let self, let w else { return }
             let menu = NSMenu()
             menu.autoenablesItems = false
-            let fm = FileManager.default
             if cmd.name == "jira" {
                 // jira: config, paths, jobs, queries, curls, columns — all
                 // live in the Jira Config window; this menu is window chrome
@@ -6720,22 +6460,10 @@ private func trimmed(_ s: String) -> String? {
                     self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
                 })
                 menu.addItem(.separator())
-                menu.addItem(self.menuItem("Open Config") { [weak self] in
-                    let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.toml"
-                    let p = fm.fileExists(atPath: canonical) ? canonical : settings.commandsConfPath
-                    if fm.fileExists(atPath: p) { self?.openNoteFile(p) }
-                })
+                menu.addItem(self.openConfigMenuItem { [weak self] in self?.openNoteFile($0) })
             }
             menu.addItem(.separator())
-            menu.addItem(self.focusLossMenuItem(for: w, section: configSection))
-            menu.addItem(self.floatMenuItem(for: w, section: configSection))
-            menu.addItem(.separator())
-            self.addThemeMenus(to: menu, window: w, section: configSection)
-            menu.addItem(.separator())
-            menu.addItem(self.menuItem("Reset Default Size") { w.resetToDefaultSize() })
-            menu.addItem(self.menuItem("Reset Default Colors") { [weak self] in
-                self?.resetWindowTheme(w, section: configSection)
-            })
+            self.addWindowSettingsItems(to: menu, window: w, section: configSection)
             if cmd.name == "jira" {
                 menu.addItem(.separator())
                 menu.addItem(self.menuItem("Disable Jira…") { [weak self] in
@@ -6883,7 +6611,7 @@ private func trimmed(_ s: String) -> String? {
             colFilters = [:]
             applyFilterData()
             w.setRows(filteredRows(query: ""))
-            w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
+            w.tabFooterText = ""
             refreshPathLabel()
             self.log("list '\(cmd.name)': tab -> \(tabs[index].path)")
         }
@@ -7045,7 +6773,7 @@ private func trimmed(_ s: String) -> String? {
             // keep the scroll position: a background json refresh must not
             // yank the list back to the top while the user reads mid-list
             w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
-            w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
+            w.tabFooterText = ""
         }
         RunLoop.main.add(watcher, forMode: .common)
         reloadWatcher = watcher
@@ -7062,7 +6790,7 @@ private func trimmed(_ s: String) -> String? {
         }
         refreshPathLabel()
         subWindows.append(w)
-        w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
+        w.tabFooterText = ""
         placeSlotWindow(w)
         w.quietShow = slotPrewarming
         w.show()
@@ -7091,7 +6819,7 @@ private func trimmed(_ s: String) -> String? {
                 visibleOffset = 0
                 w.setRows(filteredRows(query: w.currentQuery))
             }
-            w.tabFooterText = lastWriteLabel(tabs[i].path)
+            w.tabFooterText = ""
         }
         if let f = pendingJiraTab {
             pendingJiraTab = nil
@@ -7163,6 +6891,35 @@ private func trimmed(_ s: String) -> String? {
         recentObservers.append(o)
     }
 
+    // the browser the notes drawer and the files window both embed: [files]
+    // settings, shared favorites, open / copy / sort / status / Recent wiring.
+    // `tag` prefixes its log lines ("<tag>: <opened> PATH" on open).
+    private func makeFileBrowser(_ cfg: PopupConfig, startDir: String, in w: PopupWindow,
+                                 tag: String, opened: String) -> PopupFileBrowser {
+        var browserCfg = cfg
+        applyBrowserSettings(&browserCfg)
+        let fb = PopupFileBrowser(config: browserCfg, startDir: startDir,
+                                  staticFavorites: fileBrowserFavorites())
+        fb.onOpen = { [weak self] path in
+            self?.log("\(tag): \(opened) \(path)")
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
+        fb.onCopyPath = { [weak self] p in
+            self?.copy(p, "path: \(p)")
+        }
+        fb.onSortChange = { [weak self] key, desc in self?.saveBrowserSort(key, desc) }
+        w.onOpenExternalTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
+        fb.onStatus = { [weak self] s in
+            if !s.isEmpty { self?.log("\(tag): \(s)") }
+        }
+        // file-browser right-click "Open in Notes": open the row as a note tab
+        w.onFileBrowserOpenInNotes = { [weak self] p in
+            self?.openNoteFile(p)
+        }
+        attachRecent(fb)
+        return fb
+    }
+
     // [files] recent / recent-days / recent-limit / recent-exclude
     func configureRecentFiles() {
         let cmd = commands.first(where: { $0.kind == .files })
@@ -7205,18 +6962,8 @@ private func trimmed(_ s: String) -> String? {
         cfg.width = cmd.width > 0 ? cmd.width : 780
         cfg.height = cmd.height > 0 ? cmd.height : 560
         cfg.headerHeight = 30
-        cfg.headerColor = cmd.headerColor ?? headerBlueSilver
-        cfg.colors = windowColors(cmd)
+        applyWindowTheme(&cfg, cmd)
         cfg.terminalForeground = cmd.terminalForeground
-        if let ta = cmd.tintAlpha { cfg.tintAlpha = ta }
-        if let bg = cmd.backgroundColor {
-            let cc = bg.usingColorSpace(.sRGB) ?? bg
-            // the card hue stays opaque; the color's alpha becomes the card
-            // opacity (tintAlpha) so the picker's opacity slider survives
-            cfg.colors.background = cc.withAlphaComponent(1)
-            cfg.tintAlpha = cc.alphaComponent
-        }
-        cfg.fontName = cmd.font
         let w = PopupWindow(config: cfg)
         // a clean header: the icon menu (+ the shared window's view
         // switcher), no path title, no copy buttons (right-click a row for
@@ -7232,44 +6979,10 @@ private func trimmed(_ s: String) -> String? {
             let menu = NSMenu()
             menu.autoenablesItems = false
 
-            menu.addItem(self.focusLossMenuItem(for: w, section: cmd.name))
-            menu.addItem(self.floatMenuItem(for: w, section: cmd.name))
+            self.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
-            // theme presets + transparency
-            self.addThemeMenus(to: menu, window: w, section: cmd.name)
-            menu.addItem(.separator())
-
-            // reset actions
-            let resetSizeItem = NSMenuItem(title: "Reset Default Size", action: nil, keyEquivalent: "")
-            let rsTarget = MenuActionTarget { w.resetToDefaultSize() }
-            resetSizeItem.target = rsTarget
-            resetSizeItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(rsTarget)
-            menu.addItem(resetSizeItem)
-
-            let resetColorItem = NSMenuItem(title: "Reset Default Colors", action: nil, keyEquivalent: "")
-            let rcTarget = MenuActionTarget { self.resetWindowTheme(w, section: cmd.name) }
-            resetColorItem.target = rcTarget
-            resetColorItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(rcTarget)
-            menu.addItem(resetColorItem)
-            menu.addItem(.separator())
-
-            // open config
-            let configItem = NSMenuItem(title: "Open Config", action: nil, keyEquivalent: "")
-            let cfgTarget = MenuActionTarget {
-                let canonical = NSHomeDirectory() + "/.config/workspace-switcher/commands.toml"
-                let p = FileManager.default.fileExists(atPath: canonical)
-                    ? canonical : settings.commandsConfPath
-                if FileManager.default.fileExists(atPath: p) {
-                    // open config in the notes window
-                    self.openNoteFile(p)
-                }
-            }
-            configItem.target = cfgTarget
-            configItem.action = #selector(MenuActionTarget.run)
-            menuActionTargets.append(cfgTarget)
-            menu.addItem(configItem)
+            // open config in the notes window
+            menu.addItem(self.openConfigMenuItem { [weak self] in self?.openNoteFile($0) })
             menu.addItem(self.shortcutsMenuItem(for: w, view: "files"))
 
             w.showHeaderMenu(menu)
@@ -7279,31 +6992,8 @@ private func trimmed(_ s: String) -> String? {
             self.showShortcuts(on: w, view: "files")
         }
 
-        let favs = fileBrowserFavorites()
-        var browserCfg = cfg
-        applyBrowserSettings(&browserCfg)
-        let fb = PopupFileBrowser(config: browserCfg, startDir: root,
-                                  staticFavorites: favs)
-        fb.onOpen = { [weak self] path in
-            self?.log("files '\(cmd.name)': opened \(path)")
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-        }
-        fb.onCopyPath = { [weak self] p in
-            self?.copy(p, "path: \(p)")
-        }
-        fb.onCopyDir = { [weak self] dir in
-            self?.copy(dir, "directory path: \(dir)")
-        }
-        fb.onSortChange = { [weak self] key, desc in self?.saveBrowserSort(key, desc) }
-        w.onOpenExternalTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
-        fb.onStatus = { [weak self] s in
-            if !s.isEmpty { self?.log("files '\(cmd.name)': \(s)") }
-        }
-        // file-browser right-click "Open in Notes": open the row in the notes window
-        w.onFileBrowserOpenInNotes = { [weak self] p in
-            self?.openNoteFile(p)
-        }
-        attachRecent(fb)
+        let fb = makeFileBrowser(cfg, startDir: root, in: w,
+                                 tag: "files '\(cmd.name)'", opened: "opened")
         w.installFileBrowser(fb, drawer: false)
         // Hyper+F opens on Recent (the latest download / screenshot);
         // [files] start = root keeps the old folder start
@@ -7992,6 +7682,31 @@ extension SwitcherController {
     }
 
     // closure-backed menu item (targets retained in menuActionTargets)
+    // the window-settings block of every view's icon menu: focus loss, float,
+    // theme presets + transparency, reset size / colors
+    func addWindowSettingsItems(to menu: NSMenu, window w: PopupWindow, section: String) {
+        menu.addItem(focusLossMenuItem(for: w, section: section))
+        menu.addItem(floatMenuItem(for: w, section: section))
+        menu.addItem(.separator())
+        addThemeMenus(to: menu, window: w, section: section)
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Reset Default Size") { w.resetToDefaultSize() })
+        menu.addItem(menuItem("Reset Default Colors") { [weak self] in
+            self?.resetWindowTheme(w, section: section)
+        })
+    }
+
+    // "Open Config": the home's commands.toml (what every external config
+    // points at), else the one this build reads; `open` gets the path
+    func openConfigMenuItem(_ open: @escaping (String) -> Void) -> NSMenuItem {
+        menuItem("Open Config") {
+            let fm = FileManager.default
+            let canonical = homeDir + "/" + commandsConfName
+            let p = fm.fileExists(atPath: canonical) ? canonical : settings.commandsConfPath
+            if fm.fileExists(atPath: p) { open(p) }
+        }
+    }
+
     func menuItem(_ title: String, state: Bool? = nil, enabled: Bool = true,
                   _ action: @escaping () -> Void) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: #selector(MenuActionTarget.run),
