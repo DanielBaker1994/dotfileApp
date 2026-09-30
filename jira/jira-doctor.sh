@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # jira-doctor.sh — ONE command that heartbeats the whole workspace-switcher
-# stack: menu bar (sketchybar + borders + karabiner), aerospace, the
+# stack: menu bar (sketchybar + borders), aerospace, the
 # workspace-switcher daemon, permissions (mic/speech/dictation) — and, ONLY
 # if jira is enabled in commands.toml, the jira section (config, API, poll
 # agent, schedule, window json). Disabling jira must never disable the
@@ -33,7 +33,6 @@ PLIST_SRC="$WS_ROOT/jira/com.jira.poll.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
 LABEL="com.jira.poll"
 TOML="$HOME/.config/aerospace/aerospace.toml"
-KARAB="$HOME/.config/karabiner/karabiner.json"
 SKETCH_DIR="$HOME/.config/sketchybar"
 WS_SOCKET="${TMPDIR:-/tmp}"
 WS_SOCKET="${WS_SOCKET%/}/ws-notes.sock"
@@ -54,7 +53,7 @@ for b in curl jq python3 aerospace swiftc brew; do
 done
 
 # ---------------------------------------------------------------- menu bar
-head_ "== menu bar (sketchybar + borders + karabiner) =="
+head_ "== menu bar (sketchybar + borders) =="
 if running sketchybar; then
     ok "sketchybar running (pid $(pgrep -x sketchybar | head -1))"
 else
@@ -83,16 +82,6 @@ for s in sketchybar borders; do
         warn "brew service $s: not started (brew services start $s)"
     fi
 done
-if pgrep -f "Karabiner-Core-Service" >/dev/null 2>&1; then
-    ok "karabiner running (Hyper key active)"
-else
-    warn "karabiner NOT running — Hyper shortcuts (switcher/notes/jira) dead"
-fi
-if [ -f "$KARAB" ]; then
-    ok "karabiner config: $KARAB"
-else
-    bad "karabiner config missing: $KARAB"
-fi
 if fc-list 2>/dev/null | grep -i "Hack Nerd Font" >/dev/null; then
     ok "Hack Nerd Font installed (terminal drawer glyphs)"
 else
@@ -163,10 +152,10 @@ if [ -x "$WS_BIN" ]; then
                 ok "binary rebuilt (--fix): $WS_BIN"
                 # a rebuilt daemon loses its TCC grants — re-grant mic + speech
                 # (bundle-id grants persist across rebuilds)
-                if "$WS_ROOT/bin/voice-permissions.sh" >/dev/null 2>&1; then
+                if "$WS_ROOT/bin/grant-permissions.sh" >/dev/null 2>&1; then
                     ok "voice permissions re-granted (mic + speech recognition)"
                 else
-                    warn "voice permissions could not be granted — run $WS_ROOT/bin/voice-permissions.sh"
+                    warn "voice permissions could not be granted — run $WS_ROOT/bin/grant-permissions.sh"
                 fi
             else
                 bad "binary rebuild failed (see swiftc output)"
@@ -203,14 +192,9 @@ if [ -f "$WS_ROOT/commands.toml" ]; then
 else
     bad "commands.toml missing: $WS_ROOT/commands.toml"
 fi
-for s in workspace_switcher.sh voice-permissions.sh focus-bridge.sh; do
+for s in workspace_switcher.sh grant-permissions.sh focus-bridge.sh; do
     if [ -x "$WS_ROOT/bin/$s" ]; then ok "bin/$s present"; else bad "bin/$s missing or not executable"; fi
 done
-if grep -q 'caps_lock' "$KARAB" 2>/dev/null && grep -qi 'Hyper' "$KARAB" 2>/dev/null; then
-    ok "karabiner: caps_lock -> Hyper mapping present"
-else
-    warn "karabiner: no caps_lock -> Hyper mapping found"
-fi
 if grep -q 'workspace_switcher.sh' "$TOML" 2>/dev/null; then
     ok "aerospace: Hyper+S bound to workspace_switcher.sh"
 else
@@ -225,11 +209,11 @@ if [ -r "$TCC_DB" ]; then
         if [ "${N:-0}" -ge 1 ]; then
             ok "TCC $svc: granted"
         else
-            bad "TCC $svc: NOT granted — run bin/voice-permissions.sh (or System Settings > Privacy & Security)"
+            bad "TCC $svc: NOT granted — run bin/grant-permissions.sh (or System Settings > Privacy & Security)"
         fi
     done
 else
-    warn "cannot read TCC db ($TCC_DB) — run bin/voice-permissions.sh and check System Settings"
+    warn "cannot read TCC db ($TCC_DB) — run bin/grant-permissions.sh and check System Settings"
 fi
 DICT="$(defaults read com.apple.speech.recognition.AppleSpeechRecognition.prefs DictationEnabled 2>/dev/null)"
 if [ "$DICT" = "1" ]; then

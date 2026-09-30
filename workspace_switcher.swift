@@ -2599,8 +2599,8 @@ final class VoiceRecorder {
         let denied = mic == .denied || speech == .denied
             || mic == .restricted || speech == .restricted
         onError?(denied
-            ? "microphone/speech access is blocked for this binary — run aerospace/jira/voice-permissions.sh (or add it in System Settings > Privacy & Security > Microphone AND Speech Recognition), then press record again"
-            : "microphone/speech permission not granted yet — run aerospace/jira/voice-permissions.sh (or add this binary in System Settings > Privacy & Security > Microphone AND Speech Recognition), then press record again")
+            ? "microphone/speech access is blocked for this binary — run bin/grant-permissions.sh (or add it in System Settings > Privacy & Security > Microphone AND Speech Recognition), then press record again"
+            : "microphone/speech permission not granted yet — run bin/grant-permissions.sh (or add this binary in System Settings > Privacy & Security > Microphone AND Speech Recognition), then press record again")
         return false
     }
 

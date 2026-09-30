@@ -35,7 +35,7 @@ if [ "$MODE" = "jira-poll" ]; then
     exec "$BIN" jira-poll "${2:-toggle}"
 fi
 
-# Karabiner runs shell_commands with a MINIMAL PATH, so `aerospace` is not
+# Hotkey tools run shell commands with a MINIMAL PATH, so `aerospace` is not
 # found unless we add its location (it would silently fail every IPC call).
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
@@ -112,12 +112,12 @@ case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
     else
         build
         # LaunchServices launch: macOS then attributes microphone/speech TCC
-        # to the APP BUNDLE. A nohup child of karabiner's shell inherits that
+        # to the APP BUNDLE. A nohup child of the hotkey tool's shell inherits that
         # shell as its responsible process, so the bundle's mic grant never
         # applies and voice stays dead for the whole session.
         LOG "daemon ping: FAILED -> launching fresh daemon via LaunchServices ($MODE)"
         # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
-        # Karabiner attribution and would answer future pings forever)
+        # attribution and would answer future pings forever)
         pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
         # cold start: Hyper+N ("window") opens the first view, files —
         # main.swift maps it; only the terminal drawer needs notes

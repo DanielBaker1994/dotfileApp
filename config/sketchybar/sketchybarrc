@@ -55,7 +55,7 @@ source "$PLUGIN_DIR/notifications.sh"
 # this reverts it immediately (see the script header).
 sketchybar --add item stray_guard left \
            --set stray_guard drawing=off updates=on \
-                 script="$HOME/.config/workspace-switcher/config/aerospace/no_stray_workspaces.sh" \
+                 script="$HOME/.config/workspace-switcher/bin/no_stray_workspaces.sh" \
            --subscribe stray_guard display_change system_woke
 
 sketchybar --update

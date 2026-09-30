@@ -10,7 +10,7 @@ after-startup-command = [
 # variables (sketchybar does not pass them positionally), and
 # sketchybar/plugins/aerospacer.sh reads $FOCUSED_WORKSPACE to move the highlight.
 exec-on-workspace-change = [
-  '/opt/homebrew/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE; ~/.config/workspace-switcher/config/aerospace/no_stray_workspaces.sh &'
+  '/opt/homebrew/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE; ~/.config/workspace-switcher/bin/no_stray_workspaces.sh &'
 ]
 
 
@@ -171,7 +171,7 @@ W = ['^(?!built-in)', 'built-in', 'main']
 # Fallback value (if you omit the key): mode.main.binding = {}
 [mode.main.binding]
 
-    # Workspace switcher popup: Hyper+S (caps_lock = Hyper via Karabiner;
+    # Workspace switcher popup: Hyper+S (Hyper = all four modifiers;
     # AeroSpace has no `hyper` keyword, so it's spelled out as
     # alt-cmd-ctrl-shift). Hyper+N/T run the app BINARY directly (a ~20ms
     # socket ping; no bash) — the running daemon records the focused window

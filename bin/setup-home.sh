@@ -22,7 +22,7 @@
 #   setup-home.sh status               who owns the home: repo | app | none
 #
 # Never runs git. Anything replaced is moved to a backup first
-# (install.conf BACKUP_PREFIX, under ~/.config — not /tmp). $WS_HOME
+# (install.conf BACKUP_PREFIX, in /tmp). $WS_HOME
 # overrides the home (tests).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

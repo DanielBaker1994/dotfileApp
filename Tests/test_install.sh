@@ -85,7 +85,7 @@ OUT="$(bash "$SETUP" stack 2>&1)"
 t "stack succeeds" grep -q 'result=ok' <<<"$OUT"
 t "aerospace.toml links to the home's copy" is_link_to "$HOME/.config/aerospace/aerospace.toml" "$WSH/config/aerospace/aerospace.toml"
 t "sketchybarrc linked" is_link_to "$HOME/.config/sketchybar/sketchybarrc" "$WSH/config/sketchybar/sketchybarrc"
-t "the file in the way was backed up" bash -c "grep -rqx mine '$HOME/.config/workspace-switcher-backups'"
+t "the file in the way was backed up" bash -c "grep -rqx mine $BACKUP_PREFIX-*"
 t "helpers precompiled into the cache" test -x "$HOME/.cache/sketchybar/menubar_watch"
 t "symlinks --check passes" env WS_LINK_ROOT="$WSH" bash "$RES/symlinks.sh" --check
 
@@ -122,7 +122,7 @@ OUT="$(bash "$REPO/bin/setup-home.sh" repo)"
 BK="$(sed -n 's/^backup=//p' <<<"$OUT")"
 t "the app's home was moved to a backup" test -f "$BK/commands.toml"
 t "with the user's edits" grep -q 'edited in the app install' "$BK/commands.toml"
-t "backup is not in /tmp" bash -c "case '$BK' in '$HOME'/.config/workspace-switcher-backups/*) exit 0 ;; esac; exit 1"
+t "backup is under BACKUP_PREFIX" bash -c "case '$BK' in '$BACKUP_PREFIX'-*) exit 0 ;; esac; exit 1"
 ROOT="$REPO" bash "$REPO/symlinks.sh" --fix >/dev/null 2>&1
 t "home links to the checkout" is_link_to "$WSH" "$REPO"
 t "aerospace.toml now points into the checkout" is_link_to "$HOME/.config/aerospace/aerospace.toml" "$REPO/config/aerospace/aerospace.toml"

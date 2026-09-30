@@ -13,7 +13,7 @@ set -uo pipefail
 _sl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="${ROOT:-$_sl_self}"
 [ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"   # CONFIG_DIRS, BACKUP_PREFIX
-BACKUP_PREFIX="${BACKUP_PREFIX:-$HOME/.config/workspace-switcher-backups/install}"
+BACKUP_PREFIX="${BACKUP_PREFIX:-/tmp/ws-backup}"
 LINK_ROOT="${WS_LINK_ROOT:-$ROOT}"
 WS_HOME_DEFAULT="${WS_HOME_DEFAULT:-$HOME/.config/workspace-switcher}"
 

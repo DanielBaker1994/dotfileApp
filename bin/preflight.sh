@@ -186,7 +186,7 @@ if command -v brew >/dev/null 2>&1; then
     CASKS=" $(brew list --cask -1 2>/dev/null | tr '\n' ' ') "
 else
     add brew stack warn 0 "Homebrew" "not installed" \
-        "Needed for the hotkeys and the menu bar (AeroSpace, sketchybar, borders, Karabiner). Install it from https://brew.sh — it asks for your password once." "url:https://brew.sh"
+        "Needed for the hotkeys and the menu bar (AeroSpace, sketchybar, borders). Install it from https://brew.sh — it asks for your password once." "url:https://brew.sh"
     FORMULAE=" "; CASKS=" "
 fi
 for f in $BREW_FORMULAE; do
@@ -199,8 +199,7 @@ for f in $BREW_FORMULAE; do
     fi
 done
 for c in $BREW_CASKS; do
-    if [[ "$CASKS" == *" $c "* ]] \
-        || { [ "$c" = karabiner-elements ] && [ -d "/Applications/Karabiner-Elements.app" ]; }; then
+    if [[ "$CASKS" == *" $c "* ]]; then
         add "cask-$c" stack warn 1 "$c" "installed"
     else
         add "cask-$c" stack warn 0 "$c" "not installed" "brew install --cask $c" "cask:$c"

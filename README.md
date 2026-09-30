@@ -12,8 +12,7 @@ Open `workspace-switcher-<version>.dmg`, drag the app to **Applications**,
 open it. The first run shows **Setup & Health Check**: what this Mac has and
 what is missing (no Apple on-device model → the AI view is off, everything
 else works). Notes, files, Jira, Confluence and AI work straight away; the
-Hyper hotkeys and the menu bar (AeroSpace, sketchybar, borders, Karabiner —
-Homebrew) are one optional button in that window. Your settings live in
+Hyper hotkeys and the menu bar (AeroSpace, sketchybar, borders — Homebrew) are one optional button in that window. Your settings live in
 `~/.config/workspace-switcher` (`commands.toml`, `rules/`, `config/`);
 updating = dragging the new app over the old one.
 
@@ -58,7 +57,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 | Thing | Where |
 | --- | --- |
-| Switcher popup | Hyper+S (Karabiner) |
+| Switcher popup | Hyper+S |
 | Notes / Jira / Voice / Health windows | menu-bar **wrench** icon |
 | Voice notes | red record button → dictation → text, pause/resume, live draft |
 | Menu-bar stack | sketchybar + borders (brew services) |
@@ -84,12 +83,12 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
   config-driven; new windows need no code)
 - `bin/workspace_switcher.sh` — hotkey launcher (pings the daemon, launches via
   LaunchServices so mic/speech TCC grants attach to the app bundle)
-- `bin/voice-permissions.sh` — writes the mic + speech TCC grants
+- `bin/grant-permissions.sh` — writes the mic + speech TCC grants
 - `jira/` — python poller (stdlib only): `jira_api.py` (API client, JQL
   queries, `--sync`, curl logging), `jira_poll.py` (per-endpoint scheduler,
   lock, publish), `jira_config.py` (config.json load/migrate/validate +
   `[jira] columns` → API `fields=`), `jira_status.py` (status.json);
-  `jira-api.sh` / `jira-poll.sh` are thin compat wrappers; `jira-doctor.sh`
+  `jira-doctor.sh`
   (health checks, `/health-checks` window). Tests: `python3 Tests/test_jira_poll.py`
 
 ### Jira poller at a glance

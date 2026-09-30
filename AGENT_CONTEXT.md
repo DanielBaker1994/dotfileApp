@@ -57,7 +57,7 @@ files in the way, UNINSTALL.sh removes only links into the repo.
   a deleted rule stays deleted), heals the links when the app moved, hands
   over between the two installs (a checkout is never deleted: unlinked or
   renamed `…repo-<date>`; an app home goes to
-  `~/.config/workspace-switcher-backups/`). Home owned by a checkout → exit
+  `/tmp/ws-backup-<time>/`). Home owned by a checkout → exit
   3, nothing touched. `stack` = `symlinks.sh` (`WS_LINK_ROOT` = the home in
   app mode) + precompiled sketchybar helpers + brew services. Never git.
 - `bin/preflight.sh [--json] [--mode repo|app] [--app PATH]`: ONE check list

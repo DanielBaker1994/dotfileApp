@@ -473,7 +473,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     private func noBrew() {
         let cmd = "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
         ask(title: "Homebrew is not installed",
-            text: "The hotkeys and the menu bar are built on AeroSpace, sketchybar, borders and Karabiner, which come from Homebrew. "
+            text: "The hotkeys and the menu bar are built on AeroSpace, sketchybar and borders, which come from Homebrew. "
                 + "Its installer needs your password, so it has to run in Terminal:\n\n\(cmd)\n\nRun it, then press Check Again.",
             buttons: ["Copy Command & Open Terminal", "Cancel"]) { [weak self] pick in
             guard pick == 0 else { return }
@@ -495,8 +495,8 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         ask(title: "Set up the hotkeys and the menu bar?",
             text: (installs.isEmpty ? "" : "Installs with Homebrew: \(installs).\n\n")
                 + "Links this app's AeroSpace, sketchybar and borders configs into ~/.config. "
-                + "Files already there are moved to ~/.config/workspace-switcher-backups first — nothing is deleted.\n\n"
-                + "Afterwards macOS asks once for Accessibility access for AeroSpace, and Karabiner needs its system extension allowed (System Settings ▸ Privacy & Security).",
+                + "Files already there are moved to /tmp/ws-backup-<time> first — nothing is deleted.\n\n"
+                + "Afterwards macOS asks once for Accessibility access for AeroSpace (System Settings ▸ Privacy & Security).",
             buttons: ["Set Up", "Cancel"]) { [weak self] pick in
             guard pick == 0, let self else { return }
             var steps: [(String, String, [String])] = []

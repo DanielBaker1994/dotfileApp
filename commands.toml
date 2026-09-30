@@ -391,6 +391,7 @@ dim-color = "9AA5CE"
 highlight-color = 283457
 accent-color = "7AA2F7"
 palette = "BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"
+float = true
 # (window, palette, menu entry). Every section must opt in explicitly.
 [jira]
 enabled = true
