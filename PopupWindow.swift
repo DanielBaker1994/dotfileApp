@@ -9196,7 +9196,38 @@ private func scrollSelectionIntoView() {
     public func focusSearchField() { panel.makeFirstResponder(field) }
     public var currentSearchText: String { field.stringValue }
 
+    // Every key the window's local monitor sees, in a fixed order: the first
+    // stage with an answer wins (true = consumed, false = left to the focused
+    // view); nil = not this stage's key. The order is documented in
+    // AGENT_CONTEXT.md ("handleKey order").
     private func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        if let r = overlayKey(code, mods) { return r }
+        if let r = windowSizeKey(code, mods) { return r }
+        if mods.contains(.command) || mods.contains(.control),
+           let r = modifiedKey(code, mods) { return r }
+        return config.editMode ? editorKey(code, mods) : listKey(code, mods)
+    }
+
+    // Cmd / Ctrl chords, pane by pane. Editing shortcuts (select-all / copy /
+    // paste / cut / undo) must be intercepted explicitly: system key
+    // equivalents don't fire reliably for nonactivating accessory-app windows
+    // (Cmd/Ctrl + A/C/V/X/Z). Terminal policy: when the shell holds focus it
+    // owns EVERY shortcut except copy (Cmd+C) and paste (Cmd+V / Ctrl+V) —
+    // Ctrl+C must reach the shell as SIGINT, Ctrl+A/Z/X stay readline/suspend.
+    private func modifiedKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        if panel.attachedSheet != nil { return sheetEditKey(code, mods) }
+        if let r = paneFocusKey(code, mods) { return r }
+        if let r = viewCycleKey(code, mods) { return r }
+        if let r = paneResizeKey(code, mods) { return r }
+        if let vv = focusedVim() { return vimPaneKey(vv, code, mods) }
+        if let term = focusedTerm() { return terminalKey(term, code, mods) }
+        if let r = hostShortcutKey(code, mods) { return r }
+        if let r = fileBrowserKey(code, mods) { return r }
+        return editKey(code, mods)
+    }
+
+    // a host hook / an overlay that owns the keyboard, Cmd+/
+    private func overlayKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
         if let hook = onKeyPreview, hook(code, mods) { return true }
         // an open action picker owns the keyboard (its Esc never counts
         // toward the window's Esc-streak close)
@@ -9208,6 +9239,11 @@ private func scrollSelectionIntoView() {
             hook()
             return true
         }
+        return nil
+    }
+
+    // the Esc streak's reset, then the font / window size keys
+    private func windowSizeKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
         // an Esc streak (N rapid Esc close the window) only counts
         // CONSECUTIVE presses — any other key starts it over
         if code != 53 { escStreak = 0 }
@@ -9234,389 +9270,425 @@ private func scrollSelectionIntoView() {
             default: break
             }
         }
-        // Editing shortcuts (select-all / copy / paste / cut / undo) must be
-        // intercepted explicitly: system key equivalents don't fire reliably
-        // for nonactivating accessory-app windows (Cmd/Ctrl + A/C/V/X/Z).
-        // Terminal policy: when the shell holds focus it owns EVERY shortcut
-        // except copy (Cmd+C) and paste (Cmd+V / Ctrl+V) — Ctrl+C must reach
-        // the shell as SIGINT, Ctrl+A/Z/X stay readline/suspend, etc.
+        return nil
+    }
+
+    // When a sheet is up (e.g. the New Note / Open Existing dialog), its own
+    // text field must own the edit shortcuts — don't hijack Cmd+V/C/X/A into
+    // the editor behind the sheet. They are routed straight to its field
+    // editor so they ALWAYS work, even though the app has no Edit menu / key
+    // equivalents. (Cmd+V AND Ctrl+V — the Linux-style shortcut the terminal
+    // also honors — paste; Cmd+A/C/X/Z select/copy/cut/undo.)
+    private func sheetEditKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        let cmd = mods.contains(.command)
         let ctrl = mods.contains(.control)
-        if cmd || ctrl {
-            // When a sheet is up (e.g. the New Note / Open Existing dialog),
-            // its own text field must own the edit shortcuts — don't hijack
-            // Cmd+V/C/X/A into the editor behind the sheet. Paste (Cmd+V AND
-            // Ctrl+V, the Linux-style shortcut the terminal also honors) is
-            // routed straight to the sheet's field editor so it ALWAYS works,
-            // even though the app has no Edit menu / key equivalents.
-            if panel.attachedSheet != nil {
-                // The sheet's text field owns the standard edit shortcuts —
-                // routed straight to its field editor so they ALWAYS work,
-                // even though the app has no Edit menu / key equivalents.
-                // (Cmd+V AND Ctrl+V paste; Cmd+A/C/X/Z select/copy/cut/undo.)
-                if let ed = activeTextEditor() {
-                    switch code {
-                    case 9 where cmd || ctrl: ed.paste(nil); return true
-                    case 0 where cmd: ed.selectAll(nil); return true
-                    case 8 where cmd: ed.copy(nil); return true
-                    case 7 where cmd: ed.cut(nil); return true
-                    case 6 where cmd: ed.undoManager?.undo(); return true
-                    default: return false
-                    }
-                }
-                return false
-            }
-            // Ctrl+J / Ctrl+K: move keyboard focus up/down across the panes
-            // (notes editor -> file browser drawer -> terminal drawer), only
-            // over the ones that are open. J = down, K = up. Handled BEFORE
-            // the terminal branch so it works from any pane.
-            // Ctrl+Shift+J/K is reserved for pane resize — don't intercept it.
-            if ctrl && !mods.contains(.shift) && (code == 38 || code == 40), config.editMode {
-                var panes: [NSResponder] = []
-                var paneTypes: [FocusedPane] = []
-                if let ed = primaryEditor { panes.append(ed); paneTypes.append(.editor) }
-                if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView); paneTypes.append(.browser) }
-                if terminalShown, let term = terminalDrawer { panes.append(term); paneTypes.append(.terminal) }
-                if panes.count > 1 {
-                    let current = panel.firstResponder
-                    var curIdx = panes.firstIndex { p in
-                        if let current, current === p { return true }
-                        if let v = current as? NSView, let pv = p as? NSView {
-                            return v.isDescendant(of: pv)
-                        }
-                        return false
-                    }
-                    // the filter bar (its field editor), pills and preview
-                    // sit OUTSIDE the list view but are still the browser
-                    // pane — without this, Ctrl+J/K from the filter bar saw
-                    // "no pane focused" and jumped to the first/last pane
-                    // instead of the neighbour, needing extra presses
-                    var inFilterBar = false
-                    if curIdx == nil, fileBrowserShown, let fb = fileBrowser,
-                       browserHasFocus(fb), let bi = paneTypes.firstIndex(of: .browser) {
-                        curIdx = bi
-                        inFilterBar = fb.searchView.currentEditor() != nil
-                    }
-                    if let curIdx {
-                        let target = code == 38
-                            ? min(curIdx + 1, panes.count - 1)
-                            : max(curIdx - 1, 0)
-                        // at the edge from the filter bar: drop into the list
-                        // (the browser is still the pane, focus still moves)
-                        if target != curIdx || inFilterBar { panel.makeFirstResponder(panes[target]) }
-                        focusedPane = paneTypes[target]
-                    } else {
-                        let target = code == 38 ? panes[0] : panes[panes.count - 1]
-                        panel.makeFirstResponder(target)
-                        focusedPane = code == 38 ? paneTypes[0] : paneTypes[panes.count - 1]
-                    }
-                    updateFocusIndicator()
-                    return true
-                }
-                // single pane (editor only) — fall through so the emacs
-                // bindings (Ctrl+J newline, Ctrl+K kill-line) reach the text view
-            }
-            // Ctrl+Tab / Ctrl+Shift+Tab: the host's next / previous view
-            // (onCycleView), else next / previous tab, wrapping at either
-            // end. Before the vim/terminal branches so it works from every pane.
-            if ctrl && !cmd && code == 48, let hook = onCycleView, panel.attachedSheet == nil {
-                hook(mods.contains(.shift) ? -1 : 1)
-                return true
-            }
-            if ctrl && !cmd && code == 48, config.tabs, tabTitles.count > 1 {
-                let n = tabTitles.count
-                selectedTab = (selectedTab + (mods.contains(.shift) ? -1 : 1) + n) % n
-                return true
-            }
-            // Ctrl+Shift+HJKL: resize window like tmux pane resize
-            // H = shrink width, L = grow width, J = shrink height, K = grow height
-            // Requires ONLY Ctrl+Shift (no Cmd/Option) to avoid firing when
-            // CapsLock→Hyper sends all four modifiers simultaneously.
-            if ctrl && mods.contains(.shift) && !mods.contains(.command) && !mods.contains(.option), panel.attachedSheet == nil {
-                let step: CGFloat = 20
-                switch code {
-                case 4:  // H — shrink width
-                    var f = panel.frame
-                    f.size.width = max(120, f.width - step)
-                    panel.setFrame(clampToScreen(f), display: true)
-                    return true
-                case 37: // L — grow width
-                    var f = panel.frame
-                    f.size.width = min(maxPanelWidth(), f.width + step)
-                    panel.setFrame(clampToScreen(f), display: true)
-                    return true
-                case 40: // K — grow focused pane height
-                    if terminalShown && focusedPane == .terminal {
-                        currentTerminalHeight = min(600, currentTerminalHeight + step)
-                        preferredTerminalHeight = currentTerminalHeight
-                    } else if fileBrowserShown && focusedPane == .browser {
-                        currentBrowserHeight = min(600, currentBrowserHeight + step)
-                        preferredBrowserHeight = currentBrowserHeight
-                    } else {
-                        // editor: grow window height
-                        var f = panel.frame
-                        f.size.height = min(maxPanelHeight(), f.height + step)
-                        panel.setFrame(clampToScreen(f), display: true)
-                        return true
-                    }
-                    syncDrawerLayout()
-                    updateFocusIndicator()
-                    return true
-                case 38: // J — shrink focused pane height
-                    if terminalShown && focusedPane == .terminal {
-                        currentTerminalHeight = max(minTerminalH, currentTerminalHeight - step)
-                        preferredTerminalHeight = currentTerminalHeight
-                    } else if fileBrowserShown && focusedPane == .browser {
-                        currentBrowserHeight = max(minBrowserH, currentBrowserHeight - step)
-                        preferredBrowserHeight = currentBrowserHeight
-                    } else {
-                        // editor: shrink window height
-                        var f = panel.frame
-                        f.size.height = max(140, f.height - step)
-                        panel.setFrame(clampToScreen(f), display: true)
-                        return true
-                    }
-                    syncDrawerLayout()
-                    updateFocusIndicator()
-                    return true
-                default: break
-                }
-            }
-            // vim pane: every Cmd/Ctrl key belongs to the editor except the
-            // app's edit shortcuts (rule 1), mapped onto vim actions.
-            // Ctrl+C / Cmd+C only copy while a Visual selection exists —
-            // otherwise Ctrl+C stays vim's own (cancel) key.
-            if let vv = focusedVim() {
-                switch code {
-                case 8 where cmd || ctrl:           // C — copy
-                    if vimCopySelection(cut: false) { return true }
-                    if cmd, vv.selectedRange().length > 0 { vv.copy(self); return true }
-                    return cmd
-                case 9 where cmd || ctrl:           // V — paste
-                    vimPaste(); return true
-                case 7 where cmd:                   // X — cut the selection
-                    _ = vimCopySelection(cut: true); return true
-                case 0 where cmd:                   // A — select all
-                    vimRemote("<C-\\><C-N>ggVG"); return true
-                case 6 where cmd:                   // Z — undo
-                    vimRemote("<C-\\><C-N>u"); return true
-                case 1 where cmd:                   // S — save
-                    vimCommand("silent! wall")
-                    onEditorCommit?(currentEditorText)
-                    return true
-                case 3 where cmd:                   // F — vim search
-                    vimRemote("<C-\\><C-N>/"); return true
-                case 13 where cmd:                  // W — close the window
-                    handleEscape(); return true
-                case 31 where cmd:                  // O — open file at path
-                    onOpenPathPrompt?(); return true
-                default:
-                    return false                    // Ctrl+* etc. -> vim
-                }
-            }
-            if let term = focusedTerm() {
-                switch code {
-                case 8 where cmd: term.copy(self); return true    // Cmd+C copy
-                case 9 where cmd || ctrl: term.paste(self); return true  // Cmd+V / Ctrl+V paste
-                default: return false   // every other Cmd/Ctrl key goes to the shell
-                }
-            }
-            // Cmd+K: the host's action picker (the file browser keeps its
-            // own Cmd+K = copy path while it has focus)
-            if cmd && code == 40, let hook = onCommandK,
-               !(fileBrowser.map { browserActive() && browserHasFocus($0) } ?? false) {
-                hook()
-                return true
-            }
-            if cmd && code == 3, !config.editMode, let hook = onCommandF {
-                hook()
-                return true
-            }
-            // Cmd+L: focus the browser's filter bar (address-bar shortcut),
-            // selecting the current path so typing replaces it
-            if cmd && code == 37, let fb = fileBrowser, browserActive() {
-                panel.makeFirstResponder(fb.searchView)
-                fb.searchView.currentEditor()?.selectAll(nil)
-                return true
-            }
-            // The file browser's search field owns the standard editing
-            // shortcuts while it (or its list) has focus — otherwise Cmd+V
-            // pastes into the notes editor / hidden window field instead of
-            // the filter bar.
-            if let fb = fileBrowser, browserActive(), browserHasFocus(fb) {
-                // renaming a row: the rename field owns the edit shortcuts
-                if let ed = fb.renameEditor {
-                    switch code {
-                    case 0: ed.selectAll(nil); return true
-                    case 8: ed.copy(nil); return true
-                    case 9: ed.paste(nil); return true
-                    case 7: ed.cut(nil); return true
-                    case 6: ed.undoManager?.undo(); return true
-                    default: return false
-                    }
-                }
-                // files: trash / duplicate / copy / paste / undo / history…
-                if fb.handleShortcut(code, mods) { return true }
-                switch code {
-                case 15 where cmd:  // Cmd+R — rename the selected row in place
-                    fb.beginRename()
-                    return true
-                case 45 where ctrl, 35 where ctrl:   // Ctrl+N / Ctrl+P — next / prev result
-                    fb.listView.moveSelection(code == 45 ? 1 : -1)
-                    return true
-                case 40 where cmd:  // Cmd+K — copy the selected row's absolute path
-                    if let p = fb.copyRowPath(fb.listView.selection), !config.copyToast.isEmpty {
-                        let shown = (p as NSString).abbreviatingWithTildeInPath
-                        showToast(config.copyToast.replacingOccurrences(of: "{}", with: shown),
-                                  symbol: "doc.on.clipboard")
-                    }
-                    return true
-                case 0:   // A — select all in the filter bar
-                    fb.searchView.selectText(nil)
-                    return true
-                case 8:   // C — copy the search selection / the list row path
-                    if let ed = fb.searchView.currentEditor() {
-                        ed.copy(nil)
-                    } else {
-                        fb.copyRowPath(fb.listView.selection)
-                    }
-                    return true
-                case 9:   // V — paste into the filter bar
-                    if let ed = fb.searchView.currentEditor() {
-                        ed.paste(nil)
-                    } else if panel.makeFirstResponder(fb.searchView),
-                              let ed = fb.searchView.currentEditor() {
-                        ed.paste(nil)
-                    }
-                    return true
-                case 7:   // X — cut from the filter bar
-                    fb.searchView.currentEditor()?.cut(nil)
-                    return true
-                case 6:   // Z — undo in the filter bar
-                    fb.searchView.currentEditor()?.undoManager?.undo()
-                    return true
-                default:
-                    break
-                }
-            }
+        if let ed = activeTextEditor() {
             switch code {
-            case 0:   // A — select all
-                // find bar first if it's visible and focused
-                if let ff = findField, !ff.isHidden, panel.firstResponder === ff || ff.currentEditor() != nil {
-                    ff.selectText(nil)
-                    ff.currentEditor()?.selectAll(nil)
-                } else if let tv = editorView {
-                    tv.selectAll(nil)
-                } else {
-                    field.selectText(nil)
-                }
-                return true
-            case 8:   // C — copy
-                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
-                    ed.copy(nil)
-                } else if let tv = editorView {
-                    tv.copy(nil)
-                } else if let ed = field.currentEditor() {
-                    ed.copy(nil)
-                }
-                return true
-            case 9:   // V — paste
-                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
-                    ed.paste(nil)
-                } else if let tv = editorView {
-                    tv.paste(nil)
-                } else if let ed = field.currentEditor() {
-                    ed.paste(nil)
-                }
-                return true
-            case 7:   // X — cut
-                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
-                    ed.cut(nil)
-                } else if let tv = editorView {
-                    tv.cut(nil)
-                } else if let ed = field.currentEditor() {
-                    ed.cut(nil)
-                }
-                return true
-            case 6:   // Z — undo
-                if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
-                    ed.undoManager?.undo()
-                } else if let tv = editorView {
-                    tv.undoManager?.undo()
-                } else if let ed = field.currentEditor() {
-                    ed.undoManager?.undo()
-                }
-                return true
-            case 3:   // F — find in the note (Cmd+F or Ctrl+F)
-                if config.editMode {
-                    toggleFindBar()
-                    return true
-                }
-                return false
-            default:
-                break
+            case 9 where cmd || ctrl: ed.paste(nil); return true
+            case 0 where cmd: ed.selectAll(nil); return true
+            case 8 where cmd: ed.copy(nil); return true
+            case 7 where cmd: ed.cut(nil); return true
+            case 6 where cmd: ed.undoManager?.undo(); return true
+            default: return false
             }
         }
-        if config.editMode {
-            // text editor: only Esc (dismiss; host saves on close) and Cmd+S
-            // (explicit save) are consumed — everything else goes to the text
-            // view (typing, arrows, etc.)
-            if let term = terminalDrawer, terminalShown, terminalFocused(term) {
-                // the embedded terminal has keyboard focus: let SwiftTerm see
-                // EVERYTHING (including Esc — the shell's, not the window's)
-                // except the Nth rapid Esc, which closes the window
-                if code == 53, escStreakCloses() {
-                    handleEscape()
-                    return true
-                }
-                return false
-            }
-            if let vv = focusedVim() {
-                // the vim pane owns Esc (normal mode) and every plain key.
-                // Esc is written to the pty directly: a stray modifier flag
-                // (e.g. .function left over from an arrow key event) makes
-                // the terminal view drop it, stranding vim in Insert mode.
-                if code == 53, mods.intersection([.command, .control, .option]).isEmpty {
-                    // the Nth rapid Esc closes the window — but only when vim
-                    // is ALREADY in Normal mode (the earlier presses got it
-                    // there), so leaving Insert/Visual never closes anything
-                    if escStreakCloses(),
-                       vimEval("mode()")?.trimmingCharacters(in: .whitespacesAndNewlines) == "n" {
-                        handleEscape()
-                        return true
+        return false
+    }
+
+    private func paneFocusKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        let ctrl = mods.contains(.control)
+        // Ctrl+J / Ctrl+K: move keyboard focus up/down across the panes
+        // (notes editor -> file browser drawer -> terminal drawer), only
+        // over the ones that are open. J = down, K = up. Handled BEFORE
+        // the terminal branch so it works from any pane.
+        // Ctrl+Shift+J/K is reserved for pane resize — don't intercept it.
+        if ctrl && !mods.contains(.shift) && (code == 38 || code == 40), config.editMode {
+            var panes: [NSResponder] = []
+            var paneTypes: [FocusedPane] = []
+            if let ed = primaryEditor { panes.append(ed); paneTypes.append(.editor) }
+            if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView); paneTypes.append(.browser) }
+            if terminalShown, let term = terminalDrawer { panes.append(term); paneTypes.append(.terminal) }
+            if panes.count > 1 {
+                let current = panel.firstResponder
+                var curIdx = panes.firstIndex { p in
+                    if let current, current === p { return true }
+                    if let v = current as? NSView, let pv = p as? NSView {
+                        return v.isDescendant(of: pv)
                     }
-                    vv.send(txt: "\u{1b}")
-                    return true
+                    return false
                 }
-                return false
-            }
-            if findBarShown {
-                // find bar owns Esc (close) and Return/Shift+Return (cycle)
-                if code == 53 {
-                    closeFindBar()
-                    return true
+                // the filter bar (its field editor), pills and preview
+                // sit OUTSIDE the list view but are still the browser
+                // pane — without this, Ctrl+J/K from the filter bar saw
+                // "no pane focused" and jumped to the first/last pane
+                // instead of the neighbour, needing extra presses
+                var inFilterBar = false
+                if curIdx == nil, fileBrowserShown, let fb = fileBrowser,
+                   browserHasFocus(fb), let bi = paneTypes.firstIndex(of: .browser) {
+                    curIdx = bi
+                    inFilterBar = fb.searchView.currentEditor() != nil
                 }
-                if code == 36 {
-                    findStep(mods.contains(.shift) ? -1 : 1)
-                    return true
+                if let curIdx {
+                    let target = code == 38
+                        ? min(curIdx + 1, panes.count - 1)
+                        : max(curIdx - 1, 0)
+                    // at the edge from the filter bar: drop into the list
+                    // (the browser is still the pane, focus still moves)
+                    if target != curIdx || inFilterBar { panel.makeFirstResponder(panes[target]) }
+                    focusedPane = paneTypes[target]
+                } else {
+                    let target = code == 38 ? panes[0] : panes[panes.count - 1]
+                    panel.makeFirstResponder(target)
+                    focusedPane = code == 38 ? paneTypes[0] : paneTypes[panes.count - 1]
                 }
-                return false
-            }
-            if code == 53 {
-                if escStreakCloses() { handleEscape() }
+                updateFocusIndicator()
                 return true
             }
-            if code == 1, mods.contains(.command), editorView != nil {
-                onEditorCommit?(currentEditorText)
+            // single pane (editor only) — fall through so the emacs
+            // bindings (Ctrl+J newline, Ctrl+K kill-line) reach the text view
+        }
+        return nil
+    }
+
+    private func viewCycleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        let cmd = mods.contains(.command)
+        let ctrl = mods.contains(.control)
+        // Ctrl+Tab / Ctrl+Shift+Tab: the host's next / previous view
+        // (onCycleView), else next / previous tab, wrapping at either
+        // end. Before the vim/terminal branches so it works from every pane.
+        if ctrl && !cmd && code == 48, let hook = onCycleView, panel.attachedSheet == nil {
+            hook(mods.contains(.shift) ? -1 : 1)
+            return true
+        }
+        if ctrl && !cmd && code == 48, config.tabs, tabTitles.count > 1 {
+            let n = tabTitles.count
+            selectedTab = (selectedTab + (mods.contains(.shift) ? -1 : 1) + n) % n
+            return true
+        }
+        return nil
+    }
+
+    private func paneResizeKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        let ctrl = mods.contains(.control)
+        // Ctrl+Shift+HJKL: resize window like tmux pane resize
+        // H = shrink width, L = grow width, J = shrink height, K = grow height
+        // Requires ONLY Ctrl+Shift (no Cmd/Option) to avoid firing when
+        // CapsLock→Hyper sends all four modifiers simultaneously.
+        if ctrl && mods.contains(.shift) && !mods.contains(.command) && !mods.contains(.option), panel.attachedSheet == nil {
+            let step: CGFloat = 20
+            switch code {
+            case 4:  // H — shrink width
+                var f = panel.frame
+                f.size.width = max(120, f.width - step)
+                panel.setFrame(clampToScreen(f), display: true)
+                return true
+            case 37: // L — grow width
+                var f = panel.frame
+                f.size.width = min(maxPanelWidth(), f.width + step)
+                panel.setFrame(clampToScreen(f), display: true)
+                return true
+            case 40: // K — grow focused pane height
+                if terminalShown && focusedPane == .terminal {
+                    currentTerminalHeight = min(600, currentTerminalHeight + step)
+                    preferredTerminalHeight = currentTerminalHeight
+                } else if fileBrowserShown && focusedPane == .browser {
+                    currentBrowserHeight = min(600, currentBrowserHeight + step)
+                    preferredBrowserHeight = currentBrowserHeight
+                } else {
+                    // editor: grow window height
+                    var f = panel.frame
+                    f.size.height = min(maxPanelHeight(), f.height + step)
+                    panel.setFrame(clampToScreen(f), display: true)
+                    return true
+                }
+                syncDrawerLayout()
+                updateFocusIndicator()
+                return true
+            case 38: // J — shrink focused pane height
+                if terminalShown && focusedPane == .terminal {
+                    currentTerminalHeight = max(minTerminalH, currentTerminalHeight - step)
+                    preferredTerminalHeight = currentTerminalHeight
+                } else if fileBrowserShown && focusedPane == .browser {
+                    currentBrowserHeight = max(minBrowserH, currentBrowserHeight - step)
+                    preferredBrowserHeight = currentBrowserHeight
+                } else {
+                    // editor: shrink window height
+                    var f = panel.frame
+                    f.size.height = max(140, f.height - step)
+                    panel.setFrame(clampToScreen(f), display: true)
+                    return true
+                }
+                syncDrawerLayout()
+                updateFocusIndicator()
+                return true
+            default: break
+            }
+        }
+        return nil
+    }
+
+    // vim pane: every Cmd/Ctrl key belongs to the editor except the
+    // app's edit shortcuts (rule 1), mapped onto vim actions.
+    // Ctrl+C / Cmd+C only copy while a Visual selection exists —
+    // otherwise Ctrl+C stays vim's own (cancel) key.
+    private func vimPaneKey(_ vv: LocalProcessTerminalView, _ code: UInt16,
+                            _ mods: NSEvent.ModifierFlags) -> Bool {
+        let cmd = mods.contains(.command)
+        let ctrl = mods.contains(.control)
+        switch code {
+        case 8 where cmd || ctrl:           // C — copy
+            if vimCopySelection(cut: false) { return true }
+            if cmd, vv.selectedRange().length > 0 { vv.copy(self); return true }
+            return cmd
+        case 9 where cmd || ctrl:           // V — paste
+            vimPaste(); return true
+        case 7 where cmd:                   // X — cut the selection
+            _ = vimCopySelection(cut: true); return true
+        case 0 where cmd:                   // A — select all
+            vimRemote("<C-\\><C-N>ggVG"); return true
+        case 6 where cmd:                   // Z — undo
+            vimRemote("<C-\\><C-N>u"); return true
+        case 1 where cmd:                   // S — save
+            vimCommand("silent! wall")
+            onEditorCommit?(currentEditorText)
+            return true
+        case 3 where cmd:                   // F — vim search
+            vimRemote("<C-\\><C-N>/"); return true
+        case 13 where cmd:                  // W — close the window
+            handleEscape(); return true
+        case 31 where cmd:                  // O — open file at path
+            onOpenPathPrompt?(); return true
+        default:
+            return false                    // Ctrl+* etc. -> vim
+        }
+    }
+
+    // the terminal drawer: every Cmd/Ctrl key goes to the shell but copy / paste
+    private func terminalKey(_ term: LocalProcessTerminalView, _ code: UInt16,
+                             _ mods: NSEvent.ModifierFlags) -> Bool {
+        let cmd = mods.contains(.command)
+        let ctrl = mods.contains(.control)
+        switch code {
+        case 8 where cmd: term.copy(self); return true    // Cmd+C copy
+        case 9 where cmd || ctrl: term.paste(self); return true  // Cmd+V / Ctrl+V paste
+        default: return false   // every other Cmd/Ctrl key goes to the shell
+        }
+    }
+
+    private func hostShortcutKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        let cmd = mods.contains(.command)
+        // Cmd+K: the host's action picker (the file browser keeps its
+        // own Cmd+K = copy path while it has focus)
+        if cmd && code == 40, let hook = onCommandK,
+           !(fileBrowser.map { browserActive() && browserHasFocus($0) } ?? false) {
+            hook()
+            return true
+        }
+        if cmd && code == 3, !config.editMode, let hook = onCommandF {
+            hook()
+            return true
+        }
+        // Cmd+L: focus the browser's filter bar (address-bar shortcut),
+        // selecting the current path so typing replaces it
+        if cmd && code == 37, let fb = fileBrowser, browserActive() {
+            panel.makeFirstResponder(fb.searchView)
+            fb.searchView.currentEditor()?.selectAll(nil)
+            return true
+        }
+        return nil
+    }
+
+    private func fileBrowserKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        let cmd = mods.contains(.command)
+        let ctrl = mods.contains(.control)
+        // The file browser's search field owns the standard editing
+        // shortcuts while it (or its list) has focus — otherwise Cmd+V
+        // pastes into the notes editor / hidden window field instead of
+        // the filter bar.
+        guard let fb = fileBrowser, browserActive(), browserHasFocus(fb) else { return nil }
+        // renaming a row: the rename field owns the edit shortcuts
+        if let ed = fb.renameEditor {
+            switch code {
+            case 0: ed.selectAll(nil); return true
+            case 8: ed.copy(nil); return true
+            case 9: ed.paste(nil); return true
+            case 7: ed.cut(nil); return true
+            case 6: ed.undoManager?.undo(); return true
+            default: return false
+            }
+        }
+        // files: trash / duplicate / copy / paste / undo / history…
+        if fb.handleShortcut(code, mods) { return true }
+        switch code {
+        case 15 where cmd:  // Cmd+R — rename the selected row in place
+            fb.beginRename()
+            return true
+        case 45 where ctrl, 35 where ctrl:   // Ctrl+N / Ctrl+P — next / prev result
+            fb.listView.moveSelection(code == 45 ? 1 : -1)
+            return true
+        case 40 where cmd:  // Cmd+K — copy the selected row's absolute path
+            if let p = fb.copyRowPath(fb.listView.selection), !config.copyToast.isEmpty {
+                let shown = (p as NSString).abbreviatingWithTildeInPath
+                showToast(config.copyToast.replacingOccurrences(of: "{}", with: shown),
+                          symbol: "doc.on.clipboard")
+            }
+            return true
+        case 0:   // A — select all in the filter bar
+            fb.searchView.selectText(nil)
+            return true
+        case 8:   // C — copy the search selection / the list row path
+            if let ed = fb.searchView.currentEditor() {
+                ed.copy(nil)
+            } else {
+                fb.copyRowPath(fb.listView.selection)
+            }
+            return true
+        case 9:   // V — paste into the filter bar
+            if let ed = fb.searchView.currentEditor() {
+                ed.paste(nil)
+            } else if panel.makeFirstResponder(fb.searchView),
+                      let ed = fb.searchView.currentEditor() {
+                ed.paste(nil)
+            }
+            return true
+        case 7:   // X — cut from the filter bar
+            fb.searchView.currentEditor()?.cut(nil)
+            return true
+        case 6:   // Z — undo in the filter bar
+            fb.searchView.currentEditor()?.undoManager?.undo()
+            return true
+        default:
+            break
+        }
+        return nil
+    }
+
+    // the generic edit keys: find bar, editor, or the search field
+    private func editKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
+        switch code {
+        case 0:   // A — select all
+            // find bar first if it's visible and focused
+            if let ff = findField, !ff.isHidden, panel.firstResponder === ff || ff.currentEditor() != nil {
+                ff.selectText(nil)
+                ff.currentEditor()?.selectAll(nil)
+            } else if let tv = editorView {
+                tv.selectAll(nil)
+            } else {
+                field.selectText(nil)
+            }
+            return true
+        case 8:   // C — copy
+            if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                ed.copy(nil)
+            } else if let tv = editorView {
+                tv.copy(nil)
+            } else if let ed = field.currentEditor() {
+                ed.copy(nil)
+            }
+            return true
+        case 9:   // V — paste
+            if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                ed.paste(nil)
+            } else if let tv = editorView {
+                tv.paste(nil)
+            } else if let ed = field.currentEditor() {
+                ed.paste(nil)
+            }
+            return true
+        case 7:   // X — cut
+            if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                ed.cut(nil)
+            } else if let tv = editorView {
+                tv.cut(nil)
+            } else if let ed = field.currentEditor() {
+                ed.cut(nil)
+            }
+            return true
+        case 6:   // Z — undo
+            if let ff = findField, !ff.isHidden, let ed = ff.currentEditor() {
+                ed.undoManager?.undo()
+            } else if let tv = editorView {
+                tv.undoManager?.undo()
+            } else if let ed = field.currentEditor() {
+                ed.undoManager?.undo()
+            }
+            return true
+        case 3:   // F — find in the note (Cmd+F or Ctrl+F)
+            if config.editMode {
+                toggleFindBar()
                 return true
             }
-            // Cmd+O: open a file at an exact path (same prompt as the editor's
-            // "Open file at path…" context menu)
-            if code == 31, mods.contains(.command) {
-                onOpenPathPrompt?()
+            return false
+        default:
+            break
+        }
+        return nil
+    }
+
+    private func editorKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        // text editor: only Esc (dismiss; host saves on close) and Cmd+S
+        // (explicit save) are consumed — everything else goes to the text
+        // view (typing, arrows, etc.)
+        if let term = terminalDrawer, terminalShown, terminalFocused(term) {
+            // the embedded terminal has keyboard focus: let SwiftTerm see
+            // EVERYTHING (including Esc — the shell's, not the window's)
+            // except the Nth rapid Esc, which closes the window
+            if code == 53, escStreakCloses() {
+                handleEscape()
                 return true
             }
             return false
         }
+        if let vv = focusedVim() {
+            // the vim pane owns Esc (normal mode) and every plain key.
+            // Esc is written to the pty directly: a stray modifier flag
+            // (e.g. .function left over from an arrow key event) makes
+            // the terminal view drop it, stranding vim in Insert mode.
+            if code == 53, mods.intersection([.command, .control, .option]).isEmpty {
+                // the Nth rapid Esc closes the window — but only when vim
+                // is ALREADY in Normal mode (the earlier presses got it
+                // there), so leaving Insert/Visual never closes anything
+                if escStreakCloses(),
+                   vimEval("mode()")?.trimmingCharacters(in: .whitespacesAndNewlines) == "n" {
+                    handleEscape()
+                    return true
+                }
+                vv.send(txt: "\u{1b}")
+                return true
+            }
+            return false
+        }
+        if findBarShown {
+            // find bar owns Esc (close) and Return/Shift+Return (cycle)
+            if code == 53 {
+                closeFindBar()
+                return true
+            }
+            if code == 36 {
+                findStep(mods.contains(.shift) ? -1 : 1)
+                return true
+            }
+            return false
+        }
+        if code == 53 {
+            if escStreakCloses() { handleEscape() }
+            return true
+        }
+        if code == 1, mods.contains(.command), editorView != nil {
+            onEditorCommit?(currentEditorText)
+            return true
+        }
+        // Cmd+O: open a file at an exact path (same prompt as the editor's
+        // "Open file at path…" context menu)
+        if code == 31, mods.contains(.command) {
+            onOpenPathPrompt?()
+            return true
+        }
+        return false
+    }
+
+    // list windows: row ticking, navigation, Esc
+    private func listKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         if config.selectableRows, mods.contains(.control), code == 49 {
             toggleRowSelection(selection)   // Ctrl+Space ticks the current row
             return true

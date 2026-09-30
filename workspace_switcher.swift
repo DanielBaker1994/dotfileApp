@@ -1061,15 +1061,6 @@ func hexColor(_ s: String?) -> NSColor? {
                    blue: Double(v & 0xFF) / 255, alpha: max(a, 0.08))
 }
 
-// "true/yes/1/on" | "false/no/0/off" | anything else = nil (unset)
-private func tri(_ s: String?) -> Bool? {
-    switch s?.lowercased() {
-    case "true", "yes", "1", "on": return true
-    case "false", "no", "0", "off": return false
-    default: return nil
-    }
-}
-
 // Read the [app] section from commands.toml and apply the overrides. Called
 // from loadCommands (and from main.swift before any socket ping) so app
 // settings are in place before anything else — order-independent of [icons].
@@ -1515,164 +1506,6 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
     return issues
 }
 
-// commands.toml is TOML, read line by line: `[section]` headers, then one
-// `key = value` per line. Keys are bare or "quoted"; values are "basic" /
-// 'literal' strings, bare true/false/numbers, or a one-line [array] (read as
-// "a, b"). Every value reaches the app as a String — lists stay comma-
-// separated inside one string. Old unquoted values still read as written.
-// Mirrored in python: jira_config.config_entry / config_line.
-func configEntry(_ line: String) -> (key: String, value: String)? {
-    let s = line.trimmingCharacters(in: .whitespaces)
-    guard !s.isEmpty, !s.hasPrefix("#"), !s.hasPrefix("[") else { return nil }
-    var rest = Substring(s)
-    let key: String
-    if s.hasPrefix("\"") || s.hasPrefix("'") {
-        guard let (k, after) = tomlScanString(rest) else { return nil }
-        rest = after.drop(while: { $0 == " " || $0 == "\t" })
-        guard rest.first == "=" else { return nil }
-        key = k
-        rest = rest.dropFirst()
-    } else {
-        guard let eq = rest.firstIndex(of: "=") else { return nil }
-        key = rest[..<eq].trimmingCharacters(in: .whitespaces)
-        rest = rest[rest.index(after: eq)...]
-    }
-    return (key, tomlValue(rest.trimmingCharacters(in: .whitespaces)))
-}
-
-// the name of a `[section]` header line (inner spaces trimmed), else nil
-func configSectionHeader(_ line: String) -> String? {
-    let s = line.trimmingCharacters(in: .whitespaces)
-    guard s.hasPrefix("[") && s.hasSuffix("]") else { return nil }
-    return String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-}
-
-// commands.toml text as editable lines (empty lines kept, so a join restores it)
-func configLines(_ text: String) -> [String] {
-    text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-}
-
-// every `key = value` entry of [section] in file order, with its index in `lines`
-func configSectionEntries(_ lines: [String], _ section: String)
-    -> [(index: Int, key: String, value: String)] {
-    var out: [(index: Int, key: String, value: String)] = []
-    var inSection = false
-    for (i, line) in lines.enumerated() {
-        if let name = configSectionHeader(line) {
-            inSection = name == section
-        } else if inSection, let e = configEntry(line) {
-            out.append((i, e.key, e.value))
-        }
-    }
-    return out
-}
-
-// `key = value` as a TOML line (strings quoted, bools/numbers bare)
-func configLine(_ key: String, _ value: String) -> String {
-    let bare = !key.isEmpty && key.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
-    return (bare ? key : tomlQuote(key)) + " = "
-        + (tomlBareScalar(value) ? value : tomlQuote(value))
-}
-
-private func tomlBareScalar(_ v: String) -> Bool {
-    v == "true" || v == "false"
-        || v.range(of: #"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$"#, options: .regularExpression) != nil
-}
-
-private func tomlQuote(_ v: String) -> String {
-    var out = "\""
-    for u in v.unicodeScalars {
-        switch u {
-        case "\"": out += "\\\""
-        case "\\": out += "\\\\"
-        case "\n": out += "\\n"
-        case "\t": out += "\\t"
-        case "\r": out += "\\r"
-        case _ where u.value < 0x20 || u.value == 0x7F: out += String(format: "\\u%04X", u.value)
-        default: out.unicodeScalars.append(u)
-        }
-    }
-    return out + "\""
-}
-
-// a "basic" or 'literal' string at the start of `s` → (text, what follows)
-private func tomlScanString(_ s: Substring) -> (String, Substring)? {
-    guard let q = s.first, q == "\"" || q == "'" else { return nil }
-    var i = s.index(after: s.startIndex)
-    if q == "'" {
-        guard let end = s[i...].firstIndex(of: "'") else { return nil }
-        return (String(s[i..<end]), s[s.index(after: end)...])
-    }
-    var out = ""
-    while i < s.endIndex {
-        let c = s[i]
-        if c == "\"" { return (out, s[s.index(after: i)...]) }
-        if c == "\\" {
-            i = s.index(after: i)
-            guard i < s.endIndex else { return nil }
-            switch s[i] {
-            case "n": out += "\n"
-            case "t": out += "\t"
-            case "r": out += "\r"
-            case "b": out += "\u{8}"
-            case "f": out += "\u{C}"
-            case "\"": out += "\""
-            case "\\": out += "\\"
-            case "u", "U":
-                let n = s[i] == "u" ? 4 : 8
-                guard let end = s.index(i, offsetBy: n, limitedBy: s.index(before: s.endIndex)),
-                      let v = UInt32(s[s.index(after: i)...end], radix: 16),
-                      let u = Unicode.Scalar(v) else { return nil }
-                out.unicodeScalars.append(u)
-                i = end
-            default: return nil
-            }
-        } else {
-            out.append(c)
-        }
-        i = s.index(after: i)
-    }
-    return nil
-}
-
-// the text of a value: strings unquoted, [arrays] joined ", ", bare values
-// as written (a trailing `# comment` dropped only after a TOML scalar)
-private func tomlValue(_ raw: String) -> String {
-    func onlyComment(_ rest: Substring) -> Bool {
-        let t = rest.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty || t.hasPrefix("#")
-    }
-    if raw.hasPrefix("\"") || raw.hasPrefix("'") {
-        if let (v, after) = tomlScanString(Substring(raw)), onlyComment(after) { return v }
-        return raw
-    }
-    if raw.hasPrefix("[") {
-        var items: [String] = []
-        var rest = Substring(raw).dropFirst()
-        while true {
-            rest = rest.drop(while: { $0 == " " || $0 == "\t" })
-            if rest.first == "]" { return onlyComment(rest.dropFirst()) ? items.joined(separator: ", ") : raw }
-            if let (v, after) = tomlScanString(rest) {
-                items.append(v)
-                rest = after
-            } else {
-                let end = rest.firstIndex(where: { $0 == "," || $0 == "]" }) ?? rest.endIndex
-                let v = rest[..<end].trimmingCharacters(in: .whitespaces)
-                guard tomlBareScalar(v) else { return raw }
-                items.append(v)
-                rest = rest[end...]
-            }
-            rest = rest.drop(while: { $0 == " " || $0 == "\t" })
-            if rest.first == "," { rest = rest.dropFirst() } else if rest.first != "]" { return raw }
-        }
-    }
-    if let hash = raw.range(of: " #") {
-        let head = raw[..<hash.lowerBound].trimmingCharacters(in: .whitespaces)
-        if tomlBareScalar(head) { return head }
-    }
-    return raw
-}
-
 // commands.toml as the app should see it: the file itself when it validates,
 // otherwise the last-known-good backup (nil when neither is usable).
 func readConfigText() -> String? {
@@ -1764,30 +1597,11 @@ func saveConfigValue(section: String, key: String, value: String) {
 }
 
 // Set (or, for a nil value, remove) several keys of one [section] in a single
-// validated write — a theme preset touches up to 8 keys at once. A key listed
-// twice is edited where it takes effect: the last one (validateConfig).
+// validated write — a theme preset touches up to 8 keys at once.
 func saveConfigValues(section: String, _ kv: [(String, String?)]) {
     guard let content = readConfigText() else { return }
-    var lines = configLines(content)
-    for (key, value) in kv {
-        let entries = configSectionEntries(lines, section)
-        let found = entries.last(where: { $0.key == key })?.index
-        // the new line's slot: after the section's last entry, else its header
-        let header = lines.indices.last(where: { configSectionHeader(lines[$0]) == section })
-        let lastInSection = entries.last.map { max($0.index, header ?? -1) } ?? header
-        switch (found, value) {
-        case (let i?, let v?): lines[i] = configLine(key, v)
-        case (let i?, nil): lines.remove(at: i)
-        case (nil, let v?):
-            if let at = lastInSection {
-                lines.insert(configLine(key, v), at: at + 1)
-            } else {
-                lines += ["", "[\(section)]", configLine(key, v)]
-            }
-        case (nil, nil): break
-        }
-    }
-    writeConfigText(lines.joined(separator: "\n"))
+    writeConfigText(configSetting(configLines(content), section: section, kv)
+        .joined(separator: "\n"))
 }
 
 // Remove a config key from commands.toml (for reset-to-default).
@@ -1835,24 +1649,6 @@ private func resolveIconName(_ name: String) -> NSImage? {
 
 private func num(_ s: String?) -> CGFloat {
     CGFloat(Double(s ?? "") ?? 0)
-}
-
-// Resolve a binary by name: checks the PATH, returns the absolute path
-// or nil if not found. If the input is already an absolute path, returns
-// it directly if it exists.
-private func resolveBinary(_ name: String) -> String? {
-    if name.hasPrefix("/") {
-        return FileManager.default.isExecutableFile(atPath: name) ? name : nil
-    }
-    let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
-        .split(separator: ":").map(String.init)
-    for dir in paths {
-        let fullPath = dir + "/" + name
-        if FileManager.default.isExecutableFile(atPath: fullPath) {
-            return fullPath
-        }
-    }
-    return nil
 }
 
 // comma-separated config value -> trimmed non-empty list
@@ -4386,43 +4182,73 @@ private func trimmed(_ s: String) -> String? {
             log("note '\(cmd.name)': no path configured")
             return
         }
-        // expand ~, and expand any directory entry to its matching files (sorted).
-    // A `paths`/`sources` value may be a single file OR a directory — pointing
-    // at a folder means new files show up automatically without editing
-    // commands.toml. Deleted notes are NOT resurrected: a listed file that no
-    // longer exists is dropped (and removed from commands.toml) instead of
-    // being recreated empty.
-    var paths: [String] = []
-    for p in expandPaths(cmd.paths, extensions: ["md"]) {
-        if !FileManager.default.fileExists(atPath: p) {
-            log("note '\(cmd.name)': \(p) deleted — dropping it and removing from config")
-            removeNotePathFromConfig(p, section: cmd.name)
-        } else if DismissedNotes.contains(p) {
-            // closed with the tab ✕ — keep it out even if a directory entry
-            // (e.g. paths = ~/notes) would otherwise re-expand it here
-            log("note '\(cmd.name)': \(p) dismissed — skipping")
-        } else {
-            paths.append(p)
+        let paths = notePaths(cmd)
+        // vim mode: an embedded nvim pane replaces the text view (tabs,
+        // drawers and chrome stay). One long-lived editor; tab switches go
+        // over its --listen socket, so nothing quits or relaunches.
+        let vimSocket = NSHomeDirectory()
+            + "/.cache/workspace-switcher/nvim-\(cmd.name)-\(getpid()).sock"
+        let cfg = noteWindowConfig(cmd, firstNote: paths[0], vimSocket: vimSocket)
+        let w = PopupWindow(config: cfg)
+        // the tab list, the note on screen and every window hook; the hooks
+        // keep the session alive as long as the window lives
+        let session = NoteSession(host: self, cmd: cmd, window: w, paths: paths, vimSocket: vimSocket)
+        session.install()
+        // embedded file browser drawer (header "▤" toggles it): starts in the
+        // note directory, favorites shared with the floating "files" window
+        let fb = makeFileBrowser(cfg, startDir: noteDir(session.currentPath), in: w,
+                                 tag: "note '\(cmd.name)'", opened: "browser opened")
+        w.installFileBrowser(fb, drawer: true)
+        // mirror the post-install drawer state onto the header buttons
+        // (browser is the default pane, so it's on and the terminal is off)
+        w.setHeaderButtonOn(10, w.terminalShown)
+        w.setHeaderButtonOn(20, w.fileBrowserShown)
+        subWindows.append(w)
+        if settings.sharedWindow {
+            // Cmd+W: hide the shared window (Esc never does, see above)
+            w.onEscape = { [weak self] in self?.slot.hide("Cmd+W") }
+            placeSlotWindow(w)
         }
+        w.quietShow = slotPrewarming
+        w.show()
     }
-    if paths.isEmpty {
-        // every listed note is gone — open a fresh default.md scratch note
-        let first = (cmd.paths[0] as NSString).expandingTildeInPath
-        let fallback = (first as NSString).deletingLastPathComponent + "/default.md"
-        try? FileManager.default.createDirectory(
-            atPath: (fallback as NSString).deletingLastPathComponent,
-            withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: fallback) {
-            FileManager.default.createFile(atPath: fallback, contents: nil)
-        }
-        paths = [fallback]
-        addNotePathToConfig(fallback, section: cmd.name)
-        log("note '\(cmd.name)': all listed notes deleted — opened fresh \(fallback)")
-    }
-    var titles = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
-    var currentPath = paths[0]
-    let content = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
 
+    // The notes a [section]'s paths= opens as tabs: ~ expanded, directory
+    // entries expanded to their files (sorted). A `paths`/`sources` value may
+    // be a single file OR a directory — pointing at a folder means new files
+    // show up automatically without editing commands.toml. Deleted notes are
+    // NOT resurrected: a listed file that no longer exists is dropped (and
+    // removed from commands.toml) instead of being recreated empty. Never
+    // empty: with every note gone, a fresh default.md scratch note.
+    private func notePaths(_ cmd: CommandSpec) -> [String] {
+        var paths: [String] = []
+        for p in expandPaths(cmd.paths, extensions: ["md"]) {
+            if !FileManager.default.fileExists(atPath: p) {
+                log("note '\(cmd.name)': \(p) deleted — dropping it and removing from config")
+                removeNotePathFromConfig(p, section: cmd.name)
+            } else if DismissedNotes.contains(p) {
+                // closed with the tab ✕ — keep it out even if a directory entry
+                // (e.g. paths = ~/notes) would otherwise re-expand it here
+                log("note '\(cmd.name)': \(p) dismissed — skipping")
+            } else {
+                paths.append(p)
+            }
+        }
+        if paths.isEmpty {
+            // every listed note is gone — open a fresh default.md scratch note
+            let first = (cmd.paths[0] as NSString).expandingTildeInPath
+            let fallback = ensureDefaultNote(in: noteDir(first))
+            paths = [fallback]
+            addNotePathToConfig(fallback, section: cmd.name)
+            log("note '\(cmd.name)': all listed notes deleted — opened fresh \(fallback)")
+        }
+        return paths
+    }
+
+    // the notes window's PopupConfig from its [section] (`firstNote` = the
+    // tab shown first: a preview file starts vim without a file)
+    private func noteWindowConfig(_ cmd: CommandSpec, firstNote: String,
+                                  vimSocket: String) -> PopupConfig {
         var cfg = PopupConfig(name: cmd.windowName)
         cfg.enableToggle = false
         cfg.editMode = true
@@ -4470,833 +4296,17 @@ private func trimmed(_ s: String) -> String? {
         applyWindowTheme(&cfg, cmd)
         cfg.terminalForeground = cmd.terminalForeground
         cfg.markdownImages = true
-
-        // vim mode: an embedded nvim pane replaces the text view (tabs,
-        // drawers and chrome stay). One long-lived editor; tab switches go
-        // over its --listen socket, so nothing quits or relaunches.
-        let vimSocket = NSHomeDirectory()
-            + "/.cache/workspace-switcher/nvim-\(cmd.name)-\(getpid()).sock"
-        // inline-image placements the editor writes (vim/notes-init.vim)
-        let vimImageFile = (vimSocket as NSString).deletingPathExtension + ".images.json"
         if cmd.vimMode {
             let exe = resolveBinary(cmd.vimBin) ?? cmd.vimBin
             cfg.vimEditorExecutable = exe
             cfg.vimEditorSocket = vimSocket
-            cfg.vimImageFile = vimImageFile
+            // inline-image placements the editor writes (vim/notes-init.vim)
+            cfg.vimImageFile = (vimSocket as NSString).deletingPathExtension + ".images.json"
             cfg.vimEditorArgs = vimArgs(for: cmd, socket: vimSocket,
-                                        file: noteIsPreview(currentPath) ? nil : currentPath)
+                                        file: noteIsPreview(firstNote) ? nil : firstNote)
             log("note '\(cmd.name)': vim pane \(exe) socket \(vimSocket)")
         }
-
-        let w = PopupWindow(config: cfg)
-        // All window actions now live in the top-left icon dropdown menu —
-        // no scattered header buttons. The menu shows toggle state via
-        // checkmarks (terminal, browser, mic) and groups actions logically.
-
-        // image saving for pasted/dropped photos
-        func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
-        w.imageBaseDir = noteDir(currentPath)
-        if noteIsPreview(currentPath) {
-            w.setEditorFilePreview(currentPath)
-        } else {
-            w.editorReadOnly = false
-            w.setEditorMarkdown(content, baseDir: noteDir(currentPath))
-        }
-        // vim pane: text notes edit in vim; PDF/image tabs keep the native
-        // preview. A relaunched editor (after `:q`) reopens the current note.
-        if cmd.vimMode {
-            w.setVimPaneActive(!noteIsPreview(currentPath))
-            w.vimLaunchArgs = { [weak self] in
-                self?.vimArgs(for: cmd, socket: vimSocket,
-                              file: noteIsPreview(currentPath) ? nil : currentPath) ?? []
-            }
-            w.onVimExit = { [weak self] in
-                self?.log("note '\(cmd.name)': vim exited — relaunching on \(currentPath)")
-            }
-            // right-click in the vim pane: the obvious actions (rule 2)
-            let vm = NSMenu(title: "Vim")
-            vm.autoenablesItems = false
-            vm.addItem(menuItem("Copy") { [weak w] in w?.vimCopy() })
-            vm.addItem(menuItem("Paste") { [weak w] in w?.vimPaste() })
-            vm.addItem(.separator())
-            vm.addItem(menuItem("Copy File Path") { [weak self] in
-                self?.copy(currentPath, "note path: \(currentPath)")
-            })
-            vm.addItem(menuItem("Open in Default App") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: currentPath))
-            })
-            vm.addItem(menuItem("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentPath)])
-            })
-            vm.addItem(menuItem("Open file at path…") { [weak w] in w?.onOpenPathPrompt?() })
-            w.vimMenu = vm
-        }
-        w.onFontSizeStep = { [weak self] delta in self?.stepFontSizes(delta) }
-        w.imageSaver = { [weak self] img in
-            guard let self else { return nil }
-            let dir = noteDir(currentPath) + "/assets"
-            try? FileManager.default.createDirectory(atPath: dir,
-                                                     withIntermediateDirectories: true)
-            let name = "img-\(Int(Date().timeIntervalSince1970)).png"
-            guard let tiff = img.tiffRepresentation,
-                  let rep = NSBitmapImageRep(data: tiff),
-                  let data = rep.representation(using: .png, properties: [:]) else { return nil }
-            do {
-                try data.write(to: URL(fileURLWithPath: dir + "/" + name))
-                self.log("note '\(cmd.name)': saved pasted image assets/\(name)")
-                return "assets/" + name
-            } catch {
-                self.log("note '\(cmd.name)': image save failed: \(error)")
-                return nil
-            }
-        }
-
-        w.headerIcon = cmd.icon ?? notesAppIcon
-        // empty `title` in commands.toml = no header label (icon still shows)
-        w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
-        w.copyPathButtonLabel = ""          // copy path moved to right-click (tab/editor)
-        w.copyConfigButtonLabel = ""        // config is opened via the icon click
-        w.tabTitles = titles
-        w.tabFooterText = ""
-        // generic label in the drag header — the tab strip already shows the
-        // individual note names; clicking the header still copies the path
-        w.chromeHeaderTitle = cmd.chromeTitle
-        // external-write watch state: reload the current note when its file
-        // changes on disk, unless the editor holds unsaved local edits
-        var lastSynced = content
-        var lastMtime = mtime(of: currentPath)
-        // switching tabs: save the current note, load the new one. A tab whose
-        // note was deleted on disk becomes default.md instead (never recreate)
-        let loadTab: (Int) -> Void = { [weak self] index in
-            guard let self, index < paths.count else { return }
-            let outgoing = currentPath
-            // save the outgoing note BEFORE the editor is swapped to the new
-            // tab — after setEditorMarkdown, currentEditorText would already
-            // hold the NEW note's content and overwrite (wipe) the outgoing
-            // file. Never resurrect a deleted file: a missing outgoing is
-            // skipped (its text was already parked by the watcher/commit).
-            // Vim mode: the editor owns the file — flush it, never write the
-            // (hidden, stale) text view over it.
-            if cmd.vimMode {
-                w.vimFlush()
-            } else if FileManager.default.fileExists(atPath: outgoing), !noteIsPreview(outgoing) {
-                self.saveNote(w.currentEditorText, to: outgoing, cmd: cmd)
-            }
-            var target = paths[index]
-            if !FileManager.default.fileExists(atPath: target) {
-                let fallback = noteDir(target) + "/default.md"
-                try? FileManager.default.createDirectory(atPath: noteDir(fallback),
-                                                         withIntermediateDirectories: true)
-                if !FileManager.default.fileExists(atPath: fallback) {
-                    FileManager.default.createFile(atPath: fallback, contents: nil)
-                }
-                self.log("note '\(cmd.name)': \(target) deleted — tab now default.md")
-                paths[index] = fallback
-                titles[index] = URL(fileURLWithPath: fallback).lastPathComponent
-                w.tabTitles = titles
-                self.removeNotePathFromConfig(target, section: cmd.name)
-                self.addNotePathToConfig(fallback, section: cmd.name)
-                target = fallback
-            }
-            currentPath = target
-            w.imageBaseDir = noteDir(currentPath)
-            if cmd.vimMode {
-                // vim pane follows the tab; previews fall back to the native
-                // read-only view
-                let preview = noteIsPreview(currentPath)
-                if preview { w.setEditorFilePreview(currentPath) } else { w.vimOpen(currentPath) }
-                w.setVimPaneActive(!preview)
-                lastSynced = ""
-            } else if noteIsPreview(currentPath) {
-                // PDF / image: read-only preview, never editable text
-                w.setEditorFilePreview(currentPath)
-                lastSynced = ""
-            } else {
-                w.editorReadOnly = false
-                let loaded = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
-                w.setEditorMarkdown(loaded, baseDir: noteDir(currentPath))
-                lastSynced = loaded
-            }
-            lastMtime = mtime(of: currentPath)
-            w.tabFooterText = ""
-            w.copyPathButtonLabel = ""          // path lives on the right-click
-            w.onChromeHeaderClick = {
-                self.copy(currentPath, "note path: \(currentPath)")
-            }
-        }
-        w.onTabChange = { [weak self] index in
-            guard self != nil else { return }
-            loadTab(index)
-        }
-        // tab "✕": close the note at `index`. It is dropped from the tab list
-        // and from commands.toml so it never shows up as a note again — the
-        // file itself stays on disk untouched. Closing the last note opens a
-        // fresh default.md scratch pad next to it.
-        let closeNote: (Int) -> Void = { [weak self, weak w] index in
-            guard let self, let w else { return }
-            guard paths.indices.contains(index) else { return }
-            let closing = paths[index]
-            let wasCurrent = index == w.selectedTab
-            // only save when closing the ACTIVE tab — otherwise the editor
-            // holds a different note's text and must not touch this file
-            // (preview files like PDFs are never written back)
-            if cmd.vimMode {
-                w.vimFlush()
-            } else if wasCurrent, FileManager.default.fileExists(atPath: closing),
-               !noteIsPreview(closing) {
-                self.saveNote(w.currentEditorText, to: closing, cmd: cmd)
-            }
-            self.log("note '\(cmd.name)': closed \(closing)")
-            DismissedNotes.add(closing)
-            self.removeNotePathFromConfig(closing, section: cmd.name)
-            paths.remove(at: index)
-            titles.remove(at: index)
-            if paths.isEmpty {
-                let fallback = noteDir(closing) + "/default.md"
-                try? FileManager.default.createDirectory(
-                    atPath: noteDir(fallback), withIntermediateDirectories: true)
-                if !FileManager.default.fileExists(atPath: fallback) {
-                    FileManager.default.createFile(atPath: fallback, contents: nil)
-                }
-                paths = [fallback]
-                titles = [URL(fileURLWithPath: fallback).lastPathComponent]
-                self.addNotePathToConfig(fallback, section: cmd.name)
-            }
-            w.tabTitles = titles
-            if wasCurrent {
-                // switch to the tab that slid into this slot (or the last one)
-                let next = min(index, paths.count - 1)
-                if w.selectedTab == next {
-                    loadTab(next)          // same slot value — reload manually
-                } else {
-                    w.selectedTab = next   // fires onTabChange -> loadTab
-                }
-            } else if index < w.selectedTab {
-                // the closed tab was before the selection — it slid down one
-                w.selectedTab -= 1         // fires onTabChange (same note)
-            }
-        }
-        // "✕" on a tab pill closes that note (removes it from the list)
-        w.onCloseTab = { [weak self] index in
-            guard self != nil else { return }
-            closeNote(index)
-        }
-        // Top-left icon opens a dropdown menu with all window actions —
-        // replaces the scattered header buttons (terminal, browser, mic, color).
-        w.onChromeIconClick = { [weak self, weak w] in
-            guard let self, let w else { return }
-            let menu = NSMenu()
-            menu.autoenablesItems = false
-
-            // — toggles (checkmark shows state) —
-            func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
-                menu.addItem(self.menuItem(title, state: state, action))
-            }
-
-            if cmd.terminal {
-                toggleItem("Toggle Terminal", w.terminalShown) {
-                    w.toggleTerminalDrawer()
-                }
-            }
-            toggleItem("Toggle File Browser", w.fileBrowserShown) {
-                w.toggleFileBrowser()
-            }
-            if cmd.voice {
-                let micShown = w.meterEnabled
-                toggleItem(micShown ? "Mute Microphone" : "Enable Microphone", micShown) {
-                    let shown = !w.meterEnabled
-                    w.meterEnabled = shown
-                }
-            }
-            // (no jira items: this menu is the notes view's own — Jira Config
-            // lives on the jira view's menu, Enable Jira in the menu bar)
-            // Vim mode toggle — reads the LIVE spec (cmd is this window's
-            // launch snapshot)
-            if cmd.kind == .note {
-                let vimOn = self.noteCommandIndex.map { self.commands[$0].vimMode } ?? cmd.vimMode
-                toggleItem("Vim Mode", vimOn) {
-                    self.toggleVimModeForNotes()
-                }
-            }
-            menu.addItem(.separator())
-            // Font ▸ (editor / terminal family by type, size, install)
-            let fontMenu = NSMenu(title: "Font")
-            self.buildFontMenu(into: fontMenu)
-            let fontItem = NSMenuItem(title: "Font", action: nil, keyEquivalent: "")
-            fontItem.submenu = fontMenu
-            menu.addItem(fontItem)
-            // Notes Settings ▸ (vim binary, start drawer, voice, sticky, …)
-            let notesMenu = NSMenu(title: "Notes Settings")
-            self.buildNotesSettingsMenu(into: notesMenu)
-            let notesItem = NSMenuItem(title: "Notes Settings", action: nil, keyEquivalent: "")
-            notesItem.submenu = notesMenu
-            menu.addItem(notesItem)
-            menu.addItem(.separator())
-
-            self.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
-            menu.addItem(.separator())
-            menu.addItem(self.openConfigMenuItem { w.onOpenExternalPath?($0) })
-            menu.addItem(self.shortcutsMenuItem(for: w, view: "notes"))
-
-            w.showHeaderMenu(menu)
-        }
-        w.onShowShortcuts = { [weak self, weak w] in
-            guard let self, let w else { return }
-            self.showShortcuts(on: w, view: "notes")
-        }
-        // "+" pill: choose to open an EXISTING file as a tab (open panel) or
-        // create a NEW note in the default dir (next to the first note). Both
-        // are presented as SHEETs on the note window so they always appear in
-        // front.
-        w.onAddTab = { [weak self] in
-            guard let self else { return }
-            let panel = w.nativeWindow
-            panel.makeKeyAndOrderFront(nil)
-            let chooser = NSAlert()
-            chooser.messageText = "Add a note"
-            chooser.informativeText = "Open an existing file, or create a new note:"
-            chooser.addButton(withTitle: "Open Existing…")
-            chooser.addButton(withTitle: "New Note")
-            chooser.addButton(withTitle: "Cancel")
-            chooser.beginSheetModal(for: panel) { [weak self] response in
-                guard let self else { return }
-                switch response {
-                case .alertFirstButtonReturn:
-                    // "Open Existing…": no Finder picker — the integrated file
-                    // browser below is the picker. Ask for a path; strip any
-                    // extension the user typed so a mistaken ".txt" still finds
-                    // the ".md" note ("~/notes/todo.txt" -> "~/notes/todo.md").
-                    // Fall back to the exact path when the ".md" one is absent.
-                    presentPathSheet(on: panel,
-                                     title: "Open note",
-                                     message: "Path to open as a note:",
-                                     okTitle: "Open") { [weak self, weak w] value in
-                        guard let self, let w, let value else { return }
-                        let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !raw.isEmpty else { return }
-                        let expanded = (raw as NSString).expandingTildeInPath
-                        let mdPath = (expanded as NSString).deletingPathExtension + ".md"
-                        let chosen = FileManager.default.fileExists(atPath: mdPath)
-                            ? mdPath : expanded
-                        let p = (chosen as NSString).standardizingPath
-                        if FileManager.default.fileExists(atPath: p) {
-                            w.onOpenExternalPath?(p)
-                        } else {
-                            self.log("note '\(cmd.name)': no such path \(p)")
-                        }
-                    }
-                case .alertSecondButtonReturn:
-                    // "New Note": prompt for a name, create in the default dir
-                    presentPathSheet(on: panel,
-                                     title: "New note",
-                                     message: "Name for the new note:",
-                                     okTitle: "Create") { [weak self] value in
-                        guard let self, let value else { return }
-                        var name = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !name.isEmpty else {
-                            self.log("note '\(cmd.name)': empty name, not creating")
-                            return
-                        }
-                        if !name.hasSuffix(".md") { name += ".md" }
-                        let baseDir = (paths[0] as NSString).deletingLastPathComponent
-                        let newPath = baseDir + "/" + name
-                        // already open (in memory)? just switch to that tab — never
-                        // duplicate a note that already exists
-                        if let idx = paths.firstIndex(of: newPath) {
-                            w.selectedTab = idx
-                            return
-                        }
-                        if !FileManager.default.fileExists(atPath: newPath) {
-                            FileManager.default.createFile(atPath: newPath, contents: nil)
-                        }
-                        paths.append(newPath)
-                        titles.append(URL(fileURLWithPath: newPath).lastPathComponent)
-                        w.tabTitles = titles
-                        w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
-                        DismissedNotes.remove(newPath)
-                        self.addNotePathToConfig(newPath, section: cmd.name)
-                        self.log("note '\(cmd.name)': created \(newPath)")
-                    }
-                default:
-                    break
-                }
-            }
-        }
-        // clicking the ACTIVE note tab copies that note's absolute path
-        w.onTabClick = { [weak self] index in
-            guard let self, index == w.selectedTab, index < paths.count else { return }
-            self.copy(paths[index], "note path: \(paths[index])")
-        }
-        // right-click a note TAB -> copy that note's absolute path
-        w.onTabCopyPath = { [weak self] index in
-            guard let self, index < paths.count else { return }
-            self.copy(paths[index], "note path: \(paths[index])")
-        }
-        // right-click the editor -> "Copy File Path" copies the open note
-        w.onCopyFilePath = { [weak self] in
-            guard let self else { return }
-            self.copy(currentPath, "note path: \(currentPath)")
-        }
-        // Finder "Open in Notes" service: open an arbitrary file as a tab and
-        // switch to it (the file already exists on disk — never create it)
-        w.onOpenExternalPath = { [weak self, weak w] path in
-            guard let self, let w else { return }
-            let p = (path as NSString).standardizingPath
-            if let idx = paths.firstIndex(of: p) {
-                w.selectedTab = idx
-                return
-            }
-            guard FileManager.default.fileExists(atPath: p) else {
-                self.log("note '\(cmd.name)': cannot open \(p) — missing")
-                return
-            }
-            paths.append(p)
-            titles.append(URL(fileURLWithPath: p).lastPathComponent)
-            w.tabTitles = titles
-            w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
-            DismissedNotes.remove(p)          // explicit re-open beats the ✕
-            self.addNotePathToConfig(p, section: cmd.name)
-            self.log("note '\(cmd.name)': opened \(p)")
-        }
-        // editor context menu -> "Open file at path…": prompt for an exact
-        // path and open it as a tab
-        w.onOpenPathPrompt = { [weak self, weak w] in
-            guard let self, let w else { return }
-            let panel = w.nativeWindow
-            presentPathSheet(on: panel,
-                             title: "Open file at path",
-                             message: "Absolute path (or ~/…) to open as a note:",
-                             okTitle: "Open") { [weak self, weak w] value in
-                guard let self, let w, let value else { return }
-                let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !raw.isEmpty else { return }
-                let p = ((raw as NSString).expandingTildeInPath as NSString).standardizingPath
-                if FileManager.default.fileExists(atPath: p) {
-                    w.onOpenExternalPath?(p)
-                } else {
-                    self.log("note '\(cmd.name)': no such path \(p)")
-                }
-            }
-        }
-        // terminal drawer right-click "Open in Notes": the selected text is a
-        // path — open it as a note tab (openNoteFile checks it exists)
-        w.onTerminalOpenInNotes = { [weak self] path in
-            self?.openNoteFile(path)
-        }
-        // terminal right-click "Open in Default App" / "Reveal in Finder":
-        // act on the selected path (existence-checked before acting)
-        w.onTerminalOpenDefault = { path in
-            guard FileManager.default.fileExists(atPath: path) else { return }
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
-        }
-        w.onTerminalRevealInFinder = { path in
-            guard FileManager.default.fileExists(atPath: path) else { return }
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-        }
-        w.onChromeHeaderClick = { [weak self] in
-            self?.copy(currentPath, "note path: \(currentPath)")
-        }
-
-        // voice notes (commands.toml `voice = true`): the window's bottom bar
-        // becomes a record control — big record/stop button, pause/resume and
-        // live level bars; stopping transcribes with Apple's speech
-        // recognizer and appends a dated block to the current note. The
-        // header keeps its copy-path / copy-config buttons (notes + voice
-        // share this window).
-        // native editor: the note's normal save (assigned below, once
-        // commitSave exists) — dictation inserted mid-note saves the same way
-        var voiceSave: (() -> Void)?
-        if cmd.voice {
-            self.log("voice '\(cmd.name)': voice controls enabled (\(cmd.voiceLive ? "live" : "insert on stop"))")
-            let voice = VoiceRecorder()
-            // record bar starts OFF (meterEnabled stays false) — the user
-            // toggles it on via the header mic button when they want it.
-            // Dictation lands AT THE CURSOR (vim: after the character under
-            // it in Normal mode). One region per session = finalized batches
-            // + the live draft, rewritten in place:
-            //   voice-live = true  (default) the words appear as you speak
-            //   voice-live = false everything is held (draft in the footer)
-            //                      and inserted at the cursor on stop
-            // vim: the region is tracked by extmarks (vimVoiceBegin/Update),
-            // so typing elsewhere never shifts it; native editor: a range.
-            let live = cmd.voiceLive
-            var committedStr = ""     // finalized batches this session
-            var draft = ""            // live partial hypothesis (transient)
-            var sessionActive = false
-            var vimAnchored = false
-            var anchor: NSRange?      // native: region start + current length
-            var pre = "", post = ""   // native: spaces around the region
-            var liveWrite: Timer?
-            var pendingDraw: DispatchWorkItem?
-            var lastDraw = Date.distantPast
-            let dbgPath = NSString(string: "~/.cache/ws-voice-debug.log")
-                .expandingTildeInPath
-            func dbg(_ s: String) {
-                let line = "\(Date()) \(s)\n"
-                if let h = FileHandle(forWritingAtPath: dbgPath) {
-                    h.seekToEndOfFile()
-                    h.write(line.data(using: .utf8)!)
-                    h.closeFile()
-                } else {
-                    FileManager.default.createFile(atPath: dbgPath,
-                                                   contents: line.data(using: .utf8))
-                }
-            }
-            func regionText() -> String {
-                [committedStr, draft].filter { !$0.isEmpty }.joined(separator: " ")
-            }
-            func beginRegion() {
-                committedStr = ""
-                draft = ""
-                sessionActive = true
-                if cmd.vimMode {
-                    vimAnchored = w.vimVoiceBegin()
-                    dbg("record start vim anchored=\(vimAnchored) live=\(live)")
-                    return
-                }
-                // after the selection (never replaces selected text)
-                let sel = w.editorSelection
-                let text = w.editorText as NSString
-                let loc = min(sel.location + sel.length, text.length)
-                func isText(_ i: Int) -> Bool {
-                    guard i >= 0, i < text.length else { return false }
-                    return !(Character(UnicodeScalar(text.character(at: i)) ?? " ").isWhitespace)
-                }
-                pre = isText(loc - 1) ? " " : ""
-                post = isText(loc) ? " " : ""
-                anchor = NSRange(location: loc, length: 0)
-                dbg("record start at \(loc) of \(text.length) live=\(live)")
-            }
-            // write the region's current text (committed + draft) in place
-            func drawRegion() {
-                pendingDraw?.cancel()
-                pendingDraw = nil
-                lastDraw = Date()
-                let body = regionText()
-                if cmd.vimMode {
-                    if vimAnchored && !w.vimVoiceUpdate(body) {
-                        vimAnchored = false
-                        dbg("vim region lost (buffer unloaded?) - falling back to append")
-                    }
-                    return
-                }
-                guard var a = anchor else { return }
-                let full = body.isEmpty ? "" : pre + body + post
-                a.length = w.replaceRange(a, with: full,
-                                          caretBack: body.isEmpty ? 0 : (post as NSString).length)
-                anchor = a
-            }
-            // partials arrive several times a second: at most one editor
-            // update per 0.2s (each vim update is an RPC round trip)
-            func scheduleDraw() {
-                guard pendingDraw == nil else { return }
-                let item = DispatchWorkItem { drawRegion() }
-                pendingDraw = item
-                DispatchQueue.main.asyncAfter(
-                    deadline: .now() + max(0, 0.2 - Date().timeIntervalSince(lastDraw)), execute: item)
-            }
-            // no RPC (plain vim) / region lost: the old path — append the
-            // text at the end of the note
-            func vimAppendFallback(_ text: String) {
-                guard !text.isEmpty else { return }
-                if !w.vimAppend("\n" + text, to: currentPath) {
-                    let old = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
-                    var new = old
-                    if !new.isEmpty && !new.hasSuffix("\n") { new += "\n" }
-                    new += "\n" + text + "\n"
-                    try? new.write(toFile: currentPath, atomically: true, encoding: .utf8)
-                    w.vimCommand("silent! checktime")
-                }
-            }
-            func save() {
-                if cmd.vimMode { w.vimFlush() } else { voiceSave?() }
-            }
-            // the session is over (final batch, stop timeout or error): the
-            // draft counts as said, the region is written once more, saved
-            func finishSession() {
-                guard sessionActive else { return }
-                sessionActive = false
-                liveWrite?.invalidate()
-                liveWrite = nil
-                committedStr = regionText()
-                draft = ""
-                if cmd.vimMode && !vimAnchored {
-                    vimAppendFallback(committedStr)
-                } else {
-                    drawRegion()
-                }
-                if cmd.vimMode { w.vimVoiceEnd() } else { save() }
-                anchor = nil
-                dbg("session done +\(committedStr.count) chars")
-                if committedStr.isEmpty { self.log("voice '\(cmd.name)': no speech detected") }
-                committedStr = ""
-                w.tabFooterText = ""
-            }
-            w.onMeterRecord = {
-                switch voice.state {
-                case .idle:
-                    beginRegion()
-                    w.tabFooterText = live ? "🎙 dictating at the cursor" : "🎙 listening — inserted at the cursor on stop"
-                    if !cmd.vimMode && live {
-                        liveWrite = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
-                            if !regionText().isEmpty { voiceSave?() }
-                        }
-                    }
-                    voice.start()
-                    // start() failing (permissions) reports via onError
-                    if voice.state == .idle { finishSession() }
-                case .recording, .paused: voice.stop()
-                case .transcribing: break
-                }
-            }
-            w.onMeterPause = {
-                if voice.state == .recording {
-                    voice.pause()
-                } else if voice.state == .paused {
-                    voice.resume()
-                }
-            }
-            voice.onStateChange = { [weak w] state in
-                guard let w else { return }
-                w.recordingState = voice.state.rawValue
-                w.recordingElapsed = voice.elapsed
-                // the stop timeout (no final batch) ends here too
-                if state == .idle { finishSession() }
-            }
-            voice.onLevel = { [weak w] level in
-                guard let w else { return }
-                w.recordingLevel = level
-                w.recordingElapsed = voice.elapsed
-            }
-            voice.onPartial = { [weak w] text in
-                guard let w, !text.isEmpty, sessionActive else { return }
-                draft = text
-                if live && (!cmd.vimMode || vimAnchored) {
-                    scheduleDraw()
-                } else {
-                    w.tabFooterText = "🎙 " + String(regionText().suffix(80))
-                }
-            }
-            // finalized batch: it joins the committed text of the region
-            voice.onBatch = { text in
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty && sessionActive {
-                    committedStr += (committedStr.isEmpty ? "" : " ") + trimmed
-                    draft = ""
-                    dbg("batch +\(trimmed.count) committed=\(committedStr.count)")
-                    if live {
-                        if cmd.vimMode && !vimAnchored {
-                            vimAppendFallback(trimmed)
-                            committedStr = ""
-                        } else {
-                            drawRegion()
-                            save()
-                        }
-                    }
-                } else if !sessionActive {
-                    dbg("batch after the session ended dropped (+\(trimmed.count))")
-                }
-                if voice.state == .transcribing {
-                    finishSession()
-                    voice.resetSession()
-                }
-            }
-            voice.onError = { [weak self, weak w] err in
-                self?.log("voice '\(cmd.name)': \(err)")
-                dbg("error: \(err)")
-                // visible feedback WITHOUT polluting the note: the footer
-                // line shows the problem; the note keeps only dictated text
-                voice.resetSession()
-                w?.tabFooterText = "⚠️ \(err)"
-            }
-            w.onHideVoiceStop = {
-                liveWrite?.invalidate()
-                liveWrite = nil
-                voice.stop()
-            }
-        }
-        // save current text — but NEVER resurrect a deleted note: if the file
-        // vanished, park the text in a fresh default.md next to it and swap
-        // the tab (Cmd+S / close / tab-change all go through here)
-        let commitSave: (String) -> Void = { [weak self] text in
-            guard let self else { return }
-            // previews (PDF/image) are read-only — never write text back
-            guard !noteIsPreview(currentPath) else { return }
-            // vim mode: the editor owns the file; `text` is the hidden text
-            // view's stale copy — flush the editor instead of writing it
-            if cmd.vimMode {
-                w.vimFlush()
-                lastMtime = mtime(of: currentPath)
-                w.tabFooterText = ""
-                return
-            }
-            if FileManager.default.fileExists(atPath: currentPath) {
-                self.saveNote(text, to: currentPath, cmd: cmd)
-                lastSynced = text
-                lastMtime = mtime(of: currentPath)
-                w.tabFooterText = ""
-                return
-            }
-            let deadPath = currentPath
-            let fallback = noteDir(deadPath) + "/default.md"
-            try? FileManager.default.createDirectory(atPath: noteDir(fallback),
-                                                     withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: fallback) {
-                FileManager.default.createFile(atPath: fallback, contents: nil)
-            }
-            self.log("note '\(cmd.name)': \(deadPath) deleted — text parked in \(fallback)")
-            self.saveNote(text, to: fallback, cmd: cmd)
-            if let idx = paths.firstIndex(of: deadPath) {
-                paths[idx] = fallback
-                titles[idx] = URL(fileURLWithPath: fallback).lastPathComponent
-            } else {
-                paths.append(fallback)
-                titles.append(URL(fileURLWithPath: fallback).lastPathComponent)
-            }
-            w.tabTitles = titles
-            self.removeNotePathFromConfig(deadPath, section: cmd.name)
-            self.addNotePathToConfig(fallback, section: cmd.name)
-            currentPath = fallback
-            lastSynced = text
-            lastMtime = mtime(of: fallback)
-            w.tabFooterText = ""
-        }
-        w.onEditorCommit = commitSave
-        w.onEditorClose = commitSave
-        voiceSave = { [weak w] in
-            guard let w else { return }
-            commitSave(w.currentEditorText)
-        }
-        w.onHide = { [weak self] restore in
-            guard let self else { return }
-            // if the color panel is open on this window, don't leave it
-            // floating once the notes window hides
-            self.dismissPickerIfOpen(for: w)
-            // Persistent singleton note window: keep the PopupWindow (and its
-            // embedded terminal session) alive — just hide the panel. The next
-            // Hyper+N re-shows the SAME instance instead of spawning a fresh
-            // terminal. Focus is still handed back to the window we came from.
-            // The note watcher keeps running; its closure self-guards on
-            // w.isShown while hidden, so nothing needs restarting on re-show.
-            self.restoreFocus(restore)
-        }
-        // poll EVERY tab's note for external writes (1s): reload the active note
-        // when it changes on disk (unless there are unsaved edits) and watch
-        // for notes being DELETED. A deleted note is never resurrected — its
-        // tab becomes default.md in the same directory, and the active note's
-        // on-screen text is parked into that default.md so nothing is lost.
-        let t = Timer(timeInterval: noteWatchInterval, repeats: true) { [weak self, weak w] _ in
-            guard let self, let w, w.isShown else { return }
-            var dirty = false
-            var i = 0
-            while i < paths.count {
-                let p = paths[i]
-                if FileManager.default.fileExists(atPath: p) { i += 1; continue }
-                // note deleted on disk
-                let fallback = noteDir(p) + "/default.md"
-                try? FileManager.default.createDirectory(atPath: noteDir(fallback),
-                                                         withIntermediateDirectories: true)
-                if !FileManager.default.fileExists(atPath: fallback) {
-                    FileManager.default.createFile(atPath: fallback, contents: nil)
-                }
-                if p == currentPath {
-                    // vim mode: the live text is the editor's buffer
-                    let vimText = cmd.vimMode && !noteIsPreview(p)
-                        ? w.vimEval("join(getline(1, '$'), \"\\n\")") : nil
-                    let text = noteIsPreview(p) ? "" : (vimText ?? w.currentEditorText)
-                    self.log("note '\(cmd.name)': \(p) deleted on disk — text parked in \(fallback)")
-                    self.saveNote(text, to: fallback, cmd: cmd)
-                    currentPath = fallback
-                    lastSynced = text
-                    lastMtime = mtime(of: fallback)
-                    w.tabFooterText = ""
-                    w.setEditorMarkdown(text, baseDir: noteDir(fallback))
-                    w.imageBaseDir = noteDir(fallback)
-                    if cmd.vimMode {
-                        // drop the dead buffer (never rewrite the deleted
-                        // file) and edit the parked copy
-                        w.vimCommand("silent! bwipeout! " + p.replacingOccurrences(of: " ", with: "\\ "))
-                        w.vimOpen(fallback)
-                        w.setVimPaneActive(true)
-                    }
-                } else {
-                    self.log("note '\(cmd.name)': \(p) deleted on disk — tab now default.md")
-                }
-                self.removeNotePathFromConfig(p, section: cmd.name)
-                if let existing = paths.firstIndex(of: fallback), existing != i {
-                    // default.md already a tab — drop the dead entry instead
-                    paths.remove(at: i)
-                    titles.remove(at: i)
-                } else {
-                    paths[i] = fallback
-                    titles[i] = URL(fileURLWithPath: fallback).lastPathComponent
-                    self.addNotePathToConfig(fallback, section: cmd.name)
-                    i += 1
-                }
-                dirty = true
-            }
-            // NEW notes in a configured directory show up as tabs on their
-            // own — no config edit needed (directory entries cover them).
-            // Dismissed notes (✕) are never re-added by the sync.
-            for p in expandPaths(cmd.paths, extensions: ["md"])
-            where FileManager.default.fileExists(atPath: p) && !paths.contains(p)
-                && !DismissedNotes.contains(p) {
-                paths.append(p)
-                titles.append(URL(fileURLWithPath: p).lastPathComponent)
-                self.log("note '\(cmd.name)': new note detected — added tab \(p)")
-                dirty = true
-            }
-            if dirty {
-                w.tabTitles = titles
-                // keep the strip highlight on the active note
-                if let active = paths.firstIndex(of: currentPath), active != w.selectedTab {
-                    w.selectedTab = active
-                }
-            }
-            // active-note external-write reload (skipped for read-only previews)
-            if cmd.vimMode, let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
-                // vim reloads external writes itself (autoread + checktime);
-                // an unmodified buffer reloads silently
-                if let last = lastMtime, mt != last {
-                    w.vimCommand("silent! checktime")
-                    w.tabFooterText = ""
-                }
-                lastMtime = mt
-            } else if let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
-                if let last = lastMtime, mt != last {
-                    if w.currentEditorText == lastSynced {
-                        let newText = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
-                        if newText != lastSynced {
-                            w.setEditorMarkdown(newText, baseDir: noteDir(currentPath))
-                            lastSynced = newText
-                            w.tabFooterText = ""
-                            self.log("note '\(cmd.name)': reloaded \(currentPath) after external write")
-                        }
-                    } else {
-                        self.log("note '\(cmd.name)': external change to \(currentPath) ignored (unsaved edits)")
-                    }
-                }
-                lastMtime = mt
-            }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        // embedded file browser drawer (header "▤" toggles it): starts in the
-        // note directory, favorites shared with the floating "files" window
-        let fb = makeFileBrowser(cfg, startDir: noteDir(currentPath), in: w,
-                                 tag: "note '\(cmd.name)'", opened: "browser opened")
-        w.installFileBrowser(fb, drawer: true)
-        // mirror the post-install drawer state onto the header buttons
-        // (browser is the default pane, so it's on and the terminal is off)
-        w.setHeaderButtonOn(10, w.terminalShown)
-        w.setHeaderButtonOn(20, w.fileBrowserShown)
-        subWindows.append(w)
-        if settings.sharedWindow {
-            // Cmd+W: hide the shared window (Esc never does, see above)
-            w.onEscape = { [weak self] in self?.slot.hide("Cmd+W") }
-            placeSlotWindow(w)
-        }
-        w.quietShow = slotPrewarming
-        w.show()
+        return cfg
     }
 
     private func saveNote(_ text: String, to path: String, cmd: CommandSpec) {
@@ -6056,145 +5066,36 @@ private func trimmed(_ s: String) -> String? {
             log("list '\(cmd.name)': no source configured")
             return
         }
-        // the jira window, or its release view (one tab per release, built
-        // from the [jira] section — see showJiraReleaseView)
-        let isJira = cmd.name == "jira" || cmd.name == jiraReleasesWindow
-        let isReleaseView = cmd.name == jiraReleasesWindow
-        // commands.toml section behind this window (the release view wears [jira])
-        let configSection = isReleaseView ? "jira" : cmd.name
         // each source: { path, rows }
         // a source may be a single file OR a directory — a directory expands
         // to all matching files (sorted), so adding a file to a folder needs
         // no commands.toml edit
-        // jira: each tab (json file) belongs to a poll job or the live search
-        // in config.json with its OWN columns; [jira] columns is the fallback
-        func tabColumns(_ path: String?) -> [ListColumn] {
-            guard cmd.table else { return [] }
-            guard isJira else { return cmd.columns }
-            if let path, let own = JiraPoll.owner(ofTab: path), !own.columns.isEmpty {
-                return JiraPoll.labeled(own.columns)
-            }
-            return JiraPoll.labeled(cmd.columns)
-        }
-        var tabs: [(path: String, items: [FieldRow])] =
+        let tabs: [(path: String, items: [FieldRow])] =
             expandPaths(cmd.sources, extensions: ["json", "tsv"]).map { path in
-                return (path, loadListItems(path, cmd: cmd, columns: tabColumns(path)))
+                return (path, loadListItems(path, cmd: cmd, columns: ListSession.tabColumns(cmd, path)))
             }
-        var currentTab = 0
-        // filter-bar dimensions that exist in the current tab: `filters`
-        // fields that are NOT table columns (e.g. labels) — a column filters
-        // from its own header ▾ instead, so filters live with their columns
-        var activeDims: [String] = []
-        func currentItems() -> [FieldRow] { tabs[currentTab].items }
-        // multi-select filters: field -> picked values (OR within a field,
-        // AND across fields); reset on tab change, kept across reloads
-        var colFilters: [String: Set<String>] = [:]
-        let emptyValue = "\u{0}none"
-        // fields whose cells hold "a, b" lists: a row matches any part
-        let multiValued: Set<String> = ["labels", "release", "releaseLabel", "releaseDate", "components",
-                                        "fixVersions"]
-        func cellValues(_ field: String, _ row: FieldRow) -> [String] {
-            let v = (row.fields[field] ?? "").trimmingCharacters(in: .whitespaces)
-            guard !v.isEmpty else { return [emptyValue] }
-            guard multiValued.contains(field) else { return [v] }
-            let parts = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            return parts.isEmpty ? [emptyValue] : parts
-        }
-        let fieldLabels = isJira ? JiraPoll.fieldLabels() : [:]
-        func label(_ field: String) -> String { fieldLabels[field] ?? field }
+        // table mode (`table = true` + `columns`): spreadsheet rows under a
+        // sticky, sortable, resizable header; absent columns = preview rows
+        let columns = ListSession.tabColumns(cmd, tabs.first?.path)
+        let cfg = listWindowConfig(cmd, tabCount: tabs.count, columns: columns)
+        let w = PopupWindow(config: cfg)
+        // the tabs, filters, sort and every window hook; the hooks keep the
+        // session alive as long as the window lives
+        let session = ListSession(host: self, cmd: cmd, window: w, tabs: tabs, columns: columns,
+                                  restoreWID: restoreWID, restorePID: restorePID)
+        session.install()
+        subWindows.append(w)
+        w.tabFooterText = ""
+        placeSlotWindow(w)
+        w.quietShow = slotPrewarming
+        w.show()
+        session.didShow()
+    }
 
-        func barDims() -> [String] {
-            let colFields = Set(columns.filter(\.filterable).map(\.field))
-            return cmd.filters.filter { f in
-                !colFields.contains(f)
-                    // Release (label) and Fix versions (name) are one filter
-                    && !(f == "release" && colFields.contains("releaseLabel"))
-                    && !(f == "releaseLabel" && colFields.contains("release"))
-            }
-        }
-
-        // people fields: a cell value (Server: the username; Cloud: the
-        // display name) -> "Full Name (username)" + detail, from the
-        // directory (users of the projects in scope; loaded once)
-        let personFields: Set<String> = ["assignee", "reporter", "creator"]
-        var peopleCache: [String: (title: String, detail: String)]?
-        func peopleByValue() -> [String: (title: String, detail: String)] {
-            if let c = peopleCache { return c }
-            var people: [String: (title: String, detail: String)] = [:]
-            for u in JiraDirectory.load().users {
-                for k in [u.username, u.name, u.id] where !k.isEmpty && people[k] == nil {
-                    let handle = [u.username, u.email].filter { !$0.isEmpty && $0 != u.name && $0 != k }
-                    people[k] = (k == u.name ? u.name : "\(u.name) (\(k))", handle.joined(separator: " · "))
-                }
-            }
-            peopleCache = people
-            return people
-        }
-
-        // one option per distinct value in the current tab, most common
-        // first; users carry their full name / username from the directory
-        func filterOptions(_ field: String) -> [JiraMultiPicker.Option] {
-            var counts: [String: Int] = [:]
-            var order: [String] = []
-            for row in currentItems() {
-                for v in cellValues(field, row) {
-                    if counts[v] == nil { order.append(v) }
-                    counts[v, default: 0] += 1
-                }
-            }
-            let people = personFields.contains(field) ? peopleByValue() : [:]
-            let sorted = order.enumerated().sorted { a, b in
-                let ca = counts[a.element] ?? 0, cb = counts[b.element] ?? 0
-                if (a.element == emptyValue) != (b.element == emptyValue) { return b.element == emptyValue }
-                return ca != cb ? ca > cb : a.element.localizedStandardCompare(b.element) == .orderedAscending
-            }.map(\.element)
-            return sorted.map { v in
-                let n = counts[v] ?? 0
-                let count = "\(n) row\(n == 1 ? "" : "s")"
-                if v == emptyValue {
-                    return .init(id: v, title: field == "assignee" ? "(unassigned)" : "(empty)", detail: count)
-                }
-                if let p = people[v] {
-                    return .init(id: v, title: p.title, detail: ([p.detail, count].filter { !$0.isEmpty })
-                                    .joined(separator: " · "))
-                }
-                return .init(id: v, title: v, detail: count)
-            }
-        }
-
-        func filterSummary(_ field: String) -> String {
-            let picked = colFilters[field] ?? []
-            if picked.isEmpty { return "All" }
-            if picked.count == 1, let v = picked.first {
-                if v == emptyValue { return "(empty)" }
-                return personFields.contains(field) ? peopleByValue()[v]?.title ?? v : v
-            }
-            return "\(picked.count) selected"
-        }
-
-        // the ▾ chips on the header + the bar pills' text / on state
-        func updateFilterIndicators() {
-            w.tableFilterActive = Set(columns.indices.filter { !(colFilters[columns[$0].field] ?? []).isEmpty })
-            w.filterSummaries = activeDims.map(filterSummary)
-            w.filterActive = Set(activeDims.indices.filter { !(colFilters[activeDims[$0]] ?? []).isEmpty })
-        }
-
-        // refresh the bar dimensions for the current tab; dims with no
-        // values in this tab disappear from the bar entirely
-        func applyFilterData() {
-            let items = currentItems()
-            activeDims = barDims().filter { f in items.contains { !($0.fields[f] ?? "").isEmpty } }
-            colFilters = colFilters.filter { f, _ in
-                columns.contains { $0.field == f } || activeDims.contains(f) }
-            w.filterLabels = activeDims.map(label)
-            w.filterValues = activeDims.map { _ in ["All"] }
-            w.filterValueLabels = []
-            w.filterSelections = Array(repeating: 0, count: activeDims.count)
-            updateFilterIndicators()
-            w.growWidthToContent()
-        }
-
+    // a list window's PopupConfig from its [section]
+    private func listWindowConfig(_ cmd: CommandSpec, tabCount: Int,
+                                  columns: [ListColumn]) -> PopupConfig {
+        let isJira = ListSession.isJira(cmd)
         var cfg = PopupConfig(name: cmd.windowName)
         cfg.enableToggle = false
         cfg.enableResize = cmd.resize
@@ -6203,13 +5104,12 @@ private func trimmed(_ s: String) -> String? {
         cfg.floating = isJira ? settings.float : (cmd.float ?? settings.float)
         // shared window: ONE Esc = back (clearing a search first); at the
         // jira list it hides the window
-        let inSlot = settings.sharedWindow && isJira
-        cfg.escCloseCount = inSlot ? 1 : max(0, cmd.escClose ?? settings.escClose)
+        cfg.escCloseCount = ListSession.inSlot(cmd) ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.wrapContent = true
         cfg.showSearchBar = true
         cfg.dragHeader = true
-        cfg.tabs = tabs.count > 1
+        cfg.tabs = tabCount > 1
         cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.scrollableRows = true
         cfg.dynamicHeight = false
@@ -6233,599 +5133,12 @@ private func trimmed(_ s: String) -> String? {
         applyWindowTheme(&cfg, cmd)
         if cmd.searchWidth > 0 { cfg.searchWidthFraction = cmd.searchWidth }
         if cmd.maxStretch > 0 { cfg.maxRowStretch = cmd.maxStretch }
-        // table mode (`table = true` + `columns`): spreadsheet rows under a
-        // sticky, sortable, resizable header; absent columns = preview rows
-        var columns = tabColumns(tabs.first?.path)
         if !columns.isEmpty {
             cfg.tableColumns = columns.map { $0.popup }
             cfg.rowHeight = 26
         }
         cfg.tableCellTone = jiraCellTone
-        let w = PopupWindow(config: cfg)
-        let cap = cmd.maxRows > 0 ? cmd.maxRows : Int.max
-        var visibleOffset = 0
-        var reloadWatcher: Timer?
-        // empty `title` in commands.toml = no header label (icon still shows)
-        w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
-        w.headerIcon = jiraAppIcon
-        // header-click sort: (field, ascending); restored from table-sort
-        var sortKey: (field: String, ascending: Bool)?
-        if let ts = cmd.tableSort, !columns.isEmpty {
-            let parts = ts.split(separator: ":").map { $0.trimmingCharacters(in: .whitespaces) }
-            if let f = parts.first, columns.contains(where: { $0.field == f }) {
-                sortKey = (f, !(parts.count > 1 && parts[1].lowercased().hasPrefix("desc")))
-            }
-        }
-        func syncSortArrow() {
-            w.tableSort = sortKey.flatMap { k in
-                columns.firstIndex(where: { $0.field == k.field }).map { ($0, k.ascending) }
-            }
-        }
-        syncSortArrow()
-        // row copy: ticked rows (or every row) serialized as TSV lines of the
-        // configured copy-fields; the framework owns checkboxes + button +
-        // pasteboard, this closure is the only list-specific part
-        let copyKeys = cmd.copyFields
-        w.onCopyRows = { picked in
-            picked.compactMap { $0 as? FieldRow }
-                .filter { !$0.loadMore }
-                .map { row in
-                    copyKeys.map { row.fields[$0] ?? "" }.joined(separator: "\t")
-                }
-                .joined(separator: "\n")
-        }
-        // jira favorites (config.json `favorites`): the ☆ of each issue row
-        var favKeys: Set<String> = isJira ? JiraPoll.favorites() : []
-        // after a pin / blacklist edit: a tab file the window doesn't have
-        // yet appears by rebuilding the window (the current tab stays)
-        func ensureTab(_ file: String) {
-            guard cmd.name == "jira", !tabs.contains(where: { ($0.path as NSString).lastPathComponent == file }),
-                  tabs.indices.contains(currentTab) else { return }
-            pendingJiraTab = (tabs[currentTab].path as NSString).lastPathComponent
-            reloadJiraWindow()
-        }
-        func setFavorite(_ rows: [FieldRow], on: Bool) {
-            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
-            guard !keys.isEmpty else { return }
-            let before = favKeys
-            if on { favKeys.formUnion(keys) } else { favKeys.subtract(keys) }
-            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
-            let s = keys.count == 1 ? keys[0] : "\(keys.count) issues"
-            w.showToast(on ? "Pinned \(s) to favorites" : "Unpinned \(s)", symbol: on ? "star.fill" : "star")
-            // the rows as shown: favorites.json gets them at once even when
-            // the issue cache doesn't hold them (live search results)
-            let json = (try? JSONSerialization.data(withJSONObject: rows.map { $0.fields.filter { !$0.key.hasPrefix("__") } }))
-                .map { String(decoding: $0, as: UTF8.self) } ?? "[]"
-            JiraPoll.run("jira_poll.py", ["--favorite", on ? "add" : "remove"] + keys, stdin: json) {
-                [weak self, weak w] code, _, err in
-                guard let self else { return }
-                self.log("jira: favorite \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
-                         + (code == 0 ? "" : " " + err))
-                guard code == 0 else {
-                    favKeys = before
-                    w?.setRows(filteredRows(query: w?.currentQuery ?? ""), resetScroll: false)
-                    w?.showToast("Favorites not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
-                                 symbol: "exclamationmark.triangle")
-                    return
-                }
-                ensureTab(JiraPoll.favoritesFile)
-            }
-        }
-        func setBlacklisted(_ rows: [FieldRow], on: Bool) {
-            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
-            guard !keys.isEmpty else { return }
-            JiraPoll.run("jira_poll.py", ["--blacklist-release", on ? "add" : "remove"] + keys) {
-                [weak self, weak w] code, _, err in
-                guard let self else { return }
-                self.log("jira: blacklist \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
-                         + (code == 0 ? "" : " " + err))
-                let s = keys.count == 1 ? "release \(rows[0].title)" : "\(keys.count) releases"
-                guard code == 0 else {
-                    w?.showToast("Not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
-                                 symbol: "exclamationmark.triangle")
-                    return
-                }
-                w?.selectedIndices = []
-                w?.showToast(on ? "Hid \(s) → \(JiraPoll.blacklistFile)" : "Restored \(s)",
-                             symbol: on ? "eye.slash" : "eye")
-                ensureTab(JiraPoll.blacklistFile)
-            }
-        }
-        w.onToggleStar = { [weak self] i in
-            guard self != nil, w.rows.indices.contains(i), let row = w.rows[i] as? FieldRow,
-                  let on = row.starred else { return }
-            setFavorite([row], on: !on)
-        }
-
-        // Cmd+K: act on the ticked rows (else the highlighted one) — copy,
-        // open in the browser, pin to favorites, hide / restore releases
-        w.onCommandK = { [weak self, weak w] in
-            guard let self, let w else { return }
-            let rows = w.actionRows.compactMap { $0 as? FieldRow }.filter { !$0.loadMore }
-            guard !rows.isEmpty else { return }
-            let n = rows.count, what = n == 1 ? (rows[0].fields["key"] ?? "1 row") : "\(n) rows"
-            var items: [(title: String, detail: String)] = [
-                ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
-            let site = isJira ? jiraSite : ""
-            let keyed = rows.filter { !($0.fields["key"] ?? "").isEmpty }
-            let issues = keyed.filter { !jiraIsReleaseRow($0) }
-            let releases = keyed.filter { jiraIsReleaseRow($0) }
-            let urls = keyed.compactMap { r in jiraBrowseURL(r, site: site).map { (r, $0) } }
-            let s = urls.count == 1 ? "" : "s"
-            let noun = releases.isEmpty ? "issue" : issues.isEmpty ? "release" : "item"
-            if !site.isEmpty && !urls.isEmpty {
-                items.append(("Copy URL and title", "\(urls.count) \(noun)\(s) · one “URL Title” line each"))
-                items.append(("Open all in browser", "opens \(urls.count) \(noun)\(s) · copies KEY + URL"))
-            }
-            let tabFile = tabs.indices.contains(currentTab)
-                ? (tabs[currentTab].path as NSString).lastPathComponent : ""
-            if isJira && !issues.isEmpty {
-                let pinned = issues.allSatisfy { favKeys.contains($0.fields["key"] ?? "") }
-                let k = issues.count == 1 ? issues[0].fields["key"] ?? "" : "\(issues.count) issues"
-                items.append(pinned
-                    ? ("Remove from favorites", "unpin \(k) · \(JiraPoll.favoritesFile)")
-                    : ("Add to favorites", "pin \(k) → \(JiraPoll.favoritesFile) · re-polled every run"))
-            }
-            if isJira && releases.count == 1 {
-                items.append(("Show release issues", "every issue in \(releases[0].title) · one tab per release"))
-            }
-            if isJira && !releases.isEmpty {
-                let k = releases.count == 1 ? releases[0].title : "\(releases.count) releases"
-                items.append(tabFile == JiraPoll.blacklistFile
-                    ? ("Restore release", "show \(k) in the releases tab again")
-                    : ("Blacklist release", "hide \(k) → \(JiraPoll.blacklistFile)"))
-            }
-            w.showActionPicker(title: "Actions for \(what)", items: items) { [weak self, weak w] i in
-                guard let self, let w, items.indices.contains(i) else { return }
-                switch items[i].title {
-                case "Copy to clipboard":
-                    let text = w.onCopyRows?(rows) ?? ""
-                    self.copy(text, "\(n) row(s)")
-                    w.showToast("Copied \(what)", symbol: "doc.on.clipboard")
-                case "Copy URL and title":
-                    let lines = urls.map { r, u -> String in
-                        let t = (r.fields["title"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                        return u.absoluteString + (t.isEmpty ? "" : " \(t)")
-                    }
-                    self.copy(lines.joined(separator: "\n"), "\(urls.count) jira URL(s) + titles")
-                    w.showToast("Copied \(urls.count) URL\(s) + title\(s)", symbol: "link")
-                case "Open all in browser":
-                    let lines = urls.map { "\($0.0.fields["key"] ?? "")\t\($0.1.absoluteString)" }
-                    for (_, u) in urls { NSWorkspace.shared.open(u) }
-                    self.copy(lines.joined(separator: "\n"), "\(urls.count) jira key(s) + URLs")
-                    w.showToast("Opened \(urls.count) · copied keys + URLs", symbol: "safari")
-                    self.log("list '\(cmd.name)': opened \(urls.map { $0.1.absoluteString }.joined(separator: " "))")
-                case "Add to favorites":
-                    setFavorite(issues, on: true)
-                case "Remove from favorites":
-                    setFavorite(issues, on: false)
-                case "Blacklist release":
-                    setBlacklisted(releases, on: true)
-                case "Restore release":
-                    setBlacklisted(releases, on: false)
-                case "Show release issues":
-                    self.showJiraReleaseView(releases[0])
-                default:
-                    break
-                }
-            }
-        }
-        // Cmd+F (jira): the live-search panel docked to this window
-        if cmd.name == "jira" {
-            w.onCommandF = { [weak self, weak w] in
-                guard let self, let w else { return }
-                JiraSearchPanel.toggle(on: w, controller: self)
-            }
-        }
-        // clicking the drag header copies the active tab's source path
-        w.onChromeHeaderClick = { [weak self] in
-            guard let self, tabs.indices.contains(currentTab) else { return }
-            self.copy(tabs[currentTab].path, "source path: \(tabs[currentTab].path)")
-        }
-        // header "config" button: copy the commands.toml path (not on jira:
-        // its config lives in the Jira Config window)
-        if isJira { w.copyConfigButtonLabel = "" }
-        w.onChromeConfigClick = { [weak self] in
-            self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
-        }
-        // the copy-path / copy-config actions live in the top-left icon menu
-        // (below), not as header buttons — keep the header bar uncluttered
-        func refreshPathLabel() {
-            w.copyPathButtonLabel = ""
-        }
-        // top-left app glyph: window menu (copy paths, open config, jira
-        // poll options, window settings) — same idea as the notes window
-        w.onChromeIconClick = { [weak self, weak w] in
-            guard let self, let w else { return }
-            let menu = NSMenu()
-            menu.autoenablesItems = false
-            if cmd.name == "jira" {
-                // jira: config, paths, jobs, queries, curls, columns — all
-                // live in the Jira Config window; this menu is window chrome
-                menu.addItem(self.menuItem("Search Jira…  ⌘F") { [weak self, weak w] in
-                    guard let self, let w else { return }
-                    JiraSearchPanel.toggle(on: w, controller: self)
-                })
-                menu.addItem(self.menuItem("Open Jira Config Window") { [weak self] in
-                    self?.showJiraDashboard()
-                })
-            } else {
-                if tabs.indices.contains(currentTab) {
-                    let src = tabs[currentTab].path
-                    menu.addItem(self.menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [weak self] in
-                        self?.copy(src, "source path: \(src)")
-                    })
-                }
-                menu.addItem(self.menuItem("Copy Config Path") { [weak self] in
-                    self?.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
-                })
-                menu.addItem(.separator())
-                menu.addItem(self.openConfigMenuItem { [weak self] in self?.openNoteFile($0) })
-            }
-            menu.addItem(.separator())
-            self.addWindowSettingsItems(to: menu, window: w, section: configSection)
-            if cmd.name == "jira" {
-                menu.addItem(.separator())
-                menu.addItem(self.menuItem("Disable Jira…") { [weak self] in
-                    self?.disableJiraAsking()
-                })
-            }
-            menu.addItem(.separator())
-            menu.addItem(self.shortcutsMenuItem(for: w, view: cmd.name == "jira" ? "jira" : ""))
-            w.showHeaderMenu(menu)
-        }
-        w.onShowShortcuts = { [weak self, weak w] in
-            guard let self, let w else { return }
-            self.showShortcuts(on: w, view: cmd.name == "jira" ? "jira" : "")
-        }
-
-        // combined filter: search (fuzzy) + dropdown selections, then the
-        // table's header sort (numeric-aware; blanks always last)
-        func filteredRows(query: String) -> [FieldRow] {
-            let byQuery = PopupFuzzy.filter(currentItems(), query: query) { $0.searchText }
-            var matched: [FieldRow]
-            let active = colFilters.filter { !$0.value.isEmpty }
-            if active.isEmpty {
-                matched = byQuery
-            } else {
-                matched = byQuery.filter { row in
-                    for (f, picked) in active where !cellValues(f, row).contains(where: picked.contains) {
-                        return false
-                    }
-                    return true
-                }
-            }
-            if let k = sortKey {
-                matched = matched.enumerated().sorted { a, b in
-                    let x = a.element.fields[k.field] ?? "", y = b.element.fields[k.field] ?? ""
-                    if x.isEmpty != y.isEmpty { return y.isEmpty }
-                    let c = x.localizedStandardCompare(y)
-                    if c == .orderedSame { return a.offset < b.offset }
-                    return k.ascending ? c == .orderedAscending : c == .orderedDescending
-                }.map { $0.element }
-            }
-            let result = Array(matched.prefix(cap))
-            // paging: page-size > 0 keeps huge lists snappy while browsing; a
-            // "load more" row at the bottom reveals the next page on Enter or
-            // click. Searching is cheap (capped search text) and rendering a
-            // narrowed result is fine, so an ACTIVE QUERY shows every match —
-            // an item beyond the current page still renders when found.
-            var paged = result
-            if cmd.pageSize > 0, result.count > cmd.pageSize, query.isEmpty {
-                paged = Array(result.prefix(visibleOffset + cmd.pageSize))
-                if paged.count < result.count {
-                    let remaining = result.count - paged.count
-                    paged.append(FieldRow(title: "load \(remaining) more…",
-                                          content: nil, trailing: nil, detail: nil,
-                                          body: nil, searchText: "",
-                                          fields: ["__loadmore": "1"]))
-                }
-            }
-            // live header count: current items in the list (updates with search)
-            w.itemCount = paged.count == 1 ? "1 item" : "\(paged.count) items"
-            // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
-            if isJira {
-                paged = paged.map { r in
-                    guard !r.loadMore, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty else { return r }
-                    var r = r
-                    r.starred = favKeys.contains(k)
-                    return r
-                }
-            }
-            return paged
-        }
-
-        // header sort (title click, or the filter popover's Sort buttons);
-        // persisted as table-sort so the window reopens the same way
-        func setSort(_ f: String, ascending: Bool) {
-            sortKey = (f, ascending)
-            syncSortArrow()
-            visibleOffset = 0
-            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
-            let v = "\(f):\(ascending ? "asc" : "desc")"
-            guard !isReleaseView else { return }
-            if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
-                self.commands[ci].tableSort = v
-            }
-            saveConfigValue(section: cmd.name, key: "table-sort", value: v)
-            self.log("list '\(cmd.name)': sort -> \(v)")
-        }
-
-        // the searchable multi-select popover for one field, anchored at a
-        // header ▾ or a filter-bar pill
-        var openPicker: JiraMultiPicker?
-        func showFilterPicker(_ field: String, anchor: NSView, rect: NSRect) {
-            openPicker?.closePopover()
-            let opts = filterOptions(field)
-            let p = JiraMultiPicker(noun: label(field).lowercased())
-            p.applyColors(w.config.colors)
-            p.options = opts
-            p.set((colFilters[field] ?? []).filter { v in opts.contains { $0.id == v } }.sorted())
-            p.anchor = (anchor, rect)
-            if let col = columns.first(where: { $0.field == field }), col.sortable {
-                p.extraButtons = [
-                    ("Sort ↑", { [weak p] in setSort(field, ascending: true); p?.closePopover() }),
-                    ("Sort ↓", { [weak p] in setSort(field, ascending: false); p?.closePopover() }),
-                ]
-            }
-            p.onChange = { [weak p] in
-                guard let p else { return }
-                colFilters[field] = p.selected.isEmpty ? nil : Set(p.selected)
-                visibleOffset = 0
-                updateFilterIndicators()
-                w.setRows(filteredRows(query: w.currentQuery))
-            }
-            p.onClose = { openPicker = nil }
-            openPicker = p
-            p.togglePopover(nil)
-        }
-
-        applyFilterData()
-        w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
-        w.onFilter = { [weak self] query in
-            guard self != nil else { return [] }
-            visibleOffset = 0
-            return filteredRows(query: query)
-        }
-        w.onFilterChange = { [weak self] _ in
-            guard self != nil else { return }
-            visibleOffset = 0
-            w.setRows(filteredRows(query: w.currentQuery))
-        }
-        w.onTabChange = { [weak self] index in
-            guard let self, index < tabs.count, index != currentTab else { return }
-            currentTab = index
-            visibleOffset = 0
-            if cmd.table {
-                let cols = tabColumns(tabs[index].path)
-                if cols.map(\.field) != columns.map(\.field) || cols.map(\.width) != columns.map(\.width)
-                    || cols.map(\.title) != columns.map(\.title) {
-                    columns = cols
-                    w.setTableColumns(cols.map { $0.popup })
-                }
-                if let k = sortKey, !columns.contains(where: { $0.field == k.field }) { sortKey = nil }
-                syncSortArrow()
-            }
-            w.clearInput()
-            openPicker?.closePopover()
-            colFilters = [:]
-            applyFilterData()
-            w.setRows(filteredRows(query: ""))
-            w.tabFooterText = ""
-            refreshPathLabel()
-            self.log("list '\(cmd.name)': tab -> \(tabs[index].path)")
-        }
-        // clicking the ACTIVE tab copies that source's absolute path
-        w.onTabClick = { [weak self] index in
-            guard let self, index == w.selectedTab, index < tabs.count else { return }
-            self.copy(tabs[index].path, "source path: \(tabs[index].path)")
-        }
-        w.onAccept = { [weak self] row in
-            guard let self else { return }
-            if row.loadMore {
-                visibleOffset += cmd.pageSize
-                w.setRows(filteredRows(query: w.currentQuery))
-                self.log("list '\(cmd.name)': load more -> offset \(visibleOffset)")
-                return
-            }
-            // Enter = the same "more details" window as a double-click
-            guard let row = row as? FieldRow else { return }
-            self.log("list '\(cmd.name)': details for '\(row.title)'")
-            self.openRow(row, cmd: cmd, isJira: isJira)
-        }
-        w.onRowClick = { [weak self] index in
-            guard let self, index >= 0, index < w.rows.count else { return }
-            if w.rows[index].loadMore {
-                visibleOffset += cmd.pageSize
-                w.setRows(filteredRows(query: w.currentQuery))
-                self.log("list '\(cmd.name)': load more (click) -> offset \(visibleOffset)")
-            }
-        }
-        // double-click a row -> "more details" (no per-row action label)
-        w.onRowDoubleClick = { [weak self] index in
-            guard let self, index >= 0, index < w.rows.count,
-                  let row = w.rows[index] as? FieldRow, !row.loadMore else { return }
-            self.openRow(row, cmd: cmd, isJira: isJira)
-        }
-        // table header: click = sort (again = flip), divider drag = resize;
-        // both persist to commands.toml so the window reopens the same way
-        w.onTableSort = { [weak self] i in
-            guard self != nil, columns.indices.contains(i) else { return }
-            let f = columns[i].field
-            setSort(f, ascending: sortKey?.field == f ? !(sortKey?.ascending ?? true) : true)
-        }
-        // header ▾ / filter-bar pill: the field's searchable multi-select
-        w.onTableFilter = { [weak self] i, view, rect in
-            guard self != nil, columns.indices.contains(i) else { return }
-            showFilterPicker(columns[i].field, anchor: view, rect: rect)
-        }
-        w.onFilterOpen = { [weak self] dim, view, rect in
-            guard self != nil, activeDims.indices.contains(dim) else { return }
-            showFilterPicker(activeDims[dim], anchor: view, rect: rect)
-        }
-        // persisted on a short debounce after the LAST live drag update (not
-        // only on mouseUp — the header's mouseUp isn't guaranteed to arrive)
-        var resizeSave: DispatchWorkItem?
-        w.onTableColumnsResized = { [weak self] pcts, final in
-            guard let self else { return }
-            for i in columns.indices where i < pcts.count { columns[i].width = pcts[i] }
-            resizeSave?.cancel()
-            let item = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                let spec = ListColumn.serialize(columns, titles: !isJira)
-                // a jira tab owned by a poll job / search saves into THAT job
-                if isJira, tabs.indices.contains(currentTab),
-                   let own = JiraPoll.owner(ofTab: tabs[currentTab].path) {
-                    JiraPoll.run("jira_config.py", ["--set-columns", own.kind, own.name, spec]) { [weak self] code, _, err in
-                        self?.log("jira: \(own.kind) \(own.name) columns -> \(spec) (exit \(code))"
-                                  + (code == 0 ? "" : " " + err))
-                    }
-                    return
-                }
-                if let ci = self.commands.firstIndex(where: { $0.name == cmd.name }) {
-                    self.commands[ci].columns = columns
-                }
-                saveConfigValue(section: cmd.name, key: "columns", value: spec)
-                self.log("list '\(cmd.name)': columns -> \(spec)")
-            }
-            resizeSave = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + (final ? 0.05 : 0.6), execute: item)
-        }
-        // a header title dragged to another slot: same order here, the ▾ /
-        // sort marks follow their fields, saved like a divider drag
-        w.onTableColumnsReordered = { [weak self, weak w] from, to in
-            guard self != nil, columns.indices.contains(from), columns.indices.contains(to) else { return }
-            columns.insert(columns.remove(at: from), at: to)
-            syncSortArrow()
-            updateFilterIndicators()
-            w?.onTableColumnsResized?(columns.map(\.width), true)
-        }
-        w.onEscape = { [weak self] in
-            guard inSlot, let self else { w.hide(restore: true); return }
-            if !w.currentQuery.isEmpty {
-                w.clearInput()
-                visibleOffset = 0
-                w.setRows(filteredRows(query: ""))
-                return
-            }
-            self.slot.back()
-        }
-        if cmd.name == "jira" && inSlot {
-            // the Cmd+F panel hides / returns with the list
-            w.onPark = { JiraSearchPanel.park(from: w) }
-            w.onUnpark = { JiraSearchPanel.unpark(to: w) }
-        }
-        w.onHide = { [weak self] restore in
-            guard let self else { return }
-            reloadWatcher?.invalidate()
-            reloadWatcher = nil
-            if cmd.name == "jira" { JiraSearchPanel.detach(from: w) }
-            self.unregisterSubWindow(w, restore: restore,
-                                     restoreWID: restoreWID, restorePID: restorePID)
-        }
-        // reload a tab when its source file changes on disk (e.g. the poll
-        // wrote fresh json) so an open window never shows stale rows
-        var tabMtimes = tabs.map { mtime(of: $0.path) }
-        // jira: each tab's poll freshness (dot + age) from status.json —
-        // re-read when it changes, and every 30s so the ages stay current
-        var badgeStamp: (status: Date?, at: Date) = (nil, .distantPast)
-        func refreshBadges(force: Bool = false) {
-            guard cmd.name == "jira" else { return }
-            let st = mtime(of: JiraPoll.statusPath)
-            guard force || st != badgeStamp.status || Date().timeIntervalSince(badgeStamp.at) > 30 else { return }
-            badgeStamp = (st, Date())
-            let status = JiraPoll.status, config = JiraPoll.readJSON(JiraPoll.configPath)
-            w.tabBadges = tabs.map { JiraPoll.tabBadge(path: $0.path, status: status, config: config) }
-        }
-        refreshBadges(force: true)
-        // release view: its tab files are rebuilt from the issue cache
-        // whenever a poll changes it (the mtime check below reloads them)
-        var cacheStamp = mtime(of: JiraPoll.issueCachePath)
-        let watcher = Timer(timeInterval: listWatchInterval, repeats: true) { [weak self, weak w] _ in
-            guard let self, let w, w.isShown else { return }
-            refreshBadges()
-            if isReleaseView, mtime(of: JiraPoll.issueCachePath) != cacheStamp {
-                cacheStamp = mtime(of: JiraPoll.issueCachePath)
-                JiraPoll.run("jira_poll.py", ["--release-view"])
-            }
-            var changed: [Int] = []
-            for (i, t) in tabs.enumerated() {
-                let mt = mtime(of: t.path)
-                if mt != tabMtimes[i] {
-                    tabMtimes[i] = mt
-                    changed.append(i)
-                }
-            }
-            guard !changed.isEmpty else { return }
-            for i in changed {
-                tabs[i].items = loadListItems(tabs[i].path, cmd: cmd, columns: tabColumns(tabs[i].path))
-                self.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
-            }
-            // pins edited elsewhere (or by the poll) show on the ☆ too
-            if isJira { favKeys = JiraPoll.favorites() }
-            refreshBadges(force: true)
-            w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
-            refreshPathLabel()
-            // only re-filter when the tab on screen is one that changed
-            guard changed.contains(currentTab) else { return }
-            applyFilterData()
-            visibleOffset = 0
-            // keep the scroll position: a background json refresh must not
-            // yank the list back to the top while the user reads mid-list
-            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
-            w.tabFooterText = ""
-        }
-        RunLoop.main.add(watcher, forMode: .common)
-        reloadWatcher = watcher
-        w.copyConfigButtonLabel = ""
-        // "fit columns" (the table header's corner cell / right-click): every
-        // column as wide as its content, the window widened to hold them
-        // (saved like a divider drag)
-        if cmd.table && !columns.isEmpty {
-            w.onTableFit = { [weak w] in
-                guard let w, let pcts = w.fitTableColumns() else { return }
-                w.onTableColumnsResized?(pcts, true)
-                w.showToast("Columns fitted to their content", symbol: "arrow.left.and.right")
-            }
-        }
-        refreshPathLabel()
-        subWindows.append(w)
-        w.tabFooterText = ""
-        placeSlotWindow(w)
-        w.quietShow = slotPrewarming
-        w.show()
-        if isReleaseView, let f = pendingReleaseTab {
-            pendingReleaseTab = nil
-            if let i = tabs.firstIndex(where: { ($0.path as NSString).lastPathComponent == f }), i != currentTab {
-                w.selectedTab = i
-            }
-        }
-        guard cmd.name == "jira" else { return }
-        // live search results: reload that tab from disk and select it (a
-        // tab the window doesn't have yet = rebuild the window, then select)
-        jiraShowTab = { [weak self, weak w] file in
-            guard let self, let w else { return }
-            guard let i = tabs.firstIndex(where: { ($0.path as NSString).lastPathComponent == file }) else {
-                self.pendingJiraTab = file
-                self.reloadJiraWindow()
-                return
-            }
-            tabs[i].items = loadListItems(tabs[i].path, cmd: cmd, columns: tabColumns(tabs[i].path))
-            tabMtimes[i] = mtime(of: tabs[i].path)
-            if i != currentTab {
-                w.selectedTab = i
-            } else {
-                applyFilterData()
-                visibleOffset = 0
-                w.setRows(filteredRows(query: w.currentQuery))
-            }
-            w.tabFooterText = ""
-        }
-        if let f = pendingJiraTab {
-            pendingJiraTab = nil
-            jiraShowTab?(f)
-        }
-        JiraSearchPanel.reattach(to: w)
+        return cfg
     }
 
     // [files] browser settings onto a window config (both the notes drawer
@@ -8118,6 +6431,1621 @@ extension SwitcherController {
         log("config reloaded (\(commands.count) commands)")
         rebuildNoteWindow()
         prewarmSlot()
+    }
+}
+
+// the folder a note lives in (its images go to ./assets, its default.md sits there)
+private func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
+
+// `dir`/default.md, created (folder too) when missing: where a deleted or
+// closed note's tab (and its on-screen text) goes — a note is never recreated
+private func ensureDefaultNote(in dir: String) -> String {
+    let fallback = dir + "/default.md"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    if !FileManager.default.fileExists(atPath: fallback) {
+        FileManager.default.createFile(atPath: fallback, contents: nil)
+    }
+    return fallback
+}
+
+// MARK: - Notes window session
+
+extension SwitcherController {
+    // One notes window's live state — the tabs (`paths` / `titles`), the note
+    // on screen and its external-write sync marks — and every hook the window
+    // calls. openNoteWindow builds it and calls install(); the window's hooks
+    // hold it (and it holds the window) for as long as the window lives: the
+    // notes window is a long-lived singleton, rebuilt by rebuildNoteWindow.
+    final class NoteSession {
+        // the app's controller: a process-lifetime singleton
+        unowned let host: SwitcherController
+        let cmd: CommandSpec
+        let w: PopupWindow
+        let vimSocket: String
+        var paths: [String]
+        var titles: [String]
+        var currentPath: String
+        // external-write watch state: reload the current note when its file
+        // changes on disk, unless the editor holds unsaved local edits
+        var lastSynced: String
+        var lastMtime: Date?
+
+        init(host: SwitcherController, cmd: CommandSpec, window: PopupWindow,
+             paths: [String], vimSocket: String) {
+            self.host = host
+            self.cmd = cmd
+            self.w = window
+            self.vimSocket = vimSocket
+            self.paths = paths
+            titles = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+            currentPath = paths[0]
+            lastSynced = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+            lastMtime = mtime(of: currentPath)
+        }
+
+        // show the first note and wire every window hook
+        func install() {
+            // All window actions live in the top-left icon dropdown menu — no
+            // scattered header buttons. The menu shows toggle state via
+            // checkmarks (terminal, browser, mic) and groups actions logically.
+
+            // image saving for pasted/dropped photos
+            w.imageBaseDir = noteDir(currentPath)
+            if noteIsPreview(currentPath) {
+                w.setEditorFilePreview(currentPath)
+            } else {
+                w.editorReadOnly = false
+                w.setEditorMarkdown(lastSynced, baseDir: noteDir(currentPath))
+            }
+            if cmd.vimMode { installVimPane() }
+            w.onFontSizeStep = { [host] delta in host.stepFontSizes(delta) }
+            w.imageSaver = { [self] img in saveImage(img) }
+
+            w.headerIcon = cmd.icon ?? notesAppIcon
+            // empty `title` in commands.toml = no header label (icon still shows)
+            w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
+            w.copyPathButtonLabel = ""          // copy path moved to right-click (tab/editor)
+            w.copyConfigButtonLabel = ""        // config is opened via the icon click
+            w.tabTitles = titles
+            w.tabFooterText = ""
+            // generic label in the drag header — the tab strip already shows the
+            // individual note names; clicking the header still copies the path
+            w.chromeHeaderTitle = cmd.chromeTitle
+            w.onTabChange = { [self] index in loadTab(index) }
+            // "✕" on a tab pill closes that note (removes it from the list)
+            w.onCloseTab = { [self] index in closeNote(index) }
+            // Top-left icon opens a dropdown menu with all window actions —
+            // replaces the scattered header buttons (terminal, browser, mic, color).
+            w.onChromeIconClick = { [self] in showIconMenu() }
+            w.onShowShortcuts = { [host, weak w] in
+                guard let w else { return }
+                host.showShortcuts(on: w, view: "notes")
+            }
+            w.onAddTab = { [self] in addTab() }
+            // clicking the ACTIVE note tab copies that note's absolute path
+            w.onTabClick = { [self] index in
+                guard index == w.selectedTab, index < paths.count else { return }
+                host.copy(paths[index], "note path: \(paths[index])")
+            }
+            // right-click a note TAB -> copy that note's absolute path
+            w.onTabCopyPath = { [self] index in
+                guard index < paths.count else { return }
+                host.copy(paths[index], "note path: \(paths[index])")
+            }
+            // right-click the editor -> "Copy File Path" copies the open note
+            w.onCopyFilePath = { [self] in
+                host.copy(currentPath, "note path: \(currentPath)")
+            }
+            w.onOpenExternalPath = { [self] path in openExternal(path) }
+            w.onOpenPathPrompt = { [self] in promptOpenPath() }
+            // terminal drawer right-click "Open in Notes": the selected text is a
+            // path — open it as a note tab (openNoteFile checks it exists)
+            w.onTerminalOpenInNotes = { [host] path in
+                host.openNoteFile(path)
+            }
+            // terminal right-click "Open in Default App" / "Reveal in Finder":
+            // act on the selected path (existence-checked before acting)
+            w.onTerminalOpenDefault = { path in
+                guard FileManager.default.fileExists(atPath: path) else { return }
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            }
+            w.onTerminalRevealInFinder = { path in
+                guard FileManager.default.fileExists(atPath: path) else { return }
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
+            w.onChromeHeaderClick = { [self] in
+                host.copy(currentPath, "note path: \(currentPath)")
+            }
+            if cmd.voice { installVoice() }
+            w.onEditorCommit = { [self] text in commitSave(text) }
+            w.onEditorClose = { [self] text in commitSave(text) }
+            w.onHide = { [self] restore in
+                // if the color panel is open on this window, don't leave it
+                // floating once the notes window hides
+                host.dismissPickerIfOpen(for: w)
+                // Persistent singleton note window: keep the PopupWindow (and its
+                // embedded terminal session) alive — just hide the panel. The next
+                // Hyper+N re-shows the SAME instance instead of spawning a fresh
+                // terminal. Focus is still handed back to the window we came from.
+                // The note watcher keeps running; it self-guards on w.isShown
+                // while hidden, so nothing needs restarting on re-show.
+                host.restoreFocus(restore)
+            }
+            // poll EVERY tab's note for external writes and deletions (watchTick)
+            let t = Timer(timeInterval: noteWatchInterval, repeats: true) { [weak self] _ in
+                guard let self, self.w.isShown else { return }
+                self.watchTick()
+            }
+            RunLoop.main.add(t, forMode: .common)
+        }
+
+        // vim pane: text notes edit in vim; PDF/image tabs keep the native
+        // preview. A relaunched editor (after `:q`) reopens the current note.
+        private func installVimPane() {
+            w.setVimPaneActive(!noteIsPreview(currentPath))
+            w.vimLaunchArgs = { [self] in
+                host.vimArgs(for: cmd, socket: vimSocket,
+                             file: noteIsPreview(currentPath) ? nil : currentPath)
+            }
+            w.onVimExit = { [self] in
+                host.log("note '\(cmd.name)': vim exited — relaunching on \(currentPath)")
+            }
+            // right-click in the vim pane: the obvious actions (rule 2)
+            let vm = NSMenu(title: "Vim")
+            vm.autoenablesItems = false
+            vm.addItem(host.menuItem("Copy") { [weak w] in w?.vimCopy() })
+            vm.addItem(host.menuItem("Paste") { [weak w] in w?.vimPaste() })
+            vm.addItem(.separator())
+            vm.addItem(host.menuItem("Copy File Path") { [self] in
+                host.copy(currentPath, "note path: \(currentPath)")
+            })
+            vm.addItem(host.menuItem("Open in Default App") { [self] in
+                NSWorkspace.shared.open(URL(fileURLWithPath: currentPath))
+            })
+            vm.addItem(host.menuItem("Reveal in Finder") { [self] in
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentPath)])
+            })
+            vm.addItem(host.menuItem("Open file at path…") { [weak w] in w?.onOpenPathPrompt?() })
+            w.vimMenu = vm
+        }
+
+        // a pasted / dropped image → the note's assets/ folder; the relative
+        // path the Markdown link uses (nil = not saved)
+        private func saveImage(_ img: NSImage) -> String? {
+            let dir = noteDir(currentPath) + "/assets"
+            try? FileManager.default.createDirectory(atPath: dir,
+                                                     withIntermediateDirectories: true)
+            let name = "img-\(Int(Date().timeIntervalSince1970)).png"
+            guard let tiff = img.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let data = rep.representation(using: .png, properties: [:]) else { return nil }
+            do {
+                try data.write(to: URL(fileURLWithPath: dir + "/" + name))
+                host.log("note '\(cmd.name)': saved pasted image assets/\(name)")
+                return "assets/" + name
+            } catch {
+                host.log("note '\(cmd.name)': image save failed: \(error)")
+                return nil
+            }
+        }
+
+        // switching tabs: save the current note, load the new one. A tab whose
+        // note was deleted on disk becomes default.md instead (never recreate)
+        func loadTab(_ index: Int) {
+            guard index < paths.count else { return }
+            let outgoing = currentPath
+            // save the outgoing note BEFORE the editor is swapped to the new
+            // tab — after setEditorMarkdown, currentEditorText would already
+            // hold the NEW note's content and overwrite (wipe) the outgoing
+            // file. Never resurrect a deleted file: a missing outgoing is
+            // skipped (its text was already parked by the watcher/commit).
+            // Vim mode: the editor owns the file — flush it, never write the
+            // (hidden, stale) text view over it.
+            if cmd.vimMode {
+                w.vimFlush()
+            } else if FileManager.default.fileExists(atPath: outgoing), !noteIsPreview(outgoing) {
+                host.saveNote(w.currentEditorText, to: outgoing, cmd: cmd)
+            }
+            var target = paths[index]
+            if !FileManager.default.fileExists(atPath: target) {
+                let fallback = ensureDefaultNote(in: noteDir(target))
+                host.log("note '\(cmd.name)': \(target) deleted — tab now default.md")
+                paths[index] = fallback
+                titles[index] = URL(fileURLWithPath: fallback).lastPathComponent
+                w.tabTitles = titles
+                host.removeNotePathFromConfig(target, section: cmd.name)
+                host.addNotePathToConfig(fallback, section: cmd.name)
+                target = fallback
+            }
+            currentPath = target
+            w.imageBaseDir = noteDir(currentPath)
+            if cmd.vimMode {
+                // vim pane follows the tab; previews fall back to the native
+                // read-only view
+                let preview = noteIsPreview(currentPath)
+                if preview { w.setEditorFilePreview(currentPath) } else { w.vimOpen(currentPath) }
+                w.setVimPaneActive(!preview)
+                lastSynced = ""
+            } else if noteIsPreview(currentPath) {
+                // PDF / image: read-only preview, never editable text
+                w.setEditorFilePreview(currentPath)
+                lastSynced = ""
+            } else {
+                w.editorReadOnly = false
+                let loaded = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+                w.setEditorMarkdown(loaded, baseDir: noteDir(currentPath))
+                lastSynced = loaded
+            }
+            lastMtime = mtime(of: currentPath)
+            w.tabFooterText = ""
+            w.copyPathButtonLabel = ""          // path lives on the right-click
+            w.onChromeHeaderClick = { [self] in
+                host.copy(currentPath, "note path: \(currentPath)")
+            }
+        }
+
+        // tab "✕": close the note at `index`. It is dropped from the tab list
+        // and from commands.toml so it never shows up as a note again — the
+        // file itself stays on disk untouched. Closing the last note opens a
+        // fresh default.md scratch pad next to it.
+        func closeNote(_ index: Int) {
+            guard paths.indices.contains(index) else { return }
+            let closing = paths[index]
+            let wasCurrent = index == w.selectedTab
+            // only save when closing the ACTIVE tab — otherwise the editor
+            // holds a different note's text and must not touch this file
+            // (preview files like PDFs are never written back)
+            if cmd.vimMode {
+                w.vimFlush()
+            } else if wasCurrent, FileManager.default.fileExists(atPath: closing),
+               !noteIsPreview(closing) {
+                host.saveNote(w.currentEditorText, to: closing, cmd: cmd)
+            }
+            host.log("note '\(cmd.name)': closed \(closing)")
+            DismissedNotes.add(closing)
+            host.removeNotePathFromConfig(closing, section: cmd.name)
+            paths.remove(at: index)
+            titles.remove(at: index)
+            if paths.isEmpty {
+                let fallback = ensureDefaultNote(in: noteDir(closing))
+                paths = [fallback]
+                titles = [URL(fileURLWithPath: fallback).lastPathComponent]
+                host.addNotePathToConfig(fallback, section: cmd.name)
+            }
+            w.tabTitles = titles
+            if wasCurrent {
+                // switch to the tab that slid into this slot (or the last one)
+                let next = min(index, paths.count - 1)
+                if w.selectedTab == next {
+                    loadTab(next)          // same slot value — reload manually
+                } else {
+                    w.selectedTab = next   // fires onTabChange -> loadTab
+                }
+            } else if index < w.selectedTab {
+                // the closed tab was before the selection — it slid down one
+                w.selectedTab -= 1         // fires onTabChange (same note)
+            }
+        }
+
+        // the kitchen-sink menu of the header icon
+        private func showIconMenu() {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            // — toggles (checkmark shows state) —
+            func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
+                menu.addItem(host.menuItem(title, state: state, action))
+            }
+
+            if cmd.terminal {
+                toggleItem("Toggle Terminal", w.terminalShown) { [w] in
+                    w.toggleTerminalDrawer()
+                }
+            }
+            toggleItem("Toggle File Browser", w.fileBrowserShown) { [w] in
+                w.toggleFileBrowser()
+            }
+            if cmd.voice {
+                let micShown = w.meterEnabled
+                toggleItem(micShown ? "Mute Microphone" : "Enable Microphone", micShown) { [w] in
+                    let shown = !w.meterEnabled
+                    w.meterEnabled = shown
+                }
+            }
+            // (no jira items: this menu is the notes view's own — Jira Config
+            // lives on the jira view's menu, Enable Jira in the menu bar)
+            // Vim mode toggle — reads the LIVE spec (cmd is this window's
+            // launch snapshot)
+            if cmd.kind == .note {
+                let vimOn = host.noteCommandIndex.map { host.commands[$0].vimMode } ?? cmd.vimMode
+                toggleItem("Vim Mode", vimOn) { [host] in
+                    host.toggleVimModeForNotes()
+                }
+            }
+            menu.addItem(.separator())
+            // Font ▸ (editor / terminal family by type, size, install)
+            let fontMenu = NSMenu(title: "Font")
+            host.buildFontMenu(into: fontMenu)
+            let fontItem = NSMenuItem(title: "Font", action: nil, keyEquivalent: "")
+            fontItem.submenu = fontMenu
+            menu.addItem(fontItem)
+            // Notes Settings ▸ (vim binary, start drawer, voice, sticky, …)
+            let notesMenu = NSMenu(title: "Notes Settings")
+            host.buildNotesSettingsMenu(into: notesMenu)
+            let notesItem = NSMenuItem(title: "Notes Settings", action: nil, keyEquivalent: "")
+            notesItem.submenu = notesMenu
+            menu.addItem(notesItem)
+            menu.addItem(.separator())
+
+            host.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
+            menu.addItem(.separator())
+            menu.addItem(host.openConfigMenuItem { [w] in w.onOpenExternalPath?($0) })
+            menu.addItem(host.shortcutsMenuItem(for: w, view: "notes"))
+
+            w.showHeaderMenu(menu)
+        }
+
+        // "+" pill: choose to open an EXISTING file as a tab (open panel) or
+        // create a NEW note in the default dir (next to the first note). Both
+        // are presented as SHEETs on the note window so they always appear in
+        // front.
+        private func addTab() {
+            let panel = w.nativeWindow
+            panel.makeKeyAndOrderFront(nil)
+            let chooser = NSAlert()
+            chooser.messageText = "Add a note"
+            chooser.informativeText = "Open an existing file, or create a new note:"
+            chooser.addButton(withTitle: "Open Existing…")
+            chooser.addButton(withTitle: "New Note")
+            chooser.addButton(withTitle: "Cancel")
+            chooser.beginSheetModal(for: panel) { [self] response in
+                switch response {
+                case .alertFirstButtonReturn:
+                    // "Open Existing…": no Finder picker — the integrated file
+                    // browser below is the picker. Ask for a path; strip any
+                    // extension the user typed so a mistaken ".txt" still finds
+                    // the ".md" note ("~/notes/todo.txt" -> "~/notes/todo.md").
+                    // Fall back to the exact path when the ".md" one is absent.
+                    presentPathSheet(on: panel,
+                                     title: "Open note",
+                                     message: "Path to open as a note:",
+                                     okTitle: "Open") { [self] value in
+                        guard let value else { return }
+                        let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !raw.isEmpty else { return }
+                        let expanded = (raw as NSString).expandingTildeInPath
+                        let mdPath = (expanded as NSString).deletingPathExtension + ".md"
+                        let chosen = FileManager.default.fileExists(atPath: mdPath)
+                            ? mdPath : expanded
+                        let p = (chosen as NSString).standardizingPath
+                        if FileManager.default.fileExists(atPath: p) {
+                            w.onOpenExternalPath?(p)
+                        } else {
+                            host.log("note '\(cmd.name)': no such path \(p)")
+                        }
+                    }
+                case .alertSecondButtonReturn:
+                    // "New Note": prompt for a name, create in the default dir
+                    presentPathSheet(on: panel,
+                                     title: "New note",
+                                     message: "Name for the new note:",
+                                     okTitle: "Create") { [self] value in
+                        guard let value else { return }
+                        var name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !name.isEmpty else {
+                            host.log("note '\(cmd.name)': empty name, not creating")
+                            return
+                        }
+                        if !name.hasSuffix(".md") { name += ".md" }
+                        let newPath = noteDir(paths[0]) + "/" + name
+                        // already open (in memory)? just switch to that tab — never
+                        // duplicate a note that already exists
+                        if let idx = paths.firstIndex(of: newPath) {
+                            w.selectedTab = idx
+                            return
+                        }
+                        if !FileManager.default.fileExists(atPath: newPath) {
+                            FileManager.default.createFile(atPath: newPath, contents: nil)
+                        }
+                        appendTab(newPath, logged: "created")
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
+        // a note added as the last tab and shown: listed in commands.toml, and
+        // an explicit (re)open beats an earlier tab ✕
+        private func appendTab(_ p: String, logged verb: String) {
+            paths.append(p)
+            titles.append(URL(fileURLWithPath: p).lastPathComponent)
+            w.tabTitles = titles
+            w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
+            DismissedNotes.remove(p)
+            host.addNotePathToConfig(p, section: cmd.name)
+            host.log("note '\(cmd.name)': \(verb) \(p)")
+        }
+
+        // Finder "Open in Notes" service: open an arbitrary file as a tab and
+        // switch to it (the file already exists on disk — never create it)
+        private func openExternal(_ path: String) {
+            let p = (path as NSString).standardizingPath
+            if let idx = paths.firstIndex(of: p) {
+                w.selectedTab = idx
+                return
+            }
+            guard FileManager.default.fileExists(atPath: p) else {
+                host.log("note '\(cmd.name)': cannot open \(p) — missing")
+                return
+            }
+            appendTab(p, logged: "opened")
+        }
+
+        // editor context menu -> "Open file at path…": prompt for an exact
+        // path and open it as a tab
+        private func promptOpenPath() {
+            presentPathSheet(on: w.nativeWindow,
+                             title: "Open file at path",
+                             message: "Absolute path (or ~/…) to open as a note:",
+                             okTitle: "Open") { [self] value in
+                guard let value else { return }
+                let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty else { return }
+                let p = ((raw as NSString).expandingTildeInPath as NSString).standardizingPath
+                if FileManager.default.fileExists(atPath: p) {
+                    w.onOpenExternalPath?(p)
+                } else {
+                    host.log("note '\(cmd.name)': no such path \(p)")
+                }
+            }
+        }
+
+        // save current text — but NEVER resurrect a deleted note: if the file
+        // vanished, park the text in a fresh default.md next to it and swap
+        // the tab (Cmd+S / close / tab-change all go through here)
+        func commitSave(_ text: String) {
+            // previews (PDF/image) are read-only — never write text back
+            guard !noteIsPreview(currentPath) else { return }
+            // vim mode: the editor owns the file; `text` is the hidden text
+            // view's stale copy — flush the editor instead of writing it
+            if cmd.vimMode {
+                w.vimFlush()
+                lastMtime = mtime(of: currentPath)
+                w.tabFooterText = ""
+                return
+            }
+            if FileManager.default.fileExists(atPath: currentPath) {
+                host.saveNote(text, to: currentPath, cmd: cmd)
+                lastSynced = text
+                lastMtime = mtime(of: currentPath)
+                w.tabFooterText = ""
+                return
+            }
+            let deadPath = currentPath
+            let fallback = ensureDefaultNote(in: noteDir(deadPath))
+            host.log("note '\(cmd.name)': \(deadPath) deleted — text parked in \(fallback)")
+            host.saveNote(text, to: fallback, cmd: cmd)
+            if let idx = paths.firstIndex(of: deadPath) {
+                paths[idx] = fallback
+                titles[idx] = URL(fileURLWithPath: fallback).lastPathComponent
+            } else {
+                paths.append(fallback)
+                titles.append(URL(fileURLWithPath: fallback).lastPathComponent)
+            }
+            w.tabTitles = titles
+            host.removeNotePathFromConfig(deadPath, section: cmd.name)
+            host.addNotePathToConfig(fallback, section: cmd.name)
+            currentPath = fallback
+            lastSynced = text
+            lastMtime = mtime(of: fallback)
+            w.tabFooterText = ""
+        }
+
+        // the native editor's normal save — dictation inserted mid-note saves
+        // the same way
+        func saveEditorText() {
+            commitSave(w.currentEditorText)
+        }
+
+        // One watcher tick (noteWatchInterval, while shown): EVERY tab's note
+        // is checked for being DELETED, the configured directories for new
+        // notes, and the active note for external writes — reloaded unless
+        // there are unsaved edits. A deleted note is never resurrected: its tab
+        // becomes default.md in the same directory, and the active note's
+        // on-screen text is parked into that default.md so nothing is lost.
+        private func watchTick() {
+            var dirty = false
+            var i = 0
+            while i < paths.count {
+                let p = paths[i]
+                if FileManager.default.fileExists(atPath: p) { i += 1; continue }
+                // note deleted on disk
+                let fallback = ensureDefaultNote(in: noteDir(p))
+                if p == currentPath {
+                    // vim mode: the live text is the editor's buffer
+                    let vimText = cmd.vimMode && !noteIsPreview(p)
+                        ? w.vimEval("join(getline(1, '$'), \"\\n\")") : nil
+                    let text = noteIsPreview(p) ? "" : (vimText ?? w.currentEditorText)
+                    host.log("note '\(cmd.name)': \(p) deleted on disk — text parked in \(fallback)")
+                    host.saveNote(text, to: fallback, cmd: cmd)
+                    currentPath = fallback
+                    lastSynced = text
+                    lastMtime = mtime(of: fallback)
+                    w.tabFooterText = ""
+                    w.setEditorMarkdown(text, baseDir: noteDir(fallback))
+                    w.imageBaseDir = noteDir(fallback)
+                    if cmd.vimMode {
+                        // drop the dead buffer (never rewrite the deleted
+                        // file) and edit the parked copy
+                        w.vimCommand("silent! bwipeout! " + p.replacingOccurrences(of: " ", with: "\\ "))
+                        w.vimOpen(fallback)
+                        w.setVimPaneActive(true)
+                    }
+                } else {
+                    host.log("note '\(cmd.name)': \(p) deleted on disk — tab now default.md")
+                }
+                host.removeNotePathFromConfig(p, section: cmd.name)
+                if let existing = paths.firstIndex(of: fallback), existing != i {
+                    // default.md already a tab — drop the dead entry instead
+                    paths.remove(at: i)
+                    titles.remove(at: i)
+                } else {
+                    paths[i] = fallback
+                    titles[i] = URL(fileURLWithPath: fallback).lastPathComponent
+                    host.addNotePathToConfig(fallback, section: cmd.name)
+                    i += 1
+                }
+                dirty = true
+            }
+            // NEW notes in a configured directory show up as tabs on their
+            // own — no config edit needed (directory entries cover them).
+            // Dismissed notes (✕) are never re-added by the sync.
+            for p in expandPaths(cmd.paths, extensions: ["md"])
+            where FileManager.default.fileExists(atPath: p) && !paths.contains(p)
+                && !DismissedNotes.contains(p) {
+                paths.append(p)
+                titles.append(URL(fileURLWithPath: p).lastPathComponent)
+                host.log("note '\(cmd.name)': new note detected — added tab \(p)")
+                dirty = true
+            }
+            if dirty {
+                w.tabTitles = titles
+                // keep the strip highlight on the active note
+                if let active = paths.firstIndex(of: currentPath), active != w.selectedTab {
+                    w.selectedTab = active
+                }
+            }
+            // active-note external-write reload (skipped for read-only previews)
+            if cmd.vimMode, let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
+                // vim reloads external writes itself (autoread + checktime);
+                // an unmodified buffer reloads silently
+                if let last = lastMtime, mt != last {
+                    w.vimCommand("silent! checktime")
+                    w.tabFooterText = ""
+                }
+                lastMtime = mt
+            } else if let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
+                if let last = lastMtime, mt != last {
+                    if w.currentEditorText == lastSynced {
+                        let newText = (try? String(contentsOfFile: currentPath, encoding: .utf8)) ?? ""
+                        if newText != lastSynced {
+                            w.setEditorMarkdown(newText, baseDir: noteDir(currentPath))
+                            lastSynced = newText
+                            w.tabFooterText = ""
+                            host.log("note '\(cmd.name)': reloaded \(currentPath) after external write")
+                        }
+                    } else {
+                        host.log("note '\(cmd.name)': external change to \(currentPath) ignored (unsaved edits)")
+                    }
+                }
+                lastMtime = mt
+            }
+        }
+
+        // voice notes (commands.toml `voice = true`): the window's bottom bar
+        // becomes a record control — big record/stop button, pause/resume and
+        // live level bars; stopping transcribes with Apple's speech
+        // recognizer and inserts the dictation at the cursor. The header
+        // keeps its copy-path / copy-config buttons (notes + voice share
+        // this window).
+        private func installVoice() {
+            let w = self.w, cmd = self.cmd, host = self.host
+            host.log("voice '\(cmd.name)': voice controls enabled (\(cmd.voiceLive ? "live" : "insert on stop"))")
+            let voice = VoiceRecorder()
+            // record bar starts OFF (meterEnabled stays false) — the user
+            // toggles it on via the header mic button when they want it.
+            // Dictation lands AT THE CURSOR (vim: after the character under
+            // it in Normal mode). One region per session = finalized batches
+            // + the live draft, rewritten in place:
+            //   voice-live = true  (default) the words appear as you speak
+            //   voice-live = false everything is held (draft in the footer)
+            //                      and inserted at the cursor on stop
+            // vim: the region is tracked by extmarks (vimVoiceBegin/Update),
+            // so typing elsewhere never shifts it; native editor: a range.
+            let live = cmd.voiceLive
+            var committedStr = ""     // finalized batches this session
+            var draft = ""            // live partial hypothesis (transient)
+            var sessionActive = false
+            var vimAnchored = false
+            var anchor: NSRange?      // native: region start + current length
+            var pre = "", post = ""   // native: spaces around the region
+            var liveWrite: Timer?
+            var pendingDraw: DispatchWorkItem?
+            var lastDraw = Date.distantPast
+            let dbgPath = NSString(string: "~/.cache/ws-voice-debug.log")
+                .expandingTildeInPath
+            func dbg(_ s: String) {
+                let line = "\(Date()) \(s)\n"
+                if let h = FileHandle(forWritingAtPath: dbgPath) {
+                    h.seekToEndOfFile()
+                    h.write(line.data(using: .utf8)!)
+                    h.closeFile()
+                } else {
+                    FileManager.default.createFile(atPath: dbgPath,
+                                                   contents: line.data(using: .utf8))
+                }
+            }
+            func regionText() -> String {
+                [committedStr, draft].filter { !$0.isEmpty }.joined(separator: " ")
+            }
+            func beginRegion() {
+                committedStr = ""
+                draft = ""
+                sessionActive = true
+                if cmd.vimMode {
+                    vimAnchored = w.vimVoiceBegin()
+                    dbg("record start vim anchored=\(vimAnchored) live=\(live)")
+                    return
+                }
+                // after the selection (never replaces selected text)
+                let sel = w.editorSelection
+                let text = w.editorText as NSString
+                let loc = min(sel.location + sel.length, text.length)
+                func isText(_ i: Int) -> Bool {
+                    guard i >= 0, i < text.length else { return false }
+                    return !(Character(UnicodeScalar(text.character(at: i)) ?? " ").isWhitespace)
+                }
+                pre = isText(loc - 1) ? " " : ""
+                post = isText(loc) ? " " : ""
+                anchor = NSRange(location: loc, length: 0)
+                dbg("record start at \(loc) of \(text.length) live=\(live)")
+            }
+            // write the region's current text (committed + draft) in place
+            func drawRegion() {
+                pendingDraw?.cancel()
+                pendingDraw = nil
+                lastDraw = Date()
+                let body = regionText()
+                if cmd.vimMode {
+                    if vimAnchored && !w.vimVoiceUpdate(body) {
+                        vimAnchored = false
+                        dbg("vim region lost (buffer unloaded?) - falling back to append")
+                    }
+                    return
+                }
+                guard var a = anchor else { return }
+                let full = body.isEmpty ? "" : pre + body + post
+                a.length = w.replaceRange(a, with: full,
+                                          caretBack: body.isEmpty ? 0 : (post as NSString).length)
+                anchor = a
+            }
+            // partials arrive several times a second: at most one editor
+            // update per 0.2s (each vim update is an RPC round trip)
+            func scheduleDraw() {
+                guard pendingDraw == nil else { return }
+                let item = DispatchWorkItem { drawRegion() }
+                pendingDraw = item
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + max(0, 0.2 - Date().timeIntervalSince(lastDraw)), execute: item)
+            }
+            // no RPC (plain vim) / region lost: the old path — append the
+            // text at the end of the note
+            func vimAppendFallback(_ text: String) {
+                guard !text.isEmpty else { return }
+                if !w.vimAppend("\n" + text, to: self.currentPath) {
+                    let old = (try? String(contentsOfFile: self.currentPath, encoding: .utf8)) ?? ""
+                    var new = old
+                    if !new.isEmpty && !new.hasSuffix("\n") { new += "\n" }
+                    new += "\n" + text + "\n"
+                    try? new.write(toFile: self.currentPath, atomically: true, encoding: .utf8)
+                    w.vimCommand("silent! checktime")
+                }
+            }
+            func save() {
+                if cmd.vimMode { w.vimFlush() } else { self.saveEditorText() }
+            }
+            // the session is over (final batch, stop timeout or error): the
+            // draft counts as said, the region is written once more, saved
+            func finishSession() {
+                guard sessionActive else { return }
+                sessionActive = false
+                liveWrite?.invalidate()
+                liveWrite = nil
+                committedStr = regionText()
+                draft = ""
+                if cmd.vimMode && !vimAnchored {
+                    vimAppendFallback(committedStr)
+                } else {
+                    drawRegion()
+                }
+                if cmd.vimMode { w.vimVoiceEnd() } else { save() }
+                anchor = nil
+                dbg("session done +\(committedStr.count) chars")
+                if committedStr.isEmpty { host.log("voice '\(cmd.name)': no speech detected") }
+                committedStr = ""
+                w.tabFooterText = ""
+            }
+            w.onMeterRecord = {
+                switch voice.state {
+                case .idle:
+                    beginRegion()
+                    w.tabFooterText = live ? "🎙 dictating at the cursor" : "🎙 listening — inserted at the cursor on stop"
+                    if !cmd.vimMode && live {
+                        liveWrite = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+                            if !regionText().isEmpty { self.saveEditorText() }
+                        }
+                    }
+                    voice.start()
+                    // start() failing (permissions) reports via onError
+                    if voice.state == .idle { finishSession() }
+                case .recording, .paused: voice.stop()
+                case .transcribing: break
+                }
+            }
+            w.onMeterPause = {
+                if voice.state == .recording {
+                    voice.pause()
+                } else if voice.state == .paused {
+                    voice.resume()
+                }
+            }
+            voice.onStateChange = { [weak w] state in
+                guard let w else { return }
+                w.recordingState = voice.state.rawValue
+                w.recordingElapsed = voice.elapsed
+                // the stop timeout (no final batch) ends here too
+                if state == .idle { finishSession() }
+            }
+            voice.onLevel = { [weak w] level in
+                guard let w else { return }
+                w.recordingLevel = level
+                w.recordingElapsed = voice.elapsed
+            }
+            voice.onPartial = { [weak w] text in
+                guard let w, !text.isEmpty, sessionActive else { return }
+                draft = text
+                if live && (!cmd.vimMode || vimAnchored) {
+                    scheduleDraw()
+                } else {
+                    w.tabFooterText = "🎙 " + String(regionText().suffix(80))
+                }
+            }
+            // finalized batch: it joins the committed text of the region
+            voice.onBatch = { text in
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && sessionActive {
+                    committedStr += (committedStr.isEmpty ? "" : " ") + trimmed
+                    draft = ""
+                    dbg("batch +\(trimmed.count) committed=\(committedStr.count)")
+                    if live {
+                        if cmd.vimMode && !vimAnchored {
+                            vimAppendFallback(trimmed)
+                            committedStr = ""
+                        } else {
+                            drawRegion()
+                            save()
+                        }
+                    }
+                } else if !sessionActive {
+                    dbg("batch after the session ended dropped (+\(trimmed.count))")
+                }
+                if voice.state == .transcribing {
+                    finishSession()
+                    voice.resetSession()
+                }
+            }
+            voice.onError = { [weak w] err in
+                host.log("voice '\(cmd.name)': \(err)")
+                dbg("error: \(err)")
+                // visible feedback WITHOUT polluting the note: the footer
+                // line shows the problem; the note keeps only dictated text
+                voice.resetSession()
+                w?.tabFooterText = "⚠️ \(err)"
+            }
+            w.onHideVoiceStop = {
+                liveWrite?.invalidate()
+                liveWrite = nil
+                voice.stop()
+            }
+        }
+    }
+}
+
+// MARK: - List window session
+
+extension SwitcherController {
+    // One list window's live state — its tabs (source file + rows), the
+    // table columns, filters, sort and paging — and every hook the window
+    // calls. openListWindow builds it, install() wires it, didShow() runs the
+    // jira follow-ups; the window's hooks hold it (and it holds the window)
+    // until unregisterSubWindow releases them.
+    final class ListSession {
+        // the jira window, or its release view (one tab per release, built
+        // from the [jira] section — see showJiraReleaseView)
+        static func isJira(_ cmd: CommandSpec) -> Bool {
+            cmd.name == "jira" || cmd.name == jiraReleasesWindow
+        }
+        // shared window: ONE Esc = back (clearing a search first); at the
+        // jira list it hides the window
+        static func inSlot(_ cmd: CommandSpec) -> Bool { settings.sharedWindow && isJira(cmd) }
+        // jira: each tab (json file) belongs to a poll job or the live search
+        // in config.json with its OWN columns; [jira] columns is the fallback
+        static func tabColumns(_ cmd: CommandSpec, _ path: String?) -> [ListColumn] {
+            guard cmd.table else { return [] }
+            guard isJira(cmd) else { return cmd.columns }
+            if let path, let own = JiraPoll.owner(ofTab: path), !own.columns.isEmpty {
+                return JiraPoll.labeled(own.columns)
+            }
+            return JiraPoll.labeled(cmd.columns)
+        }
+        // a filter value for an empty cell
+        static let emptyValue = "\u{0}none"
+        // fields whose cells hold "a, b" lists: a row matches any part
+        static let multiValued: Set<String> = ["labels", "release", "releaseLabel", "releaseDate", "components",
+                                               "fixVersions"]
+        // people fields: a cell value (Server: the username; Cloud: the
+        // display name) -> "Full Name (username)" + detail, from the
+        // directory (users of the projects in scope; loaded once)
+        static let personFields: Set<String> = ["assignee", "reporter", "creator"]
+
+        // the app's controller: a process-lifetime singleton
+        unowned let host: SwitcherController
+        let cmd: CommandSpec
+        let w: PopupWindow
+        let isJira: Bool
+        let isReleaseView: Bool
+        // commands.toml section behind this window (the release view wears [jira])
+        let configSection: String
+        let inSlot: Bool
+        let cap: Int
+        let copyKeys: [String]
+        let fieldLabels: [String: String]
+        let restoreWID: String?
+        let restorePID: pid_t?
+
+        var tabs: [(path: String, items: [FieldRow])]
+        var currentTab = 0
+        var columns: [ListColumn]
+        // filter-bar dimensions that exist in the current tab: `filters`
+        // fields that are NOT table columns (e.g. labels) — a column filters
+        // from its own header ▾ instead, so filters live with their columns
+        var activeDims: [String] = []
+        // multi-select filters: field -> picked values (OR within a field,
+        // AND across fields); reset on tab change, kept across reloads
+        var colFilters: [String: Set<String>] = [:]
+        var peopleCache: [String: (title: String, detail: String)]?
+        var visibleOffset = 0
+        var reloadWatcher: Timer?
+        // header-click sort: (field, ascending); restored from table-sort
+        var sortKey: (field: String, ascending: Bool)?
+        // jira favorites (config.json `favorites`): the ☆ of each issue row
+        var favKeys: Set<String>
+        // the searchable multi-select popover open on a header ▾ / bar pill
+        var openPicker: JiraMultiPicker?
+        // the pending save of a column drag (debounced)
+        var resizeSave: DispatchWorkItem?
+        // reload a tab when its source file changes on disk (e.g. the poll
+        // wrote fresh json) so an open window never shows stale rows
+        var tabMtimes: [Date?]
+        // jira: each tab's poll freshness (dot + age) from status.json —
+        // re-read when it changes, and every 30s so the ages stay current
+        var badgeStamp: (status: Date?, at: Date) = (nil, .distantPast)
+        // release view: its tab files are rebuilt from the issue cache
+        // whenever a poll changes it (the watcher's mtime check reloads them)
+        var cacheStamp: Date?
+
+        init(host: SwitcherController, cmd: CommandSpec, window: PopupWindow,
+             tabs: [(path: String, items: [FieldRow])], columns: [ListColumn],
+             restoreWID: String?, restorePID: pid_t?) {
+            self.host = host
+            self.cmd = cmd
+            self.w = window
+            self.tabs = tabs
+            self.columns = columns
+            self.restoreWID = restoreWID
+            self.restorePID = restorePID
+            isJira = ListSession.isJira(cmd)
+            isReleaseView = cmd.name == jiraReleasesWindow
+            configSection = isReleaseView ? "jira" : cmd.name
+            inSlot = ListSession.inSlot(cmd)
+            cap = cmd.maxRows > 0 ? cmd.maxRows : Int.max
+            copyKeys = cmd.copyFields
+            fieldLabels = isJira ? JiraPoll.fieldLabels() : [:]
+            favKeys = isJira ? JiraPoll.favorites() : []
+            tabMtimes = tabs.map { mtime(of: $0.path) }
+            cacheStamp = mtime(of: JiraPoll.issueCachePath)
+        }
+
+        func currentItems() -> [FieldRow] { tabs[currentTab].items }
+
+        func cellValues(_ field: String, _ row: FieldRow) -> [String] {
+            let v = (row.fields[field] ?? "").trimmingCharacters(in: .whitespaces)
+            guard !v.isEmpty else { return [ListSession.emptyValue] }
+            guard ListSession.multiValued.contains(field) else { return [v] }
+            let parts = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return parts.isEmpty ? [ListSession.emptyValue] : parts
+        }
+
+        func label(_ field: String) -> String { fieldLabels[field] ?? field }
+
+        func barDims() -> [String] {
+            let colFields = Set(columns.filter(\.filterable).map(\.field))
+            return cmd.filters.filter { f in
+                !colFields.contains(f)
+                    // Release (label) and Fix versions (name) are one filter
+                    && !(f == "release" && colFields.contains("releaseLabel"))
+                    && !(f == "releaseLabel" && colFields.contains("release"))
+            }
+        }
+
+        func peopleByValue() -> [String: (title: String, detail: String)] {
+            if let c = peopleCache { return c }
+            var people: [String: (title: String, detail: String)] = [:]
+            for u in JiraDirectory.load().users {
+                for k in [u.username, u.name, u.id] where !k.isEmpty && people[k] == nil {
+                    let handle = [u.username, u.email].filter { !$0.isEmpty && $0 != u.name && $0 != k }
+                    people[k] = (k == u.name ? u.name : "\(u.name) (\(k))", handle.joined(separator: " · "))
+                }
+            }
+            peopleCache = people
+            return people
+        }
+
+        // one option per distinct value in the current tab, most common
+        // first; users carry their full name / username from the directory
+        func filterOptions(_ field: String) -> [JiraMultiPicker.Option] {
+            let emptyValue = ListSession.emptyValue
+            var counts: [String: Int] = [:]
+            var order: [String] = []
+            for row in currentItems() {
+                for v in cellValues(field, row) {
+                    if counts[v] == nil { order.append(v) }
+                    counts[v, default: 0] += 1
+                }
+            }
+            let people = ListSession.personFields.contains(field) ? peopleByValue() : [:]
+            let sorted = order.enumerated().sorted { a, b in
+                let ca = counts[a.element] ?? 0, cb = counts[b.element] ?? 0
+                if (a.element == emptyValue) != (b.element == emptyValue) { return b.element == emptyValue }
+                return ca != cb ? ca > cb : a.element.localizedStandardCompare(b.element) == .orderedAscending
+            }.map(\.element)
+            return sorted.map { v in
+                let n = counts[v] ?? 0
+                let count = "\(n) row\(n == 1 ? "" : "s")"
+                if v == emptyValue {
+                    return .init(id: v, title: field == "assignee" ? "(unassigned)" : "(empty)", detail: count)
+                }
+                if let p = people[v] {
+                    return .init(id: v, title: p.title, detail: ([p.detail, count].filter { !$0.isEmpty })
+                                    .joined(separator: " · "))
+                }
+                return .init(id: v, title: v, detail: count)
+            }
+        }
+
+        func filterSummary(_ field: String) -> String {
+            let picked = colFilters[field] ?? []
+            if picked.isEmpty { return "All" }
+            if picked.count == 1, let v = picked.first {
+                if v == ListSession.emptyValue { return "(empty)" }
+                return ListSession.personFields.contains(field) ? peopleByValue()[v]?.title ?? v : v
+            }
+            return "\(picked.count) selected"
+        }
+
+        // the ▾ chips on the header + the bar pills' text / on state
+        func updateFilterIndicators() {
+            w.tableFilterActive = Set(columns.indices.filter { !(colFilters[columns[$0].field] ?? []).isEmpty })
+            w.filterSummaries = activeDims.map(filterSummary)
+            w.filterActive = Set(activeDims.indices.filter { !(colFilters[activeDims[$0]] ?? []).isEmpty })
+        }
+
+        // refresh the bar dimensions for the current tab; dims with no
+        // values in this tab disappear from the bar entirely
+        func applyFilterData() {
+            let items = currentItems()
+            activeDims = barDims().filter { f in items.contains { !($0.fields[f] ?? "").isEmpty } }
+            colFilters = colFilters.filter { f, _ in
+                columns.contains { $0.field == f } || activeDims.contains(f) }
+            w.filterLabels = activeDims.map(label)
+            w.filterValues = activeDims.map { _ in ["All"] }
+            w.filterValueLabels = []
+            w.filterSelections = Array(repeating: 0, count: activeDims.count)
+            updateFilterIndicators()
+            w.growWidthToContent()
+        }
+
+        func syncSortArrow() {
+            w.tableSort = sortKey.flatMap { k in
+                columns.firstIndex(where: { $0.field == k.field }).map { ($0, k.ascending) }
+            }
+        }
+
+        // after a pin / blacklist edit: a tab file the window doesn't have
+        // yet appears by rebuilding the window (the current tab stays)
+        func ensureTab(_ file: String) {
+            guard cmd.name == "jira", !tabs.contains(where: { ($0.path as NSString).lastPathComponent == file }),
+                  tabs.indices.contains(currentTab) else { return }
+            host.pendingJiraTab = (tabs[currentTab].path as NSString).lastPathComponent
+            host.reloadJiraWindow()
+        }
+
+        func setFavorite(_ rows: [FieldRow], on: Bool) {
+            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
+            guard !keys.isEmpty else { return }
+            let before = favKeys
+            if on { favKeys.formUnion(keys) } else { favKeys.subtract(keys) }
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            let s = keys.count == 1 ? keys[0] : "\(keys.count) issues"
+            w.showToast(on ? "Pinned \(s) to favorites" : "Unpinned \(s)", symbol: on ? "star.fill" : "star")
+            // the rows as shown: favorites.json gets them at once even when
+            // the issue cache doesn't hold them (live search results)
+            let json = (try? JSONSerialization.data(withJSONObject: rows.map { $0.fields.filter { !$0.key.hasPrefix("__") } }))
+                .map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+            JiraPoll.run("jira_poll.py", ["--favorite", on ? "add" : "remove"] + keys, stdin: json) {
+                [self] code, _, err in
+                host.log("jira: favorite \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
+                         + (code == 0 ? "" : " " + err))
+                guard code == 0 else {
+                    favKeys = before
+                    w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+                    w.showToast("Favorites not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
+                                symbol: "exclamationmark.triangle")
+                    return
+                }
+                ensureTab(JiraPoll.favoritesFile)
+            }
+        }
+
+        func setBlacklisted(_ rows: [FieldRow], on: Bool) {
+            let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
+            guard !keys.isEmpty else { return }
+            JiraPoll.run("jira_poll.py", ["--blacklist-release", on ? "add" : "remove"] + keys) {
+                [self] code, _, err in
+                host.log("jira: blacklist \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
+                         + (code == 0 ? "" : " " + err))
+                let s = keys.count == 1 ? "release \(rows[0].title)" : "\(keys.count) releases"
+                guard code == 0 else {
+                    w.showToast("Not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
+                                symbol: "exclamationmark.triangle")
+                    return
+                }
+                w.selectedIndices = []
+                w.showToast(on ? "Hid \(s) → \(JiraPoll.blacklistFile)" : "Restored \(s)",
+                            symbol: on ? "eye.slash" : "eye")
+                ensureTab(JiraPoll.blacklistFile)
+            }
+        }
+
+        // combined filter: search (fuzzy) + dropdown selections, then the
+        // table's header sort (numeric-aware; blanks always last)
+        func filteredRows(query: String) -> [FieldRow] {
+            let byQuery = PopupFuzzy.filter(currentItems(), query: query) { $0.searchText }
+            var matched: [FieldRow]
+            let active = colFilters.filter { !$0.value.isEmpty }
+            if active.isEmpty {
+                matched = byQuery
+            } else {
+                matched = byQuery.filter { row in
+                    for (f, picked) in active where !cellValues(f, row).contains(where: picked.contains) {
+                        return false
+                    }
+                    return true
+                }
+            }
+            if let k = sortKey {
+                matched = matched.enumerated().sorted { a, b in
+                    let x = a.element.fields[k.field] ?? "", y = b.element.fields[k.field] ?? ""
+                    if x.isEmpty != y.isEmpty { return y.isEmpty }
+                    let c = x.localizedStandardCompare(y)
+                    if c == .orderedSame { return a.offset < b.offset }
+                    return k.ascending ? c == .orderedAscending : c == .orderedDescending
+                }.map { $0.element }
+            }
+            let result = Array(matched.prefix(cap))
+            // paging: page-size > 0 keeps huge lists snappy while browsing; a
+            // "load more" row at the bottom reveals the next page on Enter or
+            // click. Searching is cheap (capped search text) and rendering a
+            // narrowed result is fine, so an ACTIVE QUERY shows every match —
+            // an item beyond the current page still renders when found.
+            var paged = result
+            if cmd.pageSize > 0, result.count > cmd.pageSize, query.isEmpty {
+                paged = Array(result.prefix(visibleOffset + cmd.pageSize))
+                if paged.count < result.count {
+                    let remaining = result.count - paged.count
+                    paged.append(FieldRow(title: "load \(remaining) more…",
+                                          content: nil, trailing: nil, detail: nil,
+                                          body: nil, searchText: "",
+                                          fields: ["__loadmore": "1"]))
+                }
+            }
+            // live header count: current items in the list (updates with search)
+            w.itemCount = paged.count == 1 ? "1 item" : "\(paged.count) items"
+            // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
+            if isJira {
+                paged = paged.map { r in
+                    guard !r.loadMore, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty else { return r }
+                    var r = r
+                    r.starred = favKeys.contains(k)
+                    return r
+                }
+            }
+            return paged
+        }
+
+        // header sort (title click, or the filter popover's Sort buttons);
+        // persisted as table-sort so the window reopens the same way
+        func setSort(_ f: String, ascending: Bool) {
+            sortKey = (f, ascending)
+            syncSortArrow()
+            visibleOffset = 0
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            let v = "\(f):\(ascending ? "asc" : "desc")"
+            guard !isReleaseView else { return }
+            if let ci = host.commands.firstIndex(where: { $0.name == cmd.name }) {
+                host.commands[ci].tableSort = v
+            }
+            saveConfigValue(section: cmd.name, key: "table-sort", value: v)
+            host.log("list '\(cmd.name)': sort -> \(v)")
+        }
+
+        // the searchable multi-select popover for one field, anchored at a
+        // header ▾ or a filter-bar pill
+        func showFilterPicker(_ field: String, anchor: NSView, rect: NSRect) {
+            openPicker?.closePopover()
+            let opts = filterOptions(field)
+            let p = JiraMultiPicker(noun: label(field).lowercased())
+            p.applyColors(w.config.colors)
+            p.options = opts
+            p.set((colFilters[field] ?? []).filter { v in opts.contains { $0.id == v } }.sorted())
+            p.anchor = (anchor, rect)
+            if let col = columns.first(where: { $0.field == field }), col.sortable {
+                p.extraButtons = [
+                    ("Sort ↑", { [self, weak p] in setSort(field, ascending: true); p?.closePopover() }),
+                    ("Sort ↓", { [self, weak p] in setSort(field, ascending: false); p?.closePopover() }),
+                ]
+            }
+            p.onChange = { [self, weak p] in
+                guard let p else { return }
+                colFilters[field] = p.selected.isEmpty ? nil : Set(p.selected)
+                visibleOffset = 0
+                updateFilterIndicators()
+                w.setRows(filteredRows(query: w.currentQuery))
+            }
+            p.onClose = { [self] in openPicker = nil }
+            openPicker = p
+            p.togglePopover(nil)
+        }
+
+        // the copy-path / copy-config actions live in the top-left icon menu
+        // (below), not as header buttons — keep the header bar uncluttered
+        func refreshPathLabel() {
+            w.copyPathButtonLabel = ""
+        }
+
+        func refreshBadges(force: Bool = false) {
+            guard cmd.name == "jira" else { return }
+            let st = mtime(of: JiraPoll.statusPath)
+            guard force || st != badgeStamp.status || Date().timeIntervalSince(badgeStamp.at) > 30 else { return }
+            badgeStamp = (st, Date())
+            let status = JiraPoll.status, config = JiraPoll.readJSON(JiraPoll.configPath)
+            w.tabBadges = tabs.map { JiraPoll.tabBadge(path: $0.path, status: status, config: config) }
+        }
+
+        // wire every window hook (before the first show)
+        func install() {
+            // empty `title` in commands.toml = no header label (icon still shows)
+            w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
+            w.headerIcon = jiraAppIcon
+            if let ts = cmd.tableSort, !columns.isEmpty {
+                let parts = ts.split(separator: ":").map { $0.trimmingCharacters(in: .whitespaces) }
+                if let f = parts.first, columns.contains(where: { $0.field == f }) {
+                    sortKey = (f, !(parts.count > 1 && parts[1].lowercased().hasPrefix("desc")))
+                }
+            }
+            syncSortArrow()
+            // row copy: ticked rows (or every row) serialized as TSV lines of the
+            // configured copy-fields; the framework owns checkboxes + button +
+            // pasteboard, this closure is the only list-specific part
+            let copyKeys = copyKeys
+            w.onCopyRows = { picked in
+                picked.compactMap { $0 as? FieldRow }
+                    .filter { !$0.loadMore }
+                    .map { row in
+                        copyKeys.map { row.fields[$0] ?? "" }.joined(separator: "\t")
+                    }
+                    .joined(separator: "\n")
+            }
+            w.onToggleStar = { [self] i in
+                guard w.rows.indices.contains(i), let row = w.rows[i] as? FieldRow,
+                      let on = row.starred else { return }
+                setFavorite([row], on: !on)
+            }
+            w.onCommandK = { [self] in showActions() }
+            // Cmd+F (jira): the live-search panel docked to this window
+            if cmd.name == "jira" {
+                w.onCommandF = { [host, weak w] in
+                    guard let w else { return }
+                    JiraSearchPanel.toggle(on: w, controller: host)
+                }
+            }
+            // clicking the drag header copies the active tab's source path
+            w.onChromeHeaderClick = { [self] in
+                guard tabs.indices.contains(currentTab) else { return }
+                host.copy(tabs[currentTab].path, "source path: \(tabs[currentTab].path)")
+            }
+            // header "config" button: copy the commands.toml path (not on jira:
+            // its config lives in the Jira Config window)
+            if isJira { w.copyConfigButtonLabel = "" }
+            w.onChromeConfigClick = { [host] in
+                host.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
+            }
+            // top-left app glyph: window menu (copy paths, open config, jira
+            // poll options, window settings) — same idea as the notes window
+            w.onChromeIconClick = { [self] in showIconMenu() }
+            w.onShowShortcuts = { [self] in
+                host.showShortcuts(on: w, view: cmd.name == "jira" ? "jira" : "")
+            }
+            applyFilterData()
+            w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
+            w.onFilter = { [self] query in
+                visibleOffset = 0
+                return filteredRows(query: query)
+            }
+            w.onFilterChange = { [self] _ in
+                visibleOffset = 0
+                w.setRows(filteredRows(query: w.currentQuery))
+            }
+            w.onTabChange = { [self] index in selectTab(index) }
+            // clicking the ACTIVE tab copies that source's absolute path
+            w.onTabClick = { [self] index in
+                guard index == w.selectedTab, index < tabs.count else { return }
+                host.copy(tabs[index].path, "source path: \(tabs[index].path)")
+            }
+            w.onAccept = { [self] row in
+                if row.loadMore {
+                    visibleOffset += cmd.pageSize
+                    w.setRows(filteredRows(query: w.currentQuery))
+                    host.log("list '\(cmd.name)': load more -> offset \(visibleOffset)")
+                    return
+                }
+                // Enter = the same "more details" window as a double-click
+                guard let row = row as? FieldRow else { return }
+                host.log("list '\(cmd.name)': details for '\(row.title)'")
+                host.openRow(row, cmd: cmd, isJira: isJira)
+            }
+            w.onRowClick = { [self] index in
+                guard index >= 0, index < w.rows.count else { return }
+                if w.rows[index].loadMore {
+                    visibleOffset += cmd.pageSize
+                    w.setRows(filteredRows(query: w.currentQuery))
+                    host.log("list '\(cmd.name)': load more (click) -> offset \(visibleOffset)")
+                }
+            }
+            // double-click a row -> "more details" (no per-row action label)
+            w.onRowDoubleClick = { [self] index in
+                guard index >= 0, index < w.rows.count,
+                      let row = w.rows[index] as? FieldRow, !row.loadMore else { return }
+                host.openRow(row, cmd: cmd, isJira: isJira)
+            }
+            // table header: click = sort (again = flip), divider drag = resize;
+            // both persist to commands.toml so the window reopens the same way
+            w.onTableSort = { [self] i in
+                guard columns.indices.contains(i) else { return }
+                let f = columns[i].field
+                setSort(f, ascending: sortKey?.field == f ? !(sortKey?.ascending ?? true) : true)
+            }
+            // header ▾ / filter-bar pill: the field's searchable multi-select
+            w.onTableFilter = { [self] i, view, rect in
+                guard columns.indices.contains(i) else { return }
+                showFilterPicker(columns[i].field, anchor: view, rect: rect)
+            }
+            w.onFilterOpen = { [self] dim, view, rect in
+                guard activeDims.indices.contains(dim) else { return }
+                showFilterPicker(activeDims[dim], anchor: view, rect: rect)
+            }
+            w.onTableColumnsResized = { [self] pcts, final in columnsResized(pcts, final: final) }
+            // a header title dragged to another slot: same order here, the ▾ /
+            // sort marks follow their fields, saved like a divider drag
+            w.onTableColumnsReordered = { [self] from, to in
+                guard columns.indices.contains(from), columns.indices.contains(to) else { return }
+                columns.insert(columns.remove(at: from), at: to)
+                syncSortArrow()
+                updateFilterIndicators()
+                w.onTableColumnsResized?(columns.map(\.width), true)
+            }
+            w.onEscape = { [self] in
+                guard inSlot else { w.hide(restore: true); return }
+                if !w.currentQuery.isEmpty {
+                    w.clearInput()
+                    visibleOffset = 0
+                    w.setRows(filteredRows(query: ""))
+                    return
+                }
+                host.slot.back()
+            }
+            if cmd.name == "jira" && inSlot {
+                // the Cmd+F panel hides / returns with the list
+                w.onPark = { [w] in JiraSearchPanel.park(from: w) }
+                w.onUnpark = { [w] in JiraSearchPanel.unpark(to: w) }
+            }
+            w.onHide = { [self] restore in
+                reloadWatcher?.invalidate()
+                reloadWatcher = nil
+                if cmd.name == "jira" { JiraSearchPanel.detach(from: w) }
+                host.unregisterSubWindow(w, restore: restore,
+                                         restoreWID: restoreWID, restorePID: restorePID)
+            }
+            refreshBadges(force: true)
+            let watcher = Timer(timeInterval: listWatchInterval, repeats: true) { [weak self] _ in
+                guard let self, self.w.isShown else { return }
+                self.watchTick()
+            }
+            RunLoop.main.add(watcher, forMode: .common)
+            reloadWatcher = watcher
+            w.copyConfigButtonLabel = ""
+            // "fit columns" (the table header's corner cell / right-click): every
+            // column as wide as its content, the window widened to hold them
+            // (saved like a divider drag)
+            if cmd.table && !columns.isEmpty {
+                w.onTableFit = { [weak w] in
+                    guard let w, let pcts = w.fitTableColumns() else { return }
+                    w.onTableColumnsResized?(pcts, true)
+                    w.showToast("Columns fitted to their content", symbol: "arrow.left.and.right")
+                }
+            }
+            refreshPathLabel()
+        }
+
+        // after the first show: the release view's pending tab, and for jira
+        // the live-search hand-off (jiraShowTab) + the Cmd+F panel
+        func didShow() {
+            if isReleaseView, let f = host.pendingReleaseTab {
+                host.pendingReleaseTab = nil
+                if let i = tabs.firstIndex(where: { ($0.path as NSString).lastPathComponent == f }), i != currentTab {
+                    w.selectedTab = i
+                }
+            }
+            guard cmd.name == "jira" else { return }
+            // live search results: reload that tab from disk and select it (a
+            // tab the window doesn't have yet = rebuild the window, then select)
+            host.jiraShowTab = { [weak self] file in self?.showTab(file) }
+            if let f = host.pendingJiraTab {
+                host.pendingJiraTab = nil
+                host.jiraShowTab?(f)
+            }
+            JiraSearchPanel.reattach(to: w)
+        }
+
+        private func showTab(_ file: String) {
+            guard let i = tabs.firstIndex(where: { ($0.path as NSString).lastPathComponent == file }) else {
+                host.pendingJiraTab = file
+                host.reloadJiraWindow()
+                return
+            }
+            tabs[i].items = host.loadListItems(tabs[i].path, cmd: cmd, columns: ListSession.tabColumns(cmd, tabs[i].path))
+            tabMtimes[i] = mtime(of: tabs[i].path)
+            if i != currentTab {
+                w.selectedTab = i
+            } else {
+                applyFilterData()
+                visibleOffset = 0
+                w.setRows(filteredRows(query: w.currentQuery))
+            }
+            w.tabFooterText = ""
+        }
+
+        private func selectTab(_ index: Int) {
+            guard index < tabs.count, index != currentTab else { return }
+            currentTab = index
+            visibleOffset = 0
+            if cmd.table {
+                let cols = ListSession.tabColumns(cmd, tabs[index].path)
+                if cols.map(\.field) != columns.map(\.field) || cols.map(\.width) != columns.map(\.width)
+                    || cols.map(\.title) != columns.map(\.title) {
+                    columns = cols
+                    w.setTableColumns(cols.map { $0.popup })
+                }
+                if let k = sortKey, !columns.contains(where: { $0.field == k.field }) { sortKey = nil }
+                syncSortArrow()
+            }
+            w.clearInput()
+            openPicker?.closePopover()
+            colFilters = [:]
+            applyFilterData()
+            w.setRows(filteredRows(query: ""))
+            w.tabFooterText = ""
+            refreshPathLabel()
+            host.log("list '\(cmd.name)': tab -> \(tabs[index].path)")
+        }
+
+        // persisted on a short debounce after the LAST live drag update (not
+        // only on mouseUp — the header's mouseUp isn't guaranteed to arrive)
+        private func columnsResized(_ pcts: [CGFloat], final: Bool) {
+            for i in columns.indices where i < pcts.count { columns[i].width = pcts[i] }
+            resizeSave?.cancel()
+            let item = DispatchWorkItem { [self] in
+                let spec = ListColumn.serialize(columns, titles: !isJira)
+                // a jira tab owned by a poll job / search saves into THAT job
+                if isJira, tabs.indices.contains(currentTab),
+                   let own = JiraPoll.owner(ofTab: tabs[currentTab].path) {
+                    JiraPoll.run("jira_config.py", ["--set-columns", own.kind, own.name, spec]) { [host] code, _, err in
+                        host.log("jira: \(own.kind) \(own.name) columns -> \(spec) (exit \(code))"
+                                 + (code == 0 ? "" : " " + err))
+                    }
+                    return
+                }
+                if let ci = host.commands.firstIndex(where: { $0.name == cmd.name }) {
+                    host.commands[ci].columns = columns
+                }
+                saveConfigValue(section: cmd.name, key: "columns", value: spec)
+                host.log("list '\(cmd.name)': columns -> \(spec)")
+            }
+            resizeSave = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + (final ? 0.05 : 0.6), execute: item)
+        }
+
+        // Cmd+K: act on the ticked rows (else the highlighted one) — copy,
+        // open in the browser, pin to favorites, hide / restore releases
+        private func showActions() {
+            let rows = w.actionRows.compactMap { $0 as? FieldRow }.filter { !$0.loadMore }
+            guard !rows.isEmpty else { return }
+            let n = rows.count, what = n == 1 ? (rows[0].fields["key"] ?? "1 row") : "\(n) rows"
+            var items: [(title: String, detail: String)] = [
+                ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
+            let site = isJira ? jiraSite : ""
+            let keyed = rows.filter { !($0.fields["key"] ?? "").isEmpty }
+            let issues = keyed.filter { !jiraIsReleaseRow($0) }
+            let releases = keyed.filter { jiraIsReleaseRow($0) }
+            let urls = keyed.compactMap { r in jiraBrowseURL(r, site: site).map { (r, $0) } }
+            let s = urls.count == 1 ? "" : "s"
+            let noun = releases.isEmpty ? "issue" : issues.isEmpty ? "release" : "item"
+            if !site.isEmpty && !urls.isEmpty {
+                items.append(("Copy URL and title", "\(urls.count) \(noun)\(s) · one “URL Title” line each"))
+                items.append(("Open all in browser", "opens \(urls.count) \(noun)\(s) · copies KEY + URL"))
+            }
+            let tabFile = tabs.indices.contains(currentTab)
+                ? (tabs[currentTab].path as NSString).lastPathComponent : ""
+            if isJira && !issues.isEmpty {
+                let pinned = issues.allSatisfy { favKeys.contains($0.fields["key"] ?? "") }
+                let k = issues.count == 1 ? issues[0].fields["key"] ?? "" : "\(issues.count) issues"
+                items.append(pinned
+                    ? ("Remove from favorites", "unpin \(k) · \(JiraPoll.favoritesFile)")
+                    : ("Add to favorites", "pin \(k) → \(JiraPoll.favoritesFile) · re-polled every run"))
+            }
+            if isJira && releases.count == 1 {
+                items.append(("Show release issues", "every issue in \(releases[0].title) · one tab per release"))
+            }
+            if isJira && !releases.isEmpty {
+                let k = releases.count == 1 ? releases[0].title : "\(releases.count) releases"
+                items.append(tabFile == JiraPoll.blacklistFile
+                    ? ("Restore release", "show \(k) in the releases tab again")
+                    : ("Blacklist release", "hide \(k) → \(JiraPoll.blacklistFile)"))
+            }
+            w.showActionPicker(title: "Actions for \(what)", items: items) { [self] i in
+                guard items.indices.contains(i) else { return }
+                switch items[i].title {
+                case "Copy to clipboard":
+                    let text = w.onCopyRows?(rows) ?? ""
+                    host.copy(text, "\(n) row(s)")
+                    w.showToast("Copied \(what)", symbol: "doc.on.clipboard")
+                case "Copy URL and title":
+                    let lines = urls.map { r, u -> String in
+                        let t = (r.fields["title"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        return u.absoluteString + (t.isEmpty ? "" : " \(t)")
+                    }
+                    host.copy(lines.joined(separator: "\n"), "\(urls.count) jira URL(s) + titles")
+                    w.showToast("Copied \(urls.count) URL\(s) + title\(s)", symbol: "link")
+                case "Open all in browser":
+                    let lines = urls.map { "\($0.0.fields["key"] ?? "")\t\($0.1.absoluteString)" }
+                    for (_, u) in urls { NSWorkspace.shared.open(u) }
+                    host.copy(lines.joined(separator: "\n"), "\(urls.count) jira key(s) + URLs")
+                    w.showToast("Opened \(urls.count) · copied keys + URLs", symbol: "safari")
+                    host.log("list '\(cmd.name)': opened \(urls.map { $0.1.absoluteString }.joined(separator: " "))")
+                case "Add to favorites":
+                    setFavorite(issues, on: true)
+                case "Remove from favorites":
+                    setFavorite(issues, on: false)
+                case "Blacklist release":
+                    setBlacklisted(releases, on: true)
+                case "Restore release":
+                    setBlacklisted(releases, on: false)
+                case "Show release issues":
+                    host.showJiraReleaseView(releases[0])
+                default:
+                    break
+                }
+            }
+        }
+
+        // the kitchen-sink menu of the header icon
+        private func showIconMenu() {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            if cmd.name == "jira" {
+                // jira: config, paths, jobs, queries, curls, columns — all
+                // live in the Jira Config window; this menu is window chrome
+                menu.addItem(host.menuItem("Search Jira…  ⌘F") { [host, weak w] in
+                    guard let w else { return }
+                    JiraSearchPanel.toggle(on: w, controller: host)
+                })
+                menu.addItem(host.menuItem("Open Jira Config Window") { [host] in
+                    host.showJiraDashboard()
+                })
+            } else {
+                if tabs.indices.contains(currentTab) {
+                    let src = tabs[currentTab].path
+                    menu.addItem(host.menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [host] in
+                        host.copy(src, "source path: \(src)")
+                    })
+                }
+                menu.addItem(host.menuItem("Copy Config Path") { [host] in
+                    host.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
+                })
+                menu.addItem(.separator())
+                menu.addItem(host.openConfigMenuItem { [host] in host.openNoteFile($0) })
+            }
+            menu.addItem(.separator())
+            host.addWindowSettingsItems(to: menu, window: w, section: configSection)
+            if cmd.name == "jira" {
+                menu.addItem(.separator())
+                menu.addItem(host.menuItem("Disable Jira…") { [host] in
+                    host.disableJiraAsking()
+                })
+            }
+            menu.addItem(.separator())
+            menu.addItem(host.shortcutsMenuItem(for: w, view: cmd.name == "jira" ? "jira" : ""))
+            w.showHeaderMenu(menu)
+        }
+
+        // One watcher tick (listWatchInterval, while shown): jira badges, the
+        // release view's rebuild after a poll, and every tab whose source file
+        // changed on disk reloaded (re-filtered when it is the one on screen)
+        private func watchTick() {
+            refreshBadges()
+            if isReleaseView, mtime(of: JiraPoll.issueCachePath) != cacheStamp {
+                cacheStamp = mtime(of: JiraPoll.issueCachePath)
+                JiraPoll.run("jira_poll.py", ["--release-view"])
+            }
+            var changed: [Int] = []
+            for (i, t) in tabs.enumerated() {
+                let mt = mtime(of: t.path)
+                if mt != tabMtimes[i] {
+                    tabMtimes[i] = mt
+                    changed.append(i)
+                }
+            }
+            guard !changed.isEmpty else { return }
+            for i in changed {
+                tabs[i].items = host.loadListItems(tabs[i].path, cmd: cmd, columns: ListSession.tabColumns(cmd, tabs[i].path))
+                host.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
+            }
+            // pins edited elsewhere (or by the poll) show on the ☆ too
+            if isJira { favKeys = JiraPoll.favorites() }
+            refreshBadges(force: true)
+            w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
+            refreshPathLabel()
+            // only re-filter when the tab on screen is one that changed
+            guard changed.contains(currentTab) else { return }
+            applyFilterData()
+            visibleOffset = 0
+            // keep the scroll position: a background json refresh must not
+            // yank the list back to the top while the user reads mid-list
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            w.tabFooterText = ""
+        }
     }
 }
 

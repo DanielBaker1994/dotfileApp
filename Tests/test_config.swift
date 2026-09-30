@@ -1,267 +1,162 @@
-#!/usr/bin/env swift
-// Minimal assertion helper for standalone Swift tests
-// Usage: swift test_config.swift
+// sources: ConfigText.swift
+// commands.toml as text (ConfigText.swift): the one-line TOML codec, the
+// section scanner, the writer's edits (configSetting), tri, resolveBinary.
+// Usage: bin/run-tests.sh config
 
 import Foundation
 
 var passed = 0
 var failed = 0
 
-func assert(_ condition: Bool, _ message: String, file: String = #file, line: Int = #line) {
+func check(_ condition: Bool, _ message: String, line: Int = #line) {
     if condition {
         passed += 1
     } else {
         failed += 1
-        let file = (file as NSString).lastPathComponent
-        print("  FAIL: \(message) (\(file):\(line))")
+        print("  FAIL: \(message) (test_config.swift:\(line))")
     }
 }
 
-func assertEquals<T: Equatable>(_ actual: T, _ expected: T, _ message: String, file: String = #file, line: Int = #line) {
-    if actual == expected {
-        passed += 1
-    } else {
-        failed += 1
-        let file = (file as NSString).lastPathComponent
-        print("  FAIL: \(message) — expected '\(expected)', got '\(actual)' (\(file):\(line))")
-    }
+func checkEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String, line: Int = #line) {
+    check(actual == expected, "\(message): got \(String(reflecting: actual)), want \(String(reflecting: expected))",
+          line: line)
 }
 
-// MARK: - Config parsing tests
-
-func testParseKeyValue() {
-    print("Config key-value parsing:")
-
-    let line = "vim-mode = true"
-    guard let eq = line.firstIndex(of: "=") else {
-        assert(false, "should find '=' in key-value line")
-        return
-    }
-    let key = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
-    let val = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-    assertEquals(key, "vim-mode", "key parsed correctly")
-    assertEquals(val, "true", "value parsed correctly")
+// configEntry as a comparable pair (nil = not an entry)
+func entry(_ line: String) -> [String]? {
+    configEntry(line).map { [$0.key, $0.value] }
 }
 
-func testTriFunction() {
-    print("Boolean tri-state parsing:")
-
-    func tri(_ s: String?) -> Bool? {
-        switch s?.lowercased() {
-        case "true", "yes", "1", "on": return true
-        case "false", "no", "0", "off": return false
-        default: return nil
-        }
-    }
-
-    assert(tri("true") == true, "'true' → true")
-    assert(tri("yes") == true, "'yes' → true")
-    assert(tri("1") == true, "'1' → true")
-    assert(tri("on") == true, "'on' → true")
-    assert(tri("false") == false, "'false' → false")
-    assert(tri("no") == false, "'no' → false")
-    assert(tri("0") == false, "'0' → false")
-    assert(tri("off") == false, "'off' → false")
-    assert(tri(nil) == nil, "nil → nil")
-    assert(tri("maybe") == nil, "'maybe' → nil")
+// configSetting over text, joined back (what saveConfigValues writes)
+func setting(_ text: String, _ section: String, _ kv: [(String, String?)]) -> String {
+    configSetting(configLines(text), section: section, kv).joined(separator: "\n")
 }
 
-func testFindSection() {
-    print("Section finding in config:")
-
-    let config = """
-    [app]
-    shell = /bin/bash
-    hide-on-focus-loss = false
-
-    [notes]
-    enabled = true
-    vim-mode = true
-    vim-bin = nvim
-    """
-
-    // Find [notes] section
-    var inNotes = false
-    var notesVars: [String: String] = [:]
-    for line in config.split(separator: "\n") {
-        let s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("[") && s.hasSuffix("]") {
-            inNotes = s == "[notes]"
-            continue
-        }
-        guard inNotes, let eq = s.firstIndex(of: "=") else { continue }
-        let k = String(s[..<eq]).trimmingCharacters(in: .whitespaces)
-        let v = String(s[s.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-        notesVars[k] = v
-    }
-
-    assertEquals(notesVars["vim-mode"], "true", "vim-mode found in [notes]")
-    assertEquals(notesVars["vim-bin"], "nvim", "vim-bin found in [notes]")
-    assertEquals(notesVars["enabled"], "true", "enabled found in [notes]")
+func testEntries() {
+    print("configEntry:")
+    checkEqual(entry("vim-mode = true"), ["vim-mode", "true"], "bare bool")
+    checkEqual(entry("  width = 780  "), ["width", "780"], "surrounding spaces")
+    checkEqual(entry("shell = \"/bin/zsh\""), ["shell", "/bin/zsh"], "basic string")
+    checkEqual(entry("re = '\\d+ \"x\"'"), ["re", "\\d+ \"x\""], "literal string: no escapes")
+    checkEqual(entry("t = \"a\\tb\\n\\\"q\\\" \\u00e9\""), ["t", "a\tb\n\"q\" é"], "basic escapes")
+    checkEqual(entry("paths = [\"~/a.md\", '~/b.md', 3]"), ["paths", "~/a.md, ~/b.md, 3"], "array → one comma string")
+    checkEqual(entry("n = 42 # answer"), ["n", "42"], "comment after a scalar dropped")
+    checkEqual(entry("s = \"x\" # note"), ["s", "x"], "comment after a string dropped")
+    checkEqual(entry("font = Menlo # legacy"), ["font", "Menlo # legacy"], "legacy unquoted value kept whole")
+    checkEqual(entry("\"view: keys\" = \"what\""), ["view: keys", "what"], "quoted key")
+    checkEqual(entry("url = \"a=b\""), ["url", "a=b"], "'=' inside the value")
+    checkEqual(entry("empty ="), ["empty", ""], "empty value")
+    check(entry("# comment") == nil, "comment line")
+    check(entry("") == nil, "blank line")
+    check(entry("[app]") == nil, "section header")
+    check(entry("no equals sign") == nil, "no '='")
 }
 
-func testSaveConfigValue() {
-    print("Config value saving:")
-
-    // Simulate the save logic
-    func updateConfig(_ content: String, section: String, key: String, value: String) -> String {
-        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var inTarget = false
-        var keyFound = false
-        var insertAfter = -1
-
-        for i in 0..<lines.count {
-            let s = lines[i].trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("[") && s.hasSuffix("]") {
-                let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-                inTarget = name == section
-                if inTarget { insertAfter = i }
-                continue
-            }
-            guard inTarget, let eq = s.firstIndex(of: "=") else { continue }
-            let k = String(s[..<eq]).trimmingCharacters(in: .whitespaces)
-            if k == key {
-                lines[i] = "\(key) = \(value)"
-                keyFound = true
-                break
-            }
-            insertAfter = i
-        }
-
-        if !keyFound, insertAfter >= 0 {
-            lines.insert("\(key) = \(value)", at: insertAfter + 1)
-        } else if !keyFound {
-            lines.append("")
-            lines.append("[\(section)]")
-            lines.append("\(key) = \(value)")
-        }
-
-        return lines.joined(separator: "\n")
+func testLines() {
+    print("configLine:")
+    checkEqual(configLine("float", "true"), "float = true", "bool stays bare")
+    checkEqual(configLine("width", "-12.5"), "width = -12.5", "number stays bare")
+    checkEqual(configLine("width", "007"), "width = \"007\"", "leading-zero number is a string")
+    checkEqual(configLine("shell", "/bin/zsh"), "shell = \"/bin/zsh\"", "string quoted")
+    checkEqual(configLine("view: keys", "x"), "\"view: keys\" = \"x\"", "non-bare key quoted")
+    // everything written must read back as written
+    let tricky = ["", "plain", "with \"quotes\"", "back\\slash", "tab\tand\nnewline",
+                  "# not a comment", "a, b, c", "é ü 🐙", "bell\u{7}", "[not an array]", "true", "3.14"]
+    for v in tricky {
+        checkEqual(entry(configLine("k", v)), ["k", v], "round trip \(String(reflecting: v))")
     }
-
-    let original = """
-    [app]
-    shell = /bin/bash
-
-    [notes]
-    enabled = true
-    vim-mode = false
-    """
-
-    // Test 1: Update existing key
-    let updated = updateConfig(original, section: "notes", key: "vim-mode", value: "true")
-    assert(updated.contains("vim-mode = true"), "existing key updated")
-
-    // Test 2: Add new key to existing section
-    let withNewKey = updateConfig(original, section: "notes", key: "vim-bin", value: "nvim")
-    assert(withNewKey.contains("vim-bin = nvim"), "new key added to existing section")
-    assert(withNewKey.contains("vim-mode = false"), "existing key preserved")
-
-    // Test 3: Add new section
-    let withNewSection = updateConfig(original, section: "runtime", key: "test", value: "value")
-    assert(withNewSection.contains("[runtime]"), "new section added")
-    assert(withNewSection.contains("test = value"), "key in new section")
+    checkEqual(entry(configLine("a b = c", "v")), ["a b = c", "v"], "round trip of a key with '='")
 }
 
-func testRemoveConfigValue() {
-    print("Config value removal:")
+func testSections() {
+    print("sections:")
+    checkEqual(configSectionHeader("[app]"), "app", "header")
+    checkEqual(configSectionHeader("  [ notes ]  "), "notes", "spaces trimmed (TOML allows them)")
+    check(configSectionHeader("key = [a]") == nil, "an array value is not a header")
+    check(configSectionHeader("[unclosed") == nil, "unclosed")
+    checkEqual(configLines("a\n\nb\n"), ["a", "", "b", ""], "lines keep empties (join restores the text)")
 
-    func removeKey(_ content: String, section: String, key: String) -> String {
-        var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var inTarget = false
-        var toRemove: [Int] = []
+    let lines = configLines("""
+        # top
+        [app]
+        float = true
+        # comment
+        shell = "/bin/zsh"
+        [notes]
+        paths = "~/a.md"
+        [ app ]
+        float = false
+        """)
+    let app = configSectionEntries(lines, "app")
+    checkEqual(app.map(\.index), [2, 4, 8], "indices of [app] entries, both [app] blocks")
+    checkEqual(app.map(\.key), ["float", "shell", "float"], "keys in file order")
+    checkEqual(app.map(\.value), ["true", "/bin/zsh", "false"], "decoded values")
+    checkEqual(configSectionEntries(lines, "notes").map(\.key), ["paths"], "other section")
+    check(configSectionEntries(lines, "missing").isEmpty, "missing section")
+}
 
-        for i in 0..<lines.count {
-            let s = lines[i].trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("[") && s.hasSuffix("]") {
-                let name = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-                inTarget = name == section
-                continue
-            }
-            guard inTarget, let eq = s.firstIndex(of: "=") else { continue }
-            let k = String(s[..<eq]).trimmingCharacters(in: .whitespaces)
-            if k == key {
-                toRemove.append(i)
-                break
-            }
-        }
+func testSetting() {
+    print("configSetting:")
+    let base = """
+        [app]
+        shell = "/bin/bash"
 
-        for idx in toRemove.sorted(by: >) {
-            lines.remove(at: idx)
-        }
+        # notes window
+        [notes]
+        enabled = true
+        vim-mode = false
 
-        while lines.last?.isEmpty ?? false, lines.count > 1 {
-            lines.removeLast()
-        }
+        """
+    checkEqual(setting(base, "notes", [("vim-mode", "true")]),
+               base.replacingOccurrences(of: "vim-mode = false", with: "vim-mode = true"),
+               "update in place")
+    checkEqual(setting(base, "app", [("float", "true")]),
+               base.replacingOccurrences(of: "shell = \"/bin/bash\"", with: "shell = \"/bin/bash\"\nfloat = true"),
+               "new key after the section's last entry")
+    checkEqual(setting("[app]\n", "app", [("k", "v")]), "[app]\nk = \"v\"\n", "new key under an empty section")
+    checkEqual(setting(base, "runtime", [("test", "value")]), base + "\n\n[runtime]\ntest = \"value\"",
+               "missing section appended")
+    checkEqual(setting(base, "app", [("shell", nil)]),
+               base.replacingOccurrences(of: "shell = \"/bin/bash\"\n", with: ""),
+               "remove keeps everything else, trailing newline too")
+    checkEqual(setting(base, "app", [("absent", nil)]), base, "removing an absent key changes nothing")
+    checkEqual(setting(base, "notes", [("enabled", "false"), ("vim-mode", nil), ("font", "Menlo")]),
+               base.replacingOccurrences(of: "enabled = true\nvim-mode = false", with: "enabled = false\nfont = \"Menlo\""),
+               "several keys in one edit")
+    checkEqual(setting("[a]\nx = 1\nx = 2\n", "a", [("x", "3")]), "[a]\nx = 1\nx = 3\n",
+               "a duplicated key: the last one (the one that counts) is edited")
+    checkEqual(setting("[a]\nk = 1\n[b]\n[a]\n", "a", [("n", "2")]), "[a]\nk = 1\n[b]\n[a]\nn = 2\n",
+               "a section split in two: new key goes in the later block")
+    checkEqual(setting("[ a ]\nk = 1\n", "a", [("k", "2")]), "[ a ]\nk = 2\n", "spaced header found")
+    checkEqual(setting("[b]\nk = 1\n", "a", [("k", "2")]), "[b]\nk = 1\n\n\n[a]\nk = 2",
+               "same key in another section is not touched")
+}
 
-        return lines.joined(separator: "\n")
-    }
-
-    let original = """
-    [app]
-    shell = /bin/bash
-    hide-on-focus-loss = false
-
-    [notes]
-    enabled = true
-    vim-mode = true
-    vim-bin = nvim
-    """
-
-    let removed = removeKey(original, section: "app", key: "hide-on-focus-loss")
-    assert(!removed.contains("hide-on-focus-loss"), "key removed from [app]")
-    assert(removed.contains("shell = /bin/bash"), "other key preserved")
-    assert(removed.contains("[notes]"), "other section preserved")
-    assert(removed.contains("vim-mode = true"), "notes section untouched")
+func testTri() {
+    print("tri:")
+    for s in ["true", "yes", "1", "on", "TRUE", "On"] { check(tri(s) == true, "'\(s)' → true") }
+    for s in ["false", "no", "0", "off", "No"] { check(tri(s) == false, "'\(s)' → false") }
+    for s: String? in [nil, "", "maybe", "2"] { check(tri(s) == nil, "\(String(reflecting: s)) → nil") }
 }
 
 func testResolveBinary() {
-    print("Binary resolution:")
-
-    // Test with absolute path
-    func resolveBinary(_ name: String) -> String? {
-        if name.hasPrefix("/") {
-            return FileManager.default.isExecutableFile(atPath: name) ? name : nil
-        }
-        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin")
-            .split(separator: ":").map(String.init)
-        for dir in paths {
-            let fullPath = dir + "/" + name
-            if FileManager.default.isExecutableFile(atPath: fullPath) {
-                return fullPath
-            }
-        }
-        return nil
-    }
-
-    // /bin/bash should exist
-    let bash = resolveBinary("/bin/bash")
-    assert(bash == "/bin/bash", "absolute path resolved when executable")
-
-    // 'ls' should be in PATH
-    let ls = resolveBinary("ls")
-    assert(ls != nil, "'ls' found in PATH")
-    assert(ls?.hasSuffix("/ls") ?? false, "'ls' path ends with /ls")
-
-    // non-existent binary
-    let fake = resolveBinary("definitely-not-a-real-binary-xyz")
-    assert(fake == nil, "non-existent binary returns nil")
+    print("resolveBinary:")
+    checkEqual(resolveBinary("/bin/sh"), "/bin/sh", "absolute executable path")
+    check(resolveBinary("/etc/hosts") == nil, "absolute non-executable path")
+    check(resolveBinary("ls")?.hasSuffix("/ls") == true, "'ls' found on PATH")
+    check(resolveBinary("definitely-not-a-real-binary-xyz") == nil, "unknown name")
 }
 
-// MARK: - Run tests
-
-print("=== Workspace Switcher Config Tests ===\n")
-testParseKeyValue()
-print()
-testTriFunction()
-print()
-testFindSection()
-print()
-testSaveConfigValue()
-print()
-testRemoveConfigValue()
-print()
-testResolveBinary()
-
-print("\n=== Results: \(passed) passed, \(failed) failed ===")
-exit(failed > 0 ? 1 : 0)
+@main
+struct ConfigTests {
+    static func main() {
+        testEntries()
+        testLines()
+        testSections()
+        testSetting()
+        testTri()
+        testResolveBinary()
+        print("\n=== Results: \(passed) passed, \(failed) failed ===")
+        exit(failed == 0 ? 0 : 1)
+    }
+}
