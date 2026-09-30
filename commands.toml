@@ -88,9 +88,10 @@
 #              the window is made transparent (true/false, default true)
 #   label      any command: text the Hyper+S "/" palette shows (default =
 #              the section name)
-#   float      note/files/list/output: stay above other apps' windows
-#              (true/false); default = [app] float. Header icon menu ▸ Float
-#              Above Other Windows writes it.
+#   float      popup-only "/" windows (filefast, output, prettyprint): stay
+#              above other apps' windows (true/false); default = [app] float.
+#              Ignored by notes/files/jira/confluence/ai — they follow
+#              [app] float only.
 #   (The header icon menu's Theme ▸ presets and Transparency ▸ levels write
 #    THESE per-window keys: "Whole Window" sets every surface + the text
 #    colors, "<Surface> Only" just that surface. Theme ▸ Custom Color… keeps
@@ -109,11 +110,15 @@
 # [app] — app-level settings. Every key is optional (built-in defaults apply
 # otherwise); lists are comma-separated, paths may use "~". May sit anywhere
 # in the file — it is applied before anything else at startup.
-#   float               true/false (default false): popup windows sit above
-#                       every normal window (AeroSpace tiles included; below
-#                       menus, alerts and the Dock); false = ordinary windows
-#                       that tiles can cover.
-#                       Menu bar ▸ Settings ▸ Float Windows Above Others.
+#   float               true/false (default false): ONE switch for notes,
+#                       files, jira, confluence and ai. true = they sit above
+#                       every normal window (below menus, alerts and the
+#                       Dock) and AeroSpace floats them; false = ordinary
+#                       windows that AeroSpace TILES. The Hyper+S popup and
+#                       popup-only "/" windows never tile.
+#                       Menu bar ▸ Settings ▸ Float Windows Above Others, or
+#                       any of those apps' header icon menu ▸ Float Above
+#                       Other Windows.
 #   terminal-app        app the file browser's `term` command opens when the
 #                       window has no shell drawer (default Ghostty if
 #                       installed, else Terminal)
@@ -324,7 +329,6 @@ highlight-color = "45475A"
 accent-color = "CBA6F7"
 palette = "89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"
 sticky = true
-float = false
 
 # Read-only file browser: type to fuzzy-filter the current directory, Enter
 # on a file opens it in its default app, Enter on a directory (or "..")
@@ -391,7 +395,6 @@ dim-color = "9AA5CE"
 highlight-color = 283457
 accent-color = "7AA2F7"
 palette = "BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"
-float = true
 # (window, palette, menu entry). Every section must opt in explicitly.
 [jira]
 enabled = true

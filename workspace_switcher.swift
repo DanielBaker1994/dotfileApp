@@ -4535,7 +4535,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = cmd.float ?? settings.float
+        cfg.floating = settings.float   // global switch (floatMenuItem)
         // shared window: Esc belongs to vim / the shell — never closes notes
         // (hide with the hotkey, Cmd+W or ✕)
         cfg.escCloseCount = settings.sharedWindow ? 0 : max(0, cmd.escClose ?? settings.escClose)
@@ -5848,29 +5848,76 @@ private func trimmed(_ s: String) -> String? {
         log("theme reset for [\(section)] — back to system defaults")
     }
 
-    // "Float Above Other Windows" (header icon menu): per-window `float`.
-    // On = stays above every app (default); off = a normal window.
+    // "Float Above Other Windows" (header icon menu): the GLOBAL `[app] float`
+    // — one switch for every app in the shared window (notes, files, jira,
+    // confluence, ai). On = above every app + AeroSpace floating; off = a
+    // normal window that AeroSpace tiles.
     func floatMenuItem(for w: PopupWindow, section: String) -> NSMenuItem {
-        let on = w.config.floating
-        return menuItem("Float Above Other Windows", state: on) { [weak self, weak w] in
-            guard let self, let w else { return }
-            w.setFloating(!on)
-            if let i = self.commands.firstIndex(where: { $0.name == section }) {
-                self.commands[i].float = !on
-            }
-            saveConfigValue(section: section, key: "float", value: on ? "false" : "true")
-            self.log("[\(section)] float = \(!on)")
+        menuItem("Float Above Other Windows", state: settings.float) { [weak self] in
+            self?.setGlobalFloat(!settings.float)
         }
     }
 
-    // global default for every popup (menu bar ▸ Settings ▸ Float Windows):
-    // applies live to windows without their own `float` key
+    // the apps the float switch owns. NOT the Hyper+S popup or the "/"
+    // palette's popup-only windows (filefast, output, prettyprint, jira
+    // config): those keep their own `float` and never tile.
+    static let floatSwitchViews: [SlotView] = [.notes, .files, .jira, .detail, .releases, .confluence, .ai]
+
+    func floatSwitchMember(_ win: NSWindow) -> SlotMember? {
+        Self.floatSwitchViews.lazy.compactMap { self.slotMember($0) }.first { $0.slotWindow === win }
+    }
+
+    func applyFloat(_ m: SlotMember) {
+        if let p = m as? PopupWindow { p.setFloating(settings.float) }
+        else { m.slotWindow.level = settings.float ? .floating : .normal }
+    }
+
+    // global switch (menu bar ▸ Settings ▸ Float Windows / header icon menu):
+    // the shared-window apps always follow it; other popups only when they
+    // have no `float` key of their own (window level only, no tiling)
     func setGlobalFloat(_ on: Bool) {
         settings.float = on
         saveConfigValue(section: "app", key: "float", value: on ? "true" : "false")
-        for w in subWindows {
+        var members: [SlotMember] = []
+        for v in Self.floatSwitchViews {
+            if let m = slotMember(v), !members.contains(where: { $0 === m }) { members.append(m) }
+        }
+        for m in members {
+            applyFloat(m)
+            syncAerospaceLayout(m.slotWindow)
+        }
+        for w in subWindows where !members.contains(where: { $0 === w }) {
             let own = commands.first(where: { $0.windowName == w.config.name })?.float
             w.setFloating(own ?? on)
+        }
+        log("[app] float = \(on)")
+    }
+
+    // `float` also drives the AeroSpace layout: on = floating (what its
+    // dialog heuristic picks for our windows anyway), off = a normal TILE.
+    // AeroSpace re-detects a window every time it is ordered in (a view
+    // switch, a re-show) and floats it again, so float-off windows are
+    // re-tiled whenever they become key; the retry covers a window AeroSpace
+    // hasn't registered yet.
+    func syncAerospaceLayout(_ win: NSWindow) {
+        guard win.isVisible else { return }
+        let args = ["layout", "--window-id", String(win.windowNumber),
+                    settings.float ? "floating" : "tiling"]
+        for delay in [0.15, 0.6] {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
+                _ = aerospaceCall(args)
+            }
+        }
+    }
+
+    func installAerospaceLayoutSync() {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let win = note.object as? NSWindow,
+                  let m = self.floatSwitchMember(win) else { return }
+            self.applyFloat(m)
+            if !settings.float { self.syncAerospaceLayout(win) }
         }
     }
 
@@ -6408,7 +6455,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = cmd.float ?? settings.float
+        cfg.floating = isJira ? settings.float : (cmd.float ?? settings.float)
         // shared window: ONE Esc = back (clearing a search first); at the
         // jira list it hides the window
         let inSlot = settings.sharedWindow && isJira
@@ -7142,7 +7189,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = cmd.float ?? settings.float
+        cfg.floating = settings.float   // global switch (floatMenuItem)
         // shared window: one Esc hides it (the filter bar clears itself first)
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
@@ -7467,6 +7514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = SwitcherController()
         controller = c
         c.start()
+        c.installAerospaceLayoutSync()
         // Finder right-click services ("Copy Path" / "Open in Notes")
         let sh = ServicesHandler(c)
         servicesHandler = sh
