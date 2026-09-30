@@ -89,6 +89,14 @@ bin/ui-test.sh              # Full UI test suite (cliclick + osascript)
 bin/ui-test.sh --verbose
 ```
 
+- Daemon state for tests: the socket answers `state` (JSON: view, frames,
+  drawers open, focus pane, tabs…) and `do:ACTION` (cycle, hide, open:VIEW,
+  toggle-terminal…) — `SwitcherController.testQuery` + `PopupWindow.testState`.
+  ui-test.sh: `ws_state` / `ws_do` / `wait_state` (poll, no sleeps).
+  Quick checks: the `ui-check` skill (`.claude/skills/ui-check`).
+- No source-grep "tests": a check must drive the app or unit-test code.
+- ui-test.sh snapshots commands.toml and restores it byte-for-byte on exit.
+
 ## Key files
 
 - `main.swift` — entry point

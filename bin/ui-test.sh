@@ -98,6 +98,28 @@ status_item_count() {
     ' 2>/dev/null || echo 0
 }
 
+# --- daemon state over the socket (no AppleScript, no sleeps) ---------------
+# `state` answers one JSON line (SwitcherController.testQuery); `do:ACTION`
+# runs cycle | cycle-back | hide | back | home | toggle | toggle-terminal |
+# toggle-browser | reset-size | open:VIEW and answers the state afterwards.
+WS_SOCK="${TMPDIR%/}/$(sed -nE 's/^notes-socket *= *"?([^"]*)"?.*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../commands.toml" | head -1)"
+[[ "$WS_SOCK" == */ ]] && WS_SOCK="${TMPDIR%/}/ws-notes.sock"
+ws_query() { echo "$1" | nc -U -w 3 "$WS_SOCK" 2>/dev/null; }
+# ws_state JQ — e.g. ws_state .view, ws_state '.views.notes.terminal'
+ws_state() { ws_query state | jq -r "$1" 2>/dev/null; }
+ws_do() { ws_query "do:$1" >/dev/null; }
+# wait_state JQ_BOOL [seconds] — poll every 50 ms until the jq test is true
+wait_state() {
+    local expr="$1" max="${2:-3}" end
+    end=$(( $(date +%s) + max ))
+    while (( $(date +%s) <= end )); do
+        [[ "$(ws_query state | jq -r "$expr" 2>/dev/null)" == "true" ]] && return 0
+        sleep 0.05
+    done
+    vlog "wait_state timed out: $expr → $(ws_query state | jq -c "$expr" 2>/dev/null)"
+    return 1
+}
+
 # Send a keyboard shortcut
 send_shortcut() {
     local keys="$1"  # e.g. "cmd+0", "cmd+alt+t"
@@ -132,13 +154,21 @@ echo
 # note — so run with vim mode OFF and put the setting back on exit.
 # (The vim pane has its own safe suite: bin/ui-test-vim.sh.)
 CONF_FILE="$ROOT/../commands.toml"
+# Snapshot the WHOLE file and put it back byte-for-byte on any exit (Ctrl+C
+# included) — the suite's menu actions (color reset…) write it too.
+CONF_SNAPSHOT="$(mktemp)"
+cp "$CONF_FILE" "$CONF_SNAPSHOT"
+restore_config() {
+    if ! cmp -s "$CONF_SNAPSHOT" "$CONF_FILE"; then
+        cp "$CONF_SNAPSHOT" "$CONF_FILE"
+        pkill -x workspace-switcher 2>/dev/null || true
+    fi
+    rm -f "$CONF_SNAPSHOT"
+}
+trap restore_config EXIT
+trap 'exit 130' INT TERM
 if grep -Eq '^vim-mode *= *true' "$CONF_FILE"; then
     sed -i '' -E 's/^vim-mode *= *true/vim-mode = false/' "$CONF_FILE"
-    restore_vim_mode() {
-        sed -i '' -E 's/^vim-mode *= *false/vim-mode = true/' "$CONF_FILE"
-        pkill -x workspace-switcher 2>/dev/null || true
-    }
-    trap restore_vim_mode EXIT
     echo "  (vim-mode temporarily off for this run)"
 fi
 
@@ -153,12 +183,11 @@ sleep 0.5
 echo "== 1. App launches and shows popup =="
 
 "$BIN" show >/dev/null 2>&1 &
-sleep 1.5
 
-if wait_for "window_count | grep -q '^[1-9]'" 5; then
-    pass "popup window appeared"
+if wait_state '.palette' 5; then
+    pass "switcher palette shown"
 else
-    fail "popup window did not appear within 5s"
+    fail "switcher palette did not appear within 5s"
 fi
 
 FRAME="$(window_frame 1)"
@@ -176,31 +205,23 @@ fi
 
 echo "== 2. Single-instance guard: re-invoking notes never duplicates it =="
 
-# Open notes window
-"$BIN" notes >/dev/null 2>&1 &
-sleep 1
-
-# Count windows: should be popup + notes = 2 (not 3)
-WC="$(window_count)"
-if [[ "$WC" -le 2 ]]; then
-    pass "notes opened without duplicating (windows=$WC)"
+ws_do open:notes
+if wait_state '.view == "notes" and .views.notes.shown' 5; then
+    pass "notes view shown"
 else
-    fail "duplicate notes window detected (windows=$WC, expected ≤2)"
+    fail "notes view not shown (view=$(ws_state .view))"
 fi
+WC="$(ws_state .windows)"
 
-# Invoke notes again — the shared window TOGGLES (Hyper+N on a shown notes
-# view hides it); it must never create a second window
-"$BIN" notes >/dev/null 2>&1 &
-sleep 0.5
-
-WC2="$(window_count)"
-if [[ "$WC2" -le "$WC" ]]; then
-    pass "re-invoking notes did not create duplicate (was $WC, now $WC2)"
+# every open goes through the ONE shared window — never a second one
+ws_do open:notes
+ws_do open:files
+ws_do open:notes
+if wait_state '.view == "notes"' 3 && [[ "$(ws_state .windows)" -le "$WC" ]]; then
+    pass "re-opening notes did not create a window (windows=$WC)"
 else
-    fail "re-invoking notes created a duplicate (was $WC, now $WC2)"
+    fail "re-opening notes changed the window count (was $WC, now $(ws_state .windows))"
 fi
-# bring it back for the tests below
-window_exists "notes" || { "$BIN" notes >/dev/null 2>&1 & sleep 0.5; }
 
 # ============================================================================
 # WINDOW RESIZE TESTS
@@ -208,21 +229,14 @@ window_exists "notes" || { "$BIN" notes >/dev/null 2>&1 & sleep 0.5; }
 
 echo "== 3. Window resize and reset =="
 
-# Notes window should exist and be resizable
-if window_exists "notes"; then
-    pass "notes window exists"
-    NOTES_FRAME="$(window_frame 2)"  # notes is likely window 2
-    if [[ -n "$NOTES_FRAME" ]]; then
-        IFS=',' read -r NX NY NW NH <<< "$NOTES_FRAME"
-        BEFORE_W="$NW"
-        BEFORE_H="$NH"
-        pass "notes window size before: ${NW}x${NH}"
-
-        # Reset size is available via menu only (no shortcut)
-        pass "Reset size: available via menu (no keyboard shortcut)"
-    fi
+ws_do reset-size
+BASE="$(ws_state '.views.notes.frame | "\(.[2])x\(.[3])"')"
+ws_do reset-size
+AGAIN="$(ws_state '.views.notes.frame | "\(.[2])x\(.[3])"')"
+if [[ -n "$BASE" && "$BASE" == "$AGAIN" ]]; then
+    pass "reset-size is stable ($BASE)"
 else
-    skip "notes window not found (may need config)"
+    fail "reset-size moved the window: $BASE → $AGAIN"
 fi
 
 # ============================================================================
@@ -231,64 +245,25 @@ fi
 
 echo "== 4. Drawer toggles (terminal / file browser) =="
 
-# Focus the notes window (it has both terminal and browser drawers)
-osascript -e '
-    tell application "System Events"
-        tell process "workspace-switcher"
-            set frontmost to true
-        end tell
-    end tell
-' 2>/dev/null
-sleep 0.3
-
-# Get initial window height
-INIT_H="$(osascript -e '
-    tell application "System Events"
-        tell process "workspace-switcher"
-            set s to size of window 1
-            return item 2 of s
-        end tell
-    end tell
-' 2>/dev/null)"
-
-# Toggle terminal with Cmd+Opt+T
-send_shortcut "cmd+alt+t"
-sleep 0.5
-
-TERM_H="$(osascript -e '
-    tell application "System Events"
-        tell process "workspace-switcher"
-            set s to size of window 1
-            return item 2 of s
-        end tell
-    end tell
-' 2>/dev/null)"
-
-if [[ "$TERM_H" != "$INIT_H" ]] || [[ "$TERM_H" == "$INIT_H" ]]; then
-    # Height may or may not change depending on initial state
-    # Just verify the shortcut didn't crash
-    pass "Terminal toggle shortcut sent (height: ${INIT_H} -> ${TERM_H})"
-fi
-
-# Toggle file browser with Cmd+Opt+B
-send_shortcut "cmd+alt+b"
-sleep 0.5
-
-BROWSER_H="$(osascript -e '
-    tell application "System Events"
-        tell process "workspace-switcher"
-            set s to size of window 1
-            return item 2 of s
-        end tell
-    end tell
-' 2>/dev/null)"
-
-pass "File browser toggle shortcut sent (height: ${TERM_H} -> ${BROWSER_H})"
-
-# Toggle terminal again (should revert)
-send_shortcut "cmd+alt+t"
-sleep 0.5
-pass "Terminal toggle again sent (toggle off)"
+# each drawer toggles on and off; a full on/off cycle leaves the frame and
+# drawerInset exactly where they started (the drawer bookkeeping invariant)
+for drawer in terminal browser; do
+    was="$(ws_state ".views.notes.$drawer")"
+    h0="$(ws_state '.views.notes.frame[3]')"
+    inset0="$(ws_state '.views.notes.drawerInset')"
+    ws_do "toggle-$drawer"
+    if wait_state ".views.notes.$drawer != $was" 3; then
+        pass "$drawer drawer toggled ($was → $(ws_state ".views.notes.$drawer"))"
+    else
+        fail "$drawer drawer did not toggle (still $was)"
+    fi
+    ws_do "toggle-$drawer"
+    if wait_state ".views.notes.$drawer == $was and .views.notes.frame[3] == $h0 and .views.notes.drawerInset == $inset0" 3; then
+        pass "$drawer drawer round trip restores height $h0 / inset $inset0"
+    else
+        fail "$drawer round trip: height $h0 → $(ws_state '.views.notes.frame[3]'), inset $inset0 → $(ws_state '.views.notes.drawerInset')"
+    fi
+done
 
 # ============================================================================
 # WINDOW TOGGLE TESTS (notes / jira / health checks)
@@ -522,30 +497,6 @@ window_size() {
         end tell
     ' 2>/dev/null | tr -d ' '
 }
-
-# --- Test 13a: Source code regression guard ---
-# .activeInKeyWindow in resize tracking areas prevents resize until window
-# becomes key (e.g. after clicking terminal). The fix is .activeAlways.
-# Verify both resize-specific views use .activeAlways.
-TA_COUNT=$(grep -c '\.activeAlways' "$ROOT/../PopupWindow.swift" 2>/dev/null)
-# Check that PopupBackdrop's tracking area uses .activeAlways (line ~836)
-BACKDROP_LINE=$(grep -n 'options:.*\.activeAlways' "$ROOT/../PopupWindow.swift" 2>/dev/null | head -1)
-EDGE_LINE=$(grep -n 'options:.*\.activeAlways' "$ROOT/../PopupWindow.swift" 2>/dev/null | tail -1)
-if [[ "$TA_COUNT" -ge 2 && -n "$BACKDROP_LINE" && -n "$EDGE_LINE" ]]; then
-    pass "Resize tracking areas use .activeAlways (count=$TA_COUNT)"
-else
-    fail "Missing .activeAlways in tracking areas (count=$TA_COUNT, expected ≥2)"
-fi
-# Verify no .activeInKeyWindow appears near 'updateTrackingAreas' within PopupBackdrop or ResizeEdgeView
-BACKDROP_BLOCK=$(sed -n '/^final class PopupBackdrop/,/^} *$/p' "$ROOT/../PopupWindow.swift" 2>/dev/null | head -60)
-EDGE_BLOCK=$(sed -n '/^final class ResizeEdgeView/,/^} *$/p' "$ROOT/../PopupWindow.swift" 2>/dev/null)
-BACKDROP_BAD=$(echo "$BACKDROP_BLOCK" | grep -c '\.activeInKeyWindow' || true)
-EDGE_BAD=$(echo "$EDGE_BLOCK" | grep -c '\.activeInKeyWindow' || true)
-if [[ "$BACKDROP_BAD" -eq 0 && "$EDGE_BAD" -eq 0 ]]; then
-    pass "PopupBackdrop and ResizeEdgeView have no .activeInKeyWindow"
-else
-    fail "Resize views still have .activeInKeyWindow: backdrop=$BACKDROP_BAD edge=$EDGE_BAD"
-fi
 
 # --- Test 13b: Notes window opens and size is readable ---
 "$BIN" notes >/dev/null 2>&1 &
@@ -917,14 +868,6 @@ else
     fail "Notes singleton did not restore after Cmd+W close"
 fi
 
-# --- Test 15b: Source code guard — auto-save on close ---
-SAVE_HOOKS=$(grep -c 'onEditorClose\|onEditorCommit\|writeNote' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$SAVE_HOOKS" -ge 2 ]]; then
-    pass "Editor save hooks present in source (count=$SAVE_HOOKS)"
-else
-    fail "Missing editor save hooks (count=$SAVE_HOOKS, expected ≥2)"
-fi
-
 # --- Test 15c: Tab add/close/switch cycle ---
 pkill -f "workspace-switcher.app" 2>/dev/null || true
 sleep 0.5
@@ -958,40 +901,6 @@ else
     fail "Notes toggle cycle: window count changed ($TAB_WC_BEFORE → $TAB_WC_AFTER)"
 fi
 
-# --- Test 15d: External write detection source guard ---
-POLL_SOURCES=$(grep -c 'pollNote\|externalWrite\|fileModification\|attrModification' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$POLL_SOURCES" -ge 1 ]]; then
-    pass "External write detection code present (count=$POLL_SOURCES)"
-else
-    skip "External write detection: no poll sources found (may use different mechanism)"
-fi
-
-# --- Test 15e: Deleted note resilience (default.md fallback) ---
-NOTE_SOURCES=$(grep -c 'default\.md\|deletedNote\|parkedText\|noteDeleted' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$NOTE_SOURCES" -ge 2 ]]; then
-    pass "Deleted note resilience code present (count=$NOTE_SOURCES)"
-else
-    fail "Missing deleted note resilience code (count=$NOTE_SOURCES, expected ≥2)"
-fi
-
-# --- Test 15f: Auto-save on tab switch source guard ---
-TAB_SAVE=$(grep -c 'tabChange\|tabSwitch\|switchTab\|selectTab.*save\|save.*tab' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-TAB_SAVE2=$(grep -c 'saveNote\|writeNote\|saveEditor' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-TOTAL_SAVE=$((TAB_SAVE + TAB_SAVE2))
-if [[ "$TOTAL_SAVE" -ge 2 ]]; then
-    pass "Auto-save on tab switch code present (count=$TOTAL_SAVE)"
-else
-    skip "Auto-save on tab switch: source patterns not found (may use different naming)"
-fi
-
-# --- Test 15g: Never-resurrect-deleted-notes guard ---
-DISMISS_SOURCES=$(grep -c 'dismissedNotes\|persistedDismiss\|dismissedTabs' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$DISMISS_SOURCES" -ge 1 ]]; then
-    pass "Dismissed notes persistence code present (count=$DISMISS_SOURCES)"
-else
-    skip "Dismissed notes persistence: source not found (may use different naming)"
-fi
-
 # ============================================================================
 # FILE BROWSER TESTS
 # ============================================================================
@@ -1017,31 +926,6 @@ else
     fi
 fi
 
-# --- Test 16b: File browser keyboard navigation source guard ---
-FB_NAV=$(grep -c 'fileListKey\|fileNav\|navigateDir\|parentDir\|openSelection' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-FB_NAV2=$(grep -c 'keyDown.*file\|fileKey\|fileList.*key' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_NAV" -ge 2 || "$FB_NAV2" -ge 1 ]]; then
-    pass "File browser keyboard navigation code present"
-else
-    skip "File browser keyboard nav: source patterns not found"
-fi
-
-# --- Test 16c: Favorites + zoxide source guard ---
-FB_FAVS=$(grep -c 'favorites\|zoxide\|favDir\|staticFav' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_FAVS" -ge 2 ]]; then
-    pass "File browser favorites/zoxide code present (count=$FB_FAVS)"
-else
-    skip "File browser favorites/zoxide: source patterns not found"
-fi
-
-# --- Test 16d: File browser search/filter source guard ---
-FB_SEARCH=$(grep -c 'fileFilter\|fileSearch\|globMatch\|filterFiles' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_SEARCH" -ge 1 ]]; then
-    pass "File browser search/filter code present (count=$FB_SEARCH)"
-else
-    skip "File browser search/filter: source patterns not found"
-fi
-
 # --- Test 16e: File browser drawer in notes window ---
 pkill -f "workspace-switcher.app" 2>/dev/null || true
 sleep 0.5
@@ -1065,14 +949,6 @@ if [[ -n "$BH1" && -n "$BH2" ]]; then
     pass "File browser drawer toggle: with=${BH1} without=${BH2}"
 else
     fail "File browser drawer toggle: size unreadable"
-fi
-
-# --- Test 16f: File browser split pane source guard ---
-FB_SPLIT=$(grep -c 'splitFraction\|splitter\|layoutPanes\|listPane\|previewPane' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_SPLIT" -ge 3 ]]; then
-    pass "File browser split pane code present (count=$FB_SPLIT)"
-else
-    skip "File browser split pane: source patterns not found"
 fi
 
 # ============================================================================
@@ -1102,46 +978,6 @@ else
     fi
 fi
 
-# --- Test 17b: Row selection source guard ---
-ROW_SEL=$(grep -c 'rowView.selection\|selectRow\|selection = \|selected.*index' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$ROW_SEL" -ge 2 ]]; then
-    pass "Row selection code present (count=$ROW_SEL)"
-else
-    skip "Row selection: source patterns not found"
-fi
-
-# --- Test 17c: Pagination source guard ---
-PAGINATION=$(grep -c 'page.size\|loadMore\|pageRows\|hasMorePages\|pagination' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$PAGINATION" -ge 1 ]]; then
-    pass "Pagination code present (count=$PAGINATION)"
-else
-    skip "Pagination: source patterns not found"
-fi
-
-# --- Test 17d: Filter pills source guard ---
-FILTER_PILLS=$(grep -c 'filterPill\|FilterPill\|filterBar\|FilterBar\|dropdown.*filter\|filter.*dropdown' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FILTER_PILLS" -ge 3 ]]; then
-    pass "Filter pills code present (count=$FILTER_PILLS)"
-else
-    skip "Filter pills: source patterns not found"
-fi
-
-# --- Test 17e: Checkbox row copy source guard ---
-CHECKBOX=$(grep -c 'selectableRows\|checkbox\|selectedIndices\|copyRows\|onCopyRows' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$CHECKBOX" -ge 3 ]]; then
-    pass "Checkbox row copy code present (count=$CHECKBOX)"
-else
-    skip "Checkbox row copy: source patterns not found"
-fi
-
-# --- Test 17f: Detail window source guard ---
-DETAIL=$(grep -c 'DetailWindow\|detailWindow\|openDetail\|detailView\|showDetail' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$DETAIL" -ge 1 ]]; then
-    pass "Detail window code present (count=$DETAIL)"
-else
-    skip "Detail window: source patterns not found"
-fi
-
 # ============================================================================
 # CONFIG & RESILIENCE TESTS
 # ============================================================================
@@ -1163,102 +999,6 @@ else
 fi
 pkill -f "workspace-switcher.app" 2>/dev/null || true
 sleep 0.3
-
-# --- Test 18b: Config parser source guard ---
-CONFIG_PARSER=$(grep -c 'func parseAppConfig\|func parseTheme\|func parseColors\|func parseIconRules\|func applyAppConfigFromDisk' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$CONFIG_PARSER" -ge 2 ]]; then
-    pass "Config parser code present (count=$CONFIG_PARSER)"
-else
-    fail "Missing config parser code (count=$CONFIG_PARSER, expected ≥2)"
-fi
-
-# --- Test 18c: Default values for missing keys ---
-DEFAULTS=$(grep -c 'default\|fallback\|Default\|Fallback' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$DEFAULTS" -ge 5 ]]; then
-    pass "Config default/fallback values present (count=$DEFAULTS)"
-else
-    skip "Config defaults: fewer patterns found than expected ($DEFAULTS)"
-fi
-
-# --- Test 18d: Crash handler source guard ---
-CRASH_HANDLER=$(grep -c 'signal\|SIGSEGV\|SIGABRT\|SIGBUS\|crashLog\|backtrace\|fatalHandler' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$CRASH_HANDLER" -ge 3 ]]; then
-    pass "Crash handler code present (count=$CRASH_HANDLER)"
-else
-    fail "Missing crash handler code (count=$CRASH_HANDLER, expected ≥3)"
-fi
-
-# --- Test 18e: IPC resilience source guard (socket + CLI fallback) ---
-IPC_SOURCES=$(grep -c 'socket\|Socket\|aeroCli\|AeroSpace.*CLI\|ipcFallback\|socketTimeout' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$IPC_SOURCES" -ge 3 ]]; then
-    pass "IPC resilience code present (count=$IPC_SOURCES)"
-else
-    fail "Missing IPC resilience code (count=$IPC_SOURCES, expected ≥3)"
-fi
-
-# --- Test 18f: Focus resilience source guard (retry loop) ---
-FOCUS_RETRY=$(grep -c 'func takeFocus\|func startFocusPoller\|func focusExistingOrOpen\|func focusSubWindow\|func restoreFocus\|func readFocusFile' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$FOCUS_RETRY" -ge 2 ]]; then
-    pass "Focus resilience code present (count=$FOCUS_RETRY)"
-else
-    fail "Missing focus resilience code (count=$FOCUS_RETRY, expected ≥2)"
-fi
-
-# --- Test 18g: Terminal auto-restart source guard ---
-TERM_RESTART=$(grep -c 'TerminalAutoRestart\|autoRestart\|respawnShell\|processTerminated\|processFailedToStart' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$TERM_RESTART" -ge 3 ]]; then
-    pass "Terminal auto-restart code present (count=$TERM_RESTART)"
-else
-    skip "Terminal auto-restart: source patterns not found ($TERM_RESTART)"
-fi
-
-# --- Test 18h: Screen clamping source guard ---
-CLAMP=$(grep -c 'clampToScreen\|clamp.*screen\|screenRect\|visibleFrame\|visibleScreen' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$CLAMP" -ge 1 ]]; then
-    pass "Screen clamping code present (count=$CLAMP)"
-else
-    fail "Missing screen clamping code (expected clampToScreen)"
-fi
-
-# --- Test 18i: Minimum size enforcement source guard ---
-MIN_SIZE=$(grep -c 'minW\|minH\|minimumSize\|minWidth\|minHeight\|120\|140' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$MIN_SIZE" -ge 2 ]]; then
-    pass "Minimum size enforcement code present (count=$MIN_SIZE)"
-else
-    skip "Minimum size enforcement: source patterns not found"
-fi
-
-# --- Test 18j: AeroSpace focus bridge source guard ---
-FOCUS_BRIDGE=$(grep -c 'focusBridge\|focusFile\|focusPoll\|bridgeFile\|poll.*focus\|aeroFocus' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$FOCUS_BRIDGE" -ge 2 ]]; then
-    pass "AeroSpace focus bridge code present (count=$FOCUS_BRIDGE)"
-else
-    skip "AeroSpace focus bridge: source patterns not found"
-fi
-
-# --- Test 18k: Menu bar structure source guard ---
-MENU_ITEMS=$(grep -c 'NSMenuItem\|statusMenu\|addMenuItem\|menu\.addItem' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$MENU_ITEMS" -ge 5 ]]; then
-    pass "Menu bar structure code present (count=$MENU_ITEMS)"
-else
-    fail "Menu bar structure code incomplete (count=$MENU_ITEMS, expected ≥5)"
-fi
-
-# --- Test 18l: Voice recording source guard ---
-VOICE=$(grep -c 'VoiceRecorder\|voiceRecord\|SFSpeechRecognizer\|audioEngine\|speechSession\|voiceLocale' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$VOICE" -ge 5 ]]; then
-    pass "Voice recording code present (count=$VOICE)"
-else
-    skip "Voice recording: source patterns not found (may not be enabled)"
-fi
-
-# --- Test 18m: Markdown image rendering source guard ---
-MARKDOWN=$(grep -c 'imageAttachment\|pasteImage\|assetsDir\|insertImage\|markdownImages\|attachmentURLs\|attachmentsDir\|imagePaste\|renderImage' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
-if [[ "$MARKDOWN" -ge 2 ]]; then
-    pass "Markdown image rendering code present (count=$MARKDOWN)"
-else
-    skip "Markdown image rendering: source patterns not found"
-fi
 
 # ============================================================================
 # INFRASTRUCTURE IMPROVEMENTS
@@ -1323,26 +1063,6 @@ else
     fail "osascript not available"
 fi
 
-# --- Test 19g: No .activeInKeyWindow in resize views (regression) ---
-BACKDROP_BLOCK2=$(sed -n '/^final class PopupBackdrop/,/^} *$/p' "$ROOT/../PopupWindow.swift" 2>/dev/null | head -60)
-EDGE_BLOCK2=$(sed -n '/^final class ResizeEdgeView/,/^} *$/p' "$ROOT/../PopupWindow.swift" 2>/dev/null)
-BACKDROP_BAD2=$(echo "$BACKDROP_BLOCK2" | grep -c '\.activeInKeyWindow' || true)
-EDGE_BAD2=$(echo "$EDGE_BLOCK2" | grep -c '\.activeInKeyWindow' || true)
-if [[ "$BACKDROP_BAD2" -eq 0 && "$EDGE_BAD2" -eq 0 ]]; then
-    pass "Resize views still use .activeAlways (regression guard passed)"
-else
-    fail "REGRESSION: resize views have .activeInKeyWindow again (backdrop=$BACKDROP_BAD2 edge=$EDGE_BAD2)"
-fi
-
-# --- Test 19h: No dead code in PopupBackdrop (duplicate methods removed) ---
-CURSOR_COUNT=$(sed -n '/^final class PopupBackdrop/,/^} *$/p' "$ROOT/../PopupWindow.swift" 2>/dev/null | grep -c 'private func cursor' || true)
-UTAC_COUNT=$(sed -n '/^final class PopupBackdrop/,/^} *$/p' "$ROOT/../PopupWindow.swift" 2>/dev/null | grep -c 'override func updateTrackingAreas' || true)
-if [[ "$CURSOR_COUNT" -le 1 && "$UTAC_COUNT" -le 1 ]]; then
-    pass "PopupBackdrop: no duplicate cursor/updateTrackingAreas methods"
-else
-    fail "PopupBackdrop has duplicate methods (cursor=$CURSOR_COUNT updateTrackingAreas=$UTAC_COUNT)"
-fi
-
 # ============================================================================
 # FILE BROWSER E2E TESTS (real directory with fixture files)
 # ============================================================================
@@ -1399,73 +1119,6 @@ else
     else
         fail "File browser did not open (check [files] config)"
     fi
-fi
-
-# --- Test 20b: File browser shows correct file count ---
-# We can verify via source that the file browser reads the directory
-FB_READ_DIR=$(grep -c 'contentsOfPath\|enumeratorAtPath\|FileManager.*contents' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_READ_DIR" -ge 1 ]]; then
-    pass "File browser directory read code present (count=$FB_READ_DIR)"
-else
-    skip "File browser directory read: source pattern not found"
-fi
-
-# --- Test 20c: File filter/search source guard ---
-FB_FILTER=$(grep -c 'fileFilter\|filterFiles\|fuzzyFile\|fileQuery\|searchField.*file\|fileSearch' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_FILTER" -ge 1 ]]; then
-    pass "File browser filter/search code present (count=$FB_FILTER)"
-else
-    skip "File browser filter: source pattern not found"
-fi
-
-# --- Test 20d: Open in Finder / default app source guard ---
-FB_OPEN=$(grep -c 'NSWorkspace.*open\|openURL\|openFile\|revealInFinder\|NSWorkspace\.shared' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_OPEN" -ge 2 ]]; then
-    pass "File browser open-in-finder/default-app code present (count=$FB_OPEN)"
-else
-    skip "File browser open: source pattern not found"
-fi
-
-# --- Test 20e: Hidden file handling source guard ---
-FB_HIDDEN=$(grep -c 'hiddenFile\|\.hidden\|hasPrefix.*dot\|skipHidden\|showHidden' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_HIDDEN" -ge 0 ]]; then
-    # Hidden file handling may be implicit (FileManager skips them by default)
-    pass "File browser: hidden file handling checked (explicit=$FB_HIDDEN)"
-else
-    skip "File browser hidden files: source pattern not found"
-fi
-
-# --- Test 20f: Directory navigation source guard (← up button) ---
-FB_UP=$(grep -c 'parentDir\|parentDirectory\|navigateUp\|goUp\|upButton\|leftArrow.*nav\|keyLeft\|leftArrow.*dir' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-FB_UP2=$(grep -c 'contentsOfPath.*parent\|deletingLastPathComponent\|stringByDeletingLastPathComponent\|parent.*path' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$FB_UP" -ge 1 || "$FB_UP2" -ge 1 ]]; then
-    pass "File browser up/parent navigation code present (nav=$FB_UP path=$FB_UP2)"
-else
-    fail "Missing file browser up/parent navigation code"
-fi
-
-# --- Test 20g: Pinned repos (★ pin button) source guard ---
-PINNED=$(grep -c 'pinnedFavorites\|pinnedFavorite\|pinButton\|starButton\|onPin\|togglePin\|isPinned\|pinned.*fav\|fav.*pinned' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$PINNED" -ge 3 ]]; then
-    pass "Pinned repos/favorites code present (count=$PINNED)"
-else
-    fail "Missing pinned repos code (count=$PINNED, expected ≥3)"
-fi
-
-# --- Test 20h: Pin/unpin roundtrip source guard ---
-PIN_SAVE=$(grep -c 'pinnedFavorites.append\|pinnedFavorites.remove\|pinnedFavorites.contains\|UserDefaults.*pinned\|writePinned\|savePinned' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$PIN_SAVE" -ge 2 ]]; then
-    pass "Pin/unpin state management code present (count=$PIN_SAVE)"
-else
-    skip "Pin/unpin state: source patterns not found (may use different naming)"
-fi
-
-# --- Test 20i: ← up button click source guard ---
-LEFT_CLICK=$(grep -c 'leftArrow\|leftClick\|upButton\|↑\|backButton\|navigateBack\|onBack\|←' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
-if [[ "$LEFT_CLICK" -ge 1 ]]; then
-    pass "Left/up navigation button code present (count=$LEFT_CLICK)"
-else
-    skip "Left/up button: source pattern not found"
 fi
 
 # --- Test 20j: Fixture file existence verification ---

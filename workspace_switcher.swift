@@ -3070,6 +3070,51 @@ final class SwitcherController: NSObject {
                       moved.isEmpty ? "" : ", moved " + moved.joined(separator: ","))
     }
 
+    // `state` / `do:ACTION` over the socket (main thread): JSON the UI tests
+    // poll instead of sleeping + AppleScript. Actions run the same code the
+    // keys / header icons run; the answer is the state afterwards.
+    func testQuery(_ q: String) -> String {
+        if q.hasPrefix("do:") {
+            let a = String(q.dropFirst(3))
+            switch a {
+            case "cycle": slot.cycle(1)
+            case "cycle-back": slot.cycle(-1)
+            case "hide": slot.hide("test")
+            case "back": slot.back()
+            case "home": slot.home()
+            case "toggle": slot.toggle()
+            case "toggle-terminal": noteWindow?.toggleTerminalDrawer()
+            case "toggle-browser": noteWindow?.toggleFileBrowser()
+            case "reset-size": noteWindow?.resetToDefaultSize()
+            case _ where a.hasPrefix("open:"):
+                guard let v = SlotView(rawValue: String(a.dropFirst(5))) else {
+                    return "{\"error\":\"unknown view\"}"
+                }
+                slot.open(v)
+            default: return "{\"error\":\"unknown action \(a)\"}"
+            }
+        }
+        var views: [String: Any] = [:]
+        for v in [SlotView.notes, .files, .jira, .detail, .releases, .config, .output, .confluence, .ai] {
+            guard let m = slotMember(v) else { continue }
+            if let p = m as? PopupWindow {
+                views[v.rawValue] = p.testState
+            } else {
+                let f = m.slotWindow.frame
+                views[v.rawValue] = ["shown": m.slotShown, "key": m.slotWindow.isKeyWindow,
+                                     "frame": [f.origin.x, f.origin.y, f.width, f.height].map { Int($0.rounded()) }]
+            }
+        }
+        let state: [String: Any] = [
+            "view": slot.current?.rawValue ?? "", "visible": slot.isVisible,
+            "active": NSApp.isActive, "keyWindow": NSApp.keyWindow?.title ?? "",
+            "windows": NSApp.windows.filter(\.isVisible).count,
+            "palette": popup.isShown, "views": views,
+        ]
+        guard let d = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) else { return "{}" }
+        return String(decoding: d, as: UTF8.self)
+    }
+
     // Unix socket for the isolated command launcher: a message naming a
     // commands.toml section ("notes", "jira", …) opens that window in the
     // running daemon (no second process needed).
@@ -3088,10 +3133,27 @@ final class SwitcherController: NSObject {
                            socklen_t(MemoryLayout<timeval>.size))
                 var buf = [UInt8](repeating: 0, count: 2048)
                 let n = read(cfd, &buf, buf.count)
+                let query = n > 0 ? (String(bytes: buf[..<n], encoding: .utf8) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines) : ""
+                if query == "state" || query.hasPrefix("do:") {
+                    // tests: answered on the same connection (bin/ui-test.sh
+                    // ws_query); main thread, bounded wait so a busy main
+                    // loop can't wedge the accept loop
+                    var reply = "{\"error\":\"timeout\"}"
+                    let done = DispatchSemaphore(value: 0)
+                    DispatchQueue.main.async { [weak self] in
+                        reply = self?.testQuery(query) ?? "{}"
+                        done.signal()
+                    }
+                    _ = done.wait(timeout: .now() + 2)
+                    let line = reply + "\n"
+                    line.withCString { _ = Darwin.write(cfd, $0, strlen($0)) }
+                    close(cfd)
+                    continue
+                }
                 close(cfd)
                 if n > 0 {
-                    let msg = String(bytes: buf[..<n], encoding: .utf8) ?? ""
-                    let name = msg.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let name = query
                     let t0 = DispatchTime.now().uptimeNanoseconds
                     let prep = settings.sharedWindow && Self.hotkeyModes.contains(name)
                         ? Self.hotkeyPrep() : ""

@@ -11126,6 +11126,23 @@ public enum ThemeRole: String, CaseIterable {
     public var hasTerminalDrawer: Bool { terminalDrawer != nil }
     public var hasFileBrowser: Bool { fileBrowser != nil }
 
+    // the socket's `state` answer for this window (tests: bin/ui-test.sh
+    // wait_state) — plain JSON values only
+    public var testState: [String: Any] {
+        let f = panel.frame
+        return [
+            "name": config.name, "shown": isShown, "key": panel.isKeyWindow,
+            "frame": [f.origin.x, f.origin.y, f.width, f.height].map { Int($0.rounded()) },
+            "drawerInset": Int(drawerInsetNow.rounded()),
+            "terminal": terminalDrawer != nil && terminalShown,
+            "browser": fileBrowser != nil && (!fileBrowserDrawerMode || fileBrowserShown),
+            "findBar": findBarShown, "accessory": topAccessory != nil,
+            "pane": focusedPane.map { "\($0)" } ?? "",
+            "tabs": tabTitles, "selectedTab": selectedTab,
+            "responder": panel.firstResponder.map { String(describing: type(of: $0)) } ?? "",
+        ]
+    }
+
     // the current window's drag-header rect (for popping the theme menu under
     // the paint-brush button)
     public func headerButtonRect(_ id: Int) -> NSRect? {
