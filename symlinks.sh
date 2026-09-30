@@ -12,8 +12,7 @@ set -uo pipefail
 #                 seeds them from the bundle) — never a link into the app
 _sl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="${ROOT:-$_sl_self}"
-[ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"   # CONFIG_DIRS, BACKUP_PREFIX
-BACKUP_PREFIX="${BACKUP_PREFIX:-/tmp/ws-backup}"
+[ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"   # CONFIG_DIRS
 LINK_ROOT="${WS_LINK_ROOT:-$ROOT}"
 WS_HOME_DEFAULT="${WS_HOME_DEFAULT:-$HOME/.config/workspace-switcher}"
 
@@ -78,28 +77,29 @@ _ws_parent_links() {
                # last `[ -L ]` must not fail the command substitution
 }
 
+# only links are ever replaced: a real file / directory in the way (a git
+# checkout included) is never moved or deleted — it is reported and left alone
 _sl_repair() {
     local -a idx=("$@")
-    local backup="$BACKUP_PREFIX-$(date +%s)" i t s rel d
+    local i t s d rc=0
     for d in $CONFIG_DIRS; do
         [ -L "$HOME/.config/$d" ] && rm "$HOME/.config/$d"
     done
     [ "${#idx[@]}" -eq 0 ] && return 0
-    mkdir -p "$backup"
     for i in "${idx[@]}"; do
         t="${MAN_TARGET[$i]}"; s="${MAN_SOURCE[$i]}"
         if [ ! -e "$s" ]; then warn "skip (source missing): ~${s#$HOME}"; continue; fi
         [ -L "$t" ] && rm "$t"
         if [ -e "$t" ]; then
-            rel="${t#"$HOME"/}"
-            mkdir -p "$backup/$(dirname "$rel")"
-            mv "$t" "$backup/$rel"
-            warn "backed up ~${t#$HOME} -> $backup/"
+            fail "~${t#$HOME} is a real file/dir, not a link — left alone (remove it yourself, then re-run)"
+            rc=1
+            continue
         fi
         mkdir -p "$(dirname "$t")"
         ln -s "$s" "$t"
         ok "~${t#$HOME} -> ~${s#$HOME}"
     done
+    return "$rc"
 }
 
 validate_sym_links() {

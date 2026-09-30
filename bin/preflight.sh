@@ -108,11 +108,11 @@ if [ -n "$MARK_MODE" ] && [ "$MARK_MODE" != "$MODE" ]; then
     if [ "$MODE" = app ]; then
         add other-install core warn 0 "No other install in the way" \
             "${WS_HOME/#$HOME/~} is a developer checkout (git)" \
-            "Keep using the checkout, or switch this Mac to the installed app (the checkout is kept, your settings are carried over)." setup-home
+            "Keep using the checkout, or move it out of ~/.config yourself and switch this Mac to the installed app." setup-home
     else
         add other-install core warn 0 "No other install in the way" \
             "${WS_HOME/#$HOME/~} belongs to the installed app (DMG)" \
-            "INSTALL.sh takes it over: your commands.toml and rules are backed up first."
+            "Run the app's UNINSTALL.sh (or remove the folder) before INSTALL.sh."
     fi
 else
     add other-install core warn 1 "No other install in the way" "${MARK_MODE:-first install}"
@@ -216,7 +216,7 @@ if [ -f "$ROOT/symlinks.sh" ]; then
     else
         BAD="$(printf '%s\n' "$LINKS" | grep -c -e '✘' -e '·' || true)"
         add links stack warn 0 "Config links" "$BAD link(s) missing or pointing elsewhere" \
-            "Link the aerospace / sketchybar / borders configs (anything in the way is backed up)." stack
+            "Link the aerospace / sketchybar / borders configs (a real file in the way is left alone and reported)." stack
     fi
 fi
 

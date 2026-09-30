@@ -7,7 +7,7 @@
 #
 # Covers bin/setup-home.sh (fresh app install, idempotent re-run, moved app,
 # seeded files: untouched -> updated, edited -> kept + .new, deleted rule
-# stays deleted), symlinks.sh in both modes (backup of a file in the way),
+# stays deleted), symlinks.sh in both modes (a real file in the way is left alone),
 # bin/preflight.sh --json (missing Apple model = a warning, never a failure),
 # app -> repo and repo -> app.
 set -uo pipefail
@@ -81,11 +81,14 @@ t "version recorded" grep -q '^version=9.9.9' "$WSH/.install"
 echo "stack: config links"
 mkdir -p "$HOME/.config/aerospace"
 echo "mine" > "$HOME/.config/aerospace/aerospace.toml"
+OUT="$(bash "$SETUP" stack 2>&1)"; RC=$?
+t "stack stops on a real file in the way" test "$RC" != 0
+t "the file in the way is untouched" bash -c "[ ! -L '$HOME/.config/aerospace/aerospace.toml' ] && grep -qx mine '$HOME/.config/aerospace/aerospace.toml'"
+rm "$HOME/.config/aerospace/aerospace.toml"
 OUT="$(bash "$SETUP" stack 2>&1)"
 t "stack succeeds" grep -q 'result=ok' <<<"$OUT"
 t "aerospace.toml links to the home's copy" is_link_to "$HOME/.config/aerospace/aerospace.toml" "$WSH/config/aerospace/aerospace.toml"
 t "sketchybarrc linked" is_link_to "$HOME/.config/sketchybar/sketchybarrc" "$WSH/config/sketchybar/sketchybarrc"
-t "the file in the way was backed up" bash -c "grep -rqx mine $BACKUP_PREFIX-*"
 t "helpers precompiled into the cache" test -x "$HOME/.cache/sketchybar/menubar_watch"
 t "symlinks --check passes" env WS_LINK_ROOT="$WSH" bash "$RES/symlinks.sh" --check
 
@@ -118,11 +121,10 @@ cp "$ROOT/bin/setup-home.sh" "$REPO/bin/"
 cp -R "$ROOT/config" "$REPO/config"
 echo "# the checkout's config" > "$REPO/commands.toml"
 echo "# edited in the app install" >> "$WSH/commands.toml"
-OUT="$(bash "$REPO/bin/setup-home.sh" repo)"
-BK="$(sed -n 's/^backup=//p' <<<"$OUT")"
-t "the app's home was moved to a backup" test -f "$BK/commands.toml"
-t "with the user's edits" grep -q 'edited in the app install' "$BK/commands.toml"
-t "backup is under BACKUP_PREFIX" bash -c "case '$BK' in '$BACKUP_PREFIX'-*) exit 0 ;; esac; exit 1"
+t "repo refuses while the app owns the home" bash -c "! bash '$REPO/bin/setup-home.sh' repo 2>/dev/null"
+t "the app's home is untouched" grep -q 'edited in the app install' "$WSH/commands.toml"
+rm -rf "$WSH"   # the user removes it by hand
+t "repo takes the empty home" bash "$REPO/bin/setup-home.sh" repo
 ROOT="$REPO" bash "$REPO/symlinks.sh" --fix >/dev/null 2>&1
 t "home links to the checkout" is_link_to "$WSH" "$REPO"
 t "aerospace.toml now points into the checkout" is_link_to "$HOME/.config/aerospace/aerospace.toml" "$REPO/config/aerospace/aerospace.toml"
@@ -145,10 +147,11 @@ t "links re-pointed at the home" is_link_to "$HOME/.config/aerospace/aerospace.t
 
 echo "repo -> app (the checkout IS the home)"
 rm -rf "$WSH"; cp -R "$REPO" "$WSH"
-OUT="$(bash "$SETUP" app "$APP" --switch)"
-KEPT="$(sed -n 's/^kept=//p' <<<"$OUT")"
-t "checkout renamed, not deleted" test -d "$KEPT/.git"
-t "home set up for the app" grep -q '^mode=app' "$WSH/.install"
+t "--switch refuses a real checkout" bash -c "! bash '$SETUP' app '$APP' --switch 2>/dev/null"
+t "the checkout is not moved" test -d "$WSH/.git"
+bash "$SETUP" stack >/dev/null 2>&1
+t "stack from the app never moves the checkout" bash -c "[ -d '$WSH/.git' ] && [ ! -L '$WSH' ]"
+t "nothing renamed beside it" bash -c "! ls -d '$WSH'.repo-* 2>/dev/null"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

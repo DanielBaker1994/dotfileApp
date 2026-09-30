@@ -55,10 +55,10 @@ files in the way, UNINSTALL.sh removes only links into the repo.
 - `bin/setup-home.sh app APP [--switch] | repo | stack | status`: seeds
   (untouched file follows a new default, an edited one is kept + `FILE.new`,
   a deleted rule stays deleted), heals the links when the app moved, hands
-  over between the two installs (a checkout is never deleted: unlinked or
-  renamed `…repo-<date>`; an app home goes to
-  `/tmp/ws-backup-<time>/`). Home owned by a checkout → exit
-  3, nothing touched. `stack` = `symlinks.sh` (`WS_LINK_ROOT` = the home in
+  over between the two installs. NO backups: only links are ever replaced; a
+  real file / dir in the way (a checkout above all) → error, untouched
+  (`--switch` only unlinks a home that is a link; `repo` refuses an app
+  home). Home owned by a checkout → exit 3, nothing touched. `stack` = `symlinks.sh` (`WS_LINK_ROOT` = the home in
   app mode) + precompiled sketchybar helpers + brew services. Never git.
 - `bin/preflight.sh [--json] [--mode repo|app] [--app PATH]`: ONE check list
   for INSTALL.sh (step 0) and the Setup window. Required: macOS ≥

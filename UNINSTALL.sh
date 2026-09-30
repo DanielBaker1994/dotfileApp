@@ -15,7 +15,6 @@ UID_="$(id -u)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 # every name/path removed below lives in install.conf
 . "$ROOT/install.conf"
-BACKUP="$UNINSTALL_BACKUP_PREFIX-$(date +%s)"
 WS_HOME="${WS_HOME:-$WS_HOME_DEFAULT}"
 # app install: the configs the links point at live in the home, and the app
 # itself is this script's bundle
@@ -50,8 +49,8 @@ launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
 rm -f "$PLIST"
 ok "poll agent removed"
 
-step "removing installed configs (backed up to $BACKUP)"
-mkdir -p "$BACKUP"
+# only OUR links go; real files / directories are never moved or deleted
+step "removing the config links"
 for d in $CONFIG_DIRS; do
     dst="$HOME/.config/$d"
     # links into this repo (INSTALL.sh) just go — the repo keeps the files
@@ -63,11 +62,9 @@ for d in $CONFIG_DIRS; do
         done < <(find "$dst" -type l)
         find "$dst" -depth -type d -empty -delete
     fi
-    if [ -e "$dst" ] || [ -L "$dst" ]; then
-        mv "$dst" "$BACKUP/"
-    fi
+    [ -e "$dst" ] && warn "left in place (not ours): $dst"
 done
-ok "configs removed"
+ok "config links removed"
 
 step "removing microphone + speech permissions"
 TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
@@ -81,19 +78,15 @@ rm -rf $CACHE_DIRS
 rm -f $RUNTIME_FILES
 ok "caches removed"
 
-# app install: the home (your commands.toml, rules, config copies) is moved
-# to the backup, and the app goes to the Trash. A checkout is never touched.
+# app install: the app goes to the Trash; the home (your commands.toml,
+# rules, config copies) stays where it is. A checkout is never touched.
 if [ -n "$APP_BUNDLE" ]; then
-    step "removing the app and its settings folder"
-    if [ -d "$WS_HOME" ] && [ ! -L "$WS_HOME" ] && [ ! -e "$WS_HOME/.git" ] \
-        && grep -q '^mode=app' "$WS_HOME/.install" 2>/dev/null; then
-        mv "$WS_HOME" "$BACKUP/home"
-        ok "settings moved to $BACKUP/home"
-    fi
+    step "removing the app"
+    [ -d "$WS_HOME" ] && ! [ -L "$WS_HOME" ] && ok "your settings are still in $WS_HOME — delete it if you don't want them"
     mv "$APP_BUNDLE" "$HOME/.Trash/$APP_NAME-$(date +%s).app" 2>/dev/null \
         && ok "app moved to the Trash" || warn "could not move $APP_BUNDLE to the Trash — drag it there"
 else
     rm -f "$ROOT/.install"
 fi
 
-printf "\n${GREEN}Done. Configs backed up in: %s${RESET}\n" "$BACKUP"
+printf "\n${GREEN}Done.${RESET}\n"

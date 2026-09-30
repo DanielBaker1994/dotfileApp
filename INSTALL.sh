@@ -126,22 +126,9 @@ fi
 "$ROOT/bin/preflight.sh" --mode repo || die "this Mac cannot run the app (see the ✘ lines above)"
 ok "this Mac can build and run the app (! lines = optional features that are off)"
 
-# the stable home (~/.config/workspace-switcher) may belong to an installed
-# app (DMG): take it over — its commands.toml / rules / configs are moved to
-# a backup, never deleted
-HOME_OUT="$("$ROOT/bin/setup-home.sh" repo)" || die "could not prepare ~/.config/workspace-switcher"
-APP_HOME_BACKUP="$(printf '%s\n' "$HOME_OUT" | sed -n 's/^backup=//p' | head -1)"
-if [ -n "$APP_HOME_BACKUP" ]; then
-    warn "the installed app's settings were moved to $APP_HOME_BACKUP"
-    if [ -t 0 ] && [ -f "$APP_HOME_BACKUP/commands.toml" ]; then
-        read -r -p "    Use that commands.toml in this checkout (replaces the repo's copy)? [y/N] " ans
-        case "$ans" in y|Y|yes|YES)
-            cp "$ROOT/commands.toml" "$APP_HOME_BACKUP/commands.toml.repo"
-            cp "$APP_HOME_BACKUP/commands.toml" "$ROOT/commands.toml"
-            ok "commands.toml carried over (the repo's copy: $APP_HOME_BACKUP/commands.toml.repo)" ;;
-        esac
-    fi
-fi
+# the stable home (~/.config/workspace-switcher) must not belong to an
+# installed app (DMG) — setup-home.sh stops if it does, nothing is moved
+"$ROOT/bin/setup-home.sh" repo >/dev/null || die "could not prepare ~/.config/workspace-switcher"
 # a second copy with the same bundle id confuses LaunchServices and the
 # privacy grants — this install runs the one built in the checkout
 for other in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; do
@@ -193,13 +180,13 @@ ok "all dependencies present (font-hack-nerd-font powers the terminal glyphs)"
 
 # ------------------------------------------------------------- 3. configs
 STEP="installing configs"
-step "3/6 configs (symlinked into the repo; old files backed up)"
+step "3/6 configs (symlinked into the repo)"
 # Every file under config/<name> becomes a symlink in ~/.config/<name>, so
 # editing either path edits the repo copy (one file, tracked by git). Real
 # directories are kept, so files that aren't in the repo stay where they are.
-# A real file in the way is backed up first; a link that's already right is
-# left alone (rerunnable).
-ensure_sym_links
+# A real file in the way stops the install and is left alone (remove it,
+# re-run); a link that's already right is left alone (rerunnable).
+ensure_sym_links || die "a real file is in the way of a config link (see ✘ above)"
 ok "configs linked to the repo ($CONFIG_DIRS)"
 
 # ------------------------------------------------------------- 4. build

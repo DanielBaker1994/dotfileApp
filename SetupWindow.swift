@@ -484,7 +484,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // the opt-in step: brew packages, config links (with backups), services
+    // the opt-in step: brew packages, config links, services
     @objc private func stackClicked(_ sender: Any?) {
         guard !busy else { return }
         guard let b = brewPath else { noBrew(); return }
@@ -495,7 +495,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         ask(title: "Set up the hotkeys and the menu bar?",
             text: (installs.isEmpty ? "" : "Installs with Homebrew: \(installs).\n\n")
                 + "Links this app's AeroSpace, sketchybar and borders configs into ~/.config. "
-                + "Files already there are moved to /tmp/ws-backup-<time> first — nothing is deleted.\n\n"
+                + "Real files already there are left alone and reported — nothing is moved or deleted.\n\n"
                 + "Afterwards macOS asks once for Accessibility access for AeroSpace (System Settings ▸ Privacy & Security).",
             buttons: ["Set Up", "Cancel"]) { [weak self] pick in
             guard pick == 0, let self else { return }
@@ -525,6 +525,14 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         env["NONINTERACTIVE"] = "1"
+        // brew's tap trust list lives under $XDG_CONFIG_HOME when the user's
+        // shell sets it; launched from Finder we don't inherit that, and brew
+        // then refuses the sketchybar / borders / aerospace taps
+        let home = NSHomeDirectory(), fm = FileManager.default
+        if env["XDG_CONFIG_HOME"] == nil, fm.fileExists(atPath: home + "/.config/homebrew/trust.json"),
+           !fm.fileExists(atPath: home + "/.homebrew/trust.json") {
+            env["XDG_CONFIG_HOME"] = home + "/.config"
+        }
         p.environment = env
         let pipe = Pipe()
         p.standardOutput = pipe

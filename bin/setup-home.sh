@@ -15,26 +15,32 @@
 #                                      moved / updated app heals itself).
 #                                      Home owned by a checkout: exit 3 and
 #                                      touch nothing, unless --switch.
-#   setup-home.sh repo                 INSTALL.sh: take the home over from an
-#                                      app install (its files are backed up)
+#   setup-home.sh repo                 INSTALL.sh: mark the home as the
+#                                      checkout's (refuses while an app
+#                                      install owns it)
 #   setup-home.sh stack                link the aerospace / sketchybar /
 #                                      borders configs + start the services
 #   setup-home.sh status               who owns the home: repo | app | none
 #
-# Never runs git. Anything replaced is moved to a backup first
-# (install.conf BACKUP_PREFIX, in /tmp). $WS_HOME
-# overrides the home (tests).
+# Never runs git, never moves or deletes a real file / directory (a git
+# checkout least of all): only links are replaced; anything else in the way
+# stops with an error. $WS_HOME overrides the home (tests).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$DIR/.." && pwd -P)"
 # shellcheck source=../install.conf
 . "$ROOT/install.conf"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# brew keeps its tap trust list (`brew trust`) under $XDG_CONFIG_HOME when the
+# shell sets it; an app launched from Finder has no XDG_CONFIG_HOME, so brew
+# would look in ~/.homebrew and refuse the sketchybar / borders / aerospace taps
+if [ -z "${XDG_CONFIG_HOME:-}" ] && [ -f "$HOME/.config/homebrew/trust.json" ] \
+    && [ ! -f "$HOME/.homebrew/trust.json" ]; then
+    export XDG_CONFIG_HOME="$HOME/.config"
+fi
 
 WS_HOME="${WS_HOME:-$WS_HOME_DEFAULT}"
 MARK="$WS_HOME/.install"
-STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP="$BACKUP_PREFIX-$STAMP"
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'setup-home: %s\n' "$*" >&2; exit 1; }
@@ -81,16 +87,14 @@ seed $new $rel"
     fi
 }
 
-# a link in the home; a real file / directory in the way is backed up
+# a link in the home; a real file / directory in the way is left alone
 link() {   # target name
     local t="$1" l="$WS_HOME/$2"
     if [ -L "$l" ]; then
         [ "$(readlink "$l")" = "$t" ] && return 0
         rm "$l"
     elif [ -e "$l" ]; then
-        mkdir -p "$BACKUP"
-        mv "$l" "$BACKUP/$2"
-        say "backup=$BACKUP/$2"
+        die "$l is a real file/dir, not a link — left alone (remove it yourself, then re-run)"
     fi
     ln -s "$t" "$l"
 }
@@ -118,8 +122,10 @@ cmd_app() {
             say "detail=$WS_HOME is a developer checkout — left alone"
             return 3
         fi
-        # hand over: the checkout is KEPT (a link is just removed, a real
-        # directory is renamed) and the user's settings are carried over
+        # a real checkout is never moved: the user does that by hand
+        [ -L "$WS_HOME" ] || die "$WS_HOME is a git checkout — left alone (move it out of the way yourself, then re-run)"
+        # hand over: the link is removed (the checkout it points at is
+        # untouched) and the user's settings are carried over
         # (rules + the aerospace / sketchybar / borders configs included:
         # the per-file links in ~/.config keep resolving to the same content)
         local keep old
@@ -132,13 +138,8 @@ cmd_app() {
         # the repo-built daemon is the wrong one from here on
         pkill -f "$WS_HOME/$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
         [ -n "$old" ] && pkill -f "$old/$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
-        if [ -L "$WS_HOME" ]; then
-            say "kept=$(readlink "$WS_HOME")"
-            rm "$WS_HOME"
-        else
-            mv "$WS_HOME" "$WS_HOME.repo-$STAMP" || die "could not move the checkout aside"
-            say "kept=$WS_HOME.repo-$STAMP"
-        fi
+        say "kept=$(readlink "$WS_HOME")"
+        rm "$WS_HOME"
         mkdir -p "$WS_HOME"
         [ -f "$keep/commands.toml" ] && cp -p "$keep/commands.toml" "$WS_HOME/commands.toml"
         for d in $RESOURCE_SEED_DIRS; do
@@ -185,10 +186,7 @@ cmd_repo() {
     own="$(owner)"
     case "$ROOT" in *.app/Contents/Resources) die "'repo' is for a git checkout (run ./INSTALL.sh there)" ;; esac
     if [ "$own" = app ] && [ "$(cd "$WS_HOME" 2>/dev/null && pwd -P)" != "$ROOT" ]; then
-        mkdir -p "$BACKUP"
-        mv "$WS_HOME" "$BACKUP/home" || die "could not move $WS_HOME aside"
-        say "backup=$BACKUP/home"
-        say "detail=the installed app's settings (commands.toml, rules, configs) are in $BACKUP/home"
+        die "$WS_HOME belongs to the installed app — run its UNINSTALL.sh (or remove the folder) first"
     fi
     # the repo is the home, or symlinks.sh links the home to it next
     printf 'mode=repo\nroot=%s\n' "$ROOT" > "$ROOT/.install"
@@ -197,11 +195,13 @@ cmd_repo() {
 
 # -------------------------------------------------------------- stack
 cmd_stack() {
-    local own res svc f
-    own="$(owner)"
-    if [ "$own" = app ]; then
+    local res svc f rc=0
+    # run from the app bundle: the configs are the home's copies, whoever
+    # owns the home (without WS_LINK_ROOT symlinks.sh would try to make the
+    # home a link to the bundle)
+    case "$ROOT" in *.app/Contents/Resources)
         export WS_LINK_ROOT="$WS_HOME"
-        res="$WS_HOME/$APP_NAME.app/Contents/Resources"
+        res="$ROOT"
         # precompiled sketchybar helpers (no swiftc on an end user's Mac);
         # touched so they count as newer than their sources
         if [ -d "$res/helpers-bin" ]; then
@@ -210,7 +210,8 @@ cmd_stack() {
                 cp -p "$f" "$HOME/.cache/sketchybar/" && touch "$HOME/.cache/sketchybar/$(basename "$f")"
             done
         fi
-    fi
+        ;;
+    esac
     # shellcheck source=../symlinks.sh
     . "$ROOT/symlinks.sh"
     ensure_sym_links || die "linking the configs failed"
@@ -218,11 +219,12 @@ cmd_stack() {
     if [ -n "${WS_NO_SERVICES:-}" ]; then say "result=ok"; return 0; fi
     if command -v brew >/dev/null 2>&1; then
         for svc in $BREW_SERVICES; do
-            brew services start "$svc" >/dev/null 2>&1 || true
+            brew services start "$svc" || { printf 'setup-home: brew services start %s failed\n' "$svc" >&2; rc=1; }
         done
     fi
-    command -v aerospace >/dev/null 2>&1 && aerospace reload-config >/dev/null 2>&1
-    command -v sketchybar >/dev/null 2>&1 && sketchybar --reload >/dev/null 2>&1
+    command -v aerospace >/dev/null 2>&1 && aerospace reload-config
+    command -v sketchybar >/dev/null 2>&1 && sketchybar --reload
+    [ "$rc" = 0 ] || return "$rc"
     say "result=ok"
 }
 
