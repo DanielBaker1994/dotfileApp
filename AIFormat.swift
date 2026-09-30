@@ -300,3 +300,233 @@ enum AnswerCleanup {
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+// MARK: - rule files
+
+struct AIRule {
+    let path: String
+    var name: String
+    var output = "plain"            // diff | plain
+    var placeholder = ""
+    var flags: [String] = []        // fm respond options, in file order
+    var instructions = ""
+    var warnings: [String] = []
+    var protectCodeSet: Bool?       // protect-code (default on)
+    var chunkSet: Bool?             // chunk: split long text (default: diff rules)
+    var prompt = ""                 // a line put before the text ("Proofread this draft:")
+    var then = ""                   // the rule file that gets this rule's answer next
+    var keepWords = false           // an answer that changes the words is dropped
+    var csvTables = false           // comma rows become a Markdown table first
+
+    var file: String { (path as NSString).lastPathComponent }
+    var diff: Bool { output == "diff" }
+    var protectCode: Bool { protectCodeSet ?? true }
+    var chunk: Bool { chunkSet ?? diff }
+
+    // `---` frontmatter (key: value, # comments) + the body as instructions
+    static func load(_ path: String) -> AIRule {
+        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        let base = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        var r = AIRule(path: path, name: base)
+        var lines = text.components(separatedBy: "\n")
+        if lines.first?.trimmingCharacters(in: .whitespaces) == "---",
+           let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) {
+            for raw in lines[1..<end] {
+                var line = raw
+                if let h = line.range(of: #"(^|\s)#.*$"#, options: .regularExpression) { line.removeSubrange(h) }
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                var val = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                if val.count >= 2, let f = val.first, f == "\"" || f == "'", val.last == f {
+                    val = String(val.dropFirst().dropLast())
+                }
+                guard !key.isEmpty, !val.isEmpty else { continue }
+                let on = ["true", "yes", "1", "on"].contains(val.lowercased())
+                switch key {
+                case "name": r.name = val
+                case "output": r.output = val.lowercased()
+                case "placeholder": r.placeholder = val
+                case "greedy": if on { r.flags.append("--greedy") }
+                case "guardrails": r.flags += ["--guardrails", val]
+                case "use-case", "use_case", "usecase": r.flags += ["--use-case", val]
+                case "model": r.flags += ["-m", val]
+                case "protect-code": r.protectCodeSet = on
+                case "chunk": r.chunkSet = on
+                case "prompt": r.prompt = val
+                case "then": r.then = val.lowercased().hasSuffix(".md") ? val : val + ".md"
+                case "keep-words": r.keepWords = on
+                case "csv-tables": r.csvTables = on
+                default: r.warnings.append("unknown key “\(key)”")
+                }
+            }
+            lines = Array(lines[(end + 1)...])
+        }
+        r.instructions = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return r
+    }
+
+    // this rule, then every rule its `then:` leads to (same folder; a
+    // missing file or a loop ends the chain with a warning on the first)
+    static func chain(_ first: AIRule) -> [AIRule] {
+        var out = [first]
+        let dir = (first.path as NSString).deletingLastPathComponent
+        while let next = out.last?.then, !next.isEmpty, out.count < 6 {
+            let path = dir + "/" + next
+            if out.contains(where: { $0.file == next }) {
+                out[0].warnings.append("then: “\(next)” loops")
+                break
+            }
+            guard FileManager.default.fileExists(atPath: path) else {
+                out[0].warnings.append("then: no “\(next)”")
+                break
+            }
+            out.append(load(path))
+        }
+        return out
+    }
+
+    // the instructions a run sends (plus the code-token rule when needed)
+    func instructions(guarded: Bool) -> String {
+        let i = Reflow.instructions(instructions)
+        return guarded ? i + "\n- " + CodeGuard.instruction : i
+    }
+
+    // what goes to fm on stdin: `prompt:` on its own line, then the text
+    func wrap(_ text: String) -> String { prompt.isEmpty ? text : prompt + "\n\n" + text }
+
+    // what the rule does to its text before the model sees it
+    func prepare(_ text: String) -> String { csvTables ? CSVTables.convert(text) : text }
+
+    // the model's answer to `input` (what prepare returned), or the input
+    // back when a keep-words rule's answer changed the words
+    func accept(input: String, answer: String) -> (text: String, note: String?) {
+        guard keepWords else { return (answer, nil) }
+        let c = WordGuard.check(input, answer)
+        guard !c.ok else { return (answer, nil) }
+        let what = [c.added.isEmpty ? nil : "added “\(c.added.prefix(3).joined(separator: " "))”",
+                    c.dropped.isEmpty ? nil : "dropped “\(c.dropped.prefix(3).joined(separator: " "))”"]
+            .compactMap { $0 }.joined(separator: ", ")
+        return (input, "“\(name)” skipped: it \(what)")
+    }
+
+    // the argv after the fm binary; the input goes on stdin
+    func arguments(guarded: Bool) -> [String] {
+        let i = instructions(guarded: guarded)
+        return ["respond", "--stream"] + (i.isEmpty ? [] : ["-i", i]) + flags
+    }
+
+    // what the view shows: the instructions by file, the input by name
+    var preview: String {
+        (["fm", "respond"] + (instructions.isEmpty ? [] : ["-i", "@rules/" + file]) + flags.map(shq))
+            .joined(separator: " ") + " < input" + (then.isEmpty ? "" : "  → then " + then)
+    }
+
+    // a command you can paste into a shell (instructions + input inline)
+    func runnable(input: String) -> String {
+        let args = ["fm", "respond"] + (instructions.isEmpty ? [] : ["-i", shq(Reflow.instructions(instructions))]) + flags.map(shq)
+        return args.joined(separator: " ") + " <<'WS_INPUT'\n" + wrap(prepare(input)) + "\nWS_INPUT"
+    }
+}
+
+private func shq(_ s: String) -> String {
+    s.range(of: #"^[A-Za-z0-9_@./:=+-]+$"#, options: .regularExpression) != nil
+        ? s : "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+// comma rows typed as a quick table ("name,status" / "---" / "web01,up")
+// -> a Markdown table. Done here, not by the model: it's exact every time.
+enum CSVTables {
+    // a row's cells, or nil when the line doesn't look like one
+    static func cells(_ line: String) -> [String]? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.contains(","), !["|", "#", "- ", "* ", "> "].contains(where: { t.hasPrefix($0) }) else { return nil }
+        let c = t.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard c.count >= 2, c.allSatisfy({ cell in
+            !cell.isEmpty && cell.count <= 40 && cell.split(separator: " ").count <= 5
+                && !(cell.count > 1 && [".", "?", "!"].contains(where: { cell.hasSuffix($0) }))
+        }) else { return nil }
+        return c
+    }
+
+    private static func isRule(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces).range(of: #"^[-=]{3,}$"#, options: .regularExpression) != nil
+    }
+
+    static func convert(_ s: String) -> String {
+        let lines = s.components(separatedBy: "\n")
+        var out: [String] = []
+        var i = 0
+        var inFence = false
+        while i < lines.count {
+            let t = lines[i].trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("```") || t.hasPrefix("~~~") { inFence.toggle() }
+            if !inFence, let head = cells(lines[i]) {
+                var j = i + 1
+                let ruled = j < lines.count && isRule(lines[j])
+                if ruled { j += 1 }
+                var rows: [[String]] = []
+                while j < lines.count, let r = cells(lines[j]), r.count == head.count {
+                    rows.append(r)
+                    j += 1
+                }
+                // without the --- line it takes more to be sure it's a table
+                if ruled ? rows.count >= 1 : (rows.count >= 2 || (rows.count == 1 && head.count >= 3)) {
+                    func row(_ c: [String]) -> String {
+                        "| " + c.map { $0.replacingOccurrences(of: "|", with: "\\|") }.joined(separator: " | ") + " |"
+                    }
+                    if let last = out.last, !last.trimmingCharacters(in: .whitespaces).isEmpty { out.append("") }
+                    out.append(row(head))
+                    out.append(row(head.map { _ in "---" }))
+                    out += rows.map(row)
+                    if j < lines.count, !lines[j].trimmingCharacters(in: .whitespaces).isEmpty { out.append("") }
+                    i = j
+                    continue
+                }
+            }
+            out.append(lines[i])
+            i += 1
+        }
+        return out.joined(separator: "\n")
+    }
+}
+
+// a layout-only rule (keep-words) may move the words, never change them:
+// nothing new (a table's header row aside), nothing lost but filler
+enum WordGuard {
+    static let filler: Set<String> = [
+        "first", "second", "third", "fourth", "fifth", "firstly", "secondly", "thirdly", "then", "next",
+        "finally", "lastly", "and", "also", "is", "are", "was", "were", "has", "have", "had", "with", "the",
+        "a", "an", "of", "at", "in", "on", "it", "to", "for", "that", "which", "or",
+    ]
+
+    // lowercase words, table header rows and list numbers left out
+    static func words(_ s: String) -> [String] {
+        let lines = s.components(separatedBy: "\n")
+        var kept: [String] = []
+        for (i, l) in lines.enumerated() {
+            let sep = l.range(of: #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#, options: .regularExpression) != nil
+            let nextSep = i + 1 < lines.count && lines[i + 1].contains("|")
+                && lines[i + 1].range(of: #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#, options: .regularExpression) != nil
+            if (sep && l.contains("|")) || (nextSep && l.contains("|")) { continue }
+            // "1." of a numbered list is a marker, not a word
+            kept.append(l.replacingOccurrences(of: #"^\s*\d+[.)]\s"#, with: "", options: .regularExpression))
+        }
+        return kept.joined(separator: "\n").lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+    }
+
+    static func check(_ input: String, _ output: String) -> (ok: Bool, added: [String], dropped: [String]) {
+        var count: [String: Int] = [:]
+        for w in words(input) { count[w, default: 0] += 1 }
+        var added: [String] = []
+        for w in words(output) {
+            if let n = count[w], n > 0 { count[w] = n - 1 } else if !filler.contains(w) { added.append(w) }
+        }
+        let dropped = words(input).filter { w in
+            guard let n = count[w], n > 0, !filler.contains(w) else { return false }
+            count[w] = n - 1
+            return true
+        }
+        return (added.isEmpty && dropped.isEmpty, added, dropped)
+    }
+}

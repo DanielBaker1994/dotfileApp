@@ -48,6 +48,8 @@ source "$PLUGIN_DIR/aerospacer.sh"
 
 # Right
 source "$PLUGIN_DIR/status.sh"
+# Notification chips (left end of the status group; [notifications] in commands.toml)
+source "$PLUGIN_DIR/notifications.sh"
 
 # Guard: a monitor plug/unplug or wake can make AeroSpace invent workspace "10";
 # this reverts it immediately (see the script header).

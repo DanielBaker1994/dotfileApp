@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-_sl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# symlinks.sh — the per-file links from ~/.config/<name> (aerospace,
+# sketchybar, borders) into THE config copies, + the stable home link.
+#
+# Where the copies live ($LINK_ROOT/config/<name>):
+#   repo install  the repo itself (ROOT); ~/.config/workspace-switcher is
+#                 then the repo, or a link to it
+#   app install   WS_LINK_ROOT = ~/.config/workspace-switcher, a real
+#                 directory holding the user's own copies (bin/setup-home.sh
+#                 seeds them from the bundle) — never a link into the app
+_sl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="${ROOT:-$_sl_self}"
 [ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"   # CONFIG_DIRS, BACKUP_PREFIX
-BACKUP_PREFIX="${BACKUP_PREFIX:-/tmp/ws-backup}"
+BACKUP_PREFIX="${BACKUP_PREFIX:-$HOME/.config/workspace-switcher-backups/install}"
+LINK_ROOT="${WS_LINK_ROOT:-$ROOT}"
+WS_HOME_DEFAULT="${WS_HOME_DEFAULT:-$HOME/.config/workspace-switcher}"
 
 command -v ok   >/dev/null 2>&1 || ok()   { printf '\033[32m  \342\234\224 %s\033[0m\n' "$*"; }
 command -v fail >/dev/null 2>&1 || fail() { printf '\033[31m  \342\234\230 %s\033[0m\n' "$*"; }
@@ -27,22 +38,27 @@ _ws_build_manifest() {
     MAN_SOURCE=()
     local d f rel
     for d in $CONFIG_DIRS; do
-        [ -d "$ROOT/config/$d" ] || continue
+        [ -d "$LINK_ROOT/config/$d" ] || continue
         while IFS= read -r f; do
-            rel="${f#"$ROOT/config/$d"/}"
+            rel="${f#"$LINK_ROOT/config/$d"/}"
             MAN_TARGET+=("$HOME/.config/$d/$rel")
             MAN_SOURCE+=("$f")
-        done < <(find "$ROOT/config/$d" -type f 2>/dev/null | sort)
+        done < <(find "$LINK_ROOT/config/$d" -type f ! -name '*.new' ! -name '.DS_Store' 2>/dev/null | sort)
     done
-    MAN_TARGET+=("$HOME/.config/workspace-switcher")
-    MAN_SOURCE+=("$ROOT")
+    # repo install only: the stable home IS (a link to) the repo
+    if [ -z "${WS_LINK_ROOT:-}" ]; then
+        MAN_TARGET+=("${WS_HOME:-$WS_HOME_DEFAULT}")
+        MAN_SOURCE+=("$ROOT")
+    fi
 }
 
 _sl_state() {
     local t="$1" s="$2" rt rs
     [ -e "$s" ] || { printf 'BROKEN'; return; }
-    rt="$(cd "$t" 2>/dev/null && pwd -P)"
-    rs="$(cd "$s" 2>/dev/null && pwd -P)"
+    # the same file on disk, however it is reached (a linked parent
+    # directory counts): nothing to do
+    rt="$(realpath "$t" 2>/dev/null)"
+    rs="$(realpath "$s" 2>/dev/null)"
     [ -n "$rt" ] && [ "$rt" = "$rs" ] && { printf 'OK'; return; }
     if [ -L "$t" ]; then
         [ "$(readlink "$t")" = "$s" ] && printf 'OK' || printf 'WRONG'
@@ -90,7 +106,7 @@ validate_sym_links() {
     local mode="${1:-prompt}"
     _ws_build_manifest
     step "symlinks (workspace-switcher)"
-    info "repo = $ROOT"
+    info "configs = $LINK_ROOT/config"
     local i t s st bad=0 total=0
     local -a bad_idx=()
     for i in "${!MAN_TARGET[@]}"; do

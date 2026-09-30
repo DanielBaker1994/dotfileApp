@@ -25,91 +25,7 @@ private func aiPath(_ key: String, _ fallback: String) -> String {
     (aiSetting(key, fallback) as NSString).expandingTildeInPath
 }
 
-// MARK: - rule files
-
-struct AIRule {
-    let path: String
-    var name: String
-    var output = "plain"            // diff | plain
-    var placeholder = ""
-    var flags: [String] = []        // fm respond options, in file order
-    var instructions = ""
-    var warnings: [String] = []
-    var protectCodeSet: Bool?       // protect-code (default on)
-    var chunkSet: Bool?             // chunk: split long text (default: diff rules)
-
-    var file: String { (path as NSString).lastPathComponent }
-    var diff: Bool { output == "diff" }
-    var protectCode: Bool { protectCodeSet ?? true }
-    var chunk: Bool { chunkSet ?? diff }
-
-    // `---` frontmatter (key: value, # comments) + the body as instructions
-    static func load(_ path: String) -> AIRule {
-        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-        let base = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        var r = AIRule(path: path, name: base)
-        var lines = text.components(separatedBy: "\n")
-        if lines.first?.trimmingCharacters(in: .whitespaces) == "---",
-           let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) {
-            for raw in lines[1..<end] {
-                var line = raw
-                if let h = line.range(of: #"(^|\s)#.*$"#, options: .regularExpression) { line.removeSubrange(h) }
-                guard let colon = line.firstIndex(of: ":") else { continue }
-                let key = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-                var val = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                if val.count >= 2, let f = val.first, f == "\"" || f == "'", val.last == f {
-                    val = String(val.dropFirst().dropLast())
-                }
-                guard !key.isEmpty, !val.isEmpty else { continue }
-                let on = ["true", "yes", "1", "on"].contains(val.lowercased())
-                switch key {
-                case "name": r.name = val
-                case "output": r.output = val.lowercased()
-                case "placeholder": r.placeholder = val
-                case "greedy": if on { r.flags.append("--greedy") }
-                case "guardrails": r.flags += ["--guardrails", val]
-                case "use-case", "use_case", "usecase": r.flags += ["--use-case", val]
-                case "model": r.flags += ["-m", val]
-                case "protect-code": r.protectCodeSet = on
-                case "chunk": r.chunkSet = on
-                default: r.warnings.append("unknown key “\(key)”")
-                }
-            }
-            lines = Array(lines[(end + 1)...])
-        }
-        r.instructions = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return r
-    }
-
-    // the instructions a run sends (plus the code-token rule when needed)
-    func instructions(guarded: Bool) -> String {
-        let i = Reflow.instructions(instructions)
-        return guarded ? i + "\n- " + CodeGuard.instruction : i
-    }
-
-    // the argv after the fm binary; the input goes on stdin
-    func arguments(guarded: Bool) -> [String] {
-        let i = instructions(guarded: guarded)
-        return ["respond", "--stream"] + (i.isEmpty ? [] : ["-i", i]) + flags
-    }
-
-    // what the view shows: the instructions by file, the input by name
-    var preview: String {
-        (["fm", "respond"] + (instructions.isEmpty ? [] : ["-i", "@rules/" + file]) + flags.map(shq))
-            .joined(separator: " ") + " < input"
-    }
-
-    // a command you can paste into a shell (instructions + input inline)
-    func runnable(input: String) -> String {
-        let args = ["fm", "respond"] + (instructions.isEmpty ? [] : ["-i", shq(Reflow.instructions(instructions))]) + flags.map(shq)
-        return args.joined(separator: " ") + " <<'WS_INPUT'\n" + input + "\nWS_INPUT"
-    }
-}
-
-private func shq(_ s: String) -> String {
-    s.range(of: #"^[A-Za-z0-9_@./:=+-]+$"#, options: .regularExpression) != nil
-        ? s : "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-}
+// (rule files: AIRule in AIFormat.swift)
 
 // MARK: - word diff
 
@@ -349,6 +265,11 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
     private var partIndex = 0
     private var doneParts: [String] = []
     private var streamData = Data()
+    // a run's rules: the picked one, then each `then:` on the answer before
+    private var steps: [AIRule] = []
+    private var stepIndex = 0
+    private var stepInput = ""          // what the current step was given
+    private var stepNotes: [String] = []
     private var tokenTimer: Timer?
     private var tokenGen = 0
 
@@ -359,7 +280,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
     private static func inputKey(_ file: String) -> String { "aiInput." + file }
 
     private var fmBin: String { aiPath("fm-bin", "/usr/bin/fm") }
-    private var rulesDir: String { aiPath("rules-dir", binDir + "/rules") }
+    private var rulesDir: String { aiPath("rules-dir", userDir + "/rules") }
     private var fontSize: CGFloat { max(9, min(32, aiNumber("font-size", 14))) }
     private var textFont: NSFont {
         let name = aiSetting("font", "")
@@ -660,6 +581,9 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         let sw = modeSeg.intrinsicContentSize.width
         x -= 6 + sw
         modeSeg.frame = NSRect(x: x, y: (headH - JiraTheme.height) / 2, width: sw, height: JiraTheme.height)
+        // squeezed: the title ("Changes") gives way to the buttons, never under them
+        let room = x - 8 - rightTitle.frame.minX
+        rightTitle.isHidden = room < rightTitle.frame.width
         // footer: Run · spinner · status ……… tokens
         runButton.sizeToFit()
         let fy = top + bodyH + (footH - 28) / 2
@@ -890,7 +814,10 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         saveInput()
         // the file may have been edited since the last look
         if let r = rule { rules[selected] = AIRule.load(r.path); applyRule(loadInput: false) }
-        guard let r = rule else { newRule(); return }
+        guard let picked = rule else { newRule(); return }
+        steps = AIRule.chain(picked)
+        let r = steps[0]
+        cmdLine.warning = r.warnings.joined(separator: ", ")
         if available == false { setStatus(unavailableWhy, tone: .danger); return }
         let text = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -902,11 +829,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         // code the model can't touch; long text in parts that fit fm's window
         let g = r.protectCode ? CodeGuard(text) : nil
         guardCode = (g?.codes.isEmpty ?? true) ? nil : g
-        let sendText = guardCode?.text ?? text
-        let budget = TokenBudget.partBudget(instructions: r.instructions(guarded: guardCode != nil))
-        parts = r.chunk ? TokenBudget.parts(sendText, budget: budget) : [sendText]
-        partIndex = 0
-        doneParts = []
+        stepNotes = []
         runGen += 1
         started = Date()
         answer = ""
@@ -920,13 +843,26 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         runButton.title = "Stop  ⎋"
         body.needsLayout = true
         if mode.target != nil { showPreviewMessage("Waiting for the model…") }
+        startStep(0, text: guardCode?.text ?? text)
+    }
+
+    // one rule of the run over `text` (the input, or the step before's answer)
+    private func startStep(_ i: Int, text: String) {
+        let r = steps[i]
+        stepIndex = i
+        stepInput = r.prepare(text)
+        let budget = TokenBudget.partBudget(instructions: r.instructions(guarded: guardCode != nil) + r.prompt)
+        parts = r.chunk ? TokenBudget.parts(stepInput, budget: budget) : [stepInput]
+        partIndex = 0
+        doneParts = []
         runPart(r)
     }
 
     private func runPart(_ r: AIRule) {
         let gen = runGen
         let n = parts.count
-        setStatus(n > 1 ? "Asking the on-device model… part \(partIndex + 1) of \(n)" : "Asking the on-device model…")
+        let stepNote = steps.count > 1 ? " \(r.name) (\(stepIndex + 1) of \(steps.count))" : ""
+        setStatus("Asking the on-device model…" + stepNote + (n > 1 ? " part \(partIndex + 1) of \(n)" : ""))
         streamData = Data()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: fmBin)
@@ -940,7 +876,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
             return
         }
         process = p
-        let data = Data(parts[partIndex].utf8)
+        let data = Data(r.wrap(parts[partIndex]).utf8)
         DispatchQueue.global(qos: .userInitiated).async {
             inPipe.fileHandleForWriting.write(data)
             try? inPipe.fileHandleForWriting.close()
@@ -969,14 +905,17 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         }
     }
 
-    // everything so far, code put back
-    private func soFar() -> (text: String, missing: Int) {
+    // this step's answer so far (code still as tokens)
+    private func stepSoFar() -> String {
         let cur = String(decoding: streamData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        var joined = (doneParts + (cur.isEmpty ? [] : [cur])).joined(separator: "\n\n")
+        let joined = (doneParts + (cur.isEmpty ? [] : [cur])).joined(separator: "\n\n")
         // a wrapper fence the model added (unless the text itself was one)
-        if guardCode != nil || !answerInput.hasPrefix("```") { joined = AnswerCleanup.unwrapFence(joined) }
-        return guardCode?.restore(joined) ?? (joined, 0)
+        return guardCode != nil || !answerInput.hasPrefix("```") ? AnswerCleanup.unwrapFence(joined) : joined
     }
+
+    // code put back
+    private func restored(_ s: String) -> (text: String, missing: Int) { guardCode?.restore(s) ?? (s, 0) }
+    private func soFar() -> (text: String, missing: Int) { restored(stepSoFar()) }
 
     private func chunk(gen: Int, _ d: Data) {
         guard gen == runGen else { return }
@@ -991,14 +930,34 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
     private func finish(gen: Int, code: Int32, err: String) {
         guard gen == runGen else { return }
         process = nil
-        if code == 0, let r = rule, partIndex + 1 < parts.count {
+        guard steps.indices.contains(stepIndex) else { return }
+        let step = steps[stepIndex]
+        if code == 0, partIndex + 1 < parts.count {
             doneParts.append(String(decoding: streamData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
             partIndex += 1
-            runPart(r)
+            runPart(step)
             return
         }
-        let result = soFar()
+        var code = code
+        var stepText = stepSoFar()
+        if code != 0, stepIndex > 0 {
+            // a later step failed: the answer of the one before still stands
+            let line = err.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
+                .last(where: { !$0.isEmpty }) ?? "exit \(code)"
+            stepNotes.append("“\(step.name)” failed (\(stripANSI(line)))")
+            stepText = stepInput
+            code = 0
+        } else if code == 0 {
+            let a = step.accept(input: stepInput, answer: stepText)
+            stepText = a.text
+            if let n = a.note { stepNotes.append(n) }
+        }
         streamData = Data()
+        if code == 0, stepIndex + 1 < steps.count {
+            startStep(stepIndex + 1, text: stepText)
+            return
+        }
+        let result = restored(stepText)
         spinner.stopAnimation(nil)
         spinner.isHidden = true
         runButton.title = "Run  ⌃↩"
@@ -1013,7 +972,9 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
             return
         }
         let partsNote = parts.count > 1 ? " · \(parts.count) parts" : ""
-        if result.missing > 0 {
+        if !stepNotes.isEmpty {
+            setStatus(stepNotes.joined(separator: " · ") + " · \(secs)", tone: .warning)
+        } else if result.missing > 0 {
             setStatus("The model dropped \(result.missing) code block\(result.missing == 1 ? "" : "s") — check before sending"
                 + partsNote, tone: .warning)
         } else if answerDiff {
@@ -1203,7 +1164,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         guard !text.isEmpty else { tokens.stringValue = ""; body.needsLayout = true; return }
         let g = r.protectCode ? CodeGuard(text) : nil
         let guarded = !(g?.codes.isEmpty ?? true)
-        let send = guarded ? g!.text : text
+        let send = r.wrap(r.prepare(guarded ? g!.text : text))
         let instr = r.instructions(guarded: guarded)
         tokenGen += 1
         let gen = tokenGen, bin = fmBin, ctx = TokenBudget.context
@@ -1420,6 +1381,8 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
     greedy: true
     # guardrails: permissive-content-transformations
     # placeholder: hint shown in the empty input pane
+    # prompt: a line put before your text, e.g. "Summarize this text:"
+    # then: another-rule.md   (runs next, on this rule's answer)
     ---
     Describe what the model should do with the text it is given.
     Return ONLY the result — no commentary, no preamble.

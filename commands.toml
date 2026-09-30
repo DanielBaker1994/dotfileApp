@@ -117,10 +117,14 @@
 #   terminal-app        app the file browser's `term` command opens when the
 #                       window has no shell drawer (default Ghostty if
 #                       installed, else Terminal)
+#   preload             true/false (default true): build every view of the
+#                       shared window right after launch, hidden, so the
+#                       first switch to one doesn't flicker; false = build
+#                       each view the first time it is opened
 #   shared-window       true/false (default true): notes and jira live in ONE
-#                       window — Hyper+N / Hyper+J show it on that view,
-#                       switch views, or hide it when it already shows that
-#                       view; the header's notes | jira switches too. Jira's
+#                       window — Hyper+N shows it on the view you were last in, or
+#                       hides it when you are in it; the header icons and
+#                       Ctrl+Tab switch views. Jira's
 #                       ticket details, release view and Jira Config open IN
 #                       it (home / back in the header). Esc: jira = back
 #                       (clears a search first), at the list = hide; notes =
@@ -243,8 +247,12 @@ terminal = "4F5A6EC7"
 # A file-name field above a paste area; "save & copy path" / Cmd+S runs `script`
 # (bash; content on stdin, env FF_DIR = <save-dir>/YYYY_MM_DD, FF_NAME = the
 # typed name) which writes the file and pbcopy's its path. Handled in-process.
+# sticky = true: clicking another app leaves it open (paste now, copy the name
+# elsewhere, click back / run /filefast again); float = true: stays on top.
 [filefast]
 enabled = true
+sticky = true
+float = true
 type = "shell"
 label = "filefast"
 icon = "notes"
@@ -300,7 +308,7 @@ font-size = 13
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
-paths = "~/notes, ~/.config/workspace-switcher/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/workspace-switcher/rules/grammar-check.md"
+paths = "~/notes, ~/.config/workspace-switcher/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/workspace-switcher/rules/grammar-check.md, ~/notes/retirement.md"
 # window 20% wider (640 -> 768) and the notepad ~30% taller; max-height lets
 # the taller window actually apply (the 60%-of-screen cap would clamp it)
 width = 768
@@ -320,7 +328,7 @@ float = false
 
 # Read-only file browser: type to fuzzy-filter the current directory, Enter
 # on a file opens it in its default app, Enter on a directory (or "..")
-# navigates. `root` is the starting directory (default ~). Hyper+F opens it.
+# navigates. `root` is the starting directory (default ~). A view of the shared window (header icon, Ctrl+Tab, palette).
 # These browser keys also apply to the notes window's file drawer.
 # Filter bar:
 #   notes / *.md / .*        filter this folder (.* shows dotfiles)
@@ -367,7 +375,7 @@ favorites = "~/notes, ~/Desktop"
 #   recent-days     how far back (default 7)
 #   recent-limit    max entries (default 200)
 #   recent-exclude  extra globs / path prefixes to skip, e.g. ~/work/build, *.log
-#   start           recent | root — what Hyper+F opens on (default recent)
+#   start           recent | root — what the files view opens on (default recent)
 start = "recent"
 # one Esc closes the files window
 esc-close = 1
@@ -390,13 +398,13 @@ type = "list"
 name = "jira"
 title = ""
 # Tokyo Night (Theme ▸ presets rewrite these)
-header-color = 111219
-background-color = "C71A1B26"
-text-color = "C0CAF5"
-dim-color = "9AA5CE"
-highlight-color = 283457
-accent-color = "7AA2F7"
-palette = "BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"
+header-color = "99191A21"
+background-color = "99282A36"
+text-color = "F8F8F2"
+dim-color = "A4AACC"
+highlight-color = "44475A"
+accent-color = "BD93F9"
+palette = "FF79C6, 50FA7B, F1FA8C, FF5555, 8BE9FD"
 # a directory — every .json/.tsv file inside becomes a tab
 sources = "~/.cache/workspace-switcher/jira_json"
 # table mode: spreadsheet rows under a sticky header. columns = one line of
@@ -433,6 +441,7 @@ height = 560
 font = "SF Mono"
 body-lines = 5
 page-size = 150
+browser-background = "4D4F596E"
 # Jira Config window (menu bar ▸ Open Jira Config Window): size + how often
 # it re-reads status (seconds). Unset = 1080 x 720, every 5s.
 # dashboard-width = 1080
@@ -454,7 +463,8 @@ page-size = 150
 # = the Jira window's palette.
 [confluence]
 enabled = true
-# the view's own frame (the shared window grows to it while it shows)
+# the standalone window's size ([app] shared-window = false); in the shared
+# window every view keeps the current frame
 width = 1400
 height = 900
 # results pane share of the width (drag the divider to change it)
@@ -503,10 +513,10 @@ workspace-switcher = "*:app"
 # Cmd+Minus for Cmd+= / Cmd+- (the first "=" ends the key).
 [shortcuts]
 "all: Hyper+S" = "switcher palette: search windows + commands"
-"all: Hyper+N / Hyper+F / Hyper+J" = "notes / files / jira (again while in it = hide)"
+"all: Hyper+N" = "show the window on the view you were last in / hide it"
 "all: Hyper+T" = "notes terminal drawer (open + focus / close)"
 "all: Cmd+W" = "hide the window"
-"all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (notes · AI · files · jira · confluence)"
+"all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (files · notes · AI · jira · confluence)"
 "all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
 "all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
 "all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
@@ -521,6 +531,17 @@ workspace-switcher = "*:app"
 "files: Tab" = "complete the typed path"
 "files: Cmd+L" = "focus the filter / address bar"
 "files: Cmd+K" = "copy the selected file's path"
+"files: Cmd+R / F2 / click the selected name" = "rename the file (Return renames, Esc cancels)"
+"files: Space" = "Quick Look the selected file"
+"files: Shift+click / Cmd+click / Cmd+A" = "select several files"
+"files: Cmd+C / Cmd+X / Cmd+V" = "copy / cut / paste files (in the list)"
+"files: Cmd+D" = "duplicate"
+"files: Cmd+Delete" = "move to the Trash"
+"files: Cmd+Z" = "undo the last rename / move / copy / trash"
+"files: Cmd+Shift+N" = "new folder"
+"files: Cmd+[ / Cmd+]" = "back / forward"
+"files: Cmd+Up" = "parent folder (Recent: the file's folder)"
+"files: Cmd+Shift+." = "show / hide hidden files"
 "files: **" = "in the filter: search every folder below"
 "files: term" = "in the filter + Return: a shell in that folder"
 "files: Esc Esc" = "hide"
@@ -570,3 +591,69 @@ label = "Jira Config Window"
 # Notes-attached terminal: a plain-shell Ghostty window created once at daemon
 # startup, parked hidden. This entry shows it stacked ABOVE the notes window
 # (it follows notes as you drag it); the same entry again parks it. NEVER closed.
+
+# Sketchybar notifications pill, left of the CPU/RAM/clock group
+# (config/sketchybar/plugins/notifications.sh → notify/notify_poll.py).
+# One chip per source: app icon + unread count (the app's Dock badge, red
+# pill); "@N" = @mentions from the source's API; amber dot = the API needs
+# attention (~/.cache/notifications/poll.log). Click = popup: unread spaces +
+# mentions (click one to open it), sign in, open app, refresh.
+# Apply changes: `sketchybar --reload`.
+# Webex API sign-in (once): python3 notify/webex_api.py --login
+[notifications]
+enabled = true
+# chip order, left to right; each needs NAME-enabled = true
+sources = "webex, outlook, imessage"
+# seconds between API polls (the Dock badge is read every tick)
+poll-seconds = 60
+tick-seconds = 5
+# hide the whole pill while nothing is unread / mentioned / broken
+hide-when-zero = true
+unread-color = "0xffff3b30"
+unread-text-color = "0xffffffff"
+mention-color = "0xffed8796"
+warn-color = "0xffeed49f"
+tag-color = "0xff939ab7"
+# size of the app icon on the chip
+icon-scale = 0.62
+# click popup: rows of mentions / unread spaces, width in pt
+popup-rows = 6
+popup-width = 340
+# how "Sign in" runs the login ({} = the command)
+login-command = "open -na Ghostty --args -e {}"
+# mentions older than this are ignored (also the window when Webex gives no read status)
+mention-max-age-hours = 24
+webex-enabled = true
+webex-app = "Cisco-Systems.Spark"
+webex-tag = "WEBEX"
+# "app" = the app's own icon, anything else = that text
+webex-icon = "app"
+# where the unread count comes from: "window" = the Webex window's own
+# Messaging badge (Webex draws no Dock badge), "dock" = the Dock badge
+webex-count = "window"
+# false = count only (no API sign-in needed); true adds "@N" mentions
+webex-api = false
+# most recently active spaces checked per poll
+webex-rooms = 30
+# Outlook: Dock badge count only for now (Microsoft Graph later); the chip
+# shows only while Outlook has unread mail
+outlook-enabled = true
+outlook-app = "com.microsoft.Outlook"
+outlook-tag = "MAIL"
+outlook-icon = "app"
+# iMessage / SMS: the Messages app's Dock badge (keep Messages in the Dock)
+imessage-enabled = true
+imessage-app = "com.apple.MobileSMS"
+imessage-tag = "MESSAGES"
+imessage-icon = "app"
+
+# The Setup & Health Check window (menu bar ▸ Setup & Health Check…, or
+# `workspace-switcher setup`): what this Mac needs + the optional hotkeys /
+# menu-bar set-up. An installed app (DMG) opens it on first run.
+#   title / intro   the window title and the line under it ("" = built-in)
+#   width / height  window size in points
+[setup]
+title = "workspace-switcher — Setup & Health Check"
+intro = ""
+width = 640
+height = 620

@@ -24,6 +24,7 @@ Read and honor `rule.md` before touching any code. Key points:
 ./build.sh            # Build + relaunch
 ./build.sh --force    # Force rebuild
 ./build.sh --build-only
+bin/make-dmg.sh       # the distributable .dmg (.build/dist) — see Install modes
 ```
 
 ONE build: `bin/build-app.sh` (compiles every top-level `*.swift`, SwiftTerm
@@ -33,6 +34,53 @@ launchd agent, caches) live in `install.conf`. Configs (`CONFIG_DIRS`:
 aerospace, sketchybar, borders) are per-file SYMLINKS from `~/.config/<name>`
 into the repo's `config/<name>` — edit the repo copy; INSTALL.sh backs up real
 files in the way, UNINSTALL.sh removes only links into the repo.
+
+## Install modes (repo + DMG)
+
+- `~/.config/workspace-switcher` ("the home") is THE path every external
+  config points at (aerospace.toml hotkeys, sketchybarrc, notifications.sh,
+  the jira launchd agent). Repo install: the home is the checkout (or a link
+  to it). App install (DMG): a real directory — the user's `commands.toml`,
+  `rules/`, `config/` (copies seeded from the bundle, never links into the
+  signed app) + links `bin jira confluence notify vim install.conf` →
+  `workspace-switcher.app/Contents/Resources/…` (relative) and ONE absolute
+  link `workspace-switcher.app` → the app. `.install` = marker (`mode`,
+  `app`, `version`, `seed <sha> <file>`).
+- Swift paths (`workspace_switcher.swift` top): `isRepoBuild` (commands.toml
+  + bin/build-app.sh beside the bundle), `assetDir` (repo / Contents/Resources:
+  jira, confluence, vim, bin, icons), `userDir` (commands.toml, rules: repo /
+  the home), `homeDir` (`$WS_HOME` overrides — tests). `main.swift` sets
+  `PYTHONDONTWRITEBYTECODE` (a `__pycache__` in the bundle breaks its
+  signature) and `WS_COMMANDS_CONF` for the python side.
+- `bin/setup-home.sh app APP [--switch] | repo | stack | status`: seeds
+  (untouched file follows a new default, an edited one is kept + `FILE.new`,
+  a deleted rule stays deleted), heals the links when the app moved, hands
+  over between the two installs (a checkout is never deleted: unlinked or
+  renamed `…repo-<date>`; an app home goes to
+  `~/.config/workspace-switcher-backups/`). Home owned by a checkout → exit
+  3, nothing touched. `stack` = `symlinks.sh` (`WS_LINK_ROOT` = the home in
+  app mode) + precompiled sketchybar helpers + brew services. Never git.
+- `bin/preflight.sh [--json] [--mode repo|app] [--app PATH]`: ONE check list
+  for INSTALL.sh (step 0) and the Setup window. Required: macOS ≥
+  `MACOS_MIN`, arm64 + not on the disk image (app), swiftc + git (repo).
+  Warnings: Apple on-device model (`fm available` → AI view off), python3
+  (never runs the CLT stub), nvim, Homebrew + each formula / cask, config
+  links, another install owning the home, a second copy of the app.
+- `SetupWindow.swift`: `AppInstall.ensureHome()` first thing in main.swift
+  (marker check; runs setup-home.sh only when something changed),
+  `SetupWindow` (rows from preflight JSON, Fix per row: `move-app`,
+  `setup-home`, `brew:` / `cask:`, `stack`, `url:`, `term:`; opt-in "Set Up
+  Hotkeys & Menu Bar…"; output log). Opens on first run / new version / not
+  in Applications; menu bar ▸ Setup & Health Check…, `workspace-switcher
+  setup`. `[setup]` in commands.toml (not a palette command).
+- `bin/build-app.sh --dist` → `.build/dist/<app>` (Resources per
+  `install.conf` `RESOURCE_*`, `commands.default.toml` = the repo's minus
+  personal bits + jira off, `helpers-bin/`; never kills the daemon, never
+  touches TCC). `bin/make-dmg.sh`: `DEVELOPER_ID` + `NOTARY_PROFILE` →
+  hardened runtime (`entitlements.plist`) + notarize + staple; empty → the
+  self-signed cert / ad-hoc with a warning. Info.plist version / min macOS /
+  icon are generated from install.conf at build time.
+- Tests: `Tests/test_install.sh` (needs the dist bundle; throwaway `$HOME`).
 
 ## Tests
 
@@ -54,7 +102,8 @@ bin/ui-test.sh --verbose
   releases / config) with back + home in the RIGHT header bar (ids 63/62,
   after the view's own buttons). Header, every view: ✕ · kitchen sink (the
   app's icon menu, `appIcon`, `[app] app-icon`) · view switcher ICONS
-  notes / files / jira (`PopupChrome.navIcons` / `navOn`, ids 60/64/61,
+  files / notes / AI / jira / confluence — files first + the default view
+  (`PopupChrome.navIcons` / `navOn`, ids 60/64/61,
   `[app] notes-icon` / `files-icon` / `jira-icon`) — set in `decorate`.
   Views share the DRAWER-LESS frame (`slotBaseFrame` = `PopupWindow.baseFrame`;
   `unpark(frame:)` re-grows notes by its open drawers). Hotkey
@@ -74,7 +123,20 @@ bin/ui-test.sh --verbose
   `entries()` reads a lock-guarded snapshot built in `publish()` — never
   `queue.sync` from main. Previews load on `previewQueue` (ImageIO
   downsampled images, `previewGen` drops stale results, 24-entry cache).
-  Zoxide favorites were removed.
+  Zoxide favorites were removed. Renames: the stream is IgnoreSelf, so the
+  browser reports its OWN rename / move / copy (`FileDrag.onFileOp` →
+  `RecentFiles.ownChange`, snapshot patched synchronously, row keeps its
+  place); other apps' renames pair old + new event by inode
+  (`UseExtendedData`, `departed`) so a renamed folder keeps the files
+  listed inside it; `present` = exact-case check (case-only renames).
+  Tests: `bin/run-tests.sh recent` (`Tests/test_recent_files.swift`,
+  `// sources:` header = compiled with the app's file; synthetic events +
+  a live stream on a temp home).
+- Preload (`[app] preload`, default true): `SwitcherController.prewarmSlot()`
+  (launch + `reloadConfig()`) builds each missing view hidden, one per
+  main-loop turn: openers set `PopupWindow.quietShow` from `slotPrewarming`
+  (`presentList` does everything but order front), then
+  `SharedWindow.prepare` sets the frame + `decorate`. Log: `preload VIEW: N ms`.
 - Shared window members: notes, files, jira (+ detail / releases / config),
   output windows (`currentOutputName`). Only the notes terminal drawer and
   JiraSetupWindow live outside it.
@@ -100,8 +162,18 @@ bin/ui-test.sh --verbose
   shares the frame). `[ai]` in commands.toml: enabled, fm-bin, pandoc-bin,
   rules-dir, context-tokens (4096), split, font / font-size, copy-toast.
   Opened from the Hyper+S palette (`/ai`), the menu bar, CLI / socket `ai`.
-- Rules = every `.md` in `rules-dir` (repo `rules/`: ONE rule, grammar-check
-  = grammar + light Markdown formatting for Outlook/Webex, output diff), one
+- Rules = every `.md` in `rules-dir` (repo `rules/`: `grammar-check` =
+  grammar ONLY, `then:` → `markdown-format` = layout ONLY (also its own
+  pill), `ask` = free-form prompt, plain). ONE job per rule: fm's small model
+  given grammar + formatting in one prompt duplicated text and reworded.
+  Extra keys: `prompt:` (a line before the text — without it the model
+  ANSWERS the draft / follows instructions inside it), `then:` (chain:
+  `AIRule.chain`, the next rule gets the answer; a later step that fails
+  keeps the earlier answer), `keep-words:` (`WordGuard`: a layout answer that
+  adds/loses words is thrown away, status warns), `csv-tables:`
+  (`CSVTables.convert`: comma rows → a Markdown table, in code, before the
+  model). `AIRule` lives in `AIFormat.swift` (testable without the window).
+  Tests: `bin/run-tests.sh ai` (pure), `ai-live` (the rules through fm). One
   `PopupTabsBar` pill each (`closable = false`, `menuFor` right-click: Edit
   in Notes → `openNoteFile`, Reveal, Copy Path, Duplicate, Delete). "+" =
   `jiraFormSheet` → a template file, opened in notes. Dir watched
@@ -133,6 +205,44 @@ bin/ui-test.sh --verbose
   (`[shortcuts] "ai: …"`), Esc = stop a run (never closes), Cmd+C/A in the
   preview, rest → `JiraEditKeys.route`.
 
+## Notifications pill (sketchybar)
+
+- `config/sketchybar/plugins/notifications.sh` (sourced AFTER status.sh →
+  its chips are the LEFT END of the status group: no own group, it re-runs
+  status.sh's `status_bracket`, which spans `status.*` + `notif.*`) only builds items;
+  every tick / `notifications_update` event runs `notify/notify_poll.py
+  --tick` (config, badges, cached state → ONE `sketchybar --set` batch).
+  `[notifications]` in commands.toml (skipped by `loadCommands`, not a
+  palette command); `enabled = false` → no items. `updates=on` on
+  `notif.tail` so a hidden pill (`hide-when-zero`) keeps ticking.
+- Per source (`sources`, `NAME-enabled/app/tag/icon/api`): items
+  `notif.NAME` (icon = `app.<bundle-id>` image, `NAME-icon = "app"`, else the
+  text), label = the count: an iOS-style red badge ON TOP of the icon's corner (`chip_args`: narrowed `icon.width` makes the label overlap; no separate `.n` item), `.at` ("@N", or an amber dot = API error).
+  Webex count (`webex-count = "window"`) = the Messaging-tab badge in the
+  Webex WINDOW's AX tree (`helpers/webex_unread.swift`: `WTMessagingHubButton`
+  value indicator + unread rows of `spaces_list` → popup rows; Webex draws NO
+  Dock badge; `notify_poll.unread` falls back to the Dock when unreadable).
+  `webex-api = false` by default (count only, no OAuth, no amber dot).
+  Other sources: count = the badge the DOCK draws (`helpers/dock_badges.swift` via AX
+  `AXURL` + `AXStatusLabel`, built into ~/.cache/sketchybar on demand; needs
+  Accessibility for sketchybar, else poll.log says so). `lsappinfo
+  StatusLabel` misses UserNotifications badges (Messages) — only the
+  fallback for apps not in the Dock. Mentions are zeroed when the badge is 0.
+- Click (`--event`, `$SENDER` mouse.clicked / mouse.exited.global on both
+  items) → `popup_rows` rebuilt as `notif.pop.*` in `popup.notif.NAME`
+  (text = icon slot, right text = label): header, sign-in (`login-command`),
+  mentions + unread spaces (`webexteams://im?space=UUID` via `space_link`),
+  Open, Refresh.
+- Webex API (`notify/webex_api.py`, stdlib urllib): Integration OAuth
+  (`--login`, local redirect server on 127.0.0.1:8765), creds + refresh token
+  in `~/.config/notifications/webex.json` (0600, never commands.toml);
+  401 → refresh once; 429 → Retry-After ≤ 30s. Unread = room lastActivity >
+  my membership's lastSeenDate; mentions = `mentionedPeople=me` in group
+  rooms newer than that (or `mention-max-age-hours`). Background `--poll`
+  (fcntl lock) every `poll-seconds` → `~/.cache/notifications/state.json`.
+- iMessage (`imessage`, com.apple.MobileSMS) + Outlook = badge-only sources (Outlook: enabled, Dock badge; each chip hides on its own at zero; Graph API later → add to
+  `API_SOURCES`). Tests: `python3 Tests/test_notifications.py`.
+
 ## Confluence search
 
 - `Confluence.swift` — `ConfluenceWindow` (a `JiraConfigNSWindow` + the Jira
@@ -152,9 +262,9 @@ bin/ui-test.sh --verbose
   through `wsconf://` (`ConfluenceImageLoader`, URLSession + the auth header
   read from the config file); links open in the browser. In-memory only: 20
   pages + 80 images. Esc = clear the query, never closes.
-- The ONE view with its own frame: `SharedWindow.bigFrame`
-  (`sharedWindowFrame.confluence`, default `[confluence] width/height`, never
-  smaller than the shared frame); `targetFrame(for:)` / `setFrame(_:for:)`.
+- Shares the shared window's frame like every view (no own `bigFrame`
+  any more: switching views must never resize the window). `[confluence]
+  width/height` only size the standalone window (`shared-window = false`).
 - Python: `confluence/confluence_api.py` (one JSON object on stdout; `--check
   --save --detect-auth --add-space --remove-space --search --page --favorite
   --favorites --import-saved`) on `jira_api.Client` (`ConfluenceClient`:
@@ -485,9 +595,16 @@ Line numbers drift; grep the symbol names (they're stable).
    bar (single Esc closes bar), Esc (streak), Cmd+S, Cmd+O.
 4. list navigation (Up/Down/Tab/C-n/C-p/Return), then Esc (streak).
 
-## Hotkey fast path (Hyper+N / F / J / T)
+## Hotkey fast path (Hyper+N / T)
 
-- aerospace runs the app BINARY (`workspace-switcher notes|files|jira|terminal`),
+- ONLY two window hotkeys besides Hyper+S: Hyper+N = `window`
+  (`SharedWindow.toggle`: hidden → the view you were LAST on (`last`), in it →
+  hide, elsewhere → focus) and Hyper+T. No per-view hotkeys (Hyper+F / J
+  removed): views switch via Ctrl+Tab, header icons, the Hyper+S palette.
+  The named modes (`notes|files|jira|confluence|ai`) remain as CLI / socket
+  messages.
+
+- aerospace runs the app BINARY (`workspace-switcher window|terminal`),
   not the script: `main.swift` pings the socket (~20 ms) and exits. No
   daemon (ppid != 1) → it execs `bin/workspace_switcher.sh MODE` (cold start:
   build-if-stale + LaunchServices `open -n -g`; a launchd-parented process
@@ -532,7 +649,7 @@ Line numbers drift; grep the symbol names (they're stable).
 - Why it looks random: a popup centered over ONE full-screen tile has
   almost the same center as the tile → a few pixels flip "left of" vs
   "right of". The shared window's center also moves with its frame
-  (Confluence `bigFrame`, notes drawers). With 2+ tiles it belongs to the
+  (notes drawers). With 2+ tiles it belongs to the
   tile under its center, not the one that looks "behind" it.
 - Our windows float via aerospace's dialog/panel heuristic; the
   `app-name = workspace-switcher → layout floating` rule is commented out.
@@ -551,6 +668,34 @@ Line numbers drift; grep the symbol names (they're stable).
   jira source tabs are click-only now.
 - File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's
   absolute path (+ toast), Cmd+L focus filter bar, Tab completes, Enter opens.
+- File browser drag & drop (Finder-style, `FileDrag` + `FileListPane` drag
+  source/destination + `FileDragImageView` preview): drag a row / the image
+  preview out as a file URL; drop onto a folder row or the list (cwd; not in
+  Recent / typed-path / recursive views — `dropDirectory` nil). Same volume =
+  move, else copy; Option = copy, Cmd = move; clashes keep both ("x 2.ext");
+  file promises (Photos/Safari/Mail) received. Ops run off main.
+- File browser rename (`PopupFileBrowser.beginRename` / `commitRename` /
+  `cancelRename`): Cmd+R, F2, right-click "Rename…" or a single click on the already-selected
+  row's name (`renameClick`, fires after the double-click interval) puts a text field over
+  the row's name (`FileListPane.nameRect`, stem selected). Return / Tab /
+  clicking away renames, Esc cancels only the rename (`transientEscape`);
+  edit shortcuts go to `renameEditor` in `handleKey`. Main list only.
+- File browser file actions (`FileOps.swift` = the ops + undo stack, AppKit-free,
+  `bin/run-tests.sh fileops`; `PopupFileBrowser.handleShortcut` /
+  `perform(_:)` / `run`; right-click = `FileListPane.Action`). While the LIST
+  has focus (in the filter bar they stay text keys): Cmd+Delete trash, Cmd+D
+  duplicate, Cmd+C / Cmd+X copy / cut the FILES (file URLs + the path as
+  text), Cmd+V paste into the listed folder (`opsDirectory`; Cmd+Opt+V or
+  after a cut = move), Cmd+Z undo the last rename / move / copy / trash /
+  drop, Cmd+A select all, Cmd+Down open. Anywhere in the browser:
+  Cmd+Shift+N new folder (straight into rename), Cmd+[ / Cmd+] back /
+  forward, Cmd+Up parent (Recent / search row: its enclosing folder),
+  Cmd+Shift+. hidden files. Space = Quick Look (`QLPreviewPanel`, follows
+  the selection), Home / End / PgUp / PgDn. Every op reports to Recent via
+  `FileDrag.onFileOp` (trash = a move out of scope → dropped from the list).
+- File browser multi-select (`FileListPane.marked` + cursor `selection`,
+  `selectedRows`): Shift-click / Shift+Up/Down range, Cmd-click toggle; a
+  drag or right-click inside it acts on all of it; setting `rows` clears it.
 - Ctrl+J/K: move focus between editor / browser / terminal panes.
 - Hyper+T: notes terminal drawer (show + focus / close → editor).
 

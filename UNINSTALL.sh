@@ -7,12 +7,24 @@
 # Your personal files (notes, ~/.config/jira) are left alone.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Works for both installs: run from the checkout (repo install), or the copy
+# inside the app (app install):
+#   /Applications/workspace-switcher.app/Contents/Resources/UNINSTALL.sh
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 UID_="$(id -u)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 # every name/path removed below lives in install.conf
 . "$ROOT/install.conf"
 BACKUP="$UNINSTALL_BACKUP_PREFIX-$(date +%s)"
+WS_HOME="${WS_HOME:-$WS_HOME_DEFAULT}"
+# app install: the configs the links point at live in the home, and the app
+# itself is this script's bundle
+APP_BUNDLE=""
+LINK_ROOT="$ROOT"
+case "$ROOT" in *.app/Contents/Resources)
+    APP_BUNDLE="${ROOT%/Contents/Resources}"
+    LINK_ROOT="$(cd "$WS_HOME" 2>/dev/null && pwd -P)" ;;
+esac
 
 GREEN='\033[32m'; RED='\033[31m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
 ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
@@ -29,6 +41,7 @@ ok "services stopped"
 
 step "killing the app daemon"
 pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
+[ -n "$APP_BUNDLE" ] && pkill -f "$APP_BUNDLE/Contents/MacOS" 2>/dev/null || true
 ok "daemon stopped"
 
 step "removing the jira poll launchd agent"
@@ -43,10 +56,10 @@ for d in $CONFIG_DIRS; do
     dst="$HOME/.config/$d"
     # links into this repo (INSTALL.sh) just go — the repo keeps the files
     if [ -L "$dst" ]; then
-        case "$(readlink "$dst")" in "$ROOT"/*) rm "$dst"; continue ;; esac
+        case "$(readlink "$dst")" in "$ROOT"/*|"$LINK_ROOT"/*|"$WS_HOME"/*) rm "$dst"; continue ;; esac
     elif [ -d "$dst" ]; then
         while IFS= read -r l; do
-            case "$(readlink "$l")" in "$ROOT"/*) rm "$l" ;; esac
+            case "$(readlink "$l")" in "$ROOT"/*|"$LINK_ROOT"/*|"$WS_HOME"/*) rm "$l" ;; esac
         done < <(find "$dst" -type l)
         find "$dst" -depth -type d -empty -delete
     fi
@@ -67,5 +80,20 @@ step "removing caches and runtime files"
 rm -rf $CACHE_DIRS
 rm -f $RUNTIME_FILES
 ok "caches removed"
+
+# app install: the home (your commands.toml, rules, config copies) is moved
+# to the backup, and the app goes to the Trash. A checkout is never touched.
+if [ -n "$APP_BUNDLE" ]; then
+    step "removing the app and its settings folder"
+    if [ -d "$WS_HOME" ] && [ ! -L "$WS_HOME" ] && [ ! -e "$WS_HOME/.git" ] \
+        && grep -q '^mode=app' "$WS_HOME/.install" 2>/dev/null; then
+        mv "$WS_HOME" "$BACKUP/home"
+        ok "settings moved to $BACKUP/home"
+    fi
+    mv "$APP_BUNDLE" "$HOME/.Trash/$APP_NAME-$(date +%s).app" 2>/dev/null \
+        && ok "app moved to the Trash" || warn "could not move $APP_BUNDLE to the Trash — drag it there"
+else
+    rm -f "$ROOT/.install"
+fi
 
 printf "\n${GREEN}Done. Configs backed up in: %s${RESET}\n" "$BACKUP"

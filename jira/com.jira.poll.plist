@@ -17,6 +17,10 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- an app install runs the script from inside the signed bundle:
+             a __pycache__ written there would break its signature -->
+        <key>PYTHONDONTWRITEBYTECODE</key>
+        <string>1</string>
     </dict>
     <key>StartInterval</key>
     <integer>60</integer>

@@ -23,3 +23,6 @@ testbackups/
 # commands.toml safety copies (last-known-good + parked invalid edits)
 commands.toml.bak
 commands.toml.broken-*
+
+# which install owns ~/.config/workspace-switcher (bin/setup-home.sh)
+.install

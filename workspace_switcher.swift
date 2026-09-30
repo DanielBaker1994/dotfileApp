@@ -27,11 +27,15 @@ var menuActionTargets: [MenuActionTarget] = []
 
 // Derived from the binary location; everything else environment-specific
 // lives in `app` (AppSettings) below and is overridable from commands.toml.
-let binDir: String = {
-    let u = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL
+//
+// Two kinds of install (see AGENT_CONTEXT.md "Install modes"):
+//   repo build  the bundle sits in the git checkout, its assets NEXT TO it
+//   app install (DMG, /Applications): assets inside Contents/Resources, the
+//               user's files in ~/.config/workspace-switcher
+private let bundleParentDir: String = {
+    let u = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL.resolvingSymlinksInPath()
     let p = u.path
-    // .app bundle: the binary lives at <dir>/<name>.app/Contents/MacOS/<bin>,
-    // but the app's assets (commands.toml, icons) sit NEXT TO the bundle.
+    // .app bundle: the binary lives at <dir>/<name>.app/Contents/MacOS/<bin>.
     // TCC grants key by the bundle id (stable across rebuilds) — the bundle
     // is what keeps mic/speech permissions working.
     if let r = p.range(of: "/Contents/MacOS/") {
@@ -41,6 +45,34 @@ let binDir: String = {
     }
     return u.deletingLastPathComponent().path
 }()
+// the bundle itself (…/workspace-switcher.app); nil when run as a bare binary
+let appBundlePath: String? = {
+    let p = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL.resolvingSymlinksInPath().path
+    guard let r = p.range(of: "/Contents/MacOS/") else { return nil }
+    return String(p[..<r.lowerBound])
+}()
+// a repo build: the checkout's files sit beside the bundle
+let isRepoBuild: Bool = {
+    let fm = FileManager.default
+    return fm.fileExists(atPath: bundleParentDir + "/commands.toml")
+        && fm.fileExists(atPath: bundleParentDir + "/bin/build-app.sh")
+}()
+// the stable location every external config points at (aerospace.toml,
+// sketchybarrc, the launchd agent): the repo, a link to it, or — for an app
+// install — a real directory set up by bin/setup-home.sh. $WS_HOME overrides
+// it (tests).
+let homeDir: String = {
+    if let h = ProcessInfo.processInfo.environment["WS_HOME"], !h.isEmpty { return h }
+    return NSHomeDirectory() + "/.config/workspace-switcher"
+}()
+// read-only code + resources: jira/, confluence/, vim/, bin/, icons
+let assetDir: String = {
+    if isRepoBuild { return bundleParentDir }
+    if let b = appBundlePath { return b + "/Contents/Resources" }
+    return bundleParentDir
+}()
+// the user's own files: commands.toml, rules/
+let userDir: String = isRepoBuild ? bundleParentDir : homeDir
 
 // The config file name is a constant (it must be findable before any config
 // is read); every OTHER string — shell, paths, sockets, icon names — is
@@ -58,6 +90,9 @@ struct AppSettings {
     // whose view is swapped in place (SharedWindow.swift); false = separate
     // windows like before
     var sharedWindow = true
+    // build every shared-window view right after launch (hidden), so the
+    // first switch to one is as quick as the next; false = on first use
+    var preload = true
     var sharedWidth: CGFloat = 1100
     var sharedHeight: CGFloat = 640
     var shell = "/opt/homebrew/bin/bash"
@@ -132,15 +167,15 @@ struct AppSettings {
     // the window has no embedded shell drawer (default Ghostty, else Terminal)
     var terminalApp = ""
     // derived (recomputed whenever the settings change)
-    var commandsConfPath: String { binDir + "/" + commandsConfName }
+    var commandsConfPath: String { userDir + "/" + commandsConfName }
     var focusFilePath: String { popupTmpDir() + focusFileName }
-    var jiraIconPath: String { binDir + "/" + jiraIconName }
-    var confluenceIconPath: String { binDir + "/" + confluenceIconName }
-    var aiIconPath: String { aiIconName.isEmpty ? "" : (aiIconName.hasPrefix("/") ? aiIconName : binDir + "/" + aiIconName) }
-    var notesIconPath: String { binDir + "/" + notesIconName }
-    var appIconPath: String { binDir + "/" + appIconName }
+    var jiraIconPath: String { assetDir + "/" + jiraIconName }
+    var confluenceIconPath: String { assetDir + "/" + confluenceIconName }
+    var aiIconPath: String { aiIconName.isEmpty ? "" : (aiIconName.hasPrefix("/") ? aiIconName : assetDir + "/" + aiIconName) }
+    var notesIconPath: String { assetDir + "/" + notesIconName }
+    var appIconPath: String { assetDir + "/" + appIconName }
     var filesIconPath: String {
-        filesIconName.isEmpty || filesIconName.hasPrefix("/") ? filesIconName : binDir + "/" + filesIconName
+        filesIconName.isEmpty || filesIconName.hasPrefix("/") ? filesIconName : assetDir + "/" + filesIconName
     }
 }
 var settings = AppSettings()
@@ -788,6 +823,12 @@ func loadCommands() -> [CommandSpec] {
             // the Confluence / AI views (Confluence.swift, AIWindow.swift)
             // read it directly (configSectionValue) - never a palette command
             break
+        case "notifications":
+            // the sketchybar notifications pill (notify/notify_poll.py)
+            break
+        case "setup":
+            // the Setup & Health Check window's strings / size (SetupWindow.swift)
+            break
         default:
             // enabled = true is required: no key, no command. Nothing shows
             // unless the section says enabled = true explicitly.
@@ -888,9 +929,9 @@ func syncJiraLaunchAgent() {
         return
     }
     var changed = false
-    if let tmpl = try? String(contentsOfFile: binDir + "/jira/com.jira.poll.plist", encoding: .utf8) {
+    if let tmpl = try? String(contentsOfFile: assetDir + "/jira/com.jira.poll.plist", encoding: .utf8) {
         let want = tmpl.replacingOccurrences(of: "__WS_CONFIG__",
-                                             with: home + "/.config/workspace-switcher")
+                                             with: homeDir)
         let have = try? String(contentsOfFile: plist, encoding: .utf8)
         if have != want {
             try? FileManager.default.createDirectory(atPath: home + "/Library/LaunchAgents",
@@ -1111,6 +1152,7 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("focus-loss-delay"), let n = Double(v), n >= 0 { settings.focusLossDelay = min(n, 5) }
     if let v = tri(str("float")) { settings.float = v }
     if let v = tri(str("shared-window")) { settings.sharedWindow = v }
+    if let v = tri(str("preload")) { settings.preload = v }
     if let v = str("shared-width"), let n = Double(v), n >= 400 { settings.sharedWidth = CGFloat(n) }
     if let v = str("shared-height"), let n = Double(v), n >= 300 { settings.sharedHeight = CGFloat(n) }
     if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
@@ -1346,7 +1388,7 @@ private func configLog(_ s: String) {
 
 private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
-    "checkbox", "hide-on-focus-loss", "float", "table", "shared-window",
+    "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
@@ -1819,7 +1861,7 @@ func removeConfigValue(section: String, key: String) {
 
 // [icons] section -> IconRule list. Line format per app:
 //   app-name = title-match:icon, other-title:icon, *:default-icon
-// icon names: jira, notes, or a png filename (binDir) / absolute path.
+// icon names: jira, notes, or a png filename (assetDir) / absolute path.
 private func parseIconRules(_ vars: [String: String]) -> [IconRule] {
     var rules: [IconRule] = []
     for (app, spec) in vars {
@@ -1850,7 +1892,7 @@ private func resolveIconName(_ name: String) -> NSImage? {
     case "heart": return heartIcon
     case "mic", "voice": return micIcon
     default:
-        let p = name.hasPrefix("/") ? name : binDir + "/" + name
+        let p = name.hasPrefix("/") ? name : assetDir + "/" + name
         return fileIconTile(p, size: appIconSize)
     }
 }
@@ -2982,6 +3024,42 @@ final class SwitcherController: NSObject {
     lazy var slot = SharedWindow(controller: self)
     // the frame the NEXT slot window opens at (consumed by the openers)
     var pendingSlotFrame: NSRect?
+    // an opener running for prewarmSlot(): build the window, don't show it
+    var slotPrewarming = false
+    private var prewarmGen = 0
+
+    // [app] preload: build the views that don't exist yet, hidden and with
+    // their header in place, one per main-loop turn (AppKit = main thread
+    // only, so the work is spread out instead of moved off it). The first
+    // switch to a view is then an unpark like any later one — no half-built
+    // first paint.
+    func prewarmSlot(after delay: Double = 1.0) {
+        guard settings.sharedWindow, settings.preload else { return }
+        prewarmGen += 1
+        let gen = prewarmGen
+        var views: [SlotView] = [.notes]
+        if aiEnabled() { views.append(.ai) }
+        views.append(.files)
+        if jiraEnabledInConfig() { views.append(.jira) }
+        if confluenceEnabled() { views.append(.confluence) }
+        func step(_ rest: ArraySlice<SlotView>, _ wait: Double) {
+            guard let v = rest.first else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                guard let self, gen == self.prewarmGen else { return }
+                if self.slotMember(v) == nil {
+                    let t0 = DispatchTime.now().uptimeNanoseconds
+                    self.slotPrewarming = true
+                    let ok = self.ensureSlotMember(v, frame: self.slot.currentFrame())
+                    self.slotPrewarming = false
+                    if ok { self.slot.prepare(v) }
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+                    self.log(String(format: "preload %@: %@%.0f ms", v.rawValue, ok ? "" : "not available, ", ms))
+                }
+                step(rest.dropFirst(), 0.3)
+            }
+        }
+        step(views[...], delay)
+    }
     // the output window (type = output) the shared window shows
     var currentOutputName: String?
     private var filesCommand: CommandSpec? { commands.first { $0.kind == .files } }
@@ -3044,7 +3122,7 @@ final class SwitcherController: NSObject {
     }
 
     // the files view, landing on Recent when it wasn't already on screen
-    // ([files] start = recent): that's what Hyper+F is for
+    // ([files] start = recent)
     func slotShowFiles(hotkey: Bool = false, userInIt: Bool? = nil) {
         let wasShown = slot.current == .files && slot.isVisible
         if hotkey { slot.hotkey(.files, userInIt: userInIt) } else { slot.open(.files) }
@@ -3241,8 +3319,9 @@ final class SwitcherController: NSObject {
         log("focused existing '\(w.config.name)' window")
     }
 
-    // the hotkey messages (Hyper+N / F / J / T) that show the shared window
-    static let hotkeyModes: Set<String> = ["notes", "voice", "jira", "files", "terminal", "confluence", "ai"]
+    // the messages that show the shared window: "window" = Hyper+N (show the
+    // last view / hide), "terminal" = Hyper+T; the named views are CLI only
+    static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "terminal", "confluence", "ai"]
 
     // Runs on the socket thread BEFORE the hotkey reaches the main thread
     // (the binary is the hotkey, no launcher script): record the window
@@ -3341,12 +3420,14 @@ final class SwitcherController: NSObject {
                             let path = String(name.dropFirst(5))
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
                         } else if settings.sharedWindow && Self.hotkeyModes.contains(name) {
-                            // Hyper+N / F / J / T: toggle / switch the shared window
+                            // Hyper+N (window) / Hyper+T, or a named view from the CLI
                             self?.toggleCommand(name)
                         } else if name == "notes" {
                             self?.showNotes()
                         } else if name == "jira-dashboard" {
                             self?.showJiraDashboard()
+                        } else if name == "setup" {
+                            SetupWindow.show(controller: self)
                         } else if name == "confluence" || name == "confluence-setup" {
                             self?.showConfluence(setup: name == "confluence-setup")
                         } else if name == "ai" {
@@ -3603,6 +3684,14 @@ final class SwitcherController: NSObject {
     func toggleCommand(_ name: String) {
         // "voice" aliases the merged notes+voice window (see showCommand)
         let name = name == "voice" ? "notes" : name
+        if name == "window" {
+            // Hyper+N: show the view you were last on / hide the window
+            guard settings.sharedWindow else { toggleNotes(); return }
+            let (wid, pid) = readFocusFile()
+            if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
+            slot.toggle(userInIt: userInOurWindow(pid, name))
+            return
+        }
         if name == "terminal" {
             guard settings.sharedWindow else {
                 showNotes()
@@ -3708,7 +3797,7 @@ final class SwitcherController: NSObject {
         if let custom, FileManager.default.fileExists(atPath: custom) {
             a += ["-u", custom]
         } else {
-            let bundled = binDir + "/vim/notes-init.vim"
+            let bundled = assetDir + "/vim/notes-init.vim"
             if FileManager.default.fileExists(atPath: bundled) {
                 a += ["--noplugin", "-u", bundled]
             }
@@ -4071,7 +4160,13 @@ final class SwitcherController: NSObject {
     private func openFileFastWindow(_ cmd: CommandSpec, restoreWID: String?, restorePID: pid_t?) {
         let windowName = "filefast"
         if let existing = subWindows.first(where: { $0.config.name == windowName }) {
-            focusSubWindow(existing)
+            // already open (you clicked away to copy something): take the
+            // keyboard back WITHOUT activating the app — activation hands key
+            // to the app's last key window (notes / jira) instead of this panel
+            let win = existing.nativeWindow
+            win.orderFrontRegardless()
+            win.makeKey()
+            log("filefast refocused")
             return
         }
         let colors = windowColors(cmd)
@@ -4079,7 +4174,12 @@ final class SwitcherController: NSObject {
         cfg.enableToggle = false
         cfg.enableDrag = false
         cfg.dynamicHeight = true
-        cfg.floating = cmd.float ?? settings.float
+        // sticky (default): clicking another app leaves the bar open, so you
+        // can paste the content, go copy the file name, and come back (click
+        // it or run /filefast again). Floating (default): it stays above the
+        // app you went to. Esc closes it; a save closes it.
+        cfg.sticky = cmd.sticky
+        cfg.floating = cmd.float ?? true
         cfg.width = 620
         cfg.colors = colors
         cfg.showSearchBar = true
@@ -4212,6 +4312,15 @@ final class SwitcherController: NSObject {
             backdrop.addSubview(scroll)
         }
         w.focusSearchField()
+        // opened from another app: hiding the switcher can hand key to one of
+        // OUR other windows (notes / jira) a beat later — take it back, but
+        // never from another app the user clicked into
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak w] in
+            guard let w, w.isShown, !w.nativeWindow.isKeyWindow,
+                  let k = NSApp.keyWindow, k !== w.nativeWindow else { return }
+            w.nativeWindow.makeKeyAndOrderFront(nil)
+            w.focusSearchField()
+        }
         log("filefast window opened")
     }
 
@@ -4816,9 +4925,28 @@ private func trimmed(_ s: String) -> String? {
                 switch response {
                 case .alertFirstButtonReturn:
                     // "Open Existing…": no Finder picker — the integrated file
-                    // browser below is the picker. Just ask for a path and
-                    // trust it; if it isn't a real file the note doesn't open.
-                    w.onOpenPathPrompt?()
+                    // browser below is the picker. Ask for a path; strip any
+                    // extension the user typed so a mistaken ".txt" still finds
+                    // the ".md" note ("~/notes/todo.txt" -> "~/notes/todo.md").
+                    // Fall back to the exact path when the ".md" one is absent.
+                    presentPathSheet(on: panel,
+                                     title: "Open note",
+                                     message: "Path to open as a note:",
+                                     okTitle: "Open") { [weak self, weak w] value in
+                        guard let self, let w, let value else { return }
+                        let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !raw.isEmpty else { return }
+                        let expanded = (raw as NSString).expandingTildeInPath
+                        let mdPath = (expanded as NSString).deletingPathExtension + ".md"
+                        let chosen = FileManager.default.fileExists(atPath: mdPath)
+                            ? mdPath : expanded
+                        let p = (chosen as NSString).standardizingPath
+                        if FileManager.default.fileExists(atPath: p) {
+                            w.onOpenExternalPath?(p)
+                        } else {
+                            self.log("note '\(cmd.name)': no such path \(p)")
+                        }
+                    }
                 case .alertSecondButtonReturn:
                     // "New Note": prompt for a name, create in the default dir
                     presentPathSheet(on: panel,
@@ -5352,6 +5480,7 @@ private func trimmed(_ s: String) -> String? {
             w.onEscape = { [weak self] in self?.slot.hide("Cmd+W") }
             placeSlotWindow(w)
         }
+        w.quietShow = slotPrewarming
         w.show()
     }
 
@@ -6888,6 +7017,7 @@ private func trimmed(_ s: String) -> String? {
         subWindows.append(w)
         w.tabFooterText = lastWriteLabel(tabs[currentTab].path)
         placeSlotWindow(w)
+        w.quietShow = slotPrewarming
         w.show()
         if isReleaseView, let f = pendingReleaseTab {
             pendingReleaseTab = nil
@@ -6989,6 +7119,7 @@ private func trimmed(_ s: String) -> String? {
     // [files] recent / recent-days / recent-limit / recent-exclude
     func configureRecentFiles() {
         let cmd = commands.first(where: { $0.kind == .files })
+        FileDrag.onFileOp = { RecentFiles.shared.ownChange(from: $0, to: $1) }
         RecentFiles.shared.configure(enabled: cmd?.recent ?? true, days: cmd?.recentDays ?? 7,
                                      limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [],
                                      everywhere: cmd?.recentEverywhere ?? true)
@@ -7142,6 +7273,7 @@ private func trimmed(_ s: String) -> String? {
         }
         subWindows.append(w)
         placeSlotWindow(w)
+        w.quietShow = slotPrewarming
         w.show()
         // give the browser's list keyboard focus (the window's own hidden
         // search field would otherwise take it)
@@ -7358,6 +7490,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 c.showCommand(name)
             }
         }
+        c.prewarmSlot()
+        if AppInstall.requested || AppInstall.wantsSetupWindow {
+            // first run / new version / not installed yet (an app install)
+            SetupWindow.show(controller: c)
+        } else if !isRepoBuild, !showOnLaunch, openCommand == nil {
+            // an installed app opened from Finder: show something
+            c.showCommand("files")
+        }
+    }
+
+    // a second double-click in Finder while the daemon runs (accessory app,
+    // no Dock icon): open the window
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { controller?.showCommand("files") }
+        return false
     }
 
     // One unified menu bar icon with a comprehensive dropdown — replaces the
@@ -7384,6 +7531,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         addMenuItem(menu, "Close Window", #selector(MenuTarget.closeWindow(_:)), key: "w", modifiers: .command)
         addMenuItem(menu, "Quit", #selector(MenuTarget.quitApp(_:)), key: "q", modifiers: .command)
+        menu.addItem(.separator())
+        // what this Mac needs + the optional hotkeys / menu bar set-up
+        addMenuItem(menu, "Setup & Health Check…", #selector(MenuTarget.openSetup(_:)), key: "")
         menu.addItem(.separator())
 
         // Drawer toggles (affect the key/focused window)
@@ -7666,6 +7816,10 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     @objc func openJiraDashboard(_ sender: Any?) {
         MenuTarget.controller?.showJiraDashboard()
+    }
+
+    @objc func openSetup(_ sender: Any?) {
+        SetupWindow.show(controller: MenuTarget.controller)
     }
 
     @objc func openConfluence(_ sender: Any?) {
@@ -8200,6 +8354,7 @@ extension SwitcherController {
         fontFamilyCache = nil
         log("config reloaded (\(commands.count) commands)")
         rebuildNoteWindow()
+        prewarmSlot()
     }
 }
 
@@ -8221,7 +8376,7 @@ final class FontPanelReceiver: NSObject {
 // enabled), kicks polls, edits schedules through jira_config.py, and SHOWS
 // the state — so the menu, jira-doctor and `cat status.json` always agree.
 enum JiraPoll {
-    static var dir: String { binDir + "/jira" }
+    static var dir: String { assetDir + "/jira" }
     static let configPath = NSHomeDirectory() + "/.config/jira/config.json"
     static let statusPath = NSHomeDirectory() + "/.cache/jira/status.json"
     static let curlLogPath = NSHomeDirectory() + "/.cache/jira/curl.log"

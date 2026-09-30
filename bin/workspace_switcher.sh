@@ -5,6 +5,7 @@
 #
 # Usage:
 #   workspace_switcher.sh            toggle the main popup
+#   workspace_switcher.sh window     show the shared window on its last view / hide it (Hyper+N)
 #   workspace_switcher.sh notes      open ONLY the notes window (no popup)
 #   workspace_switcher.sh jira       open ONLY the jira window (no popup)
 #   workspace_switcher.sh voice      open ONLY the voice-to-text window
@@ -13,10 +14,15 @@
 #                                    THE jira switch ([jira] enabled + the
 #                                    launchd poll agent) — NOT the window
 #                                    toggle above; needs a running daemon
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
+# (physical paths: an app install reaches this script through the link
+# ~/.config/workspace-switcher/bin -> <App>/Contents/Resources/bin)
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd "$DIR/.." && pwd -P)"
 . "$ROOT/install.conf"
 APP="$ROOT/$APP_NAME.app"
+# app install (DMG): this script lives INSIDE the bundle — nothing to build
+BUNDLED=0
+case "$ROOT" in *.app/Contents/Resources) BUNDLED=1; APP="${ROOT%/Contents/Resources}" ;; esac
 BIN="$APP/Contents/MacOS/$APP_NAME"
 TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/workspace-switcher-focus"
@@ -67,6 +73,7 @@ fi
 # must not go dead), except in build-only mode where the failure is the
 # answer.
 build() {
+    [ "$BUNDLED" = 1 ] && return 0
     if ! "$DIR/build-app.sh"; then
         [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
     fi
@@ -84,7 +91,7 @@ fi
 # WS_DEBUG=1 logs the launch steps to $TMPDIR/ws-launch.log
 LOG(){ [ "${WS_DEBUG:-}" = "1" ] && echo "$(date '+%H:%M:%S') $*" >>"$TMP/ws-launch.log"; }
 
-case "$MODE" in notes|jira|voice|files|terminal|confluence|ai)
+case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
     LOG "== invoke MODE=$MODE focused=[$LINE] =="
     # notes, files, jira and output windows are all views of ONE shared
     # window: move ours (not the Hyper+S palette, titled like the app) onto
@@ -111,7 +118,9 @@ case "$MODE" in notes|jira|voice|files|terminal|confluence|ai)
         LOG "daemon ping: FAILED -> launching fresh daemon via LaunchServices ($MODE)"
         # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
         # Karabiner attribution and would answer future pings forever)
-        pkill -f "workspace-switcher.app/Contents/MacOS" 2>/dev/null || true
+        pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
+        # cold start: Hyper+N ("window") opens the first view, files —
+        # main.swift maps it; only the terminal drawer needs notes
         [ "$MODE" = "terminal" ] && MODE=notes
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
             LOG "LaunchServices launch FAILED — voice permissions will be broken"
@@ -125,7 +134,7 @@ esac
 # as above so a cold start from Hyper+S still gets the mic grant.
 if ! "$BIN" toggle >/dev/null 2>&1; then
     build
-    pkill -f "workspace-switcher.app/Contents/MacOS" 2>/dev/null || true
+    pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
     if ! open -n -g "$APP" --args show >/dev/null 2>&1; then
         LOG "LaunchServices launch FAILED — voice permissions will be broken"
     fi

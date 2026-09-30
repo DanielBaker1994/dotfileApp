@@ -3,6 +3,19 @@ import Foundation
 
 // Entry point (must be in main.swift for multi-file builds).
 
+// Children (python, the launcher script) inherit this: an app install keeps
+// its python inside the signed bundle, and a __pycache__ written there would
+// break the signature.
+setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
+// ... and the python side finds commands.toml beside its own folder, which
+// in an app install is the bundle: point it at the user's file.
+if !isRepoBuild { setenv("WS_COMMANDS_CONF", settings.commandsConfPath, 0) }
+
+// An app install (DMG): make sure ~/.config/workspace-switcher exists and
+// points at THIS app before anything reads commands.toml from it (a marker
+// check when nothing changed — a hotkey ping pays two file reads).
+AppInstall.ensureHome()
+
 // App settings ([app] section) first so the socket pings below use the
 // configured names, not just the built-in defaults.
 applyAppConfigFromDisk()
@@ -36,7 +49,11 @@ if cliArgs.count > 1 {
         if sendLaunchMessage(msg) { exit(0) }
         FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
         exit(1)
-    case "notes", "jira", "voice", "files", "terminal", "confluence", "ai":
+    case "setup":
+        // the Setup & Health Check window (running daemon, else this launch)
+        if sendLaunchMessage("setup") { exit(0) }
+        AppInstall.requested = true
+    case "window", "notes", "jira", "voice", "files", "terminal", "confluence", "ai":
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->
         // hand off to the launcher script (build-if-stale + LaunchServices
@@ -47,17 +64,15 @@ if cliArgs.count > 1 {
         // (a LaunchServices launch — the script's own `open -n -g`, INSTALL.sh
         // — has launchd as parent: that IS the daemon starting, never re-exec)
         if getppid() != 1 {
-            let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-            // <root>/<app>.app/Contents/MacOS/<bin> -> <root>/bin/workspace_switcher.sh
-            let root = exe.deletingLastPathComponent().deletingLastPathComponent()
-                .deletingLastPathComponent().deletingLastPathComponent()
-            let script = root.appendingPathComponent("bin/workspace_switcher.sh").path
+            // repo build: <root>/bin/…; app install: Contents/Resources/bin/…
+            let script = assetDir + "/bin/workspace_switcher.sh"
             if FileManager.default.isExecutableFile(atPath: script) {
                 let argv: [UnsafeMutablePointer<CChar>?] = [strdup(script), strdup(cliArgs[1]), nil]
                 execv(script, argv)
             }
         }
-        openCommand = cliArgs[1] == "terminal" ? "notes" : cliArgs[1]
+        // cold start: Hyper+N ("window") opens the default view, files
+        openCommand = cliArgs[1] == "terminal" ? "notes" : cliArgs[1] == "window" ? "files" : cliArgs[1]
     default:
         break
     }

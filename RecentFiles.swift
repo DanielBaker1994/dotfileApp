@@ -48,8 +48,20 @@ final class RecentFiles {
     // arrow press in the Recent view)
     private let snapLock = NSLock()
     private var snapshot: [(path: String, at: Date, source: String?)] = []
-    private let home = NSHomeDirectory()
-    private let store = NSHomeDirectory() + "/.cache/workspace-switcher/recent.json"
+    private let home: String
+    private let store: String
+    // a rename shows up as TWO events — the old path (gone), then the new
+    // one — tied together by the file's inode. What the old path held
+    // (itself at "", what was inside a folder by "/suffix") waits here for
+    // its second half.
+    private var departed: [UInt64: (at: Double, items: [String: Item])] = [:]
+
+    // home / store are parameters for Tests/test_recent_files.swift
+    init(home: String = NSHomeDirectory(),
+         store: String = NSHomeDirectory() + "/.cache/workspace-switcher/recent.json") {
+        self.home = home
+        self.store = store
+    }
 
     // [files] recent / recent-days / recent-limit / recent-exclude / recent-scope
     func configure(enabled on: Bool, days: Int, limit: Int, excludes: [String], everywhere all: Bool) {
@@ -75,6 +87,73 @@ final class RecentFiles {
         return Array(all.filter { !arrivedOnly || $0.source != nil }.prefix(limit))
     }
 
+    // A rename / move (old → new) or a copy (old nil) made by THIS app: the
+    // stream ignores our own writes (IgnoreSelf), so the browser reports
+    // them (`FileDrag.onFileOp`). The snapshot is patched right here — the
+    // caller reloads its list straight after — and the store follows on
+    // `queue`. A renamed row keeps its place in the list.
+    func ownChange(from old: String?, to new: String) {
+        guard enabled else { return }
+        if let old {
+            snapLock.lock()
+            // (moved out of scope — into the Trash — = gone from the list)
+            snapshot = snapshot.compactMap { e in
+                guard let p = Self.rekeyed(e.path, from: old, to: new) else { return e }
+                return keep(p) ? (path: p, at: e.at, source: e.source) : nil
+            }
+            snapLock.unlock()
+        }
+        queue.async { [self] in
+            let carried = old.map { rekey(from: $0, to: new) } ?? false
+            if !carried, keep(new), FileManager.default.fileExists(atPath: new) {
+                items[new] = Item(at: Date().timeIntervalSince1970, source: Self.origin(new))
+            }
+            trim()
+            publish()
+        }
+    }
+
+    // is there a file under EXACTLY this name? "a.txt" still "exists" after
+    // a case-only rename to "A.txt" (case-insensitive volume) — without
+    // this the file was listed twice
+    static func present(_ p: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: p) else { return false }
+        let real = try? URL(fileURLWithPath: p).resourceValues(forKeys: [.nameKey]).name
+        return real == nil || real == (p as NSString).lastPathComponent
+    }
+
+    // `p` after old was renamed to new: old itself, or anything inside it
+    static func rekeyed(_ p: String, from old: String, to new: String) -> String? {
+        if p == old { return new }
+        if p.hasPrefix(old + "/") { return new + p.dropFirst(old.count) }
+        return nil
+    }
+
+    // on `queue`: move old (and what's inside it) to new; false = nothing
+    // of it was listed
+    private func rekey(from old: String, to new: String) -> Bool {
+        let gone = take(old)
+        for (suffix, it) in gone { put(new + suffix, it) }
+        return !gone.isEmpty
+    }
+
+    // on `queue`: drop `p` and everything inside it; returns what was
+    // there, keyed by the path after `p` ("" = p itself)
+    private func take(_ p: String) -> [String: Item] {
+        var gone: [String: Item] = [:]
+        for (k, it) in items where k == p || k.hasPrefix(p + "/") {
+            gone[String(k.dropFirst(p.count))] = it
+        }
+        for suffix in gone.keys { items[p + suffix] = nil }
+        return gone
+    }
+
+    // on `queue`: the newer activity wins, a known origin is never lost
+    private func put(_ p: String, _ it: Item) {
+        guard let have = items[p] else { items[p] = it; return }
+        items[p] = Item(at: max(have.at, it.at), source: have.source ?? it.source)
+    }
+
     // MARK: lifecycle
 
     private func start() {
@@ -98,13 +177,18 @@ final class RecentFiles {
         let ctx = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         var context = FSEventStreamContext(version: 0, info: ctx, retain: nil, release: nil,
                                            copyDescription: nil)
+        // ExtendedData: each event is a dictionary, path + the file's inode
         let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes
+                           | kFSEventStreamCreateFlagUseExtendedData
                            | kFSEventStreamCreateFlagIgnoreSelf)
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let me = Unmanaged<RecentFiles>.fromOpaque(info).takeUnretainedValue()
-            let arr = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
-            me.handle(arr, Array(UnsafeBufferPointer(start: flags, count: count)))
+            let arr = unsafeBitCast(paths, to: NSArray.self) as? [NSDictionary] ?? []
+            // kFSEventStreamEventExtendedDataPathKey / …ExtendedFileIDKey
+            me.handle(arr.map { $0["path"] as? String ?? "" },
+                      Array(UnsafeBufferPointer(start: flags, count: count)),
+                      arr.map { ($0["fileID"] as? NSNumber)?.uint64Value })
         }
         let roots = queue.sync { everywhere } ? ["/"] : [home, "/private/tmp"]
         // 1s latency: the kernel batches a busy disk into one callback
@@ -126,18 +210,27 @@ final class RecentFiles {
         stream = nil
     }
 
-    // on `queue`
-    private func handle(_ paths: [String], _ flags: [FSEventStreamEventFlags]) {
+    // on `queue`. ids = each event's inode (nil = unknown: a rename is then
+    // just "old gone, new appeared")
+    func handle(_ paths: [String], _ flags: [FSEventStreamEventFlags], _ ids: [UInt64?] = []) {
         let now = Date().timeIntervalSince1970
         var touched = false
+        // a rename OUT of scope never sends its second half
+        departed = departed.filter { now - $0.value.at < 10 }
         for (i, raw) in paths.enumerated() where i < flags.count {
             let p = raw.hasPrefix("/tmp/") ? "/private" + raw : raw
             // the cheap string check first: a busy disk sends thousands of
             // system-tree events that must cost nothing
             guard inScope(p) else { continue }
             let f = Int(flags[i])
-            if f & kFSEventStreamEventFlagItemRemoved != 0, !FileManager.default.fileExists(atPath: p) {
-                if items.removeValue(forKey: p) != nil { touched = true }
+            let id = i < ids.count ? ids[i] : nil
+            // deleted, or the OLD name of a rename: it leaves the list with
+            // everything inside it — a rename's new name picks that up below
+            if f & (kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemRenamed) != 0,
+               !Self.present(p) {
+                let gone = take(p)
+                if !gone.isEmpty { touched = true }
+                if let id, f & kFSEventStreamEventFlagItemRenamed != 0 { departed[id] = (now, gone) }
                 continue
             }
             let isFile = f & kFSEventStreamEventFlagItemIsFile != 0
@@ -154,6 +247,12 @@ final class RecentFiles {
             // a download finishes by RENAMING foo.crdownload -> foo: read
             // the origin when the file appears under its final name
             if created || renamed || item.source == nil { item.source = Self.origin(p) ?? item.source }
+            // the new name of a rename: what the old name held comes along
+            // (a renamed folder keeps the files listed inside it)
+            if renamed, let id, let was = departed.removeValue(forKey: id) {
+                item.source = item.source ?? was.items[""]?.source
+                for (suffix, it) in was.items where !suffix.isEmpty { put(p + suffix, it) }
+            }
             items[p] = item
             touched = true
         }
@@ -309,7 +408,7 @@ final class RecentFiles {
         let ext = (name as NSString).pathExtension.lowercased()
         if Self.noiseExts.contains(ext) || name.hasSuffix("~") || name == "4913" { return false }
         // /private/tmp: skip system / tool scratch areas
-        if p.hasPrefix("/private/tmp/") {
+        if p.hasPrefix("/private/tmp/"), !p.hasPrefix(home + "/") {
             let top = comps.count > 3 ? comps[3] : ""
             if top.hasPrefix("com.apple") || top.hasPrefix("claude") || top.hasPrefix("tmp")
                 || top.hasPrefix("ws-") || top.hasPrefix("workspace-switcher")

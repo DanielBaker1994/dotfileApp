@@ -1,5 +1,6 @@
 import AppKit
 import PDFKit
+import Quartz
 import SwiftTerm
 import Foundation
 import Darwin
@@ -3211,16 +3212,54 @@ final class PopupTableRowView: NSTableRowView {
 
 // The browser's file list: custom-drawn rows (icon + name + size), click to
 // select (preview), double-click/Return to open, arrows to move. Printable
-// keys hand focus to the search field.
-final class FileListPane: NSView {
+// keys hand focus to the search field. Finder-style drag and drop: drag a
+// row out (a real file URL: Finder, Slack, browsers, Mail…) and drop files /
+// file promises (Photos, Safari images) onto a folder row or the list itself.
+final class FileListPane: NSView, NSDraggingSource {
     private var config: PopupConfig
     var rows: [PopupFileBrowser.Entry] = [] {
         didSet {
             if let h = hover, !rows.indices.contains(h) { hover = nil }
+            marked = []
             needsDisplay = true
         }
     }
     var selection = 0 { didSet { needsDisplay = true } }
+    // a multi-selection (Shift / Cmd click, Shift+arrows, Cmd+A): the rows
+    // selected besides the cursor row `selection`. Empty = just the cursor.
+    private(set) var marked: Set<Int> = [] { didSet { needsDisplay = true } }
+    // where a Shift range starts
+    private var anchor = 0
+    // every selected row, top to bottom — what trash / copy / drag act on
+    var selectedRows: [Int] {
+        marked.isEmpty ? (rows.indices.contains(selection) ? [selection] : []) : marked.sorted()
+    }
+    func clearMarks() { marked = [] }
+    func selectAll() {
+        let all = rows.indices.filter { rows[$0].name != ".." }
+        guard !all.isEmpty else { return }
+        marked = Set(all)
+        if !marked.contains(selection) { selection = all[0] }
+        anchor = all[0]
+    }
+    // Shift+click / Shift+arrow: everything from the anchor to `i`
+    private func extendSelection(to i: Int) {
+        guard rows.indices.contains(i) else { return }
+        if marked.isEmpty { anchor = selection }
+        let a = min(max(0, anchor), rows.count - 1)
+        marked = Set((min(a, i)...max(a, i)).filter { rows[$0].name != ".." })
+        selection = i
+        onSelect?(i)
+    }
+    // the file actions of the context menu / shortcuts; the host acts on
+    // `selectedRows` (the menu selects the clicked row first)
+    enum Action {
+        case trash, duplicate, copy, cut, paste, newFolder, newFile, quickLook, enclosing, toggleHidden
+    }
+    var onAction: ((Action) -> Void)?
+    // which actions apply right now (paste needs files on the clipboard…)
+    var canPerform: ((Action) -> Bool)?
+    var hiddenShown: (() -> Bool)?
     private(set) var hover: Int?
     var onSelect: ((Int) -> Void)?
     var onOpen: ((Int) -> Void)?
@@ -3230,6 +3269,20 @@ final class FileListPane: NSView {
     var onCopyPath: ((Int) -> Void)?
     var onOpenInNotes: ((Int) -> Void)?
     var onOpenTerminal: ((Int) -> Void)?
+    // rename a row in place (F2 / right-click "Rename…"); nil = not offered
+    var onRename: ((Int) -> Void)?
+    // the folder a drop on empty space / a file row lands in (nil = this
+    // list takes no drops, e.g. the Recent view or a recursive search)
+    var dropDirectory: (() -> String?)?
+    // files were copied / moved in or out: reload + a status line
+    var onFilesChanged: ((String) -> Void)?
+
+    // drag bookkeeping: the press point + row, until the mouse travels far
+    // enough to start a drag (a plain click still just selects)
+    private var dragStart: (point: NSPoint, row: Int)?
+    // drop target while a drag hovers: a folder row, or the whole list
+    private var dropRow: Int? { didSet { if dropRow != oldValue { needsDisplay = true } } }
+    private var dropWhole = false { didSet { if dropWhole != oldValue { needsDisplay = true } } }
 
     private let rowH: CGFloat = 22
     private static let iconSize: CGFloat = 16
@@ -3240,11 +3293,13 @@ final class FileListPane: NSView {
     init(config: PopupConfig) {
         self.config = config
         super.init(frame: .zero)
+        registerForDraggedTypes([.fileURL] + NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) })
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -3273,10 +3328,30 @@ final class FileListPane: NSView {
     func rowRect(_ i: Int) -> NSRect {
         NSRect(x: 0, y: CGFloat(i) * rowH, width: bounds.width, height: rowH)
     }
+    // where a row's name is drawn (the inline rename field sits here)
+    func nameRect(_ i: Int) -> NSRect {
+        let r = rowRect(i)
+        var tx = 10 + Self.iconSize + 6
+        var trailing: CGFloat = 8
+        if rows.indices.contains(i) {
+            let e = rows[i]
+            if e.isDir && e.name != ".." { tx += 4 }
+            if e.trailingWidth > 0 { trailing += e.trailingWidth + Self.trailingInset + 4 }
+        }
+        return NSRect(x: tx, y: r.minY, width: max(60, r.width - tx - trailing), height: rowH)
+    }
 
     override func draw(_ dirty: NSRect) {
         let w = bounds.width
         // only the rows in the dirty rect (search results can be thousands)
+        if dropWhole {
+            // drop into this list's folder: an accent ring round what's visible
+            config.colors.accentOn.setStroke()
+            let ring = NSBezierPath(roundedRect: visibleRect.insetBy(dx: 2, dy: 2),
+                                    xRadius: config.buttonRadius, yRadius: config.buttonRadius)
+            ring.lineWidth = 2
+            ring.stroke()
+        }
         let first = max(0, Int(dirty.minY / rowH))
         let last = min(rows.count - 1, Int(dirty.maxY / rowH))
         guard first <= last else { return }
@@ -3286,20 +3361,31 @@ final class FileListPane: NSView {
             // the same cursor language as the list windows: a rounded
             // highlight pill with an accent edge; hover = a quiet surface
             let pillR = r.insetBy(dx: 4, dy: 1)
-            if i == selection {
+            if i == selection || marked.contains(i) {
                 let p = NSBezierPath(roundedRect: pillR, xRadius: config.buttonRadius,
                                      yRadius: config.buttonRadius)
                 config.colors.highlight.setFill()
                 p.fill()
-                NSGraphicsContext.saveGraphicsState()
-                p.addClip()
-                config.colors.accentOn.setFill()
-                NSRect(x: pillR.minX, y: pillR.minY, width: 3, height: pillR.height).fill()
-                NSGraphicsContext.restoreGraphicsState()
+                // the accent edge marks the cursor row of a multi-selection
+                if i == selection {
+                    NSGraphicsContext.saveGraphicsState()
+                    p.addClip()
+                    config.colors.accentOn.setFill()
+                    NSRect(x: pillR.minX, y: pillR.minY, width: 3, height: pillR.height).fill()
+                    NSGraphicsContext.restoreGraphicsState()
+                }
             } else if let h = hover, h == i {
                 ButtonStyle.fill(.hover, config.colors).setFill()
                 NSBezierPath(roundedRect: pillR, xRadius: config.buttonRadius,
                              yRadius: config.buttonRadius).fill()
+            }
+            if i == dropRow {
+                // folder under a drag: Finder's "drop here" outline
+                config.colors.accentOn.setStroke()
+                let ring = NSBezierPath(roundedRect: pillR, xRadius: config.buttonRadius,
+                                        yRadius: config.buttonRadius)
+                ring.lineWidth = 2
+                ring.stroke()
             }
             let icon = e.icon ?? NSWorkspace.shared.icon(forFile: e.path)
             var ir = r
@@ -3315,7 +3401,8 @@ final class FileListPane: NSView {
 
             let nameAttrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 12, weight: .regular),
-                .foregroundColor: i == selection ? config.colors.text : config.colors.text.withAlphaComponent(0.85),
+                .foregroundColor: i == selection || marked.contains(i)
+                    ? config.colors.text : config.colors.text.withAlphaComponent(0.85),
             ]
             var tx = ir.maxX + 6
             if e.isDir && e.name != ".." { tx += 4 }   // folder emoji leading space kept small
@@ -3349,10 +3436,191 @@ final class FileListPane: NSView {
     override func mouseDown(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
         let idx = Int(p.y / rowH)
-        guard rows.indices.contains(idx) else { return }
+        dragStart = nil
+        renameClick?.cancel()
+        renameClick = nil
+        collapseOnUp = nil
+        // a click on empty space drops a multi-selection
+        guard rows.indices.contains(idx) else { marked = []; return }
+        let mods = e.modifierFlags
+        if mods.contains(.shift) {
+            extendSelection(to: idx)
+            return
+        }
+        if mods.contains(.command) {
+            // toggle one row in / out of the selection
+            guard rows[idx].name != ".." else { return }
+            var m = marked.isEmpty && rows.indices.contains(selection) && rows[selection].name != ".."
+                ? [selection] : marked
+            if m.contains(idx) { m.remove(idx) } else { m.insert(idx) }
+            if m.contains(idx) {
+                selection = idx
+            } else if let first = m.min() {
+                selection = first
+            }
+            marked = m.count > 1 ? m : []
+            anchor = selection
+            onSelect?(selection)
+            return
+        }
+        // a press inside a multi-selection keeps it (so it can be dragged);
+        // a plain click then collapses it on mouse-up
+        if marked.count > 1, marked.contains(idx) {
+            selection = idx
+            onSelect?(idx)
+            if e.clickCount >= 2 { marked = []; onOpen?(idx); return }
+            dragStart = (p, idx)
+            collapseOnUp = idx
+            return
+        }
+        // Finder's slow second click: a single click on the NAME of the row
+        // that is already selected renames it — once the double-click time
+        // has passed with no second click (that opens) and no drag
+        let onName = e.clickCount == 1 && idx == selection && marked.isEmpty && onRename != nil
+            && rows[idx].name != ".." && nameTextRect(idx).contains(p)
+        marked = []
+        anchor = idx
         selection = idx
         onSelect?(idx)
-        if e.clickCount >= 2 { onOpen?(idx) }
+        if e.clickCount >= 2 { onOpen?(idx); return }
+        if rows[idx].name != ".." { dragStart = (p, idx) }
+        if onName {
+            let path = rows[idx].path
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.renameClick = nil
+                guard self.selection == idx, self.rows.indices.contains(idx),
+                      self.rows[idx].path == path, self.window?.isKeyWindow == true else { return }
+                self.onRename?(idx)
+            }
+            renameClick = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+        }
+    }
+
+    // a pending click-to-rename (cancelled by a second click or a drag)
+    private var renameClick: DispatchWorkItem?
+    // the row a plain click inside a multi-selection collapses it to
+    private var collapseOnUp: Int?
+    // the drawn name itself, not the whole column: clicks beside the text
+    // only select
+    private func nameTextRect(_ i: Int) -> NSRect {
+        var r = nameRect(i)
+        let w = (rows[i].name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width
+        r.size.width = min(r.width, ceil(w) + 6)
+        return r
+    }
+
+    override func mouseDragged(with e: NSEvent) {
+        guard let start = dragStart, rows.indices.contains(start.row) else { return }
+        let p = convert(e.locationInWindow, from: nil)
+        guard hypot(p.x - start.point.x, p.y - start.point.y) > 4 else { return }
+        dragStart = nil
+        collapseOnUp = nil
+        renameClick?.cancel()
+        renameClick = nil
+        let entry = rows[start.row]
+        // dragging one row of a multi-selection drags all of it
+        let more = marked.contains(start.row)
+            ? marked.sorted().filter { $0 != start.row && rows[$0].name != ".." }.map { rows[$0].path } : []
+        let img = Self.dragImage(entry, count: more.count + 1, width: min(bounds.width, 320),
+                                 rowH: rowH, config: config)
+        FileDrag.begin(path: entry.path, more: more, image: img,
+                       frame: NSRect(origin: rowRect(start.row).origin, size: img.size),
+                       view: self, event: e, source: self)
+    }
+
+    override func mouseUp(with e: NSEvent) {
+        dragStart = nil
+        if let i = collapseOnUp {
+            collapseOnUp = nil
+            marked = []
+            anchor = i
+        }
+    }
+
+    // the row as Finder drags it: icon + name, slightly translucent
+    private static func dragImage(_ e: PopupFileBrowser.Entry, count: Int = 1, width: CGFloat, rowH: CGFloat,
+                                  config: PopupConfig) -> NSImage {
+        let icon = e.icon ?? NSWorkspace.shared.icon(forFile: e.path)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: config.colors.text,
+        ]
+        // a multi-selection drags as "name +2"
+        let label = count > 1 ? "\(e.name)  +\(count - 1)" : e.name
+        let nameW = min((label as NSString).size(withAttributes: attrs).width, width - 40)
+        let size = NSSize(width: 10 + iconSize + 6 + nameW + 10, height: rowH)
+        return NSImage(size: size, flipped: true) { _ in
+            config.colors.highlight.withAlphaComponent(0.85).setFill()
+            NSBezierPath(roundedRect: NSRect(origin: .zero, size: size).insetBy(dx: 1, dy: 1),
+                         xRadius: 5, yRadius: 5).fill()
+            FileDrag.drawFlipped(icon, in: NSRect(x: 10, y: (rowH - iconSize) / 2,
+                                                  width: iconSize, height: iconSize))
+            (label as NSString).draw(with: NSRect(x: 10 + iconSize + 6, y: (rowH - 15) / 2,
+                                                  width: nameW, height: 15),
+                                      options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
+                                      attributes: attrs)
+            return true
+        }
+    }
+
+    // MARK: drag source
+
+    func draggingSession(_ session: NSDraggingSession,
+                         sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        FileDrag.sourceMask(context)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint,
+                         operation: NSDragOperation) {
+        // moved out (e.g. into a Finder window): the row is gone — reload
+        if operation.contains(.move) || operation.contains(.delete) {
+            onFilesChanged?("moved out")
+        }
+    }
+
+    // MARK: drop target
+
+    // the folder under the pointer (a folder row), else the list's own folder
+    private func dropTarget(_ info: NSDraggingInfo) -> (dir: String, row: Int?)? {
+        let p = convert(info.draggingLocation, from: nil)
+        let idx = Int(p.y / rowH)
+        if p.y >= 0, rows.indices.contains(idx), rows[idx].isDir {
+            return ((rows[idx].path as NSString).standardizingPath, idx)
+        }
+        guard let d = dropDirectory?() else { return nil }
+        return ((d as NSString).standardizingPath, nil)
+    }
+
+    private func updateDrop(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard let t = dropTarget(info) else {
+            dropRow = nil; dropWhole = false
+            return []
+        }
+        let op = FileDrag.operation(info, into: t.dir)
+        dropRow = op.isEmpty ? nil : t.row
+        dropWhole = !op.isEmpty && t.row == nil
+        return op
+    }
+
+    override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation { updateDrop(info) }
+    override func draggingUpdated(_ info: NSDraggingInfo) -> NSDragOperation {
+        autoscroll(with: NSApp.currentEvent ?? NSEvent())
+        return updateDrop(info)
+    }
+    override func draggingExited(_ info: NSDraggingInfo?) { dropRow = nil; dropWhole = false }
+    override func draggingEnded(_ info: NSDraggingInfo) { dropRow = nil; dropWhole = false }
+
+    override func performDragOperation(_ info: NSDraggingInfo) -> Bool {
+        defer { dropRow = nil; dropWhole = false }
+        guard let t = dropTarget(info) else { return false }
+        let op = FileDrag.operation(info, into: t.dir)
+        guard !op.isEmpty else { return false }
+        FileDrag.perform(info, into: t.dir, op: op) { [weak self] msg in
+            self?.onFilesChanged?(msg)
+        }
+        return true
     }
 
     // right-click a row -> context menu: open in the notes window / copy the
@@ -3360,17 +3628,100 @@ final class FileListPane: NSView {
     override func rightMouseDown(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
         let idx = Int(p.y / rowH)
-        guard rows.indices.contains(idx) else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func can(_ a: Action) -> Bool { onAction != nil && (canPerform?(a) ?? true) }
+        func add(_ title: String, _ a: Action) {
+            guard can(a) else { return }
+            let i = NSMenuItem(title: title, action: #selector(rowAction(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = a
+            menu.addItem(i)
+        }
+        func addFolderItems() {
+            add("New Folder", .newFolder)
+            add("New File", .newFile)
+            add("Paste", .paste)
+            add(hiddenShown?() == true ? "Hide Hidden Files" : "Show Hidden Files", .toggleHidden)
+        }
+        // empty space: what applies to the folder itself
+        guard p.y >= 0, rows.indices.contains(idx) else {
+            marked = []
+            addFolderItems()
+            if !menu.items.isEmpty { NSMenu.popUpContextMenu(menu, with: e, for: self) }
+            return
+        }
+        // a right-click inside a multi-selection acts on all of it
+        if !marked.contains(idx) { marked = [] }
         selection = idx
         onSelect?(idx)
-        let menu = NSMenu()
-        menu.addItem(menuItem("Open in Notes", #selector(rowOpenInNotes(_:)), idx))
-        menu.addItem(menuItem("Copy Path", #selector(rowCopyPath(_:)), idx))
+        let many = marked.count > 1
+        let real = rows[idx].name != ".."
+        if !many {
+            menu.addItem(menuItem("Open", #selector(rowOpen(_:)), idx))
+            if real, !rows[idx].isDir { addOpenWith(menu, idx) }
+            menu.addItem(menuItem("Open in Notes", #selector(rowOpenInNotes(_:)), idx))
+            if real { add("Quick Look", .quickLook) }
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(menuItem("Copy Path", #selector(rowCopyPath(_:)), idx))
+        }
+        if real {
+            add(many ? "Copy \(marked.count) Items" : "Copy", .copy)
+            add(many ? "Cut \(marked.count) Items" : "Cut", .cut)
+            add("Duplicate", .duplicate)
+        }
+        if !many {
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(menuItem("Reveal in Finder", #selector(rowRevealInFinder(_:)), idx))
+            if real { add("Show in Enclosing Folder", .enclosing) }
+            menu.addItem(menuItem("Open Terminal Here", #selector(rowOpenTerminal(_:)), idx))
+        }
+        if real {
+            menu.addItem(NSMenuItem.separator())
+            if !many, onRename != nil { menu.addItem(menuItem("Rename…", #selector(rowRename(_:)), idx)) }
+            add(many ? "Move \(marked.count) Items to Trash" : "Move to Trash", .trash)
+        }
+        let before = menu.items.count
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(menuItem("Open", #selector(rowOpen(_:)), idx))
-        menu.addItem(menuItem("Reveal in Finder", #selector(rowRevealInFinder(_:)), idx))
-        menu.addItem(menuItem("Open Terminal Here", #selector(rowOpenTerminal(_:)), idx))
+        addFolderItems()
+        if menu.items.count == before + 1 { menu.removeItem(at: before) }
         NSMenu.popUpContextMenu(menu, with: e, for: self)
+    }
+
+    @objc private func rowAction(_ sender: NSMenuItem) {
+        guard let a = sender.representedObject as? Action else { return }
+        onAction?(a)
+    }
+
+    // "Open With ▸": the apps that can open the file, the default one first
+    private func addOpenWith(_ menu: NSMenu, _ idx: Int) {
+        let url = URL(fileURLWithPath: rows[idx].path)
+        var apps = NSWorkspace.shared.urlsForApplications(toOpen: url)
+        guard !apps.isEmpty else { return }
+        if let def = NSWorkspace.shared.urlForApplication(toOpen: url) {
+            apps.removeAll { $0 == def }
+            apps.insert(def, at: 0)
+        }
+        let sub = NSMenu()
+        for app in apps.prefix(12) {
+            let i = NSMenuItem(title: FileManager.default.displayName(atPath: app.path),
+                               action: #selector(rowOpenWith(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = [url, app]
+            let icon = NSWorkspace.shared.icon(forFile: app.path)
+            icon.size = NSSize(width: 16, height: 16)
+            i.image = icon
+            sub.addItem(i)
+        }
+        let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        menu.addItem(item)
+    }
+
+    @objc private func rowOpenWith(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [URL], pair.count == 2 else { return }
+        NSWorkspace.shared.open([pair[0]], withApplicationAt: pair[1],
+                                configuration: NSWorkspace.OpenConfiguration())
     }
 
     private func menuItem(_ title: String, _ sel: Selector, _ idx: Int) -> NSMenuItem {
@@ -3400,6 +3751,11 @@ final class FileListPane: NSView {
         onOpenTerminal?(idx)
     }
 
+    @objc private func rowRename(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int else { return }
+        onRename?(idx)
+    }
+
     @objc private func rowRevealInFinder(_ sender: NSMenuItem) {
         guard let idx = sender.representedObject as? Int, rows.indices.contains(idx) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: rows[idx].path)])
@@ -3411,15 +3767,26 @@ final class FileListPane: NSView {
             super.keyDown(with: e)
             return
         }
+        if mods.contains(.shift), e.keyCode == 126 || e.keyCode == 125 {
+            // Shift+Up / Shift+Down grow the selection
+            extendSelection(to: min(max(0, rows.count - 1), max(0, selection + (e.keyCode == 125 ? 1 : -1))))
+            return
+        }
         switch e.keyCode {
         case 126:   // up
-            selection = max(0, selection - 1)
-            onSelect?(selection)
+            moveSelection(-1)
         case 125:   // down
-            selection = min(max(0, rows.count - 1), selection + 1)
-            onSelect?(selection)
+            moveSelection(1)
+        case 115, 116:   // home / page up
+            moveSelection(e.keyCode == 115 ? -rows.count : -pageRows)
+        case 119, 121:   // end / page down
+            moveSelection(e.keyCode == 119 ? rows.count : pageRows)
+        case 49 where onAction != nil:   // space — Quick Look
+            onAction?(.quickLook)
         case 36:    // return
             onOpen?(selection)
+        case 120 where onRename != nil:   // F2 — rename in place
+            onRename?(selection)
         case 123:   // left — parent dir
             onParent?()
         case 124:   // right — open selection
@@ -3438,8 +3805,159 @@ final class FileListPane: NSView {
     // move the selection from the filter bar (which doesn't own it)
     func moveSelection(_ delta: Int) {
         guard !rows.isEmpty else { return }
+        marked = []
         selection = min(max(0, rows.count - 1), max(0, selection + delta))
+        anchor = selection
         onSelect?(selection)
+    }
+    // rows a Page Up / Page Down steps over
+    private var pageRows: Int { max(1, Int(visibleRect.height / rowH) - 1) }
+}
+
+// Finder-style file drag and drop, shared by the file lists and the image
+// preview. A drag carries a real file URL; a drop moves on the same volume
+// and copies across volumes (Option = copy, Cmd = move), name clashes keep
+// both ("name 2.ext"). File promises (Photos, Safari, Mail) are received too.
+enum FileDrag {
+    private static let queue = DispatchQueue(label: "file-drop", qos: .userInitiated)
+    // a file this app renamed / moved (from → to) or copied (from nil):
+    // the host's recent list can't see our own writes. Any thread.
+    static var onFileOp: ((_ from: String?, _ to: String) -> Void)?
+
+    // `more` = the rest of a multi-selection, dragged along under the image
+    static func begin(path: String, more: [String] = [], image: NSImage, frame: NSRect, view: NSView,
+                      event: NSEvent, source: NSDraggingSource) {
+        let item = NSDraggingItem(pasteboardWriter: URL(fileURLWithPath: path) as NSURL)
+        item.setDraggingFrame(frame, contents: image)
+        let rest = more.map { p -> NSDraggingItem in
+            let i = NSDraggingItem(pasteboardWriter: URL(fileURLWithPath: p) as NSURL)
+            i.setDraggingFrame(frame, contents: nil)
+            return i
+        }
+        let session = view.beginDraggingSession(with: [item] + rest, event: event, source: source)
+        session.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    static func sourceMask(_ context: NSDraggingContext) -> NSDragOperation {
+        context == .outsideApplication ? [.copy, .move, .link, .generic] : [.copy, .move, .generic]
+    }
+
+    // draw into a flipped image / view without mirroring the icon
+    static func drawFlipped(_ img: NSImage, in r: NSRect) {
+        img.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1,
+                 respectFlipped: true, hints: nil)
+    }
+
+    static func fileURLs(_ info: NSDraggingInfo) -> [URL] {
+        info.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    static func promises(_ info: NSDraggingInfo) -> [NSFilePromiseReceiver] {
+        info.draggingPasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self],
+                                            options: nil) as? [NSFilePromiseReceiver] ?? []
+    }
+
+    private static func sameVolume(_ a: URL, _ dir: String) -> Bool {
+        let k: Set<URLResourceKey> = [.volumeIdentifierKey]
+        guard let va = try? a.resourceValues(forKeys: k).volumeIdentifier as? NSObject,
+              let vb = try? URL(fileURLWithPath: dir).resourceValues(forKeys: k).volumeIdentifier as? NSObject
+        else { return false }
+        return va.isEqual(vb)
+    }
+
+    // what a drop into `dir` would do ([] = refuse)
+    static func operation(_ info: NSDraggingInfo, into dir: String) -> NSDragOperation {
+        let mask = info.draggingSourceOperationMask
+        let canCopy = mask.contains(.copy) || mask.contains(.generic)
+        let urls = fileURLs(info)
+        if urls.isEmpty { return !promises(info).isEmpty && canCopy ? .copy : [] }
+        for u in urls {
+            // a folder into itself / its own subfolder
+            let p = u.standardizedFileURL.path
+            if dir == p || dir.hasPrefix(p + "/") { return [] }
+        }
+        let mods = NSEvent.modifierFlags
+        let move = mods.contains(.option) ? false
+            : mods.contains(.command) ? true
+            : sameVolume(urls[0], dir)
+        if move, mask.contains(.move) || mask.contains(.generic) {
+            // already there: nothing to move
+            let home = urls.allSatisfy { $0.standardizedFileURL.deletingLastPathComponent().path == dir }
+            return home ? [] : .move
+        }
+        return canCopy ? .copy : []
+    }
+
+    // copy / move off the main thread (media can be big); `done` gets a
+    // status line on main
+    static func perform(_ info: NSDraggingInfo, into dir: String, op: NSDragOperation,
+                        done: @escaping (String) -> Void) {
+        let dest = URL(fileURLWithPath: dir, isDirectory: true)
+        let shown = (dir as NSString).abbreviatingWithTildeInPath
+        let urls = fileURLs(info)
+        if urls.isEmpty {
+            let ops = OperationQueue()
+            ops.qualityOfService = .userInitiated
+            for r in promises(info) {
+                r.receivePromisedFiles(atDestination: dest, options: [:], operationQueue: ops) { url, err in
+                    let msg = err.map { "drop failed: \($0.localizedDescription)" }
+                        ?? "received \(url.lastPathComponent) → \(shown)"
+                    DispatchQueue.main.async { done(msg) }
+                }
+            }
+            return
+        }
+        let move = op == .move
+        queue.async {
+            let out = FileOps.transfer(urls, into: dir, move: move)
+            for c in out.changes { onFileOp?(c.from, c.to) }
+            let ok = out.changes.count
+            let verb = move ? "moved" : "copied"
+            let what = urls.count == 1 ? urls[0].lastPathComponent : "\(ok) items"
+            let msg = out.failed.map { "\(verb) \(ok)/\(urls.count) — \($0)" } ?? "\(verb) \(what) → \(shown)"
+            DispatchQueue.main.async { done(msg) }
+        }
+    }
+}
+
+// The image / PDF preview: dragging it drags the FILE (like Finder's Quick
+// Look), with a thumbnail of the picture as the drag image.
+final class FileDragImageView: NSImageView, NSDraggingSource {
+    var path: String?
+    private var downAt: NSPoint?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        unregisterDraggedTypes()   // read-only: never an image drop well
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with e: NSEvent) { downAt = path == nil ? nil : e.locationInWindow }
+    override func mouseUp(with e: NSEvent) { downAt = nil }
+    override func mouseDragged(with e: NSEvent) {
+        guard let start = downAt, let path, let image else { return }
+        let p = e.locationInWindow
+        guard hypot(p.x - start.x, p.y - start.y) > 4 else { return }
+        downAt = nil
+        let s = image.size
+        let k = min(1, 160 / max(1, max(s.width, s.height)))
+        let sz = NSSize(width: max(1, s.width * k), height: max(1, s.height * k))
+        let thumb = NSImage(size: sz, flipped: false) { r in
+            image.draw(in: r, from: .zero, operation: .sourceOver, fraction: 0.85)
+            return true
+        }
+        let at = convert(p, from: nil)
+        FileDrag.begin(path: path, image: thumb,
+                       frame: NSRect(x: at.x - sz.width / 2, y: at.y - sz.height / 2,
+                                     width: sz.width, height: sz.height),
+                       view: self, event: e, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession,
+                         sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        FileDrag.sourceMask(context)
     }
 }
 
@@ -3508,7 +4026,7 @@ final class DocxTextExtractor: NSObject, XMLParserDelegate {
     }
 }
 
-final class PopupFileBrowser: NSView, NSTextFieldDelegate {
+final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var config: PopupConfig
     var onOpen: ((String) -> Void)?          // open a FILE in its default app
     var onDirChange: ((String) -> Void)?     // cwd changed (host labels)
@@ -3625,7 +4143,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     private var splitFraction: CGFloat = 0.56
     private let previewScroll = NSScrollView()
     private let previewText = NSTextView()
-    private let previewImage = NSImageView()
+    private let previewImage = FileDragImageView(frame: .zero)
     private let previewHint = NSTextField(labelWithString: "")
     // folder preview: selecting a directory shows its contents as a REAL file
     // list (icons, hover, right-click Open in Notes / Copy Path) on the right
@@ -3723,10 +4241,17 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         layer?.backgroundColor = config.fileBrowserBackground.cgColor
 
         listPane.onSelect = { [weak self] i in
-            self?.selection = i
-            self?.previewSelection()
-            self?.scrollSelectionVisible()
+            guard let self else { return }
+            self.selection = i
+            self.previewSelection()
+            self.scrollSelectionVisible()
+            let n = self.listPane.marked.count
+            if n > 1 { self.setStatus("\(n) selected") }
+            self.refreshQuickLook()
         }
+        listPane.onAction = { [weak self] a in self?.perform(a) }
+        listPane.canPerform = { [weak self] a in self?.canPerform(a) ?? false }
+        listPane.hiddenShown = { [weak self] in self?.showHidden ?? false }
         listPane.onOpen = { [weak self] i in
             self?.openIndex(i)
         }
@@ -3746,6 +4271,22 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         listPane.onOpenTerminal = { [weak self] i in
             guard let self, self.rows.indices.contains(i) else { return }
             self.openTerminal(self.terminalDir(for: self.rows[i]))
+        }
+        listPane.onRename = { [weak self] i in
+            self?.beginRename(i)
+        }
+        // drops on empty space land in the listed folder — not in the Recent
+        // view or a typed-path / recursive search (rows from elsewhere)
+        listPane.dropDirectory = { [weak self] in
+            guard let self, !self.inRecent else { return nil }
+            switch self.mode {
+            case .all, .local: return self.cwd
+            default: return nil
+            }
+        }
+        listPane.onFilesChanged = { [weak self] msg in
+            self?.reload()
+            self?.setStatus(msg)
         }
         listPane.onFocusSearch = { [weak self] chars in
             guard let self else { return }
@@ -3850,6 +4391,17 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         previewListScroll.documentView = previewList
         previewList.onOpen = { [weak self] i in self?.previewOpen(i) }
         previewList.onParent = { [weak self] in self?.cdParent() }
+        // folder preview: a drop lands in the previewed folder
+        previewList.dropDirectory = { [weak self] in
+            guard let self, self.rows.indices.contains(self.selection),
+                  self.rows[self.selection].isDir else { return nil }
+            return self.rows[self.selection].path
+        }
+        previewList.onFilesChanged = { [weak self] msg in
+            self?.reload()
+            self?.previewSelection()
+            self?.setStatus(msg)
+        }
         previewList.onCopyPath = { [weak self] i in
             guard let self, self.previewList.rows.indices.contains(i) else { return }
             let p = self.previewList.rows[i].path
@@ -4076,7 +4628,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
             up.icon = Self.iconCache[parent] ?? NSWorkspace.shared.icon(forFile: parent)
             out.append(up)
         }
-        for n in names where hidden || !n.hasPrefix(".") {
+        for n in names where hidden || showHidden || !n.hasPrefix(".") {
             let p = (dir as NSString).appendingPathComponent(n)
             guard var e = Self.makeEntry(name: n, path: p) else { continue }
             if let cached = Self.iconCache[p] {
@@ -4524,6 +5076,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
 
     public func showVirtual(_ i: Int) {
         guard virtualLists.indices.contains(i) else { return }
+        if virtualIndex != i { remember() }
         virtualIndex = i
         query = ""
         selection = 0
@@ -4578,8 +5131,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
 
     func cd(_ dir: String) {
+        let dest = (dir as NSString).standardizingPath
+        if inRecent || dest != cwd { remember() }
         virtualIndex = nil
-        cwd = (dir as NSString).standardizingPath
+        cwd = dest
         query = ""
         selection = 0
         cancelSearch()
@@ -4610,7 +5165,441 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     func copyDir() {
         onCopyDir?(cwd)
     }
-    // copy a list row's path (Cmd+C while the list is focused)
+    // MARK: rename
+
+    // Finder-style rename in place: a text field over the row's name (F2,
+    // Cmd+R, right-click "Rename…"). Return / Tab / clicking away renames,
+    // Esc cancels (only the rename — never the window).
+    private var renameField: NSTextField?
+    private var renamePath: String?
+    // the rename field's editor while a rename is up (edit shortcuts go here)
+    var renameEditor: NSText? { renameField?.currentEditor() }
+
+    func beginRename(_ index: Int? = nil) {
+        let i = index ?? listPane.selection
+        guard rows.indices.contains(i), rows[i].name != "..", let w = window else { return }
+        commitRename()
+        let e = rows[i]
+        selection = i
+        listPane.selection = i
+        scrollSelectionVisible()
+        let c = config.colors
+        let f = NSTextField(string: (e.path as NSString).lastPathComponent)
+        f.font = NSFont.systemFont(ofSize: 12)
+        f.isBordered = false
+        f.focusRingType = .none
+        f.drawsBackground = true
+        f.backgroundColor = c.mantle
+        f.textColor = c.text
+        f.usesSingleLineMode = true
+        f.cell?.isScrollable = true
+        f.cell?.lineBreakMode = .byClipping
+        f.wantsLayer = true
+        f.layer?.cornerRadius = 3
+        f.layer?.borderWidth = 1
+        f.layer?.borderColor = c.accentOn.cgColor
+        f.delegate = self
+        let nr = listPane.nameRect(i)
+        f.frame = NSRect(x: nr.minX - 3, y: nr.minY + 2, width: nr.width + 3, height: nr.height - 4)
+        listPane.addSubview(f)
+        renameField = f
+        renamePath = e.path
+        PopupWindow.transientEscape = { [weak self] in self?.cancelRename() }
+        guard w.makeFirstResponder(f) else { cancelRename(); return }
+        // like Finder: the name without its extension is selected
+        let name = f.stringValue as NSString
+        let stem = e.isDir ? name.length : (name.deletingPathExtension as NSString).length
+        f.currentEditor()?.selectedRange = NSRange(location: 0, length: stem > 0 ? stem : name.length)
+    }
+
+    // take the field down; the path + typed name, nil when no rename is up
+    private func endRename() -> (path: String, text: String)? {
+        guard let f = renameField, let p = renamePath else { return nil }
+        renameField = nil
+        renamePath = nil
+        PopupWindow.transientEscape = nil
+        let text = f.stringValue
+        let hadFocus = f.currentEditor() != nil
+        f.removeFromSuperview()
+        if hadFocus, let w = window { w.makeFirstResponder(listPane) }
+        return (p, text)
+    }
+
+    func cancelRename() {
+        _ = endRename()
+    }
+
+    func commitRename() {
+        guard let (path, text) = endRename() else { return }
+        let old = (path as NSString).lastPathComponent
+        let new = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !new.isEmpty, new != old else { return }
+        guard !new.contains("/"), new != ".", new != ".." else {
+            setStatus("can't rename: “\(new)” is not a valid name")
+            return
+        }
+        let dst = ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(new)
+        // a case-only change ("a.txt" → "A.txt") is the same file on a
+        // case-insensitive volume, not a clash
+        if new.lowercased() != old.lowercased(), FileManager.default.fileExists(atPath: dst) {
+            setStatus("can't rename: “\(new)” already exists")
+            return
+        }
+        do {
+            try FileManager.default.moveItem(atPath: path, toPath: dst)
+        } catch {
+            setStatus("rename failed: \(error.localizedDescription)")
+            return
+        }
+        FileDrag.onFileOp?(path, dst)
+        FileOps.recordRename(from: path, to: dst)
+        reload()
+        if let i = rows.firstIndex(where: { $0.path == dst }) {
+            selection = i
+            listPane.selection = i
+            scrollSelectionVisible()
+        }
+        previewSelection()
+        setStatus("renamed “\(old)” to “\(new)”")
+    }
+
+
+    // MARK: history (Cmd+[ / Cmd+])
+
+    // a place the browser showed: a folder, or a pinned virtual list
+    private struct Place: Equatable {
+        var virtual: Int?
+        var dir: String
+    }
+    private var backStack: [Place] = []
+    private var forwardStack: [Place] = []
+    private var travelling = false
+    private var place: Place { Place(virtual: virtualIndex, dir: cwd) }
+
+    // about to leave `place` for somewhere new
+    private func remember() {
+        guard !travelling else { return }
+        if backStack.last != place { backStack.append(place) }
+        if backStack.count > 50 { backStack.removeFirst() }
+        forwardStack = []
+    }
+
+    private func travel(back: Bool) {
+        guard let to = back ? backStack.popLast() : forwardStack.popLast() else {
+            setStatus(back ? "no earlier folder" : "no later folder")
+            return
+        }
+        if back { forwardStack.append(place) } else { backStack.append(place) }
+        travelling = true
+        defer { travelling = false }
+        if let v = to.virtual, virtualLists.indices.contains(v) { showVirtual(v) } else { cd(to.dir) }
+    }
+    func goBack() { travel(back: true) }
+    func goForward() { travel(back: false) }
+
+    // MARK: file actions (trash / new / duplicate / copy / paste / undo)
+
+    private var showHidden = false
+    // the clipboard change our Cut made: a paste of THAT moves the files
+    private static var cutChange: Int?
+
+    // the rows the actions apply to (never "..")
+    private func selectedPaths() -> [String] {
+        listPane.selectedRows.filter { rows.indices.contains($0) && rows[$0].name != ".." }.map { rows[$0].path }
+    }
+
+    // the folder New / Paste land in: the one listed (not the Recent view
+    // or a recursive search — rows from all over)
+    private var opsDirectory: String? {
+        guard !inRecent else { return nil }
+        switch mode {
+        case .all, .local, .terminal: return cwd
+        case .dir(let d, _): return d
+        case .recursive: return nil
+        }
+    }
+
+    private static func clipboardFiles() -> [URL] {
+        NSPasteboard.general.readObjects(forClasses: [NSURL.self],
+                                         options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    func canPerform(_ a: FileListPane.Action) -> Bool {
+        switch a {
+        case .newFolder, .newFile: return opsDirectory != nil
+        case .paste: return opsDirectory != nil && !Self.clipboardFiles().isEmpty
+        case .toggleHidden: return !inRecent
+        case .enclosing:
+            // only where the row isn't already listed in its own folder
+            if inRecent { return true }
+            if case .recursive = mode { return true }
+            return false
+        case .trash, .duplicate, .copy, .cut, .quickLook: return !selectedPaths().isEmpty
+        }
+    }
+
+    func perform(_ a: FileListPane.Action) {
+        switch a {
+        case .trash: trashSelection()
+        case .duplicate: duplicateSelection()
+        case .copy: copyFiles(cut: false)
+        case .cut: copyFiles(cut: true)
+        case .paste: pasteFiles(move: false)
+        case .newFolder: newItem(folder: true)
+        case .newFile: newItem(folder: false)
+        case .quickLook: toggleQuickLook()
+        case .enclosing: showEnclosing()
+        case .toggleHidden: toggleHidden()
+        }
+    }
+
+    // run a file op off the main thread (media can be big), then report it
+    // to the Recent list, reload and say what happened
+    private func run(_ work: @escaping () -> FileOps.Outcome,
+                     then: @escaping (FileOps.Outcome) -> String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let out = work()
+            for c in out.changes { FileDrag.onFileOp?(c.from, c.to) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.reload()
+                let msg = then(out)
+                self.scrollSelectionVisible()
+                self.setStatus(out.failed.map { out.changes.isEmpty ? "failed — \($0)" : "\(msg) — \($0)" } ?? msg)
+            }
+        }
+    }
+
+    // put the cursor on `path` if it is listed
+    @discardableResult
+    private func select(path: String) -> Bool {
+        guard let i = rows.firstIndex(where: { $0.path == path }) else { return false }
+        selection = i
+        listPane.selection = i
+        scrollSelectionVisible()
+        previewSelection()
+        return true
+    }
+
+    private static func items(_ n: Int, _ one: String) -> String {
+        n == 1 ? "“\(one)”" : "\(n) items"
+    }
+    private static func leaf(_ p: String?) -> String { ((p ?? "") as NSString).lastPathComponent }
+
+    func trashSelection() {
+        let paths = selectedPaths()
+        guard !paths.isEmpty else { return }
+        commitRename()
+        run({ FileOps.trash(paths) }) { out in
+            "moved \(Self.items(out.changes.count, Self.leaf(out.changes.first?.from))) to the Trash · ⌘Z undoes"
+        }
+    }
+
+    func duplicateSelection() {
+        let paths = selectedPaths()
+        guard !paths.isEmpty else { return }
+        run({ FileOps.duplicate(paths) }) { [weak self] out in
+            if let first = out.paths.first { self?.select(path: first) }
+            return "duplicated \(Self.items(out.changes.count, Self.leaf(paths.first)))"
+        }
+    }
+
+    // Cmd+C / Cmd+X on the list: the FILES go on the clipboard (paste them
+    // here or in Finder) along with their paths as text (paste in a terminal)
+    func copyFiles(cut: Bool) {
+        let paths = selectedPaths()
+        guard !paths.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects(paths.map { p -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            item.setString(URL(fileURLWithPath: p).absoluteString, forType: .fileURL)
+            item.setString(p, forType: .string)
+            return item
+        })
+        Self.cutChange = cut ? pb.changeCount : nil
+        let what = Self.items(paths.count, Self.leaf(paths.first))
+        setStatus(cut ? "cut \(what) · ⌘V moves it here" : "copied \(what) · ⌘V pastes the file, or its path as text")
+    }
+
+    // Cmd+V: copy the clipboard's files into the listed folder (move after a
+    // Cut, or with Option — Finder's Cmd+Opt+V)
+    func pasteFiles(move forceMove: Bool) {
+        let urls = Self.clipboardFiles()
+        guard !urls.isEmpty else { return }
+        guard let dir = opsDirectory else {
+            setStatus("can't paste here — open a folder first")
+            return
+        }
+        let move = forceMove || Self.cutChange == NSPasteboard.general.changeCount
+        if move { Self.cutChange = nil }
+        let shown = displayPath(dir)
+        run({ FileOps.transfer(urls, into: dir, move: move) }) { [weak self] out in
+            if let first = out.paths.first { self?.select(path: first) }
+            let what = Self.items(out.changes.count, Self.leaf(out.paths.first))
+            return out.changes.isEmpty ? "nothing to paste" : "\(move ? "moved" : "pasted") \(what) → \(shown)"
+        }
+    }
+
+    // Cmd+Shift+N: a new folder (or file), straight into rename
+    func newItem(folder: Bool) {
+        guard let dir = opsDirectory else {
+            setStatus("can't create here — open a folder first")
+            return
+        }
+        commitRename()
+        let out = FileOps.create(folder ? "untitled folder" : "untitled.txt", in: dir, folder: folder)
+        guard let path = out.paths.first else {
+            setStatus("couldn't create — \(out.failed ?? "unknown error")")
+            return
+        }
+        FileDrag.onFileOp?(nil, path)
+        // show it even if the filter would hide it
+        if !query.isEmpty {
+            query = ""
+            searchField.stringValue = ""
+        }
+        if dir != cwd { cd(dir) } else { reload() }
+        guard select(path: path) else { return }
+        if let w = window { w.makeFirstResponder(listPane) }
+        setStatus("created “\(Self.leaf(path))”")
+        beginRename(selection)
+    }
+
+    // Cmd+Z on the list: take back the last rename / move / copy / trash
+    func undoFileOp() {
+        guard FileOps.canUndo else {
+            setStatus("nothing to undo")
+            return
+        }
+        var what = ""
+        run({
+            guard let u = FileOps.undo() else { return FileOps.Outcome() }
+            what = u.what
+            return u.outcome
+        }) { [weak self] out in
+            if let first = out.paths.first { self?.select(path: first) }
+            return out.changes.isEmpty ? "couldn't undo \(what)" : "undid \(what)"
+        }
+    }
+
+    // Cmd+Shift+. : dotfiles on / off
+    func toggleHidden() {
+        guard !inRecent else { return }
+        let keep = rows.indices.contains(selection) ? rows[selection].path : nil
+        showHidden.toggle()
+        reload()
+        if let keep { select(path: keep) }
+        setStatus(showHidden ? "showing hidden files" : "hidden files hidden")
+    }
+
+    // a Recent / search row: open the folder it lives in, with it selected
+    func showEnclosing() {
+        guard rows.indices.contains(selection), rows[selection].name != ".." else { return }
+        let path = rows[selection].path
+        searchField.abortEditing()
+        cd((path as NSString).deletingLastPathComponent)
+        if !select(path: path), path.contains("/.") {
+            // a dotfile: it's there, just not shown
+            showHidden = true
+            reload()
+            select(path: path)
+        }
+        if let w = window { w.makeFirstResponder(listPane) }
+    }
+
+    // Cmd shortcuts while the browser has focus (the window's handleKey asks
+    // first; false = not ours). The edit keys only act on FILES while the
+    // list itself holds the keyboard — in the filter bar they stay text keys.
+    func handleShortcut(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        guard mods.contains(.command), let w = window else { return false }
+        let shift = mods.contains(.shift)
+        let inList = w.firstResponder === listPane
+        switch code {
+        case 33: goBack(); return true                         // Cmd+[
+        case 30: goForward(); return true                      // Cmd+]
+        case 47 where shift: toggleHidden(); return true       // Cmd+Shift+.
+        case 45 where shift: newItem(folder: true); return true   // Cmd+Shift+N
+        case 126:                                              // Cmd+Up
+            if canPerform(.enclosing) { showEnclosing() } else { cdParent() }
+            return true
+        case 125 where inList: openIndex(selection); return true   // Cmd+Down
+        case 51 where inList: trashSelection(); return true        // Cmd+Delete
+        case 2 where inList: duplicateSelection(); return true     // Cmd+D
+        case 0 where inList:                                       // Cmd+A
+            listPane.selectAll()
+            setStatus("\(listPane.selectedRows.count) selected")
+            return true
+        case 8 where inList: copyFiles(cut: false); return true    // Cmd+C
+        case 7 where inList: copyFiles(cut: true); return true     // Cmd+X
+        case 9 where inList && canPerform(.paste):                 // Cmd+V / Cmd+Opt+V
+            pasteFiles(move: mods.contains(.option))
+            return true
+        case 6 where inList: undoFileOp(); return true             // Cmd+Z
+        default: return false
+        }
+    }
+
+    // MARK: Quick Look (Space)
+
+    private var quickLookPaths: [String] = []
+    private var quickLookUp: Bool {
+        QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
+            && QLPreviewPanel.shared().dataSource === self
+    }
+
+    func toggleQuickLook() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if quickLookUp {
+            panel.orderOut(nil)
+            window?.makeKey()
+            return
+        }
+        let paths = selectedPaths()
+        guard !paths.isEmpty else { return }
+        quickLookPaths = paths
+        panel.dataSource = self
+        panel.delegate = self
+        panel.reloadData()
+        panel.currentPreviewItemIndex = 0
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    // the selection moved while the panel is up: it follows
+    private func refreshQuickLook() {
+        guard quickLookUp else { return }
+        quickLookPaths = selectedPaths()
+        QLPreviewPanel.shared().reloadData()
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = self
+        panel.delegate = self
+    }
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {}
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { quickLookPaths.count }
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        guard quickLookPaths.indices.contains(index) else { return nil }
+        return URL(fileURLWithPath: quickLookPaths[index]) as NSURL
+    }
+    // the panel holds the keyboard: Space closes it, Up / Down step the list
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown else { return false }
+        switch event.keyCode {
+        case 49:
+            toggleQuickLook()
+            return true
+        case 125, 126:
+            listPane.moveSelection(event.keyCode == 125 ? 1 : -1)
+            return true
+        default:
+            return false
+        }
+    }
+
+    // copy a list row's path (Cmd+K, right-click "Copy Path")
     @discardableResult
     func copyRowPath(_ i: Int) -> String? {
         guard rows.indices.contains(i) else { return nil }
@@ -4697,6 +5686,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
         switch content {
         case .image(let img):
             previewImage.image = img
+            previewImage.path = rows.indices.contains(selection) ? rows[selection].path : nil
             showImage()
         case .text(let text):
             previewText.string = text
@@ -4969,6 +5959,8 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     }
     // leaving the filter bar with no query restores the directory display
     func controlTextDidEndEditing(_ obj: Notification) {
+        // clicking away from a rename applies it (Finder does the same)
+        if let f = renameField, (obj.object as AnyObject?) === f { commitRename(); return }
         guard (obj.object as AnyObject?) === searchField else { return }
         if query.isEmpty { showCwdInFilter() }
     }
@@ -5023,6 +6015,19 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate {
     // row into the bar (shell style); Up/Down move the list selection.
     func control(_ control: NSControl, textView: NSTextView,
                  doCommandBy commandSelector: Selector) -> Bool {
+        if control === renameField {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)),
+                 #selector(NSResponder.insertBacktab(_:)):
+                commitRename()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                cancelRename()
+                return true
+            default:
+                return false
+            }
+        }
         guard control === searchField else { return false }
         switch commandSelector {
         case #selector(NSResponder.insertNewline(_:)):
@@ -7364,6 +8369,10 @@ scroll.documentView = rowView
     // first show at this exact frame instead of centered at the config
     // size (the shared window opens a new view where the last one was)
     public var initialFrame: NSRect?
+    // the next show() builds everything (size, layout, rows, vim) but leaves
+    // the window ordered out = parked: the shared window preloads its views
+    // this way, unpark(frame:) puts it on screen
+    public var quietShow = false
 
     // MARK: Shared window (park / unpark)
 
@@ -7428,8 +8437,12 @@ scroll.documentView = rowView
             // (otherwise the browser stretches to fill the window on first
             // paint and the editor is left at its tiny init frame)
             layoutForZoom()
-            isShown = true
-            installMonitors()
+            let quiet = quietShow
+            quietShow = false
+            if !quiet {
+                isShown = true
+                installMonitors()
+            }
             focusRetries = 0
             // vim pane: start the editor NOW that it has its final size
             startVimIfNeeded()
@@ -7478,8 +8491,12 @@ scroll.documentView = rowView
         rowView.sizingRowCount = rows.count
         rowView.needsDisplay = true
 
-        isShown = true
-        installMonitors()
+        let quiet = quietShow
+        quietShow = false
+        if !quiet {
+            isShown = true
+            installMonitors()
+        }
         focusRetries = 0
         relayoutTabs()          // wrap the tab strip at the final window width
         layoutSearchField()     // search field ~80% width, centered
@@ -8475,7 +9492,23 @@ private func scrollSelectionIntoView() {
             // pastes into the notes editor / hidden window field instead of
             // the filter bar.
             if let fb = fileBrowser, browserActive(), browserHasFocus(fb) {
+                // renaming a row: the rename field owns the edit shortcuts
+                if let ed = fb.renameEditor {
+                    switch code {
+                    case 0: ed.selectAll(nil); return true
+                    case 8: ed.copy(nil); return true
+                    case 9: ed.paste(nil); return true
+                    case 7: ed.cut(nil); return true
+                    case 6: ed.undoManager?.undo(); return true
+                    default: return false
+                    }
+                }
+                // files: trash / duplicate / copy / paste / undo / history…
+                if fb.handleShortcut(code, mods) { return true }
                 switch code {
+                case 15 where cmd:  // Cmd+R — rename the selected row in place
+                    fb.beginRename()
+                    return true
                 case 45 where ctrl, 35 where ctrl:   // Ctrl+N / Ctrl+P — next / prev result
                     fb.listView.moveSelection(code == 45 ? 1 : -1)
                     return true

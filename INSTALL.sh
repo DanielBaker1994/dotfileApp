@@ -14,7 +14,7 @@ UID_="$(id -u)"
 # absent only in a standalone copy, which clones the repo and re-runs below
 [ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"
 # (not in install.conf: needed exactly when that file isn't here yet)
-REPO_URL="https://github.com/DanielBaker1994/workspace-switcher.git"
+REPO_URL="https://github.com/DanielBaker1994/dotfileApp.git"
 
 # This script can run from stripped environments (curl|bash, cron) where
 # /opt/homebrew/bin is NOT on PATH — make sure brew and friends are always
@@ -72,7 +72,7 @@ esac
 
 # If this script is NOT running from a git checkout (e.g. you downloaded just
 # this file, or piped it through curl), clone the whole app first — that is
-# the retard-proof path: one script, it fetches everything itself.
+# the foolproof path: one script, it fetches everything itself.
 if [ ! -d "$ROOT/.git" ]; then
     printf "\n${CYAN}This looks like a standalone copy — the full app is in a git repo.${RESET}\n"
     printf "${CYAN}I'll clone it and continue the install from the fresh copy.${RESET}\n\n"
@@ -112,12 +112,49 @@ printf "${DIM}This script installs a macOS app that gives you a notes window, a\
 # ---------------------------------------------------------------- 0. sanity
 STEP="checking your Mac"
 step "0/7 checking your Mac"
-command -v swiftc >/dev/null 2>&1 || { warn "Xcode command-line tools missing — installing them"; xcode-select --install; die "run again after the tools finish installing"; }
-# version gate BEFORE any dependency work: the app is built for MACOS_MIN and
-# will not launch on an older host (LaunchServices error -10825). The same
-# check runs in bin/build-app.sh, so every build path agrees.
-"$ROOT/bin/check-macos.sh" || die "this Mac is older than the target macOS (see above)"
-ok "macOS $MACOS_MIN or newer + Swift compiler present"
+# ONE list of checks for both doors (this script and the installed app's
+# Setup window): bin/preflight.sh. Required ones stop here — macOS older than
+# MACOS_MIN (the app would not launch, LaunchServices error -10825; the same
+# gate runs in bin/build-app.sh), no Swift compiler. The rest are warnings:
+# missing brew packages are installed below, and a Mac without Apple's
+# on-device model simply has no AI view.
+if ! command -v swiftc >/dev/null 2>&1 || ! xcode-select -p >/dev/null 2>&1; then
+    warn "Xcode command-line tools missing — installing them"
+    xcode-select --install || true
+    die "run again after the tools finish installing"
+fi
+"$ROOT/bin/preflight.sh" --mode repo || die "this Mac cannot run the app (see the ✘ lines above)"
+ok "this Mac can build and run the app (! lines = optional features that are off)"
+
+# the stable home (~/.config/workspace-switcher) may belong to an installed
+# app (DMG): take it over — its commands.toml / rules / configs are moved to
+# a backup, never deleted
+HOME_OUT="$("$ROOT/bin/setup-home.sh" repo)" || die "could not prepare ~/.config/workspace-switcher"
+APP_HOME_BACKUP="$(printf '%s\n' "$HOME_OUT" | sed -n 's/^backup=//p' | head -1)"
+if [ -n "$APP_HOME_BACKUP" ]; then
+    warn "the installed app's settings were moved to $APP_HOME_BACKUP"
+    if [ -t 0 ] && [ -f "$APP_HOME_BACKUP/commands.toml" ]; then
+        read -r -p "    Use that commands.toml in this checkout (replaces the repo's copy)? [y/N] " ans
+        case "$ans" in y|Y|yes|YES)
+            cp "$ROOT/commands.toml" "$APP_HOME_BACKUP/commands.toml.repo"
+            cp "$APP_HOME_BACKUP/commands.toml" "$ROOT/commands.toml"
+            ok "commands.toml carried over (the repo's copy: $APP_HOME_BACKUP/commands.toml.repo)" ;;
+        esac
+    fi
+fi
+# a second copy with the same bundle id confuses LaunchServices and the
+# privacy grants — this install runs the one built in the checkout
+for other in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; do
+    [ -d "$other" ] || continue
+    warn "$other is still installed (the DMG copy)"
+    if [ -t 0 ]; then
+        read -r -p "    Move it to the Trash? [y/N] " ans
+        case "$ans" in y|Y|yes|YES)
+            pkill -f "$other/Contents/MacOS" 2>/dev/null || true
+            mv "$other" "$HOME/.Trash/$APP_NAME-$(date +%s).app" && ok "moved to the Trash" ;;
+        esac
+    fi
+done
 
 # ------------------------------------------------------------- 1. homebrew
 STEP="installing Homebrew"

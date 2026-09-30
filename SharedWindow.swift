@@ -10,8 +10,8 @@ import AppKit
 // but alive), so the vim session, the jira tab / filters / scroll and an
 // in-progress Jira Config edit all survive a switch.
 //
-//   Hyper+N / F / J     hidden -> show that view; showing another ->
-//                       switch; already in it -> hide the window
+//   Hyper+N             hidden -> show the view you were last on;
+//                       already in it -> hide the window (no per-view keys)
 //   header              notes | files | jira switch; jira sub-views add
 //                       home + back, output views add back
 //   Esc                 jira: Back (clears a search first), at the list =
@@ -19,10 +19,8 @@ import AppKit
 //                       (vim / the shell own Esc; the notes terminal drawer
 //                       is part of the notes view)
 //   Cmd+W / ✕           hide the whole window
-//   confluence          the one view with its OWN, larger frame ([confluence]
-//                       width x height, remembered separately): switching
-//                       in grows the window, switching out restores the
-//                       shared size
+//   confluence          shares the frame like every other view (a switch
+//                       never resizes the window)
 //   ai                  fm (Apple's on-device model) driven by rule files
 //                       (AIWindow.swift); shares the frame
 //
@@ -64,8 +62,8 @@ final class SharedWindow {
 
     private unowned let controller: SwitcherController
     private(set) var current: SlotView?     // the visible view (nil = hidden)
-    private var last: SlotView = .notes     // what a hotkey re-opens
-    private var lastJira: SlotView = .jira  // where Hyper+J comes back to
+    private var last: SlotView = .files     // what Hyper+N re-opens
+    private var lastJira: SlotView = .jira  // where the jira icon comes back to
     private var stack: [SlotView] = []      // jira views under `current` (Back)
     private var returnWID: String?
     private var returnPID: pid_t?
@@ -136,45 +134,13 @@ final class SharedWindow {
         set { UserDefaults.standard.set(NSStringFromRect(newValue), forKey: Self.frameKey) }
     }
 
-    // the Confluence view's own frame: search + results + a page preview
-    // need more room than notes. Default [confluence] width x height
-    // (1400 x 900), centered on the shared frame, kept on its screen
-    private static let bigFrameKey = "sharedWindowFrame.confluence"
-    var bigFrame: NSRect {
-        get {
-            if let s = UserDefaults.standard.string(forKey: Self.bigFrameKey) {
-                let r = NSRectFromString(s)
-                if r.width > 400, r.height > 300,
-                   NSScreen.screens.contains(where: { $0.visibleFrame.intersects(r) }) { return r }
-            }
-            let base = frame
-            let vis = (NSScreen.screens.first { $0.visibleFrame.intersects(base) } ?? NSScreen.main)?.visibleFrame
-                ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
-            // never smaller than the shared frame it grows out of
-            let w = min(max(confluenceSetting("width", 1400), base.width), vis.width - 24)
-            let h = min(max(confluenceSetting("height", 900), base.height), vis.height - 24)
-            let x = min(max(base.midX - w / 2, vis.minX + 12), vis.maxX - w - 12)
-            let y = min(max(base.midY - h / 2, vis.minY + 12), vis.maxY - h - 12)
-            return NSRect(x: x, y: y, width: w, height: h)
-        }
-        set { UserDefaults.standard.set(NSStringFromRect(newValue), forKey: Self.bigFrameKey) }
-    }
+    func storedFrame(for v: SlotView) -> NSRect { frame }
 
-    private func usesBigFrame(_ v: SlotView) -> Bool { v == .confluence }
+    func setFrame(_ f: NSRect, for v: SlotView) { frame = f }
 
-    func storedFrame(for v: SlotView) -> NSRect { usesBigFrame(v) ? bigFrame : frame }
-
-    func setFrame(_ f: NSRect, for v: SlotView) {
-        if usesBigFrame(v) { bigFrame = f } else { frame = f }
-    }
-
-    // where `v` shows: the visible view's frame when both share a frame,
-    // else `v`'s own remembered one
-    func targetFrame(for v: SlotView) -> NSRect {
-        if let cur = current, let m = controller.slotMember(cur), m.slotShown,
-           usesBigFrame(cur) == usesBigFrame(v) { return m.slotBaseFrame }
-        return storedFrame(for: v)
-    }
+    // where `v` shows: the visible view's frame (every view shares it, so a
+    // switch never resizes the window), else the remembered one
+    func targetFrame(for v: SlotView) -> NSRect { currentFrame() }
 
     var isVisible: Bool {
         current.flatMap { controller.slotMember($0) }?.slotShown == true
@@ -182,7 +148,7 @@ final class SharedWindow {
 
     // MARK: navigation
 
-    // Hyper+N / Hyper+J (and the menu's toggles)
+    // a named view (CLI `notes` / `jira` / …, the menu's toggles)
     // userInIt: whether the window focused at the keypress was ours (from
     // the launcher's focus file); nil = unknown, judge from AppKit
     func hotkey(_ v: SlotView, userInIt: Bool? = nil) {
@@ -208,6 +174,32 @@ final class SharedWindow {
         } else {
             open(v)
         }
+    }
+
+    // Hyper+N: THE show / hide key. Hidden -> the view you were last on
+    // (jira stays jira, never back to notes); in it -> hide; visible but
+    // you're elsewhere -> focus it. Views are switched inside the window
+    // (Ctrl+Tab, header icons, the Hyper+S palette).
+    func toggle(userInIt: Bool? = nil) {
+        if let cur = current, let m = controller.slotMember(cur), m.slotShown {
+            let inIt = userInIt ?? (m.slotWindow.isKeyWindow && NSApp.isActive
+                && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid())
+            if inIt {
+                hide("hotkey pressed while in it")
+            } else {
+                m.slotShow(frame: nil)
+            }
+            return
+        }
+        if controller.slotMember(last) != nil {
+            present(last)
+            return
+        }
+        // its window is gone (rebuilt, feature switched off): the top-level
+        // view, else files
+        let top: SlotView = last.isJira ? .jira : last
+        if top == .files { controller.slotShowFiles() } else { open(top) }
+        if !isVisible && top != .files { controller.slotShowFiles() }
     }
 
     // show a top-level view, creating its window when needed
@@ -271,7 +263,6 @@ final class SharedWindow {
         // window = "Hyper+J closed it")
         var outgoing: SlotMember?
         if let cur = current, let old = controller.slotMember(cur), old !== m, old.slotShown {
-            // its size stays with its own frame (confluence vs the rest)
             setFrame(old.slotBaseFrame, for: cur)
             outgoing = old
         }
@@ -288,6 +279,14 @@ final class SharedWindow {
         last = v
         if v.isJira { lastJira = v }
         controller.log("shared window: \(v.rawValue)" + (stack.isEmpty ? "" : " (back: \(stack.map(\.rawValue).joined(separator: " > ")))"))
+    }
+
+    // preload: a freshly built, still hidden view gets the shared frame and
+    // its header now, so its first show is an unpark like any other
+    func prepare(_ v: SlotView) {
+        guard let m = controller.slotMember(v), !m.slotShown else { return }
+        m.slotWindow.setFrame(targetFrame(for: v), display: false)
+        decorate(m, v)
     }
 
     // hide the whole window; focus returns to what was focused when it was
@@ -312,7 +311,7 @@ final class SharedWindow {
     func memberGone(_ v: SlotView) {
         stack.removeAll { $0 == v }
         if current == v { current = nil }
-        if last == v { last = v.isJira ? .jira : .notes }
+        if last == v { last = v.isJira ? .jira : .files }
         if lastJira == v { lastJira = .jira }
     }
 
@@ -341,13 +340,13 @@ final class SharedWindow {
         }
     }
 
-    // the view switcher: notes / files / jira as icons just right of the
-    // kitchen sink (the app's icon menu), top-left in every view
+    // the view switcher: files (first, the default view) / notes / AI /
+    // jira / confluence as icons just right of the kitchen sink (the app's
+    // icon menu), top-left in every view
     static var navIcons: [(image: NSImage, id: Int, tip: String)] {
-        [(notesNavIcon, navNotes, "Notes (Hyper+N)")]
+        [(filesNavIcon, navFiles, "Files"), (notesNavIcon, navNotes, "Notes")]
             + (aiEnabled() ? [(aiNavIcon, navAI, "AI view")] : [])
-            + [(filesNavIcon, navFiles, "Files (Hyper+F)"),
-         (jiraNavIcon, navJira, "Jira (Hyper+J)")]
+            + [(jiraNavIcon, navJira, "Jira")]
             + (confluenceEnabled() ? [(confluenceNavIcon, navConfluence, "Confluence search")] : [])
     }
 

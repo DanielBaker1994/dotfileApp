@@ -57,7 +57,7 @@ func confluenceColors() -> PopupColors {
 // MARK: - python bridge
 
 enum ConfluenceAPI {
-    static var dir: String { binDir + "/confluence" }
+    static var dir: String { assetDir + "/confluence" }
 
     // confluence_api.py ARGS (stdin = JSON) -> its one JSON object; a crash
     // or non-JSON output becomes {ok: false, error: <last stderr line>}

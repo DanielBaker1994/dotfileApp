@@ -6,6 +6,26 @@ dependencies beyond what the installer brings.
 
 ## Install (end user — pick one)
 
+### The app (disk image)
+
+Open `workspace-switcher-<version>.dmg`, drag the app to **Applications**,
+open it. The first run shows **Setup & Health Check**: what this Mac has and
+what is missing (no Apple on-device model → the AI view is off, everything
+else works). Notes, files, Jira, Confluence and AI work straight away; the
+Hyper hotkeys and the menu bar (AeroSpace, sketchybar, borders, Karabiner —
+Homebrew) are one optional button in that window. Your settings live in
+`~/.config/workspace-switcher` (`commands.toml`, `rules/`, `config/`);
+updating = dragging the new app over the old one.
+
+Build the image: `bin/make-dmg.sh` (→ `.build/dist/`). With `DEVELOPER_ID` +
+`NOTARY_PROFILE` set in `install.conf` it is signed and notarized; without
+them it is self-signed and other Macs need System Settings ▸ Privacy &
+Security ▸ Open Anyway. Uninstall:
+`/Applications/workspace-switcher.app/Contents/Resources/UNINSTALL.sh`.
+
+### From source
+
+
 **There is ONE command.** From the repo root:
 
 ```

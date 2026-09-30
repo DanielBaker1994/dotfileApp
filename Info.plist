@@ -17,6 +17,12 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Ask other apps for the windows and files shown in the switcher.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Daniel Baker</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record your voice so voice notes can be transcribed to text.</string>
 	<key>NSServices</key>
