@@ -266,19 +266,28 @@ final class SharedWindow {
         // window on the workspace (a terminal raised over the slower jira
         // window = "Hyper+J closed it")
         var outgoing: SlotMember?
+        // float off: the tile to keep (the one the outgoing view sits in,
+        // else the stored frame saved from it on hide)
+        var tile: NSRect? = settings.float ? nil : f
+        let wasShown = m.slotShown
         if let cur = current, let old = controller.slotMember(cur), old !== m, old.slotShown {
             setFrame(old.slotBaseFrame, for: cur)
             outgoing = old
+            if tile != nil { tile = old.slotWindow.frame }
         }
-        // a window with a larger minimum (Jira Config) grows the frame
+        // a window with a larger minimum (Jira Config) grows the frame —
+        // floating only: a tile keeps the layout's size (`applyFloat`)
+        controller.applyFloat(m)
         let min = m.slotWindow.minSize
-        if f.width < min.width { f.size.width = min.width }
-        if f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
+        if settings.float, f.width < min.width { f.size.width = min.width }
+        if settings.float, f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
         setFrame(f, for: v)
         decorate(m, v)
         m.slotShow(frame: f)
         outgoing?.slotPark(stopVoice: false)
         if outgoing != nil { swappedAt = Date() }
+        // a re-show of the same visible view keeps its tile as is
+        if let tile, outgoing != nil || !wasShown { controller.retile(m.slotWindow, to: tile) }
         current = v
         last = v
         if v.isJira { lastJira = v }

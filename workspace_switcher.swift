@@ -4882,9 +4882,17 @@ private func trimmed(_ s: String) -> String? {
     }
 
     func applyFloat(_ m: SlotMember) {
-        if let p = m as? PopupWindow { p.setFloating(settings.float) }
-        else { m.slotWindow.level = settings.float ? .floating : .normal }
+        if let p = m as? PopupWindow { p.setFloating(settings.float); return }
+        let w = m.slotWindow
+        w.level = settings.float ? .floating : .normal
+        // a tile's size is the layout's: a floating window's minimum (AI
+        // 360pt, Jira Config 520pt high) would refuse a short tile and push
+        // the split around — kept only while floating
+        let key = ObjectIdentifier(w)
+        if floatMinSizes[key] == nil { floatMinSizes[key] = w.minSize }
+        w.minSize = settings.float ? floatMinSizes[key]! : NSSize(width: 200, height: 120)
     }
+    private var floatMinSizes: [ObjectIdentifier: NSSize] = [:]
 
     // global switch (menu bar ▸ Settings ▸ Float Windows / header icon menu):
     // the shared-window apps always follow it; other popups only when they
@@ -4920,6 +4928,32 @@ private func trimmed(_ s: String) -> String? {
         for delay in [0.15, 0.6] {
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
                 _ = aerospaceCall(args)
+            }
+        }
+    }
+
+    // float off: a view swap orders a DIFFERENT window in, which AeroSpace
+    // tiles as a new tile with a default weight (the split rebalances, e.g.
+    // 80/20 → 50/50). Size it back to the tile it replaced. Checked for
+    // ~1.5s: AeroSpace may register it late or re-tile it once more
+    // (`syncAerospaceLayout`); relative resizes (absolute ones land a few
+    // points off: gaps). A newer swap drops this one.
+    private var retileGen = 0
+    func retile(_ win: NSWindow, to r: NSRect) {
+        retileGen += 1
+        let gen = retileGen, id = String(win.windowNumber)
+        for d in [0.2, 0.45, 0.8, 1.2, 1.6] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
+                guard let self, gen == self.retileGen, win.isVisible, !settings.float else { return }
+                let f = win.frame
+                let dh = Int((r.height - f.height).rounded()), dw = Int((r.width - f.width).rounded())
+                guard abs(dh) > 1 || abs(dw) > 1 else { return }
+                self.log("retile \(id): \(Int(f.width))x\(Int(f.height)) → \(Int(r.width))x\(Int(r.height))")
+                DispatchQueue.global(qos: .userInitiated).async {
+                    _ = aerospaceCall(["layout", "--window-id", id, "tiling"])
+                    if abs(dh) > 1 { _ = aerospaceCall(["resize", "--window-id", id, "height", String(format: "%+d", dh)]) }
+                    if abs(dw) > 1 { _ = aerospaceCall(["resize", "--window-id", id, "width", String(format: "%+d", dw)]) }
+                }
             }
         }
     }
