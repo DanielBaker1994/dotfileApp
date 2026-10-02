@@ -5,6 +5,8 @@
 #   ./bin/run-tests.sh recent    run only the file browser's Recent list tests
 #   ./bin/run-tests.sh fileops   run only the file browser's file operation tests
 #   ./bin/run-tests.sh ai        run only the AI view's rule / table / keep-words tests
+#   ./bin/run-tests.sh nvim      run only the notes pane's nvim RPC client tests (needs nvim)
+#   ./bin/run-tests.sh paths     run only the /paths shelf tests (ignore rules vs git, shelf, clipboard)
 #   ./bin/run-tests.sh ai-live   run the shipped rules through fm's on-device model (slow; not in "all")
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +46,12 @@ case "${1:-all}" in
         ;;
     ai)
         run_test "$TESTS/test_ai_format.swift"
+        ;;
+    nvim)
+        run_test "$TESTS/test_nvim_rpc.swift"
+        ;;
+    paths)
+        run_test "$TESTS/test_path_shelf.swift"
         ;;
     ai-live)
         run_test "$TESTS/live_ai_rules.swift"

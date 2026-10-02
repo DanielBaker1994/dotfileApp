@@ -79,19 +79,27 @@
 #                     match highlights, jira status + priority cells, the ✕
 #                     hover, the shell drawer's ANSI colors and vim's syntax
 #                     roles. Theme ▸ presets write it.
-#   esc-close  note/files/list/output: rapid Esc presses (within 0.6s) that
-#              close the window; default = [app] esc-close (2). 1 = single
-#              Esc, 0 = never. Counts from every pane: editor, vim (must
-#              reach Normal mode), file browser, shell drawer (earlier
-#              presses still reach vim / the shell). `vim-esc-close` = alias.
+#   esc-close  notes/files/jira/confluence/ai (and popup windows): rapid Esc
+#              presses (within 0.6s) that HIDE the window; default = [app]
+#              esc-close (0 = never). 1 = single Esc, 2 = double-tap. Each
+#              view's kitchen sink (header icon menu) ▸ "Esc Hides Window"
+#              writes it. In notes it counts from every pane: editor, vim
+#              (must reach Normal mode), file browser, shell drawer (earlier
+#              presses still reach vim / the shell). In the shared window Esc
+#              first clears / steps back (jira back, confluence query) and
+#              only hides at the top. `vim-esc-close` = alias.
 #   tabs-opaque any window: the tab / open-file pills strip stays solid when
 #              the window is made transparent (true/false, default true)
 #   label      any command: text the Hyper+S "/" palette shows (default =
 #              the section name)
+#   in-palette any section: false = not listed in the Hyper+S "/" palette
+#              (default true). Its window still opens from the hotkeys,
+#              header icons and menu bar — notes / files / jira / confluence
+#              / ai / Jira Config are reached that way.
 #   float      popup-only "/" windows (filefast, output, prettyprint): stay
-#              above other apps' windows (true/false); default = [app] float.
-#              Ignored by notes/files/jira/confluence/ai — they follow
-#              [app] float only.
+#              above other apps' windows (true/false, default false).
+#              Ignored by notes/files/jira/confluence/ai: AeroSpace floats
+#              them (config/aerospace/aerospace.toml), always normal level.
 #   (The header icon menu's Theme ▸ presets and Transparency ▸ levels write
 #    THESE per-window keys: "Whole Window" sets every surface + the text
 #    colors, "<Surface> Only" just that surface. Theme ▸ Custom Color… keeps
@@ -110,15 +118,10 @@
 # [app] — app-level settings. Every key is optional (built-in defaults apply
 # otherwise); lists are comma-separated, paths may use "~". May sit anywhere
 # in the file — it is applied before anything else at startup.
-#   float               true/false (default false): ONE switch for notes,
-#                       files, jira, confluence and ai. true = they sit above
-#                       every normal window (below menus, alerts and the
-#                       Dock) and AeroSpace floats them; false = ordinary
-#                       windows that AeroSpace TILES. The Hyper+S popup and
-#                       popup-only "/" windows never tile.
-#                       Menu bar ▸ Settings ▸ Float Windows Above Others, or
-#                       any of those apps' header icon menu ▸ Float Above
-#                       Other Windows.
+#   (float is gone: AeroSpace decides. Its on-window-detected rule floats
+#    every window of the app — config/aerospace/aerospace.toml — and the
+#    app never tiles / floats itself; the windows sit at normal level, so
+#    the focused window is in front.)
 #   terminal-app        app the file browser's `term` command opens when the
 #                       window has no shell drawer (default Ghostty if
 #                       installed, else Terminal)
@@ -132,28 +135,29 @@
 #                       Ctrl+Tab switch views. Jira's
 #                       ticket details, release view and Jira Config open IN
 #                       it (home / back in the header). Esc: jira = back
-#                       (clears a search first), at the list = hide; notes =
-#                       never (vim / the shell own Esc) — hide with the
-#                       hotkey, Cmd+W or ✕. Focus returns to what you were in
-#                       when you summoned it. false = separate windows.
+#                       (clears a search first); at the top of a view it
+#                       hides the window only where "Esc Hides Window" is on
+#                       (esc-close) — else hide with the hotkey, Cmd+W or ✕.
+#                       Focus returns to what you were in when you summoned
+#                       it; the next show lands on the focused workspace's
+#                       monitor. false = separate windows.
 #   shared-width / shared-height   first size of the shared window (default
 #                       1100 x 640); after that it keeps the size you leave it
-#   esc-close           rapid Esc presses that close a notes / files / jira /
-#                       output window (default 2; 1 = single Esc, 0 = never).
-#                       The workspace switcher palette always uses one Esc.
-#                       (The shared window ignores it — see shared-window.)
+#   esc-close           rapid Esc presses that hide a window (default 0 =
+#                       never; 1 = single Esc, 2 = double-tap). A view's own
+#                       `esc-close` overrides it — kitchen sink ▸ "Esc Hides
+#                       Window", per view. The workspace switcher palette
+#                       always closes on one Esc.
 #   copy-toast          pill shown when Cmd+K copies a path in the file
 #                       browser; "{}" = the path (default "Copied {} to
 #                       clipboard"; empty = off)
-#   hide-on-focus-loss  true/false (default true); when false windows only
-#                       dismiss via Esc (useful for reference while working).
-#                       ONE switch for notes, files, jira, confluence and ai
-#                       (their `sticky` is ignored); only while float = true —
-#                       a tiled window never hides. Every view's icon menu +
-#                       the menu bar lead with "Global Window Options ▸"
-#                       (one mode choice): Float, Hide When Focus Is Lost / Float,
-#                       Stay Open When Focus Is Lost / Tile, Stay Open When
-#                       Focus Is Lost
+#   hide-on-focus-loss  true/false (default true); false = the window stays
+#                       up when you switch apps (reference while working)
+#                       until ✕, Cmd+W, the hotkey or Esc (esc-close). ONE
+#                       switch for notes, files, jira, confluence and ai
+#                       (their `sticky` is ignored). Every view's icon menu +
+#                       the menu bar lead with "Global Window Options ▸ Hide
+#                       When Focus Is Lost"
 #   header-style        the drag header's look, every window at once: flat
 #                       (default) | edge (accent rule under it) | stripe
 #                       (accent ribbon on top) | tinted | glow | aurora
@@ -168,9 +172,6 @@
 #                       Default: org.flameshot, pl.maketheweb.cleanshotx,
 #                       cc.ffitch.shottr, com.skitch.skitch
 [app]
-# off: whichever window has focus is on top — alt-hjkl (AeroSpace) raises
-# the popup it focuses, and focusing another app puts that app in front
-float = false
 # shell used to run palette commands (persistent runner + output windows)
 shell = "/opt/homebrew/bin/bash"
 # args for the embedded terminal's shell (--login -i sources ~/.bash_profile
@@ -206,7 +207,9 @@ focus-file = "workspace-switcher-focus"
 focus-bridge = "ws-aerospace-focus"
 switcher-name = "workspace-switcher"
 detail-name = "jira-detail"
-aerospace-socket = "/tmp/bobko.aerospace-DANIELBAKER.sock"
+# aerospace-socket: AeroSpace's IPC socket. Default = its own per-user path
+# (/tmp/bobko.aerospace-<user>.sock); "$USER" expands. Never hard-code a user
+# name here: a path that doesn't exist made every aerospace call spawn the CLI.
 crash-log = "~/.cache/ws-crash.log"
 # debug artifacts
 debug-flag = "~/.cache/aero-debug"
@@ -270,10 +273,41 @@ enabled = true
 sticky = true
 float = true
 type = "shell"
-label = "filefast"
+label = "File Fast"
 icon = "notes"
 save-dir = "/tmp/filefast"
 script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_DIR/$FF_NAME\" | pbcopy && printf %s \"$FF_DIR/$FF_NAME\""
+
+# /paths ("file paths" in the Hyper+S palette): the <=25 files you most
+# recently created, changed, downloaded or copied, newest first — for
+# SHARING them (PathsWindow.swift, PathShelf.swift). Return copies the FILE
+# (Cmd+V in Webex / Outlook / Teams attaches it; a terminal gets the path),
+# Cmd+C the path as text, drag a row onto any app, Space / Cmd+Y Quick Look,
+# Cmd+O open, Cmd+R reveal, Cmd+Delete forget a row (the file stays), Esc
+# closes. Floats and stays open (sticky) so you can drag onto another app.
+# What lands on it: every file the Files view's Recent stream sees ([files]
+# recent must be on) that NO ignore rule rejects — your repo's .gitignore /
+# .ignore / .rgignore, the global git excludes, and `ignore-file` — plus
+# paths you copy (a file in Finder, or text that is 1-5 existing paths;
+# password-manager copies skipped), filefast saves and the Files view's Copy
+# Path / drag-out. Stored in ~/.cache/workspace-switcher/paths.json.
+#   limit        rows kept (1-25, default 25)
+#   return       what Return does: file (default) | path | open
+#   clipboard    true/false (default true): add paths you copy
+#   ignore-file  gitignore-syntax rules for the shelf (default
+#                config/paths.ignore beside this file; ~/ and absolute
+#                patterns allowed; these win over every other ignore file)
+[paths]
+enabled = true
+type = "shell"
+label = "File Paths"
+icon = "folder"
+sticky = true
+float = true
+limit = 25
+return = "file"
+clipboard = true
+ignore-file = "config/paths.ignore"
 
 # Notes + voice in ONE window: every note tab (tabs, markdown images, paste)
 # plus the record/pause/stop meter bar when `voice = true`. Dictation lands
@@ -304,6 +338,7 @@ script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_
 [notes]
 terminal-background = "A6111720"
 enabled = true
+in-palette = false
 type = "note"
 name = "notes"
 title = ""
@@ -361,6 +396,7 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 #   terminal-words filter words that open a terminal (default term, terminal, cmd)
 [files]
 enabled = true
+in-palette = false
 type = "files"
 name = "files"
 title = ""
@@ -391,8 +427,6 @@ favorites = "~/notes, ~/Desktop"
 #   recent-exclude  extra globs / path prefixes to skip, e.g. ~/work/build, *.log
 #   start           recent | root — what the files view opens on (default recent)
 start = "recent"
-# one Esc closes the files window
-esc-close = 1
 
 # THE SWITCH: enabled = true shows the window, anything else hides it
 sort = "created"
@@ -408,6 +442,7 @@ palette = "BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"
 # (window, palette, menu entry). Every section must opt in explicitly.
 [jira]
 enabled = true
+in-palette = false
 type = "list"
 name = "jira"
 title = ""
@@ -477,6 +512,7 @@ browser-background = "4D4F596E"
 # = the Jira window's palette.
 [confluence]
 enabled = true
+in-palette = false
 # the standalone window's size ([app] shared-window = false); in the shared
 # window every view keeps the current frame
 width = 1400
@@ -491,6 +527,7 @@ split = 0.42
 # writes rich text (HTML + RTF + Markdown) through pandoc.
 [ai]
 enabled = true
+in-palette = false
 fm-bin = "/usr/bin/fm"
 # Markdown -> HTML for the paste preview + rich copy (brew install pandoc)
 pandoc-bin = "/opt/homebrew/bin/pandoc"
@@ -572,6 +609,7 @@ workspace-switcher = "*:app"
 # read-only window showing the stack health check (Hyper+S -> /health-checks).
 [health-checks]
 enabled = true
+label = "Health Checks"
 type = "output"
 title = ""
 icon = "heart"
@@ -588,6 +626,7 @@ font = "SF Mono"
 # by name.
 [prettyprint]
 enabled = true
+label = "Pretty Print"
 type = "shell"
 title = ""
 icon = "notes"
@@ -599,6 +638,7 @@ save-dir = "/tmp/"
 # `label` = the text the palette shows (default: the section name).
 [jira-config]
 enabled = true
+in-palette = false
 type = "shell"
 label = "Jira Config Window"
 

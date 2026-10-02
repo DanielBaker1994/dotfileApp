@@ -14,10 +14,11 @@ import AppKit
 //                       already in it -> hide the window (no per-view keys)
 //   header              notes | files | jira switch; jira sub-views add
 //                       home + back, output views add back
-//   Esc                 jira: Back (clears a search first), at the list =
-//                       hide; files: hide; output: back; notes: never
-//                       (vim / the shell own Esc; the notes terminal drawer
-//                       is part of the notes view)
+//   Esc                 jira: Back (clears a search first); output: back.
+//                       At the top of a view Esc HIDES the window only when
+//                       that view's kitchen sink "Esc Hides Window" is on
+//                       (`esc-close` in its section; default off — vim, the
+//                       shell, AI and confluence keep Esc for themselves)
 //   Cmd+W / ✕           hide the whole window
 //   confluence          shares the frame like every other view (a switch
 //                       never resizes the window)
@@ -27,6 +28,12 @@ import AppKit
 // Focus goes back to what was focused when the window was SUMMONED, and only
 // when the whole window hides — never on a view switch (per-window restore
 // targets were what scattered windows across workspaces).
+// Floating vs tiling is AeroSpace's call (its on-window-detected rule floats
+// the app); the app only keeps the window at normal level. A shown view lands
+// on the focused workspace, at the remembered frame moved onto that
+// workspace's monitor (`targetScreen`) — after AeroSpace's closed-windows
+// cache is cleared (`clearAerospaceCache`), or AeroSpace "restores the
+// world" and throws you back to the workspace you hid it on.
 // [app] shared-window = false brings back separate windows.
 
 enum SlotView: String {
@@ -70,6 +77,13 @@ final class SharedWindow {
     private var summoned = false            // on screen since the last hide
     private var swappedAt: Date?            // the last view swap (focus-steal grace)
     private var focusLossGen = 0            // stale pending checks drop out
+    // the focused AeroSpace workspace's monitor at the last hotkey (1-based
+    // NSScreen.screens index, from hotkeyPrep): a hidden window comes back
+    // on THAT screen. Cleared on hide.
+    var targetScreen: Int?
+    // hotkeyPrep already cleared AeroSpace's closed-windows cache for the
+    // show this hotkey triggers (only for that hotkey: reset after it)
+    var aerospaceCacheCleared = false
 
     init(controller: SwitcherController) {
         self.controller = controller
@@ -88,6 +102,16 @@ final class SharedWindow {
         nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] _ in
             self?.focusLossGen += 1
         }
+        // a drag / resize of the visible view is remembered at once, so a
+        // window left up on another workspace comes back where you put it
+        // (AeroSpace's off-screen "hidden" corner is refused by `frame`)
+        for name in [NSWindow.didMoveNotification, NSWindow.didEndLiveResizeNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] n in
+                guard let self, let w = n.object as? NSWindow, let cur = self.current,
+                      let m = self.controller.slotMember(cur), m.slotShown, m.slotWindow === w else { return }
+                self.frame = m.slotBaseFrame
+            }
+        }
     }
 
     // Focus left the visible view `v` (window `w`) and stayed away
@@ -97,7 +121,8 @@ final class SharedWindow {
     // user left: hide the whole window when hide-on-focus-loss says so. It is
     // PARKED like any hide (views keep their state — hiding the popup member
     // itself tore files / jira / detail down) and focus is NOT handed back
-    // (the user already went somewhere).
+    // (the user already went somewhere). The window always floats (AeroSpace),
+    // so alt-hjkl to a tile IS leaving.
     private func checkFocusLoss(_ v: SlotView, _ w: NSWindow) {
         guard current == v, let m = controller.slotMember(v), m.slotShown, m.slotWindow === w,
               focusLeft(w) else { return }
@@ -109,9 +134,6 @@ final class SharedWindow {
             return
         }
         guard settings.hideOnFocusLoss else { return }
-        // float off = the window is an AeroSpace TILE: alt-hjkl to the tile
-        // beside it is moving around the layout, not leaving — never hide
-        guard settings.float else { return }
         // one global switch for every view (no per-view `sticky` here)
         if let p = m as? PopupWindow, p.isShowingMenu { return }
         hide("focus loss → \(front)", restoreFocus: false)
@@ -121,21 +143,62 @@ final class SharedWindow {
 
     private static let frameKey = "sharedWindowFrame"
     // the frame every view shares: the last one used (kept across launches),
-    // else [app] shared-width x shared-height centered on the mouse's screen
+    // else [app] shared-width x shared-height centered on the mouse's screen;
+    // moved onto `targetScreen` when it sits on another one
     var frame: NSRect {
         get {
             if let s = UserDefaults.standard.string(forKey: Self.frameKey) {
                 let r = NSRectFromString(s)
-                if r.width > 200, r.height > 150,
-                   NSScreen.screens.contains(where: { $0.visibleFrame.intersects(r) }) { return r }
+                if r.width > 200, r.height > 150, let from = Self.screen(of: r) {
+                    return Self.place(r, from: from, to: targetNSScreen ?? from)
+                }
             }
             let mouse = NSEvent.mouseLocation
-            let vis = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame
+            let vis = (targetNSScreen ?? NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
             let w = min(settings.sharedWidth, vis.width - 40), h = min(settings.sharedHeight, vis.height - 40)
             return NSRect(x: vis.midX - w / 2, y: vis.midY - h / 2, width: w, height: h)
         }
-        set { UserDefaults.standard.set(NSStringFromRect(newValue), forKey: Self.frameKey) }
+        set {
+            // a window on a hidden AeroSpace workspace sits off-screen in a
+            // corner: never remember THAT as the shared frame (the next show
+            // would land off-screen / slide in)
+            guard Self.screen(of: newValue) != nil else { return }
+            UserDefaults.standard.set(NSStringFromRect(newValue), forKey: Self.frameKey)
+        }
+    }
+
+    private var targetNSScreen: NSScreen? {
+        guard let i = targetScreen, NSScreen.screens.indices.contains(i - 1) else { return nil }
+        return NSScreen.screens[i - 1]
+    }
+
+    // the screen holding most of `r`; nil = under half of it is on any screen
+    static func screen(of r: NSRect) -> NSScreen? {
+        let area = r.width * r.height
+        guard area > 0 else { return nil }
+        let best = NSScreen.screens.max { a, b in
+            let ia = a.frame.intersection(r), ib = b.frame.intersection(r)
+            return ia.width * ia.height < ib.width * ib.height
+        }
+        guard let best else { return nil }
+        let i = best.frame.intersection(r)
+        return i.width * i.height >= area / 2 ? best : nil
+    }
+
+    // `r` (on `from`) at the same relative spot on `to`, inside its visible
+    // frame (a smaller screen shrinks it to fit)
+    static func place(_ r: NSRect, from: NSScreen, to: NSScreen) -> NSRect {
+        let fv = from.visibleFrame, tv = to.visibleFrame
+        let w = min(r.width, tv.width), h = min(r.height, tv.height)
+        var x = r.minX, y = r.minY
+        if from != to {
+            x = tv.minX + (r.midX - fv.minX) / fv.width * tv.width - w / 2
+            y = tv.minY + (r.midY - fv.minY) / fv.height * tv.height - h / 2
+        }
+        x = min(max(x, tv.minX), tv.maxX - w)
+        y = min(max(y, tv.minY), tv.maxY - h)
+        return NSRect(x: x, y: y, width: w, height: h)
     }
 
     func storedFrame(for v: SlotView) -> NSRect { frame }
@@ -226,7 +289,9 @@ final class SharedWindow {
         present(v)
     }
 
-    func back() {
+    // the header's back (nothing left = hide) or Esc (`esc`: nothing left =
+    // hide only when the view's "Esc Hides Window" is on)
+    func back(esc: Bool = false) {
         while let prev = stack.popLast() {
             if controller.slotMember(prev) != nil || prev == .jira {
                 open(prev)
@@ -235,8 +300,8 @@ final class SharedWindow {
         }
         if let cur = current, cur.isJira, cur != .jira {
             open(.jira)
-        } else {
-            hide("back from the first view")
+        } else if let cur = current {
+            if esc { escapeAtTop(cur) } else { hide("back from the first view") }
         }
     }
 
@@ -266,32 +331,47 @@ final class SharedWindow {
         // window on the workspace (a terminal raised over the slower jira
         // window = "Hyper+J closed it")
         var outgoing: SlotMember?
-        // float off: the tile to keep (the one the outgoing view sits in,
-        // else the stored frame saved from it on hide)
-        var tile: NSRect? = settings.float ? nil : f
-        let wasShown = m.slotShown
         if let cur = current, let old = controller.slotMember(cur), old !== m, old.slotShown {
             setFrame(old.slotBaseFrame, for: cur)
             outgoing = old
-            if tile != nil { tile = old.slotWindow.frame }
         }
-        // a window with a larger minimum (Jira Config) grows the frame —
-        // floating only: a tile keeps the layout's size (`applyFloat`)
-        controller.applyFloat(m)
+        // normal level, whatever the window was built with (Jira Config is
+        // made for a standalone life above the popups)
+        if let p = m as? PopupWindow { p.setFloating(false) } else { m.slotWindow.level = .normal }
+        // a window with a larger minimum (Jira Config) grows the frame
         let min = m.slotWindow.minSize
-        if settings.float, f.width < min.width { f.size.width = min.width }
-        if settings.float, f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
+        if f.width < min.width { f.size.width = min.width }
+        if f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
         setFrame(f, for: v)
         decorate(m, v)
+        // a hidden view coming back is, to AeroSpace, a closed window
+        // reappearing: clear its closed-windows cache first (the hotkey's
+        // prep already did, in parallel with its queries)
+        if !m.slotShown && !aerospaceCacheCleared { Self.clearAerospaceCache() }
+        aerospaceCacheCleared = false
         m.slotShow(frame: f)
         outgoing?.slotPark(stopVoice: false)
         if outgoing != nil { swappedAt = Date() }
-        // a re-show of the same visible view keeps its tile as is
-        if let tile, outgoing != nil || !wasShown { controller.retile(m.slotWindow, to: tile) }
         current = v
         last = v
         if v.isJira { lastJira = v }
         controller.log("shared window: \(v.rawValue)" + (stack.isEmpty ? "" : " (back: \(stack.map(\.rawValue).joined(separator: " > ")))"))
+    }
+
+    // AeroSpace's lock-screen defence: whenever a window dies — and an
+    // ordered-out window is a dead one to it — it snapshots the WHOLE world
+    // (every workspace's tiles + floating windows, which workspace each
+    // monitor shows), and when that window id shows up again it RESTORES
+    // the snapshot: the monitor flips back to the workspace you hid the
+    // window on (the old "jumped straight back to 4", "focus stolen right
+    // after a view swap") and tiles snap back to their old sizes. Only
+    // layout-changing commands clear that cache — `workspace N` doesn't. A
+    // no-op `eval true` does (AeroSpace closedWindowsCache.swift / Shell.swift).
+    // Before any hidden view is ordered in, then: the window comes back as a
+    // NEW window, on the focused workspace. ~10-20 ms; bounded.
+    static func clearAerospaceCache() {
+        guard liveAerospaceSocket() != nil else { return }
+        _ = aerospaceSocket(["eval", "true"], timeout: 0.25)
     }
 
     // preload: a freshly built, still hidden view gets the shared frame and
@@ -308,6 +388,8 @@ final class SharedWindow {
     func hide(_ reason: String = "", restoreFocus: Bool = true) {
         summoned = false
         swappedAt = nil
+        targetScreen = nil
+        aerospaceCacheCleared = false
         guard let cur = current else { return }
         current = nil
         if let m = controller.slotMember(cur) {
@@ -318,6 +400,22 @@ final class SharedWindow {
         returnWID = nil
         returnPID = nil
         controller.log("shared window: hidden (\(cur.rawValue))" + (reason.isEmpty ? "" : " — \(reason)"))
+    }
+
+    // MARK: Esc
+
+    // the views with an "Esc Hides Window" switch (their kitchen sink);
+    // jira's sub-views step back with Esc and follow jira's switch
+    static let escViews: [SlotView] = [.files, .notes, .ai, .jira, .confluence]
+
+    // rapid Esc presses that hide the window from `v`; 0 = Esc never does
+    func escHideCount(_ v: SlotView) -> Int { controller.escHideCount(v) }
+
+    // Esc reached the top of view `v` (no search to clear, nothing to step
+    // back from): hide the window if the view's switch is on, else nothing
+    func escapeAtTop(_ v: SlotView) {
+        guard escHideCount(v) > 0 else { return }
+        hide("Esc (\(v.rawValue))")
     }
 
     // a member window went away on its own (rebuilt / closed): forget it

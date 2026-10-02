@@ -101,20 +101,15 @@ if [ -f "$TOML" ]; then
 else
     bad "aerospace config missing: $TOML"
 fi
-if grep -q 'test %{app-name} = workspace-switcher' "$TOML" 2>/dev/null; then
+if grep -q 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher' "$TOML" 2>/dev/null; then
     ok "aerospace.toml: workspace-switcher windows float"
 else
-    bad "aerospace.toml: no floating rule for app-name workspace-switcher"
+    bad "aerospace.toml: no floating rule for dev.danielbaker.workspace-switcher"
 fi
-if [ -x "$WS_ROOT/bin/focus-bridge.sh" ]; then
-    ok "focus-bridge.sh executable (aerospace focus -> daemon self-activate)"
+if grep -q 'ws-aerospace-focus' "$TOML" 2>/dev/null; then
+    ok "aerospace.toml: on-focus-changed writes the focus bridge (daemon self-activate)"
 else
-    bad "focus-bridge.sh missing or not executable: $WS_ROOT/bin/focus-bridge.sh"
-fi
-if grep -q 'focus-bridge.sh' "$TOML" 2>/dev/null; then
-    ok "aerospace.toml: on-focus-changed wires focus-bridge.sh"
-else
-    bad "aerospace.toml: on-focus-changed does not run focus-bridge.sh"
+    bad "aerospace.toml: on-focus-changed does not write ws-aerospace-focus"
 fi
 
 # ---------------------------------------------------------------- daemon
@@ -192,7 +187,7 @@ if [ -f "$WS_ROOT/commands.toml" ]; then
 else
     bad "commands.toml missing: $WS_ROOT/commands.toml"
 fi
-for s in workspace_switcher.sh grant-permissions.sh focus-bridge.sh; do
+for s in workspace_switcher.sh grant-permissions.sh aerospace-monitors.sh; do
     if [ -x "$WS_ROOT/bin/$s" ]; then ok "bin/$s present"; else bad "bin/$s missing or not executable"; fi
 done
 if grep -q 'workspace_switcher.sh' "$TOML" 2>/dev/null; then

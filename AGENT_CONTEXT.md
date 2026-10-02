@@ -87,7 +87,17 @@ files in the way, UNINSTALL.sh removes only links into the repo.
 ```bash
 bin/ui-test.sh              # Full UI test suite (cliclick + osascript)
 bin/ui-test.sh --verbose
+bin/ui-test-focus.py        # show / hide / focus / follow-the-workspace, timed (~20 s)
+bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
 ```
+
+- `bin/ui-test-focus.py [single show hide follow stranded swap focus esc]`:
+  drives the REAL paths — the hotkey binary as aerospace runs it,
+  `aerospace workspace` / `focus`, Esc via System Events (cliclick's keys
+  don't reach apps from every session) — and checks AeroSpace's view
+  (layout floating, which workspace) + frame stillness (no shudder), with ms
+  budgets. Moves your workspaces while it runs; restores workspace, focus,
+  view, esc switches and commands.toml.
 
 - Daemon state for tests: the socket answers `state` (JSON: view, frames,
   drawers open, focus pane, tabs…) and `do:ACTION` (cycle, hide, open:VIEW,
@@ -99,7 +109,11 @@ bin/ui-test.sh --verbose
 
 ## Key files
 
-- `main.swift` — entry point
+- `main.swift` — entry point (one-daemon lock hand-over)
+- `NvimRPC.swift` — the notes vim pane's msgpack-RPC client (AppKit-free;
+  `bin/run-tests.sh nvim`)
+- `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
+  (see "/paths" below; `bin/run-tests.sh paths`)
 - `workspace_switcher.swift` — app logic (~7300 lines)
 - `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
 - `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
@@ -117,14 +131,30 @@ bin/ui-test.sh --verbose
   `unpark(frame:)` re-grows notes by its open drawers). Hotkey
   toggle uses the launcher's focus file (`toggleCommand` → `slot.hotkey`);
   focus hand-back only when the whole window hides. `[app] shared-window`.
-  Esc: notes never (`escCloseCount 0`, Cmd+W / ✕ / hotkey hide), jira = back.
+  Esc: jira / output = back (`slot.back(esc: true)`); at the top of a view
+  Esc HIDES only when that view's kitchen sink "Esc Hides Window" is on
+  (`escHideCount(v)` = the section's `esc-close`, else `[app] esc-close`,
+  default 0; `setEscHides`, `escapeAtTop`). Notes counts it in its own panes
+  (`escCloseCount`, vim: Normal mode only). Cmd+W / ✕ / hotkey always hide.
   Focus loss: ONE path for every view (`checkFocusLoss`, popups set
   `hostHandlesFocusLoss`): after `[app] focus-loss-delay` (0.3s) and
-  `focusLeft(w)` → `hide(…, restoreFocus: false)` (parks, never tears down;
-  NEVER with `[app] float = false` — the window is a tile, alt-hjkl away
-  is layout navigation);
+  `focusLeft(w)` → `hide(…, restoreFocus: false)` (parks, never tears down);
   within 1s of a view swap it was stolen (aerospace focusing the next
   window) → the view is re-shown instead.
+  Float vs tile is NOT the app's: aerospace.toml's on-window-detected rule
+  floats every window of the bundle id; members sit at `.normal` level
+  (`present` normalizes Jira Config's popUpMenu+1). No `[app] float`, no
+  layout / retile IPC.
+  AeroSpace's closed-windows cache (its lock-screen defence, AeroSpace
+  `closedWindowsCache.swift`): an ordered-out window = a closed one → it
+  snapshots the WHOLE world; the same window id reappearing RESTORES it
+  (monitor flips back to the workspace you hid on, tiles snap to old
+  sizes). `workspace N` doesn't clear it; `aerospace eval true` does. So
+  every hidden view is shown after `SharedWindow.clearAerospaceCache()`
+  (hotkeyPrep does it in parallel; `present` otherwise, ≤0.25 s).
+  Frame: `frame` refuses off-screen rects (AeroSpace's hidden corner),
+  tracks drags / resizes, and lands on `targetScreen` (the focused
+  workspace's monitor from hotkeyPrep, `place(_:from:to:)`).
 - `RecentFiles.swift` — the file browser's pinned "Recent" + "Arrived" views:
   ONE FSEvents stream on / (`inScope` prefix filter first), origin from the
   quarantine xattr + kMDItemWhereFroms (`origin`), Spotlight seed,
@@ -163,6 +193,42 @@ bin/ui-test.sh --verbose
   `jira_log.py` = debug.log + raw response dumps);
   tests: `python3 Tests/test_jira_poll.py`
 - `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
+
+## /paths — recent-file shelf (Hyper+S → "file paths")
+
+- `PathShelf.swift` (AppKit-light, tested: `bin/run-tests.sh paths`):
+  `PathShelf.shared` = ≤25 rows (`[paths] limit`, hard cap 25), newest
+  first, `~/.cache/workspace-switcher/paths.json`; rows are CANONICAL
+  (`realpath`: a symlinked folder is one row, /tmp = /private/tmp).
+  Feeds: `RecentFiles.onKept` / `onRenamed` (the ONE FSEvents stream; needs
+  `[files] recent` on) → regular files only → `IgnoreRules`; `ClipboardPaths`
+  (0.5 s `changeCount` timer; file URLs or text that is 1-5 existing paths;
+  nspasteboard.org concealed / transient skipped; our own copies via
+  `ownWrite`); filefast saves, Files-view Copy Path, `FileDrag.onDragOut`.
+  Clipboard / explicit paths skip the ignore rules; files or folders.
+- `IgnoreRules`: gitignore syntax, git / ripgrep precedence — global git
+  excludes < per folder `.gitignore` (inside a repo only) < `.ignore` <
+  `.rgignore` (deeper wins) < `config/paths.ignore` (`[paths] ignore-file`;
+  ~/ and absolute patterns OK). Native regex matcher, cached per folder,
+  re-stat ≤ every 2 s; an ignored folder hides everything below (git).
+  Parity-tested against `git check-ignore`. `load()` re-applies the rules
+  to stored rows.
+- `PathsWindow.swift`: filefast's recipe — a `PopupWindow` (switcher look,
+  `onFilter` = query hook, `onKeyPreview` = all keys) + the file browser's
+  `FileListPane` in a scroll view under the filter box (drag-out = real
+  file drags, multi-select, right-click menu limited by `canPerform` to
+  Quick Look + Copy). Built once, kept (`showPersistent`); sticky + floating
+  (stays above Webex while you drag); placed on the mouse's screen, top at
+  20%. Return = `[paths] return` (file | path | open): "file" =
+  `writeFiles` — one pasteboard item per file with `.fileURL` AND the path
+  as `.string` (Cmd+V attaches in chat / mail apps, pastes the path in a
+  terminal). Cmd+C path text (a filter-box selection wins), Cmd+Shift+C
+  file, Space (empty filter) / Cmd+Y Quick Look, Cmd+O, Cmd+R reveal,
+  Cmd+Delete forget a row, Esc / Cmd+W close.
+- Controller: `configurePathShelf()` (from `configureRecentFiles`, i.e.
+  launch + every reload; no `[paths]` = all feeds unhooked), `showPaths`,
+  `pathsWindow`, `clipboardPaths`. Socket: `do:paths:show|hide|return|
+  select:N`, state `paths` {shown, key, level, rows[{path, why}], frame}.
 
 ## AI view
 
@@ -561,7 +627,7 @@ Line numbers drift; grep the symbol names (they're stable).
 ### workspace_switcher.swift (host / app logic)
 | Symbol | What |
 |---|---|
-| `struct AppSettings` / `settings` | `[app]` values (float, esc-close, shell, …) |
+| `struct AppSettings` / `settings` | `[app]` values (esc-close, hide-on-focus-loss, shell, …) |
 | `parseAppConfig(_:)` | parses `[app]` into `settings` |
 | `struct CommandSpec` | one `[section]` (note/list/files/output) |
 | `makeCommand(_:_:)` | `[section]` key → CommandSpec field parsing |
@@ -571,7 +637,7 @@ Line numbers drift; grep the symbol names (they're stable).
 | `THEME`, `BAR`, `GROUP_BG`, `TEXT`, `DIM` | `[theme]` globals |
 | `vimArgs(for:socket:file:)` | nvim launch args, passes `g:ws_fg/dim/sel/line` |
 | `showDetail` | jira detail window (PopupConfig built here) |
-| `openOutputWindow` / `openNoteWindow` / `openListWindow` / `openFilesWindow` | build `PopupConfig` per window type — per-window config goes here (`cfg.floating = cmd.float ?? settings.float` line is a good anchor) |
+| `openOutputWindow` / `openNoteWindow` / `openListWindow` / `openFilesWindow` | build `PopupConfig` per window type — per-window config goes here (`cfg.escCloseCount =` line is a good anchor) |
 | `installStatusMenus` | menu-bar menu |
 | `reloadConfig()` | re-read commands.toml |
 | `handleEscape()` (SwitcherController) | switcher palette Esc (command mode → back) |
@@ -591,7 +657,7 @@ Line numbers drift; grep the symbol names (they're stable).
 | `PopupPlainWindow._cornerRadius` | makes the system window frame use `config.cornerRadius` (else macOS 26's 16pt frame peeks out around the card) |
 | `PopupChrome.closeButtonRect` | ✕ glyph far-left of the drag header (`PopupConfig.headerCloseButton`, default on; titled windows only); icon sits right of it (`leftInset`) |
 | `PopupFileBrowser.updatePartFocus` | which part has focus: filter bar (bright 2px outline) / list / preview (`partRing`); KVO on `firstResponder` |
-| `focusedVim()`, `vimRemote`, `vimEval`, `vimCommand` | nvim pane + RPC |
+| `focusedVim()`, `vimRemote`, `vimEval`, `vimCommand` | nvim pane + RPC (`vimClient` → `NvimRPC`: ONE persistent msgpack-RPC socket, ~0.03 ms a call; it used to spawn `nvim --server` per call on the main thread) |
 | `browserHasFocus`, `browserActive` | file browser focus checks |
 
 ### handleKey order (first match wins)
@@ -620,11 +686,28 @@ Line numbers drift; grep the symbol names (they're stable).
   build-if-stale + LaunchServices `open -n -g`; a launchd-parented process
   never re-execs).
 - The daemon's socket thread runs `SwitcherController.hotkeyPrep()` before the
-  main thread sees the message: `list-windows --focused` (→ focus file) and
-  `list-windows --all` IN PARALLEL (aerospace ≈ 20-25 ms per query — the
-  floor), then `move-node-to-workspace` only for our windows on another
-  workspace. No sleeps. Log: `/tmp/ws-debug.log` `hotkey X: prep N ms, M ms
+  main thread sees the message: `list-windows --focused` (→ focus file),
+  `eval true` (clears AeroSpace's closed-windows cache, see the shared
+  window) and `list-windows --all` (+ which workspace is focused and its
+  NSScreen index → `slot.targetScreen`; an empty workspace costs one more
+  `list-workspaces --focused`) IN PARALLEL (aerospace ≈ 10-25 ms per query,
+  served one by one — the floor), then `move-node-to-workspace` only for
+  our windows still up on another workspace. `applyHotkeyPrep` hands it to the main
+  thread. No sleeps. Log: `/tmp/ws-debug.log` `hotkey X: prep N ms, M ms
   to shown`.
+- AeroSpace IPC: `liveAerospaceSocket()` — a configured `aerospace-socket`
+  that doesn't exist falls back to `/tmp/bobko.aerospace-<user>.sock` (a
+  hard-coded user name made every call a CLI spawn on another Mac).
+- ONE daemon: `acquireDaemonLock` (flock beside the socket, O_CLOEXEC, held
+  for life); main.swift: a second launch forwards its request (`window`,
+  `setup`, `show` → toggle, none → `ping`) and exits; it waits ≤3 s for a
+  dying daemon's lock. The command socket's connections are SO_NOSIGPIPE
+  (a client hanging up before its reply); never a global SIG_IGN — the
+  drawer's shell and nvim would inherit it.
+- Focus bridge (accessory apps can't be activated from outside): in-process
+  `didBecomeKey` while inactive → self-activate at once; plus aerospace's
+  `on-focus-changed` writes `$TMPDIR/ws-aerospace-focus` inline (one bash,
+  no script) and the daemon watches it (DispatchSource vnode, no poll).
 - The script builds only when no daemon answers / `WS_BUILD_ONLY`;
   `./build.sh` runs `build-app.sh` itself. `WS_DEBUG=1` → `$TMPDIR/ws-launch.log`.
 - Hyper+T (`terminal` → `slotToggleTerminal`): notes hidden / you're
@@ -661,17 +744,23 @@ Line numbers drift; grep the symbol names (they're stable).
   "right of". The shared window's center also moves with its frame
   (notes drawers). With 2+ tiles it belongs to the
   tile under its center, not the one that looks "behind" it.
-- Our windows float via aerospace's dialog/panel heuristic; the
-  `app-name = workspace-switcher → layout floating` rule is commented out.
+- Our windows float via the aerospace.toml rule `test %{app-bundle-id} =
+  dev.danielbaker.workspace-switcher → layout floating` (first rule).
+  Finder, Preview, Webex and every `com.microsoft.*` but VS Code float too.
+- Monitors: `bin/aerospace-monitors.sh main|inverse|toggle|status` rewrites
+  the `# >>> monitor-layout` block (main = 1-8 + letters on the main
+  monitor, 9 on the secondary; inverse = the other way round); service mode
+  `m` toggles. 9 always owns a screen so AeroSpace never invents "10".
 - Fixes (not applied): `focus --ignore-floating <dir>` so directional
   focus only walks tiles (reach popups by hotkey), or place the window so
   its center lands clearly on one side of a tile.
 
 ## Keyboard shortcuts (user-facing)
 
-- Esc: `esc-close` rapid presses (default 2, `[app]` or per section; 1 =
-  single, 0 = never) close notes/files/jira/detail/output windows. The
-  switcher palette always closes on one Esc. Find bar: one Esc.
+- Esc: hides a view only where its kitchen sink "Esc Hides Window" is on
+  (`esc-close` per section, default `[app] esc-close` = 0 = never; 1 =
+  single, 2 = double-tap). Jira / output: Esc = back first. The switcher
+  palette always closes on one Esc. Find bar: one Esc.
 - Ctrl+Tab / Ctrl+Shift+Tab: next/prev shared-window VIEW in header-icon
   order (`SharedWindow.cycle`; every member's `onCycleView`), wraps. Not
   while a sheet / popover / Cmd+K picker / shortcuts card is up. Notes and
@@ -727,11 +816,10 @@ Line numbers drift; grep the symbol names (they're stable).
   Options ▸" submenu): the FIRST item of every
   view's icon menu (notes, files, jira/detail, confluence, ai) and of the
   menu-bar menu (re-inserted by `MenuTarget.menuNeedsUpdate` above the
-  `globalGroupTag` separator): ONE mode of three — Float, Hide When Focus
-  Is Lost / Float, Stay Open When Focus Is Lost / Tile, Stay Open When
-  Focus Is Lost (`[app] float` +
-  `hide-on-focus-loss` bundled: tiled never hides;
-  `setGlobalHideOnFocusLoss` drops the views' `sticky`), Header Style ▸.
+  `globalGroupTag` separator): Hide When Focus Is Lost (`[app]
+  hide-on-focus-loss`; `setGlobalHideOnFocusLoss` drops the views'
+  `sticky`), Header Style ▸. No float / tile item (AeroSpace decides).
+  Per view (its own menu): "Esc Hides Window" (`escHidesMenuItem`).
 - `HeaderStyle` (PopupWindow.swift, `[app] header-style`: flat / edge /
   stripe / tinted / glow / aurora): `PopupChrome.drawHeaderBackground`, built
   from the header color + accent + accent2; setting `current` redraws every
@@ -747,8 +835,10 @@ Line numbers drift; grep the symbol names (they're stable).
 
 ## Config defaults worth knowing
 
-- `[app] float` default **false** (windows are normal, not floating).
-- `[app] esc-close` default 2; per-section `esc-close` (alias `vim-esc-close`).
+- No `[app] float` (retired; AeroSpace floats the app). Per-section `float`
+  only for popup-only "/" windows (level), default false.
+- `[app] esc-close` default 0 (Esc never hides); per-section `esc-close`
+  (alias `vim-esc-close`) = the view's "Esc Hides Window".
 - `[app] copy-toast` default `Copied {} to clipboard` (`{}` = ~-path; empty = off).
 - Vim pane (`vim/notes-init.vim`): `number` + `cursorline` on; cursor-line
   color `g:ws_line` = highlight color blended 50% toward the card color.

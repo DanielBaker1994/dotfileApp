@@ -17,14 +17,15 @@ exec-on-workspace-change = [
 # Notify Sketchybar about focus change (window opened/closed/moved).
 # Debounced in aerospacer.sh to 1/sec so it doesn't block aerospace's
 # main thread (aerospace #230).
-# focus-bridge.sh records the newly focused window id for the
-# workspace-switcher daemon (macOS won't activate an accessory app from
-# another process, so the daemon self-activates when aerospace focuses it).
-# Event-driven: one tiny file write per focus change — no polling, no
-# aerospace IPC, no extra sketchybar triggers.
+# The second line is the workspace-switcher focus bridge: it records the
+# newly focused window id for the daemon (macOS won't activate an accessory
+# app from another process, so the daemon self-activates when aerospace
+# focuses it; it watches the file, no polling). Inline on purpose: ONE
+# process (exec-and-forget's /bin/bash, printf is a builtin) instead of a
+# script + env + bash — every exec is scanned on a managed Mac.
 on-focus-changed = [
   'exec-and-forget sketchybar --trigger aerospace_focus_change',
-  'exec-and-forget ~/.config/workspace-switcher/bin/focus-bridge.sh'
+  'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"'
 ]
 
 # Place a copy of this config to ~/.aerospace.toml
@@ -92,27 +93,31 @@ focus-follows-mouse.enabled = false
 # See https://nikitabobko.github.io/AeroSpace/guide#key-mapping
 key-mapping.preset = 'qwerty'
 
-# Floating whitelist for our own popups. Everything else tiles by default —
-# the OLD catch-all `true -> layout tiling` rule is gone because it also
-# force-tiled app dialogs (Word "Save or Don't Save", NSAlert popups, etc.),
-# which then couldn't be focused properly. The dialog heuristic floats those
-# now (floating windows stay above tiled ones since #713 was fixed), and
-# regular windows still tile by default.
+# Floating: workspace-switcher, Finder, Preview, Webex and the Microsoft
+# stack. Everything else tiles by default — the OLD catch-all `true ->
+# layout tiling` rule is gone because it also force-tiled app dialogs (Word
+# "Save or Don't Save", NSAlert popups, etc.), which then couldn't be focused
+# properly; the dialog heuristic floats those now.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
-  #{ if = 'test %{app-bundle-id} = com.microsoft.Word', run = ['layout floating'], check-further-callbacks = true },
-  # ALL workspace-switcher windows (popup, notes, jira) are overlays: one
-  # app-name rule floats them; per-title rules went stale every time a
-  # window name changed in commands.toml.
-  #{ if = 'test %{app-name} = workspace-switcher', run = ['layout floating'] },
-  #{ if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
+  # workspace-switcher (notes / files / jira / AI / confluence, the Hyper+S
+  # palette, its dialogs) is an overlay: ALWAYS floating. The app never
+  # tiles or floats itself any more — this rule is the one place that
+  # decides. Each view is its own window, re-detected on every show / view
+  # switch, so this runs often: keep it first and cheap.
+  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout floating'] },
+  # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
+  # before the Microsoft float rule below)
+  { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
+  # float Finder, Preview, Webex and every other Microsoft app (Word, Excel,
+  # PowerPoint, Outlook, Teams, OneNote, OneDrive, Edge, AutoUpdate…);
+  # check-further-callbacks: the workspace rules below still apply
+  { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$|Cisco-Systems[.]Spark$)'", run = ['layout floating'], check-further-callbacks = true },
+#{ if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
 #{ if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
-#{ if = 'test %{app-bundle-id} = com.apple.finder', run = ['move-node-to-workspace 1'] },
-#{ if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['move-node-to-workspace 1'] },
 #{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
-{ if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
 { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 3'] },
 { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 8'] },
@@ -143,27 +148,34 @@ outer.right =      [{ monitor.main = 10 }, 10]
 outer.bottom =     [{ monitor.main = 10 }, 10]
 outer.top =        [{ monitor."built-in" = 15 }, 48]  # notch screen: visibleFrame already starts 33.5pt down
 
-# Pin workspaces to monitors WITHOUT relying on the external's name.
-# Why: when a monitor connects, AeroSpace shows an invisible workspace already
-# assigned to it; if none exists it invents the first unused number that is not
-# in persistent-workspaces -> "10" (no keybinding). DisplayLink reports changing/
-# phantom names, so 'DELL' often failed to match and the external got "10".
-# '^(?!built-in)' = any monitor whose name doesn't start with "Built-in", i.e. the
-# external whatever it's called. The laptop screen ("Built-in Retina Display")
-# keeps 9. Laptop-only / clamshell: everything falls back to the one screen.
+# Pin workspaces to monitors. 9 ALWAYS has a screen of its own: when a
+# monitor connects, AeroSpace shows an invisible workspace already assigned
+# to it; if none exists it invents the first unused number that is not in
+# persistent-workspaces -> "10" (no keybinding). Force-assigning 9 to the
+# other screen means it never has to invent one (bin/no_stray_workspaces.sh
+# cleans up if it still does).
+# The block between the markers is REWRITTEN by
+# bin/aerospace-monitors.sh main|inverse|toggle (service mode: alt-shift-;
+# then m flips it):
+#   main     1-8 + letters on the main monitor (menu bar), 9 on the other
+#   inverse  1-8 + letters on the secondary monitor, 9 on the main one
+# With one screen every pattern falls back to it ('main').
+# >>> monitor-layout
+# mode: main  (1-8 + letters on the main monitor, 9 on the secondary)
 [workspace-to-monitor-force-assignment]
-1 = ['^(?!built-in)', 'built-in', 'main']
-2 = ['^(?!built-in)', 'built-in', 'main']
-3 = ['^(?!built-in)', 'built-in', 'main']
-4 = ['^(?!built-in)', 'built-in', 'main']
-5 = ['^(?!built-in)', 'built-in', 'main']
-6 = ['^(?!built-in)', 'built-in', 'main']
-7 = ['^(?!built-in)', 'built-in', 'main']
-8 = ['^(?!built-in)', 'built-in', 'main']
-9 = ['built-in', 'main']
-M = ['^(?!built-in)', 'built-in', 'main']
-Y = ['^(?!built-in)', 'built-in', 'main']
-W = ['^(?!built-in)', 'built-in', 'main']
+1 = ['main']
+2 = ['main']
+3 = ['main']
+4 = ['main']
+5 = ['main']
+6 = ['main']
+7 = ['main']
+8 = ['main']
+M = ['main']
+Y = ['main']
+W = ['main']
+9 = ['secondary', 'main']
+# <<< monitor-layout
 
 # 'main' binding mode declaration
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -255,6 +267,8 @@ W = ['^(?!built-in)', 'built-in', 'main']
     r = ['flatten-workspace-tree', 'mode main'] # reset layout
     f = ['layout floating tiling', 'mode main'] # Toggle between floating and tiling layout
     backspace = ['close-all-windows-but-current', 'mode main']
+    # flip which monitor owns 1-8 + letters vs 9 (bin/aerospace-monitors.sh)
+    m = ['exec-and-forget ~/.config/workspace-switcher/bin/aerospace-monitors.sh toggle', 'mode main']
 
     # sticky is not yet supported https://github.com/nikitabobko/AeroSpace/issues/2
     #s = ['layout sticky tiling', 'mode main']

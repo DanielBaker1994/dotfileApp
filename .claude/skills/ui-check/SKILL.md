@@ -18,8 +18,13 @@ The daemon answers two test messages on `$TMPDIR/ws-notes.sock`
   `accessory`, `pane`, `tabs`, `selectedTab`, `responder` (class name).
 - `do:ACTION` → runs it, answers the state afterwards. ACTION = `cycle`,
   `cycle-back`, `hide`, `back`, `home`, `toggle`, `toggle-terminal`,
-  `toggle-browser`, `reset-size`, `open:VIEW`, `header-style:STYLE` (live only).
-  State also carries `float`, `hideOnFocusLoss`, `headerStyle`.
+  `toggle-browser`, `reset-size`, `open:VIEW`, `header-style:STYLE` (live only),
+  `esc-hides:VIEW:on|off` (writes the view's `esc-close`),
+  `paths:show|hide|return|select:N` (the /paths shelf popup; state `paths`
+  = {shown, key, level, rows[{path, why}], frame}).
+  State also carries `hideOnFocusLoss`, `escHides` (per view), `pid` (the
+  daemon), `paletteCommands` (what Hyper+S "/" lists), `headerStyle`; each view has `wid` (its window id — compare with
+  `aerospace list-windows --all --format '%{window-id}|%{workspace}|%{window-layout}'`).
 
 ## Steps
 
@@ -40,4 +45,10 @@ In bin/ui-test.sh the same is wrapped as `ws_state JQ`, `ws_do ACTION`,
 `wait_state 'JQ_BOOL' [secs]` (50 ms polling — use instead of `sleep`).
 
 Only real keyboard/mouse paths (the key routing in `handleKey`, clicks)
-still need cliclick; run the full suite at most once (it is slow).
+still need synthetic input; run the full suite at most once (it is slow).
+cliclick's keystrokes may not reach apps from the agent's session —
+`osascript -e 'tell application "System Events" to key code 53'` does.
+
+Show / hide / focus / workspace-follow changes: `bin/ui-test-focus.py`
+(or a subset: `show hide follow stranded swap focus esc single`) — timed,
+checks AeroSpace's view of the window too, restores everything after.

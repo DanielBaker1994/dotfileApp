@@ -79,6 +79,25 @@ if cliArgs.count > 1 {
 }
 let showOnLaunch = cliArgs.count > 1 && cliArgs[1] == "show"
 
+// ONE daemon (acquireDaemonLock): another one is running -> hand it this
+// launch's request and exit. A daemon on its way out (build.sh / the
+// launcher pkill it first) frees the lock within moments: then this one
+// takes over.
+if !acquireDaemonLock(waitUpTo: 0) {
+    let arg = cliArgs.count > 1 ? cliArgs[1] : ""
+    let deadline = Date().addingTimeInterval(3)
+    while true {
+        let delivered = arg == "show" ? sendToggle(name: settings.switcherWindowName)
+            : sendLaunchMessage(openCommand == nil && arg != "setup" ? "ping" : arg)
+        if delivered { exit(0) }
+        if acquireDaemonLock(waitUpTo: 0.25) { break }
+        if Date() >= deadline {
+            FileHandle.standardError.write(Data("workspace-switcher: another daemon holds the lock but does not answer — not starting a second one\n".utf8))
+            exit(1)
+        }
+    }
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate(showOnLaunch: showOnLaunch, openCommand: openCommand)
 app.delegate = delegate

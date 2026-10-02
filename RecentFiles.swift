@@ -54,7 +54,12 @@ final class RecentFiles {
     // one — tied together by the file's inode. What the old path held
     // (itself at "", what was inside a folder by "/suffix") waits here for
     // its second half.
-    private var departed: [UInt64: (at: Double, items: [String: Item])] = [:]
+    private var departed: [UInt64: (at: Double, items: [String: Item], path: String)] = [:]
+    // the /paths shelf rides on this stream (PathShelf.swift): every FILE
+    // that passes the filters above, and every rename (old → new). Called
+    // on `queue`; keep them cheap.
+    var onKept: ((_ path: String, _ created: Bool, _ origin: String?) -> Void)?
+    var onRenamed: ((_ from: String, _ to: String) -> Void)?
 
     // home / store are parameters for Tests/test_recent_files.swift
     init(home: String = NSHomeDirectory(),
@@ -94,6 +99,7 @@ final class RecentFiles {
     // `queue`. A renamed row keeps its place in the list.
     func ownChange(from old: String?, to new: String) {
         guard enabled else { return }
+        if let old { onRenamed?(old, new) } else { onKept?(new, true, nil) }
         if let old {
             snapLock.lock()
             // (moved out of scope — into the Trash — = gone from the list)
@@ -230,7 +236,7 @@ final class RecentFiles {
                !Self.present(p) {
                 let gone = take(p)
                 if !gone.isEmpty { touched = true }
-                if let id, f & kFSEventStreamEventFlagItemRenamed != 0 { departed[id] = (now, gone) }
+                if let id, f & kFSEventStreamEventFlagItemRenamed != 0 { departed[id] = (now, gone, p) }
                 continue
             }
             let isFile = f & kFSEventStreamEventFlagItemIsFile != 0
@@ -249,12 +255,16 @@ final class RecentFiles {
             if created || renamed || item.source == nil { item.source = Self.origin(p) ?? item.source }
             // the new name of a rename: what the old name held comes along
             // (a renamed folder keeps the files listed inside it)
+            var renamedFrom: String?
             if renamed, let id, let was = departed.removeValue(forKey: id) {
                 item.source = item.source ?? was.items[""]?.source
                 for (suffix, it) in was.items where !suffix.isEmpty { put(p + suffix, it) }
+                renamedFrom = was.path
             }
             items[p] = item
             touched = true
+            if let from = renamedFrom { onRenamed?(from, p) }
+            if isFile { onKept?(p, created, item.source) }
         }
         if touched { trim(); publish() }
     }

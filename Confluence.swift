@@ -17,7 +17,8 @@ import WebKit
 //   Cmd+C / ⇧Cmd+C        copy link / title + link
 //   Cmd+D                 ☆ favorite
 //   Cmd+L / Cmd+F         search box       Cmd+G / ⇧Cmd+G  next / previous hit
-//   Esc                   an open filter, else clear the query (never closes)
+//   Esc                   an open filter, else clear the query, else hide
+//                         (only with the kitchen sink's "Esc Hides Window")
 //
 // Search and Favorites are separate: Search starts empty; Favorites is the
 // pinned list for one-click opening (typing filters it, the Search button
@@ -489,7 +490,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         window.title = "Confluence"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 820, height: 480)
-        window.level = settings.float ? .floating : .normal
+        window.level = .normal   // AeroSpace floats it (aerospace.toml)
         window.delegate = self
         split = CGFloat(UserDefaults.standard.double(forKey: Self.splitKey))
         if split < 0.2 || split > 0.8 { split = confluenceSetting("split", 0.42) }
@@ -1659,6 +1660,9 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             textBox.field.stringValue = ""
             if scope == .favorites { showFavorites() } else if !hasCriteria { showSearchEmpty() }
             focusSearch()
+        } else if onSlotHide != nil, let c = controller, c.escHideCount(.confluence) > 0 {
+            // nothing to clear: Confluence's "Esc Hides Window" is on
+            c.slot.escapeAtTop(.confluence)
         } else if window.firstResponder !== textBox.field.currentEditor() {
             focusSearch()
         }
@@ -1731,6 +1735,10 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         if let c = controller {
             c.addGlobalWindowItems(to: menu)
             menu.addItem(.separator())
+            if onSlotHide != nil {
+                menu.addItem(c.escHidesMenuItem(.confluence))
+                menu.addItem(.separator())
+            }
         }
         func add(_ t: String, _ f: @escaping () -> Void) {
             let target = MenuActionTarget(action: f)
@@ -1767,7 +1775,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             Favorites: type to filter, Return opens, Search looks inside them
             Cmd+G / Shift+Cmd+G — next / previous match in the page
             Cmd+L / Cmd+F — search box · Cmd+R — search again
-            Esc — close an open filter, else clear the query
+            Esc — close an open filter, else clear the query (else hide, if switched on)
             Cmd+W / ✕ — hide the window
             """, buttons: ["OK"]) { _ in }
         }

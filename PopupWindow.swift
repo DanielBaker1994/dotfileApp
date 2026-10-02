@@ -3259,8 +3259,9 @@ final class FileListPane: NSView, NSDraggingSource {
         if !marked.contains(selection) { selection = all[0] }
         anchor = all[0]
     }
-    // Shift+click / Shift+arrow: everything from the anchor to `i`
-    private func extendSelection(to i: Int) {
+    // Shift+click / Shift+arrow: everything from the anchor to `i` (the
+    // /paths popup drives it from its own key handling)
+    func extendSelection(to i: Int) {
         guard rows.indices.contains(i) else { return }
         if marked.isEmpty { anchor = selection }
         let a = min(max(0, anchor), rows.count - 1)
@@ -3841,9 +3842,13 @@ enum FileDrag {
     // the host's recent list can't see our own writes. Any thread.
     static var onFileOp: ((_ from: String?, _ to: String) -> Void)?
 
+    // files dragged OUT of a list (the /paths shelf counts them as used)
+    static var onDragOut: (([String]) -> Void)?
+
     // `more` = the rest of a multi-selection, dragged along under the image
     static func begin(path: String, more: [String] = [], image: NSImage, frame: NSRect, view: NSView,
                       event: NSEvent, source: NSDraggingSource) {
+        onDragOut?([path] + more)
         let item = NSDraggingItem(pasteboardWriter: URL(fileURLWithPath: path) as NSURL)
         item.setDraggingFrame(frame, contents: image)
         let rest = more.map { p -> NSDraggingItem in
@@ -9531,8 +9536,9 @@ private func scrollSelectionIntoView() {
             return true
         case 3 where cmd:                   // F — vim search
             vimRemote("<C-\\><C-N>/"); return true
-        case 13 where cmd:                  // W — close the window
-            handleEscape(); return true
+        case 13 where cmd:                  // W — close the window (never gated by esc-close)
+            if let onCloseWindow { onCloseWindow() } else { handleEscape() }
+            return true
         case 31 where cmd:                  // O — open file at path
             onOpenPathPrompt?(); return true
         default:
@@ -10673,28 +10679,19 @@ private func scrollSelectionIntoView() {
         vimRemote("<C-\\><C-N>:qa!<CR>")
     }
 
-    // Run `nvim --server <socket> <flag> <arg>` (short timeout). Returns the
-    // client's stdout, or nil when the socket/editor is unavailable.
+    // `--remote-send` / `--remote-expr` against the pane's nvim (short
+    // timeout): the client's would-be stdout, or nil when the socket /
+    // editor is unavailable. One persistent msgpack-RPC connection
+    // (NvimRPC.swift) — no `nvim --server` process per call.
+    private var vimRPC: NvimRPC?
     @discardableResult
     private func vimClient(_ flag: String, _ arg: String) -> String? {
-        guard let exec = config.vimEditorExecutable,
+        guard config.vimEditorExecutable != nil,
               let sock = config.vimEditorSocket,
-              FileManager.default.fileExists(atPath: sock),
               vimRunning else { return nil }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exec)
-        p.arguments = ["--headless", "--clean", "--server", sock, flag, arg]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let deadline = Date().addingTimeInterval(1.5)
-        while p.isRunning && Date() < deadline { usleep(5_000) }
-        if p.isRunning { p.terminate(); return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard p.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8) ?? ""
+        if vimRPC?.path != sock { vimRPC = NvimRPC(path: sock) }
+        guard let rpc = vimRPC else { return nil }
+        return flag == "--remote-send" ? (rpc.input(arg) ? "" : nil) : rpc.eval(arg)
     }
 
     // Send keys to the editor as if typed (vim key notation: <CR>, <Esc>…).

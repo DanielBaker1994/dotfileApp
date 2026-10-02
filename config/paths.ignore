@@ -1,0 +1,62 @@
+# /paths shelf: files that never belong on it. gitignore syntax — `*` `?`
+# `[...]` within a name, `**` across folders, a trailing `/` = a folder (and
+# everything in it), `!pattern` re-includes, the LAST match wins. `~/...` and
+# absolute paths work here too. These rules win over every repo's
+# .gitignore / .ignore / .rgignore and the global git excludes, which also
+# apply. Files you COPY (Finder Cmd+C, a pasted path) skip all of this.
+# Edits apply within ~2 s; nothing to restart.
+
+# compiled / generated
+*.pyc
+*.pyo
+*.o
+*.obj
+*.class
+*.so
+*.dylib
+*.a
+*.d
+*.swiftmodule
+*.swiftdeps
+*.swiftdoc
+
+# editor / OS scratch
+*.swp
+*.swo
+*~
+~$*
+.DS_Store
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# half-done downloads and transfers
+*.crdownload
+*.part
+*.partial
+*.download
+
+# app state / files that churn in the background (copy one in Finder to
+# shelve it anyway)
+*.plist
+*.log
+*.lock
+*.pid
+*.sqlite
+*.sqlite-journal
+*.db-journal
+
+# build / dependency / cache trees
+build/
+dist/
+target/
+out/
+.build/
+.cache/
+__pycache__/
+node_modules/
+vendor/
+coverage/
+.venv/
+venv/

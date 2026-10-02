@@ -313,7 +313,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         window.title = "AI"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 560, height: 360)
-        window.level = settings.float ? .floating : .normal
+        window.level = .normal   // AeroSpace floats it (aerospace.toml)
         window.delegate = self
         split = CGFloat(UserDefaults.standard.double(forKey: Self.splitKey))
         if split < 0.2 || split > 0.8 { split = aiNumber("split", 0.5) }
@@ -1301,7 +1301,9 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
             }
             switch e.keyCode {
             case 53:                                                         // Esc
+                // stop a run; idle: hide when AI's "Esc Hides Window" is on
                 if self.process != nil { self.cancelRun() }
+                else if self.onSlotHide != nil { self.controller?.slot.escapeAtTop(.ai) }
                 return nil
             case 36 where ctrl || cmd, 76 where ctrl || cmd:                 // Ctrl/Cmd+Return
                 self.run()
@@ -1329,6 +1331,10 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         if let c = controller {
             c.addGlobalWindowItems(to: menu)
             menu.addItem(.separator())
+            if onSlotHide != nil {
+                menu.addItem(c.escHidesMenuItem(.ai))
+                menu.addItem(.separator())
+            }
         }
         func add(_ t: String, _ f: @escaping () -> Void) {
             let target = MenuActionTarget(action: f)

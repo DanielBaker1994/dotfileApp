@@ -152,13 +152,14 @@ struct AppSettings {
     // a window hides — a key-window blip (aerospace re-focusing while a view
     // swaps, an activation hand-off) never counts as leaving
     var focusLossDelay = 0.3
-    // [app] float: popup windows stay above other apps' windows (default
-    // false); per window `float` in its section overrides it
-    var float = false
-    // [app] esc-close: rapid Esc presses that close a notes / files / jira
-    // window (default 2; 1 = single Esc, 0 = never). Per window `esc-close`
-    // overrides it. The switcher palette always closes on one Esc.
-    var escClose = 2
+    // (no [app] float any more: AeroSpace's on-window-detected rule floats
+    // every window of the app, the app never tiles / floats itself; popup-only
+    // "/" windows keep their own per-section `float` = window level)
+    // [app] esc-close: rapid Esc presses that hide a window (default 0 =
+    // never; 1 = single Esc, 2 = double-tap). Per view `esc-close` overrides
+    // it — every view's kitchen sink has "Esc Hides Window". The switcher
+    // palette always closes on one Esc.
+    var escClose = 0
     // [app] copy-toast: pill shown after Cmd+K copies a file browser path
     // ("{}" = the path; empty = no toast)
     var copyToast = "Copied {} to clipboard"
@@ -187,7 +188,6 @@ let presetMinOpacity: CGFloat = 0.6
 let ipcSocketTimeout = 1.0    // s: aerospace socket reads + launcher ping
 let ipcFallbackTimeout = 1.5  // s: aerospace CLI fallback kill timeout
 let serverRecvTimeout = 2.0   // s: command-server socket recv timeout
-let focusPollInterval = 0.25  // s: focus-bridge file poller
 let noteWatchInterval = 1.0   // s: note external-write watcher
 let listWatchInterval = 1.5   // s: list reload watcher
 let defaultNoteSize = CGSize(width: 640, height: 440)
@@ -422,6 +422,26 @@ func sendLaunchMessage(_ name: String) -> Bool {
     return true
 }
 
+// ONE daemon per socket. The first process holds an exclusive flock beside
+// the socket for its whole life (the kernel drops it however the process
+// ends; O_CLOEXEC so nvim / shells / python never inherit it and outlive
+// us holding it). A second launch — `open -n`, a double hotkey during a cold
+// start, the DMG app next to the repo build — must not steal the socket and
+// open a second set of windows: main.swift hands its request over instead.
+private var daemonLockFD: Int32 = -1
+func acquireDaemonLock(waitUpTo seconds: Double) -> Bool {
+    if daemonLockFD >= 0 { return true }
+    let fd = open(popupTmpDir() + settings.notesSocketName + ".lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { return true }   // can't even create it: never block a launch on that
+    let deadline = Date().addingTimeInterval(seconds)
+    while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+        if Date() >= deadline { close(fd); return false }
+        usleep(50_000)
+    }
+    daemonLockFD = fd   // held until exit
+    return true
+}
+
 func readFocusFile() -> (String?, pid_t?) {
     guard let content = try? String(contentsOfFile: settings.focusFilePath, encoding: .utf8)
     else { return (nil, nil) }
@@ -457,8 +477,19 @@ func readUInt32(_ fd: Int32) -> UInt32? {
     return d.withUnsafeBytes { $0.load(as: UInt32.self) }.littleEndian
 }
 
-func aerospaceSocket(_ args: [String]) -> String? {
-    let path = settings.aerospaceSocketPath
+// AeroSpace's own socket is /tmp/bobko.aerospace-<short user name>.sock. A
+// configured `aerospace-socket` that doesn't exist (a path hard-coded on
+// another Mac / user) falls back to that one: missing it silently turned
+// EVERY aerospace call into a CLI process spawn. nil = AeroSpace isn't up.
+func liveAerospaceSocket() -> String? {
+    let fm = FileManager.default
+    if fm.fileExists(atPath: settings.aerospaceSocketPath) { return settings.aerospaceSocketPath }
+    let own = "/tmp/bobko.aerospace-\(NSUserName()).sock"
+    return fm.fileExists(atPath: own) ? own : nil
+}
+
+func aerospaceSocket(_ args: [String], timeout: Double = ipcSocketTimeout) -> String? {
+    guard let path = liveAerospaceSocket() else { return nil }
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return nil }
     defer { close(fd) }
@@ -471,7 +502,7 @@ func aerospaceSocket(_ args: [String]) -> String? {
     guard ok else { return nil }
     // aerospace IPC can stall (its own main thread is busy) — never let a
     // blocking read hang OUR main thread: time out and fall back
-    var tv = timeval(tv_sec: Int(ipcSocketTimeout), tv_usec: 0)
+    var tv = timeval(tv_sec: Int(timeout), tv_usec: Int32((timeout - Double(Int(timeout))) * 1_000_000))
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     writeUInt32(fd, 1)
     guard readUInt32(fd) != nil else { return nil }
@@ -667,6 +698,7 @@ struct CommandSpec {
     var sticky: Bool          // stay visible when another app takes focus
     var float: Bool? = nil    // stay above other apps' windows (nil = [app] float)
     var label: String? = nil  // palette text for "/" commands (nil = the section name)
+    var inPalette = true      // `in-palette = false`: not listed in the Hyper+S "/" palette
     var tabsOpaque: Bool? = nil  // any window: solid (never transparent) tabs strip (nil = on)
     // files: browser sort (name|modified|created|size|kind) + asc/desc, the
     // recursive-search cap/excludes and the filter words that open a terminal
@@ -1016,6 +1048,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
         saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
     spec.textColor = hexColor(vars["text-color"])
     if let l = vars["label"]?.trimmingCharacters(in: .whitespaces), !l.isEmpty { spec.label = l }
+    spec.inPalette = tri(vars["in-palette"]) ?? true
     spec.tabsOpaque = tri(vars["tabs-opaque"])
     spec.dimColor = hexColor(vars["dim-color"])
     spec.highlightColor = hexColor(vars["highlight-color"])
@@ -1112,7 +1145,9 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("focus-bridge"), !v.isEmpty { settings.focusBridgeName = v }
     if let v = str("switcher-name"), !v.isEmpty { settings.switcherWindowName = v }
     if let v = str("detail-name"), !v.isEmpty { settings.detailWindowName = v }
-    if let v = str("aerospace-socket"), !v.isEmpty { settings.aerospaceSocketPath = v }
+    if let v = str("aerospace-socket"), !v.isEmpty {
+        settings.aerospaceSocketPath = v.replacingOccurrences(of: "$USER", with: NSUserName())
+    }
     if let v = str("crash-log"), !v.isEmpty {
         settings.crashLogPath = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
     }
@@ -1126,7 +1161,6 @@ private func parseAppConfig(_ vars: [String: String]) {
     if vars["screenshot-apps"] != nil { settings.screenshotApps = csv(vars["screenshot-apps"]) }
     if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
     if let v = str("focus-loss-delay"), let n = Double(v), n >= 0 { settings.focusLossDelay = min(n, 5) }
-    if let v = tri(str("float")) { settings.float = v }
     HeaderStyle.current = str("header-style").flatMap { HeaderStyle(rawValue: $0.lowercased()) } ?? .flat
     if let v = tri(str("shared-window")) { settings.sharedWindow = v }
     if let v = tri(str("preload")) { settings.preload = v }
@@ -1394,9 +1428,10 @@ private func configLog(_ s: String) {
 
 private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
-    "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload",
+    "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload", "in-palette",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
+    "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
     "shared-width": 400...8000, "shared-height": 300...8000,
     "terminal-height": 40...4000, "font-size": 6...96, "terminal-font-size": 6...96,
@@ -1680,6 +1715,7 @@ private func resolveIconName(_ name: String) -> NSImage? {
     case "app": return appIcon
     case "heart": return heartIcon
     case "mic", "voice": return micIcon
+    case "folder", "files", "paths": return filesNavIcon
     default:
         let p = name.hasPrefix("/") ? name : assetDir + "/" + name
         return fileIconTile(p, size: appIconSize)
@@ -2575,6 +2611,10 @@ final class SwitcherController: NSObject {
     var commandSelection = 0
     var savedWID: String?
     var savedPID: pid_t?
+    // /paths: the shelf popup + the clipboard watcher feeding it
+    var pathsWindow: PathsWindow?
+    var clipboardPaths: ClipboardPaths?
+    var pathsSeedObserver: NSObjectProtocol?
     private var iconCache: [String: NSImage] = [:]
     // All open sub-windows (note editor / jira list). Several can coexist
     // (notes + jira at the same time); each hides on Esc and removes itself.
@@ -2664,7 +2704,7 @@ final class SwitcherController: NSObject {
     func start() {
         popup.start()
         startCommandServer()
-        startFocusPoller()
+        startFocusBridge()
         startScreenshotYield()
     }
 
@@ -2705,15 +2745,18 @@ final class SwitcherController: NSObject {
 
     // macOS refuses EXTERNAL activation of an accessory app (aerospace's
     // focus raises our window but the app never becomes active, so keyboard
-    // focus stays in the previous app and alt-j/k looks "stuck").
-    // aerospace/focus-bridge.sh (an on-focus-changed hook) writes the newly
-    // focused window id to a file; we watch that file's mtime and activate
-    // ourselves from the inside — the one activation path that always works.
-    // Event-driven: a stat() per tick, no aerospace IPC, no sketchybar load.
+    // focus stays in the previous app and alt-j/k looks "stuck"). Two ways
+    // in, both event-driven, neither polls:
+    //  1. in-process: aerospace's focus makes our window KEY while the app
+    //     stays inactive — activate right there (no hook, no file, no wait);
+    //  2. the bridge: aerospace's on-focus-changed hook writes the newly
+    //     focused window id to a file (aerospace.toml); a vnode watch on it
+    //     fires at once (it was a 0.25 s stat() poll) — for the focus
+    //     changes that never make our window key on their own.
     private var bridgeMtime: (Int, Int)?
-    private func startFocusPoller() {
-        let path = popupTmpDir() + settings.focusBridgeName
-        // Record clicks in OTHER apps so the poller never steals focus back
+    private var bridgeSource: DispatchSourceFileSystemObject?
+    private func startFocusBridge() {
+        // Record clicks in OTHER apps so the bridge never steals focus back
         // right after the user clicked away (see lastOtherAppClick above).
         if globalClickMonitor == nil,
            let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] event in
@@ -2728,38 +2771,79 @@ final class SwitcherController: NSObject {
         }) {
             globalClickMonitor = m
         }
-        let t = Timer(timeInterval: focusPollInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            // consume EVERY bridge write, even while we're already active:
-            // a write left unconsumed (notes focused while active) used to
-            // fire later — switching workspaces 4 -> 1 deactivated us, the
-            // poller saw the stale "notes focused" write, re-activated the
-            // notes window and aerospace jumped straight back to 4
-            var st = stat()
-            guard stat(path, &st) == 0 else { return }
-            let mt = (Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec))
-            if let prev = self.bridgeMtime, prev.0 == mt.0, prev.1 == mt.1 { return }
-            self.bridgeMtime = mt
-            guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
-                  let id = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  let w = self.subWindows.first(where: {
-                      $0.isShown && $0.nativeWindow.windowNumber == id
-                  }) else { return }
-            // only a FRESH write means aerospace just focused us — never act
-            // on one that sat around (e.g. the first tick after launch)
-            let age = Date().timeIntervalSince1970
-                - (Double(mt.0) + Double(mt.1) / 1_000_000_000)
-            let clickedAway = self.lastOtherAppClick.map { Date().timeIntervalSince($0) < 1.0 } ?? false
-            guard !clickedAway, age < 1.0 else { return }
-            // raise EVEN when already key: aerospace's focus makes our
-            // (non-activating) panel key while the previous app stays in
-            // front, so alt-j/k gave it the keyboard but left it hidden
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, !NSApp.isActive, let w = note.object as? NSWindow, w.isVisible,
+                  Self.sharedViews.contains(where: { self.slotMember($0)?.slotWindow === w })
+                    || self.subWindows.contains(where: { $0.nativeWindow === w && $0.isShown }) else { return }
+            if let t = self.lastOtherAppClick, Date().timeIntervalSince(t) < 1.0 { return }
             NSApp.activate(ignoringOtherApps: true)
-            w.nativeWindow.orderFrontRegardless()
-            w.nativeWindow.makeKeyAndOrderFront(nil)
-            self.log("aerospace focused our window \(id) — self-activated")
+            w.orderFrontRegardless()
+            self.log("our window became key while inactive (aerospace focus) — self-activated")
         }
-        RunLoop.main.add(t, forMode: .common)
+        watchFocusBridge()
+    }
+
+    private func watchFocusBridge() {
+        let path = popupTmpDir() + settings.focusBridgeName
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        let fd = open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.watchFocusBridge() }
+            return
+        }
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .extend, .attrib, .delete, .rename], queue: .main)
+        src.setEventHandler { [weak self, weak src] in
+            guard let self, let src else { return }
+            if !src.data.isDisjoint(with: [.delete, .rename]) {
+                // the file was replaced / cleaned up: watch the new one
+                src.cancel()
+                self.bridgeSource = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.watchFocusBridge()
+                    self?.focusBridgeChanged(path)
+                }
+                return
+            }
+            self.focusBridgeChanged(path)
+        }
+        src.setCancelHandler { close(fd) }
+        bridgeSource = src
+        src.resume()
+    }
+
+    private func focusBridgeChanged(_ path: String) {
+        // consume EVERY bridge write, even while we're already active: a
+        // write left unconsumed (notes focused while active) used to fire
+        // later — switching workspaces 4 -> 1 deactivated us, the stale
+        // "notes focused" write re-activated the notes window and aerospace
+        // jumped straight back to 4
+        var st = stat()
+        guard stat(path, &st) == 0 else { return }
+        let mt = (Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec))
+        if let prev = bridgeMtime, prev.0 == mt.0, prev.1 == mt.1 { return }
+        bridgeMtime = mt
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
+              let id = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let w = subWindows.first(where: {
+                  $0.isShown && $0.nativeWindow.windowNumber == id
+              }) else { return }
+        // only a FRESH write means aerospace just focused us — never act on
+        // one that sat around (e.g. the first event after launch)
+        let age = Date().timeIntervalSince1970 - (Double(mt.0) + Double(mt.1) / 1_000_000_000)
+        let clickedAway = lastOtherAppClick.map { Date().timeIntervalSince($0) < 1.0 } ?? false
+        guard !clickedAway, age < 1.0 else { return }
+        // raise EVEN when already key: aerospace's focus makes our
+        // (non-activating) panel key while the previous app stays in front,
+        // so alt-j/k gave it the keyboard but left it hidden
+        NSApp.activate(ignoringOtherApps: true)
+        w.nativeWindow.orderFrontRegardless()
+        w.nativeWindow.makeKeyAndOrderFront(nil)
+        log("aerospace focused our window \(id) — self-activated")
     }
 
     // MARK: shared window plumbing (SharedWindow.swift)
@@ -2820,6 +2904,53 @@ final class SwitcherController: NSObject {
         case .confluence: return ConfluenceWindow.current
         case .ai: return AIWindow.current
         }
+    }
+
+    // the commands.toml section behind a view's settings
+    func slotSection(_ v: SlotView) -> String? {
+        switch v {
+        case .notes: return commands.first { $0.kind == .note }?.name
+        case .files: return filesCommand?.name
+        case .jira, .detail, .releases, .config: return "jira"
+        case .confluence: return "confluence"
+        case .ai: return "ai"
+        case .output: return currentOutputName.flatMap { n in commands.first { $0.windowName == n }?.name }
+        }
+    }
+
+    // rapid Esc presses that hide the shared window from view `v` (0 = Esc
+    // never hides it): the view's `esc-close` (alias `vim-esc-close`), else
+    // [app] esc-close (default 0). Read from the file: confluence / ai are
+    // no CommandSpecs, and a hand edit counts at once.
+    func escHideCount(_ v: SlotView, lines: [String]? = nil) -> Int {
+        guard let sec = slotSection(v),
+              let lines = lines ?? readConfigText().map(configLines) else { return settings.escClose }
+        let entries = configSectionEntries(lines, sec)
+        let own = (entries.first { $0.key == "esc-close" } ?? entries.first { $0.key == "vim-esc-close" })?.value
+        return max(0, own.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? settings.escClose)
+    }
+
+    // kitchen sink ▸ "Esc Hides Window" (per view): on = one Esc hides the
+    // window from the top of that view (notes' vim: once in Normal mode)
+    func setEscHides(_ v: SlotView, _ on: Bool) {
+        guard let sec = slotSection(v) else { return }
+        // off falls back to [app] esc-close when that already means never
+        let value: String? = on ? "1" : settings.escClose == 0 ? nil : "0"
+        saveConfigValues(section: sec, [("esc-close", value), ("vim-esc-close", nil)])
+        let n = escHideCount(v)
+        if let i = commands.firstIndex(where: { $0.name == sec }) { commands[i].escClose = value.flatMap(Int.init) }
+        // notes counts Esc in its own panes (vim / shell): live
+        if v == .notes { noteWindow?.config.escCloseCount = n }
+        log("[\(sec)] esc-close = \(value ?? "(default \(settings.escClose))") — Esc \(n > 0 ? "hides" : "never hides") the window")
+    }
+
+    func escHidesMenuItem(_ v: SlotView) -> NSMenuItem {
+        let on = escHideCount(v) > 0
+        let item = menuItem("Esc Hides Window", state: on) { [weak self] in self?.setEscHides(v, !on) }
+        item.toolTip = v == .notes
+            ? "Esc in Normal mode (vim) / the editor hides the window. Off: hide with ✕, Cmd+W or the hotkey"
+            : "Esc hides the window once there is nothing left to clear or step back from. Off: ✕, Cmd+W or the hotkey"
+        return item
     }
 
     // which view a sub-window is (nil = not a shared-window member)
@@ -3066,23 +3197,50 @@ final class SwitcherController: NSObject {
     // last view / hide), "terminal" = Hyper+T; the named views are CLI only
     static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "terminal", "confluence", "ai"]
 
+    // what hotkeyPrep found at the keypress (handed to the main thread)
+    struct HotkeyPrep {
+        var log = ""
+        var workspace = ""          // the focused workspace
+        var screen: Int?            // its monitor (1-based NSScreen.screens)
+        var cacheCleared = false    // AeroSpace's closed-windows cache (SharedWindow.clearAerospaceCache)
+    }
+
     // Runs on the socket thread BEFORE the hotkey reaches the main thread
     // (the binary is the hotkey, no launcher script): record the window
     // aerospace has focused at the keypress (the focus file toggleCommand
-    // reads) and pull our windows onto the focused workspace. Direct
-    // aerospace socket, a few ms, never on the main thread; no sleep — the
-    // move is done when aerospace replies.
-    static func hotkeyPrep() -> String {
+    // reads), the focused workspace + its monitor, clear AeroSpace's
+    // closed-windows cache for the show to come (SharedWindow.
+    // clearAerospaceCache), and pull our windows that are still up on
+    // another workspace over to this one. Direct aerospace socket, three
+    // queries at once (AeroSpace answers them one by one, ~10-25 ms each —
+    // the floor), never on the main thread; no sleep — a move is done when
+    // aerospace replies.
+    static func hotkeyPrep() -> HotkeyPrep {
         let t0 = DispatchTime.now().uptimeNanoseconds
-        // aerospace answers each query in ~20-25 ms: ask both at once
-        var focused = "", rows = ""
+        var focused = "", rows = "", ws = ""
         let g = DispatchGroup()
         DispatchQueue.global(qos: .userInteractive).async(group: g) {
             focused = aerospaceCall(["list-windows", "--focused", "--format", "%{window-id} %{app-pid}"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        var cleared = false
+        DispatchQueue.global(qos: .userInteractive).async(group: g) {
+            cleared = aerospaceSocket(["eval", "true"]) != nil
+        }
+        // the focused workspace + its monitor ride along in the listing;
+        // an empty focused workspace has no rows: then one more query
         rows = aerospaceCall(["list-windows", "--all", "--format",
-                              "%{window-id}|%{app-pid}|%{workspace}|%{workspace-is-focused}|%{window-title}"])
+                              "%{window-id}|%{app-pid}|%{workspace}|%{workspace-is-focused}|%{monitor-appkit-nsscreen-screens-id}|%{window-title}"])
+        let table = rows.split(separator: "\n").map {
+            $0.split(separator: "|", maxSplits: 5, omittingEmptySubsequences: false).map(String.init)
+        }.filter { $0.count == 6 }
+        if let f = table.first(where: { $0[3] == "true" }) {
+            ws = f[2] + "|" + f[4]
+        } else {
+            ws = aerospaceCall(["list-workspaces", "--focused", "--format",
+                                "%{workspace}|%{monitor-appkit-nsscreen-screens-id}"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         g.wait()
         if focused.split(separator: " ").count == 2 {
             try? focused.write(toFile: settings.focusFilePath, atomically: true, encoding: .utf8)
@@ -3090,23 +3248,30 @@ final class SwitcherController: NSObject {
             // nothing focused (empty workspace): not "in our window"
             try? FileManager.default.removeItem(atPath: settings.focusFilePath)
         }
-        let table = rows.split(separator: "\n").map {
-            $0.split(separator: "|", maxSplits: 4, omittingEmptySubsequences: false).map(String.init)
-        }.filter { $0.count == 5 }
-        var cur = table.first { $0[3] == "true" }?[2] ?? ""
-        if cur.isEmpty {
-            // an empty workspace has no rows
-            cur = aerospaceCall(["list-workspaces", "--focused"]).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        var moved: [String] = []
+        var prep = HotkeyPrep()
+        prep.cacheCleared = cleared
+        let wsParts = ws.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let cur = wsParts.first ?? ""
+        prep.workspace = cur
+        prep.screen = wsParts.count > 1 ? Int(wsParts[1]) : nil
         let me = String(getpid())
-        for f in table where !cur.isEmpty && f[1] == me && f[2] != cur && f[4] != settings.switcherWindowName {
+        var moved: [String] = []
+        for f in table {
+            guard f[1] == me, !cur.isEmpty, f[2] != cur, f[5] != settings.switcherWindowName else { continue }
             _ = aerospaceCall(["move-node-to-workspace", "--window-id", f[0], cur])
             moved.append(f[0])
         }
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
-        return String(format: "prep %.1f ms (ws %@%@)", ms, cur,
-                      moved.isEmpty ? "" : ", moved " + moved.joined(separator: ","))
+        prep.log = String(format: "prep %.1f ms (ws %@, screen %@%@)", ms, cur, prep.screen.map(String.init) ?? "?",
+                          moved.isEmpty ? "" : ", moved " + moved.joined(separator: ","))
+        return prep
+    }
+
+    // main thread, before the hotkey runs: the show it triggers lands on the
+    // focused workspace's screen, AeroSpace's cache already cleared
+    func applyHotkeyPrep(_ prep: HotkeyPrep) {
+        slot.targetScreen = prep.screen
+        slot.aerospaceCacheCleared = prep.cacheCleared
     }
 
     // `state` / `do:ACTION` over the socket (main thread): JSON the UI tests
@@ -3130,6 +3295,26 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"unknown view\"}"
                 }
                 slot.open(v)
+            case _ where a.hasPrefix("paths:"):
+                // paths:show | hide | return | select:N — the /paths popup
+                let arg = String(a.dropFirst(6))
+                switch arg {
+                case "show":
+                    guard let cmd = pathsCommand else { return "{\"error\":\"[paths] not enabled\"}" }
+                    showPaths(cmd, restoreWID: nil, restorePID: nil)
+                case "hide": pathsWindow?.hide()
+                case "return": pathsWindow?.testReturn()
+                case _ where arg.hasPrefix("select:"):
+                    pathsWindow?.testSelect(Int(arg.dropFirst(7)) ?? 0)
+                default: return "{\"error\":\"paths:show|hide|return|select:N\"}"
+                }
+            case _ where a.hasPrefix("esc-hides:"):
+                // esc-hides:VIEW:on|off — the kitchen sink's "Esc Hides Window"
+                let parts = a.split(separator: ":").map(String.init)
+                guard parts.count == 3, let v = SlotView(rawValue: parts[1]), ["on", "off"].contains(parts[2]) else {
+                    return "{\"error\":\"esc-hides:VIEW:on|off\"}"
+                }
+                setEscHides(v, parts[2] == "on")
             case _ where a.hasPrefix("header-style:"):
                 // live only (not written to commands.toml)
                 guard let st = HeaderStyle(rawValue: String(a.dropFirst(13))) else {
@@ -3143,10 +3328,12 @@ final class SwitcherController: NSObject {
         for v in [SlotView.notes, .files, .jira, .detail, .releases, .config, .output, .confluence, .ai] {
             guard let m = slotMember(v) else { continue }
             if let p = m as? PopupWindow {
-                views[v.rawValue] = p.testState
+                var st = p.testState
+                st["wid"] = m.slotWindow.windowNumber
+                views[v.rawValue] = st
             } else {
                 let f = m.slotWindow.frame
-                views[v.rawValue] = ["shown": m.slotShown, "key": m.slotWindow.isKeyWindow,
+                views[v.rawValue] = ["shown": m.slotShown, "key": m.slotWindow.isKeyWindow, "wid": m.slotWindow.windowNumber,
                                      "frame": [f.origin.x, f.origin.y, f.width, f.height].map { Int($0.rounded()) }]
             }
         }
@@ -3155,7 +3342,15 @@ final class SwitcherController: NSObject {
             "active": NSApp.isActive, "keyWindow": NSApp.keyWindow?.title ?? "",
             "windows": NSApp.windows.filter(\.isVisible).count,
             "palette": popup.isShown, "views": views,
-            "float": settings.float, "hideOnFocusLoss": settings.hideOnFocusLoss,
+            "hideOnFocusLoss": settings.hideOnFocusLoss,
+            "escHides": { () -> [String: Bool] in
+                let lines = readConfigText().map(configLines)   // one read for every view
+                return Dictionary(uniqueKeysWithValues: SharedWindow.escViews.map { ($0.rawValue, escHideCount($0, lines: lines) > 0) })
+            }(),
+            "pid": Int(getpid()),
+            "paletteCommands": paletteCommands().map { $0.label ?? $0.name },
+            "paths": pathsWindow?.testState ?? ["shown": false,
+                                                "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
         ]
         guard let d = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) else { return "{}" }
@@ -3172,6 +3367,11 @@ final class SwitcherController: NSObject {
             while true {
                 let cfd = Darwin.accept(fd, nil, nil)
                 guard cfd >= 0 else { continue }
+                // a client that hangs up before its reply (a timed-out test
+                // query) must not SIGPIPE the daemon (per socket: a global
+                // SIG_IGN would be inherited by the drawer's shell + nvim)
+                var noSigPipe: Int32 = 1
+                setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
                 // a client that connects and never writes must not wedge the
                 // accept loop (a wedged loop saturates the backlog and then
                 // blocks every future ping in connect())
@@ -3182,6 +3382,11 @@ final class SwitcherController: NSObject {
                 let n = read(cfd, &buf, buf.count)
                 let query = n > 0 ? (String(bytes: buf[..<n], encoding: .utf8) ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines) : ""
+                if query == "ping" {
+                    // a second launch checking that this daemon is alive
+                    close(cfd)
+                    continue
+                }
                 if query == "state" || query.hasPrefix("do:") {
                     // tests: answered on the same connection (bin/ui-test.sh
                     // ws_query); main thread, bounded wait so a busy main
@@ -3203,14 +3408,17 @@ final class SwitcherController: NSObject {
                     let name = query
                     let t0 = DispatchTime.now().uptimeNanoseconds
                     let prep = settings.sharedWindow && Self.hotkeyModes.contains(name)
-                        ? Self.hotkeyPrep() : ""
+                        ? Self.hotkeyPrep() : nil
                     DispatchQueue.main.async { [weak self] in
                         defer {
                             if Self.hotkeyModes.contains(name) {
                                 let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
-                                self?.log(String(format: "hotkey %@: %@, %.1f ms to shown", name, prep, ms))
+                                self?.log(String(format: "hotkey %@: %@, %.1f ms to shown", name, prep?.log ?? "", ms))
                             }
+                            // the prep's cache clear was for THIS hotkey's show only
+                            self?.slot.aerospaceCacheCleared = false
                         }
+                        if let prep { self?.applyHotkeyPrep(prep) }
                         if name == "reset-size" {
                             self?.noteWindow?.resetToDefaultSize()
                         } else if name == "toggle-terminal" || name == "toggle-browser" {
@@ -3321,6 +3529,25 @@ final class SwitcherController: NSObject {
         return c
     }
 
+    // what the Hyper+S "/" palette lists. [jira-config] only exists while
+    // Jira is enabled; [confluence] and [ai] are config sections whose views
+    // are palette commands. `in-palette = false` keeps a section out of the
+    // list (its window still opens from the hotkeys, header icons, menu bar)
+    func paletteCommands() -> [CommandSpec] {
+        let jira = jiraEnabledInConfig()
+        func listed(_ section: String) -> Bool {
+            tri(configSectionValue(section, "in-palette")) ?? true
+        }
+        var all = commands.filter { $0.inPalette && ($0.name != "jira-config" || jira) }
+        if confluenceEnabled(), listed("confluence") {
+            all.append(Self.slotCommand("confluence", label: configSectionValue("confluence", "label") ?? "Confluence Search"))
+        }
+        if aiEnabled(), listed("ai") {
+            all.append(Self.slotCommand("ai", label: configSectionValue("ai", "label") ?? "AI View"))
+        }
+        return all
+    }
+
     private func filter(_ query: String) -> [PopupRow] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q.hasPrefix("/") {
@@ -3331,13 +3558,7 @@ final class SwitcherController: NSObject {
                 popup.selection = commandSelection
             }
             let sub = String(q.dropFirst()).trimmingCharacters(in: .whitespaces)
-            // [jira-config] only exists while Jira is enabled; [confluence]
-            // and [ai] are config sections whose views are palette commands
-            let jira = jiraEnabledInConfig()
-            var all = commands.filter { $0.name != "jira-config" || jira }
-            if confluenceEnabled() { all.append(Self.slotCommand("confluence", label: "Confluence Search")) }
-            if aiEnabled() { all.append(Self.slotCommand("ai", label: "AI View")) }
-            let cmds = PopupFuzzy.filter(all, query: sub) { c in
+            let cmds = PopupFuzzy.filter(paletteCommands(), query: sub) { c in
                 c.label.map { "\($0) \(c.name)" } ?? c.name
             }
             if popup.selection >= cmds.count {
@@ -3375,6 +3596,14 @@ final class SwitcherController: NSObject {
                     let wid = savedWID, pid = savedPID
                     popup.hide(restore: false)
                     openFileFastWindow(cmd, restoreWID: wid, restorePID: pid)
+                    break
+                }
+                // /paths: the recent-file shelf (PathsWindow.swift) — a
+                // nonactivating panel too, same focus rules as filefast
+                if cmd.name == "paths" {
+                    let wid = savedWID, pid = savedPID
+                    popup.hide(restore: false)
+                    showPaths(cmd, restoreWID: wid, restorePID: pid)
                     break
                 }
                 popup.hide(restore: true)
@@ -3722,7 +3951,7 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = true
         cfg.sticky = true
-        cfg.floating = cmd.float ?? settings.float
+        cfg.floating = cmd.float ?? false
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.width = defaultDetailSize.width
@@ -3764,7 +3993,7 @@ final class SwitcherController: NSObject {
         }
         subWindows.append(w)
         if settings.sharedWindow {
-            w.onEscape = { [weak self] in self?.slot.back() }
+            w.onEscape = { [weak self] in self?.slot.back(esc: true) }
             placeSlotWindow(w)
             w.show()
             slot.push(.detail)
@@ -3823,7 +4052,7 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = cmd.float ?? settings.float
+        cfg.floating = cmd.float ?? false
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
@@ -3852,7 +4081,7 @@ final class SwitcherController: NSObject {
         }
         subWindows.append(w)
         if settings.sharedWindow {
-            w.onEscape = { [weak self] in self?.slot.back() }
+            w.onEscape = { [weak self] in self?.slot.back(esc: true) }
             placeSlotWindow(w)
             w.show()
             slot.push(.output)
@@ -3881,7 +4110,7 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = true
         cfg.sticky = true
-        cfg.floating = cmd.float ?? settings.float
+        cfg.floating = cmd.float ?? false
         cfg.width = 1000
         cfg.height = 600
         cfg.headerHeight = 30
@@ -4055,6 +4284,7 @@ final class SwitcherController: NSObject {
                     // same confirmation pill as the jira copy, centered on the thin bar
                     let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
                         .split(separator: "\n").last.map(String.init) ?? name
+                    if path.hasPrefix("/") { PathShelf.shared.add([path], why: .filefast) }
                     w.showToast("Copied \(path) to clipboard", symbol: "checkmark.circle.fill", centered: true)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak w] in if let w, w.isShown { w.hide(restore: true) } }
                 }
@@ -4314,8 +4544,8 @@ private func trimmed(_ s: String) -> String? {
         w.setHeaderButtonOn(20, w.fileBrowserShown)
         subWindows.append(w)
         if settings.sharedWindow {
-            // Cmd+W: hide the shared window (Esc never does, see above)
-            w.onEscape = { [weak self] in self?.slot.hide("Cmd+W") }
+            // Esc (when esc-close says so, see noteWindowConfig) / Cmd+W
+            w.onEscape = { [weak self] in self?.slot.hide("Esc / Cmd+W (notes)") }
             placeSlotWindow(w)
         }
         w.quietShow = slotPrewarming
@@ -4364,10 +4594,11 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = settings.float   // global switch (addGlobalWindowItems)
-        // shared window: Esc belongs to vim / the shell — never closes notes
-        // (hide with the hotkey, Cmd+W or ✕)
-        cfg.escCloseCount = settings.sharedWindow ? 0 : max(0, cmd.escClose ?? settings.escClose)
+        cfg.floating = false   // normal level; AeroSpace floats it (aerospace.toml)
+        // Esc belongs to vim / the shell unless the kitchen sink's "Esc Hides
+        // Window" is on (`esc-close`, default 0): then the Nth rapid Esc
+        // hides (vim: only once it is in Normal mode)
+        cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.tabs = true
         cfg.tabsAddButton = true
@@ -4819,40 +5050,26 @@ private func trimmed(_ s: String) -> String? {
         log("theme reset for [\(section)] — back to system defaults")
     }
 
-    // The GLOBAL window mode — "Global Window Options ▸", the FIRST item of every view's icon menu
+    // "Global Window Options ▸" — the FIRST item of every view's icon menu
     // (notes, files, jira, confluence, ai) and of the menu-bar menu; it
-    // changes every app in the shared window at once. ONE choice of three
-    // (float + focus loss bundled, so the impossible "tiled but hides on
-    // focus loss" can't be picked — a tile's alt-hjkl away is layout
-    // navigation, not leaving):
-    //   Float, Hide When Focus Is Lost       float = true,  hide-on-focus-loss = true
-    //   Float, Stay Open When Focus Is Lost  float = true,  hide-on-focus-loss = false
-    //   Tile, Stay Open When Focus Is Lost   float = false  (a tile never hides)
-    // plus Header Style ▸ (`[app] header-style`).
+    // changes every view of the shared window at once:
+    //   Hide When Focus Is Lost   [app] hide-on-focus-loss
+    //   Header Style ▸            [app] header-style
+    // Float vs tile is NOT an app setting: AeroSpace's on-window-detected
+    // rule floats every window of the app (config/aerospace/aerospace.toml).
+    // The window level is always normal — the focused window is in front;
+    // alt-hjkl or a click on another app puts that app in front of it.
     func addGlobalWindowItems(to parent: NSMenu) {
         let menu = NSMenu(title: "Global Window Options")
         menu.autoenablesItems = false
         let group = NSMenuItem(title: "Global Window Options", action: nil, keyEquivalent: "")
         group.submenu = menu
         parent.addItem(group)
-        let modes: [(String, Bool, Bool)] = [
-            ("Float, Hide When Focus Is Lost", true, true),
-            ("Float, Stay Open When Focus Is Lost", true, false),
-            ("Tile, Stay Open When Focus Is Lost", false, settings.hideOnFocusLoss),
-        ]
-        for (title, float, hide) in modes {
-            let on = settings.float == float && (!float || settings.hideOnFocusLoss == hide)
-            let item = menuItem(title, state: on) { [weak self] in
-                guard let self else { return }
-                if float && settings.hideOnFocusLoss != hide { self.setGlobalHideOnFocusLoss(hide) }
-                if settings.float != float { self.setGlobalFloat(float) }
-            }
-            item.toolTip = float
-                ? (hide ? "Above every app; hides when you switch to another app"
-                        : "Above every app; stays until Esc / ✕ / the hotkey")
-                : "A normal window AeroSpace tiles; stays open when you switch apps"
-            menu.addItem(item)
+        let hide = menuItem("Hide When Focus Is Lost", state: settings.hideOnFocusLoss) { [weak self] in
+            self?.setGlobalHideOnFocusLoss(!settings.hideOnFocusLoss)
         }
+        hide.toolTip = "On: the window hides when you switch to another app. Off: it stays until ✕, Cmd+W, the hotkey or Esc (when the view's \"Esc Hides Window\" is on)"
+        menu.addItem(hide)
         menu.addItem(headerStyleMenuItem())
     }
 
@@ -4861,7 +5078,7 @@ private func trimmed(_ s: String) -> String? {
     func setGlobalHideOnFocusLoss(_ on: Bool) {
         settings.hideOnFocusLoss = on
         saveConfigValue(section: "app", key: "hide-on-focus-loss", value: on ? "true" : "false")
-        for v in Self.floatSwitchViews {
+        for v in Self.sharedViews {
             guard let p = slotMember(v) as? PopupWindow, p.config.sticky else { continue }
             p.config.sticky = false
             if let i = commands.firstIndex(where: { $0.windowName == p.config.name }) {
@@ -4872,102 +5089,10 @@ private func trimmed(_ s: String) -> String? {
         log("[app] hide-on-focus-loss = \(on)")
     }
 
-    // the apps the float switch owns. NOT the Hyper+S popup or the "/"
+    // the apps the global switches own. NOT the Hyper+S popup or the "/"
     // palette's popup-only windows (filefast, output, prettyprint, jira
-    // config): those keep their own `float` and never tile.
-    static let floatSwitchViews: [SlotView] = [.notes, .files, .jira, .detail, .releases, .confluence, .ai]
-
-    func floatSwitchMember(_ win: NSWindow) -> SlotMember? {
-        Self.floatSwitchViews.lazy.compactMap { self.slotMember($0) }.first { $0.slotWindow === win }
-    }
-
-    func applyFloat(_ m: SlotMember) {
-        if let p = m as? PopupWindow { p.setFloating(settings.float); return }
-        let w = m.slotWindow
-        w.level = settings.float ? .floating : .normal
-        // a tile's size is the layout's: a floating window's minimum (AI
-        // 360pt, Jira Config 520pt high) would refuse a short tile and push
-        // the split around — kept only while floating
-        let key = ObjectIdentifier(w)
-        if floatMinSizes[key] == nil { floatMinSizes[key] = w.minSize }
-        w.minSize = settings.float ? floatMinSizes[key]! : NSSize(width: 200, height: 120)
-    }
-    private var floatMinSizes: [ObjectIdentifier: NSSize] = [:]
-
-    // global switch (menu bar ▸ Settings ▸ Float Windows / header icon menu):
-    // the shared-window apps always follow it; other popups only when they
-    // have no `float` key of their own (window level only, no tiling)
-    func setGlobalFloat(_ on: Bool) {
-        settings.float = on
-        saveConfigValue(section: "app", key: "float", value: on ? "true" : "false")
-        var members: [SlotMember] = []
-        for v in Self.floatSwitchViews {
-            if let m = slotMember(v), !members.contains(where: { $0 === m }) { members.append(m) }
-        }
-        for m in members {
-            applyFloat(m)
-            syncAerospaceLayout(m.slotWindow)
-        }
-        for w in subWindows where !members.contains(where: { $0 === w }) {
-            let own = commands.first(where: { $0.windowName == w.config.name })?.float
-            w.setFloating(own ?? on)
-        }
-        log("[app] float = \(on)")
-    }
-
-    // `float` also drives the AeroSpace layout: on = floating (what its
-    // dialog heuristic picks for our windows anyway), off = a normal TILE.
-    // AeroSpace re-detects a window every time it is ordered in (a view
-    // switch, a re-show) and floats it again, so float-off windows are
-    // re-tiled whenever they become key; the retry covers a window AeroSpace
-    // hasn't registered yet.
-    func syncAerospaceLayout(_ win: NSWindow) {
-        guard win.isVisible else { return }
-        let args = ["layout", "--window-id", String(win.windowNumber),
-                    settings.float ? "floating" : "tiling"]
-        for delay in [0.15, 0.6] {
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
-                _ = aerospaceCall(args)
-            }
-        }
-    }
-
-    // float off: a view swap orders a DIFFERENT window in, which AeroSpace
-    // tiles as a new tile with a default weight (the split rebalances, e.g.
-    // 80/20 → 50/50). Size it back to the tile it replaced. Checked for
-    // ~1.5s: AeroSpace may register it late or re-tile it once more
-    // (`syncAerospaceLayout`); relative resizes (absolute ones land a few
-    // points off: gaps). A newer swap drops this one.
-    private var retileGen = 0
-    func retile(_ win: NSWindow, to r: NSRect) {
-        retileGen += 1
-        let gen = retileGen, id = String(win.windowNumber)
-        for d in [0.2, 0.45, 0.8, 1.2, 1.6] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self] in
-                guard let self, gen == self.retileGen, win.isVisible, !settings.float else { return }
-                let f = win.frame
-                let dh = Int((r.height - f.height).rounded()), dw = Int((r.width - f.width).rounded())
-                guard abs(dh) > 1 || abs(dw) > 1 else { return }
-                self.log("retile \(id): \(Int(f.width))x\(Int(f.height)) → \(Int(r.width))x\(Int(r.height))")
-                DispatchQueue.global(qos: .userInitiated).async {
-                    _ = aerospaceCall(["layout", "--window-id", id, "tiling"])
-                    if abs(dh) > 1 { _ = aerospaceCall(["resize", "--window-id", id, "height", String(format: "%+d", dh)]) }
-                    if abs(dw) > 1 { _ = aerospaceCall(["resize", "--window-id", id, "width", String(format: "%+d", dw)]) }
-                }
-            }
-        }
-    }
-
-    func installAerospaceLayoutSync() {
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self, let win = note.object as? NSWindow,
-                  let m = self.floatSwitchMember(win) else { return }
-            self.applyFloat(m)
-            if !settings.float { self.syncAerospaceLayout(win) }
-        }
-    }
+    // config): those keep their own `sticky` / `float`.
+    static let sharedViews: [SlotView] = [.notes, .files, .jira, .detail, .releases, .confluence, .ai]
 
     // "Keyboard Shortcuts…" (every view's kitchen sink menu; Cmd+/ too):
     // commands.toml [shortcuts] — this view's first, then "Everywhere"
@@ -5318,9 +5443,10 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = isJira ? settings.float : (cmd.float ?? settings.float)
+        cfg.floating = isJira ? false : (cmd.float ?? false)
         // shared window: ONE Esc = back (clearing a search first); at the
-        // jira list it hides the window
+        // jira list it hides the window only when jira's "Esc Hides Window"
+        // is on (SharedWindow.escapeAtTop)
         cfg.escCloseCount = ListSession.inSlot(cmd) ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.wrapContent = true
@@ -5436,6 +5562,7 @@ private func trimmed(_ s: String) -> String? {
         }
         fb.onCopyPath = { [weak self] p in
             self?.copy(p, "path: \(p)")
+            PathShelf.shared.add([p], why: .copied)
         }
         fb.onSortChange = { [weak self] key, desc in self?.saveBrowserSort(key, desc) }
         w.onOpenExternalTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
@@ -5457,6 +5584,80 @@ private func trimmed(_ s: String) -> String? {
         RecentFiles.shared.configure(enabled: cmd?.recent ?? true, days: cmd?.recentDays ?? 7,
                                      limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [],
                                      everywhere: cmd?.recentEverywhere ?? true)
+        configurePathShelf()
+    }
+
+    // MARK: /paths (PathShelf.swift + PathsWindow.swift)
+
+    var pathsCommand: CommandSpec? { commands.first { $0.name == "paths" } }
+
+    // [paths] on: the shelf rides on RecentFiles' stream, the clipboard is
+    // watched, filefast saves / Files-view copies + drags land on it. Off:
+    // every feed unhooked (the stored list stays for next time).
+    func configurePathShelf() {
+        guard pathsCommand != nil else {
+            RecentFiles.shared.onKept = nil
+            RecentFiles.shared.onRenamed = nil
+            FileDrag.onDragOut = nil
+            clipboardPaths?.stop()
+            pathsWindow?.hide()
+            return
+        }
+        let shelf = PathShelf.shared
+        let limit = configSectionValue("paths", "limit").flatMap { Int($0) } ?? PathShelf.maxLimit
+        let ignore = configSectionValue("paths", "ignore-file").map { ($0 as NSString).expandingTildeInPath }
+            .flatMap { $0.isEmpty ? nil : ($0.hasPrefix("/") ? $0 : userDir + "/" + $0) }
+            ?? userDir + "/config/paths.ignore"
+        shelf.configure(limit: limit, ignoreFile: ignore)
+        RecentFiles.shared.onKept = { shelf.observe($0, created: $1, origin: $2) }
+        RecentFiles.shared.onRenamed = { shelf.renamed(from: $0, to: $1) }
+        FileDrag.onDragOut = { shelf.add($0, why: .copied) }
+        // first run: start from the newest of what RecentFiles already knows
+        if shelf.isEmpty, pathsSeedObserver == nil {
+            pathsSeedObserver = NotificationCenter.default.addObserver(
+                forName: RecentFiles.changed, object: nil, queue: .main) { [weak self] _ in
+                guard let self, let o = self.pathsSeedObserver else { return }
+                NotificationCenter.default.removeObserver(o)
+                self.pathsSeedObserver = nil
+                shelf.seed(from: RecentFiles.shared.entries())
+            }
+        }
+        let watchClipboard = !["false", "no", "0", "off"].contains((configSectionValue("paths", "clipboard") ?? "").lowercased())
+        if watchClipboard {
+            if clipboardPaths == nil {
+                let c = ClipboardPaths()
+                c.onPaths = { shelf.add($0, why: .clipboard) }
+                clipboardPaths = c
+            }
+            clipboardPaths?.start()
+        } else {
+            clipboardPaths?.stop()
+        }
+    }
+
+    // Hyper+S → /paths: built once, kept; a reopen orders it back in
+    func showPaths(_ cmd: CommandSpec, restoreWID: String?, restorePID: pid_t?) {
+        let ret = (configSectionValue("paths", "return") ?? "file").trimmingCharacters(in: .whitespaces).lowercased()
+        if pathsWindow == nil {
+            let p = PathsWindow(cmd, returnAction: ["file", "path", "open"].contains(ret) ? ret : "file")
+            p.onRestoreFocus = { [weak self] wid, pid in self?.restoreFocus(wid: wid, pid: pid) }
+            p.onOpenInNotes = { [weak self] path in self?.openNoteFile(path) }
+            p.onOpenTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
+            p.onCopied = { [weak self] in self?.clipboardPaths?.ownWrite() }
+            p.log = { [weak self] in self?.log($0) }
+            pathsWindow = p
+            subWindows.append(p.window)
+        }
+        pathsWindow?.show(restoreWID: restoreWID, restorePID: restorePID)
+        // opened from another app: hiding the switcher can hand key to one
+        // of OUR other windows a beat later — take it back (filefast's rule)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let w = self?.pathsWindow?.window, w.isShown, !w.nativeWindow.isKeyWindow,
+                  let k = NSApp.keyWindow, k !== w.nativeWindow else { return }
+            w.nativeWindow.makeKeyAndOrderFront(nil)
+            w.focusSearchField()
+        }
+        log("paths window opened")
     }
 
     // Read-only file browser ("files" commands): a keyboard-driven directory
@@ -5476,8 +5677,9 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = settings.float   // global switch (addGlobalWindowItems)
-        // shared window: one Esc hides it (the filter bar clears itself first)
+        cfg.floating = false   // normal level; AeroSpace floats it (aerospace.toml)
+        // shared window: Esc hides it only when "Esc Hides Window" is on
+        // (`esc-close`, default 0 — onEscape asks SharedWindow.escapeAtTop)
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.enableNavigation = false   // the browser owns up/down/return
@@ -5510,6 +5712,10 @@ private func trimmed(_ s: String) -> String? {
             menu.autoenablesItems = false
             self.addGlobalWindowItems(to: menu)
             menu.addItem(.separator())
+            if settings.sharedWindow {
+                menu.addItem(self.escHidesMenuItem(.files))
+                menu.addItem(.separator())
+            }
             self.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
             // open config in the notes window
@@ -5531,7 +5737,7 @@ private func trimmed(_ s: String) -> String? {
         if cmd.startRecent { fb.showRecent() }
 
         w.onEscape = { [weak self] in
-            if settings.sharedWindow { self?.slot.hide("Esc (files)") } else { w.hide(restore: true) }
+            if settings.sharedWindow { self?.slot.escapeAtTop(.files) } else { w.hide(restore: true) }
         }
         w.onHide = { [weak self] restore in
             guard let self else { return }
@@ -5735,7 +5941,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = SwitcherController()
         controller = c
         c.start()
-        c.installAerospaceLayoutSync()
         // Finder right-click services ("Copy Path" / "Open in Notes")
         let sh = ServicesHandler(c)
         servicesHandler = sh
@@ -6177,8 +6382,7 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         // Reset to defaults: remove custom values from commands.toml
         settings.hideOnFocusLoss = true
         removeConfigValue(section: "app", key: "hide-on-focus-loss")
-        MenuTarget.controller?.setGlobalFloat(false)   // the [app] float default
-        removeConfigValue(section: "app", key: "float")
+        removeConfigValue(section: "app", key: "float")   // retired: AeroSpace floats the app
         HeaderStyle.current = .flat
         removeConfigValue(section: "app", key: "header-style")
         removeConfigValue(section: "notes", key: "vim-mode")
@@ -6985,6 +7189,7 @@ extension SwitcherController {
                 toggleItem("Vim Mode", vimOn) { [host] in
                     host.toggleVimModeForNotes()
                 }
+                if settings.sharedWindow { menu.addItem(host.escHidesMenuItem(.notes)) }
             }
             menu.addItem(.separator())
             // Font ▸ (editor / terminal family by type, size, install)
@@ -7501,7 +7706,8 @@ extension SwitcherController {
             cmd.name == "jira" || cmd.name == jiraReleasesWindow
         }
         // shared window: ONE Esc = back (clearing a search first); at the
-        // jira list it hides the window
+        // jira list it hides the window only when jira's "Esc Hides Window"
+        // is on (SharedWindow.escapeAtTop)
         static func inSlot(_ cmd: CommandSpec) -> Bool { settings.sharedWindow && isJira(cmd) }
         // jira: each tab (json file) belongs to a poll job or the live search
         // in config.json with its OWN columns; [jira] columns is the fallback
@@ -7998,7 +8204,7 @@ extension SwitcherController {
                     w.setRows(filteredRows(query: ""))
                     return
                 }
-                host.slot.back()
+                host.slot.back(esc: true)
             }
             if cmd.name == "jira" && inSlot {
                 // the Cmd+F panel hides / returns with the list
@@ -8210,6 +8416,7 @@ extension SwitcherController {
                 menu.addItem(host.menuItem("Open Jira Config Window") { [host] in
                     host.showJiraDashboard()
                 })
+                if inSlot { menu.addItem(host.escHidesMenuItem(.jira)) }
             } else {
                 if tabs.indices.contains(currentTab) {
                     let src = tabs[currentTab].path
