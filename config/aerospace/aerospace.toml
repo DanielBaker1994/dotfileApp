@@ -120,11 +120,12 @@ on-window-detected = [
   # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
   # before the Microsoft float rule below)
   { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
-  # tile Finder, Preview, Webex (matched by app name) and every other Microsoft
-  # app (Word, Excel, PowerPoint, Outlook, Teams, OneNote, OneDrive, Edge,
-  # AutoUpdate…) into v_accordion; `layout tiling` first because v_accordion
-  # can't unfloat. check-further-callbacks: the workspace rules below still apply
-  { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },
+  # tile Finder, Preview, Webex (bundle id Cisco-Systems.Spark, app name
+  # "Webex"; also matched by app name) and every other Microsoft app (Word,
+  # Excel, PowerPoint, Outlook, Teams, OneNote, OneDrive, Edge, AutoUpdate…)
+  # into v_accordion; `layout tiling` first because v_accordion can't unfloat.
+  # check-further-callbacks: the workspace rules below still apply
+  { if = "test %{app-bundle-id} ~= '^(com[.]microsoft[.]|com[.]apple[.](finder|Preview)$|Cisco-Systems[.]Spark$)' || test %{app-name} ~= 'webex'", run = ['layout tiling', 'layout v_accordion'], check-further-callbacks = true },
 #{ if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
 #{ if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
 #{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
