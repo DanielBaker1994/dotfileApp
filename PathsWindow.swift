@@ -32,6 +32,7 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
     private var returnAction: String
     private var iconCache: [String: NSImage] = [:]
     private var quickLookPaths: [String] = []
+    private var rename: InlineRename?
     private static let rowH: CGFloat = 22   // FileListPane's row height
 
     // host hooks (the controller's private helpers)
@@ -94,6 +95,7 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
             self.onOpenTerminal?((self.shown[i].path as NSString).deletingLastPathComponent)
         }
         list.onSelect = { [weak self] _ in self?.refreshQuickLook() }
+        list.onRename = { [weak self] i in self?.beginRename(i) }
         // a letter typed with the list focused goes to the filter box
         list.onFocusSearch = { [weak self] chars in
             guard let self else { return }
@@ -289,7 +291,9 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
             toggleQuickLook(); return true                          // Space
         case 31 where cmd:                                          // Cmd+O
             open(list.selectedRows); return true
-        case 15 where cmd:                                          // Cmd+R
+        case 15 where cmd && !shift:                                // Cmd+R: rename
+            beginRename(); return true
+        case 15 where cmd && shift:                                 // Cmd+Shift+R: reveal
             reveal(); return true
         case 51 where cmd:                                          // Cmd+Delete: forget
             forget(); return true
@@ -378,6 +382,74 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         window.showToast(paths.count == 1 ? "Removed from the list (the file is untouched)"
                          : "Removed \(paths.count) from the list (files untouched)",
                          symbol: "minus.circle", centered: true)
+    }
+
+    // MARK: rename
+
+    // Finder-style rename in place: F2, Cmd+R, or right-click "Rename…"
+    // overlays a text field on the row's name. Return/Tab commits, Esc cancels.
+    var renameEditor: NSText? { rename?.textField?.currentEditor() }
+
+    private func beginRename(_ index: Int? = nil) {
+        let i = index ?? list.selection
+        guard shown.indices.contains(i) else { return }
+        commitRename()
+        let item = shown[i]
+        let name = (item.path as NSString).lastPathComponent
+        let r = InlineRename.begin(parent: list, nameRect: list.nameRect(i),
+                                   name: name, isDir: false, colors: colors,
+                                   onCommit: { [weak self] in self?.commitRename() })
+        r.setPath(item.path)
+        rename = r
+        PopupWindow.transientEscape = { [weak self] in self?.cancelRename() }
+        let w = window.nativeWindow
+        guard w.makeFirstResponder(r.textField!) else { cancelRename(); return }
+    }
+
+    private func endRename() -> (path: String, text: String)? {
+        guard let r = rename else { return nil }
+        let result = r.end(list: list, window: window.nativeWindow)
+        rename = nil
+        PopupWindow.transientEscape = nil
+        return result
+    }
+
+    func cancelRename() {
+        rename?.cancel(window: window.nativeWindow)
+        rename = nil
+        PopupWindow.transientEscape = nil
+    }
+
+    private func commitRename() {
+        guard let (path, text) = endRename() else { return }
+        let old = (path as NSString).lastPathComponent
+        let new = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !new.isEmpty, new != old else { return }
+        guard !new.contains("/"), new != ".", new != ".." else {
+            window.showToast("can't rename: \"\(new)\" is not a valid name", symbol: "exclamationmark.triangle", centered: true)
+            return
+        }
+        let dst = ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(new)
+        if new.lowercased() != old.lowercased(), FileManager.default.fileExists(atPath: dst) {
+            window.showToast("can't rename: \"\(new)\" already exists", symbol: "exclamationmark.triangle", centered: true)
+            return
+        }
+        do {
+            try FileManager.default.moveItem(atPath: path, toPath: dst)
+        } catch {
+            window.showToast("rename failed: \(error.localizedDescription)", symbol: "exclamationmark.triangle", centered: true)
+            return
+        }
+        FileDrag.onFileOp?(path, dst)
+        FileOps.recordRename(from: path, to: dst)
+        PathShelf.shared.renamed(from: path, to: dst)
+        reload(keepSelection: true)
+        if let i = shown.firstIndex(where: { $0.path == dst }) {
+            list.selection = i
+            scrollToSelection()
+        }
+        window.showToast("renamed \"\(old)\" to \"\(new)\"", symbol: "checkmark.circle.fill", centered: true)
+        log?("paths: renamed \"\(old)\" to \"\(new)\"")
     }
 
     // MARK: Quick Look

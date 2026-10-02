@@ -279,17 +279,17 @@ enabled = true
 sticky = true
 float = true
 type = "shell"
-label = "File Fast"
+label = "Create File"
 icon = "notes"
 save-dir = "/tmp/filefast"
 script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_DIR/$FF_NAME\" | pbcopy && printf %s \"$FF_DIR/$FF_NAME\""
 
-# /paths ("file paths" in the Hyper+S palette): the <=25 files you most
+# /paths ("Find Recent Files" in the Hyper+S palette): the <=25 files you most
 # recently created, changed, downloaded or copied, newest first — for
 # SHARING them (PathsWindow.swift, PathShelf.swift). Return copies the FILE
 # (Cmd+V in Webex / Outlook / Teams attaches it; a terminal gets the path),
 # Cmd+C the path as text, drag a row onto any app, Space / Cmd+Y Quick Look,
-# Cmd+O open, Cmd+R reveal, Cmd+Delete forget a row (the file stays), Esc
+# Cmd+O open, Cmd+R rename, Cmd+Shift+R reveal, Cmd+Delete forget a row (the file stays), Esc
 # closes. Floats and stays open (sticky) so you can drag onto another app.
 # What lands on it: every file the Files view's Recent stream sees ([files]
 # recent must be on) that NO ignore rule rejects — your repo's .gitignore /
@@ -306,7 +306,7 @@ script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_
 [paths]
 enabled = true
 type = "shell"
-label = "File Paths"
+  label = "Find Recent Files"
 icon = "folder"
 sticky = true
 float = true

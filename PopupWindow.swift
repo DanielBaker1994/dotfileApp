@@ -5244,10 +5244,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     // Finder-style rename in place: a text field over the row's name (F2,
     // Cmd+R, right-click "Rename…"). Return / Tab / clicking away renames,
     // Esc cancels (only the rename — never the window).
-    private var renameField: NSTextField?
-    private var renamePath: String?
+    private var rename: InlineRename?
     // the rename field's editor while a rename is up (edit shortcuts go here)
-    var renameEditor: NSText? { renameField?.currentEditor() }
+    var renameEditor: NSText? { rename?.textField?.currentEditor() }
 
     func beginRename(_ index: Int? = nil) {
         let i = index ?? listPane.selection
@@ -5257,50 +5256,29 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         selection = i
         listPane.selection = i
         scrollSelectionVisible()
-        let c = config.colors
-        let f = NSTextField(string: (e.path as NSString).lastPathComponent)
-        f.font = NSFont.systemFont(ofSize: 12)
-        f.isBordered = false
-        f.focusRingType = .none
-        f.drawsBackground = true
-        f.backgroundColor = c.mantle
-        f.textColor = c.text
-        f.usesSingleLineMode = true
-        f.cell?.isScrollable = true
-        f.cell?.lineBreakMode = .byClipping
-        f.wantsLayer = true
-        f.layer?.cornerRadius = 3
-        f.layer?.borderWidth = 1
-        f.layer?.borderColor = c.accentOn.cgColor
-        f.delegate = self
-        let nr = listPane.nameRect(i)
-        f.frame = NSRect(x: nr.minX - 3, y: nr.minY + 2, width: nr.width + 3, height: nr.height - 4)
-        listPane.addSubview(f)
-        renameField = f
-        renamePath = e.path
+        let r = InlineRename.begin(parent: listPane, nameRect: listPane.nameRect(i),
+                                   name: (e.path as NSString).lastPathComponent,
+                                   isDir: e.isDir, colors: config.colors,
+                                   onCommit: { [weak self] in self?.commitRename() })
+        r.setPath(e.path)
+        rename = r
         PopupWindow.transientEscape = { [weak self] in self?.cancelRename() }
-        guard w.makeFirstResponder(f) else { cancelRename(); return }
-        // like Finder: the name without its extension is selected
-        let name = f.stringValue as NSString
-        let stem = e.isDir ? name.length : (name.deletingPathExtension as NSString).length
-        f.currentEditor()?.selectedRange = NSRange(location: 0, length: stem > 0 ? stem : name.length)
+        guard w.makeFirstResponder(r.textField!) else { cancelRename(); return }
     }
 
     // take the field down; the path + typed name, nil when no rename is up
     private func endRename() -> (path: String, text: String)? {
-        guard let f = renameField, let p = renamePath else { return nil }
-        renameField = nil
-        renamePath = nil
+        guard let r = rename else { return nil }
+        let result = r.end(list: listPane, window: window)
+        rename = nil
         PopupWindow.transientEscape = nil
-        let text = f.stringValue
-        let hadFocus = f.currentEditor() != nil
-        f.removeFromSuperview()
-        if hadFocus, let w = window { w.makeFirstResponder(listPane) }
-        return (p, text)
+        return result
     }
 
     func cancelRename() {
-        _ = endRename()
+        rename?.cancel(window: window)
+        rename = nil
+        PopupWindow.transientEscape = nil
     }
 
     func commitRename() {
@@ -6022,8 +6000,6 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     }
     // leaving the filter bar with no query restores the directory display
     func controlTextDidEndEditing(_ obj: Notification) {
-        // clicking away from a rename applies it (Finder does the same)
-        if let f = renameField, (obj.object as AnyObject?) === f { commitRename(); return }
         guard (obj.object as AnyObject?) === searchField else { return }
         if query.isEmpty { showCwdInFilter() }
     }
@@ -6078,19 +6054,6 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     // row into the bar (shell style); Up/Down move the list selection.
     func control(_ control: NSControl, textView: NSTextView,
                  doCommandBy commandSelector: Selector) -> Bool {
-        if control === renameField {
-            switch commandSelector {
-            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)),
-                 #selector(NSResponder.insertBacktab(_:)):
-                commitRename()
-                return true
-            case #selector(NSResponder.cancelOperation(_:)):
-                cancelRename()
-                return true
-            default:
-                return false
-            }
-        }
         guard control === searchField else { return false }
         switch commandSelector {
         case #selector(NSResponder.insertNewline(_:)):
