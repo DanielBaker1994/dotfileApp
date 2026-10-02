@@ -324,7 +324,7 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var anchor: (view: NSView, rect: NSRect)?
     // extra footer buttons left of Clear (e.g. a column's sort)
     var extraButtons: [(title: String, action: () -> Void)] = []
-    private var extraTargets: [MenuActionTarget] = []
+    private var extraTargets: [ClosureTarget] = []
     var onClose: (() -> Void)?
     var isOpen: Bool { popover != nil }
     // palette: the Jira window's theme in the Cmd+F panel, else the system's
@@ -483,9 +483,9 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let clear = ThemedPushButton(title: "Clear", target: self, action: #selector(clearAll(_:)))
         let done = ThemedPushButton(title: "Done", target: self, action: #selector(togglePopover(_:)))
         done.role = .primary
-        extraTargets = extraButtons.map { MenuActionTarget(action: $0.action) }
+        extraTargets = extraButtons.map { ClosureTarget(action: $0.action) }
         let extras = zip(extraButtons, extraTargets).map { b, t in
-            ThemedPushButton(title: b.title, target: t, action: #selector(MenuActionTarget.run))
+            ThemedPushButton(title: b.title, target: t, action: #selector(ClosureTarget.run))
         }
         for b in extras + [clear, done] { b.controlSize = .small; b.colors = colors }
         countLabel.font = .systemFont(ofSize: 11)

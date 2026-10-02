@@ -1,4 +1,4 @@
-// sources: PathShelf.swift RecentFiles.swift
+// sources: PathShelf.swift RecentFiles.swift ProcessRun.swift
 // The /paths shelf (PathShelf.swift): IgnoreRules against REAL git
 // (`git check-ignore` on a temp repo) plus ripgrep's .ignore / .rgignore
 // and the shelf's own file; the shelf's cap / order / dedup / rename /

@@ -269,9 +269,13 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
             hide(); return true
         case 13 where cmd:                                          // Cmd+W
             hide(); return true
-        case 125, 45 where ctrl:                                    // ↓ / Ctrl+N
+        case 125:                                                   // ↓
             move(1, extend: shift); return true
-        case 126, 35 where ctrl:                                    // ↑ / Ctrl+P
+        case 45 where ctrl:                                         // Ctrl+N
+            move(1, extend: shift); return true
+        case 126:                                                   // ↑
+            move(-1, extend: shift); return true
+        case 35 where ctrl:                                         // Ctrl+P
             move(-1, extend: shift); return true
         case 36, 76:                                                // Return
             runDefault(); return true

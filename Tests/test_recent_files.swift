@@ -1,4 +1,4 @@
-// sources: RecentFiles.swift
+// sources: RecentFiles.swift ProcessRun.swift
 // The file browser's "Recent" list (RecentFiles.swift) must keep a file
 // through whatever happens to it: renamed, moved, its folder renamed —
 // by this app (own writes: the FSEvents stream ignores them) or by anything

@@ -4,18 +4,34 @@ import Darwin
 import AVFoundation
 import Speech
 
-// Tiny target object that holds a closure so NSMenuItem actions can use
-// Swift closures instead of @objc selectors. The host retains these in
-// `menuActionTargets` while the menu is alive.
-final class MenuActionTarget: NSObject {
+// A menu item whose action is a Swift closure. It is its own target, so the
+// menu holding the item keeps the closure alive — nothing to retain on the
+// side, nothing that outlives the menu.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+    init(_ title: String, _ handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) not supported") }
+    @objc private func fire() { handler() }
+}
+
+func menuItem(_ title: String, state: Bool? = nil, enabled: Bool = true,
+              _ action: @escaping () -> Void) -> NSMenuItem {
+    let item = ClosureMenuItem(title, action)
+    if let state { item.state = state ? .on : .off }
+    item.isEnabled = enabled
+    return item
+}
+
+// The same for a button: the owner keeps the target (a control's target is weak).
+final class ClosureTarget: NSObject {
     private let action: () -> Void
     init(action: @escaping () -> Void) { self.action = action }
     @objc func run() { action() }
 }
-
-// Retains MenuActionTarget instances while menus are open so closures survive
-// past the popUp() call.
-var menuActionTargets: [MenuActionTarget] = []
 
 // ============================================================================
 // Workspace switcher — host app built on the PopupWindow framework.
@@ -152,9 +168,9 @@ struct AppSettings {
     // a window hides — a key-window blip (aerospace re-focusing while a view
     // swaps, an activation hand-off) never counts as leaving
     var focusLossDelay = 0.3
-    // (no [app] float any more: AeroSpace's on-window-detected rule floats
-    // every window of the app, the app never tiles / floats itself; popup-only
-    // "/" windows keep their own per-section `float` = window level)
+    // (no [app] float: AeroSpace's on-window-detected rule places every
+    // window of the app, which never tiles / floats itself; popup-only "/"
+    // windows keep their own per-section `float` = window level)
     // [app] esc-close: rapid Esc presses that hide a window (default 0 =
     // never; 1 = single Esc, 2 = double-tap). Per view `esc-close` overrides
     // it — every view's kitchen sink has "Esc Hides Window". The switcher
@@ -384,10 +400,11 @@ func applyWindowTheme(_ cfg: inout PopupConfig, _ cmd: CommandSpec) {
     cfg.fontName = cmd.font
 }
 
-// MARK: - Focus file (captured by the launcher at keypress time)
+// MARK: - Daemon socket, lock + focus file
 
-// Ask a RUNNING daemon to open the notes window directly (isolated notes
-// launch). Returns false when no daemon is listening.
+// Hand `name` (a mode — window / notes / ping / jira-poll-on …) to the
+// RUNNING daemon over its command socket. Returns false when no daemon is
+// listening.
 @discardableResult
 func sendLaunchMessage(_ name: String) -> Bool {
     let path = popupTmpDir() + settings.notesSocketName
@@ -546,19 +563,13 @@ func aerospaceFallback(_ args: [String]) -> String {
 }
 
 func aerospaceCall(_ args: [String]) -> String {
-    // TEMP DEBUG: time every IPC call, logged while ~/.cache/aero-debug exists
+    // every IPC call timed into [app] aero-log while [app] debug-flag
+    // (~/.cache/aero-debug) exists
     let t0 = DispatchTime.now().uptimeNanoseconds
     let r = aerospaceSocket(args) ?? aerospaceFallback(args)
     let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
     if FileManager.default.fileExists(atPath: settings.aeroDebugFlag) {
-        let line = String(format: "%.1fms %@ -> [%@]\n", ms, args.joined(separator: " "), r)
-        if let fh = FileHandle(forWritingAtPath: settings.aeroLog) {
-            fh.seekToEndOfFile()
-            fh.write(Data(line.utf8))
-            try? fh.close()
-        } else {
-            FileManager.default.createFile(atPath: settings.aeroLog, contents: Data(line.utf8))
-        }
+        appendToFile(settings.aeroLog, String(format: "%.1fms %@ -> [%@]\n", ms, args.joined(separator: " "), r))
     }
     return r
 }
@@ -658,14 +669,14 @@ struct CommandSpec {
     enum Kind { case shell, note, list, output, files }
 
     var name: String
-    let kind: Kind
+    var kind: Kind
     var windowName: String   // PopupConfig.name -> window title / identity
     var chromeTitle: String  // drag-header label
-    let script: String?    // shell: command to run
-    let paths: [String]    // note: files edited in-window (tabs when > 1)
-    var sources: [String]  // list: JSON array (or TSV) data files (tabs when > 1)
-    let root: String?     // files: starting directory for the file browser
-    let favorites: [String]  // files: static favorite dirs (commands.toml, tilde ok)
+    var script: String?           // shell: command to run
+    var paths: [String] = []      // note: files edited in-window (tabs when > 1)
+    var sources: [String] = []    // list: JSON array (or TSV) data files (tabs when > 1)
+    var root: String?             // files: starting directory for the file browser
+    var favorites: [String] = []  // files: static favorite dirs (commands.toml, tilde ok)
     // files: the pinned "Recent" view (RecentFiles.swift) + where it opens
     var recent = true
     var recentDays = 7
@@ -676,151 +687,80 @@ struct CommandSpec {
     var browserBackground: NSColor?  // files: panel background (default silvery blue)
     var backgroundColor: NSColor?  // note/files: window card fill (the notepad)
     var tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
-    let primary: String?   // list: field shown as the row title
-    let content: String?   // list: field drawn next to the title (truncated)
-    let detail: String?    // list: field drawn dim on line 2 (left)
-    let trailing: String?  // list: field drawn dim on line 2 (right)
-    let body: String?      // list: field drawn wrapped under line 2 (2 lines max)
-    let filter: [String]   // list: fields matched by the query (default: all)
-    let filters: [String]  // list: dropdown filter dimensions (field keys)
-    let width: CGFloat     // list/note: popup width override
-    let maxRows: Int       // list: max rows shown
-    let contentCap: Int    // list: max chars of `content` before truncation
-    let bodyLines: Int     // list: max wrapped lines for `body` (0 = framework default)
-    let pageSize: Int      // list: rows per page; 0 = no paging ("load more" row)
-    let copyFields: [String]  // list: row fields copied as TSV (empty = no copy UI)
-    let copyFormat: String    // list: "tsv" (only format today)
+    var primary: String?   // list: field shown as the row title
+    var content: String?   // list: field drawn next to the title (truncated)
+    var detail: String?    // list: field drawn dim on line 2 (left)
+    var trailing: String?  // list: field drawn dim on line 2 (right)
+    var body: String?      // list: field drawn wrapped under line 2 (2 lines max)
+    var filter: [String] = []    // list: fields matched by the query (default: all)
+    var filters: [String] = []   // list: dropdown filter dimensions (field keys)
+    var width: CGFloat = 0       // list/note: popup width override
+    var maxRows = 0              // list: max rows shown
+    var contentCap = 0           // list: max chars of `content` before truncation
+    var bodyLines = 0            // list: max wrapped lines for `body` (0 = framework default)
+    var pageSize = 0             // list: rows per page; 0 = no paging ("load more" row)
+    var copyFields: [String] = []  // list: row fields copied as TSV (empty = no copy UI)
     // window behavior, all commands.toml-driven so new windows need no code:
-    let checkbox: Bool?       // list: show the copy checkbox column
+    var checkbox: Bool?       // list: show the copy checkbox column
                               //       (nil = on when copy-fields is set)
-    let resize: Bool          // drag edges/corners to resize
-    let drag: Bool            // drag the window by its header
-    var sticky: Bool          // stay visible when another app takes focus
-    var float: Bool? = nil    // stay above other apps' windows (nil = [app] float)
+    var resize = false        // drag edges/corners to resize
+    var drag = true           // drag the window by its header
+    var sticky = true         // stay visible when another app takes focus
+    var float: Bool?          // popup-only "/" windows: stay above other apps' windows (nil = per-window default)
     var panel = false         // output: a tool panel, not a shared-window view (isToolPanel)
-    var label: String? = nil  // palette text for "/" commands (nil = the section name)
+    var label: String?        // palette text for "/" commands (nil = the section name)
     var inPalette = true      // `in-palette = false`: not listed in the Hyper+S "/" palette
-    var tabsOpaque: Bool? = nil  // any window: solid (never transparent) tabs strip (nil = on)
+    var tabsOpaque: Bool?     // any window: solid (never transparent) tabs strip (nil = on)
     // files: browser sort (name|modified|created|size|kind) + asc/desc, the
     // recursive-search cap/excludes and the filter words that open a terminal
-    var sort: String? = nil
-    var sortDescending: Bool? = nil
-    var searchLimit: Int? = nil
-    var searchExclude: [String]? = nil
-    var terminalWords: [String]? = nil
-    let searchWidth: CGFloat  // list: search bar as a fraction of window width
-    let maxStretch: CGFloat   // list: cap on per-row stretch when resized big
-    let height: CGFloat       // window height in points
-    let maxHeight: CGFloat    // cap on the window height (0 = 60% of screen)
-    var font: String?         // font family for this window's text
-    var fontSize: CGFloat     // note: editor point size (0 = default 13)
-    var headerColor: NSColor? // drag-header tint (nil = window background)
-    var voice: Bool           // note: record + transcribe button in the header
+    var sort: String?
+    var sortDescending: Bool?
+    var searchLimit: Int?
+    var searchExclude: [String]?
+    var terminalWords: [String]?
+    var searchWidth: CGFloat = 0  // list: search bar as a fraction of window width
+    var maxStretch: CGFloat = 0   // list: cap on per-row stretch when resized big
+    var height: CGFloat = 0       // window height in points
+    var maxHeight: CGFloat = 0    // cap on the window height (0 = 60% of screen)
+    var font: String?             // font family for this window's text
+    var fontSize: CGFloat = 0     // note: editor point size (0 = default 13)
+    var headerColor: NSColor?     // drag-header tint (nil = window background)
+    var voice = false             // note: record + transcribe button in the header
     // note: dictation appears at the cursor AS YOU SPEAK (true, default);
     // false = held until stop, then inserted at the cursor in one go
     var voiceLive = true
-    let terminal: Bool        // note: embedded shell drawer at the bottom
-    let terminalHeight: CGFloat
-    let terminalDir: String?  // note: starting directory for the embedded shell
+    var terminal = false          // note: embedded shell drawer at the bottom
+    var terminalHeight: CGFloat = 240
+    var terminalDir: String?      // note: starting directory for the embedded shell
     var terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
     // per-window text palette (Theme ▸ presets); nil = the [theme] colors
-    var textColor: NSColor? = nil
-    var dimColor: NSColor? = nil
-    var highlightColor: NSColor? = nil
-    var accentColor: NSColor? = nil        // active tab / chip underline
-    var palette: PopupPalette? = nil       // `palette` = accent2, success, warning, danger, info
-    var terminalForeground: NSColor? = nil  // shell drawer text (nil = textColor)
-    var vimMode: Bool          // note: edit notes in an embedded nvim pane
-    var vimBin: String         // note: vim binary path or name (default "nvim")
-    var vimInit: String?       // note: init file for the vim pane (nil = bundled)
-    var startDrawer: String    // note: drawer open at launch: browser|terminal|none
-    var escClose: Int?         // rapid Esc presses that close the window (nil = [app] esc-close; 0 = never)
-    var imageRows: Int         // note: screen rows an inline image gets in vim
-    let icon: NSImage?        // window header glyph (jira/notes/heart/png)
-    let saveDir: String       // prettyprint: where "save file" writes (default /tmp/)
+    var textColor: NSColor?
+    var dimColor: NSColor?
+    var highlightColor: NSColor?
+    var accentColor: NSColor?           // active tab / chip underline
+    var palette: PopupPalette?          // `palette` = accent2, success, warning, danger, info
+    var terminalForeground: NSColor?    // shell drawer text (nil = textColor)
+    var vimMode = false           // note: edit notes in an embedded nvim pane
+    var vimBin = "nvim"           // note: vim binary path or name
+    var vimInit: String?          // note: init file for the vim pane (nil = bundled)
+    var startDrawer = "none"      // note: drawer open at launch: browser|terminal|none
+    var escClose: Int?            // rapid Esc presses that close the window (nil = [app] esc-close; 0 = never)
+    var imageRows = 10            // note: screen rows an inline image gets in vim
+    var icon: NSImage?            // window header glyph (jira/notes/heart/png)
+    var saveDir = "/tmp/"         // prettyprint: where "save file" writes
     // list: spreadsheet mode — `table = true` + `columns = field:Title:
     // width%:align:flags, …` (flags filter / sort, e.g. filter+sort);
     // table-sort = field:asc|desc remembers the last clicked header
-    var table: Bool = false
+    var table = false
     var columns: [ListColumn] = []
-    var tableSort: String? = nil
+    var tableSort: String?
 
-    init(name: String, kind: Kind = .shell, windowName: String? = nil,
-         chromeTitle: String? = nil, script: String? = nil, paths: [String] = [],
-         sources: [String] = [], root: String? = nil,
-         favorites: [String] = [],
-         browserBackground: NSColor? = nil,
-         backgroundColor: NSColor? = nil,
-         tintAlpha: CGFloat? = nil,
-         primary: String? = nil,
-         content: String? = nil, detail: String? = nil, trailing: String? = nil,
-         body: String? = nil, filter: [String] = [], filters: [String] = [],
-         width: CGFloat = 0, maxRows: Int = 0, contentCap: Int = 0,
-         bodyLines: Int = 0, pageSize: Int = 0, copyFields: [String] = [],
-         copyFormat: String = "tsv", checkbox: Bool? = nil, resize: Bool = false,
-         drag: Bool = true, sticky: Bool = true, searchWidth: CGFloat = 0,
-         maxStretch: CGFloat = 0, height: CGFloat = 0, font: String? = nil,
-         headerColor: NSColor? = nil, voice: Bool = false,
-         terminal: Bool = false, terminalHeight: CGFloat = 240,
-         terminalDir: String? = nil,
-         terminalBackground: NSColor? = nil,
-         vimMode: Bool = false, vimBin: String = "nvim",
-         vimInit: String? = nil, startDrawer: String = "none",
-         fontSize: CGFloat = 0,
-         escClose: Int? = nil, imageRows: Int = 10,
-         maxHeight: CGFloat = 0,
-         icon: NSImage? = nil,
-         saveDir: String = "/tmp/") {
+    init(name: String, kind: Kind = .shell, script: String? = nil) {
         self.name = name
         self.kind = kind
-        self.windowName = windowName ?? name
-        self.chromeTitle = chromeTitle ?? (windowName ?? name)
+        windowName = name
+        chromeTitle = name
         self.script = script
-        self.paths = paths
-        self.sources = sources
-        self.root = root
-        self.favorites = favorites
-        self.browserBackground = browserBackground
-        self.backgroundColor = backgroundColor
-        self.tintAlpha = tintAlpha
-        self.primary = primary
-        self.content = content
-        self.detail = detail
-        self.trailing = trailing
-        self.body = body
-        self.filter = filter
-        self.filters = filters
-        self.width = width
-        self.maxRows = maxRows
-        self.contentCap = contentCap
-        self.bodyLines = bodyLines
-        self.pageSize = pageSize
-        self.copyFields = copyFields
-        self.copyFormat = copyFormat
-        self.checkbox = checkbox
-        self.resize = resize
-        self.drag = drag
-        self.sticky = sticky
-        self.searchWidth = searchWidth
-        self.maxStretch = maxStretch
-        self.height = height
-        self.maxHeight = maxHeight
-        self.font = font
-        self.headerColor = headerColor
-        self.voice = voice
-        self.terminal = terminal
-        self.terminalHeight = terminalHeight
-        self.terminalDir = terminalDir
-        self.terminalBackground = terminalBackground
-        self.vimMode = vimMode
-        self.vimBin = vimBin
-        self.vimInit = vimInit
-        self.startDrawer = startDrawer
-        self.fontSize = fontSize
-        self.escClose = escClose
-        self.imageRows = imageRows
-        self.icon = icon
-        self.saveDir = saveDir
     }
 }
 
@@ -850,21 +790,12 @@ func loadCommands() -> [CommandSpec] {
         case "icons":
             // icon overrides for the workspace-switcher rows ([icons] section)
             iconRules = parseIconRules(s.vars)
-        case "shortcuts":
-            break   // collected line by line below (order matters)
-        case "app":
-            // already applied by applyAppConfigFromDisk() — nothing to do
-            break
-        case "confluence", "ai":
-            // the Confluence / AI views (Confluence.swift, AIWindow.swift)
-            // read it directly (configSectionValue) - never a palette command
-            break
-        case "notifications":
-            // the sketchybar notifications pill (notify/notify_poll.py)
-            break
-        case "setup":
-            // the Setup & Health Check window's strings / size (SetupWindow.swift)
-            break
+        case "shortcuts",       // collected line by line below (order matters)
+             "app",             // already applied by applyAppConfigFromDisk()
+             "confluence", "ai", // their views read it directly (configSectionValue)
+             "notifications",   // the sketchybar pill (notify/notify_poll.py)
+             "setup":           // the Setup & Health Check window (SetupWindow.swift)
+            break               // never palette commands
         default:
             // enabled = true is required: no key, no command. Nothing shows
             // unless the section says enabled = true explicitly.
@@ -923,10 +854,7 @@ func jiraBackgroundPollInConfig() -> Bool { jiraConfigFlag("poll-when-disabled")
 func jiraPollActiveInConfig() -> Bool { jiraEnabledInConfig() || jiraBackgroundPollInConfig() }
 
 // boolean key of the [jira] section, false when absent (disabled by default)
-func jiraConfigFlag(_ key: String) -> Bool {
-    guard let val = jiraConfigValue(key) else { return false }
-    return ["true", "yes", "1", "on"].contains(val.lowercased())
-}
+func jiraConfigFlag(_ key: String) -> Bool { tri(jiraConfigValue(key)) == true }
 
 // raw value of a [jira] key straight from commands.toml (nil when absent)
 func jiraConfigValue(_ key: String) -> String? { configSectionValue("jira", key) }
@@ -973,107 +901,91 @@ func syncJiraLaunchAgent() {
 
 @discardableResult
 private func runLaunchctl(_ args: [String]) -> Int32 {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-    p.arguments = args
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
-    guard (try? p.run()) != nil else { return -1 }
-    p.waitUntilExit()
-    return p.terminationStatus
+    (try? runProcess("/bin/launchctl", args))?.code ?? -1
 }
 
 private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpec {
-    let kind: CommandSpec.Kind
-    switch vars["type"] ?? "shell" {
-    case "note": kind = .note
-    case "list": kind = .list
-    case "output": kind = .output
-    case "files": kind = .files
-    default: kind = .shell
-    }
-    let filter = (vars["filter"] ?? "")
-        .split(separator: ",")
-        .map { $0.trimmingCharacters(in: .whitespaces) }
-        .filter { !$0.isEmpty }
-    let filters = (vars["filters"] ?? "")
-        .split(separator: ",")
-        .map { $0.trimmingCharacters(in: .whitespaces) }
-        .filter { !$0.isEmpty }
-    let width = (vars["width"] ?? "").isEmpty
-        ? 0 : CGFloat(Double(vars["width"] ?? "") ?? 0)
-    let maxRows = Int(vars["max-rows"] ?? "") ?? 0
-    var spec = CommandSpec(
-        name: name, kind: kind, windowName: vars["name"], chromeTitle: vars["title"],
-        script: vars["script"],
-        paths: csv(vars["paths"] ?? vars["path"]),
-        sources: csv(vars["sources"] ?? vars["source"]),
-        root: vars["root"],
-        favorites: csv(vars["favorites"]),
-        browserBackground: hexColor(vars["browser-background"]),
-        backgroundColor: hexColor(vars["background-color"]),
-        tintAlpha: num(vars["tint-alpha"]) > 0 ? min(num(vars["tint-alpha"]), 1) : nil,
-        primary: vars["primary"],
-        content: vars["content"], detail: vars["detail"], trailing: vars["trailing"],
-        body: vars["body"], filter: filter, filters: filters, width: width,
-        maxRows: maxRows,
-        contentCap: Int(vars["content-cap"] ?? "") ?? 0,
-        bodyLines: Int(vars["body-lines"] ?? "") ?? 0,
-        pageSize: Int(vars["page-size"] ?? "") ?? 0,
-        copyFields: csv(vars["copy-fields"]),
-        copyFormat: vars["copy-format"] ?? "tsv",
-        checkbox: tri(vars["checkbox"]),
-        resize: tri(vars["resize"]) ?? false,
-        drag: tri(vars["drag"]) ?? true,
-        sticky: tri(vars["sticky"]) ?? true,
-        searchWidth: num(vars["search-width"]),
-        maxStretch: num(vars["max-row-stretch"]),
-        height: num(vars["height"]),
-        font: vars["font"],
-        headerColor: hexColor(vars["header-color"]),
-        voice: tri(vars["voice"]) ?? false,
-        terminal: tri(vars["terminal"]) ?? false,
-        terminalHeight: num(vars["terminal-height"]) > 0 ? num(vars["terminal-height"]) : 240,
-        terminalDir: vars["terminal-dir"],
-        terminalBackground: hexColor(vars["terminal-background"]),
-        vimMode: tri(vars["vim-mode"]) ?? false,
-        vimBin: vars["vim-bin"]?.trimmingCharacters(in: .whitespaces) ?? "nvim",
-        vimInit: (vars["vim-init"] ?? "").isEmpty ? nil : vars["vim-init"],
-        startDrawer: (vars["start-drawer"] ?? "").isEmpty ? "none"
-            : vars["start-drawer"]!.lowercased(),
-        fontSize: num(vars["font-size"]),
-        escClose: Int(vars["esc-close"] ?? vars["vim-esc-close"] ?? ""),
-        imageRows: Int(vars["image-rows"] ?? "") ?? 10,
-        maxHeight: num(vars["max-height"]),
-        icon: vars["icon"].flatMap(resolveIconName),
-        saveDir: (vars["save-dir"] ?? "").isEmpty ? "/tmp/" : vars["save-dir"]!)
-    spec.textColor = hexColor(vars["text-color"])
-    if let l = vars["label"]?.trimmingCharacters(in: .whitespaces), !l.isEmpty { spec.label = l }
-    spec.inPalette = tri(vars["in-palette"]) ?? true
-    spec.tabsOpaque = tri(vars["tabs-opaque"])
-    spec.dimColor = hexColor(vars["dim-color"])
-    spec.highlightColor = hexColor(vars["highlight-color"])
-    spec.accentColor = hexColor(vars["accent-color"])
-    spec.palette = parsePalette(vars["palette"])
-    spec.float = tri(vars["float"])
-    spec.panel = tri(vars["panel"]) ?? false
-    spec.sort = vars["sort"]
-    if let o = vars["sort-order"]?.lowercased() { spec.sortDescending = o.hasPrefix("desc") }
-    spec.searchLimit = Int(vars["search-limit"] ?? "")
-    if vars["search-exclude"] != nil { spec.searchExclude = csv(vars["search-exclude"]) }
-    if vars["terminal-words"] != nil { spec.terminalWords = csv(vars["terminal-words"]) }
-    spec.terminalForeground = hexColor(vars["terminal-foreground"])
-    spec.table = tri(vars["table"]) ?? false
-    spec.columns = ListColumn.parse(vars["columns"])
-    spec.tableSort = vars["table-sort"]
-    spec.voiceLive = tri(vars["voice-live"]) ?? true
-    spec.recent = tri(vars["recent"]) ?? true
-    spec.recentDays = Int(vars["recent-days"] ?? "") ?? 7
-    spec.recentLimit = Int(vars["recent-limit"] ?? "") ?? 200
-    spec.recentExclude = csv(vars["recent-exclude"])
-    spec.startRecent = (vars["start"] ?? "recent").lowercased() != "root"
-    spec.recentEverywhere = (vars["recent-scope"] ?? "everywhere").lowercased() != "home"
-    return spec
+    let kinds: [String: CommandSpec.Kind] = ["note": .note, "list": .list, "output": .output, "files": .files]
+    var s = CommandSpec(name: name, kind: kinds[vars["type"] ?? ""] ?? .shell, script: vars["script"])
+    if let v = vars["name"] { s.windowName = v }
+    s.chromeTitle = vars["title"] ?? s.windowName
+    if let l = vars["label"]?.trimmingCharacters(in: .whitespaces), !l.isEmpty { s.label = l }
+    s.inPalette = tri(vars["in-palette"]) ?? true
+    // note / files / output
+    s.paths = csv(vars["paths"] ?? vars["path"])
+    s.root = vars["root"]
+    s.favorites = csv(vars["favorites"])
+    s.panel = tri(vars["panel"]) ?? false
+    s.icon = vars["icon"].flatMap(resolveIconName)
+    if let v = vars["save-dir"], !v.isEmpty { s.saveDir = v }
+    // list
+    s.sources = csv(vars["sources"] ?? vars["source"])
+    s.primary = vars["primary"]
+    s.content = vars["content"]
+    s.detail = vars["detail"]
+    s.trailing = vars["trailing"]
+    s.body = vars["body"]
+    s.filter = csv(vars["filter"])
+    s.filters = csv(vars["filters"])
+    s.maxRows = Int(vars["max-rows"] ?? "") ?? 0
+    s.contentCap = Int(vars["content-cap"] ?? "") ?? 0
+    s.bodyLines = Int(vars["body-lines"] ?? "") ?? 0
+    s.pageSize = Int(vars["page-size"] ?? "") ?? 0
+    s.copyFields = csv(vars["copy-fields"])
+    s.checkbox = tri(vars["checkbox"])
+    s.searchWidth = num(vars["search-width"])
+    s.maxStretch = num(vars["max-row-stretch"])
+    s.table = tri(vars["table"]) ?? false
+    s.columns = ListColumn.parse(vars["columns"])
+    s.tableSort = vars["table-sort"]
+    // window size + behavior
+    s.width = num(vars["width"])
+    s.height = num(vars["height"])
+    s.maxHeight = num(vars["max-height"])
+    s.resize = tri(vars["resize"]) ?? false
+    s.drag = tri(vars["drag"]) ?? true
+    s.sticky = tri(vars["sticky"]) ?? true
+    s.float = tri(vars["float"])
+    s.escClose = Int(vars["esc-close"] ?? vars["vim-esc-close"] ?? "")
+    // look
+    s.font = vars["font"]
+    s.fontSize = num(vars["font-size"])
+    s.headerColor = hexColor(vars["header-color"])
+    s.browserBackground = hexColor(vars["browser-background"])
+    s.backgroundColor = hexColor(vars["background-color"])
+    if num(vars["tint-alpha"]) > 0 { s.tintAlpha = min(num(vars["tint-alpha"]), 1) }
+    s.textColor = hexColor(vars["text-color"])
+    s.dimColor = hexColor(vars["dim-color"])
+    s.highlightColor = hexColor(vars["highlight-color"])
+    s.accentColor = hexColor(vars["accent-color"])
+    s.palette = parsePalette(vars["palette"])
+    s.tabsOpaque = tri(vars["tabs-opaque"])
+    // notes: voice, shell drawer, vim pane
+    s.voice = tri(vars["voice"]) ?? false
+    s.voiceLive = tri(vars["voice-live"]) ?? true
+    s.terminal = tri(vars["terminal"]) ?? false
+    if num(vars["terminal-height"]) > 0 { s.terminalHeight = num(vars["terminal-height"]) }
+    s.terminalDir = vars["terminal-dir"]
+    s.terminalBackground = hexColor(vars["terminal-background"])
+    s.terminalForeground = hexColor(vars["terminal-foreground"])
+    s.vimMode = tri(vars["vim-mode"]) ?? false
+    if let v = vars["vim-bin"] { s.vimBin = v.trimmingCharacters(in: .whitespaces) }
+    if let v = vars["vim-init"], !v.isEmpty { s.vimInit = v }
+    if let v = vars["start-drawer"], !v.isEmpty { s.startDrawer = v.lowercased() }
+    s.imageRows = Int(vars["image-rows"] ?? "") ?? 10
+    // files: browser sort, recursive search, the Recent view
+    s.sort = vars["sort"]
+    if let o = vars["sort-order"]?.lowercased() { s.sortDescending = o.hasPrefix("desc") }
+    s.searchLimit = Int(vars["search-limit"] ?? "")
+    if vars["search-exclude"] != nil { s.searchExclude = csv(vars["search-exclude"]) }
+    if vars["terminal-words"] != nil { s.terminalWords = csv(vars["terminal-words"]) }
+    s.recent = tri(vars["recent"]) ?? true
+    s.recentDays = Int(vars["recent-days"] ?? "") ?? 7
+    s.recentLimit = Int(vars["recent-limit"] ?? "") ?? 200
+    s.recentExclude = csv(vars["recent-exclude"])
+    s.startRecent = (vars["start"] ?? "recent").lowercased() != "root"
+    s.recentEverywhere = (vars["recent-scope"] ?? "everywhere").lowercased() != "home"
+    return s
 }
 
 // hex color from commands.toml: "7d8fa6", "0x7d8fa6" or "#7d8fa6" (opaque),
@@ -1150,18 +1062,12 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("aerospace-socket"), !v.isEmpty {
         settings.aerospaceSocketPath = v.replacingOccurrences(of: "$USER", with: NSUserName())
     }
-    if let v = str("crash-log"), !v.isEmpty {
-        settings.crashLogPath = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
-    }
-    if let v = str("debug-flag"), !v.isEmpty {
-        settings.aeroDebugFlag = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
-    }
-    if let v = str("aero-log"), !v.isEmpty {
-        settings.aeroLog = v.hasPrefix("~") ? (v as NSString).expandingTildeInPath : v
-    }
+    if let v = str("crash-log"), !v.isEmpty { settings.crashLogPath = (v as NSString).expandingTildeInPath }
+    if let v = str("debug-flag"), !v.isEmpty { settings.aeroDebugFlag = (v as NSString).expandingTildeInPath }
+    if let v = str("aero-log"), !v.isEmpty { settings.aeroLog = (v as NSString).expandingTildeInPath }
     if let v = str("voice-locale"), !v.isEmpty { settings.voiceLocale = v }
     if vars["screenshot-apps"] != nil { settings.screenshotApps = csv(vars["screenshot-apps"]) }
-    if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = ["true", "yes", "1", "on"].contains(v.lowercased()) }
+    if let v = str("hide-on-focus-loss") { settings.hideOnFocusLoss = tri(v) == true }
     if let v = str("focus-loss-delay"), let n = Double(v), n >= 0 { settings.focusLossDelay = min(n, 5) }
     HeaderStyle.current = str("header-style").flatMap { HeaderStyle(rawValue: $0.lowercased()) } ?? .flat
     if let v = tri(str("shared-window")) { settings.sharedWindow = v }
@@ -1418,14 +1324,11 @@ private(set) var configUsingBackup = false
 // (mtime+size stamp, text handed out) so repeated reads don't re-validate
 private var configReadCache: (stamp: String, text: String?)?
 
-private func configLog(_ s: String) {
+// the daemon's log line: stderr + debugLogPath (SwitcherController.log)
+func wsLog(_ s: String) {
     let line = "ws: \(s)\n"
     FileHandle.standardError.write(Data(line.utf8))
-    if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/ws-debug.log")) {
-        fh.seekToEndOfFile()
-        fh.write(Data(line.utf8))
-        try? fh.close()
-    }
+    appendToFile(debugLogPath, line)
 }
 
 private let configBoolKeys: Set<String> = [
@@ -1454,7 +1357,6 @@ private let configEnumKeys: [String: Set<String>] = [
     "start-drawer": ["browser", "terminal", "none"],
     "sort": ["name", "modified", "created", "size", "kind"],
     "sort-order": ["asc", "desc", "ascending", "descending"],
-    "copy-format": ["tsv"],
     "header-style": Set(HeaderStyle.allCases.map(\.rawValue)),
 ]
 
@@ -1613,7 +1515,7 @@ func readConfigText() -> String? {
             let why = issues.filter(\.fatal)
                 .map { ($0.line > 0 ? "line \($0.line): " : "") + $0.message }
                 .joined(separator: "; ")
-            configLog("commands.toml invalid (\(why)) — using \(configBackupPath)")
+            wsLog("commands.toml invalid (\(why)) — using \(configBackupPath)")
         }
         // a rejected file's per-value warnings are mostly fallout of the
         // fatal error (keys folded into the wrong section) — list only it
@@ -1621,7 +1523,7 @@ func readConfigText() -> String? {
     } else if let text, text != backup {
         try? text.write(toFile: configBackupPath, atomically: true, encoding: .utf8)
     }
-    for i in issues where !i.fatal { configLog("commands.toml:\(i.line): \(i.message)") }
+    for i in issues where !i.fatal { wsLog("commands.toml:\(i.line): \(i.message)") }
     configIssues = issues
     configUsingBackup = usingBackup
     // re-stat: restoring a missing file changes the stamp
@@ -1638,7 +1540,7 @@ func readConfigText() -> String? {
 func writeConfigText(_ text: String) -> Bool {
     let fatal = validateConfig(text).filter(\.fatal)
     guard fatal.isEmpty else {
-        configLog("commands.toml: write refused — \(fatal.map(\.message).joined(separator: "; "))")
+        wsLog("commands.toml: write refused — \(fatal.map(\.message).joined(separator: "; "))")
         return false
     }
     let path = settings.commandsConfPath
@@ -1646,7 +1548,7 @@ func writeConfigText(_ text: String) -> Bool {
         if validateConfig(cur).contains(where: \.fatal) {
             let parked = path + ".broken-\(Int(Date().timeIntervalSince1970))"
             try? cur.write(toFile: parked, atomically: true, encoding: .utf8)
-            configLog("commands.toml: invalid file parked at \(parked)")
+            wsLog("commands.toml: invalid file parked at \(parked)")
         } else {
             try? cur.write(toFile: configBackupPath, atomically: true, encoding: .utf8)
         }
@@ -1655,7 +1557,7 @@ func writeConfigText(_ text: String) -> Bool {
         try text.write(toFile: path, atomically: true, encoding: .utf8)
         return true
     } catch {
-        configLog("commands.toml: write failed: \(error)")
+        wsLog("commands.toml: write failed: \(error)")
         return false
     }
 }
@@ -3041,7 +2943,7 @@ final class SwitcherController: NSObject {
     // an opener about to show a slot window: place it at the shared frame
     func placeSlotWindow(_ w: PopupWindow) {
         guard settings.sharedWindow, slotView(of: w) != nil else { return }
-        w.initialFrame = pendingSlotFrame ?? slotView(of: w).map { slot.targetFrame(for: $0) } ?? slot.currentFrame()
+        w.initialFrame = pendingSlotFrame ?? slot.currentFrame()
         pendingSlotFrame = nil
     }
 
@@ -3121,8 +3023,8 @@ final class SwitcherController: NSObject {
     }
 
     // Open a command's window directly (no switcher popup) by its
-    // commands.toml section name — e.g. hyper+J -> notes, hyper+N -> jira.
-    // Re-invoking focuses the existing window of that type.
+    // commands.toml section name (CLI / socket `notes`, `jira`, a palette
+    // command). Re-invoking focuses the existing window of that type.
     func showCommand(_ name: String) {
         // "voice" is no longer its own window: it aliases the merged
         // notes+voice window (commands.toml [notes] with `voice = true`)
@@ -3703,17 +3605,7 @@ final class SwitcherController: NSObject {
 
     // MARK: Command actions
 
-    func log(_ s: String) {
-        FileHandle.standardError.write(Data("ws: \(s)\n".utf8))
-        let p = "/tmp/ws-debug.log"
-        if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: p)) {
-            fh.seekToEndOfFile()
-            fh.write(Data("ws: \(s)\n".utf8))
-            try? fh.close()
-        } else {
-            try? "ws: \(s)\n".write(to: URL(fileURLWithPath: p), atomically: true, encoding: .utf8)
-        }
-    }
+    func log(_ s: String) { wsLog(s) }
 
     // one pasteboard write + log line behind every "copy …" affordance
     private func copy(_ text: String, _ what: String) {
@@ -4317,7 +4209,6 @@ final class SwitcherController: NSObject {
         let hint = NSTextField(labelWithString: "paste output")
         hint.font = NSFont.systemFont(ofSize: cfg.inputFontSize)
         hint.textColor = colors.dim
-        hint.frame = NSRect(x: 8, y: 3, width: 200, height: 16)
         paste.hint = hint
         paste.placeholderColor = colors.dim
         paste.pastedColor = colors.tone(.success)
@@ -4332,26 +4223,16 @@ final class SwitcherController: NSObject {
             guard !contents.isEmpty else { w.nativeWindow.makeFirstResponder(paste); NSSound.beep(); return }
             let script = cmd.script ?? ""
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/bin/bash")
-                p.arguments = ["-c", script]
                 var env = ProcessInfo.processInfo.environment
                 env["FF_DIR"] = dir
                 env["FF_NAME"] = name
-                p.environment = env
-                let inp = Pipe(), outp = Pipe()
-                p.standardInput = inp
-                p.standardOutput = outp
-                p.standardError = outp
-                var out = ""
+                let out: String, ok: Bool
                 do {
-                    try p.run()
-                    inp.fileHandleForWriting.write(Data(contents.utf8))
-                    try? inp.fileHandleForWriting.close()
-                    out = String(decoding: outp.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                    p.waitUntilExit()
-                } catch { out = error.localizedDescription }
-                let ok = p.terminationStatus == 0
+                    let r = try runProcess("/bin/bash", ["-c", script], stdin: contents, env: env, mergeStderr: true)
+                    (out, ok) = (r.out, r.code == 0)
+                } catch {
+                    (out, ok) = (error.localizedDescription, false)
+                }
                 DispatchQueue.main.async { [weak self, weak w] in
                     self?.log("filefast \(ok ? "saved" : "failed"): \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
                     guard ok, let w else { NSSound.beep(); return }
@@ -4426,153 +4307,110 @@ final class SwitcherController: NSObject {
         return f
     }()
 
-// "save file": write the current editor contents to a timestamped file in the
-// command's configured save directory (default /tmp/; commands.toml `save-dir`
-// overrides), then copy the ABSOLUTE path to the clipboard (pbcopy equivalent).
-// Feedback lands in the status strip — the saved path on success, a red error
-// on failure.
-private func savePrettyPrint(_ w: PopupWindow, dir: String) {
-    let contents = w.currentEditorText
-    guard !contents.isEmpty else { return }
-    let t = contents.trimmingCharacters(in: .whitespacesAndNewlines)
-    let ext: String
-    if let f = t.first {
-        if f == "<" { ext = "xml" }
-        else if f == "{" || f == "[" { ext = "json" }
-        else { ext = "txt" }
-    } else {
-        ext = "txt"
-    }
-    // expand any `~`/relative path into an absolute directory
-    let absDir = (dir as NSString).expandingTildeInPath
-    let path = (absDir as NSString)
-        .appendingPathComponent("prettyprint-\(prettySaveStamp.string(from: Date())).\(ext)")
-    do {
-        try contents.write(toFile: path, atomically: true, encoding: .utf8)
-    } catch {
-        w.setStatus("save failed: \(error.localizedDescription)", isError: true)
-        return
-    }
-    let pb = NSPasteboard.general
-    pb.clearContents()
-    pb.setString(path, forType: .string)
-    w.setStatus("saved: \(path)", isError: false)
-    log("prettyprint saved to \(path)")
-}
-
-// Sniff + reformat JSON/XML via the real formatter bins (jq / xmllint — the
-// same tools the shell `prettyprint` util uses), so the output AND the parse
-// errors match exactly. `.formatted` = pretty text (content was JSON/XML);
-// `.error` = the formatter's stderr (content LOOKED like JSON/XML but didn't
-// parse); nil/nil = plain text (nothing to do).
-private struct FormatResult {
-    let formatted: String?
-    let error: String?
-}
-
-private func prettyFormat(_ raw: String) -> FormatResult {
-    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let first = t.first else { return FormatResult(formatted: nil, error: nil) }
-    if first == "{" || first == "[" {
-        let (out, err) = runFormatter(tool: "jq", paths: ["/opt/homebrew/bin/jq",
-                                                           "/usr/local/bin/jq"],
-                                      args: ["."], input: raw)
-        if let e = trimmed(err) {
-            return FormatResult(formatted: nil, error: e)
+    // "save file": write the current editor contents to a timestamped file in the
+    // command's configured save directory (default /tmp/; commands.toml `save-dir`
+    // overrides), then copy the ABSOLUTE path to the clipboard (pbcopy equivalent).
+    // Feedback lands in the status strip — the saved path on success, a red error
+    // on failure.
+    private func savePrettyPrint(_ w: PopupWindow, dir: String) {
+        let contents = w.currentEditorText
+        guard !contents.isEmpty else { return }
+        let t = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ext: String
+        if let f = t.first {
+            if f == "<" { ext = "xml" }
+            else if f == "{" || f == "[" { ext = "json" }
+            else { ext = "txt" }
+        } else {
+            ext = "txt"
         }
-        return FormatResult(formatted: out.isEmpty ? raw : out, error: nil)
-    }
-    if first == "<" {
-        let (out, err) = runFormatter(tool: "xmllint",
-                                      paths: ["/usr/bin/xmllint", "/opt/homebrew/bin/xmllint"],
-                                      args: ["--format", "-"], input: raw)
-        if let e = trimmed(err) {
-            return FormatResult(formatted: nil, error: e)
+        // expand any `~`/relative path into an absolute directory
+        let absDir = (dir as NSString).expandingTildeInPath
+        let path = (absDir as NSString)
+            .appendingPathComponent("prettyprint-\(prettySaveStamp.string(from: Date())).\(ext)")
+        do {
+            try contents.write(toFile: path, atomically: true, encoding: .utf8)
+        } catch {
+            w.setStatus("save failed: \(error.localizedDescription)", isError: true)
+            return
         }
-        return FormatResult(formatted: out.isEmpty ? raw : out, error: nil)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(path, forType: .string)
+        w.setStatus("saved: \(path)", isError: false)
+        log("prettyprint saved to \(path)")
     }
-    return FormatResult(formatted: nil, error: nil)
-}
 
-// Run a formatter tool with `input` on stdin; returns (stdout, stderr). Pipes
-// are drained on a background queue so large output can't deadlock the read.
-// Falls back to PATH lookup (/usr/bin/env) when none of the absolute paths
-// exist, so the tool is found however the daemon was launched.
-private func runFormatter(tool: String, paths: [String], args: [String],
-                          input: String) -> (String, String) {
-    var executable = URL(fileURLWithPath: "/usr/bin/env")
-    var argv = [tool] + args
-    if let p = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-        executable = URL(fileURLWithPath: p)
-        argv = args
+    // Sniff + reformat JSON/XML via the real formatter bins (jq / xmllint — the
+    // same tools the shell `prettyprint` util uses), so the output AND the parse
+    // errors match exactly. `.formatted` = pretty text (content was JSON/XML);
+    // `.error` = the formatter's stderr (content LOOKED like JSON/XML but didn't
+    // parse); nil/nil = plain text (nothing to do).
+    private struct FormatResult {
+        let formatted: String?
+        let error: String?
     }
-    let p = Process()
-    p.executableURL = executable
-    p.arguments = argv
-    let inp = Pipe()
-    let out = Pipe()
-    let err = Pipe()
-    p.standardInput = inp
-    p.standardOutput = out
-    p.standardError = err
-    do { try p.run() } catch { return ("", "\(tool): \(error.localizedDescription)") }
-    var outData = Data()
-    var errData = Data()
-    let group = DispatchGroup()
-    group.enter()
-    DispatchQueue.global(qos: .userInitiated).async {
-        outData = out.fileHandleForReading.readDataToEndOfFile()
-        group.leave()
-    }
-    group.enter()
-    DispatchQueue.global(qos: .userInitiated).async {
-        errData = err.fileHandleForReading.readDataToEndOfFile()
-        group.leave()
-    }
-    inp.fileHandleForWriting.write(input.data(using: .utf8) ?? Data())
-    try? inp.fileHandleForWriting.close()
-    p.waitUntilExit()
-    group.wait()
-    return (String(data: outData, encoding: .utf8) ?? "",
-            String(data: errData, encoding: .utf8) ?? "")
-}
 
-private func trimmed(_ s: String) -> String? {
-    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-    return t.isEmpty ? nil : t
-}
+    private func prettyFormat(_ raw: String) -> FormatResult {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = t.first else { return FormatResult(formatted: nil, error: nil) }
+        if first == "{" || first == "[" {
+            let (out, err) = runFormatter(tool: "jq", paths: ["/opt/homebrew/bin/jq",
+                                                               "/usr/local/bin/jq"],
+                                          args: ["."], input: raw)
+            if let e = trimmed(err) {
+                return FormatResult(formatted: nil, error: e)
+            }
+            return FormatResult(formatted: out.isEmpty ? raw : out, error: nil)
+        }
+        if first == "<" {
+            let (out, err) = runFormatter(tool: "xmllint",
+                                          paths: ["/usr/bin/xmllint", "/opt/homebrew/bin/xmllint"],
+                                          args: ["--format", "-"], input: raw)
+            if let e = trimmed(err) {
+                return FormatResult(formatted: nil, error: e)
+            }
+            return FormatResult(formatted: out.isEmpty ? raw : out, error: nil)
+        }
+        return FormatResult(formatted: nil, error: nil)
+    }
+
+    // Run a formatter tool with `input` on stdin; returns (stdout, stderr).
+    // Falls back to PATH lookup (/usr/bin/env) when none of the absolute paths
+    // exist, so the tool is found however the daemon was launched.
+    private func runFormatter(tool: String, paths: [String], args: [String],
+                              input: String) -> (String, String) {
+        let exe = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        do {
+            let r = try runProcess(exe ?? "/usr/bin/env", exe == nil ? [tool] + args : args, stdin: input)
+            return (r.out, r.err)
+        } catch {
+            return ("", "\(tool): \(error.localizedDescription)")
+        }
+    }
+
+    private func trimmed(_ s: String) -> String? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
 
     // run any shell line into an output window
     private func runScript(_ script: String, label: String, into w: PopupWindow) {
+        let shell = settings.shell
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak w] in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: settings.shell)
-            p.arguments = ["-c", (script as NSString).expandingTildeInPath]
-            let out = Pipe()
-            let err = Pipe()
-            p.standardOutput = out
-            p.standardError = err
+            let r: ProcessOutput
             do {
-                try p.run()
+                r = try runProcess(shell, ["-c", (script as NSString).expandingTildeInPath])
             } catch {
                 DispatchQueue.main.async { w?.setEditorText("failed to run: \(error)") }
                 return
             }
-            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
-                              encoding: .utf8) ?? ""
-            let etext = String(data: err.fileHandleForReading.readDataToEndOfFile(),
-                               encoding: .utf8) ?? ""
-            p.waitUntilExit()
             // render ANSI colors (doctor's PASS/FAIL/WARN) in the editor
-            var shown = text
-            if !etext.isEmpty {
-                shown += "\n-- stderr --\n" + etext
-            }
-            shown += "\n(exit \(p.terminationStatus))"
+            let shown = r.out + (r.err.isEmpty ? "" : "\n-- stderr --\n" + r.err) + "\n(exit \(r.code))"
             DispatchQueue.main.async { [weak self] in
                 guard let w else { return }
                 w.setEditorANSI(shown)
-                self?.log("output '\(label)': exit \(p.terminationStatus)")
+                self?.log("output '\(label)': exit \(r.code)")
             }
         }
     }
@@ -4660,7 +4498,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = false   // normal level; AeroSpace floats it (aerospace.toml)
+        cfg.floating = false   // normal level; AeroSpace places it (aerospace.toml)
         // Esc belongs to vim / the shell unless the kitchen sink's "Esc Hides
         // Window" is on (`esc-close`, default 0): then the Nth rapid Esc
         // hides (vim: only once it is in Normal mode)
@@ -5122,7 +4960,7 @@ private func trimmed(_ s: String) -> String? {
     //   Hide When Focus Is Lost   [app] hide-on-focus-loss
     //   Header Style ▸            [app] header-style
     // Float vs tile is NOT an app setting: AeroSpace's on-window-detected
-    // rule floats every window of the app (config/aerospace/aerospace.toml).
+    // rule places every window of the app (config/aerospace/aerospace.toml).
     // The window level is always normal — the focused window is in front;
     // alt-hjkl or a click on another app puts that app in front of it.
     func addGlobalWindowItems(to parent: NSMenu) {
@@ -5737,7 +5575,7 @@ private func trimmed(_ s: String) -> String? {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = false   // normal level; AeroSpace floats it (aerospace.toml)
+        cfg.floating = false   // normal level; AeroSpace places it (aerospace.toml)
         // shared window: Esc hides it only when "Esc Hides Window" is on
         // (`esc-close`, default 0 — onEscape asks SharedWindow.escapeAtTop)
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
@@ -5792,7 +5630,7 @@ private func trimmed(_ s: String) -> String? {
         let fb = makeFileBrowser(cfg, startDir: root, in: w,
                                  tag: "files '\(cmd.name)'", opened: "opened")
         w.installFileBrowser(fb, drawer: false)
-        // Hyper+F opens on Recent (the latest download / screenshot);
+        // files opens on Recent (the latest download / screenshot);
         // [files] start = root keeps the old folder start
         if cmd.startRecent { fb.showRecent() }
 
@@ -5988,15 +5826,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if FileManager.default.fileExists(atPath: authDebugPath) {
             let mic = AVCaptureDevice.authorizationStatus(for: .audio).rawValue
             let speech = SFSpeechRecognizer.authorizationStatus().rawValue
-            let line = "auth-debug: mic=\(mic) speech=\(speech) bundle=\(Bundle.main.bundleIdentifier ?? "nil") launch=\(CommandLine.arguments[0])\n"
-            let path = NSString(string: "~/.cache/ws-auth.log").expandingTildeInPath
-            if let fh = FileHandle(forWritingAtPath: path) {
-                fh.seekToEndOfFile()
-                fh.write(Data(line.utf8))
-                try? fh.close()
-            } else {
-                FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
-            }
+            appendToFile(NSString(string: "~/.cache/ws-auth.log").expandingTildeInPath,
+                         "auth-debug: mic=\(mic) speech=\(speech) bundle=\(Bundle.main.bundleIdentifier ?? "nil") launch=\(CommandLine.arguments[0])\n")
         }
         let c = SwitcherController()
         controller = c
@@ -6145,7 +5976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        configLog("app terminating (front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"))")
+        wsLog("app terminating (front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"))")
     }
 
     // Build a real macOS app menu (top-left click) so the user has obvious
@@ -6442,7 +6273,7 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         // Reset to defaults: remove custom values from commands.toml
         settings.hideOnFocusLoss = true
         removeConfigValue(section: "app", key: "hide-on-focus-loss")
-        removeConfigValue(section: "app", key: "float")   // retired: AeroSpace floats the app
+        removeConfigValue(section: "app", key: "float")   // retired: AeroSpace places the app
         HeaderStyle.current = .flat
         removeConfigValue(section: "app", key: "header-style")
         removeConfigValue(section: "notes", key: "vim-mode")
@@ -6482,7 +6313,6 @@ extension SwitcherController {
         return subWindows.first(where: { $0.config.name == commands[i].windowName })
     }
 
-    // closure-backed menu item (targets retained in menuActionTargets)
     // the window-settings block of every view's icon menu: theme presets,
     // transparency, reset size / colors (the global float / focus-loss /
     // header-style switches lead the menu: addGlobalWindowItems)
@@ -6504,18 +6334,6 @@ extension SwitcherController {
             let p = fm.fileExists(atPath: canonical) ? canonical : settings.commandsConfPath
             if fm.fileExists(atPath: p) { open(p) }
         }
-    }
-
-    func menuItem(_ title: String, state: Bool? = nil, enabled: Bool = true,
-                  _ action: @escaping () -> Void) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: #selector(MenuActionTarget.run),
-                              keyEquivalent: "")
-        let t = MenuActionTarget(action: action)
-        item.target = t
-        menuActionTargets.append(t)
-        if let state { item.state = state ? .on : .off }
-        item.isEnabled = enabled
-        return item
     }
 
     // a disabled section label inside a menu
@@ -6720,38 +6538,31 @@ extension SwitcherController {
         let before = Set(NSFontManager.shared.availableFontFamilies)
         log("font install: brew install --cask \(cask)")
         noteWindow?.setStatus("Installing \(label)…", isError: false)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: brew)
-        p.arguments = ["install", "--cask", cask]
         var env = ProcessInfo.processInfo.environment
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         env["HOMEBREW_NO_INSTALL_CLEANUP"] = "1"
-        p.environment = env
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = FileHandle.nullDevice
-        p.terminationHandler = { proc in
-            let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(),
-                             encoding: .utf8) ?? ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try runProcess(brew, ["install", "--cask", cask], env: env) }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 fontInstallsRunning.remove(cask)
-                fontFamilyCache = nil
-                guard proc.terminationStatus == 0 else {
-                    let msg = err.split(separator: "\n").last.map(String.init) ?? "exit \(proc.terminationStatus)"
-                    self.log("font install \(cask) failed: \(err)")
-                    self.noteWindow?.setStatus("Install failed: \(msg)", isError: true)
-                    return
+                switch result {
+                case .failure(let error):
+                    self.log("font install \(cask): \(error)")
+                    self.noteWindow?.setStatus("Install failed: \(error.localizedDescription)", isError: true)
+                case .success(let r):
+                    fontFamilyCache = nil
+                    guard r.code == 0 else {
+                        let msg = r.err.split(separator: "\n").last.map(String.init) ?? "exit \(r.code)"
+                        self.log("font install \(cask) failed: \(r.err)")
+                        self.noteWindow?.setStatus("Install failed: \(msg)", isError: true)
+                        return
+                    }
+                    self.log("font install \(cask): ok")
+                    self.noteWindow?.setStatus(nil, isError: false)
+                    self.offerNewFont(label: label, before: before, tries: 0)
                 }
-                self.log("font install \(cask): ok")
-                self.noteWindow?.setStatus(nil, isError: false)
-                self.offerNewFont(label: label, before: before, tries: 0)
             }
-        }
-        do { try p.run() } catch {
-            fontInstallsRunning.remove(cask)
-            log("font install \(cask): \(error)")
-            noteWindow?.setStatus("Install failed: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -7079,19 +6890,19 @@ extension SwitcherController {
             // right-click in the vim pane: the obvious actions (rule 2)
             let vm = NSMenu(title: "Vim")
             vm.autoenablesItems = false
-            vm.addItem(host.menuItem("Copy") { [weak w] in w?.vimCopy() })
-            vm.addItem(host.menuItem("Paste") { [weak w] in w?.vimPaste() })
+            vm.addItem(menuItem("Copy") { [weak w] in w?.vimCopy() })
+            vm.addItem(menuItem("Paste") { [weak w] in w?.vimPaste() })
             vm.addItem(.separator())
-            vm.addItem(host.menuItem("Copy File Path") { [self] in
+            vm.addItem(menuItem("Copy File Path") { [self] in
                 host.copy(currentPath, "note path: \(currentPath)")
             })
-            vm.addItem(host.menuItem("Open in Default App") { [self] in
+            vm.addItem(menuItem("Open in Default App") { [self] in
                 NSWorkspace.shared.open(URL(fileURLWithPath: currentPath))
             })
-            vm.addItem(host.menuItem("Reveal in Finder") { [self] in
+            vm.addItem(menuItem("Reveal in Finder") { [self] in
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentPath)])
             })
-            vm.addItem(host.menuItem("Open file at path…") { [weak w] in w?.onOpenPathPrompt?() })
+            vm.addItem(menuItem("Open file at path…") { [weak w] in w?.onOpenPathPrompt?() })
             w.vimMenu = vm
         }
 
@@ -7222,7 +7033,7 @@ extension SwitcherController {
 
             // — toggles (checkmark shows state) —
             func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
-                menu.addItem(host.menuItem(title, state: state, action))
+                menu.addItem(menuItem(title, state: state, action))
             }
 
             if cmd.terminal {
@@ -7564,17 +7375,7 @@ extension SwitcherController {
             var lastDraw = Date.distantPast
             let dbgPath = NSString(string: "~/.cache/ws-voice-debug.log")
                 .expandingTildeInPath
-            func dbg(_ s: String) {
-                let line = "\(Date()) \(s)\n"
-                if let h = FileHandle(forWritingAtPath: dbgPath) {
-                    h.seekToEndOfFile()
-                    h.write(line.data(using: .utf8)!)
-                    h.closeFile()
-                } else {
-                    FileManager.default.createFile(atPath: dbgPath,
-                                                   contents: line.data(using: .utf8))
-                }
-            }
+            func dbg(_ s: String) { appendToFile(dbgPath, "\(Date()) \(s)\n") }
             func regionText() -> String {
                 [committedStr, draft].filter { !$0.isEmpty }.joined(separator: " ")
             }
@@ -8469,22 +8270,22 @@ extension SwitcherController {
             if cmd.name == "jira" {
                 // jira: config, paths, jobs, queries, curls, columns — all
                 // live in the Jira Config window; this menu is window chrome
-                menu.addItem(host.menuItem("Search Jira…  ⌘F") { [host, weak w] in
+                menu.addItem(menuItem("Search Jira…  ⌘F") { [host, weak w] in
                     guard let w else { return }
                     JiraSearchPanel.toggle(on: w, controller: host)
                 })
-                menu.addItem(host.menuItem("Open Jira Config Window") { [host] in
+                menu.addItem(menuItem("Open Jira Config Window") { [host] in
                     host.showJiraDashboard()
                 })
                 if inSlot { menu.addItem(host.escHidesMenuItem(.jira)) }
             } else {
                 if tabs.indices.contains(currentTab) {
                     let src = tabs[currentTab].path
-                    menu.addItem(host.menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [host] in
+                    menu.addItem(menuItem("Copy \(URL(fileURLWithPath: src).lastPathComponent) Path") { [host] in
                         host.copy(src, "source path: \(src)")
                     })
                 }
-                menu.addItem(host.menuItem("Copy Config Path") { [host] in
+                menu.addItem(menuItem("Copy Config Path") { [host] in
                     host.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
                 })
                 menu.addItem(.separator())
@@ -8494,7 +8295,7 @@ extension SwitcherController {
             host.addWindowSettingsItems(to: menu, window: w, section: configSection)
             if cmd.name == "jira" {
                 menu.addItem(.separator())
-                menu.addItem(host.menuItem("Disable Jira…") { [host] in
+                menu.addItem(menuItem("Disable Jira…") { [host] in
                     host.disableJiraAsking()
                 })
             }
@@ -8711,35 +8512,17 @@ enum JiraPoll {
     static func run(_ script: String, _ args: [String], stdin: String? = nil, folder: String? = nil,
                     done: ((Int32, String, String) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            p.arguments = ["python3", (folder ?? dir) + "/" + script] + args
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
-            p.environment = env
-            let out = Pipe(), err = Pipe(), inp = Pipe()
-            p.standardOutput = out
-            p.standardError = err
-            p.standardInput = inp
-            do { try p.run() } catch {
+            let r: ProcessOutput
+            do {
+                r = try runProcess("/usr/bin/env", ["python3", (folder ?? dir) + "/" + script] + args,
+                                   stdin: stdin ?? "", env: env)
+            } catch {
                 DispatchQueue.main.async { done?(-1, "", "cannot run python3: \(error)") }
                 return
             }
-            if let s = stdin { inp.fileHandleForWriting.write(Data(s.utf8)) }
-            try? inp.fileHandleForWriting.close()
-            // drain both pipes concurrently — a full stderr buffer must never
-            // block the child while we wait on stdout
-            var o = Data(), e = Data()
-            let g = DispatchGroup()
-            g.enter()
-            DispatchQueue.global().async { o = out.fileHandleForReading.readDataToEndOfFile(); g.leave() }
-            e = err.fileHandleForReading.readDataToEndOfFile()
-            g.wait()
-            p.waitUntilExit()
-            let code = p.terminationStatus
-            DispatchQueue.main.async {
-                done?(code, String(decoding: o, as: UTF8.self), String(decoding: e, as: UTF8.self))
-            }
+            DispatchQueue.main.async { done?(r.code, r.out, r.err) }
         }
     }
 
@@ -8946,7 +8729,6 @@ extension SwitcherController {
         if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
         JiraDashboardWindow.show(controller: self, present: false)
         JiraDashboardWindow.current?.onSlotBack = { [weak self] in self?.slot.back() }
-        JiraDashboardWindow.current?.onSlotHide = { [weak self] in self?.slot.hide("✕ / Cmd+W (Jira Config)") }
         slot.push(.config)
     }
 

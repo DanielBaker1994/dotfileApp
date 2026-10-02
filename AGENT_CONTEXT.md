@@ -114,8 +114,21 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   `bin/run-tests.sh nvim`)
 - `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
   (see "/paths" below; `bin/run-tests.sh paths`)
-- `workspace_switcher.swift` — app logic (~7300 lines)
-- `PopupWindow.swift` — popup window framework (~8500 lines; all keys in `handleKey`)
+- `workspace_switcher.swift` — app logic (~9200 lines)
+- `PopupWindow.swift` — popup window framework (~11700 lines; all keys in `handleKey`;
+  `init` = `makePanel` / `makeBackdrop` + the `build…` steps, each wiring its own hooks)
+- `CardWindow.swift` — `CardNSWindow` + `CardWindowController`, the base of the
+  Confluence / AI / Jira Config windows: the popup-card surface (`themedRoot`),
+  header clicks, `setSlotNav`, the shared keys (sheet edit keys, Ctrl+Tab,
+  Cmd+W; subclasses override `handleKey` / `keyBeforeSheet`), the kitchen
+  sink's head (`iconMenu(view:)` / `popUpIconMenu`) and `SlotMember`
+  (subclasses override `didShow`)
+- `ConfigText.swift` — commands.toml's one-line TOML codec (`configEntry`,
+  `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
+- `ProcessRun.swift` — `runProcess`: run a program to completion, stdin fed,
+  stdout + stderr drained concurrently (Foundation only — the tested files use it)
+- Closure actions: `menuItem(title) { … }` (a `ClosureMenuItem` owns its
+  closure — nothing to retain on the side), `ClosureTarget` for buttons
 - `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
 - `JiraSearch.swift` — Cmd+F live search (`JiraSearchPanel`), `JiraMultiPicker`, `JiraDirectory`
 - `SharedWindow.swift` — ONE window for notes + jira (`SharedWindow`, `SlotView`,
@@ -270,8 +283,7 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
 
 ## AI view
 
-- `AIWindow.swift` — `AIWindow` (a `JiraConfigNSWindow` + Confluence-style
-  themed root; `SlotMember`, view `.ai`, nav id 66 placed RIGHT AFTER notes
+- `AIWindow.swift` — `AIWindow` (a `CardWindowController`; `SlotMember`, view `.ai`, nav id 66 placed RIGHT AFTER notes
   in `SharedWindow.navIcons`, `[app] ai-icon` ("" = violet sparkles glyph);
   shares the frame). `[ai]` in commands.toml: enabled, fm-bin, pandoc-bin,
   rules-dir, context-tokens (4096), split, font / font-size, copy-toast.
@@ -359,8 +371,7 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
 
 ## Confluence search
 
-- `Confluence.swift` — `ConfluenceWindow` (a `JiraConfigNSWindow` + the Jira
-  Config window's themed root; `SlotMember`, view `.confluence`, nav id 65,
+- `Confluence.swift` — `ConfluenceWindow` (a `CardWindowController`; `SlotMember`, view `.confluence`, nav id 65,
   `[app] confluence-icon` = `confluence_icon.png`; no header setup button —
   Setup = icon menu, menu bar, and the "Set Up Confluence…" button in the
   empty preview). Strip, 3 rows: Search | ★ Favorites · All words / Phrase /
@@ -482,14 +493,13 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   Window" (`showJiraDashboard`). No other jira menu items — everything else
   lives in that window. Socket messages `jira-poll-on/off/toggle`,
   `jira-setup`, `jira-dashboard` (CLI: `workspace-switcher jira-poll on|off|toggle|setup|dashboard`).
-- Jira Config window look: `JiraConfigNSWindow` (titled + hidden titlebar,
-  `_cornerRadius` override, header clicks caught in `sendEvent`) +
-  `themedRoot` (blur, card tint, border, a real `PopupChrome` header: ✕ ·
-  icon · title). Status lines are one sentence; details live in tooltips.
+- Jira Config window look: a `CardWindowController` (CardWindow.swift:
+  `CardNSWindow` = titled + hidden titlebar, `_cornerRadius` override, header
+  clicks caught in `sendEvent`; `themedRoot` = blur, card tint, border, a real
+  `PopupChrome` header: ✕ · icon · title). Status lines are one sentence; details live in tooltips.
   Job pages show "Defined in config.json › endpoints › NAME" + Open config.json.
 - Jira Config window: `JiraDashboard.swift` (`JiraDashboardWindow` +
-  `JiraColumnEditor` + `jiraFormSheet`; own file, compiled by
-  `bin/workspace_switcher.sh`). Master–detail: sidebar (POLL JOBS / SETTINGS:
+  `JiraColumnEditor` + `jiraFormSheet`). Master–detail: sidebar (POLL JOBS / SETTINGS:
   Live Search, Connection, Definitions) → editor per item. All data from ONE
   call: `jira_poll.py --describe` (per job: schedule, status, next window, full
   JQL, full curl of every request, `maxResults`/`maxTotal`, its columns → API
@@ -534,8 +544,8 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   `max_results_search`. `jira_api.directory()` → projects,
   assignable users of `project_keys` (paginated, merged by id: Server `name`,
   Cloud `accountId`), statuses, issue types, priorities, fields, per-project
-  releases (`project_releases`: unarchived versions) and labels
-  (`project_labels`: labels of the newest `search_defaults.labels_max_issues`
+  releases (its `versions` stage: unarchived versions) and labels (its
+  `labels` stage: labels of the newest `search_defaults.labels_max_issues`
   labelled issues, fields=labels) → `~/.cache/jira/directory.json`.
   `jira_poll.py --directory` = run it now.
 - Live search (replaced saved searches; `migrate_v3` drops `searches` and
@@ -652,7 +662,7 @@ Line numbers drift; grep the symbol names (they're stable).
 - Real repo: `/Users/danielbaker/.config/workspace-switcher` (rule.md still
   says `dotfileApp` — that's the old name; same rule: no git in backups).
 - Backdrop (`panel.contentView`) is FLIPPED — y=0 is the top when placing overlays.
-- Signing: `bin/workspace_switcher.sh` signs with the self-signed login-keychain
+- Signing: `bin/build-app.sh` signs with the self-signed login-keychain
   cert "workspace-switcher codesign" (stable TCC grants across rebuilds);
   falls back to ad-hoc (`-`) if the cert is missing.
 - `./build.sh` builds AND relaunches the app (exit 0 + no output = OK). The

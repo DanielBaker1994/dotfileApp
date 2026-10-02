@@ -28,8 +28,8 @@ import AppKit
 // Focus goes back to what was focused when the window was SUMMONED, and only
 // when the whole window hides — never on a view switch (per-window restore
 // targets were what scattered windows across workspaces).
-// Floating vs tiling is AeroSpace's call (its on-window-detected rule floats
-// the app); the app only keeps the window at normal level. A shown view lands
+// Floating vs tiling is AeroSpace's call (its on-window-detected rule places
+// the app's windows); the app only keeps them at normal level. A shown view lands
 // on the focused workspace, at the remembered frame moved onto that
 // workspace's monitor (`targetScreen`) — after AeroSpace's closed-windows
 // cache is cleared (`clearAerospaceCache`), or AeroSpace "restores the
@@ -121,8 +121,8 @@ final class SharedWindow {
     // user left: hide the whole window when hide-on-focus-loss says so. It is
     // PARKED like any hide (views keep their state — hiding the popup member
     // itself tore files / jira / detail down) and focus is NOT handed back
-    // (the user already went somewhere). The window always floats (AeroSpace),
-    // so alt-hjkl to a tile IS leaving.
+    // (the user already went somewhere). alt-hjkl to another window IS
+    // leaving.
     private func checkFocusLoss(_ v: SlotView, _ w: NSWindow) {
         guard current == v, let m = controller.slotMember(v), m.slotShown, m.slotWindow === w,
               focusLeft(w) else { return }
@@ -201,39 +201,39 @@ final class SharedWindow {
         return NSRect(x: x, y: y, width: w, height: h)
     }
 
-    func storedFrame(for v: SlotView) -> NSRect { frame }
-
-    func setFrame(_ f: NSRect, for v: SlotView) { frame = f }
-
-    // where `v` shows: the visible view's frame (every view shares it, so a
-    // switch never resizes the window), else the remembered one
-    func targetFrame(for v: SlotView) -> NSRect { currentFrame() }
+    // where a view shows: the visible view's frame (every view shares it,
+    // so a switch never resizes the window), else the remembered one
+    func currentFrame() -> NSRect {
+        shownMember?.slotBaseFrame ?? frame
+    }
 
     var isVisible: Bool {
-        current.flatMap { controller.slotMember($0) }?.slotShown == true
+        shownMember != nil
     }
 
     // MARK: navigation
 
+    // the visible view's member, nil = hidden
+    private var shownMember: SlotMember? {
+        current.flatMap { controller.slotMember($0) }.flatMap { $0.slotShown ? $0 : nil }
+    }
+
+    // a hotkey for the visible view: in it -> hide; visible but you're
+    // elsewhere -> focus it. userInIt: whether the window focused at the
+    // keypress was ours (the launcher's focus file); nil = unknown, judge
+    // from AppKit (alone it can't always tell: an accessory app may report
+    // isActive while the user types in another app)
+    private func hideOrFocus(_ m: SlotMember, userInIt: Bool?) {
+        let inIt = userInIt ?? (m.slotWindow.isKeyWindow && NSApp.isActive
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid())
+        if inIt { hide("hotkey pressed while in it") } else { m.slotShow(frame: nil) }
+    }
+
     // a named view (CLI `notes` / `jira` / …, the menu's toggles)
-    // userInIt: whether the window focused at the keypress was ours (from
-    // the launcher's focus file); nil = unknown, judge from AppKit
     func hotkey(_ v: SlotView, userInIt: Bool? = nil) {
-        if let cur = current, let m = controller.slotMember(cur), m.slotShown {
-            let same = v == .jira ? cur.isJira : cur == v
-            if same {
-                // in it -> hide; visible but you're elsewhere -> focus it
-                // (AppKit alone can't tell: an accessory app may report
-                // isActive while the user types in another app)
-                let inIt = userInIt ?? (m.slotWindow.isKeyWindow && NSApp.isActive
-                    && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid())
-                if inIt {
-                    hide("hotkey pressed while in it")
-                } else {
-                    m.slotShow(frame: nil)
-                }
-                return
-            }
+        if let cur = current, let m = shownMember, v == .jira ? cur.isJira : cur == v {
+            hideOrFocus(m, userInIt: userInIt)
+            return
         }
         // jira comes back where you left it (a ticket, a release, Config)
         if v == .jira, lastJira != .jira, controller.slotMember(lastJira) != nil {
@@ -248,14 +248,8 @@ final class SharedWindow {
     // you're elsewhere -> focus it. Views are switched inside the window
     // (Ctrl+Tab, header icons, the Hyper+S palette).
     func toggle(userInIt: Bool? = nil) {
-        if let cur = current, let m = controller.slotMember(cur), m.slotShown {
-            let inIt = userInIt ?? (m.slotWindow.isKeyWindow && NSApp.isActive
-                && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid())
-            if inIt {
-                hide("hotkey pressed while in it")
-            } else {
-                m.slotShow(frame: nil)
-            }
+        if let m = shownMember {
+            hideOrFocus(m, userInIt: userInIt)
             return
         }
         if controller.slotMember(last) != nil {
@@ -273,7 +267,7 @@ final class SharedWindow {
     func open(_ v: SlotView) {
         if v == .jira && current?.isJira == true { stack = [] }
         if !v.isJira { stack.removeAll { $0 == v } }
-        guard controller.ensureSlotMember(v, frame: targetFrame(for: v)) else { return }
+        guard controller.ensureSlotMember(v, frame: currentFrame()) else { return }
         present(v)
     }
 
@@ -310,12 +304,6 @@ final class SharedWindow {
         open(.jira)
     }
 
-    // the visible view's frame, else the remembered one
-    func currentFrame() -> NSRect {
-        if let cur = current, let m = controller.slotMember(cur), m.slotShown { return m.slotBaseFrame }
-        return frame
-    }
-
     // make `v` (its window exists) the visible view, in the shared frame
     func present(_ v: SlotView) {
         guard let m = controller.slotMember(v) else { return }
@@ -325,14 +313,14 @@ final class SharedWindow {
             returnWID = controller.savedWID
             returnPID = controller.savedPID
         }
-        var f = targetFrame(for: v)
+        var f = currentFrame()
         // the old view is parked only AFTER the new one is up: parked first,
         // aerospace sees its focused window vanish and focuses the next
         // window on the workspace (a terminal raised over the slower jira
-        // window = "Hyper+J closed it")
+        // window looked like the switch had closed it)
         var outgoing: SlotMember?
-        if let cur = current, let old = controller.slotMember(cur), old !== m, old.slotShown {
-            setFrame(old.slotBaseFrame, for: cur)
+        if let old = shownMember, old !== m {
+            frame = old.slotBaseFrame
             outgoing = old
         }
         // normal level, whatever the window was built with (Jira Config is
@@ -342,7 +330,7 @@ final class SharedWindow {
         let min = m.slotWindow.minSize
         if f.width < min.width { f.size.width = min.width }
         if f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
-        setFrame(f, for: v)
+        frame = f
         decorate(m, v)
         // a hidden view coming back is, to AeroSpace, a closed window
         // reappearing: clear its closed-windows cache first (the hotkey's
@@ -378,7 +366,7 @@ final class SharedWindow {
     // its header now, so its first show is an unpark like any other
     func prepare(_ v: SlotView) {
         guard let m = controller.slotMember(v), !m.slotShown else { return }
-        m.slotWindow.setFrame(targetFrame(for: v), display: false)
+        m.slotWindow.setFrame(currentFrame(), display: false)
         decorate(m, v)
     }
 
@@ -393,7 +381,7 @@ final class SharedWindow {
         guard let cur = current else { return }
         current = nil
         if let m = controller.slotMember(cur) {
-            if m.slotShown { setFrame(m.slotBaseFrame, for: cur) }
+            if m.slotShown { frame = m.slotBaseFrame }
             m.slotPark(stopVoice: true)
         }
         if restoreFocus { controller.restoreFocus(wid: returnWID, pid: returnPID) }
@@ -408,13 +396,10 @@ final class SharedWindow {
     // jira's sub-views step back with Esc and follow jira's switch
     static let escViews: [SlotView] = [.files, .notes, .ai, .jira, .confluence]
 
-    // rapid Esc presses that hide the window from `v`; 0 = Esc never does
-    func escHideCount(_ v: SlotView) -> Int { controller.escHideCount(v) }
-
     // Esc reached the top of view `v` (no search to clear, nothing to step
     // back from): hide the window if the view's switch is on, else nothing
     func escapeAtTop(_ v: SlotView) {
-        guard escHideCount(v) > 0 else { return }
+        guard controller.escHideCount(v) > 0 else { return }
         hide("Esc (\(v.rawValue))")
     }
 
@@ -498,24 +483,13 @@ final class SharedWindow {
             w.headerIcon = appIcon
             w.navOn = Self.navOn(v)
             w.onCycleView = { [weak self] in self?.cycle($0) }
-        } else if let c = m as? JiraDashboardWindow {
-            c.setSlotNav(Self.navButtons(for: v), icons: Self.navIcons, icon: appIcon,
-                         on: Self.navJira) { [weak self] id in
+        } else if let c = m as? CardWindowController, let on = Self.navOn(v) {
+            // Confluence, AI, Jira Config
+            c.setSlotNav(Self.navButtons(for: v), icons: Self.navIcons, icon: appIcon, on: on) { [weak self] id in
                 self?.navClicked(id)
             }
             c.onCycleView = { [weak self] in self?.cycle($0) }
-        } else if let c = m as? ConfluenceWindow {
-            c.setSlotNav(icons: Self.navIcons, icon: appIcon, on: Self.navConfluence) { [weak self] id in
-                self?.navClicked(id)
-            }
-            c.onCycleView = { [weak self] in self?.cycle($0) }
-            c.onSlotHide = { [weak self] in self?.hide("✕ / Cmd+W") }
-        } else if let a = m as? AIWindow {
-            a.setSlotNav(icons: Self.navIcons, icon: appIcon, on: Self.navAI) { [weak self] id in
-                self?.navClicked(id)
-            }
-            a.onCycleView = { [weak self] in self?.cycle($0) }
-            a.onSlotHide = { [weak self] in self?.hide("✕ / Cmd+W") }
+            c.onSlotHide = { [weak self] in self?.hide("✕ / Cmd+W (\(v.rawValue))") }
         }
     }
 }

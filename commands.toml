@@ -39,7 +39,6 @@
 #   copy-fields list: comma-separated row fields copied as TSV lines when rows
 #                     are ticked (checkbox per row) and "copy selected"/
 #                     "copy N" is pressed; empty/absent = no copy UI at all
-#   copy-format list: clipboard format for copy-fields (tsv)
 #   checkbox   list:  on/off for the copy checkbox column
 #                     (absent = on when copy-fields is set)
 #   resize     note/list: drag edges/corners to resize (true/false)
@@ -125,7 +124,7 @@
 # [app] — app-level settings. Every key is optional (built-in defaults apply
 # otherwise); lists are comma-separated, paths may use "~". May sit anywhere
 # in the file — it is applied before anything else at startup.
-#   (float is gone: AeroSpace decides. Its on-window-detected rule floats
+#   (float is gone: AeroSpace decides. Its on-window-detected rule places
 #    every window of the app — config/aerospace/aerospace.toml — and the
 #    app never tiles / floats itself; the windows sit at normal level, so
 #    the focused window is in front.)
@@ -487,7 +486,6 @@ body = "description"
 filter = "key,title,status,assignee,reporter,description,labels,priority"
 filters = "releaseStatus,release,assignee,reporter,status,priority,labels"
 copy-fields = "key,title,status,assignee,release,releaseDate,priority,labels"
-copy-format = "tsv"
 checkbox = true
 resize = true
 search-width = 0.9

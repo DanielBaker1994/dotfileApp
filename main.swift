@@ -53,7 +53,7 @@ if cliArgs.count > 1 {
         // the Setup & Health Check window (running daemon, else this launch)
         if sendLaunchMessage("setup") { exit(0) }
         AppInstall.requested = true
-    case "window", "notes", "jira", "voice", "files", "terminal", "confluence", "ai":
+    case let mode where SwitcherController.hotkeyModes.contains(mode):
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->
         // hand off to the launcher script (build-if-stale + LaunchServices

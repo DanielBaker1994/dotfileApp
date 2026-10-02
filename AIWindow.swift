@@ -9,7 +9,7 @@ import WebKit
 
 // [ai] enabled - the view, its hotkey and its menu entry
 func aiEnabled() -> Bool {
-    ["true", "yes", "1", "on"].contains((configSectionValue("ai", "enabled") ?? "").lowercased())
+    tri(configSectionValue("ai", "enabled")) == true
 }
 
 func aiSetting(_ key: String, _ fallback: String) -> String {
@@ -207,19 +207,11 @@ final class AICommandLine: NSView, PopupThemeable {
 
 // MARK: - the window
 
-final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate {
+final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDelegate {
     private static var live: AIWindow?
     static var current: AIWindow? { live }
 
-    private weak var controller: SwitcherController?
-    let window: JiraConfigNSWindow
-    private var chrome: PopupChrome?
     private var colors = jiraWindowColors()
-    private var monitor: Any?
-    var onSlotHide: (() -> Void)?
-    private var slotNavClick: ((Int) -> Void)?
-    // Ctrl+Tab / Ctrl+Shift+Tab: the shared window's next / previous view
-    var onCycleView: ((Int) -> Void)?
 
     private var body: ConfPane!
     private var pills: PopupTabsBar!
@@ -303,125 +295,28 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         focusInput()
     }
 
+    // the shared window brought the view back
+    override func didShow() {
+        reloadRules()
+        if window.firstResponder === window || window.firstResponder == nil { focusInput() }
+    }
+
     private init(controller: SwitcherController, frame: NSRect?) {
-        self.controller = controller
         let f = frame ?? NSRect(x: 0, y: 0, width: aiNumber("width", 900), height: aiNumber("height", 600))
-        window = JiraConfigNSWindow(contentRect: f, styleMask: [.titled, .closable, .resizable, .miniaturizable,
-                                                                 .fullSizeContentView],
-                                    backing: .buffered, defer: false)
-        super.init()
-        window.title = "AI"
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 560, height: 360)
-        window.level = .normal   // AeroSpace floats it (aerospace.toml)
-        window.delegate = self
+        super.init(controller: controller, frame: f, title: "AI", minSize: NSSize(width: 560, height: 360))
         split = CGFloat(UserDefaults.standard.double(forKey: Self.splitKey))
         if split < 0.2 || split > 0.8 { split = aiNumber("split", 0.5) }
         mode = PaneMode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "") ?? .diff
         target = PasteTarget(rawValue: UserDefaults.standard.integer(forKey: Self.targetKey)) ?? .outlook
         PopupThemeDefaults.colors = colors
-        window.contentView = themedRoot(buildContent())
+        window.contentView = themedRoot(buildContent(), name: "ai", colors: colors,
+                                        headerColor: hexColor(configSectionValue("ai", "header-color")) ?? jiraHeaderColor,
+                                        icon: aiAppIcon, title: "AI")
         if frame != nil { window.setFrame(f, display: false) }
-        installKeys()
         reloadRules()
         watchRulesDir()
         checkAvailable()
         setMode(mode)
-    }
-
-    // same surface as the Confluence / Jira Config windows: blur + card
-    // tint + border, the popup header strip on top
-    private func themedRoot(_ content: NSView) -> NSView {
-        var cfg = PopupConfig(name: "ai")
-        cfg.colors = colors
-        cfg.headerHeight = 30
-        cfg.titlePill = false
-        cfg.headerColor = hexColor(configSectionValue("ai", "header-color")) ?? jiraHeaderColor
-        let radius = cfg.cornerRadius + 1
-        window.cornerRadius = radius
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        for b: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(b)?.isHidden = true
-        }
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.appearance = NSAppearance(named: colors.isLight ? .aqua : .darkAqua)
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.cornerRadius = radius
-        root.layer?.masksToBounds = true
-        let fx = NSVisualEffectView()
-        fx.material = cfg.material
-        fx.blendingMode = .behindWindow
-        fx.state = .active
-        let tint = NSView()
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor = colors.base.withAlphaComponent(max(cfg.tintAlpha, 0.94)).cgColor
-        tint.layer?.borderColor = colors.border.cgColor
-        tint.layer?.borderWidth = 1
-        tint.layer?.cornerRadius = radius
-        let ch = PopupChrome(config: cfg)
-        ch.dragHeaderHeight = cfg.headerHeight
-        ch.headerIcon = aiAppIcon
-        ch.headerTitle = "AI"
-        ch.copyPathLabel = ""
-        ch.copyConfigLabel = ""
-        chrome = ch
-        for v in [fx, tint, ch, content] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(v)
-        }
-        for v in [fx, tint] as [NSView] {
-            NSLayoutConstraint.activate([
-                v.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-                v.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-                v.topAnchor.constraint(equalTo: root.topAnchor),
-                v.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            ])
-        }
-        NSLayoutConstraint.activate([
-            ch.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            ch.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            ch.topAnchor.constraint(equalTo: root.topAnchor),
-            ch.heightAnchor.constraint(equalToConstant: cfg.headerHeight),
-            content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 1),
-            content.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -1),
-            content.topAnchor.constraint(equalTo: ch.bottomAnchor),
-            content.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -1),
-        ])
-        func walk(_ v: NSView) {
-            (v as? PopupThemeable)?.applyColors(colors)
-            v.subviews.forEach(walk)
-        }
-        walk(content)
-        window.headerBand = cfg.headerHeight
-        window.onHeaderClick = { [weak self] p in
-            guard let self, let ch = self.chrome else { return }
-            if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
-                self.closeOrHide()
-            } else if let hit = ch.extraButtonRects.first(where: { $0.value.contains(p) }) {
-                self.slotNavClick?(hit.key)
-            } else if ch.headerIcon != nil, ch.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
-                self.showIconMenu()
-            }
-        }
-        return root
-    }
-
-    // the shared window's header: view icons (this one lit)
-    func setSlotNav(icons: [(image: NSImage, id: Int, tip: String)], icon: NSImage, on: Int,
-                    click: @escaping (Int) -> Void) {
-        chrome?.navIcons = icons
-        chrome?.navOn = on
-        chrome?.headerIcon = icon
-        chrome?.needsDisplay = true
-        slotNavClick = click
-    }
-
-    private func closeOrHide() {
-        if let hide = onSlotHide { hide() } else { window.orderOut(nil) }
     }
 
     // MARK: build
@@ -687,13 +582,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         guard rules.indices.contains(i) else { return nil }
         let r = rules[i]
         let menu = NSMenu()
-        func add(_ t: String, _ f: @escaping () -> Void) {
-            let target = MenuActionTarget(action: f)
-            menuActionTargets.append(target)
-            let it = NSMenuItem(title: t, action: #selector(MenuActionTarget.run), keyEquivalent: "")
-            it.target = target
-            menu.addItem(it)
-        }
+        func add(_ t: String, _ f: @escaping () -> Void) { menu.addItem(menuItem(t, f)) }
         add("Edit in Notes") { [weak self] in self?.controller?.openNoteFile(r.path) }
         add("Open in Default App") { NSWorkspace.shared.open(URL(fileURLWithPath: r.path)) }
         add("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: r.path)]) }
@@ -1286,63 +1175,27 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         window.makeFirstResponder(input)
     }
 
-    private func installKeys() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self else { return e }
-            if let sheet = self.window.attachedSheet {
-                return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
-            }
-            guard self.window.isKeyWindow else { return e }
-            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let cmd = mods.contains(.command), ctrl = mods.contains(.control)
-            if ctrl && !cmd && e.keyCode == 48, let cycle = self.onCycleView {     // Ctrl+Tab: next view
-                cycle(mods.contains(.shift) ? -1 : 1)
-                return nil
-            }
-            switch e.keyCode {
-            case 53:                                                         // Esc
-                // stop a run; idle: hide when AI's "Esc Hides Window" is on
-                if self.process != nil { self.cancelRun() }
-                else if self.onSlotHide != nil { self.controller?.slot.escapeAtTop(.ai) }
-                return nil
-            case 36 where ctrl || cmd, 76 where ctrl || cmd:                 // Ctrl/Cmd+Return
-                self.run()
-                return nil
-            case 13 where cmd: self.closeOrHide(); return nil                // Cmd+W
-            case 37 where cmd: self.focusInput(); return nil                 // Cmd+L
-            case 44 where cmd: self.showShortcuts(); return nil              // Cmd+/
-            default: break
-            }
-            // the preview: copy / select all like any document
-            if cmd, (self.window.firstResponder as? NSView)?.isDescendant(of: self.web) == true {
-                if e.keyCode == 8 { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil); return nil }
-                if e.keyCode == 0 { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil); return nil }
-            }
-            return JiraEditKeys.route(e, in: self.window) ? nil : e
+    override func handleKey(_ e: NSEvent) -> Bool {
+        let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let cmd = mods.contains(.command), ctrl = mods.contains(.control)
+        switch e.keyCode {
+        case 53:                                                         // Esc
+            // stop a run; idle: hide when AI's "Esc Hides Window" is on
+            if process != nil { cancelRun() }
+            else if onSlotHide != nil { controller?.slot.escapeAtTop(.ai) }
+        case 36 where ctrl || cmd, 76 where ctrl || cmd: run()           // Ctrl/Cmd+Return
+        case 37 where cmd: focusInput()                                  // Cmd+L
+        case 44 where cmd: showShortcuts()                               // Cmd+/
+        default: return webEditKey(e, in: web)                           // the preview
         }
+        return true
     }
 
     // MARK: kitchen sink (the header icon)
 
-    private func showIconMenu() {
-        guard let ch = chrome else { return }
-        let menu = NSMenu()
-        menu.autoenablesItems = false   // keeps a greyed global item greyed
-        if let c = controller {
-            c.addGlobalWindowItems(to: menu)
-            menu.addItem(.separator())
-            if onSlotHide != nil {
-                menu.addItem(c.escHidesMenuItem(.ai))
-                menu.addItem(.separator())
-            }
-        }
-        func add(_ t: String, _ f: @escaping () -> Void) {
-            let target = MenuActionTarget(action: f)
-            menuActionTargets.append(target)
-            let it = NSMenuItem(title: t, action: #selector(MenuActionTarget.run), keyEquivalent: "")
-            it.target = target
-            menu.addItem(it)
-        }
+    override func showIconMenu() {
+        let menu = iconMenu(view: .ai)
+        func add(_ t: String, _ f: @escaping () -> Void) { menu.addItem(menuItem(t, f)) }
         add("New Rule…") { [weak self] in self?.newRule() }
         if let r = rule {
             add("Edit “\(r.name)” in Notes") { [weak self] in self?.controller?.openNoteFile(r.path) }
@@ -1358,9 +1211,7 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         add("Copy as Markdown") { [weak self] in self?.copyMarkdown() }
         add("Copy Command") { [weak self] in self?.copyCommand() }
         add("Keyboard Shortcuts") { [weak self] in self?.showShortcuts() }
-        ch.iconMenuOpen = true
-        menu.popUp(positioning: nil, at: NSPoint(x: ch.iconButtonRect.minX, y: ch.iconButtonRect.maxY + 4), in: ch)
-        ch.iconMenuOpen = false
+        popUpIconMenu(menu)
     }
 
     // commands.toml [shortcuts] "ai: …" lines, then "all: …"
@@ -1378,11 +1229,6 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
         a.beginSheetModal(for: window) { _ in }
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        closeOrHide()
-        return false
-    }
-
     // the file "+" writes for a new rule
     private static let ruleTemplate = """
     ---
@@ -1398,18 +1244,4 @@ final class AIWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigati
     Describe what the model should do with the text it is given.
     Return ONLY the result — no commentary, no preamble.
     """
-}
-
-extension AIWindow: SlotMember {
-    var slotWindow: NSWindow { window }
-    var slotShown: Bool { window.isVisible }
-    var slotBaseFrame: NSRect { window.frame }
-    func slotPark(stopVoice: Bool) { window.orderOut(nil) }
-    func slotShow(frame: NSRect?) {
-        if let f = frame { window.setFrame(f, display: false) }
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        reloadRules()
-        if window.firstResponder === window || window.firstResponder == nil { focusInput() }
-    }
 }

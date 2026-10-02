@@ -9,7 +9,6 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UID_="$(id -u)"
 # every name/path this script uses (brew deps, bundle id, launchd agent, …);
 # absent only in a standalone copy, which clones the repo and re-runs below
 [ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"
