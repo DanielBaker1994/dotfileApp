@@ -2203,14 +2203,25 @@ private let compactStampFormatter: DateFormatter = {
     f.dateFormat = "yyyy-MM-dd HH:mm"
     return f
 }()
+// Parsed stamps are memoized: DateFormatter parsing is slow (ICU), and a
+// table redraw (every keystroke in the filter box) re-renders every visible
+// date cell.
+private let compactStampCache: NSCache<NSString, NSString> = {
+    let c = NSCache<NSString, NSString>()
+    c.countLimit = 50_000
+    return c
+}()
 func compactTimestamp(_ s: String) -> String {
     let u = Array(s.utf8)
     guard u.count >= 19, u.count <= 35, u[4] == 45, u[7] == 45, u[10] == 84, u[13] == 58
     else { return s }
+    if let hit = compactStampCache.object(forKey: s as NSString) { return hit as String }
+    var out = s
     for p in isoParsers {
-        if let d = p.date(from: s) { return compactStampFormatter.string(from: d) }
+        if let d = p.date(from: s) { out = compactStampFormatter.string(from: d); break }
     }
-    return s
+    compactStampCache.setObject(out as NSString, forKey: s as NSString)
+    return out
 }
 
 // MARK: - Voice notes (record -> Apple speech recognition)
@@ -2585,6 +2596,9 @@ final class SwitcherController: NSObject {
         }
         popup.onShow = { [weak self] in
             guard let self else { return }
+            // the palette opens in command mode: "/" is pre-filled so the
+            // command list shows at once (Esc drops to the workspace list)
+            self.popup.initialQuery = "/"
             // the toggle path goes through popup.show(), not controller
             // show() — refresh the keypress-time focus target HERE
             (self.savedWID, self.savedPID) = readFocusFile()
@@ -7605,8 +7619,8 @@ extension SwitcherController {
         let restoreWID: String?
         let restorePID: pid_t?
 
-        var tabs: [(path: String, items: [FieldRow])]
-        var currentTab = 0
+        var tabs: [(path: String, items: [FieldRow])] { didSet { invalidateFilter() } }
+        var currentTab = 0 { didSet { invalidateFilter() } }
         var columns: [ListColumn]
         // filter-bar dimensions that exist in the current tab: `filters`
         // fields that are NOT table columns (e.g. labels) — a column filters
@@ -7635,6 +7649,14 @@ extension SwitcherController {
         // release view: its tab files are rebuilt from the issue cache
         // whenever a poll changes it (the watcher's mtime check reloads them)
         var cacheStamp: Date?
+        // the filter box's matcher + the header sort's ranks for the tab on
+        // screen (ListFilter.swift): built once per data change (in the
+        // background, right after it), so a keystroke over 20k rows only
+        // scans bytes and sorts Ints
+        var filterIndex: FuzzyIndex?
+        var sortRanks: (field: String, ascending: Bool, ranks: [Int])?
+        var filterGen = 0
+        var filterPrewarmQueued = false
 
         init(host: SwitcherController, cmd: CommandSpec, window: PopupWindow,
              tabs: [(path: String, items: [FieldRow])], columns: [ListColumn],
@@ -7820,59 +7842,98 @@ extension SwitcherController {
             }
         }
 
+        // rows changed (reload, tab switch): drop the matcher / ranks and
+        // rebuild them off the main thread before the next keystroke needs them
+        func invalidateFilter() {
+            filterIndex = nil
+            sortRanks = nil
+            filterGen += 1
+            guard !filterPrewarmQueued else { return }
+            filterPrewarmQueued = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                filterPrewarmQueued = false
+                guard tabs.indices.contains(currentTab) else { return }
+                let gen = filterGen, key = sortKey, items = currentItems()
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let index = FuzzyIndex(items.map(\.searchText))
+                    let ranks = key.map { k in
+                        SortRank.ranks(items.map { $0.fields[k.field] ?? "" }, ascending: k.ascending)
+                    }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, filterGen == gen else { return }
+                        if filterIndex == nil { filterIndex = index }
+                        if let k = key, let ranks, sortRanks == nil,
+                           sortKey?.field == k.field, sortKey?.ascending == k.ascending {
+                            sortRanks = (k.field, k.ascending, ranks)
+                        }
+                    }
+                }
+            }
+        }
+
         // combined filter: search (fuzzy) + dropdown selections, then the
         // table's header sort (numeric-aware; blanks always last)
         func filteredRows(query: String) -> [FieldRow] {
-            let byQuery = PopupFuzzy.filter(currentItems(), query: query) { $0.searchText }
-            var matched: [FieldRow]
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            let items = currentItems()
+            let index = filterIndex ?? FuzzyIndex(items.map(\.searchText))
+            filterIndex = index
+            var order = index.ranked(query)
+            let t1 = DispatchTime.now().uptimeNanoseconds
             let active = colFilters.filter { !$0.value.isEmpty }
-            if active.isEmpty {
-                matched = byQuery
-            } else {
-                matched = byQuery.filter { row in
-                    for (f, picked) in active where !cellValues(f, row).contains(where: picked.contains) {
+            if !active.isEmpty {
+                order = order.filter { i in
+                    for (f, picked) in active where !cellValues(f, items[i]).contains(where: picked.contains) {
                         return false
                     }
                     return true
                 }
             }
             if let k = sortKey {
-                matched = matched.enumerated().sorted { a, b in
-                    let x = a.element.fields[k.field] ?? "", y = b.element.fields[k.field] ?? ""
-                    if x.isEmpty != y.isEmpty { return y.isEmpty }
-                    let c = x.localizedStandardCompare(y)
-                    if c == .orderedSame { return a.offset < b.offset }
-                    return k.ascending ? c == .orderedAscending : c == .orderedDescending
-                }.map { $0.element }
+                if sortRanks?.field != k.field || sortRanks?.ascending != k.ascending {
+                    sortRanks = (k.field, k.ascending,
+                                 SortRank.ranks(items.map { $0.fields[k.field] ?? "" }, ascending: k.ascending))
+                }
+                order = SortRank.order(order, by: sortRanks?.ranks ?? [])
             }
-            let result = Array(matched.prefix(cap))
+            let t2 = DispatchTime.now().uptimeNanoseconds
+            defer {
+                // typing lag shows up here first (work-sized tabs: bin/fake-jira-tab.sh)
+                let total = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
+                if total > 8 {
+                    host.log(String(format: "list '%@' filter: %d rows -> %d, q=\"%@\", match %.1f ms, "
+                                    + "filter+sort %.1f ms, total %.1f ms", cmd.name, items.count, order.count,
+                                    query, Double(t1 - t0) / 1e6, Double(t2 - t1) / 1e6, total))
+                }
+            }
+            let shown = order.prefix(cap)
             // paging: page-size > 0 keeps huge lists snappy while browsing; a
             // "load more" row at the bottom reveals the next page on Enter or
             // click. Searching is cheap (capped search text) and rendering a
             // narrowed result is fine, so an ACTIVE QUERY shows every match —
             // an item beyond the current page still renders when found.
-            var paged = result
-            if cmd.pageSize > 0, result.count > cmd.pageSize, query.isEmpty {
-                paged = Array(result.prefix(visibleOffset + cmd.pageSize))
-                if paged.count < result.count {
-                    let remaining = result.count - paged.count
-                    paged.append(FieldRow(title: "load \(remaining) more…",
-                                          content: nil, trailing: nil, detail: nil,
-                                          body: nil, searchText: "",
-                                          fields: ["__loadmore": "1"]))
+            var take = shown.count
+            if cmd.pageSize > 0, shown.count > cmd.pageSize, query.isEmpty {
+                take = min(shown.count, visibleOffset + cmd.pageSize)
+            }
+            // ONE copy of each shown row (20k matches while typing);
+            // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
+            var paged = shown.prefix(take).map { i -> FieldRow in
+                var r = items[i]
+                if isJira, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty {
+                    r.starred = favKeys.contains(k)
                 }
+                return r
+            }
+            if take < shown.count {
+                paged.append(FieldRow(title: "load \(shown.count - take) more…",
+                                      content: nil, trailing: nil, detail: nil,
+                                      body: nil, searchText: "",
+                                      fields: ["__loadmore": "1"]))
             }
             // live header count: current items in the list (updates with search)
             w.itemCount = paged.count == 1 ? "1 item" : "\(paged.count) items"
-            // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
-            if isJira {
-                paged = paged.map { r in
-                    guard !r.loadMore, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty else { return r }
-                    var r = r
-                    r.starred = favKeys.contains(k)
-                    return r
-                }
-            }
             return paged
         }
 

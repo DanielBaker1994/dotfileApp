@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "create-prd": {
+      "source": "phuryn/pm-skills",
+      "sourceType": "github",
+      "skillPath": "pm-execution/skills/create-prd/SKILL.md",
+      "computedHash": "5c242d3abb9508f59021ed22936230e555971feab690cbf2a90142e06d10e7ae"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",

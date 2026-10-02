@@ -611,19 +611,6 @@ workspace-switcher = "*:app"
 "ai: Cmd+L" = "focus your text"
 "ai: Esc" = "stop a running request (never closes)"
 
-# read-only window showing the stack health check (Hyper+S -> /health-checks).
-[health-checks]
-enabled = true
-label = "Health Checks"
-type = "output"
-panel = true
-title = ""
-icon = "heart"
-script = "~/.config/workspace-switcher/jira/jira-doctor.sh"
-width = 800
-height = 640
-font = "SF Mono"
-
 # Paste-and-format window: paste raw JSON or XML into the popup and it
 # re-renders itself formatted (debounced as you paste); the "copy contents"
 # header button copies the result, "save file" writes it to `save-dir`
@@ -638,6 +625,19 @@ title = ""
 icon = "notes"
 # where "save file" writes the formatted output (absolute or ~-prefixed)
 save-dir = "/tmp/"
+
+# read-only window showing the stack health check (Hyper+S -> /health-checks).
+[health-checks]
+enabled = true
+label = "Health Checks"
+type = "output"
+panel = true
+title = ""
+icon = "heart"
+script = "~/.config/workspace-switcher/jira/jira-doctor.sh"
+width = 800
+height = 640
+font = "SF Mono"
 
 # "/Jira Config Window" in the Hyper+S palette: opens the Jira Config window
 # (handled in-process, like prettyprint). Listed only while [jira] enabled.

@@ -823,127 +823,6 @@ extension Array where Element == PopupTableColumn {
     }
 }
 
-// MARK: - Fuzzy search (generic, framework-level)
-
-// Port of fzf's FuzzyMatchV2 (default scoring scheme, case-insensitive):
-// Smith-Waterman-style DP over the pattern and text with word-boundary /
-// camelCase / delimiter bonus points, so exact phrases and acronyms rank
-// above lucky sparse matches. The query is split on whitespace into tokens
-// (fzf semantics); every token must match, best combined score wins.
-public enum PopupFuzzy {
-    // --- scoring constants (from fzf's algo.go, default scheme) ---
-    private static let scoreMatch: Int16 = 16
-    private static let bonusBoundary: Int16 = scoreMatch / 2
-    private static let bonusBoundaryWhite: Int16 = bonusBoundary + 2
-
-    // One token's match against the text (all tokens must match; sum of
-    // scores = overall score, total matched length for tiebreaking).
-    // LESS PERMISSIVE: a token must appear as a CONTIGUOUS substring
-    // (case-insensitive) — a typed word like "magazine" only matches rows
-    // that actually contain "magazine", never letters scattered mid-word.
-    // Matches at word boundaries are preferred, then earlier matches.
-    private static func matchToken(_ token: [Character], _ text: [Character])
-        -> (score: Int, length: Int, positions: [Int])? {
-        let len = token.count
-        guard len > 0, len <= text.count else { return nil }
-        var bestStart = -1
-        var bestScore = Int.min
-        var i = 0
-        while i + len <= text.count {
-            var equal = true
-            for k in 0..<len where text[i + k] != token[k] {
-                equal = false
-                break
-            }
-            if equal {
-                let isWordStart = i == 0 || !(text[i - 1].isLetter || text[i - 1].isNumber)
-                let sc = Int(isWordStart ? bonusBoundaryWhite : 0) - i / 8
-                if sc > bestScore {
-                    bestScore = sc
-                    bestStart = i
-                }
-            }
-            i += 1
-        }
-        guard bestStart >= 0 else { return nil }
-        let positions = (0..<len).map { bestStart + $0 }
-        return (Int(bestScore) + Int(scoreMatch) * len, len, positions)
-    }
-
-    private static func tokens(of query: String) -> [String] {
-        query.lowercased()
-            .split(whereSeparator: { $0.isWhitespace })
-            .map(String.init)
-    }
-
-    // Total score of the query against the text; nil = not a match.
-    public static func score(_ query: String, against text: String) -> Double? {
-        let ts = tokens(of: query)
-        guard !ts.isEmpty else { return 0 }
-        let t = Array(text.lowercased())
-        var total = 0
-        for tok in ts {
-            guard let m = matchToken(Array(tok), t) else { return nil }
-            total += m.score
-        }
-        return Double(total)
-    }
-
-    // Filter rows by fzf score against their searchable text, best first
-    // (score desc, then shorter total match, then input order — fzf's
-    // default tiebreaks). Empty query returns everything unchanged.
-    public static func filter<T>(_ rows: [T], query: String,
-                                 search: (T) -> String) -> [T] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return rows }
-        let ts = tokens(of: q)
-        let textCache = rows.map { Array(search($0).lowercased()) }
-        let scored: [(T, Int, Int)] = rows.enumerated().compactMap { i, row in
-            var total = 0
-            var length = 0
-            for tok in ts {
-                guard let m = matchToken(Array(tok), textCache[i]) else { return nil }
-                total += m.score
-                length += m.length
-            }
-            return (row, total, length)
-        }
-        return scored
-            .sorted { a, b in
-                if a.1 != b.1 { return a.1 > b.1 }
-                if a.2 != b.2 { return a.2 < b.2 }
-                return false
-            }
-            .map { $0.0 }
-    }
-
-    // Character ranges of the query's matched characters within `text`
-    // (adjacent matches merged). nil = no match.
-    public static func matchRanges(_ query: String, against text: String) -> [NSRange]? {
-        let ts = tokens(of: query)
-        guard !ts.isEmpty else { return [] }
-        let t = Array(text.lowercased())
-        var hits: [NSRange] = []
-        for tok in ts {
-            guard let m = matchToken(Array(tok), t) else { return nil }
-            for p in m.positions {
-                hits.append(NSRange(location: p, length: 1))
-            }
-        }
-        // merge adjacent single-character matches into runs
-        var merged: [NSRange] = []
-        for r in hits.sorted(by: { $0.location < $1.location }) {
-            if let last = merged.last, NSMaxRange(last) == r.location {
-                merged[merged.count - 1] = NSRange(location: last.location,
-                                                   length: last.length + 1)
-            } else {
-                merged.append(r)
-            }
-        }
-        return merged
-    }
-}
-
 // MARK: - Panel
 
 // Borderless windows can't become key by default; without this the popup
@@ -2129,11 +2008,13 @@ final class PopupRowView: NSView {
         let extra = stretchExtra()
         let hs = heights(forWidth: bounds.width)
         var y: CGFloat = topInset
-        // visible-band culling: with hundreds of rows, only draw what's on
-        // screen (heights are cached, so scanning is cheap)
+        // visible-band culling: in a scroll view the bounds are the whole
+        // document (20k rows while filtering), so only rows inside the dirty
+        // rect are drawn (heights are cached, so scanning is cheap)
         for (i, row) in rows.enumerated() {
             let h = hs[i] + extra
-            if y + h > 0, y < bounds.height {
+            if y >= dirtyRect.maxY { break }
+            if y + h > dirtyRect.minY {
                 let rect = NSRect(x: 0, y: y, width: bounds.width, height: h)
                 if let onDrawRow {
                     onDrawRow(rect, row, i == selection)
@@ -8339,6 +8220,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // the window ordered out = parked: the shared window preloads its views
     // this way, unpark(frame:) puts it on screen
     public var quietShow = false
+    // the next show() starts with this in the search field (the Hyper+S
+    // palette opens in command mode: "/" lists the commands); consumed once
+    public var initialQuery: String?
 
     // a show's bookkeeping once it is laid out: shown + key monitors, unless
     // quiet (the one-shot quietShow is consumed either way)
@@ -8427,10 +8311,12 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             takeFocus()
             return
         }
-        let initial = onFilter?("") ?? []
+        let q = initialQuery ?? ""
+        initialQuery = nil
+        let initial = onFilter?(q) ?? []
         setRows(initial)
-        field.stringValue = ""
-        rowView.highlightQuery = ""
+        field.stringValue = q
+        rowView.highlightQuery = q
 
         // scrollable windows keep a fixed height (config.height, else their
         // current content height) — rows scroll inside instead of growing it
@@ -8468,6 +8354,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         layoutSearchField()     // search field ~80% width, centered
         growWidthToContent()    // never show a clipped label on first paint
         takeFocus()
+        // a pre-filled query ("/" command mode): put the caret after it so the
+        // next keystroke appends instead of replacing the slash
+        if !q.isEmpty {
+            field.currentEditor()?.selectedRange = NSRange(location: (q as NSString).length, length: 0)
+        }
     }
 
     public func hide(restore: Bool) {
@@ -10035,78 +9926,19 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     func showToast(_ text: String, symbol: String? = nil, centered: Bool = false) {
         guard let root = panel.contentView else { return }
         toastView?.removeFromSuperview()
-        let c = config.colors
-        let pill = NSView()
-        pill.wantsLayer = true
-        pill.layer?.backgroundColor = c.crust.withAlphaComponent(0.94).cgColor
-        pill.layer?.borderColor = c.text.withAlphaComponent(0.10).cgColor
-        pill.layer?.borderWidth = 1
-        pill.layer?.shadowColor = NSColor.black.cgColor
-        pill.layer?.shadowOpacity = 0.25
-        pill.layer?.shadowRadius = 8
-        pill.layer?.shadowOffset = CGSize(width: 0, height: -2)
-
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 12.5 * zoom, weight: .medium)
-        label.textColor = c.text
-        label.lineBreakMode = .byTruncatingMiddle
-        label.cell?.truncatesLastVisibleLine = true
-        var icon: NSImageView?
-        if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-            let iv = NSImageView(image: img)
-            iv.symbolConfiguration = .init(pointSize: 12.5 * zoom, weight: .medium)
-            iv.contentTintColor = c.tone(.success)
-            icon = iv
-        }
-        // explicit frames (no stack view): symmetric side padding and the
-        // icon + text group centered on both axes of the pill
-        label.sizeToFit()
-        let padX = 16 * zoom, gap = 8 * zoom
-        let iconSize = icon?.fittingSize ?? .zero
-        let groupExtra = icon == nil ? 0 : iconSize.width + gap
-        let h = 32 * zoom
-        let w = min(ceil(label.frame.width + groupExtra + padX * 2), root.bounds.width - 32)
-        let labelW = max(0, w - padX * 2 - groupExtra)
-        let groupW = groupExtra + labelW
-        var x = (w - groupW) / 2
-        if let icon {
-            icon.frame = NSRect(x: x, y: round((h - iconSize.height) / 2),
-                                width: iconSize.width, height: iconSize.height)
-            pill.addSubview(icon)
-            x += groupExtra
-        }
-        label.frame = NSRect(x: x, y: round((h - label.frame.height) / 2),
-                             width: labelW, height: label.frame.height)
-        pill.addSubview(label)
+        let pill = makeToastPill(text, symbol: symbol, colors: config.colors, zoom: zoom,
+                                 maxWidth: root.bounds.width - 32)
         // bottom-center, clear of the footer strip; the backdrop is flipped
+        let h = pill.frame.height, w = pill.frame.width
         let inset = centered ? max(0, (root.bounds.height - h) / 2) : 30 * zoom
         let flipped = root.isFlipped
         pill.frame = NSRect(x: (root.bounds.width - w) / 2,
                             y: flipped ? root.bounds.height - h - inset : inset,
                             width: w, height: h)
         pill.autoresizingMask = [.minXMargin, .maxXMargin, flipped ? .minYMargin : .maxYMargin]
-        pill.layer?.cornerRadius = h / 2
         root.addSubview(pill, positioned: .above, relativeTo: nil)
         toastView = pill
-
-        // pop in: rise 6pt + fade, then hold and fade out
-        let final = pill.frame
-        pill.alphaValue = 0
-        pill.setFrameOrigin(NSPoint(x: final.minX, y: final.minY + (flipped ? 6 : -6) * zoom))
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            pill.animator().alphaValue = 1
-            pill.animator().setFrameOrigin(final.origin)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak pill] in
-            guard let pill, pill.superview != nil else { return }
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.25
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                pill.animator().alphaValue = 0
-            }, completionHandler: { pill.removeFromSuperview() })
-        }
+        animateToastPill(pill, rise: (flipped ? 6 : -6) * zoom)
     }
 
     // counts one Esc press toward config.escCloseCount; true (and the streak
@@ -11657,3 +11489,79 @@ public func sendToggle(name: String) -> Bool {
 }
 
 
+
+// MARK: - Toast pill (PopupWindow.showToast + the screen-level ScreenToast)
+
+// The Raycast-style pill: crust fill, hairline border, soft shadow, optional
+// success-toned SF Symbol + text centered on both axes. Sized to its text
+// (≤ maxWidth); the caller places it.
+func makeToastPill(_ text: String, symbol: String?, colors c: PopupColors, zoom: CGFloat,
+                   maxWidth: CGFloat) -> NSView {
+    let pill = NSView()
+    pill.wantsLayer = true
+    pill.layer?.backgroundColor = c.crust.withAlphaComponent(0.94).cgColor
+    pill.layer?.borderColor = c.text.withAlphaComponent(0.10).cgColor
+    pill.layer?.borderWidth = 1
+    pill.layer?.shadowColor = NSColor.black.cgColor
+    pill.layer?.shadowOpacity = 0.25
+    pill.layer?.shadowRadius = 8
+    pill.layer?.shadowOffset = CGSize(width: 0, height: -2)
+
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 12.5 * zoom, weight: .medium)
+    label.textColor = c.text
+    label.lineBreakMode = .byTruncatingMiddle
+    label.cell?.truncatesLastVisibleLine = true
+    var icon: NSImageView?
+    if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+        let iv = NSImageView(image: img)
+        iv.symbolConfiguration = .init(pointSize: 12.5 * zoom, weight: .medium)
+        iv.contentTintColor = c.tone(.success)
+        icon = iv
+    }
+    // explicit frames (no stack view): symmetric side padding and the
+    // icon + text group centered on both axes of the pill
+    label.sizeToFit()
+    let padX = 16 * zoom, gap = 8 * zoom
+    let iconSize = icon?.fittingSize ?? .zero
+    let groupExtra = icon == nil ? 0 : iconSize.width + gap
+    let h = 32 * zoom
+    let w = min(ceil(label.frame.width + groupExtra + padX * 2), maxWidth)
+    let labelW = max(0, w - padX * 2 - groupExtra)
+    let groupW = groupExtra + labelW
+    var x = (w - groupW) / 2
+    if let icon {
+        icon.frame = NSRect(x: x, y: round((h - iconSize.height) / 2),
+                            width: iconSize.width, height: iconSize.height)
+        pill.addSubview(icon)
+        x += groupExtra
+    }
+    label.frame = NSRect(x: x, y: round((h - label.frame.height) / 2),
+                         width: labelW, height: label.frame.height)
+    pill.addSubview(label)
+    pill.frame = NSRect(x: 0, y: 0, width: w, height: h)
+    pill.layer?.cornerRadius = h / 2
+    return pill
+}
+
+// pop in (rise `rise` pt + fade), hold 1.4 s, fade out, then `done`
+// (default: remove the pill)
+func animateToastPill(_ pill: NSView, rise: CGFloat, done: (() -> Void)? = nil) {
+    let final = pill.frame
+    pill.alphaValue = 0
+    pill.setFrameOrigin(NSPoint(x: final.minX, y: final.minY + rise))
+    NSAnimationContext.runAnimationGroup { ctx in
+        ctx.duration = 0.18
+        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        pill.animator().alphaValue = 1
+        pill.animator().setFrameOrigin(final.origin)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak pill] in
+        guard let pill, pill.superview != nil else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.25
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            pill.animator().alphaValue = 0
+        }, completionHandler: { if let done { done() } else { pill.removeFromSuperview() } })
+    }
+}

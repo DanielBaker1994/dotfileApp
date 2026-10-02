@@ -595,6 +595,15 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   "fit columns" = the table header's corner cell icon (over the checkbox /
   star gutter) + header right-click (`PopupWindow.onTableFit` →
   `PopupTableHeaderView.onFit` → `fitTableColumns()`).
+- Filter box speed (work tabs are 5k–20k issues): `ListFilter.swift`
+  (`FuzzyIndex` = lowercased UTF-8 keys built once per data change, in the
+  background via `ListSession.invalidateFilter`, narrowing while typing
+  forward; `SortRank` = header sort as Int ranks; `PopupFuzzy` lives there
+  too). `PopupRowView.draw` culls to the DIRTY rect (bounds = the whole
+  document). `compactTimestamp` is memoized. Slow keystrokes log `list 'jira'
+  filter: …` (> 8 ms) to /tmp/ws-debug.log. Repro: `bin/fake-jira-tab.sh
+  start [N] | stop` (Faker tab, flips `[jira] sources`); bench + parity vs
+  the old matcher: `bin/run-tests.sh filter` (`WS_FILTER_JSON=` a tab file).
 - Tab freshness badges: `JiraPoll.tabBadge` (status.json per job) →
   `PopupWindow.tabBadges` (dot + age; green fresh+ok, yellow stale or a
   failed run, red stale+failed; tooltip = details).
