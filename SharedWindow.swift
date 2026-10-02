@@ -104,12 +104,17 @@ final class SharedWindow {
         }
         // a drag / resize of the visible view is remembered at once, so a
         // window left up on another workspace comes back where you put it
-        // (AeroSpace's off-screen "hidden" corner is refused by `frame`)
+        // (AeroSpace's off-screen "hidden" corner is refused by `frame`).
+        // Read a turn later: a drawer opening moves the window mid-change,
+        // before its bookkeeping (baseFrame) is final.
         for name in [NSWindow.didMoveNotification, NSWindow.didEndLiveResizeNotification] {
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] n in
-                guard let self, let w = n.object as? NSWindow, let cur = self.current,
-                      let m = self.controller.slotMember(cur), m.slotShown, m.slotWindow === w else { return }
-                self.frame = m.slotBaseFrame
+                guard let w = n.object as? NSWindow else { return }
+                DispatchQueue.main.async {
+                    guard let self, let cur = self.current, let m = self.controller.slotMember(cur),
+                          m.slotShown, m.slotWindow === w else { return }
+                    self.frame = m.slotBaseFrame
+                }
             }
         }
     }

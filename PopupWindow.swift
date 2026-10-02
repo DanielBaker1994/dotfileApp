@@ -11267,11 +11267,28 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
     // the frame WITHOUT the drawer growth (the drawers grow the window by
     // its top edge, origin fixed): what the other shared-window views use,
-    // so the notes terminal never leaks its height into files / jira
+    // so the notes terminal never leaks its height (or the push it caused)
+    // into files / jira
     public var baseFrame: NSRect {
         var f = panel.frame
+        f.origin.y += drawerShift
         f.size.height = max(minEditorH, f.height - drawerInsetNow)
         return f
+    }
+
+    // How far the drawers moved the window off its drawer-less spot: grown
+    // by its top edge, a window near the top of the screen is pushed DOWN
+    // to stay on it (clampToScreen). Handed back as the drawers close, so
+    // the window returns where it was. Void once the window moved since the
+    // last drawer change (the user's new spot wins).
+    private var drawerShiftValue: CGFloat = 0
+    private var drawerShiftFrame: NSRect = .zero
+    private var drawerShift: CGFloat { panel.frame == drawerShiftFrame ? drawerShiftValue : 0 }
+    // the drawers just put the window where it is now; `baseY` = its
+    // drawer-less origin
+    private func noteDrawerFrame(baseY: CGFloat) {
+        drawerShiftFrame = panel.frame
+        drawerShiftValue = baseY - drawerShiftFrame.origin.y
     }
 
     // place the window at a drawer-less frame, re-growing it by the drawers
@@ -11283,6 +11300,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         drawerInsetNow = 0
         panel.setFrame(grown, display: false)
         drawerInsetNow = max(0, min(want, grown.height - f.height))
+        noteDrawerFrame(baseY: f.minY)
         panel.invalidateShadow()
     }
 
@@ -11290,13 +11308,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let want = drawerInsetTotal()
         if abs(want - drawerInsetNow) > 0.5 {
             let f = panel.frame, was = drawerInsetNow
-            panel.setFrame(NSRect(x: f.origin.x, y: f.origin.y,
-                                  width: f.width, height: f.height + (want - drawerInsetNow)),
+            let delta = want - was, shift = drawerShift
+            // closing first hands back the push the opening caused
+            var y = f.origin.y
+            if delta < 0 { y += shift > 0 ? min(shift, -delta) : max(shift, delta) }
+            panel.setFrame(NSRect(x: f.origin.x, y: y, width: f.width, height: f.height + delta),
                            display: true)
             // count only what the window REALLY grew: at screen height the
             // grow is clamped (the drawer eats editor space instead), and
             // closing it must not then shrink the window by the full height
             drawerInsetNow = max(0, was + panel.frame.height - f.height)
+            noteDrawerFrame(baseY: f.origin.y + shift)
             // the window server keeps the old outline otherwise (a ghost of
             // the terminal band under a closed drawer)
             panel.invalidateShadow()
