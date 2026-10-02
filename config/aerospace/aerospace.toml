@@ -1,3 +1,12 @@
+# Quick reference (AeroSpace CLI):
+#   aerospace list-windows --all --format "%{window-id} | %{app-name} | %{workspace} | %{window-parent-container-layout} | %{window-title}"
+#   aerospace layout v_accordion
+#   aerospace layout h_accordion
+#   aerospace layout v_tiles
+#   aerospace layout h_tiles
+#   aerospace reload-config && sketchybar --reload
+# re-apply rules to open windows (generic, no restart)
+#   aerospace run-callback --for-every-window on-window-detected  
 after-startup-command = [
 # sketchybar is also managed by brew services; sketchybar has built-in
 # detection of an already-running process, so this is a no-op if brew already
@@ -80,7 +89,7 @@ automatically-unhide-macos-hidden-apps = true
 # even when they are invisible.
 # This config option is only available since 'config-version = 2'
 # Fallback value (if you omit the key): persistent-workspaces = []
-persistent-workspaces = ["M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+persistent-workspaces = ["G", "M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 # A callback that runs every time binding mode changes
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -118,7 +127,7 @@ on-window-detected = [
 #{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
-{ if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace 3'] },
+{ if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace G'] },
 { if = 'test %{app-bundle-id} = org.jkiss.dbeaver.core.product', run = ['move-node-to-workspace 3'] },
 { if = 'test %{app-bundle-id} = com.microsoft.Excel', run = ['move-node-to-workspace 8'] },
 { if = 'test %{app-bundle-id} = com.google.Chrome', run = ['move-node-to-workspace Y'] },
@@ -171,6 +180,7 @@ outer.top =        [{ monitor."built-in" = 15 }, 48]  # notch screen: visibleFra
 6 = ['main']
 7 = ['main']
 8 = ['main']
+G = ['main']
 M = ['main']
 Y = ['main']
 W = ['main']
@@ -235,9 +245,10 @@ W = ['main']
     alt-7 = 'workspace 7'
     alt-8 = 'workspace 8'
     alt-9 = 'workspace 9'
+    alt-g = 'workspace G'
+    alt-m = 'workspace M'
     alt-y = 'workspace Y'
     alt-w = 'workspace W'
-    alt-m = 'workspace M'
 
     alt-shift-1 = 'move-node-to-workspace 1 --focus-follows-window'
     alt-shift-2 = 'move-node-to-workspace 2 --focus-follows-window'
@@ -248,9 +259,10 @@ W = ['main']
     alt-shift-7 = 'move-node-to-workspace 7 --focus-follows-window'
     alt-shift-8 = 'move-node-to-workspace 8 --focus-follows-window'
     alt-shift-9 = 'move-node-to-workspace 9 --focus-follows-window'
+    alt-shift-g = 'move-node-to-workspace G --focus-follows-window'
+    alt-shift-m = 'move-node-to-workspace M --focus-follows-window'
     alt-shift-y = 'move-node-to-workspace Y --focus-follows-window'
     alt-shift-w = 'move-node-to-workspace W --focus-follows-window'
-    alt-shift-m = 'move-node-to-workspace M --focus-follows-window'
 
     # See: https://nikitabobko.github.io/AeroSpace/commands#workspace-back-and-forth
     alt-tab = 'workspace-back-and-forth'

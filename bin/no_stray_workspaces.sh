@@ -11,7 +11,7 @@
 # Triggered by: sketchybar display_change/system_woke (monitor plug/unplug,
 # wake) and aerospace exec-on-workspace-change. Fast path = one aerospace call.
 
-ALLOWED=(M Y W 1 2 3 4 5 6 7 8 9)
+ALLOWED=(G M Y W 1 2 3 4 5 6 7 8 9)
 is_allowed() { case " ${ALLOWED[*]} " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # Display events fire before AeroSpace has placed the new monitor's workspace.

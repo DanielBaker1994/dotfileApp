@@ -54,7 +54,7 @@ MAX_ICONS=3
 # runs rarely instead of hammering aerospace with 2 CLI calls every 2 seconds.
 MONITOR_UPDATE_FREQ=30
 # Bar order (AeroSpace lists workspaces alphabetically, which we don't want).
-SPACE_ORDER=(M Y W 1 2 3 4 5 6 7 8 9)
+SPACE_ORDER=(G M Y W 1 2 3 4 5 6 7 8 9)
 
 CONFIG_DIR="${CONFIG_DIR:-$HOME/.config/sketchybar}"
 ICON_MAP="$HOME/.config/sketchybar/sketchybar-app-font/dist/icon_map.json"
