@@ -25,7 +25,7 @@ case "$ROOT" in *.app/Contents/Resources)
     LINK_ROOT="$(cd "$WS_HOME" 2>/dev/null && pwd -P)" ;;
 esac
 
-GREEN='\033[32m'; RED='\033[31m'; CYAN='\033[1;36m'; DIM='\033[2m'; RESET='\033[0m'
+GREEN='\033[32m'; RED='\033[31m'; CYAN='\033[1;36m'; RESET='\033[0m'
 ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
 warn() { printf "${RED}  ✘ %s${RESET}\n" "$*"; }
 step() { printf "\n${CYAN}== %s ==${RESET}\n" "$*"; }
@@ -73,8 +73,10 @@ killall tccd 2>/dev/null || true
 ok "permissions removed"
 
 step "removing caches and runtime files"
-# shellcheck disable=SC2086 — space-separated lists from install.conf
+# space-separated lists from install.conf: split on purpose
+# shellcheck disable=SC2086
 rm -rf $CACHE_DIRS
+# shellcheck disable=SC2086
 rm -f $RUNTIME_FILES
 ok "caches removed"
 

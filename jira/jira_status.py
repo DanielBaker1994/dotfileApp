@@ -116,10 +116,6 @@ def set_progress(**kw) -> None:
     update(fn)
 
 
-def clear_progress() -> None:
-    update(lambda d: d.update(progress=None))
-
-
 def endpoint_entry(d: dict, name: str) -> dict:
     eps = d.setdefault("endpoints", [])
     for e in eps:

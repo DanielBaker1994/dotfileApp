@@ -83,23 +83,11 @@ enum RichText {
 
     // pandoc: gfm -> an HTML fragment (nil = no pandoc / it failed)
     static func pandocHTML(_ md: String) -> String? {
-        guard available else { return nil }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: pandocBin)
-        p.arguments = ["-f", "gfm", "-t", "html", "--syntax-highlighting=none", "--wrap=none"]
-        let inP = Pipe(), outP = Pipe()
-        p.standardInput = inP
-        p.standardOutput = outP
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = Data(md.utf8)
-        DispatchQueue.global(qos: .userInitiated).async {
-            inP.fileHandleForWriting.write(data)
-            try? inP.fileHandleForWriting.close()
-        }
-        let out = outP.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return p.terminationStatus == 0 ? String(decoding: out, as: UTF8.self) : nil
+        guard available,
+              let r = try? runProcess(pandocBin, ["-f", "gfm", "-t", "html", "--syntax-highlighting=none",
+                                                  "--wrap=none"], stdin: md),
+              r.code == 0 else { return nil }
+        return r.out
     }
 
     // every style inline, in the target's own type

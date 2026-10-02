@@ -352,16 +352,7 @@ final class RecentFiles {
     }
 
     private func run(_ exe: String, _ args: [String]) -> [String] {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        ((try? runProcess(exe, args))?.out ?? "").split(separator: "\n").map(String.init)
     }
 
     // MARK: noise filter

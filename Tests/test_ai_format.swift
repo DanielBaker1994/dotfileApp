@@ -1,4 +1,4 @@
-// sources: AIFormat.swift
+// sources: AIFormat.swift ProcessRun.swift
 // The AI view's text helpers (AIFormat.swift): rule files and their chain,
 // comma rows -> tables, the keep-words check. No model needed.
 // Usage: bin/run-tests.sh ai      (the model itself: bin/run-tests.sh ai-live)

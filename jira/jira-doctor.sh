@@ -28,7 +28,6 @@ WS_BIN="$WS_APP/Contents/MacOS/workspace-switcher"
 CONF_JSON="$HOME/.config/jira/config.json"
 CACHE="$HOME/.cache/jira"
 STATUS="$CACHE/status.json"
-JSON_DIR="$HOME/.cache/workspace-switcher/jira_json"
 PLIST_SRC="$WS_ROOT/jira/com.jira.poll.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
 LABEL="com.jira.poll"
@@ -76,7 +75,7 @@ else
     fi
 fi
 for s in sketchybar borders; do
-    if brew services list 2>/dev/null | grep -q "^$s[[:space:]]*started"; then
+    if brew services list 2>/dev/null | grep -q "^${s}[[:space:]]*started"; then
         ok "brew service $s: started"
     else
         warn "brew service $s: not started (brew services start $s)"

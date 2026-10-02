@@ -1080,7 +1080,7 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
     def labels(proj, i):
         jql = f"project = \"{jira_config.jql_quote(proj)}\" AND labels is not EMPTY ORDER BY updated DESC"
         seen, n = set(), 0
-        for got, total, last in c.search_pages(jql, "labels", max_total=cap,
+        for got, total, _ in c.search_pages(jql, "labels", max_total=cap,
                                                page_size=min(cap, c.sd("max_results_search"))):
             n += len(got)
             for iss in got:

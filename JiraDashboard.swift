@@ -333,52 +333,15 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 }
 
-// The Jira Config window wears the popup windows' look: titled (sheets,
-// native resize) but with the titlebar hidden, the card's blur + tint +
-// border, and the SAME header strip (✕ close · app icon · title). The
-// invisible titlebar swallows header clicks, so they're caught here (as in
-// PopupBaseWindow); drags stay native.
-final class JiraConfigNSWindow: NSWindow {
-    var cornerRadius: CGFloat = 10
-    @objc func _cornerRadius() -> CGFloat { cornerRadius }
-    var headerBand: CGFloat = 0
-    var onHeaderClick: ((NSPoint) -> Void)?    // flipped (top-down) window coords
-    private var down: NSPoint?
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-    override func sendEvent(_ event: NSEvent) {
-        if headerBand > 0 {
-            switch event.type {
-            case .leftMouseDown where event.locationInWindow.y >= frame.height - headerBand:
-                down = NSEvent.mouseLocation
-            case .leftMouseUp:
-                if let d = down {
-                    down = nil
-                    let m = NSEvent.mouseLocation
-                    if hypot(m.x - d.x, m.y - d.y) < 4 {
-                        let l = event.locationInWindow
-                        onHeaderClick?(NSPoint(x: l.x, y: frame.height - l.y))
-                    }
-                }
-            default: break
-            }
-        }
-        super.sendEvent(event)
-    }
-}
-
-final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
-                                 NSTableViewDelegate {
+// The Jira Config window: a card window (CardWindow.swift) — the popup
+// windows' look, titled for sheets + native resize.
+final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private static var live: JiraDashboardWindow?
 
     private enum Item: Equatable {
         case group(String), job(String), addJob, setup, liveSearch, connection, definitions
     }
 
-    private weak var controller: SwitcherController?
-    private let window: JiraConfigNSWindow
-    private var chrome: PopupChrome?
-    private var monitor: Any?
     private var timer: Timer?
     private var describing = false
 
@@ -465,13 +428,9 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     // the open window (the shared window shows it as its "config" view)
     static var current: JiraDashboardWindow? { live }
-    // shared window: Esc = back (after the unsaved-edits check), ✕ / Cmd+W
-    // = hide the whole shared window; nil = a standalone window (closes)
+    // shared window: Esc = back (after the unsaved-edits check); nil = a
+    // standalone window (closes)
     var onSlotBack: (() -> Void)?
-    var onSlotHide: (() -> Void)?
-    private var slotNavClick: ((Int) -> Void)?
-    // Ctrl+Tab / Ctrl+Shift+Tab: the shared window's next / previous view
-    var onCycleView: ((Int) -> Void)?
 
     // present: false = create / refresh only (the shared window shows it)
     static func show(controller: SwitcherController, present: Bool = true) {
@@ -495,17 +454,6 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         w.window.makeKeyAndOrderFront(nil)
     }
 
-    // the shared window's header: home / back / notes | jira
-    func setSlotNav(_ buttons: [(String, Int)], icons: [(image: NSImage, id: Int, tip: String)],
-                    icon: NSImage, on: Int, click: @escaping (Int) -> Void) {
-        chrome?.extraButtons = buttons
-        chrome?.navIcons = icons
-        chrome?.navOn = on
-        chrome?.headerIcon = icon
-        chrome?.needsDisplay = true
-        slotNavClick = click
-    }
-
     // leave by Esc: back in the shared window, else close
     private func escape() {
         guard let back = onSlotBack else { close(); return }
@@ -517,119 +465,26 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         }
     }
 
-    // ✕ / Cmd+W: hide the shared window (this view stays, edits and all)
-    private func closeOrHide() {
+    // ✕ / Cmd+W: hide the shared window (this view stays, edits and all);
+    // standalone: close (after the unsaved-edits check)
+    override func closeOrHide() {
         if let hide = onSlotHide { hide() } else { close() }
     }
 
     private init(controller: SwitcherController) {
-        self.controller = controller
         let W = CGFloat(Double(jiraConfigValue("dashboard-width") ?? "") ?? 1080)
         let H = CGFloat(Double(jiraConfigValue("dashboard-height") ?? "") ?? 720)
-        window = JiraConfigNSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
-                                    styleMask: [.titled, .closable, .resizable, .miniaturizable,
-                                                .fullSizeContentView],
-                                    backing: .buffered, defer: false)
-        super.init()
-        window.title = "Jira Config"
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 860, height: 520)
-        // same level as the setup window: above the popup windows, which
-        // float at .popUpMenu
+        super.init(controller: controller, frame: NSRect(x: 0, y: 0, width: W, height: H),
+                   title: "Jira Config", minSize: NSSize(width: 860, height: 520))
+        // standalone: above the popups like the setup window (the shared
+        // window brings it down to normal: SharedWindow.present)
         window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
-        window.delegate = self
-        window.contentView = themedRoot(buildContent())
+        // denser than the list windows' card: this window is all form text
+        window.contentView = themedRoot(buildContent(), name: "jira-config", colors: JC.colors,
+                                        headerColor: jiraHeaderColor, icon: jiraAppIcon,
+                                        title: "Jira Config", minTint: 0.92)
         colEditor.onChange = { [weak self] in self?.markDirty() }
         colEditor.sheetWindow = window
-        installKeys()
-    }
-
-    // the popup windows' surface around `content`: blur + card tint + border,
-    // rounded like them, with their header strip on top
-    private func themedRoot(_ content: NSView) -> NSView {
-        var cfg = PopupConfig(name: "jira-config")
-        cfg.colors = JC.colors
-        cfg.headerHeight = 30
-        cfg.titlePill = false
-        cfg.headerColor = jiraHeaderColor
-        let card = cfg.colors.base
-        let radius = cfg.cornerRadius + 1
-        window.cornerRadius = radius
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        for b: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(b)?.isHidden = true
-        }
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.appearance = NSAppearance(named: cfg.colors.isLight ? .aqua : .darkAqua)
-
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.cornerRadius = radius
-        root.layer?.masksToBounds = true
-        let fx = NSVisualEffectView()
-        fx.material = cfg.material
-        fx.blendingMode = .behindWindow
-        fx.state = .active
-        let tint = NSView()
-        tint.wantsLayer = true
-        // denser than the list windows' card: this window is all form text
-        tint.layer?.backgroundColor = card.withAlphaComponent(max(cfg.tintAlpha, 0.92)).cgColor
-        tint.layer?.borderColor = cfg.colors.border.cgColor
-        tint.layer?.borderWidth = 1
-        tint.layer?.cornerRadius = radius
-        let ch = PopupChrome(config: cfg)
-        ch.dragHeaderHeight = cfg.headerHeight
-        ch.headerIcon = jiraAppIcon
-        ch.headerTitle = "Jira Config"
-        ch.copyPathLabel = ""
-        ch.copyConfigLabel = ""
-        chrome = ch
-        for v in [fx, tint, ch, content] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(v)
-        }
-        // pin the blur + tint WITHOUT re-adding them: addSubview on a view
-        // that's already a child moves it to the TOP, which buried the
-        // header and every control under the 92%-opaque tint (a blank card)
-        for v in [fx, tint] as [NSView] {
-            NSLayoutConstraint.activate([
-                v.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-                v.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-                v.topAnchor.constraint(equalTo: root.topAnchor),
-                v.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            ])
-        }
-        // every themed control in the form takes the window palette
-        func walk(_ v: NSView) {
-            (v as? PopupThemeable)?.applyColors(cfg.colors)
-            v.subviews.forEach(walk)
-        }
-        walk(content)
-        NSLayoutConstraint.activate([
-            ch.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            ch.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            ch.topAnchor.constraint(equalTo: root.topAnchor),
-            ch.heightAnchor.constraint(equalToConstant: cfg.headerHeight),
-            content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 1),
-            content.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -1),
-            content.topAnchor.constraint(equalTo: ch.bottomAnchor),
-            content.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -1),
-        ])
-        window.headerBand = cfg.headerHeight
-        window.onHeaderClick = { [weak self] p in
-            guard let self, let ch = self.chrome else { return }
-            if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
-                self.closeOrHide()
-            } else if let hit = ch.extraButtonRects.first(where: { $0.value.contains(p) }) {
-                self.slotNavClick?(hit.key)
-            } else if ch.headerIcon != nil, ch.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
-                self.showIconMenu()
-            }
-        }
-        return root
     }
 
     // MARK: layout helpers
@@ -722,10 +577,10 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         openMenu.action = #selector(openFile(_:))
         openMenu.toolTip = "Open a jira file in the notes window"
         stopButton.isHidden = true
-        (stopButton as? ThemedPushButton)?.role = .danger
-        (saveButton as? ThemedPushButton)?.role = .primary
-        (deleteButton as? ThemedPushButton)?.role = .danger
-        (defRemove as? ThemedPushButton)?.role = .danger
+        stopButton.role = .danger
+        saveButton.role = .primary
+        deleteButton.role = .danger
+        defRemove.role = .danger
         let header = row([
             button(enableButton, #selector(toggleEnabled(_:)), tip: "[jira] enabled — the Jira window + the launchd poll agent"),
             button(ThemedPushButton(title: "Setup…", target: nil, action: nil), #selector(setup(_:)), tip: "Site, token, auth"),
@@ -834,41 +689,25 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
 
     // MARK: keys (rule.md #1: edit shortcuts in every field)
 
-    private func installKeys() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self else { return e }
-            // a sheet (column / definition editor) is its own key window
-            if let sheet = self.window.attachedSheet {
-                return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
-            }
-            guard self.window.isKeyWindow else { return e }
-            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let cmd = mods.contains(.command), ctrl = mods.contains(.control)
-            let fr = self.window.firstResponder
-            let editing = (fr as? NSTextView)?.isEditable == true
-            if ctrl && !cmd && e.keyCode == 48, let cycle = self.onCycleView {     // Ctrl+Tab: next view
-                cycle(mods.contains(.shift) ? -1 : 1)
-                return nil
-            }
-            if e.keyCode == 53 {                       // Esc: end an edit, else close
-                if editing { self.window.makeFirstResponder(nil); return nil }
-                self.escape()
-                return nil
-            }
-            if cmd && e.keyCode == 13 { self.closeOrHide(); return nil }     // Cmd+W
-            if cmd && e.keyCode == 15 { self.refresh(); return nil }         // Cmd+R
-            if cmd && e.keyCode == 1 { self.save(nil); return nil }          // Cmd+S
-            // Return edits / Delete removes the selected column or definition
-            if !cmd, fr === self.colEditor.table {
-                if e.keyCode == 36 { self.colEditor.editSelected(); return nil }
-                if e.keyCode == 51 { self.colEditor.remove(nil); return nil }
-            }
-            if !cmd, fr === self.defTable, self.defTab.editable {
-                if e.keyCode == 36 { self.defEditClicked(nil); return nil }
-                if e.keyCode == 51 { self.defRemoveClicked(nil); return nil }
-            }
-            return JiraEditKeys.route(e, in: self.window) ? nil : e
+    override func handleKey(_ e: NSEvent) -> Bool {
+        let cmd = e.modifierFlags.contains(.command)
+        let fr = window.firstResponder
+        if e.keyCode == 53 {                       // Esc: end an edit, else close
+            if (fr as? NSTextView)?.isEditable == true { window.makeFirstResponder(nil) } else { escape() }
+            return true
         }
+        if cmd && e.keyCode == 15 { refresh(); return true }        // Cmd+R
+        if cmd && e.keyCode == 1 { save(nil); return true }         // Cmd+S
+        // Return edits / Delete removes the selected column or definition
+        if !cmd, fr === colEditor.table {
+            if e.keyCode == 36 { colEditor.editSelected(); return true }
+            if e.keyCode == 51 { colEditor.remove(nil); return true }
+        }
+        if !cmd, fr === defTable, defTab.editable {
+            if e.keyCode == 36 { defEditClicked(nil); return true }
+            if e.keyCode == 51 { defRemoveClicked(nil); return true }
+        }
+        return false
     }
 
     // MARK: data
@@ -997,7 +836,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         problemsLine.stringValue = probs.map { "⚠ " + $0 }.joined(separator: "\n")
         problemsLine.isHidden = probs.isEmpty
         enableButton.title = enabled ? "Disable Jira" : "Enable Jira"
-        (enableButton as? ThemedPushButton)?.role = enabled ? .normal : .primary
+        enableButton.role = enabled ? .normal : .primary
         stopButton.isHidden = !(lockHeld || !JiraPoll.running.isEmpty)
 
         while openMenu.numberOfItems > 1 { openMenu.removeItem(at: 1) }
@@ -1682,8 +1521,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     // the kitchen sink (header icon menu): the same files as Open…
-    private func showIconMenu() {
-        guard let ch = chrome else { return }
+    override func showIconMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
         for it in (openMenu.menu?.items ?? []).dropFirst() {
@@ -1694,9 +1532,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
             item.toolTip = it.toolTip
             menu.addItem(item)
         }
-        ch.iconMenuOpen = true
-        menu.popUp(positioning: nil, at: NSPoint(x: ch.iconButtonRect.minX, y: ch.iconButtonRect.maxY + 4), in: ch)
-        ch.iconMenuOpen = false
+        popUpIconMenu(menu)
     }
 
     private func openPath(_ path: String) {
@@ -2554,7 +2390,7 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
         }
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
+    override func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard dirty else { return true }
         confirmDiscard { [weak self] in self?.window.close() }
         return false
@@ -2570,23 +2406,15 @@ final class JiraDashboardWindow: NSObject, NSWindowDelegate, NSTableViewDataSour
     }
 
     func windowWillClose(_ notification: Notification) { teardown() }
-}
 
-// the shared window's "config" view (SharedWindow.swift): parked = ordered
-// out with its refresh timer stopped; unsaved edits stay until it returns
-extension JiraDashboardWindow: SlotMember {
-    var slotWindow: NSWindow { window }
-    var slotShown: Bool { window.isVisible }
-    var slotBaseFrame: NSRect { window.frame }
-    func slotPark(stopVoice: Bool) {
+    // the shared window's "config" view (SharedWindow.swift): parked = ordered
+    // out with its refresh timer stopped; unsaved edits stay until it returns
+    override func slotPark(stopVoice: Bool) {
         timer?.invalidate()
         timer = nil
-        window.orderOut(nil)
+        super.slotPark(stopVoice: stopVoice)
     }
-    func slotShow(frame: NSRect?) {
-        if let f = frame { window.setFrame(f, display: false) }
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+    override func didShow() {
         if timer == nil {
             refresh()
             startTimer()

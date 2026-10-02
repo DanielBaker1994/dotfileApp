@@ -322,6 +322,22 @@ private func popupAttributedTag(_ tag: String, font: NSFont,
 
 // MARK: - Shared socket helpers (framework + host app both use these)
 
+// append `text` to the file at `path`, creating it (debug / diagnostic logs)
+public func appendToFile(_ path: String, _ text: String) {
+    let data = Data(text.utf8)
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile()
+        fh.write(data)
+        try? fh.close()
+    } else {
+        FileManager.default.createFile(atPath: path, contents: data)
+    }
+}
+
+// the daemon's debug log (every window's hide, SharedWindow's reasons,
+// config problems, the controller's `log`)
+public let debugLogPath = "/tmp/ws-debug.log"
+
 public func popupTmpDir() -> String {
     let t = ProcessInfo.processInfo.environment["TMPDIR"] ?? ""
     let d = t.isEmpty ? "/tmp/" : t
@@ -1333,18 +1349,51 @@ final class PopupBackdrop: NSView {
             }
             return f
         }
+
+        // the edges within `hit` of `p` in a flipped view of `size`
+        static func at(_ p: NSPoint, in size: NSSize, hit: CGFloat = 8) -> Edge {
+            var e: Edge = []
+            if p.x <= hit { e.insert(.left) }
+            if p.x >= size.width - hit { e.insert(.right) }
+            if p.y <= hit { e.insert(.top) }
+            if p.y >= size.height - hit { e.insert(.bottom) }
+            return e
+        }
+    }
+
+    // A hand-rolled edge / corner drag (borderless panels; titled windows
+    // resize natively): the window follows the mouse from the grab on.
+    struct Resize {
+        private(set) var edges: Edge = []
+        private var startFrame = NSRect.zero
+        private var startPoint = NSPoint.zero
+
+        mutating func begin(_ e: Edge, in window: NSWindow) {
+            edges = e
+            startFrame = window.frame
+            // ABSOLUTE screen coords, not locationInWindow: window-relative
+            // deltas go to ~0 once the window catches up with the mouse,
+            // which makes the window jitter instead of following the cursor
+            startPoint = NSEvent.mouseLocation
+        }
+        func drag(_ window: NSWindow) {
+            guard !edges.isEmpty else { return }
+            let m = NSEvent.mouseLocation
+            let f = edges.resized(startFrame, dx: m.x - startPoint.x, dy: m.y - startPoint.y,
+                                  minW: 120, minH: 100)
+            window.setFrame(clampToScreen(f), display: true)
+            window.invalidateShadow()
+        }
+        // true = a resize just ended
+        mutating func end() -> Bool {
+            defer { edges = [] }
+            return !edges.isEmpty
+        }
     }
 
     let config: PopupConfig
     private var trackingArea: NSTrackingArea?
-    private var startFrame: NSRect = .zero
-    private var startPoint: NSPoint = .zero
-    private var dragEdges: Edge = []
-    private var draggingWindow = false
-
-    private let minW: CGFloat = 120
-    private let minH: CGFloat = 100
-    private let hit: CGFloat = 8  // resize hit zone around edges/corners
+    private var resize = Resize()
 
     override var isFlipped: Bool { true }
 
@@ -1371,14 +1420,7 @@ final class PopupBackdrop: NSView {
         return super.hitTest(point)
     }
 
-    private func edges(at p: NSPoint) -> Edge {
-        var e: Edge = []
-        if p.x <= hit { e.insert(.left) }
-        if p.x >= bounds.width - hit { e.insert(.right) }
-        if p.y <= hit { e.insert(.top) }
-        if p.y >= bounds.height - hit { e.insert(.bottom) }
-        return e
-    }
+    private func edges(at p: NSPoint) -> Edge { Edge.at(p, in: bounds.size) }
 
     private func cursor(for e: Edge) -> NSCursor {
         switch e {
@@ -1420,9 +1462,7 @@ final class PopupBackdrop: NSView {
         let e = edges(at: p)
         if config.enableResize && !e.isEmpty, let win = window,
            !win.styleMask.contains(.resizable) {
-            dragEdges = e
-            startFrame = win.frame
-            startPoint = NSEvent.mouseLocation   // absolute screen coords
+            resize.begin(e, in: win)
             return
         }
         if config.enableDrag, let win = window {
@@ -1436,25 +1476,11 @@ final class PopupBackdrop: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let win = window else { return }
-        let m = NSEvent.mouseLocation   // absolute screen coords, not
-        let dx = m.x - startPoint.x     // locationInWindow — window-relative
-        let dy = m.y - startPoint.y     // deltas collapse once the window
-                                        // catches up with the mouse (jitter)
-        if !dragEdges.isEmpty {
-            let f = dragEdges.resized(startFrame, dx: dx, dy: dy, minW: minW, minH: minH)
-            win.setFrame(clampToScreen(f), display: true)
-            win.invalidateShadow()
-        } else if draggingWindow {
-            win.setFrameOrigin(NSPoint(x: startFrame.origin.x + dx,
-                                       y: startFrame.origin.y + dy))
-            win.invalidateShadow()
-        }
+        if let win = window { resize.drag(win) }
     }
 
     override func mouseUp(with event: NSEvent) {
-        dragEdges = []
-        draggingWindow = false
+        _ = resize.end()
         super.mouseUp(with: event)
     }
 
@@ -2715,12 +2741,7 @@ final class PopupTableHeaderView: NSView {
         }
         if let fit = onFit {
             let menu = NSMenu()
-            let item = NSMenuItem(title: "Fit Columns to Content", action: #selector(MenuActionTarget.run),
-                                  keyEquivalent: "")
-            let t = MenuActionTarget(action: fit)
-            item.target = t
-            item.representedObject = t   // keep the target alive with the menu
-            menu.addItem(item)
+            menu.addItem(menuItem("Fit Columns to Content", fit))
             NSMenu.popUpContextMenu(menu, with: event, for: self)
             return
         }
@@ -5908,20 +5929,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     // DOCX is a zip — pull word/document.xml out via `unzip -p` and collect
     // the paragraph text
     private static func docxText(_ path: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        p.arguments = ["-p", path, "word/document.xml"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        // drain BEFORE waiting: a document.xml over the pipe buffer (64 KB)
-        // would block unzip forever, and the preview queue with it
-        let xmlData = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        guard let xml = String(data: xmlData, encoding: .utf8) else { return nil }
-        let parser = XMLParser(data: Data(xml.utf8))
+        guard let r = try? runProcess("/usr/bin/unzip", ["-p", path, "word/document.xml"]),
+              r.code == 0 else { return nil }
+        let parser = XMLParser(data: Data(r.out.utf8))
         let ex = DocxTextExtractor()
         parser.delegate = ex
         parser.parse()
@@ -6225,7 +6235,7 @@ final class PopupChrome: NSView {
     // live mic meter (recording control bar): when meterEnabled, the chrome
     // draws a permanent bottom bar with a big record/stop button, pause/
     // resume, real-time level bars and the elapsed time
-var meterEnabled = false {
+    var meterEnabled = false {
         didSet {
             window?.invalidateCursorRects(for: self)
             needsDisplay = true
@@ -6281,10 +6291,7 @@ var meterEnabled = false {
     // "copy all" / "copy N" (row copy selection); nil = not drawn
     var copyRowsButtonRect: NSRect = .zero
     var copyRowsLabel: String?
-    private var startFrame: NSRect = .zero
-    private var startPoint: NSPoint = .zero
-    private var dragEdges: PopupBackdrop.Edge = []
-    private var draggingWindow = false
+    private var resize = PopupBackdrop.Resize()
     // header button feedback: flips to "✓ …" for a moment after a copy
     private var feedback: Int = 0          // 0 none, 1 copy, 2 config
     private var feedbackTimer: DispatchWorkItem?
@@ -6311,10 +6318,6 @@ var meterEnabled = false {
     // segment rects (fb id -> rect) set during draw, used for hover hit-testing
     private var headerSegRects: [(Int, NSRect)] = []
     private var trackingArea: NSTrackingArea?
-
-    private let minW: CGFloat = 120
-    private let minH: CGFloat = 100
-    private let hit: CGFloat = 8
 
     override var isFlipped: Bool { true }
 
@@ -6383,15 +6386,6 @@ var meterEnabled = false {
         }
     }
 
-    private func edges(at p: NSPoint) -> PopupBackdrop.Edge {
-        var e: PopupBackdrop.Edge = []
-        if p.x <= hit { e.insert(.left) }
-        if p.x >= bounds.width - hit { e.insert(.right) }
-        if p.y <= hit { e.insert(.top) }
-        if p.y >= bounds.height - hit { e.insert(.bottom) }
-        return e
-    }
-
     // hand-rolled edge resize only for windows the system can't resize
     // (borderless panels); titled windows use native .resizable
     private var customResize: Bool {
@@ -6402,7 +6396,7 @@ var meterEnabled = false {
     // header exists — the header owns the top strip, otherwise grabbing it
     // near the edge starts a resize while trying to move the window.
     private func resizeEdges(at p: NSPoint) -> PopupBackdrop.Edge {
-        var e = edges(at: p)
+        var e = PopupBackdrop.Edge.at(p, in: bounds.size)
         if dragHeaderHeight > 0 {
             e.remove(.top)
         }
@@ -6432,13 +6426,8 @@ var meterEnabled = false {
                 return
             }
         }
-        if customResize && !resizeEdges(at: p).isEmpty {
-            dragEdges = resizeEdges(at: p)
-            startFrame = window?.frame ?? .zero
-            // ABSOLUTE screen coords, not locationInWindow: window-relative
-            // deltas go to ~0 once the window catches up with the mouse, which
-            // makes the window jitter instead of following the cursor
-            startPoint = NSEvent.mouseLocation
+        if customResize, let win = window, !resizeEdges(at: p).isEmpty {
+            resize.begin(resizeEdges(at: p), in: win)
         } else {
             // Move via the native window drag. These windows have a real
             // (hidden) titlebar for the AX close button; hand-rolling
@@ -6449,38 +6438,20 @@ var meterEnabled = false {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let win = window else { return }
-        let m = NSEvent.mouseLocation
-        let dx = m.x - startPoint.x
-        let dy = m.y - startPoint.y
-        if !dragEdges.isEmpty {
-            let f = dragEdges.resized(startFrame, dx: dx, dy: dy, minW: minW, minH: minH)
-            win.setFrame(clampToScreen(f), display: true)
-            win.invalidateShadow()
-        } else if draggingWindow {
-            // moves don't need shadow invalidation — the shadow follows the
-            // frame; invalidating on every event causes drag jank
-            win.setFrameOrigin(NSPoint(x: startFrame.origin.x + dx,
-                                       y: startFrame.origin.y + dy))
-        }
+        if let win = window { resize.drag(win) }
     }
 
     override func mouseUp(with event: NSEvent) {
-        let didResize = !dragEdges.isEmpty
-        dragEdges = []
-        draggingWindow = false
-        if didResize {
-            window?.invalidateShadow()
-        }
+        if resize.end() { window?.invalidateShadow() }
         super.mouseUp(with: event)
     }
 
     // Nerd-font glyphs (BMP PUA + Supplementary PUA-A codepoints, e.g. the
-// terminal / file-browser icons) only measure and render correctly in a Nerd
-// Font — a label carrying one gets the terminal's font so the segment sizes
-// to the real glyph instead of a missing-glyph box (which both under-measures
-// and draws a tofu square). Nerd Fonts v3 moved MDI icons to U+F0000-U+F2FDF.
-private func headerButtonFont(_ label: String) -> NSFont {
+    // terminal / file-browser icons) only measure and render correctly in a Nerd
+    // Font — a label carrying one gets the terminal's font so the segment sizes
+    // to the real glyph instead of a missing-glyph box (which both under-measures
+    // and draws a tofu square). Nerd Fonts v3 moved MDI icons to U+F0000-U+F2FDF.
+    private func headerButtonFont(_ label: String) -> NSFont {
         let scalars = label.unicodeScalars
         let pua = { (v: UInt32) in
             (0xE000...0xF8FF).contains(v)
@@ -6663,80 +6634,12 @@ private func headerButtonFont(_ label: String) -> NSFont {
                                y: pill.midY - sz.height / 2),
                    withAttributes: attrs)
         }
-        // app glyph pinned to the FAR-LEFT edge of the header (drawn even
-        // when the title is gone — e.g. jira/notes have no header label),
-        // vertically centered to line up with the header buttons
-        let closeRect = closeButtonRect
-        if !closeRect.isEmpty {
-            // ✕ close glyph: a quiet ghost chip, red on hover (traffic-light cue)
-            let dot = closeRect.insetBy(dx: 3, dy: 3)
-            let xColor: NSColor
-            if closeHovered {
-                let danger = config.colors.tone(.danger)
-                danger.setFill()
-                NSBezierPath(ovalIn: dot).fill()
-                xColor = ButtonStyle.readable(on: danger, preferred: config.colors.crust)
-            } else {
-                ButtonStyle.draw(dot, .idle, config.colors, radius: dot.height / 2, flat: true)
-                xColor = config.colors.dim
-            }
-            let r: CGFloat = 3.2
-            let x = NSBezierPath()
-            x.move(to: NSPoint(x: dot.midX - r, y: dot.midY - r))
-            x.line(to: NSPoint(x: dot.midX + r, y: dot.midY + r))
-            x.move(to: NSPoint(x: dot.midX + r, y: dot.midY - r))
-            x.line(to: NSPoint(x: dot.midX - r, y: dot.midY + r))
-            x.lineWidth = 1.6
-            x.lineCapStyle = .round
-            xColor.setStroke()
-            x.stroke()
-        }
-        if let icon = headerIcon {
-            // the app glyph is a MENU button (all window actions): a ghost
-            // pill with the icon + a ▾ chevron, lit on hover / while open
-            let isz: CGFloat = 16
-            let badge = iconButtonRect
-            let st: ButtonState = iconMenuOpen ? .on : iconHovered ? .hover : .idle
-            ButtonStyle.draw(badge, st, config.colors, radius: config.buttonRadius, flat: true)
-            popupDrawImage(icon, in: NSRect(x: badge.minX + 6,
-                                            y: badge.midY - isz / 2,
-                                            width: isz, height: isz))
-            ButtonStyle.chevron(in: NSRect(x: badge.maxX - 13, y: badge.midY - 4, width: 8, height: 8),
-                                color: ButtonStyle.text(st, config.colors))
-        }
+        drawCloseGlyph()
+        if let icon = headerIcon { drawIconMenuButton(icon) }
         // rects are rebuilt every draw: a button that moved (or went away)
         // must not keep catching clicks at its old spot
         extraButtonRects = [:]
-        if !navIcons.isEmpty {
-            // view switcher: one quiet well, a solid chip under the current
-            // view, a hover chip under the pointer; icons keep their colors
-            let first = navRect(0), last = navRect(navIcons.count - 1)
-            let well = NSRect(x: first.minX - 2, y: first.minY - 2,
-                              width: last.maxX - first.minX + 4, height: first.height + 4)
-            ButtonStyle.draw(well, .idle, config.colors, radius: config.buttonRadius + 1, flat: true)
-            var tips: [NSRect] = []
-            for (i, n) in navIcons.enumerated() {
-                let r = navRect(i)
-                let on = navOn == n.id, hov = hoveredSegment == n.id
-                if on || hov {
-                    ButtonStyle.draw(r, on ? (hov ? .onHover : .on) : .hover, config.colors,
-                                     radius: config.buttonRadius)
-                }
-                // the other views read a touch quieter than the current one
-                let isz: CGFloat = 18
-                popupDrawImage(n.image, in: NSRect(x: r.midX - isz / 2, y: r.midY - isz / 2,
-                                                   width: isz, height: isz),
-                               fraction: on || hov ? 1 : 0.7)
-                extraButtonRects[n.id] = r
-                tips.append(r)
-            }
-            if tips != navTipRects {
-                navTipRects = tips
-                removeAllToolTips()
-                navTipOwners = navIcons.map { $0.tip as NSString }
-                for (i, r) in tips.enumerated() { addToolTip(r, owner: navTipOwners[i], userData: nil) }
-            }
-        }
+        if !navIcons.isEmpty { drawNavIcons() }
         // header buttons (right side): "copy config" (copy the config file
         // path) and "copy path" (copy the open file path); each flips to
         // "✓ …" for a moment after a copy. The row-copy button (host-enabled
@@ -6817,109 +6720,186 @@ private func headerButtonFont(_ label: String) -> NSFont {
             (text as NSString).draw(at: NSPoint(x: x0, y: (dragHeaderHeight - sz.height) / 2),
                                     withAttributes: metaAttrs)
         }
-        // live recording control bar (bottom): big record/stop button, pause/
-        // resume, real-time level bars and elapsed — a permanent, unmistakable
-        // control while the voice window is open
-        if meterEnabled {
-            let strip = NSRect(x: 0, y: bounds.height - meterBarHeight,
-                               width: bounds.width, height: meterBarHeight)
-            // OPAQUE base so the editor's text never bleeds through the bar
-            config.colors.background.withAlphaComponent(1).setFill()
-            strip.fill()
-            NSColor.systemRed.withAlphaComponent(0.16).setFill()
-            strip.fill()
-            config.colors.dim.withAlphaComponent(0.35).setStroke()
-            let hair = NSBezierPath()
-            hair.lineWidth = 1
-            hair.move(to: NSPoint(x: 0, y: strip.minY + 0.5))
-            hair.line(to: NSPoint(x: bounds.width, y: strip.minY + 0.5))
-            hair.stroke()
-            let t = Date().timeIntervalSinceReferenceDate
-            if meterState == 3 {
-                // transcribing: just a dim label, buttons inactive
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-                    .foregroundColor: config.colors.dim,
-                ]
-                let s = "transcribing…" as NSString
-                let sz = s.size(withAttributes: attrs)
-                s.draw(at: NSPoint(x: (bounds.width - sz.width) / 2,
-                                   y: strip.midY - sz.height / 2), withAttributes: attrs)
-            } else {
-                let active = meterState == 1 || meterState == 2
-                // big record / stop button (left)
-                meterRecordRect = NSRect(x: 12, y: strip.midY - 13, width: 26, height: 26)
-                let mid = NSPoint(x: meterRecordRect.midX, y: meterRecordRect.midY)
-                if active {
-                    // stop: solid red rounded square
-                    NSColor.systemRed.setFill()
-                    NSBezierPath(roundedRect: NSRect(x: mid.x - 7, y: mid.y - 7,
-                                                     width: 14, height: 14),
-                                 xRadius: 3, yRadius: 3).fill()
-                } else {
-                    // record: red circle with a bright pulse ring
-                    let pulse = 0.65 + 0.35 * sin(t * 4)
-                    NSColor.systemRed.withAlphaComponent(CGFloat(pulse)).setStroke()
-                    let ring = NSBezierPath(ovalIn: NSRect(x: mid.x - 10, y: mid.y - 10,
-                                                           width: 20, height: 20))
-                    ring.lineWidth = 2
-                    ring.stroke()
-                    NSColor.systemRed.setFill()
-                    NSBezierPath(ovalIn: NSRect(x: mid.x - 6, y: mid.y - 6,
-                                                width: 12, height: 12)).fill()
-                }
-                // pause / resume button (only during a session)
-                if active {
-                    meterPauseRect = NSRect(x: 46, y: strip.midY - 11, width: 30, height: 22)
-                    NSColor.systemRed.withAlphaComponent(0.35).setFill()
-                    NSBezierPath(roundedRect: meterPauseRect,
-                                 xRadius: config.buttonRadius - 1,
-                                 yRadius: config.buttonRadius - 1).fill()
-                    if meterState == 1 {
-                        // pause: two bars
-                        NSColor.white.withAlphaComponent(0.9).setFill()
-                        NSRect(x: meterPauseRect.midX - 7, y: meterPauseRect.midY - 5,
-                               width: 4, height: 10).fill()
-                        NSRect(x: meterPauseRect.midX + 3, y: meterPauseRect.midY - 5,
-                               width: 4, height: 10).fill()
-                    } else {
-                        // resume: right-pointing triangle
-                        NSColor.white.withAlphaComponent(0.9).setFill()
-                        let tri = NSBezierPath()
-                        tri.move(to: NSPoint(x: meterPauseRect.midX - 4, y: meterPauseRect.midY - 5))
-                        tri.line(to: NSPoint(x: meterPauseRect.midX - 4, y: meterPauseRect.midY + 5))
-                        tri.line(to: NSPoint(x: meterPauseRect.midX + 6, y: meterPauseRect.midY))
-                        tri.close()
-                        tri.fill()
-                    }
-                }
-                // live level bars
-                let lvl = CGFloat(min(1, max(0, meterLevel)))
-                var bx: CGFloat = 88
-                for i in 0..<18 {
-                    let env = 0.35 + 0.65 * abs(sin(t * 4 + Double(i) * 0.55))
-                    let h = max(2, lvl * 16 * env)
-                    NSColor.systemRed.withAlphaComponent(0.9).setFill()
-                    NSBezierPath(roundedRect: NSRect(x: bx, y: strip.midY - h / 2,
-                                                     width: 4, height: h),
-                                 xRadius: 1.5, yRadius: 1.5).fill()
-                    bx += 7
-                }
-                // elapsed, right-aligned
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-                    .foregroundColor: config.colors.text.withAlphaComponent(0.9),
-                ]
-                let s = String(format: "%d:%02d", Int(meterElapsed) / 60,
-                               Int(meterElapsed) % 60) as NSString
-                let sz = s.size(withAttributes: attrs)
-                s.draw(at: NSPoint(x: bounds.width - sz.width - 14,
-                                   y: strip.midY - sz.height / 2), withAttributes: attrs)
+        if meterEnabled { drawMeterBar() }
+    }
+
+    // ✕ close glyph, far left: a quiet ghost chip, red on hover (traffic-light cue)
+    private func drawCloseGlyph() {
+        let closeRect = closeButtonRect
+        guard !closeRect.isEmpty else { return }
+        let dot = closeRect.insetBy(dx: 3, dy: 3)
+        let xColor: NSColor
+        if closeHovered {
+            let danger = config.colors.tone(.danger)
+            danger.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            xColor = ButtonStyle.readable(on: danger, preferred: config.colors.crust)
+        } else {
+            ButtonStyle.draw(dot, .idle, config.colors, radius: dot.height / 2, flat: true)
+            xColor = config.colors.dim
+        }
+        let r: CGFloat = 3.2
+        let x = NSBezierPath()
+        x.move(to: NSPoint(x: dot.midX - r, y: dot.midY - r))
+        x.line(to: NSPoint(x: dot.midX + r, y: dot.midY + r))
+        x.move(to: NSPoint(x: dot.midX + r, y: dot.midY - r))
+        x.line(to: NSPoint(x: dot.midX - r, y: dot.midY + r))
+        x.lineWidth = 1.6
+        x.lineCapStyle = .round
+        xColor.setStroke()
+        x.stroke()
+    }
+
+    // the app glyph, right of the ✕ (drawn even when the title is gone —
+    // e.g. jira/notes have no header label), centered on the header buttons
+    private func drawIconMenuButton(_ icon: NSImage) {
+        // the app glyph is a MENU button (all window actions): a ghost
+        // pill with the icon + a ▾ chevron, lit on hover / while open
+        let isz: CGFloat = 16
+        let badge = iconButtonRect
+        let st: ButtonState = iconMenuOpen ? .on : iconHovered ? .hover : .idle
+        ButtonStyle.draw(badge, st, config.colors, radius: config.buttonRadius, flat: true)
+        popupDrawImage(icon, in: NSRect(x: badge.minX + 6,
+                                        y: badge.midY - isz / 2,
+                                        width: isz, height: isz))
+        ButtonStyle.chevron(in: NSRect(x: badge.maxX - 13, y: badge.midY - 4, width: 8, height: 8),
+                            color: ButtonStyle.text(st, config.colors))
+    }
+
+    // the view switcher's icons (their rects join extraButtonRects)
+    private func drawNavIcons() {
+        // view switcher: one quiet well, a solid chip under the current
+        // view, a hover chip under the pointer; icons keep their colors
+        let first = navRect(0), last = navRect(navIcons.count - 1)
+        let well = NSRect(x: first.minX - 2, y: first.minY - 2,
+                          width: last.maxX - first.minX + 4, height: first.height + 4)
+        ButtonStyle.draw(well, .idle, config.colors, radius: config.buttonRadius + 1, flat: true)
+        var tips: [NSRect] = []
+        for (i, n) in navIcons.enumerated() {
+            let r = navRect(i)
+            let on = navOn == n.id, hov = hoveredSegment == n.id
+            if on || hov {
+                ButtonStyle.draw(r, on ? (hov ? .onHover : .on) : .hover, config.colors,
+                                 radius: config.buttonRadius)
             }
+            // the other views read a touch quieter than the current one
+            let isz: CGFloat = 18
+            popupDrawImage(n.image, in: NSRect(x: r.midX - isz / 2, y: r.midY - isz / 2,
+                                               width: isz, height: isz),
+                           fraction: on || hov ? 1 : 0.7)
+            extraButtonRects[n.id] = r
+            tips.append(r)
+        }
+        if tips != navTipRects {
+            navTipRects = tips
+            removeAllToolTips()
+            navTipOwners = navIcons.map { $0.tip as NSString }
+            for (i, r) in tips.enumerated() { addToolTip(r, owner: navTipOwners[i], userData: nil) }
         }
     }
 
-    // visual "copied" feedback after a header copy click (1 = copy, 2 = config)
+    // live recording control bar (bottom): big record/stop button, pause/
+    // resume, real-time level bars and elapsed — a permanent, unmistakable
+    // control while the voice window is open
+    private func drawMeterBar() {
+        let strip = NSRect(x: 0, y: bounds.height - meterBarHeight,
+                           width: bounds.width, height: meterBarHeight)
+        // OPAQUE base so the editor's text never bleeds through the bar
+        config.colors.background.withAlphaComponent(1).setFill()
+        strip.fill()
+        NSColor.systemRed.withAlphaComponent(0.16).setFill()
+        strip.fill()
+        config.colors.dim.withAlphaComponent(0.35).setStroke()
+        let hair = NSBezierPath()
+        hair.lineWidth = 1
+        hair.move(to: NSPoint(x: 0, y: strip.minY + 0.5))
+        hair.line(to: NSPoint(x: bounds.width, y: strip.minY + 0.5))
+        hair.stroke()
+        let t = Date().timeIntervalSinceReferenceDate
+        if meterState == 3 {
+            // transcribing: just a dim label, buttons inactive
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: config.colors.dim,
+            ]
+            let s = "transcribing…" as NSString
+            let sz = s.size(withAttributes: attrs)
+            s.draw(at: NSPoint(x: (bounds.width - sz.width) / 2,
+                               y: strip.midY - sz.height / 2), withAttributes: attrs)
+        } else {
+            let active = meterState == 1 || meterState == 2
+            // big record / stop button (left)
+            meterRecordRect = NSRect(x: 12, y: strip.midY - 13, width: 26, height: 26)
+            let mid = NSPoint(x: meterRecordRect.midX, y: meterRecordRect.midY)
+            if active {
+                // stop: solid red rounded square
+                NSColor.systemRed.setFill()
+                NSBezierPath(roundedRect: NSRect(x: mid.x - 7, y: mid.y - 7,
+                                                 width: 14, height: 14),
+                             xRadius: 3, yRadius: 3).fill()
+            } else {
+                // record: red circle with a bright pulse ring
+                let pulse = 0.65 + 0.35 * sin(t * 4)
+                NSColor.systemRed.withAlphaComponent(CGFloat(pulse)).setStroke()
+                let ring = NSBezierPath(ovalIn: NSRect(x: mid.x - 10, y: mid.y - 10,
+                                                       width: 20, height: 20))
+                ring.lineWidth = 2
+                ring.stroke()
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: NSRect(x: mid.x - 6, y: mid.y - 6,
+                                            width: 12, height: 12)).fill()
+            }
+            // pause / resume button (only during a session)
+            if active {
+                meterPauseRect = NSRect(x: 46, y: strip.midY - 11, width: 30, height: 22)
+                NSColor.systemRed.withAlphaComponent(0.35).setFill()
+                NSBezierPath(roundedRect: meterPauseRect,
+                             xRadius: config.buttonRadius - 1,
+                             yRadius: config.buttonRadius - 1).fill()
+                if meterState == 1 {
+                    // pause: two bars
+                    NSColor.white.withAlphaComponent(0.9).setFill()
+                    NSRect(x: meterPauseRect.midX - 7, y: meterPauseRect.midY - 5,
+                           width: 4, height: 10).fill()
+                    NSRect(x: meterPauseRect.midX + 3, y: meterPauseRect.midY - 5,
+                           width: 4, height: 10).fill()
+                } else {
+                    // resume: right-pointing triangle
+                    NSColor.white.withAlphaComponent(0.9).setFill()
+                    let tri = NSBezierPath()
+                    tri.move(to: NSPoint(x: meterPauseRect.midX - 4, y: meterPauseRect.midY - 5))
+                    tri.line(to: NSPoint(x: meterPauseRect.midX - 4, y: meterPauseRect.midY + 5))
+                    tri.line(to: NSPoint(x: meterPauseRect.midX + 6, y: meterPauseRect.midY))
+                    tri.close()
+                    tri.fill()
+                }
+            }
+            // live level bars
+            let lvl = CGFloat(min(1, max(0, meterLevel)))
+            var bx: CGFloat = 88
+            for i in 0..<18 {
+                let env = 0.35 + 0.65 * abs(sin(t * 4 + Double(i) * 0.55))
+                let h = max(2, lvl * 16 * env)
+                NSColor.systemRed.withAlphaComponent(0.9).setFill()
+                NSBezierPath(roundedRect: NSRect(x: bx, y: strip.midY - h / 2,
+                                                 width: 4, height: h),
+                             xRadius: 1.5, yRadius: 1.5).fill()
+                bx += 7
+            }
+            // elapsed, right-aligned
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: config.colors.text.withAlphaComponent(0.9),
+            ]
+            let s = String(format: "%d:%02d", Int(meterElapsed) / 60,
+                           Int(meterElapsed) % 60) as NSString
+            let sz = s.size(withAttributes: attrs)
+            s.draw(at: NSPoint(x: bounds.width - sz.width - 14,
+                               y: strip.midY - sz.height / 2), withAttributes: attrs)
+        }
+    }
+
+    // visual "copied" feedback after a header copy click (1 = copy, 2 = config)    // visual "copied" feedback after a header copy click (1 = copy, 2 = config)
     func showCopiedFeedback(_ which: Int = 1) {
         feedback = which
         needsDisplay = true
@@ -7031,25 +7011,6 @@ final class VimImageOverlay: NSView {
 // Close button target for windows with showCloseButton = true (e.g. vim mode).
 // The button's action calls onClose, which the host sets to handle the close
 // (e.g. send :wq to Vim before closing).
-final class WindowCloseTarget: NSObject {
-    var onClose: (() -> Void)?
-    @objc func close(_ sender: Any?) { onClose?() }
-}
-
-// Right-click menu actions for the embedded terminal drawer: "Copy" reads the
-// current selection safely and writes it to the clipboard; "Open in Notes"
-// forwards the selected text (a path) to the host's onTerminalOpenInNotes hook.
-final class TerminalMenuTarget: NSObject {
-    var copy: (() -> Void)?
-    var openInNotes: (() -> Void)?
-    var openInDefault: (() -> Void)?
-    var revealInFinder: (() -> Void)?
-    @objc func copySelection(_ sender: Any?) { copy?() }
-    @objc func openSelectionInNotes(_ sender: Any?) { openInNotes?() }
-    @objc func openSelectionInDefaultApp(_ sender: Any?) { openInDefault?() }
-    @objc func revealSelectionInFinder(_ sender: Any?) { revealInFinder?() }
-}
-
 // Did the keyboard really leave `window`? Not while it (or a sheet on it)
 // is key, nor while another of OUR non-popup windows is: the color / open
 // panel, AI, Confluence, Jira Config, the setup window. Another popup of
@@ -7352,8 +7313,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var tabsBar: PopupTabsBar?
     private var filterBar: PopupFilterBar?
     // close button target (retained so it survives menu/window dismiss)
-    private var windowCloseTarget: WindowCloseTarget?
-    // retained restarter so we can wire onTerminated after super.init
+    private var windowCloseTarget: ClosureTarget?
+    // the drawers' shell / editor exit hooks (processDelegate is weak)
     private var terminalRestarter: TerminalAutoRestart?
     // vim mode: the chrome-less editor terminal that replaces the text view
     private var vimView: LocalProcessTerminalView?
@@ -7698,23 +7659,50 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     public init(config: PopupConfig) {
         self.config = config
+        let height = config.padding * 2 + config.headerHeight * zoom + config.rowHeight * zoom
+        panel = Self.makePanel(config, height: height)
+        rowView = PopupRowView(config: config)
+        field = Self.makeSearchField(config, zoom: zoom)
+        super.init()
 
-        // terminal drawer context menu: built in the terminal block below
-        // (before super.init, so it can't capture self), then wired after
-        // super.init where [weak self] is legal
-        var terminalMenuView: LocalProcessTerminalView? = nil
-        var terminalMenuTarget: TerminalMenuTarget? = nil
-        var terminalMenu: NSMenu? = nil
+        let backdrop = makeBackdrop(height: height)
+        if config.editMode { buildEditor(in: backdrop) } else { buildList(in: backdrop) }
+        // the chrome overlay goes on last: it must be the topmost subview
+        if config.editMode || config.enableDrag { buildChrome(in: backdrop) }
+        panel.contentView = backdrop
+        // theme-pinned appearance + text selection (needs the drawers built)
+        applyThemeAppearance()
 
-        // Note/list windows get a (visually transparent) titlebar: AeroSpace's
-        // isWindowHeuristic treats accessory apps without an AX close button
-        // as "not a window", so they'd be invisible to focus commands and
-        // Alt+hjkl. .titled + .closable exposes the AX close button; the
-        // titlebar itself is hidden (fullSizeContentView + hidden title) and
-        // only the red close button remains visible.
-        // Tool panels never: they must NOT activate the app (config.toolPanel).
+        wireRows()
+        if config.selectableRows { updateCopyRowsLabel() }
+        wireCloseButton()
+        panel.delegate = self
+        (panel as? EscapableWindow)?.onEscape = { [weak self] in
+            self?.handleEscape()
+        }
+        if !config.editMode {
+            field.delegate = self
+        }
+        wireHeaderClicks()
+        panel.orderOut(nil)
+    }
+
+    // the shell drawer's restart poll holds only the terminal, weakly:
+    // stop it with the window
+    deinit { terminalRestartTimer?.invalidate() }
+
+    // MARK: Building (init)
+
+    // Note/list windows get a (visually transparent) titlebar: AeroSpace's
+    // isWindowHeuristic treats accessory apps without an AX close button
+    // as "not a window", so they'd be invisible to focus commands and
+    // Alt+hjkl. .titled + .closable exposes the AX close button; the
+    // titlebar itself is hidden (fullSizeContentView + hidden title), the
+    // traffic lights too unless showCloseButton.
+    // Tool panels never: they must NOT activate the app (config.toolPanel).
+    private static func makePanel(_ config: PopupConfig, height: CGFloat) -> NSWindow {
+        let panel: NSWindow
         let wantsTitlebar = (config.editMode || config.enableDrag) && !config.toolPanel
-        let initialHeight = config.padding * 2 + config.headerHeight * zoom + config.rowHeight * zoom
         if wantsTitlebar {
             // NO .nonactivatingPanel here: these windows must activate the app
             // when AeroSpace (or a click) focuses them, otherwise alt-j/k and
@@ -7726,7 +7714,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             var mask: NSWindow.StyleMask = [.titled, .closable, .fullSizeContentView]
             if config.enableResize { mask.insert(.resizable) }
             panel = PopupPlainWindow(
-                contentRect: NSRect(x: 0, y: 0, width: config.width, height: initialHeight),
+                contentRect: NSRect(x: 0, y: 0, width: config.width, height: height),
                 styleMask: mask,
                 backing: .buffered, defer: false)
             panel.contentMinSize = NSSize(width: 320, height: 220)
@@ -7736,16 +7724,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             // traffic lights hidden — the close button exists only so the
             // AeroSpace heuristic accepts the window; Esc closes it, not the X
             // (unless showCloseButton is set, e.g. for vim mode)
-            let hideClose = !config.showCloseButton
             for type: NSWindow.ButtonType in [.miniaturizeButton, .zoomButton] {
                 panel.standardWindowButton(type)?.isHidden = true
             }
-            if hideClose {
+            if !config.showCloseButton {
                 panel.standardWindowButton(.closeButton)?.isHidden = true
             }
         } else {
             panel = PopupPanel(
-                contentRect: NSRect(x: 0, y: 0, width: config.width, height: initialHeight),
+                contentRect: NSRect(x: 0, y: 0, width: config.width, height: height),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered, defer: false)
             // NSPanel defaults to hiding when the app deactivates: a tool
@@ -7761,61 +7748,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         // hotkey show/hide must be instant: no system order-in/out animation
         panel.animationBehavior = .none
         panel.title = config.name
-
-        // Wire the close button when shown (e.g. vim mode): onClick calls
-        // onCloseWindow if set, otherwise falls back to hide(restore: true).
-        // The target is created here (before super.init) but the closure is
-        // wired AFTER super.init.
-        if config.showCloseButton, let closeBtn = panel.standardWindowButton(.closeButton) {
-            let closeTarget = WindowCloseTarget()
-            closeBtn.target = closeTarget
-            closeBtn.action = #selector(WindowCloseTarget.close)
-            windowCloseTarget = closeTarget
-        }
-
-        // Backdrop: rounded container that clips a blurred material + tint,
-        // for a sleek translucent look with real see-through corners.
-        let backdrop = PopupBackdrop(config: config,
-                                     frame: NSRect(x: 0, y: 0, width: config.width, height: initialHeight))
-        backdrop.autoresizingMask = [.width, .height]
-        backdrop.wantsLayer = true
-        backdrop.layer?.cornerRadius = config.cornerRadius
-        backdrop.layer?.masksToBounds = true
-        backdrop.layer?.borderWidth = 1
-        backdrop.layer?.borderColor = config.colors.border.cgColor
-
         // allow mouse-moved for hover feedback (file-browser rows, resize
         // cursor feedback) — cheap, and the tracking areas scope the events
         panel.acceptsMouseMovedEvents = true
-        if config.enableResize {
-            // borderless: resize handled by dragging edges/corners on the
-            // backdrop; just allow mouse-moved for cursor feedback
-            panel.acceptsMouseMovedEvents = true
-        }
+        return panel
+    }
 
-        if config.tintAlpha > 0 {
-            let fx = NSVisualEffectView(frame: backdrop.bounds)
-            fx.material = config.material
-            fx.blendingMode = .behindWindow
-            fx.state = .active
-            fx.autoresizingMask = [.width, .height]
-            backdrop.addSubview(fx)
-        }
-
-        let tint = NSView(frame: backdrop.bounds)
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor =
-            config.colors.background.withAlphaComponent(config.tintAlpha).cgColor
-        tint.autoresizingMask = [.width, .height]
-        backdrop.addSubview(tint)
-        tintView = tint
-
-        rowView = PopupRowView(config: config)
-        rowView.frame = backdrop.bounds
-        rowView.autoresizingMask = [.width, .height]
-        field = NSTextField(frame: NSRect(x: config.padding + 10, y: config.padding + 2,
-                                          width: config.width - 2 * (config.padding + 10),
-                                          height: 22))
+    private static func makeSearchField(_ config: PopupConfig, zoom: CGFloat) -> NSTextField {
+        let field = NSTextField(frame: NSRect(x: config.padding + 10, y: config.padding + 2,
+                                              width: config.width - 2 * (config.padding + 10),
+                                              height: 22))
         field.isBezeled = false
         field.drawsBackground = false
         field.isEditable = config.enableSearch
@@ -7851,495 +7793,441 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                     .foregroundColor: config.colors.dim,
                 ])
         }
+        return field
+    }
 
-        if config.editMode {
-            // plain-text editor: scrollable NSTextView below the drag header
-            // (+ tab strip if enabled)
-            let topY = config.headerHeight * zoom + (config.tabs ? config.tabBarHeight * zoom + 2 : 0)
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: topY,
+    // Backdrop: rounded container that clips a blurred material + tint,
+    // for a sleek translucent look with real see-through corners.
+    private func makeBackdrop(height: CGFloat) -> PopupBackdrop {
+        let backdrop = PopupBackdrop(config: config,
+                                     frame: NSRect(x: 0, y: 0, width: config.width, height: height))
+        backdrop.autoresizingMask = [.width, .height]
+        backdrop.wantsLayer = true
+        backdrop.layer?.cornerRadius = config.cornerRadius
+        backdrop.layer?.masksToBounds = true
+        backdrop.layer?.borderWidth = 1
+        backdrop.layer?.borderColor = config.colors.border.cgColor
+
+        if config.tintAlpha > 0 {
+            let fx = NSVisualEffectView(frame: backdrop.bounds)
+            fx.material = config.material
+            fx.blendingMode = .behindWindow
+            fx.state = .active
+            fx.autoresizingMask = [.width, .height]
+            backdrop.addSubview(fx)
+        }
+
+        let tint = NSView(frame: backdrop.bounds)
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor =
+            config.colors.background.withAlphaComponent(config.tintAlpha).cgColor
+        tint.autoresizingMask = [.width, .height]
+        backdrop.addSubview(tint)
+        tintView = tint
+
+        rowView.frame = backdrop.bounds
+        rowView.autoresizingMask = [.width, .height]
+        return backdrop
+    }
+
+    // the tab strip (note tabs / list sources): selection, clicks and the
+    // pills' + / ✕ / copy-path go to the host hooks
+    private func makeTabsBar(frame: NSRect) -> PopupTabsBar {
+        let bar = PopupTabsBar(config: config)
+        bar.frame = frame
+        bar.autoresizingMask = [.width]
+        bar.onSelect = { [weak self] index in
+            self?.selectedTab = index
+        }
+        bar.onClick = { [weak self] index in
+            self?.onTabClick?(index)
+        }
+        bar.onAddTab = { [weak self] in
+            self?.onAddTab?()
+        }
+        bar.onCloseTab = { [weak self] index in
+            self?.onCloseTab?(index)
+        }
+        bar.onCopyPath = { [weak self] index in
+            self?.onTabCopyPath?(index)
+        }
+        return bar
+    }
+
+    // a bright 4-sided focus ring around a pane (shown while it has focus)
+    private func makeFocusBorder(around frame: NSRect, radius: CGFloat,
+                                 resize: NSView.AutoresizingMask) -> NSView {
+        let b = NSView(frame: frame)
+        b.autoresizingMask = resize
+        b.wantsLayer = true
+        b.layer?.borderWidth = focusBorderWidth
+        b.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
+        b.layer?.cornerRadius = radius
+        b.isHidden = true
+        return b
+    }
+
+    // edit mode: the plain-text editor below the drag header (+ tab strip),
+    // the vim pane over it, the find bar, the status strip, the shell drawer
+    private func buildEditor(in backdrop: NSView) {
+        let topY = config.headerHeight * zoom + (config.tabs ? config.tabBarHeight * zoom + 2 : 0)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: topY,
+                                                width: backdrop.bounds.width,
+                                                height: backdrop.bounds.height - topY))
+        scroll.autoresizingMask = [.width]
+        scroll.hasVerticalScroller = true
+        // photos are fitted to the editor width (see makeAttachment), so
+        // the document never overflows horizontally — no horizontal bar
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        let tv = PopupTextView(frame: scroll.bounds)
+        tv.isRichText = false
+        tv.isEditable = true
+        tv.isSelectable = true
+        tv.allowsUndo = true
+        tv.font = editorFont(config.fontName, zoom, size: config.editorFontSize)
+        tv.textColor = config.colors.text
+        // Force the selection highlight colors (Ctrl+A select-all, the
+        // find bar's match jump). The system default follows the OS
+        // appearance/accent, so the SAME binary renders differently per
+        // machine — e.g. white text on a light-mode selection is
+        // unreadable. Pin selection to the configured highlight + text
+        // colors so it always contrasts, regardless of the machine.
+        tv.selectedTextAttributes = ButtonStyle.selection(config.colors)
+        tv.backgroundColor = .clear
+        tv.drawsBackground = false
+        tv.textContainerInset = NSSize(width: 10, height: 10)
+        tv.autoresizingMask = [.width]
+        if config.markdownImages {
+            // text wraps at the window width, but the VIEW may grow wider
+            // than the clip when a natural-size photo needs the room —
+            // that growth is what the horizontal scroller scrolls
+            tv.isHorizontallyResizable = true
+            tv.maxSize = NSSize(width: 4096,
+                                height: CGFloat.greatestFiniteMagnitude)
+            tv.textContainer?.widthTracksTextView = false
+            tv.textContainer?.containerSize = NSSize(
+                width: max(120, scroll.bounds.width - 24),
+                height: CGFloat.greatestFiniteMagnitude)
+        }
+        // the editor's context menu ("Open file at path…", "Copy File Path")
+        // and pasted images -> host hooks
+        tv.onOpenFileAtPath = { [weak self] in
+            self?.onOpenPathPrompt?()
+        }
+        tv.onCopyFilePath = { [weak self] in
+            self?.onCopyFilePath?()
+        }
+        tv.onPasteImage = { [weak self] img in
+            guard let self, self.config.markdownImages,
+                  let rel = self.imageSaver?(img) else { return }
+            self.insertImageAttachment(rel: rel, image: img)
+        }
+        tv.absolutePathAt = { [weak self] idx in
+            guard let self, let tv = self.editorView,
+                  let storage = tv.textStorage, idx < storage.length else { return nil }
+            let attrs = storage.attributes(at: idx, effectiveRange: nil)
+            guard let att = attrs[.attachment] as? NSTextAttachment,
+                  let rel = self.attachmentPaths[att] else { return nil }
+            return (self.imageBaseDir as NSString).appendingPathComponent(rel)
+        }
+        scroll.documentView = tv
+        backdrop.addSubview(scroll)
+        editorView = tv
+        editorScroll = scroll
+        let efb = makeFocusBorder(around: scroll.frame, radius: 6, resize: [.width, .height])
+        backdrop.addSubview(efb)
+        editorFocusBorder = efb
+        if config.vimEditorExecutable != nil { buildVimPane(over: scroll, below: efb, in: backdrop) }
+        if config.tabs {
+            let bar = makeTabsBar(frame: NSRect(x: 0, y: config.headerHeight * zoom + 2,
+                                                width: backdrop.bounds.width, height: config.tabBarHeight * zoom))
+            backdrop.addSubview(bar)
+            tabsBar = bar
+        }
+        buildFindBar(in: backdrop)
+        // bottom status strip (lazy: hidden until the host calls setStatus)
+        let sb = PopupStatusBar(config: config)
+        sb.frame = NSRect(x: 6, y: backdrop.bounds.height - statusBarHeight - 4,
+                          width: max(0, backdrop.bounds.width - 12),
+                          height: statusBarHeight)
+        sb.autoresizingMask = [.width]
+        sb.isHidden = true
+        backdrop.addSubview(sb)
+        statusBar = sb
+        if config.terminal {
+            buildTerminalDrawer(in: backdrop)
+        } else {
+            // no shell drawer at all: the editor must not reserve its
+            // band (a read-only detail view in the shared window left a
+            // blank terminal-height gap under the text)
+            terminalShown = false
+        }
+    }
+
+    // vim mode: a chrome-less terminal running the editor sits exactly
+    // over the text view (layoutEditorScroll keeps them in sync) and
+    // blends into the notepad — no border, the card color shows
+    // through. The process starts on first show, once the pane has
+    // its real size.
+    private func buildVimPane(over scroll: NSScrollView, below focusBorder: NSView, in backdrop: NSView) {
+        let vv = LocalProcessTerminalView(frame: scroll.frame)
+        vv.font = PopupWindow.vimFont(config)
+        vv.nativeBackgroundColor = .clear
+        vv.nativeForegroundColor = config.colors.text
+        vv.wantsLayer = true
+        vv.layer?.backgroundColor = NSColor.clear.cgColor
+        // an exiting editor (`:q`) fires onVimExit and is relaunched on the
+        // current note — the pane is never left dead. The delegate callback
+        // may arrive off the main thread.
+        let vr = TerminalAutoRestart()
+        vr.onTerminated = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.vimShuttingDown else { return }
+                self.onVimExit?()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    guard let self, !self.vimShuttingDown else { return }
+                    self.startVimIfNeeded()
+                    if self.isShown, self.vimPaneActive, let vv = self.vimView {
+                        self.panel.makeFirstResponder(vv)
+                        self.focusedPane = .editor
+                        self.updateFocusIndicator()
+                    }
+                }
+            }
+        }
+        vv.processDelegate = vr
+        vimRestarter = vr
+        // sits below the focus border so the ring stays visible
+        backdrop.addSubview(vv, positioned: .below, relativeTo: focusBorder)
+        vimView = vv
+        scroll.isHidden = true
+        if config.vimImageFile != nil {
+            let ov = VimImageOverlay(frame: vv.frame)
+            backdrop.addSubview(ov, positioned: .above, relativeTo: vv)
+            vimImageOverlay = ov
+        }
+    }
+
+    // in-note find bar (Ctrl/Cmd+F): hidden until toggled; the query
+    // field matches the search-field styling
+    private func buildFindBar(in backdrop: NSView) {
+        let ff = NSTextField()
+        let ffCell = PopupSearchFieldCell()
+        ffCell.hInset = 8
+        ff.cell = ffCell
+        ff.isEditable = true
+        ff.isSelectable = true
+        ff.focusRingType = .none
+        ff.wantsLayer = true
+        ff.layer?.backgroundColor = ButtonStyle.inputFill(config.colors).cgColor
+        ff.layer?.cornerRadius = 6
+        ff.layer?.borderWidth = 1
+        ff.layer?.borderColor = ButtonStyle.focusStroke(config.colors).withAlphaComponent(0.6).cgColor
+        ff.font = config.rowFont(config.inputFontSize * zoom)
+        ff.textColor = config.colors.text
+        ff.placeholderAttributedString = NSAttributedString(
+            string: "find in note…",
+            attributes: [.font: config.rowFont(config.inputFontSize * zoom),
+                         .foregroundColor: config.colors.dim])
+        ff.isHidden = true
+        ff.delegate = self
+        backdrop.addSubview(ff)
+        findField = ff
+        let fc = NSTextField(labelWithString: "")
+        fc.font = config.rowFont(config.inputFontSize * zoom)
+        fc.textColor = config.colors.dim
+        fc.isHidden = true
+        backdrop.addSubview(fc)
+        findCountLabel = fc
+    }
+
+    // embedded shell drawer at the bottom: the editor stops above it
+    // (layoutEditorScroll), the session survives hide/show
+    private func buildTerminalDrawer(in backdrop: NSView) {
+        drawerInsetNow = config.terminalHeight
+        let term = LocalProcessTerminalView(frame: NSRect(
+            x: terminalInset,
+            y: backdrop.bounds.height - config.terminalHeight,
+            width: max(0, backdrop.bounds.width - 2 * terminalInset),
+            height: config.terminalHeight))
+        term.autoresizingMask = [.width]
+        if let tf = NSFont(name: config.terminalFont, size: config.terminalFontSize) {
+            term.font = tf
+        }
+        // softly rounded drawer corners (sits inset in the backdrop)
+        term.wantsLayer = true
+        term.layer?.cornerRadius = 8
+        term.layer?.masksToBounds = true
+        // translucent default background, matching the notepad: the
+        // silvery-blue panel color (config.terminalBackground) carries
+        // its own alpha — the color picker's opacity slider sets it
+        term.nativeBackgroundColor = config.terminalBackground
+        term.nativeForegroundColor = config.terminalForeground ?? config.colors.text
+        backdrop.addSubview(term)
+        terminalDrawer = term
+        term.installColors(PopupWindow.ansiPalette(config.colors))
+        currentTerminalHeight = config.terminalHeight
+        let tfb = makeFocusBorder(around: term.frame, radius: 8, resize: [.width])
+        backdrop.addSubview(tfb)
+        terminalFocusBorder = tfb
+        // auto-restart: if the shell exits (user typed exit/ctrl-d) spawn it
+        // again so the drawer is never dead
+        let shell = config.shell, shellArgs = config.shellArgs, dir = config.terminalDir
+        let restarter = TerminalAutoRestart()
+        restarter.onTerminated = { [weak term] in
+            term?.startProcess(executable: shell, args: shellArgs, currentDirectory: dir)
+        }
+        term.processDelegate = restarter
+        terminalRestarter = restarter
+        term.startProcess(executable: shell, args: shellArgs, currentDirectory: dir)
+        // safety net: poll the shell's state; restart once the old session
+        // is fully wound down (running == false && windingDown == false)
+        let poll = Timer(timeInterval: 1.5, repeats: true) { [weak term] _ in
+            guard let term, let p = term.process else { return }
+            if !p.running, !p.windingDown {
+                term.startProcess(executable: shell, args: shellArgs, currentDirectory: dir)
+            }
+        }
+        RunLoop.main.add(poll, forMode: .common)
+        terminalRestartTimer = poll
+        term.menu = terminalMenu(for: term)
+        if !config.terminalStartsOpen {
+            // session still spawns (ready on toggle), drawer closed
+            terminalShown = false
+            drawerInsetNow = 0
+        }
+    }
+
+    // the drawer's right-click menu: paste / copy / select-all straight to
+    // the shell (SwiftTerm owns the clipboard read/write), plus the
+    // selection (a path) -> Open in Notes / Default App / Reveal in Finder
+    private func terminalMenu(for term: LocalProcessTerminalView) -> NSMenu {
+        let menu = NSMenu(title: "Terminal")
+        func shellItem(_ t: String, _ sel: Selector, _ key: String) -> NSMenuItem {
+            let i = NSMenuItem(title: t, action: sel, keyEquivalent: key)
+            i.target = term
+            return i
+        }
+        // the selection must become a real path before acting on it — copy
+        // to the general pasteboard, then read it back (never clobber the
+        // clipboard on an empty right-click)
+        let selection: () -> String? = { [weak term] in
+            guard let term, term.selectedRange().length > 0 else { return nil }
+            term.copy(NSNull())
+            let s = NSPasteboard.general.string(forType: .string)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return s?.isEmpty == false ? s : nil
+        }
+        func pathItem(_ t: String, _ hook: @escaping (PopupWindow) -> ((String) -> Void)?) -> NSMenuItem {
+            menuItem(t) { [weak self] in
+                guard let self, let path = selection() else { return }
+                hook(self)?(path)
+            }
+        }
+        let copy = menuItem("Copy") { [weak term] in term?.copy(NSNull()) }
+        copy.keyEquivalent = "c"
+        menu.addItem(shellItem("Paste", #selector(LocalProcessTerminalView.paste(_:)), "v"))
+        menu.addItem(copy)
+        menu.addItem(.separator())
+        menu.addItem(pathItem("Open in Notes") { $0.onTerminalOpenInNotes })
+        menu.addItem(pathItem("Open in Default App") { $0.onTerminalOpenDefault })
+        menu.addItem(pathItem("Reveal in Finder") { $0.onTerminalRevealInFinder })
+        menu.addItem(.separator())
+        menu.addItem(shellItem("Select All", #selector(LocalProcessTerminalView.selectAll(_:)), "a"))
+        return menu
+    }
+
+    // search list: chrome (drag header, search field, filter bar, tab
+    // strip) fixed on top; rows below — directly (default) or in a
+    // scroll view. Non-scroll keeps chrome as rowView subviews so
+    // clicks reach them; scroll puts them on the backdrop above the
+    // scroll view.
+    private func buildList(in backdrop: NSView) {
+        let fieldH: CGFloat = 24 * zoom
+        let headerOffset = config.dragHeader ? config.headerHeight * zoom + 4 : 0
+        let fieldFrame = NSRect(x: config.padding + 10, y: headerOffset + config.padding + 2,
+                                width: (config.width - 2 * (config.padding + 10))
+                                    * config.searchWidthFraction,
+                                height: fieldH)
+        // the filter bar + tab strip stacked under the search field from
+        // `y` (subviews of `host`); returns the chrome's new bottom
+        func addListBars(to host: NSView, from y: CGFloat) -> CGFloat {
+            var bottom = y
+            if config.filters {
+                let bar = PopupFilterBar(config: config)
+                bar.frame = NSRect(x: 0, y: bottom, width: config.width,
+                                   height: config.filterBarHeight * zoom)
+                bar.autoresizingMask = [.width]
+                bar.onSelect = { [weak self] dim, vi in
+                    guard let self, self.filterSelections.indices.contains(dim) else { return }
+                    var sels = self.filterSelections
+                    sels[dim] = vi
+                    self.filterSelections = sels
+                }
+                host.addSubview(bar)
+                filterBar = bar
+                bottom += config.filterBarHeight * zoom + 2
+            }
+            if config.tabs {
+                let bar = makeTabsBar(frame: NSRect(x: 0, y: bottom, width: config.width,
+                                                    height: config.tabBarHeight * zoom))
+                host.addSubview(bar)
+                tabsBar = bar
+                bottom += config.tabBarHeight * zoom + 2
+            }
+            return bottom
+        }
+        field.frame = fieldFrame
+        field.autoresizingMask = [.width]
+        if config.scrollableRows {
+            backdrop.addSubview(field)
+            let chromeBottom = addListBars(to: backdrop, from: fieldFrame.maxY + 4)
+            // IMPORTANT: the scroll view's height must always equal
+            // windowHeight - chromeBottom. The autoresizing mask alone
+            // grows it by the FULL window delta, so once the window is
+            // taller than the initial setup height the scroll view
+            // overshoots the window bottom (scrollbar + last rows hang
+            // off-screen). layoutScrollDocument re-pins the frame on
+            // every resize/show.
+            self.chromeBottom = chromeBottom
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: chromeBottom,
                                                     width: backdrop.bounds.width,
-                                                    height: backdrop.bounds.height - topY))
-            scroll.autoresizingMask = [.width]
+                                                    height: max(40, backdrop.bounds.height - chromeBottom)))
+            scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
-            // photos are fitted to the editor width (see makeAttachment), so
-            // the document never overflows horizontally — no horizontal bar
-            scroll.hasHorizontalScroller = false
             scroll.autohidesScrollers = true
             scroll.drawsBackground = false
             scroll.borderType = .noBorder
-            let tv = PopupTextView(frame: scroll.bounds)
-            tv.isRichText = false
-            tv.isEditable = true
-            tv.isSelectable = true
-            tv.allowsUndo = true
-            tv.font = editorFont(config.fontName, zoom, size: config.editorFontSize)
-            tv.textColor = config.colors.text
-            // Force the selection highlight colors (Ctrl+A select-all, the
-            // find bar's match jump). The system default follows the OS
-            // appearance/accent, so the SAME binary renders differently per
-            // machine — e.g. white text on a light-mode selection is
-            // unreadable. Pin selection to the configured highlight + text
-            // colors so it always contrasts, regardless of the machine.
-            tv.selectedTextAttributes = ButtonStyle.selection(config.colors)
-            tv.backgroundColor = .clear
-            tv.drawsBackground = false
-            tv.textContainerInset = NSSize(width: 10, height: 10)
-            tv.autoresizingMask = [.width]
-            if config.markdownImages {
-                // text wraps at the window width, but the VIEW may grow wider
-                // than the clip when a natural-size photo needs the room —
-                // that growth is what the horizontal scroller scrolls
-                tv.isHorizontallyResizable = true
-                tv.maxSize = NSSize(width: 4096,
-                                    height: CGFloat.greatestFiniteMagnitude)
-                tv.textContainer?.widthTracksTextView = false
-                tv.textContainer?.containerSize = NSSize(
-                    width: max(120, scroll.bounds.width - 24),
-                    height: CGFloat.greatestFiniteMagnitude)
+            rowView.topInset = 4
+            rowView.bottomInset = 16   // room for the pill border stroke
+            if !config.tableColumns.isEmpty {
+                let header = PopupTableHeaderView(config: config)
+                header.frame = NSRect(x: 0, y: 0, width: backdrop.bounds.width,
+                                      height: config.tableHeaderHeight * zoom)
+                header.autoresizingMask = [.width]
+                tableHeader = header
+                rowView.topInset = config.tableHeaderHeight * zoom + 2
+                wireTableHeader(header)
             }
-            scroll.documentView = tv
+            scroll.documentView = rowView
+            if let header = tableHeader {
+                // floating: pinned to the top of the visible rows,
+                // never scrolls away
+                scroll.addFloatingSubview(header, for: .vertical)
+            }
             backdrop.addSubview(scroll)
-            editorView = tv
-            editorScroll = scroll
-            // focus indicator: bright 4-sided border around the editor scroll
-            let efb = NSView(frame: scroll.frame)
-            efb.autoresizingMask = [.width, .height]
-            efb.wantsLayer = true
-            efb.layer?.borderWidth = focusBorderWidth
-            efb.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
-            efb.layer?.cornerRadius = 6
-            efb.isHidden = true
-            backdrop.addSubview(efb)
-            editorFocusBorder = efb
-            // vim mode: a chrome-less terminal running the editor sits exactly
-            // over the text view (layoutEditorScroll keeps them in sync) and
-            // blends into the notepad — no border, the card color shows
-            // through. The process starts on first show, once the pane has
-            // its real size.
-            if config.vimEditorExecutable != nil {
-                let vv = LocalProcessTerminalView(frame: scroll.frame)
-                vv.font = PopupWindow.vimFont(config)
-                vv.nativeBackgroundColor = .clear
-                vv.nativeForegroundColor = config.colors.text
-                vv.wantsLayer = true
-                vv.layer?.backgroundColor = NSColor.clear.cgColor
-                let vr = TerminalAutoRestart()
-                vv.processDelegate = vr
-                vimRestarter = vr
-                // sits below the focus border so the ring stays visible
-                backdrop.addSubview(vv, positioned: .below, relativeTo: efb)
-                vimView = vv
-                scroll.isHidden = true
-                if config.vimImageFile != nil {
-                    let ov = VimImageOverlay(frame: vv.frame)
-                    backdrop.addSubview(ov, positioned: .above, relativeTo: vv)
-                    vimImageOverlay = ov
-                }
-            }
-            if config.tabs {
-                let bar = PopupTabsBar(config: config)
-                bar.frame = NSRect(x: 0, y: config.headerHeight * zoom + 2,
-                                   width: backdrop.bounds.width, height: config.tabBarHeight * zoom)
-                bar.autoresizingMask = [.width]
-                backdrop.addSubview(bar)
-                tabsBar = bar
-            }
-            // in-note find bar (Ctrl/Cmd+F): hidden until toggled; the query
-            // field matches the search-field styling
-            let ff = NSTextField()
-            let ffCell = PopupSearchFieldCell()
-            ffCell.hInset = 8
-            ff.cell = ffCell
-            ff.isEditable = true
-            ff.isSelectable = true
-            ff.focusRingType = .none
-            ff.wantsLayer = true
-            ff.layer?.backgroundColor = ButtonStyle.inputFill(config.colors).cgColor
-            ff.layer?.cornerRadius = 6
-            ff.layer?.borderWidth = 1
-            ff.layer?.borderColor = ButtonStyle.focusStroke(config.colors).withAlphaComponent(0.6).cgColor
-            ff.font = config.rowFont(config.inputFontSize * zoom)
-            ff.textColor = config.colors.text
-            ff.placeholderAttributedString = NSAttributedString(
-                string: "find in note…",
-                attributes: [.font: config.rowFont(config.inputFontSize * zoom),
-                             .foregroundColor: config.colors.dim])
-            ff.isHidden = true
-            backdrop.addSubview(ff)
-            findField = ff
-            let fc = NSTextField(labelWithString: "")
-            fc.font = config.rowFont(config.inputFontSize * zoom)
-            fc.textColor = config.colors.dim
-            fc.isHidden = true
-            backdrop.addSubview(fc)
-            findCountLabel = fc
-            // bottom status strip (lazy: hidden until the host calls setStatus)
-            let sb = PopupStatusBar(config: config)
-            sb.frame = NSRect(x: 6, y: backdrop.bounds.height - statusBarHeight - 4,
-                              width: max(0, backdrop.bounds.width - 12),
-                              height: statusBarHeight)
-            sb.autoresizingMask = [.width]
-            sb.isHidden = true
-            backdrop.addSubview(sb)
-            statusBar = sb
-            if config.terminal {
-                drawerInsetNow = config.terminalHeight
-                // embedded shell drawer at the bottom: the editor stops above
-                // it (layoutEditorScroll), the session survives hide/show
-                let term = LocalProcessTerminalView(frame: NSRect(
-                    x: terminalInset,
-                    y: backdrop.bounds.height - config.terminalHeight,
-                    width: max(0, backdrop.bounds.width - 2 * terminalInset),
-                    height: config.terminalHeight))
-                term.autoresizingMask = [.width]
-                if let tf = NSFont(name: config.terminalFont, size: config.terminalFontSize) {
-                    term.font = tf
-                }
-                // softly rounded drawer corners (sits inset in the backdrop)
-                term.wantsLayer = true
-                term.layer?.cornerRadius = 8
-                term.layer?.masksToBounds = true
-                // translucent default background, matching the notepad: the
-                // silvery-blue panel color (config.terminalBackground) carries
-                // its own alpha — the color picker's opacity slider sets it
-                term.nativeBackgroundColor = config.terminalBackground
-                term.nativeForegroundColor = config.terminalForeground ?? config.colors.text
-                backdrop.addSubview(term)
-                terminalDrawer = term
-                term.installColors(PopupWindow.ansiPalette(config.colors))
-                currentTerminalHeight = config.terminalHeight
-                // focus indicator: bright 4-sided border around the terminal
-                let tfb = NSView(frame: term.frame)
-                tfb.autoresizingMask = [.width]
-                tfb.wantsLayer = true
-                tfb.layer?.borderWidth = focusBorderWidth
-                tfb.layer?.borderColor = ButtonStyle.focusStroke(config.colors).cgColor
-                tfb.layer?.cornerRadius = 8
-                tfb.isHidden = true
-                backdrop.addSubview(tfb)
-                terminalFocusBorder = tfb
-                // auto-restart: if the shell exits (user typed exit/ctrl-d)
-                // spawn it again after a beat so the drawer is never dead
-                // (capture the shell locally — no self before super.init)
-                let exec = config.shell
-                let execArgs = config.shellArgs
-                let terminalDir = config.terminalDir
-                let restarter = TerminalAutoRestart()
-                // onTerminated is wired AFTER super.init (see below) to avoid
-                // capturing self before initialization completes
-                term.processDelegate = restarter
-                terminalRestarter = restarter
-                term.processDelegate = restarter
-                term.startProcess(executable: exec, args: execArgs,
-                                  currentDirectory: terminalDir)
-                // right-click menu: paste / copy / select-all straight to the
-                // shell (SwiftTerm owns the clipboard read/write), plus
-                // "Open in Notes" — the current selection (a path) becomes a
-                // note tab via the host hook. The closures that capture self
-                // are wired after super.init (see below).
-                let tmenu = NSMenu(title: "Terminal")
-                func titem(_ t: String, _ sel: Selector, _ key: String) -> NSMenuItem {
-                    let i = NSMenuItem(title: t, action: sel, keyEquivalent: key)
-                    i.target = term
-                    return i
-                }
-                let menuTarget = TerminalMenuTarget()
-                let copyItem = NSMenuItem(title: "Copy",
-                                          action: #selector(TerminalMenuTarget.copySelection(_:)),
-                                          keyEquivalent: "c")
-                copyItem.target = menuTarget
-                let openItem = NSMenuItem(title: "Open in Notes",
-                                          action: #selector(TerminalMenuTarget.openSelectionInNotes(_:)),
-                                          keyEquivalent: "")
-                openItem.target = menuTarget
-                let openDefaultItem = NSMenuItem(title: "Open in Default App",
-                                                 action: #selector(TerminalMenuTarget.openSelectionInDefaultApp(_:)),
-                                                 keyEquivalent: "")
-                openDefaultItem.target = menuTarget
-                let revealItem = NSMenuItem(title: "Reveal in Finder",
-                                            action: #selector(TerminalMenuTarget.revealSelectionInFinder(_:)),
-                                            keyEquivalent: "")
-                revealItem.target = menuTarget
-                tmenu.addItem(titem("Paste", #selector(LocalProcessTerminalView.paste(_:)), "v"))
-                tmenu.addItem(copyItem)
-                tmenu.addItem(NSMenuItem.separator())
-                tmenu.addItem(openItem)
-                tmenu.addItem(openDefaultItem)
-                tmenu.addItem(revealItem)
-                tmenu.addItem(NSMenuItem.separator())
-                tmenu.addItem(titem("Select All", #selector(LocalProcessTerminalView.selectAll(_:)), "a"))
-                terminalMenuView = term
-                terminalMenuTarget = menuTarget
-                terminalMenu = tmenu
-                // safety net: poll the shell's state; restart once the old
-                // session is fully wound down (running==false && windingDown==false)
-                let cfgShell = config.shell
-                let cfgShellArgs = config.shellArgs
-                let cfgTerminalDir = config.terminalDir
-                let poll = Timer(timeInterval: 1.5, repeats: true) { [weak term] _ in
-                    guard let term, let p = term.process else { return }
-                    if !p.running, !p.windingDown {
-                        term.startProcess(executable: cfgShell, args: cfgShellArgs,
-                                          currentDirectory: cfgTerminalDir)
-                    }
-                }
-                RunLoop.main.add(poll, forMode: .common)
-                terminalRestartTimer = poll
-                if !config.terminalStartsOpen {
-                    // session still spawns (ready on toggle), drawer closed
-                    terminalShown = false
-                    drawerInsetNow = 0
-                }
-            } else {
-                // no shell drawer at all: the editor must not reserve its
-                // band (a read-only detail view in the shared window left a
-                // blank terminal-height gap under the text)
-                terminalShown = false
-            }
+            rowScroll = scroll
+        } else {
+            rowView.addSubview(field)
+            rowView.topInset = addListBars(to: rowView, from: fieldFrame.maxY + 4)
+            backdrop.addSubview(rowView)
         }
+    }
 
-        // search list: chrome (drag header, search field, filter bar, tab
-        // strip) fixed on top; rows below — directly (default) or in a
-        // scroll view. Non-scroll keeps chrome as rowView subviews so
-        // clicks reach them; scroll puts them on the backdrop above the
-        // scroll view.
-        if !config.editMode {
-            let fieldH: CGFloat = 24 * zoom
-            let headerOffset = (config.editMode || config.dragHeader)
-                ? config.headerHeight * zoom + 4 : 0
-            let fieldFrame = NSRect(x: config.padding + 10, y: headerOffset + config.padding + 2,
-                                    width: (config.width - 2 * (config.padding + 10))
-                                        * config.searchWidthFraction,
-                                    height: fieldH)
-            // the filter bar + tab strip stacked under the search field from
-            // `y` (subviews of `host`); returns both + the chrome's new bottom
-            func addListBars(to host: NSView, from y: CGFloat, zoom: CGFloat)
-                -> (filter: PopupFilterBar?, tabs: PopupTabsBar?, bottom: CGFloat) {
-                var bottom = y
-                var filter: PopupFilterBar?
-                var tabs: PopupTabsBar?
-                if config.filters {
-                    let bar = PopupFilterBar(config: config)
-                    bar.frame = NSRect(x: 0, y: bottom, width: config.width,
-                                       height: config.filterBarHeight * zoom)
-                    bar.autoresizingMask = [.width]
-                    host.addSubview(bar)
-                    filter = bar
-                    bottom += config.filterBarHeight * zoom + 2
-                }
-                if config.tabs {
-                    let bar = PopupTabsBar(config: config)
-                    bar.frame = NSRect(x: 0, y: bottom, width: config.width,
-                                       height: config.tabBarHeight * zoom)
-                    bar.autoresizingMask = [.width]
-                    host.addSubview(bar)
-                    tabs = bar
-                    bottom += config.tabBarHeight * zoom + 2
-                }
-                return (filter, tabs, bottom)
-            }
-            var chromeBottom: CGFloat = fieldFrame.maxY + 4
-            let scrollable = config.scrollableRows
-            if scrollable {
-                field.frame = fieldFrame
-                field.autoresizingMask = [.width]
-                backdrop.addSubview(field)
-                let bars = addListBars(to: backdrop, from: chromeBottom, zoom: zoom)
-                (filterBar, tabsBar, chromeBottom) = (bars.filter, bars.tabs, bars.bottom)
-                // IMPORTANT: the scroll view's height must always equal
-                // windowHeight - chromeBottom. The autoresizing mask alone
-                // grows it by the FULL window delta, so once the window is
-                // taller than the initial setup height the scroll view
-                // overshoots the window bottom (scrollbar + last rows hang
-                // off-screen). layoutScrollDocument re-pins the frame on
-                // every resize/show.
-                self.chromeBottom = chromeBottom
-                let scroll = NSScrollView(frame: NSRect(x: 0, y: chromeBottom,
-                                                        width: backdrop.bounds.width,
-                                                        height: max(40, backdrop.bounds.height - chromeBottom)))
-                scroll.autoresizingMask = [.width, .height]
-                scroll.hasVerticalScroller = true
-                scroll.autohidesScrollers = true
-                scroll.drawsBackground = false
-                scroll.borderType = .noBorder
-                rowView.topInset = 4
-                rowView.bottomInset = 16   // room for the pill border stroke
-                if !config.tableColumns.isEmpty {
-                    let header = PopupTableHeaderView(config: config)
-                    header.frame = NSRect(x: 0, y: 0, width: backdrop.bounds.width,
-                                          height: config.tableHeaderHeight * zoom)
-                    header.autoresizingMask = [.width]
-                    tableHeader = header
-                    rowView.topInset = config.tableHeaderHeight * zoom + 2
-                }
-                // + breathing room below the last row (the scroll view now
-                // ends exactly at the window bottom, so no huge inset needed)
-scroll.documentView = rowView
-                if let header = tableHeader {
-                    // floating: pinned to the top of the visible rows,
-                    // never scrolls away
-                    scroll.addFloatingSubview(header, for: .vertical)
-                }
-                backdrop.addSubview(scroll)
-                rowScroll = scroll
-            } else {
-                rowView.frame = backdrop.bounds
-                rowView.autoresizingMask = [.width, .height]
-                field.frame = fieldFrame
-                field.autoresizingMask = [.width]
-                rowView.addSubview(field)
-                let bars = addListBars(to: rowView, from: chromeBottom, zoom: zoom)
-                (filterBar, tabsBar, chromeBottom) = (bars.filter, bars.tabs, bars.bottom)
-                rowView.topInset = chromeBottom
-                backdrop.addSubview(rowView)
-            }
-        }
-
-        // Chrome overlay (drag header for editors / drag-anywhere for list
-        // windows + resize edges). Must be the topmost subview so its hitTest
-        // gets first shot; non-chrome areas fall through to the content.
-        if config.editMode || config.enableDrag {
-            let chrome = PopupChrome(config: config)
-            // header clicks (incl. the ✕) route through the window's click
-            // band (HeaderClickWindow): the titled windows and tool panels
-            // have one, other borderless panels don't, so no glyph there
-            if !(panel is PopupBaseWindow) && !config.toolPanel { chrome.config.headerCloseButton = false }
-            chrome.frame = backdrop.bounds
-            chrome.autoresizingMask = [.width, .height]
-            if config.editMode || config.dragHeader {
-                chrome.dragHeaderHeight = config.headerHeight * zoom
-                chrome.headerTitle = chromeHeaderTitle
-            } else if config.scrollableRows {
-                // the scroll view owns the row area (scrolling), so the
-                // chrome only claims the resize edges; window drags use the
-                // hidden titlebar natively
-                chrome.dragAnywhere = false
-            } else {
-                chrome.dragAnywhere = true
-                // pass-through for interactive controls: search field + tab
-                // strip (everything above the first row)
-                let top = config.padding + 2
-                let bottom = top + 24 * zoom + 4 + (config.tabs ? config.tabBarHeight * zoom + 2 : 0)
-                chrome.reservedRect = NSRect(x: 0, y: top, width: config.width,
-                                             height: bottom - top)
-            }
-            backdrop.addSubview(chrome)
-            self.chrome = chrome
-        }
-
-        panel.contentView = backdrop
-
-        super.init()
-        // theme-pinned appearance + text selection (needs the drawers built)
-        applyThemeAppearance()
-
-        // Wire the terminal restarter (self-safe now): auto-restart the shell.
-        if let restarter = terminalRestarter {
-            let terminalDir = config.terminalDir
-            restarter.onTerminated = { [weak self] in
-                guard let self else { return }
-                terminalDrawer?.startProcess(executable: config.shell, args: config.shellArgs,
-                                             currentDirectory: terminalDir)
-            }
-        }
-        // vim pane: an exiting editor (`:q`) fires onVimExit and is relaunched
-        // on the current note — the pane is never left dead. The delegate
-        // callback may arrive off the main thread.
-        if let vr = vimRestarter {
-            vr.onTerminated = { [weak self] in
-                DispatchQueue.main.async {
-                    guard let self, !self.vimShuttingDown else { return }
-                    self.onVimExit?()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        guard let self, !self.vimShuttingDown else { return }
-                        self.startVimIfNeeded()
-                        if self.isShown, self.vimPaneActive, let vv = self.vimView {
-                            self.panel.makeFirstResponder(vv)
-                            self.focusedPane = .editor
-                            self.updateFocusIndicator()
-                        }
-                    }
-                }
-            }
-        }
-
-        // Wire the close button (self-safe now)
-        if config.showCloseButton, let _ = panel.standardWindowButton(.closeButton),
-           let closeTarget = windowCloseTarget {
-            closeTarget.onClose = { [weak self] in
-                if let onCloseWindow = self?.onCloseWindow {
-                    onCloseWindow()
-                } else {
-                    self?.hide(restore: true)
-                }
-            }
-        }
-
-        // "Open file at path…" editor context-menu item -> host prompt
-        (editorView as? PopupTextView)?.onOpenFileAtPath = { [weak self] in
-            self?.onOpenPathPrompt?()
-        }
-        (editorView as? PopupTextView)?.onCopyFilePath = { [weak self] in
-            self?.onCopyFilePath?()
-        }
-        // terminal drawer right-click actions (self-safe only after super.init):
-        // "Copy" copies the selection; "Open in Notes" / "Open in Default
-        // App" / "Reveal in Finder" forward the selected text (a path) to the
-        // host hooks.
-        if let term = terminalMenuView, let menuTarget = terminalMenuTarget {
-            menuTarget.copy = { [weak term] in
-                term?.copy(NSNull())
-            }
-            // the selection must become a real path before acting on it —
-            // copy to the general pasteboard, then read it back (never
-            // clobber the clipboard on an empty right-click)
-            let copySelectionToPasteboard: () -> String? = { [weak term] in
-                guard let term, term.selectedRange().length > 0 else { return nil }
-                term.copy(NSNull())
-                return NSPasteboard.general.string(forType: .string)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            menuTarget.openInNotes = { [weak self] in
-                guard let text = copySelectionToPasteboard(), !text.isEmpty else { return }
-                self?.onTerminalOpenInNotes?(text)
-            }
-            menuTarget.openInDefault = { [weak self] in
-                guard let text = copySelectionToPasteboard(), !text.isEmpty else { return }
-                self?.onTerminalOpenDefault?(text)
-            }
-            menuTarget.revealInFinder = { [weak self] in
-                guard let text = copySelectionToPasteboard(), !text.isEmpty else { return }
-                self?.onTerminalRevealInFinder?(text)
-            }
-        }
-        if let term = terminalMenuView, let tmenu = terminalMenu {
-            term.menu = tmenu
-        }
-        if let bar = tabsBar {
-            bar.onSelect = { [weak self] index in
-                self?.selectedTab = index
-            }
-            bar.onClick = { [weak self] index in
-                self?.onTabClick?(index)
-            }
-            bar.onAddTab = { [weak self] in
-                self?.onAddTab?()
-            }
-            bar.onCloseTab = { [weak self] index in
-                self?.onCloseTab?(index)
-            }
-            bar.onCopyPath = { [weak self] index in
-                self?.onTabCopyPath?(index)
-            }
-        }
-        if let bar = filterBar {
-            bar.onSelect = { [weak self] dim, vi in
-                guard let self, self.filterSelections.indices.contains(dim) else { return }
-                var sels = self.filterSelections
-                sels[dim] = vi
-                self.filterSelections = sels
-            }
-        }
+    private func wireRows() {
         if config.clickToSelect {
             rowView.onRowClick = { [weak self] index in
                 guard let self, self.rows.indices.contains(index) else { return }
@@ -8356,15 +8244,18 @@ scroll.documentView = rowView
             rowView.onToggleSelect = { [weak self] index in
                 self?.toggleRowSelection(index)
             }
-            updateCopyRowsLabel()
         }
-        tableHeader?.onSort = { [weak self] i in self?.onTableSort?(i) }
-        tableHeader?.onFilter = { [weak self] i, r in
+        rowView.onToggleStar = { [weak self] i in self?.onToggleStar?(i) }
+    }
+
+    // sort clicks, ▾ filters, column drags + divider drags -> host hooks
+    private func wireTableHeader(_ header: PopupTableHeaderView) {
+        header.onSort = { [weak self] i in self?.onTableSort?(i) }
+        header.onFilter = { [weak self] i, r in
             guard let self, let h = self.tableHeader else { return }
             self.onTableFilter?(i, h, r)
         }
-        rowView.onToggleStar = { [weak self] i in self?.onToggleStar?(i) }
-        tableHeader?.onReorder = { [weak self] from, to in
+        header.onReorder = { [weak self] from, to in
             guard let self else { return }
             var cols = self.config.tableColumns
             guard cols.indices.contains(from), cols.indices.contains(to) else { return }
@@ -8372,79 +8263,98 @@ scroll.documentView = rowView
             self.setTableColumns(cols)
             self.onTableColumnsReordered?(from, to)
         }
-        tableHeader?.onResize = { [weak self] pcts, final in
+        header.onResize = { [weak self] pcts, final in
             guard let self else { return }
             var cols = self.config.tableColumns
             for i in cols.indices where i < pcts.count { cols[i].width = pcts[i] }
             self.setTableColumns(cols)
             self.onTableColumnsResized?(pcts, final)
         }
-        chrome?.onMeterRecord = { [weak self] in self?.onMeterRecord?() }
-        chrome?.onMeterPause = { [weak self] in self?.onMeterPause?() }
-        // wired here (not at editor creation): the closure captures self, which
-        // is unavailable until every stored property is initialized
-        (editorView as? PopupTextView)?.onPasteImage = { [weak self] img in
-            guard let self, self.config.markdownImages,
-                  let rel = self.imageSaver?(img) else { return }
-            self.insertImageAttachment(rel: rel, image: img)
+    }
+
+    // Chrome overlay (drag header for editors / drag-anywhere for list
+    // windows + resize edges). Must be the topmost subview so its hitTest
+    // gets first shot; non-chrome areas fall through to the content.
+    private func buildChrome(in backdrop: NSView) {
+        let chrome = PopupChrome(config: config)
+        // header clicks (incl. the ✕) route through the window's click
+        // band (HeaderClickWindow): the titled windows and tool panels
+        // have one, other borderless panels don't, so no glyph there
+        if !(panel is PopupBaseWindow) && !config.toolPanel { chrome.config.headerCloseButton = false }
+        chrome.frame = backdrop.bounds
+        chrome.autoresizingMask = [.width, .height]
+        if config.editMode || config.dragHeader {
+            chrome.dragHeaderHeight = config.headerHeight * zoom
+            chrome.headerTitle = chromeHeaderTitle
+        } else if config.scrollableRows {
+            // the scroll view owns the row area (scrolling), so the
+            // chrome only claims the resize edges; window drags use the
+            // hidden titlebar natively
+            chrome.dragAnywhere = false
+        } else {
+            chrome.dragAnywhere = true
+            // pass-through for interactive controls: search field + tab
+            // strip (everything above the first row)
+            let top = config.padding + 2
+            let bottom = top + 24 * zoom + 4 + (config.tabs ? config.tabBarHeight * zoom + 2 : 0)
+            chrome.reservedRect = NSRect(x: 0, y: top, width: config.width,
+                                         height: bottom - top)
         }
-        (editorView as? PopupTextView)?.absolutePathAt = { [weak self] idx in
-            guard let self, let tv = self.editorView,
-                  let storage = tv.textStorage, idx < storage.length else { return nil }
-            let attrs = storage.attributes(at: idx, effectiveRange: nil)
-            guard let att = attrs[.attachment] as? NSTextAttachment,
-                  let rel = self.attachmentPaths[att] else { return nil }
-            return (self.imageBaseDir as NSString).appendingPathComponent(rel)
-        }
-        panel.delegate = self
-        (panel as? EscapableWindow)?.onEscape = { [weak self] in
-            self?.handleEscape()
-        }
-        if !config.editMode {
-            field.delegate = self
-        }
-        // find bar delegate (edit mode only) — set after super.init like field
-        findField?.delegate = self
-        // header clicks never reach the chrome (the invisible titlebar eats
-        // them) — intercept them at the window level instead; the click
-        // position decides which header button was hit
-        if (config.editMode || config.dragHeader), let base = panel as? HeaderClickWindow {
-            base.headerClickBand = config.headerHeight * zoom
-            base.onHeaderClick = { [weak self] point in
-                guard let self else { return }
-                // window coords (bottom-left) -> chrome coords (flipped)
-                let p = NSPoint(x: point.x, y: self.panel.frame.height - point.y)
-                if let chrome = self.chrome, chrome.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
-                    // ✕ glyph: the host's close path (same as Esc)
-                    if let onCloseWindow = self.onCloseWindow { onCloseWindow() } else { self.handleEscape() }
-                } else if let chrome = self.chrome,
-                   let hit = chrome.extraButtonRects.first(where: { $0.value.contains(p) }) {
-                    self.onHeaderButton?(hit.key)
-                    chrome.showCopiedFeedback(hit.key)
-                } else if let chrome = self.chrome,
-                   chrome.copyRowsLabel != nil,
-                   chrome.copyRowsButtonRect.contains(p) {
-                    self.performCopyRows()
-                    chrome.showCopiedFeedback(3)
-                } else if let chrome = self.chrome,
-                   chrome.configButtonRect.contains(p) {
-                    self.onChromeConfigClick?()
-                    chrome.showCopiedFeedback(2)
-                } else if let chrome = self.chrome,
-                   chrome.copyButtonRect.contains(p) {
-                    // only the actual "copy path" SEGMENT acts as the copy
-                    // button — empty header space must not trigger anything
-                    self.onChromeHeaderClick?()
-                    chrome.showCopiedFeedback(1)
-                } else if let chrome = self.chrome,
-                   chrome.headerIcon != nil, chrome.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
-                    // click on the top-left app glyph (drawn at x=10..26) —
-                    // the host e.g. opens the config file in the viewer
-                    self.onChromeIconClick?()
-                }
+        chrome.onMeterRecord = { [weak self] in self?.onMeterRecord?() }
+        chrome.onMeterPause = { [weak self] in self?.onMeterPause?() }
+        backdrop.addSubview(chrome)
+        self.chrome = chrome
+    }
+
+    // the visible close button (showCloseButton, e.g. vim mode): the
+    // host's onCloseWindow, else hide(restore: true)
+    private func wireCloseButton() {
+        guard config.showCloseButton, let closeBtn = panel.standardWindowButton(.closeButton) else { return }
+        let target = ClosureTarget { [weak self] in
+            if let onCloseWindow = self?.onCloseWindow {
+                onCloseWindow()
+            } else {
+                self?.hide(restore: true)
             }
         }
-        panel.orderOut(nil)
+        closeBtn.target = target
+        closeBtn.action = #selector(ClosureTarget.run)
+        windowCloseTarget = target
+    }
+
+    // header clicks never reach the chrome (the invisible titlebar eats
+    // them) — intercept them at the window level instead; the click
+    // position decides which header button was hit
+    private func wireHeaderClicks() {
+        guard config.editMode || config.dragHeader, let base = panel as? HeaderClickWindow else { return }
+        base.headerClickBand = config.headerHeight * zoom
+        base.onHeaderClick = { [weak self] point in
+            guard let self, let chrome = self.chrome else { return }
+            // window coords (bottom-left) -> chrome coords (flipped)
+            let p = NSPoint(x: point.x, y: self.panel.frame.height - point.y)
+            if chrome.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
+                // ✕ glyph: the host's close path (same as Esc)
+                if let onCloseWindow = self.onCloseWindow { onCloseWindow() } else { self.handleEscape() }
+            } else if let hit = chrome.extraButtonRects.first(where: { $0.value.contains(p) }) {
+                self.onHeaderButton?(hit.key)
+                chrome.showCopiedFeedback(hit.key)
+            } else if chrome.copyRowsLabel != nil, chrome.copyRowsButtonRect.contains(p) {
+                self.performCopyRows()
+                chrome.showCopiedFeedback(3)
+            } else if chrome.configButtonRect.contains(p) {
+                self.onChromeConfigClick?()
+                chrome.showCopiedFeedback(2)
+            } else if chrome.copyButtonRect.contains(p) {
+                // only the actual "copy path" SEGMENT acts as the copy
+                // button — empty header space must not trigger anything
+                self.onChromeHeaderClick?()
+                chrome.showCopiedFeedback(1)
+            } else if chrome.headerIcon != nil, chrome.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
+                // click on the top-left app glyph (drawn at x=10..26) —
+                // the host e.g. opens the config file in the viewer
+                self.onChromeIconClick?()
+            }
+        }
     }
 
     // MARK: Lifecycle
@@ -8605,12 +8515,7 @@ scroll.documentView = rowView
         let caller = Thread.callStackSymbols.dropFirst().prefix(4)
             .map { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).prefix(1).joined() }
             .joined(separator: " < ")
-        let line = "ws: hide '\(config.name)' restore=\(restore) front=\(front) via \(caller)\n"
-        if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/ws-debug.log")) {
-            fh.seekToEndOfFile()
-            fh.write(Data(line.utf8))
-            try? fh.close()
-        }
+        appendToFile(debugLogPath, "ws: hide '\(config.name)' restore=\(restore) front=\(front) via \(caller)\n")
         removeMonitors()
         panel.orderOut(nil)
         if config.editMode, editorView != nil {
@@ -8777,10 +8682,10 @@ scroll.documentView = rowView
     }
 
     // Scrollable rows: KEYBOARD navigation keeps the selected row at a FIXED
-// relative position (~45% down) — the list scrolls behind it and the
-// selection stays put (the model fzf/editors use), clamped at the ends.
-// Clicks just keep the row visible (no jump).
-private func scrollSelectionIntoView() {
+    // relative position (~45% down) — the list scrolls behind it and the
+    // selection stays put (the model fzf/editors use), clamped at the ends.
+    // Clicks just keep the row visible (no jump).
+    private func scrollSelectionIntoView() {
         guard config.scrollableRows, isShown,
               let scroll = rowScroll, selection >= 0, selection < rows.count,
               let rv = rowScroll?.documentView as? PopupRowView else { return }
@@ -11005,10 +10910,10 @@ private func scrollSelectionIntoView() {
     }
 
     // themed color roles the paint-brush picker can style. Only the per-window
-// BACKGROUNDS are interactive (card colors stay in [theme] in commands.toml):
-// `browser` = the file-explorer panel, `terminal` = the shell drawer,
-// `notepad` = the editor / window card fill, `header` = the drag-header tint.
-public enum ThemeRole: String, CaseIterable {
+    // BACKGROUNDS are interactive (card colors stay in [theme] in commands.toml):
+    // `browser` = the file-explorer panel, `terminal` = the shell drawer,
+    // `notepad` = the editor / window card fill, `header` = the drag-header tint.
+    public enum ThemeRole: String, CaseIterable {
     case browser
     case terminal
     case notepad
@@ -11362,11 +11267,28 @@ public enum ThemeRole: String, CaseIterable {
     }
     // the frame WITHOUT the drawer growth (the drawers grow the window by
     // its top edge, origin fixed): what the other shared-window views use,
-    // so the notes terminal never leaks its height into files / jira
+    // so the notes terminal never leaks its height (or the push it caused)
+    // into files / jira
     public var baseFrame: NSRect {
         var f = panel.frame
+        f.origin.y += drawerShift
         f.size.height = max(minEditorH, f.height - drawerInsetNow)
         return f
+    }
+
+    // How far the drawers moved the window off its drawer-less spot: grown
+    // by its top edge, a window near the top of the screen is pushed DOWN
+    // to stay on it (clampToScreen). Handed back as the drawers close, so
+    // the window returns where it was. Void once the window moved since the
+    // last drawer change (the user's new spot wins).
+    private var drawerShiftValue: CGFloat = 0
+    private var drawerShiftFrame: NSRect = .zero
+    private var drawerShift: CGFloat { panel.frame == drawerShiftFrame ? drawerShiftValue : 0 }
+    // the drawers just put the window where it is now; `baseY` = its
+    // drawer-less origin
+    private func noteDrawerFrame(baseY: CGFloat) {
+        drawerShiftFrame = panel.frame
+        drawerShiftValue = baseY - drawerShiftFrame.origin.y
     }
 
     // place the window at a drawer-less frame, re-growing it by the drawers
@@ -11378,6 +11300,7 @@ public enum ThemeRole: String, CaseIterable {
         drawerInsetNow = 0
         panel.setFrame(grown, display: false)
         drawerInsetNow = max(0, min(want, grown.height - f.height))
+        noteDrawerFrame(baseY: f.minY)
         panel.invalidateShadow()
     }
 
@@ -11385,13 +11308,17 @@ public enum ThemeRole: String, CaseIterable {
         let want = drawerInsetTotal()
         if abs(want - drawerInsetNow) > 0.5 {
             let f = panel.frame, was = drawerInsetNow
-            panel.setFrame(NSRect(x: f.origin.x, y: f.origin.y,
-                                  width: f.width, height: f.height + (want - drawerInsetNow)),
+            let delta = want - was, shift = drawerShift
+            // closing first hands back the push the opening caused
+            var y = f.origin.y
+            if delta < 0 { y += shift > 0 ? min(shift, -delta) : max(shift, delta) }
+            panel.setFrame(NSRect(x: f.origin.x, y: y, width: f.width, height: f.height + delta),
                            display: true)
             // count only what the window REALLY grew: at screen height the
             // grow is clamped (the drawer eats editor space instead), and
             // closing it must not then shrink the window by the full height
             drawerInsetNow = max(0, was + panel.frame.height - f.height)
+            noteDrawerFrame(baseY: f.origin.y + shift)
             // the window server keeps the old outline otherwise (a ghost of
             // the terminal band under a closed drawer)
             panel.invalidateShadow()

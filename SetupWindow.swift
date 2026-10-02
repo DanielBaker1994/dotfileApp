@@ -48,16 +48,12 @@ enum AppInstall {
     // bash <assetDir>/bin/NAME ARGS, synchronously (setup-home.sh is quick)
     @discardableResult
     static func runSync(_ script: String, _ args: [String]) -> (code: Int32, out: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [assetDir + "/bin/" + script] + args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = pipe
-        do { try p.run() } catch { return (-1, "cannot run \(script): \(error.localizedDescription)") }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        do {
+            let r = try runProcess("/bin/bash", [assetDir + "/bin/" + script] + args, mergeStderr: true)
+            return (r.code, r.out)
+        } catch {
+            return (-1, "cannot run \(script): \(error.localizedDescription)")
+        }
     }
 
     // `key=value` lines of the marker

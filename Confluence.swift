@@ -33,7 +33,7 @@ import WebKit
 
 // [confluence] enabled - the view, its hotkey and its menu entries
 func confluenceEnabled() -> Bool {
-    ["true", "yes", "1", "on"].contains((configSectionValue("confluence", "enabled") ?? "").lowercased())
+    tri(configSectionValue("confluence", "enabled")) == true
 }
 
 // a numeric [confluence] key (width / height / split)
@@ -379,20 +379,12 @@ final class ConfluenceImageLoader: NSObject, WKURLSchemeHandler {
 
 // MARK: - the window
 
-final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
+final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTableViewDelegate,
                               NSTextFieldDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private static var live: ConfluenceWindow?
     static var current: ConfluenceWindow? { live }
 
-    private weak var controller: SwitcherController?
-    let window: JiraConfigNSWindow
-    private var chrome: PopupChrome?
     private var colors = confluenceColors()
-    private var monitor: Any?
-    var onSlotHide: (() -> Void)?
-    private var slotNavClick: ((Int) -> Void)?
-    // Ctrl+Tab / Ctrl+Shift+Tab: the shared window's next / previous view
-    var onCycleView: ((Int) -> Void)?
 
     // strip
     private let scopeSeg = ConfSegmented(["Search", "★ Favorites"])
@@ -480,120 +472,22 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         focusSearch()
     }
 
+    // the shared window brought the view back
+    override func didShow() {
+        if window.firstResponder === window || window.firstResponder == nil { focusSearch() }
+    }
+
     private init(controller: SwitcherController, frame: NSRect?) {
-        self.controller = controller
         let f = frame ?? NSRect(x: 0, y: 0, width: confluenceSetting("width", 1400), height: confluenceSetting("height", 900))
-        window = JiraConfigNSWindow(contentRect: f, styleMask: [.titled, .closable, .resizable, .miniaturizable,
-                                                                 .fullSizeContentView],
-                                    backing: .buffered, defer: false)
-        super.init()
-        window.title = "Confluence"
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 820, height: 480)
-        window.level = .normal   // AeroSpace floats it (aerospace.toml)
-        window.delegate = self
+        super.init(controller: controller, frame: f, title: "Confluence", minSize: NSSize(width: 820, height: 480))
         split = CGFloat(UserDefaults.standard.double(forKey: Self.splitKey))
         if split < 0.2 || split > 0.8 { split = confluenceSetting("split", 0.42) }
         PopupThemeDefaults.colors = colors
-        window.contentView = themedRoot(buildContent())
+        window.contentView = themedRoot(buildContent(), name: "confluence", colors: colors,
+                                        headerColor: hexColor(configSectionValue("confluence", "header-color")) ?? jiraHeaderColor,
+                                        icon: confluenceAppIcon, title: "Confluence")
         if frame != nil { window.setFrame(f, display: false) }
         restoreCriteria()
-        installKeys()
-    }
-
-    // same surface as the Jira Config window: blur + card tint + border,
-    // the popup header strip on top (✕ · kitchen sink · view icons · title)
-    private func themedRoot(_ content: NSView) -> NSView {
-        var cfg = PopupConfig(name: "confluence")
-        cfg.colors = colors
-        cfg.headerHeight = 30
-        cfg.titlePill = false
-        cfg.headerColor = hexColor(configSectionValue("confluence", "header-color")) ?? jiraHeaderColor
-        let radius = cfg.cornerRadius + 1
-        window.cornerRadius = radius
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        for b: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(b)?.isHidden = true
-        }
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.appearance = NSAppearance(named: colors.isLight ? .aqua : .darkAqua)
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.cornerRadius = radius
-        root.layer?.masksToBounds = true
-        let fx = NSVisualEffectView()
-        fx.material = cfg.material
-        fx.blendingMode = .behindWindow
-        fx.state = .active
-        let tint = NSView()
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor = colors.base.withAlphaComponent(max(cfg.tintAlpha, 0.94)).cgColor
-        tint.layer?.borderColor = colors.border.cgColor
-        tint.layer?.borderWidth = 1
-        tint.layer?.cornerRadius = radius
-        let ch = PopupChrome(config: cfg)
-        ch.dragHeaderHeight = cfg.headerHeight
-        ch.headerIcon = confluenceAppIcon
-        ch.headerTitle = "Confluence"
-        ch.copyPathLabel = ""
-        ch.copyConfigLabel = ""
-        chrome = ch
-        for v in [fx, tint, ch, content] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(v)
-        }
-        for v in [fx, tint] as [NSView] {
-            NSLayoutConstraint.activate([
-                v.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-                v.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-                v.topAnchor.constraint(equalTo: root.topAnchor),
-                v.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            ])
-        }
-        NSLayoutConstraint.activate([
-            ch.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            ch.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            ch.topAnchor.constraint(equalTo: root.topAnchor),
-            ch.heightAnchor.constraint(equalToConstant: cfg.headerHeight),
-            content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 1),
-            content.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -1),
-            content.topAnchor.constraint(equalTo: ch.bottomAnchor),
-            content.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -1),
-        ])
-        func walk(_ v: NSView) {
-            (v as? PopupThemeable)?.applyColors(colors)
-            v.subviews.forEach(walk)
-        }
-        walk(content)
-        window.headerBand = cfg.headerHeight
-        window.onHeaderClick = { [weak self] p in
-            guard let self, let ch = self.chrome else { return }
-            if ch.closeButtonRect.insetBy(dx: -2, dy: -2).contains(p) {
-                self.closeOrHide()
-            } else if let hit = ch.extraButtonRects.first(where: { $0.value.contains(p) }) {
-                self.slotNavClick?(hit.key)
-            } else if ch.headerIcon != nil, ch.iconButtonRect.insetBy(dx: -4, dy: -4).contains(p) {
-                self.showIconMenu()
-            }
-        }
-        return root
-    }
-
-    // the shared window's header: view icons (this one lit)
-    func setSlotNav(icons: [(image: NSImage, id: Int, tip: String)], icon: NSImage, on: Int,
-                    click: @escaping (Int) -> Void) {
-        chrome?.navIcons = icons
-        chrome?.navOn = on
-        chrome?.headerIcon = icon
-        chrome?.needsDisplay = true
-        slotNavClick = click
-    }
-
-    private func closeOrHide() {
-        if let hide = onSlotHide { hide() } else { window.orderOut(nil) }
     }
 
     // MARK: build
@@ -1238,13 +1132,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         guard rows.indices.contains(i) else { return nil }
         let r = rows[i]
         let m = NSMenu()
-        func add(_ t: String, _ f: @escaping () -> Void) {
-            let target = MenuActionTarget(action: f)
-            menuActionTargets.append(target)
-            let it = NSMenuItem(title: t, action: #selector(MenuActionTarget.run), keyEquivalent: "")
-            it.target = target
-            m.addItem(it)
-        }
+        func add(_ t: String, _ f: @escaping () -> Void) { m.addItem(menuItem(t, f)) }
         add("Open in Browser") { [weak self] in self?.open(r) }
         add("Copy Link") { [weak self] in self?.copy(r.url, what: "link") }
         add("Copy Title + Link") { [weak self] in self?.copy("\(r.title)\n\(r.url)", what: "title + link") }
@@ -1668,85 +1556,50 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
         }
     }
 
-    private func installKeys() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self else { return e }
-            // Esc closes an open filter (and only it), wherever the keys are
-            if e.keyCode == 53, let open = [self.spaces, self.people].first(where: { $0.isOpen }) {
-                open.closePopover()
-                return nil
-            }
-            if let sheet = self.window.attachedSheet {
-                return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
-            }
-            guard self.window.isKeyWindow else { return e }
-            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let cmd = mods.contains(.command), shift = mods.contains(.shift), ctrl = mods.contains(.control)
-            let fr = self.window.firstResponder
-            let inWeb = (fr as? NSView)?.isDescendant(of: self.web) == true
-            if ctrl && !cmd && e.keyCode == 48, let cycle = self.onCycleView {     // Ctrl+Tab: next view
-                cycle(mods.contains(.shift) ? -1 : 1)
-                return nil
-            }
-            switch e.keyCode {
-            case 53:                                                         // Esc
-                self.escape()
-                return nil
-            case 13 where cmd: self.closeOrHide(); return nil                // Cmd+W
-            case 37 where cmd, 3 where cmd && !shift: self.focusSearch(); return nil   // Cmd+L / Cmd+F
-            case 5 where cmd: shift ? self.prevHit() : self.nextHit(); return nil      // Cmd+G
-            case 2 where cmd:                                                // Cmd+D
-                if self.rows.indices.contains(self.table.selectedRow) { self.toggleFavorite(row: self.table.selectedRow) }
-                return nil
-            case 15 where cmd: self.runSearch(); return nil                  // Cmd+R
-            case 36 where cmd, 76 where cmd: self.openSelected(); return nil // Cmd+Return
-            case 45 where ctrl: self.move(1); return nil                     // Ctrl+N
-            case 35 where ctrl: self.move(-1); return nil                    // Ctrl+P
-            default: break
-            }
-            if fr === self.table {
-                if e.keyCode == 36 || e.keyCode == 76 { self.openSelected(); return nil }
-                if cmd && e.keyCode == 8, let r = self.selectedRow {          // Cmd+C / Shift+Cmd+C
-                    shift ? self.copy("\(r.title)\n\(r.url)", what: "title + link") : self.copy(r.url, what: "link")
-                    return nil
+    // Esc closes an open filter (and only it), wherever the keys are
+    override func keyBeforeSheet(_ e: NSEvent) -> Bool {
+        guard e.keyCode == 53, let open = [spaces, people].first(where: { $0.isOpen }) else { return false }
+        open.closePopover()
+        return true
+    }
+
+    override func handleKey(_ e: NSEvent) -> Bool {
+        let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let cmd = mods.contains(.command), shift = mods.contains(.shift), ctrl = mods.contains(.control)
+        switch e.keyCode {
+        case 53: escape()                                                // Esc
+        case 37 where cmd, 3 where cmd && !shift: focusSearch()          // Cmd+L / Cmd+F
+        case 5 where cmd: shift ? prevHit() : nextHit()                  // Cmd+G
+        case 2 where cmd:                                                // Cmd+D
+            if rows.indices.contains(table.selectedRow) { toggleFavorite(row: table.selectedRow) }
+        case 15 where cmd: runSearch()                                   // Cmd+R
+        case 36 where cmd, 76 where cmd: openSelected()                  // Cmd+Return
+        case 45 where ctrl: move(1)                                      // Ctrl+N
+        case 35 where ctrl: move(-1)                                     // Ctrl+P
+        default:
+            if window.firstResponder === table {
+                if e.keyCode == 36 || e.keyCode == 76 { openSelected(); return true }
+                if cmd && e.keyCode == 8, let r = selectedRow {          // Cmd+C / Shift+Cmd+C
+                    shift ? copy("\(r.title)\n\(r.url)", what: "title + link") : copy(r.url, what: "link")
+                    return true
                 }
-                // typing goes to the search box
+                // typing goes to the search box (the key itself too)
                 if !cmd && !ctrl, let ch = e.characters, ch.count == 1, ch.first?.isLetter == true
                     || ch.first?.isNumber == true {
-                    self.focusSearch()
-                    return e
+                    focusSearch()
+                    return false
                 }
             }
-            if inWeb && cmd {
-                // the page: copy / select all like any document
-                if e.keyCode == 8 { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil); return nil }
-                if e.keyCode == 0 { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil); return nil }
-            }
-            return JiraEditKeys.route(e, in: self.window) ? nil : e
+            return webEditKey(e, in: web)                                // the page
         }
+        return true
     }
 
     // MARK: kitchen sink (the header icon)
 
-    private func showIconMenu() {
-        guard let ch = chrome else { return }
-        let menu = NSMenu()
-        menu.autoenablesItems = false   // keeps a greyed global item greyed
-        if let c = controller {
-            c.addGlobalWindowItems(to: menu)
-            menu.addItem(.separator())
-            if onSlotHide != nil {
-                menu.addItem(c.escHidesMenuItem(.confluence))
-                menu.addItem(.separator())
-            }
-        }
-        func add(_ t: String, _ f: @escaping () -> Void) {
-            let target = MenuActionTarget(action: f)
-            menuActionTargets.append(target)
-            let it = NSMenuItem(title: t, action: #selector(MenuActionTarget.run), keyEquivalent: "")
-            it.target = target
-            menu.addItem(it)
-        }
+    override func showIconMenu() {
+        let menu = iconMenu(view: .confluence)
+        func add(_ t: String, _ f: @escaping () -> Void) { menu.addItem(menuItem(t, f)) }
         add("Confluence Setup…") { [weak self] in self?.showSetup() }
         add("Import My Saved Pages as Favorites") { [weak self] in self?.importSaved() }
         add("Refresh Contributor List") { [weak self] in
@@ -1779,14 +1632,7 @@ final class ConfluenceWindow: NSObject, NSWindowDelegate, NSTableViewDataSource,
             Cmd+W / ✕ — hide the window
             """, buttons: ["OK"]) { _ in }
         }
-        ch.iconMenuOpen = true
-        menu.popUp(positioning: nil, at: NSPoint(x: ch.iconButtonRect.minX, y: ch.iconButtonRect.maxY + 4), in: ch)
-        ch.iconMenuOpen = false
-    }
-
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        closeOrHide()
-        return false
+        popUpIconMenu(menu)
     }
 }
 
@@ -1796,18 +1642,5 @@ private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     init(_ t: WKScriptMessageHandler) { target = t }
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
         target?.userContentController(uc, didReceive: message)
-    }
-}
-
-extension ConfluenceWindow: SlotMember {
-    var slotWindow: NSWindow { window }
-    var slotShown: Bool { window.isVisible }
-    var slotBaseFrame: NSRect { window.frame }
-    func slotPark(stopVoice: Bool) { window.orderOut(nil) }
-    func slotShow(frame: NSRect?) {
-        if let f = frame { window.setFrame(f, display: false) }
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        if window.firstResponder === window || window.firstResponder == nil { focusSearch() }
     }
 }

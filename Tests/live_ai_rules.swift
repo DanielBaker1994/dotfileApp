@@ -1,4 +1,4 @@
-// sources: AIFormat.swift
+// sources: AIFormat.swift ProcessRun.swift
 // Common-sense checks of the shipped rules (rules/*.md) against fm's
 // on-device model: the same steps the AI view runs (code kept out, comma
 // tables, prompt line, the `then:` chain, keep-words). Slow (~1-2 s a call)
