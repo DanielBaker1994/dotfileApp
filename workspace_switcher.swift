@@ -697,6 +697,7 @@ struct CommandSpec {
     let drag: Bool            // drag the window by its header
     var sticky: Bool          // stay visible when another app takes focus
     var float: Bool? = nil    // stay above other apps' windows (nil = [app] float)
+    var panel = false         // output: a tool panel, not a shared-window view (isToolPanel)
     var label: String? = nil  // palette text for "/" commands (nil = the section name)
     var inPalette = true      // `in-palette = false`: not listed in the Hyper+S "/" palette
     var tabsOpaque: Bool? = nil  // any window: solid (never transparent) tabs strip (nil = on)
@@ -1055,6 +1056,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     spec.accentColor = hexColor(vars["accent-color"])
     spec.palette = parsePalette(vars["palette"])
     spec.float = tri(vars["float"])
+    spec.panel = tri(vars["panel"]) ?? false
     spec.sort = vars["sort"]
     if let o = vars["sort-order"]?.lowercased() { spec.sortDescending = o.hasPrefix("desc") }
     spec.searchLimit = Int(vars["search-limit"] ?? "")
@@ -1429,6 +1431,7 @@ private func configLog(_ s: String) {
 private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
     "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload", "in-palette",
+    "panel",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
@@ -2632,6 +2635,9 @@ final class SwitcherController: NSObject {
     // the poller would then yank focus back off the app the user just clicked.
     // Suppress self-activation right after a click outside our windows.
     private var lastOtherAppClick: Date?
+    // app activations since launch (state `activations`): opening / using a
+    // tool panel must never add one (bin/ui-test-focus.py tools)
+    private var appActivations = 0
     private var globalClickMonitor: Any?
     // debounced auto-format for the /prettyprint window (cancelled/re-armed on
     // every keystroke so paste + brief pause renders once)
@@ -2774,14 +2780,20 @@ final class SwitcherController: NSObject {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] note in
+            // (never a tool panel: it is key WITHOUT activating the app —
+            // activation would raise every window of ours with it)
             guard let self, !NSApp.isActive, let w = note.object as? NSWindow, w.isVisible,
                   Self.sharedViews.contains(where: { self.slotMember($0)?.slotWindow === w })
-                    || self.subWindows.contains(where: { $0.nativeWindow === w && $0.isShown }) else { return }
+                    || self.subWindows.contains(where: { $0.nativeWindow === w && $0.isShown && !$0.config.toolPanel })
+            else { return }
             if let t = self.lastOtherAppClick, Date().timeIntervalSince(t) < 1.0 { return }
             NSApp.activate(ignoringOtherApps: true)
             w.orderFrontRegardless()
             self.log("our window became key while inactive (aerospace focus) — self-activated")
         }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.appActivations += 1 }
         watchFocusBridge()
     }
 
@@ -2830,7 +2842,7 @@ final class SwitcherController: NSObject {
         guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
               let id = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
               let w = subWindows.first(where: {
-                  $0.isShown && $0.nativeWindow.windowNumber == id
+                  $0.isShown && $0.nativeWindow.windowNumber == id && !$0.config.toolPanel
               }) else { return }
         // only a FRESH write means aerospace just focused us — never act on
         // one that sat around (e.g. the first event after launch)
@@ -2959,7 +2971,7 @@ final class SwitcherController: NSObject {
         let n = w.config.name
         if n == commands.first(where: { $0.kind == .note })?.windowName { return .notes }
         if n == filesCommand?.windowName { return .files }
-        if commands.contains(where: { $0.kind == .output && $0.windowName == n }) { return .output }
+        if commands.contains(where: { $0.kind == .output && !$0.panel && $0.windowName == n }) { return .output }
         if n == "jira" { return .jira }
         if n == settings.detailWindowName { return .detail }
         if n == jiraReleasesWindow { return .releases }
@@ -3301,13 +3313,24 @@ final class SwitcherController: NSObject {
                 switch arg {
                 case "show":
                     guard let cmd = pathsCommand else { return "{\"error\":\"[paths] not enabled\"}" }
-                    showPaths(cmd, restoreWID: nil, restorePID: nil)
+                    showPaths(cmd)
                 case "hide": pathsWindow?.hide()
                 case "return": pathsWindow?.testReturn()
                 case _ where arg.hasPrefix("select:"):
                     pathsWindow?.testSelect(Int(arg.dropFirst(7)) ?? 0)
                 default: return "{\"error\":\"paths:show|hide|return|select:N\"}"
                 }
+            case _ where a.hasPrefix("tool:"):
+                // tool:NAME — open a tool panel exactly as the palette does
+                let n = String(a.dropFirst(5))
+                guard let cmd = commands.first(where: { $0.name == n }), isToolPanel(cmd) else {
+                    return "{\"error\":\"not a tool panel: \(n)\"}"
+                }
+                openTool(cmd)
+            case _ where a.hasPrefix("tool-close:"):
+                let n = String(a.dropFirst(11))
+                if n == "paths" { pathsWindow?.hide() }
+                else { subWindows.first { $0.config.name == n && $0.config.toolPanel }?.hide(restore: false) }
             case _ where a.hasPrefix("esc-hides:"):
                 // esc-hides:VIEW:on|off — the kitchen sink's "Esc Hides Window"
                 let parts = a.split(separator: ":").map(String.init)
@@ -3352,6 +3375,16 @@ final class SwitcherController: NSObject {
             "paths": pathsWindow?.testState ?? ["shown": false,
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
+            "activations": appActivations,
+            // NOT `active`: a key non-activating panel (tool panel) reads as
+            // NSApp.isActive while the other app stays frontmost
+            "frontmostPid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0),
+            "tools": Dictionary(subWindows.filter(\.config.toolPanel).map { w -> (String, Any) in
+                var st = w.testState
+                st["wid"] = w.nativeWindow.windowNumber
+                st["level"] = w.nativeWindow.level.rawValue
+                return (w.config.name, st)
+            }, uniquingKeysWith: { a, _ in a }),
         ]
         guard let d = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]) else { return "{}" }
         return String(decoding: d, as: UTF8.self)
@@ -3586,33 +3619,22 @@ final class SwitcherController: NSObject {
 
     private func accept(_ row: PopupRow) {
         if let cr = row as? CommandRow {
+            // tool panels (/filefast, /paths, /prettyprint, /health-checks)
+            // are non-activating: restoring focus to the previous app here
+            // would steal key from them (and re-activating US raised every
+            // window of ours, the shared window too). They hand nothing back
+            // when they close either: the app was never activated, so the
+            // keyboard returns to the frontmost app on its own (a saved
+            // window could be on a workspace you've since left)
+            if isToolPanel(cr.command) {
+                popup.hide(restore: false)
+                openTool(cr.command)
+                return
+            }
             switch cr.command.kind {
             case .shell:
                 let cmd = cr.command
-                // /filefast is a nonactivating panel: restoring focus to the
-                // previous app here would steal key from it and focus loss
-                // would close it — it restores focus itself when it closes
-                if cmd.name == "filefast" {
-                    let wid = savedWID, pid = savedPID
-                    popup.hide(restore: false)
-                    openFileFastWindow(cmd, restoreWID: wid, restorePID: pid)
-                    break
-                }
-                // /paths: the recent-file shelf (PathsWindow.swift) — a
-                // nonactivating panel too, same focus rules as filefast
-                if cmd.name == "paths" {
-                    let wid = savedWID, pid = savedPID
-                    popup.hide(restore: false)
-                    showPaths(cmd, restoreWID: wid, restorePID: pid)
-                    break
-                }
                 popup.hide(restore: true)
-                // /prettyprint is a custom command handled in-process (a tiny
-                // paste-and-format window), not a shell script
-                if cmd.name == "prettyprint" {
-                    openPrettyPrintWindow(cmd)
-                    break
-                }
                 // /jira-config opens the Jira Config window (in-process too)
                 if cmd.name == "jira-config" {
                     showJiraDashboard()
@@ -3789,6 +3811,9 @@ final class SwitcherController: NSObject {
     private func userInOurWindow(_ focusPID: pid_t?, _ name: String) -> Bool? {
         let keyed = NSApp.isActive && NSApp.keyWindow?.isVisible == true
         guard let focusPID else { return nil }
+        // a key tool panel is its own "app": the hotkey from it focuses the
+        // shared window instead of hiding it
+        if (NSApp.keyWindow?.delegate as? PopupWindow)?.config.toolPanel == true { return false }
         let inIt = focusPID == getpid() && keyed
         if focusPID == getpid() && !keyed {
             log("hotkey \(name): aerospace says our window is focused but AppKit has no key window — focusing, not hiding")
@@ -4022,11 +4047,56 @@ final class SwitcherController: NSObject {
         return out.joined(separator: "\n")
     }
 
+    // MARK: Tool panels
+
+    // The "/" tools that act like their own apps (PopupConfig.toolPanel):
+    // /filefast, /paths, /prettyprint, and output commands with `panel =
+    // true` (/health-checks). They never activate the app — every shown
+    // popup raises itself on activation, so the shared window came along —
+    // and they are never shared-window views.
+    func isToolPanel(_ cmd: CommandSpec) -> Bool {
+        ["filefast", "paths", "prettyprint"].contains(cmd.name) || (cmd.kind == .output && cmd.panel)
+    }
+
+    // ONE way to open a tool panel (the palette, `do:tool:NAME`)
+    func openTool(_ cmd: CommandSpec) {
+        switch cmd.name {
+        case "filefast": openFileFastWindow(cmd)
+        case "paths": showPaths(cmd)
+        case "prettyprint": openPrettyPrintWindow(cmd)
+        default: openOutputWindow(cmd)
+        }
+    }
+
+    // a tool panel already up (you clicked away to copy something): take the
+    // keyboard back WITHOUT activating the app — activation raises our other
+    // windows and hands key to the app's last key window (notes / jira)
+    private func raiseToolPanel(_ w: PopupWindow) {
+        let win = w.nativeWindow
+        win.orderFrontRegardless()
+        win.makeKey()
+        log("tool '\(w.config.name)' refocused")
+    }
+
+    // opened from another app: hiding the switcher can hand key to one of
+    // OUR other windows (notes / jira) a beat later — take it back, but
+    // never from another app the user clicked into
+    private func reclaimToolKey(_ w: PopupWindow, then focus: (() -> Void)? = nil) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak w] in
+            guard let w, w.isShown, !w.nativeWindow.isKeyWindow,
+                  let k = NSApp.keyWindow, k !== w.nativeWindow else { return }
+            w.nativeWindow.makeKeyAndOrderFront(nil)
+            focus?()
+        }
+    }
+
     // type = output: run a shell command and show its output in a read-only
-    // floating window (the /health-checks palette entry). Re-invoking
-    // re-runs into the same window; Esc dismisses.
+    // window (the /health-checks palette entry). Re-invoking re-runs into the
+    // same window; Esc dismisses. `panel = true`: a tool panel (its own
+    // window, isToolPanel); else a shared-window view.
     private func openOutputWindow(_ cmd: CommandSpec) {
-        if settings.sharedWindow {
+        let shared = settings.sharedWindow && !cmd.panel
+        if shared {
             // one output view at a time in the shared window: another
             // command's output window goes away
             if let old = currentOutputName, old != cmd.windowName,
@@ -4036,13 +4106,17 @@ final class SwitcherController: NSObject {
             currentOutputName = cmd.windowName
         }
         if let existing = subWindows.first(where: { $0.config.name == cmd.windowName }) {
-            if settings.sharedWindow {
+            if shared {
                 slot.push(.output)
                 runOutput(cmd, into: existing)
                 return
             }
-            existing.nativeWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            if cmd.panel {
+                raiseToolPanel(existing)
+            } else {
+                existing.nativeWindow.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
             runOutput(cmd, into: existing)
             return
         }
@@ -4052,8 +4126,10 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = cmd.float ?? false
-        cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
+        cfg.toolPanel = cmd.panel
+        // tool panels float by default (they follow you, Raycast-style)
+        cfg.floating = cmd.float ?? cmd.panel
+        cfg.escCloseCount = shared ? 1 : max(0, cmd.escClose ?? (cmd.panel ? 1 : settings.escClose))
         cfg.copyToast = settings.copyToast
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
         cfg.height = cmd.height > 0 ? cmd.height : defaultOutputSize.height
@@ -4080,13 +4156,14 @@ final class SwitcherController: NSObject {
                                      restoreWID: nil, restorePID: nil)
         }
         subWindows.append(w)
-        if settings.sharedWindow {
+        if shared {
             w.onEscape = { [weak self] in self?.slot.back(esc: true) }
             placeSlotWindow(w)
             w.show()
             slot.push(.output)
         } else {
             w.show()
+            if cmd.panel { reclaimToolKey(w) }
         }
         runOutput(cmd, into: w)
     }
@@ -4102,7 +4179,7 @@ final class SwitcherController: NSObject {
     private func openPrettyPrintWindow(_ cmd: CommandSpec) {
         let windowName = "prettyprint"
         if let existing = subWindows.first(where: { $0.config.name == windowName }) {
-            focusSubWindow(existing)
+            raiseToolPanel(existing)
             return
         }
         var cfg = PopupConfig(name: windowName)
@@ -4110,7 +4187,8 @@ final class SwitcherController: NSObject {
         cfg.editMode = true
         cfg.enableDrag = true
         cfg.sticky = true
-        cfg.floating = cmd.float ?? false
+        cfg.toolPanel = true
+        cfg.floating = cmd.float ?? true
         cfg.width = 1000
         cfg.height = 600
         cfg.headerHeight = 30
@@ -4176,6 +4254,7 @@ final class SwitcherController: NSObject {
         }
         subWindows.append(w)
         w.show()
+        reclaimToolKey(w)
         log("prettyprint window opened")
     }
 
@@ -4185,16 +4264,10 @@ final class SwitcherController: NSObject {
     // saves the paste to <save-dir>/YYYY_MM_DD/<name> through the command's
     // bash `script` (env FF_DIR / FF_NAME, content on stdin; the script
     // pbcopies the path and prints it). Tab swaps cells, Shift+Return = newline.
-    private func openFileFastWindow(_ cmd: CommandSpec, restoreWID: String?, restorePID: pid_t?) {
+    private func openFileFastWindow(_ cmd: CommandSpec) {
         let windowName = "filefast"
         if let existing = subWindows.first(where: { $0.config.name == windowName }) {
-            // already open (you clicked away to copy something): take the
-            // keyboard back WITHOUT activating the app — activation hands key
-            // to the app's last key window (notes / jira) instead of this panel
-            let win = existing.nativeWindow
-            win.orderFrontRegardless()
-            win.makeKey()
-            log("filefast refocused")
+            raiseToolPanel(existing)
             return
         }
         let colors = windowColors(cmd)
@@ -4207,6 +4280,7 @@ final class SwitcherController: NSObject {
         // it or run /filefast again). Floating (default): it stays above the
         // app you went to. Esc closes it; a save closes it.
         cfg.sticky = cmd.sticky
+        cfg.toolPanel = true
         cfg.floating = cmd.float ?? true
         cfg.width = 620
         cfg.colors = colors
@@ -4324,7 +4398,7 @@ final class SwitcherController: NSObject {
         }
         w.onHide = { [weak self] restore in
             guard let self else { return }
-            self.unregisterSubWindow(w, restore: restore, restoreWID: restoreWID, restorePID: restorePID)
+            self.unregisterSubWindow(w, restore: restore, restoreWID: nil, restorePID: nil)
         }
         subWindows.append(w)
         w.show()
@@ -4341,15 +4415,7 @@ final class SwitcherController: NSObject {
             backdrop.addSubview(scroll)
         }
         w.focusSearchField()
-        // opened from another app: hiding the switcher can hand key to one of
-        // OUR other windows (notes / jira) a beat later — take it back, but
-        // never from another app the user clicked into
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak w] in
-            guard let w, w.isShown, !w.nativeWindow.isKeyWindow,
-                  let k = NSApp.keyWindow, k !== w.nativeWindow else { return }
-            w.nativeWindow.makeKeyAndOrderFront(nil)
-            w.focusSearchField()
-        }
+        reclaimToolKey(w) { [weak w] in w?.focusSearchField() }
         log("filefast window opened")
     }
 
@@ -5636,11 +5702,10 @@ private func trimmed(_ s: String) -> String? {
     }
 
     // Hyper+S → /paths: built once, kept; a reopen orders it back in
-    func showPaths(_ cmd: CommandSpec, restoreWID: String?, restorePID: pid_t?) {
+    func showPaths(_ cmd: CommandSpec) {
         let ret = (configSectionValue("paths", "return") ?? "file").trimmingCharacters(in: .whitespaces).lowercased()
         if pathsWindow == nil {
             let p = PathsWindow(cmd, returnAction: ["file", "path", "open"].contains(ret) ? ret : "file")
-            p.onRestoreFocus = { [weak self] wid, pid in self?.restoreFocus(wid: wid, pid: pid) }
             p.onOpenInNotes = { [weak self] path in self?.openNoteFile(path) }
             p.onOpenTerminal = { [weak self] dir in self?.openInTerminalApp(dir) }
             p.onCopied = { [weak self] in self?.clipboardPaths?.ownWrite() }
@@ -5648,14 +5713,9 @@ private func trimmed(_ s: String) -> String? {
             pathsWindow = p
             subWindows.append(p.window)
         }
-        pathsWindow?.show(restoreWID: restoreWID, restorePID: restorePID)
-        // opened from another app: hiding the switcher can hand key to one
-        // of OUR other windows a beat later — take it back (filefast's rule)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let w = self?.pathsWindow?.window, w.isShown, !w.nativeWindow.isKeyWindow,
-                  let k = NSApp.keyWindow, k !== w.nativeWindow else { return }
-            w.nativeWindow.makeKeyAndOrderFront(nil)
-            w.focusSearchField()
+        pathsWindow?.show()
+        if let w = pathsWindow?.window {
+            reclaimToolKey(w) { [weak w] in w?.focusSearchField() }
         }
         log("paths window opened")
     }

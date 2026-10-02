@@ -141,10 +141,12 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   `focusLeft(w)` → `hide(…, restoreFocus: false)` (parks, never tears down);
   within 1s of a view swap it was stolen (aerospace focusing the next
   window) → the view is re-shown instead.
-  Float vs tile is NOT the app's: aerospace.toml's on-window-detected rule
-  floats every window of the bundle id; members sit at `.normal` level
-  (`present` normalizes Jira Config's popUpMenu+1). No `[app] float`, no
-  layout / retile IPC.
+  Float vs tile is NOT the app's: aerospace.toml's first on-window-detected
+  rule decides for every window of the bundle id (now `layout v_accordion`,
+  which can't un-float: AeroSpace still lists the shared window as
+  floating); members sit at `.normal` level (`present` normalizes Jira
+  Config's popUpMenu+1). No `[app] float`, no layout / retile IPC. Tool
+  panels (below) are invisible to AeroSpace.
   AeroSpace's closed-windows cache (its lock-screen defence, AeroSpace
   `closedWindowsCache.swift`): an ordered-out window = a closed one → it
   snapshots the WHOLE world; the same window id reappearing RESTORES it
@@ -193,6 +195,42 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   `jira_log.py` = debug.log + raw response dumps);
   tests: `python3 Tests/test_jira_poll.py`
 - `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
+
+## Tool panels — /filefast, /paths, /prettyprint, /health-checks
+
+- They act like their OWN apps, never part of the shared window. Root
+  cause they fix: macOS activation is per app, and every shown
+  `PopupWindow` raises itself on `didBecomeActive` (`installMonitors`) —
+  so anything that activated the app for a tool (a titled window, a click,
+  `focusSubWindow`, the palette's `restore: true` hand-back) brought the
+  shared window along.
+- RULE: a tool panel never activates the app and never reacts to app
+  activation. `PopupConfig.toolPanel`: always a borderless
+  `.nonactivatingPanel` `PopupPanel` (even with editMode / enableDrag),
+  `hidesOnDeactivate = false`, no `didBecomeActive` observer, `takeFocus`
+  never activates. Header ✕ + buttons work through the shared
+  `HeaderClickWindow` band (`HeaderClickTracker`, also PopupBaseWindow's).
+  AeroSpace ignores them (NSPanel = AXSystemDialog, no close button): they
+  float (`float` default true), stay up across workspaces, Esc / ✕ closes.
+- `NSApp.isActive` reads TRUE while a tool panel is key even though no
+  activation happened (the other app stays frontmost) — never use it to
+  tell "the user is in our window"; `userInOurWindow` skips a key tool
+  panel (Hyper+N from one focuses the shared window).
+- Host: `isToolPanel(cmd)` (the three by name + output commands with
+  `panel = true`, i.e. `[health-checks]`), `openTool` = the ONE opener
+  (palette `accept` hides with `restore: false`; `do:tool:NAME`),
+  `raiseToolPanel` (re-open: orderFrontRegardless + makeKey, no
+  activation), `reclaimToolKey` (the 0.25 s key take-back after the palette
+  hides). NO focus hand-back on close: the app never activated, so the
+  keyboard returns to the frontmost app by itself (a saved window id could
+  sit on a workspace you've left — `aerospace focus` would yank you back).
+  Excluded from both focus bridges; `panel` output commands are not
+  `.output` slot views.
+- Test: `bin/ui-test-focus.py tools` (state `tools` = each panel's
+  testState + wid / level incl. `header` button rects, `activations`,
+  `frontmostPid`; `do:tool-close:NAME`): open / re-run / click each with
+  another app frontmost → `activations` unchanged, frontmost not us, the
+  shared view not key and not moved, AeroSpace doesn't list it.
 
 ## /paths — recent-file shelf (Hyper+S → "file paths")
 
@@ -744,9 +782,11 @@ Line numbers drift; grep the symbol names (they're stable).
   "right of". The shared window's center also moves with its frame
   (notes drawers). With 2+ tiles it belongs to the
   tile under its center, not the one that looks "behind" it.
-- Our windows float via the aerospace.toml rule `test %{app-bundle-id} =
-  dev.danielbaker.workspace-switcher → layout floating` (first rule).
-  Finder, Preview, Webex and every `com.microsoft.*` but VS Code float too.
+- Our windows are placed by the aerospace.toml rule `test %{app-bundle-id} =
+  dev.danielbaker.workspace-switcher → layout v_accordion` (first rule; it
+  can't un-float, so the shared window still reports floating). Finder,
+  Preview, Webex and every `com.microsoft.*` but VS Code tile into
+  v_accordion. The tool panels are NSPanels: AeroSpace never sees them.
 - Monitors: `bin/aerospace-monitors.sh main|inverse|toggle|status` rewrites
   the `# >>> monitor-layout` block (main = 1-8 + letters on the main
   monitor, 9 on the secondary; inverse = the other way round); service mode
@@ -835,8 +875,9 @@ Line numbers drift; grep the symbol names (they're stable).
 
 ## Config defaults worth knowing
 
-- No `[app] float` (retired; AeroSpace floats the app). Per-section `float`
-  only for popup-only "/" windows (level), default false.
+- No `[app] float` (retired; AeroSpace places the app). Per-section `float`
+  only for popup-only "/" windows (level): tool panels default true, other
+  output windows false.
 - `[app] esc-close` default 0 (Esc never hides); per-section `esc-close`
   (alias `vim-esc-close`) = the view's "Esc Hides Window".
 - `[app] copy-toast` default `Copied {} to clipboard` (`{}` = ~-path; empty = off).

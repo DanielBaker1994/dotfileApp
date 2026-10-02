@@ -30,14 +30,11 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
     private var shown: [PathShelf.Item] = []
     private var query = ""
     private var returnAction: String
-    private var restoreWID: String?
-    private var restorePID: pid_t?
     private var iconCache: [String: NSImage] = [:]
     private var quickLookPaths: [String] = []
     private static let rowH: CGFloat = 22   // FileListPane's row height
 
     // host hooks (the controller's private helpers)
-    var onRestoreFocus: ((String?, pid_t?) -> Void)?
     var onOpenInNotes: ((String) -> Void)?
     var onOpenTerminal: ((String) -> Void)?
     var onCopied: (() -> Void)?             // ClipboardPaths.ownWrite
@@ -52,6 +49,7 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         cfg.dynamicHeight = false
         cfg.enableNavigation = false     // the list below owns the cursor
         cfg.sticky = cmd.sticky
+        cfg.toolPanel = true
         cfg.floating = cmd.float ?? true
         cfg.width = cmd.width > 0 ? cmd.width : 680
         cfg.colors = colors
@@ -67,12 +65,12 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         }
         window.onEscape = { [weak self] in self?.hide() }
         window.onCloseWindow = { [weak self] in self?.hide() }
-        window.onHide = { [weak self] restore in
-            guard let self else { return }
+        // no focus hand-back: a tool panel never activated the app, so the
+        // keyboard goes back to the frontmost app on its own
+        window.onHide = { _ in
             if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
                 QLPreviewPanel.shared().orderOut(nil)
             }
-            if restore { self.onRestoreFocus?(self.restoreWID, self.restorePID) }
         }
         window.onKeyPreview = { [weak self] code, mods in self?.key(code, mods) ?? false }
 
@@ -123,15 +121,13 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
     // show (first time: build) on the screen you're on; already up: take the
     // keyboard back WITHOUT activating the app (that hands key to the app's
     // last key window — notes / jira — instead of this panel)
-    func show(restoreWID: String?, restorePID: pid_t?) {
+    func show() {
         if window.isShown {
             window.nativeWindow.orderFrontRegardless()
             window.nativeWindow.makeKey()
             window.focusSearchField()
             return
         }
-        self.restoreWID = restoreWID
-        self.restorePID = restorePID
         if window.nativeWindow.contentView?.subviews.contains(scroll) == true {
             window.showPersistent()
         } else {

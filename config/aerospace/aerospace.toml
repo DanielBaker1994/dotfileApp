@@ -109,11 +109,13 @@ key-mapping.preset = 'qwerty'
 # properly; the dialog heuristic floats those now.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
-  # workspace-switcher (notes / files / jira / AI / confluence, the Hyper+S
-  # palette, its dialogs) is an overlay: ALWAYS floating. The app never
-  # tiles or floats itself any more — this rule is the one place that
-  # decides. Each view is its own window, re-detected on every show / view
-  # switch, so this runs often: keep it first and cheap.
+  # workspace-switcher (notes / files / jira / AI / confluence, its
+  # dialogs): v_accordion. The app never tiles or floats itself — this rule
+  # is the one place that decides (v_accordion can't un-float a window the
+  # dialog heuristic floated). Each view is its own window, re-detected on
+  # every show / view switch, so this runs often: keep it first and cheap.
+  # The Hyper+S palette and the "/" tool panels (filefast, paths,
+  # prettyprint, health-checks) are NSPanels: AeroSpace never sees them.
   { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout v_accordion'] },
   # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
   # before the Microsoft float rule below)

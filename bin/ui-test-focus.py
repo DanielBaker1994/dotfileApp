@@ -18,6 +18,11 @@ Checks:
   focus     another window focused, `aerospace focus` ours -> key: latency
             (the "slow focus while it's open" path)
   esc       Esc with the view's "Esc Hides Window" off = stays; on = hides
+  tools     the "/" tool panels (prettyprint, health-checks, filefast,
+            paths) act like their own apps: opening, re-running and
+            clicking one never activates the app (the shared window never
+            comes along), AeroSpace never lists it, and the hotkey from one
+            focuses the shared window instead of hiding it
 
 It moves your workspaces / focus while it runs (~15 s) and puts them back
 (workspace, focused window, view, commands.toml byte for byte).
@@ -199,7 +204,12 @@ print(f"== focus / workspace tests (daemon pid {st0.get('pid')}, workspace {orig
 orig_esc = st0.get("escHides", {})
 
 
+TOOLS = ("prettyprint", "health-checks", "filefast", "paths")
+
+
 def restore():
+    for n in TOOLS:
+        do("tool-close:" + n)
     for v, on in orig_esc.items():
         if state().get("escHides", {}).get(v) != on:
             do(f"esc-hides:{v}:{'on' if on else 'off'}")
@@ -388,6 +398,104 @@ try:
             esc()
             ms, _ = wait(lambda s: not s["visible"], 2)
             timed("Esc with \"Esc Hides Window\" on -> hidden", ms, 150)
+
+    # ------------------------------------------------------------ tools
+    if want("tools"):
+        def screen_h():
+            # main screen height: AppKit frames (bottom-left) -> cliclick (top-left)
+            r = subprocess.run(["osascript", "-l", "JavaScript", "-e",
+                                'ObjC.import("AppKit"); $.NSScreen.screens.objectAtIndex(0).frame.size.height'],
+                               capture_output=True, text=True)
+            try:
+                return float(r.stdout.strip())
+            except ValueError:
+                return None
+
+        def tool(st, n):
+            return st.get("tools", {}).get(n, {})
+
+        # summon it onto the starting workspace (hidden + hotkey there, like
+        # `follow`): the checks need another app's window beside it
+        ensure_hidden()
+        if orig_ws:
+            aero("workspace", orig_ws)
+            time.sleep(0.25)
+        ensure_shown()
+        st = state()
+        shared_view, shared_frame = st.get("view"), cur(st).get("frame")
+        pid = str(st.get("pid"))
+        other = [l.split("|")[0] for l in aero("list-windows", "--workspace", "focused", "--format",
+                                                "%{window-id}|%{app-pid}").splitlines()
+                 if l.split("|")[1] != pid]
+        sh = screen_h() if shutil.which("cliclick") else None
+
+        def away():
+            # another app's window takes focus: our app inactive
+            aero("focus", "--window-id", other[0])
+            wait(lambda s: s.get("frontmostPid") != s.get("pid"), 2)
+            time.sleep(0.4)  # longer than focus-loss-delay
+
+        def unmoved(label, a0):
+            time.sleep(0.4)  # the 0.25 s key take-back + any late activation
+            s = state()
+            # (`active` reads true while a non-activating panel is key: the
+            # activation count + the frontmost app are what tell)
+            front = s.get("frontmostPid")
+            (ok if s.get("activations") == a0 and front != s.get("pid") else bad)(
+                f"{label}: app not activated (activations {a0} -> {s.get('activations')}, frontmost pid {front})")
+            v = s.get("views", {}).get(shared_view, {})
+            (ok if not v.get("key") and v.get("frame") == shared_frame else bad)(
+                f"{label}: shared {shared_view} untouched (key {v.get('key')}, frame {v.get('frame')} vs {shared_frame})")
+            return s
+
+        if not other:
+            skip("tools: no other app's window on this workspace to stand in for 'another app'")
+        else:
+            for n in TOOLS:
+                away()
+                a0 = state().get("activations")
+                r = do("tool:" + n)
+                if "error" in r:
+                    skip(f"tools: {n}: {r['error']}")
+                    continue
+                ms, st = wait(lambda s: tool(s, n).get("shown") and tool(s, n).get("key"), 3)
+                timed(f"/{n} -> shown + key", ms, 300)
+                if ms is None:
+                    continue
+                st = unmoved(f"/{n} opened", a0)
+                wid = tool(st, n).get("wid")
+                (bad if wid in our_windows() else ok)(f"/{n}: AeroSpace doesn't list it")
+                do("tool:" + n)  # re-run, as from Hyper+S again
+                unmoved(f"/{n} re-run", a0)
+                if sh:
+                    away()
+                    a0 = state().get("activations")
+                    x, y, w, h = tool(state(), n).get("frame", [0, 0, 0, 0])
+                    subprocess.run(["cliclick", f"c:{int(x + w / 2)},{int(sh - (y + h / 2))}"], capture_output=True)
+                    wait(lambda s: tool(s, n).get("key"), 2)
+                    s = unmoved(f"/{n} clicked", a0)
+                    (ok if tool(s, n).get("key") else bad)(f"/{n} clicked: it has the keyboard")
+                do("tool-close:" + n)
+                wait(lambda s: not tool(s, n).get("shown"), 2)
+            if not sh:
+                skip("tools: click checks need cliclick + the screen height")
+
+        # in the shared window (app active), a tool on top: the hotkey
+        # focuses the shared window, it doesn't hide it
+        ensure_shown()
+        if shared_view:
+            do("open:" + shared_view)
+        wait(shown_and_key, 2)
+        do("tool:prettyprint")
+        ms, _ = wait(lambda s: tool(s, "prettyprint").get("key"), 3)
+        if ms is None:
+            skip("tools: prettyprint didn't open for the hotkey check")
+        else:
+            time.sleep(0.4)
+            hotkey()
+            ms, _ = wait(shown_and_key, 3)
+            timed("hotkey from a tool panel -> shared window shown + key (not hidden)", ms, 300)
+            do("tool-close:prettyprint")
 finally:
     restore()
 

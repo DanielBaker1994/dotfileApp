@@ -31,7 +31,10 @@ status_ram() {
         END { printf "%d%%", used * ps * 100 / total }'
 }
 
-# SF Symbols glyphs (render in SF Pro): battery.100/75/50/25/0, battery.100.bolt.
+# Nerd Font (Material Design) battery glyphs, rendered in Hack Nerd Font
+# (a declared dependency in install.conf). SF Symbols needed the 44MB
+# ~/Library/Fonts/SF Symbols Fallback.otf, which no machine is guaranteed to
+# have -> the icon showed up as "?" elsewhere.
 # Prints "GLYPH PCT COLOR"; nothing when there is no battery (desktop Mac).
 status_battery() {
     local batt pct glyph color=$STATUS_TAG_COLOR
@@ -39,14 +42,14 @@ status_battery() {
     pct=$(echo "$batt" | grep -Eo '[0-9]+%' | head -1 | tr -d %)
     [ -z "$pct" ] && return
     if echo "$batt" | grep -q "AC Power"; then
-        glyph=􀢋
+        glyph=󰂄
         color=$GREEN
     else
-        if   [ "$pct" -ge 88 ]; then glyph=􀛨
-        elif [ "$pct" -ge 63 ]; then glyph=􀺸
-        elif [ "$pct" -ge 38 ]; then glyph=􀺶
-        elif [ "$pct" -ge 13 ]; then glyph=􀛩
-        else                         glyph=􀛪
+        if   [ "$pct" -ge 88 ]; then glyph=󰁹
+        elif [ "$pct" -ge 63 ]; then glyph=󰂁
+        elif [ "$pct" -ge 38 ]; then glyph=󰁾
+        elif [ "$pct" -ge 13 ]; then glyph=󰁻
+        else                         glyph=󰂃
         fi
         [ "$pct" -le $BATTERY_LOW ] && color=$RED
     fi
@@ -84,7 +87,7 @@ status_build() {
 
     sketchybar --add item status.battery right \
         --set status.battery \
-        icon.font="SF Pro:Regular:15.0" icon.color=$STATUS_TAG_COLOR \
+        icon.font="Hack Nerd Font:Regular:15.0" icon.color=$STATUS_TAG_COLOR \
         icon.padding_left=8 icon.padding_right=4 \
         label.padding_right=4 \
         update_freq=$BATTERY_FREQ script="$STATUS_SCRIPT" \

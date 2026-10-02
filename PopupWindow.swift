@@ -544,6 +544,15 @@ public struct PopupConfig {
     // an ordinary window that other apps can cover (commands.toml `float`)
     public var floating: Bool = true
 
+    // tool panel (/filefast, /paths, /prettyprint, /health-checks): a
+    // Raycast-style utility that acts like its own app. ALWAYS a borderless
+    // non-activating panel (even with editMode / enableDrag): it takes the
+    // keyboard WITHOUT activating the app, so the shared window never comes
+    // along (every shown popup raises itself on app activation). AeroSpace
+    // never sees it (NSPanel = AXSystemDialog, no close button); it never
+    // reacts to app activation and never activates the app itself.
+    public var toolPanel: Bool = false
+
     // multi-line rows: if a row supplies `content`, it is drawn wrapped under
     // the title (up to 3 lines) and the window grows to fit
     public var wrapContent: Bool = false
@@ -933,7 +942,49 @@ public protocol EscapableWindow: AnyObject {
     var onEscape: (() -> Void)? { get set }
 }
 
-public class PopupBaseWindow: NSWindow, EscapableWindow {
+// Click-to-copy band at the top of the window: the invisible titlebar
+// swallows mouse events in its area, so clicks there never reach the
+// chrome — intercept them in sendEvent instead. The click is fired WITHOUT
+// consuming the mouseUp: the titlebar must receive it to finish its
+// drag-tracking state, otherwise the next drag attempt jitters (two drag
+// systems fighting over the window). Drags (movement > 4pt) are ignored.
+// The titled windows and the borderless tool panels (header ✕ + buttons
+// over a performDrag header) share it.
+protocol HeaderClickWindow: NSWindow {
+    var headerClickBand: CGFloat { get set }
+    var onHeaderClick: ((NSPoint) -> Void)? { get set }
+}
+
+struct HeaderClickTracker {
+    private var down: NSPoint?
+
+    mutating func track(_ event: NSEvent, in window: NSWindow, band: CGFloat,
+                        onClick: ((NSPoint) -> Void)?) {
+        guard band > 0 else { return }
+        let loc = event.locationInWindow
+        switch event.type {
+        case .leftMouseDown:
+            if loc.y >= window.frame.height - band {
+                // store ABSOLUTE mouse position: window-relative coords
+                // don't change during a native titlebar drag, which would
+                // misclassify a drag as a click (copy fires on every drag)
+                down = NSEvent.mouseLocation
+            }
+        case .leftMouseUp:
+            if let d = down {
+                down = nil
+                let up = NSEvent.mouseLocation
+                if abs(up.x - d.x) < 4, abs(up.y - d.y) < 4 {
+                    onClick?(loc)
+                }
+            }
+        default:
+            break
+        }
+    }
+}
+
+public class PopupBaseWindow: NSWindow, EscapableWindow, HeaderClickWindow {
     public var onEscape: (() -> Void)?
 
     // themed text selection for every NSTextField in this window (search /
@@ -947,42 +998,16 @@ public class PopupBaseWindow: NSWindow, EscapableWindow {
         }
         return ed
     }
-    // click-to-copy band at the top of the window: the invisible titlebar
-    // swallows mouse events in its area, so clicks there never reach the
-    // chrome — intercept them here instead. The click is fired WITHOUT
-    // consuming the mouseUp: the titlebar must receive it to finish its
-    // drag-tracking state, otherwise the next drag attempt jitters (two drag
-    // systems fighting over the window). Drags (movement > 4pt) are ignored.
+    // click-to-copy header band (HeaderClickWindow)
     var headerClickBand: CGFloat = 0
     var onHeaderClick: ((NSPoint) -> Void)?   // click point in window coords
-    private var headerDown: NSPoint?
+    private var headerTracker = HeaderClickTracker()
 
     public override var canBecomeKey: Bool { true }
     public override var canBecomeMain: Bool { true }
 
     public override func sendEvent(_ event: NSEvent) {
-        if headerClickBand > 0 {
-            let loc = event.locationInWindow
-            switch event.type {
-            case .leftMouseDown:
-                if loc.y >= frame.height - headerClickBand {
-                    // store ABSOLUTE mouse position: window-relative coords
-                    // don't change during a native titlebar drag, which would
-                    // misclassify a drag as a click (copy fires on every drag)
-                    headerDown = NSEvent.mouseLocation
-                }
-            case .leftMouseUp:
-                if let down = headerDown {
-                    headerDown = nil
-                    let up = NSEvent.mouseLocation
-                    if abs(up.x - down.x) < 4, abs(up.y - down.y) < 4 {
-                        onHeaderClick?(loc)
-                    }
-                }
-            default:
-                break
-            }
-        }
+        headerTracker.track(event, in: self, band: headerClickBand, onClick: onHeaderClick)
         super.sendEvent(event)
     }
 
@@ -1001,9 +1026,19 @@ public class PopupBaseWindow: NSWindow, EscapableWindow {
     }
 }
 
-// Borderless variant (workspace switcher).
-public final class PopupPanel: NSPanel, EscapableWindow {
+// Borderless variant (workspace switcher, tool panels).
+public final class PopupPanel: NSPanel, EscapableWindow, HeaderClickWindow {
     public var onEscape: (() -> Void)?
+
+    // tool panels' header ✕ + buttons (HeaderClickWindow); 0 elsewhere
+    var headerClickBand: CGFloat = 0
+    var onHeaderClick: ((NSPoint) -> Void)?
+    private var headerTracker = HeaderClickTracker()
+
+    public override func sendEvent(_ event: NSEvent) {
+        headerTracker.track(event, in: self, band: headerClickBand, onClick: onHeaderClick)
+        super.sendEvent(event)
+    }
 
     // themed text selection for every NSTextField in this window (search /
     // filter / find bars share the window's field editor)
@@ -7606,7 +7641,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 chrome.dragHeaderHeight = config.headerHeight * zoom
                 chrome.needsDisplay = true
             }
-            if let base = panel as? PopupBaseWindow {
+            if let base = panel as? HeaderClickWindow, base.headerClickBand > 0 {
                 base.headerClickBand = config.headerHeight * zoom
             }
             rowView.needsDisplay = true
@@ -7677,7 +7712,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         // Alt+hjkl. .titled + .closable exposes the AX close button; the
         // titlebar itself is hidden (fullSizeContentView + hidden title) and
         // only the red close button remains visible.
-        let wantsTitlebar = config.editMode || config.enableDrag
+        // Tool panels never: they must NOT activate the app (config.toolPanel).
+        let wantsTitlebar = (config.editMode || config.enableDrag) && !config.toolPanel
         let initialHeight = config.padding * 2 + config.headerHeight * zoom + config.rowHeight * zoom
         if wantsTitlebar {
             // NO .nonactivatingPanel here: these windows must activate the app
@@ -7712,6 +7748,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 contentRect: NSRect(x: 0, y: 0, width: config.width, height: initialHeight),
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered, defer: false)
+            // NSPanel defaults to hiding when the app deactivates: a tool
+            // panel stays up whatever the app's activation does
+            if config.toolPanel { panel.hidesOnDeactivate = false }
         }
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -8161,9 +8200,10 @@ scroll.documentView = rowView
         // gets first shot; non-chrome areas fall through to the content.
         if config.editMode || config.enableDrag {
             let chrome = PopupChrome(config: config)
-            // header clicks (incl. the ✕) route through PopupBaseWindow's
-            // click band; borderless panels have none, so no glyph there
-            if !(panel is PopupBaseWindow) { chrome.config.headerCloseButton = false }
+            // header clicks (incl. the ✕) route through the window's click
+            // band (HeaderClickWindow): the titled windows and tool panels
+            // have one, other borderless panels don't, so no glyph there
+            if !(panel is PopupBaseWindow) && !config.toolPanel { chrome.config.headerCloseButton = false }
             chrome.frame = backdrop.bounds
             chrome.autoresizingMask = [.width, .height]
             if config.editMode || config.dragHeader {
@@ -8368,7 +8408,7 @@ scroll.documentView = rowView
         // header clicks never reach the chrome (the invisible titlebar eats
         // them) — intercept them at the window level instead; the click
         // position decides which header button was hit
-        if (config.editMode || config.dragHeader), let base = panel as? PopupBaseWindow {
+        if (config.editMode || config.dragHeader), let base = panel as? HeaderClickWindow {
             base.headerClickBand = config.headerHeight * zoom
             base.onHeaderClick = { [weak self] point in
                 guard let self else { return }
@@ -9067,7 +9107,9 @@ private func scrollSelectionIntoView() {
     private func takeFocus() {
         guard isShown else { return }
         panel.makeKeyAndOrderFront(nil)
-        if !panel.isKeyWindow, !NSApp.isActive {
+        // a tool panel never activates the app (config.toolPanel): it can be
+        // key while inactive, and activation raises our other windows
+        if !panel.isKeyWindow, !NSApp.isActive, !config.toolPanel {
             // NSWindow-based popups (note/list) can't become key while the
             // app is inactive — hiding the switcher deactivated us. The
             // borderless NSPanel (switcher itself) CAN be key when inactive,
@@ -9101,7 +9143,9 @@ private func scrollSelectionIntoView() {
         // AeroSpace focuses these windows by activating the app + AX-raising
         // the window; activation alone leaves the key window wherever it was,
         // so claim key/first-responder as soon as the app becomes active.
-        if activeObserver == nil {
+        // Not tool panels: AeroSpace never focuses them, and an activation
+        // meant for another of our windows must not raise them (nor them it).
+        if activeObserver == nil, !config.toolPanel {
             activeObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.didBecomeActiveNotification, object: nil,
                 queue: .main) { [weak self] _ in
@@ -11214,7 +11258,23 @@ public enum ThemeRole: String, CaseIterable {
             "pane": focusedPane.map { "\($0)" } ?? "",
             "tabs": tabTitles, "selectedTab": selectedTab,
             "responder": panel.firstResponder.map { String(describing: type(of: $0)) } ?? "",
+            "header": headerTestRects,
         ]
+    }
+
+    // the header ✕ ("close") + buttons (by id) in SCREEN coords (AppKit,
+    // bottom-left origin), so a test can click them
+    private var headerTestRects: [String: [Int]] {
+        guard let chrome, chrome.dragHeaderHeight > 0 else { return [:] }
+        let f = panel.frame
+        // the chrome is flipped (y = 0 at the top) and fills the window
+        func screen(_ r: NSRect) -> [Int] {
+            [f.minX + r.minX, f.maxY - r.maxY, r.width, r.height].map { Int($0.rounded()) }
+        }
+        var out: [String: [Int]] = [:]
+        if chrome.config.headerCloseButton { out["close"] = screen(chrome.closeButtonRect) }
+        for (id, r) in chrome.extraButtonRects { out[String(id)] = screen(r) }
+        return out
     }
 
     // the current window's drag-header rect (for popping the theme menu under

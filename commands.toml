@@ -96,10 +96,17 @@
 #              (default true). Its window still opens from the hotkeys,
 #              header icons and menu bar — notes / files / jira / confluence
 #              / ai / Jira Config are reached that way.
-#   float      popup-only "/" windows (filefast, output, prettyprint): stay
-#              above other apps' windows (true/false, default false).
-#              Ignored by notes/files/jira/confluence/ai: AeroSpace floats
+#   float      popup-only "/" windows (filefast, paths, output,
+#              prettyprint): stay above other apps' windows (true/false;
+#              tool panels default true, other output windows false).
+#              Ignored by notes/files/jira/confluence/ai: AeroSpace places
 #              them (config/aerospace/aerospace.toml), always normal level.
+#   panel      output windows: true = a TOOL PANEL (like /filefast, /paths,
+#              /prettyprint, which always are): its own Raycast-style
+#              window, never a shared-window view. It never activates the
+#              app (so the shared window never comes along), AeroSpace
+#              ignores it, it stays up across workspaces, Esc closes it.
+#              false (default) = a view inside the shared window.
 #   (The header icon menu's Theme ▸ presets and Transparency ▸ levels write
 #    THESE per-window keys: "Whole Window" sets every surface + the text
 #    colors, "<Surface> Only" just that surface. Theme ▸ Custom Color… keeps
@@ -611,6 +618,7 @@ workspace-switcher = "*:app"
 enabled = true
 label = "Health Checks"
 type = "output"
+panel = true
 title = ""
 icon = "heart"
 script = "~/.config/workspace-switcher/jira/jira-doctor.sh"
