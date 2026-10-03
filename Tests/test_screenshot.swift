@@ -1,0 +1,351 @@
+// sources: ScreenshotAnnotations.swift
+// /screenshot's pure parts (ScreenshotAnnotations.swift): the button ring's
+// placement at every screen edge + its fallbacks, counter renumbering,
+// undo / redo limits, Shift snapping, secure pixelate (no hidden pixel
+// survives), the filename pattern + clash suffix, the output size, the CLI.
+// Usage: bin/run-tests.sh screenshot
+
+import Foundation
+import CoreGraphics
+
+var passed = 0
+var failed = 0
+
+func check(_ condition: Bool, _ message: String, line: Int = #line) {
+    if condition {
+        passed += 1
+    } else {
+        failed += 1
+        print("  FAIL (line \(line)): \(message)")
+    }
+}
+
+func near(_ a: CGFloat, _ b: CGFloat, _ eps: CGFloat = 0.01) -> Bool { abs(a - b) <= eps }
+
+@main
+struct ScreenshotTests {
+    static func main() {
+        ringTests()
+        documentTests()
+        snapTests()
+        pixelateTests()
+        renderTests()
+        fileTests()
+        argTests()
+        colorTests()
+        print("screenshot: \(passed) passed, \(failed) failed")
+        exit(failed == 0 ? 0 : 1)
+    }
+
+    // MARK: ring
+
+    static func noOverlap(_ fs: [CGRect]) -> Bool {
+        for i in fs.indices { for j in fs.indices where j > i && fs[i].insetBy(dx: 0.5, dy: 0.5).intersects(fs[j]) { return false } }
+        return true
+    }
+
+    static func ringTests() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let ring = ShotTool.ring(ShotTool.defaultButtons, badge: true)
+        check(ring.count == 19, "default ring = 18 buttons + the size badge (\(ring.count))")
+        check(ring.firstIndex(of: .badge) == 11, "badge right after the last drawing tool")
+        check(Array(ring.prefix(11)) == [.pencil, .line, .arrow, .selection, .rectangle, .circle, .marker, .text, .counter, .pixelate, .invert],
+              "bottom-row tools in Flameshot's order")
+        check(!ShotTool.ring(ShotTool.defaultButtons, badge: false).contains(.badge), "show-size-badge = false drops it")
+        check(!ring.contains(.accept) && !ring.contains(.sizeUp), "accept + size buttons hidden by default")
+        check(ShotTool.ring("copy, nonsense, copy, exit", badge: false) == [.copy, .exit], "unknown + duplicate names dropped")
+
+        let B: CGFloat = 34
+        // centered
+        let sel = CGRect(x: 500, y: 300, width: 400, height: 250)
+        let l = ButtonRing.layout(selection: sel, screen: screen, count: ring.count, button: B)
+        check(l.frames.count == ring.count && !l.inside, "centered: every button placed, outside")
+        check(l.frames.allSatisfy { screen.contains($0) }, "centered: all on screen")
+        check(l.frames.allSatisfy { !$0.intersects(sel) }, "centered: none covers the selection")
+        check(noOverlap(l.frames), "centered: no two buttons overlap")
+        // bottom row first: below the selection, left to right
+        let perRow = Int((sel.width + (B / 4).rounded(.down)) / (B + (B / 4).rounded(.down)))
+        check(l.frames.prefix(perRow).allSatisfy { $0.minY >= sel.maxY }, "bottom row first")
+        check(zip(l.frames.prefix(perRow), l.frames.prefix(perRow).dropFirst()).allSatisfy { $0.minX < $1.minX }, "bottom row runs left to right")
+        // then the right column, bottom up
+        let right = l.frames[perRow]
+        check(right.minX >= sel.maxX, "then the right column")
+        check(l.frames[perRow + 1].minY < right.minY, "right column runs bottom up")
+
+        // a selection touching each edge in turn
+        let edges: [(String, CGRect)] = [
+            ("left", CGRect(x: 0, y: 300, width: 300, height: 200)),
+            ("right", CGRect(x: 1140, y: 300, width: 300, height: 200)),
+            ("top", CGRect(x: 500, y: 0, width: 300, height: 200)),
+            ("bottom", CGRect(x: 500, y: 700, width: 300, height: 200)),
+            ("top-left corner", CGRect(x: 0, y: 0, width: 200, height: 150)),
+            ("bottom-right corner", CGRect(x: 1240, y: 750, width: 200, height: 150)),
+        ]
+        for (name, s) in edges {
+            let e = ButtonRing.layout(selection: s, screen: screen, count: ring.count, button: B)
+            check(e.frames.count == ring.count && e.frames.allSatisfy { $0.width == B }, "\(name): every button placed")
+            check(e.frames.allSatisfy { screen.contains($0) }, "\(name): all on screen")
+            check(noOverlap(e.frames), "\(name): no overlap")
+        }
+
+        // full screen: all sides blocked → inside, along the bottom edge
+        let full = ButtonRing.layout(selection: screen, screen: screen, count: ring.count, button: B)
+        check(full.inside, "full-screen selection puts the buttons inside")
+        check(full.frames.allSatisfy { screen.contains($0) && $0.width == B }, "inside: all on screen")
+        check(noOverlap(full.frames), "inside: no overlap")
+        check(full.frames.first.map { $0.maxY >= screen.maxY - B - 10 } ?? false, "inside: first row at the bottom edge")
+
+        // tiny selections: laid out as if B wide
+        let tiny = CGRect(x: 700, y: 400, width: 4, height: 4)
+        let t = ButtonRing.layout(selection: tiny, screen: screen, count: ring.count, button: B)
+        check(t.frames.allSatisfy { screen.contains($0) && $0.width == B } && noOverlap(t.frames), "tiny selection: placed, no overlap")
+        let tinyCorner = CGRect(x: 0, y: 0, width: 6, height: 6)
+        let tc = ButtonRing.layout(selection: tinyCorner, screen: screen, count: ring.count, button: B)
+        check(tc.frames.allSatisfy { screen.contains($0) && $0.width == B } && noOverlap(tc.frames), "tiny selection in a corner")
+        check(ButtonRing.layout(selection: sel, screen: screen, count: 0, button: B).frames.isEmpty, "no buttons")
+        check(ButtonRing.defaultButtonSize(lineHeight: 15.5) == 34, "button size = line height × 2.2")
+    }
+
+    // MARK: document
+
+    static func counter(_ x: CGFloat) -> ShotObject {
+        ShotObject(tool: .counter, points: [CGPoint(x: x, y: 10)], color: .black, size: 1)
+    }
+
+    static func documentTests() {
+        let d = ShotDocument(undoLimit: 100)
+        d.add(counter(10)); d.add(counter(100)); d.add(counter(200))
+        check(d.objects.map(\.number) == [1, 2, 3], "counters 1, 2, 3")
+        d.remove(at: 1)
+        check(d.objects.map(\.number) == [1, 2], "delete renumbers the later ones")
+        d.undo()
+        check(d.objects.map(\.number) == [1, 2, 3], "undo brings it back, renumbered")
+        d.redo()
+        check(d.objects.map(\.number) == [1, 2], "redo deletes again")
+        d.undo()
+        d.add(ShotObject(tool: .line, points: [.zero, CGPoint(x: 5, y: 5)], color: .black, size: 3))
+        d.undo()
+        check(d.objects.count == 3, "undo of an add")
+        check(d.nextCounterNumber() == 4 && d.nextCounterNumber(offset: 6) == 10, "next counter (+ wheel offset)")
+        var jump = counter(300)
+        jump.numberOffset = 6
+        d.add(jump)
+        check(d.objects.last?.number == 10, "a bubble placed after a wheel jump")
+        d.remove(at: 0)
+        check(d.objects.map(\.number) == [1, 2, 9], "renumber keeps the jump")
+        check(ShotDocument(undoLimit: 5).nextCounterNumber() == 1, "the first bubble is 1")
+
+        // undo limit
+        let lim = ShotDocument(undoLimit: 3)
+        for i in 0..<5 { lim.add(counter(CGFloat(i * 50))) }
+        check(lim.undoDepth == 3, "undo stack capped at undo-limit (\(lim.undoDepth))")
+        while lim.undo() {}
+        check(lim.objects.count == 2, "only undo-limit steps back (\(lim.objects.count))")
+        check(lim.canRedo, "redo after undo")
+        lim.add(counter(1))
+        check(!lim.canRedo, "a new change clears redo")
+
+        // moves, color + size changes are undoable; wheel notches coalesce
+        let m = ShotDocument()
+        m.add(ShotObject(tool: .selection, points: [CGPoint(x: 10, y: 10), CGPoint(x: 50, y: 50)], color: .black, size: 3))
+        m.update(at: 0) { $0 = $0.moved(by: CGVector(dx: 5, dy: 5)) }
+        m.update(at: 0) { $0.color = .white }
+        for _ in 0..<4 { m.update(at: 0, coalesce: "size0") { $0.size += 1 } }
+        check(m.objects[0].size == 7, "size changed")
+        m.undo()
+        check(m.objects[0].size == 3, "wheel notches undo as one step")
+        m.undo()
+        check(m.objects[0].color == .black, "color change undone")
+        m.undo()
+        check(m.objects[0].start == CGPoint(x: 10, y: 10), "move undone")
+
+        // hit testing
+        let h = ShotDocument()
+        h.add(ShotObject(tool: .selection, points: [CGPoint(x: 100, y: 100), CGPoint(x: 200, y: 200)], color: .black, size: 3))
+        h.add(ShotObject(tool: .line, points: [CGPoint(x: 0, y: 0), CGPoint(x: 50, y: 0)], color: .black, size: 3))
+        check(h.hit(CGPoint(x: 100, y: 150)) == 0, "outline rect hit on its edge")
+        check(h.hit(CGPoint(x: 150, y: 150)) == nil, "outline rect not hit in its middle")
+        check(h.hit(CGPoint(x: 25, y: 2)) == 1, "line hit near it")
+        h.reorder(from: 1, to: 0)
+        check(h.objects[0].tool == .line, "reorder (Layers)")
+    }
+
+    // MARK: snapping
+
+    static func snapTests() {
+        let o = CGPoint.zero
+        let a = ShotSnap.angle(from: o, to: CGPoint(x: 100, y: 7))
+        check(near(a.y, 0) && near(a.x, hypot(100, 7)), "near-horizontal snaps to 0°")
+        let b = ShotSnap.angle(from: o, to: CGPoint(x: 50, y: 47))
+        check(near(b.x, b.y), "near-diagonal snaps to 45°")
+        let c = ShotSnap.angle(from: o, to: CGPoint(x: -3, y: -80))
+        check(near(c.x, 0) && c.y < 0, "near-vertical snaps to 90°")
+        for k in 0..<8 {
+            let ang = Double(k) * .pi / 4 + 0.1
+            let s = ShotSnap.angle(from: o, to: CGPoint(x: cos(ang) * 50, y: sin(ang) * 50))
+            let got = atan2(Double(s.y), Double(s.x))
+            let want = Double(k) * .pi / 4
+            check(abs(remainder(got - want, 2 * .pi)) < 1e-6, "8 directions: \(k * 45)°")
+        }
+        let sq = ShotSnap.square(from: CGPoint(x: 10, y: 10), to: CGPoint(x: 40, y: -5))
+        check(sq == CGPoint(x: 40, y: -20), "square keeps the signs, longer side")
+        check(ShotSnap.snap(.pencil, from: o, to: CGPoint(x: 3, y: 4)) == CGPoint(x: 3, y: 4), "pencil never snaps")
+    }
+
+    // MARK: pixelate
+
+    static func pixels(w: Int, h: Int, interior: CGRect, _ inner: (Int, Int) -> [UInt8], _ outer: (Int, Int) -> [UInt8]) -> ShotPixels {
+        var data = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let c = interior.contains(CGPoint(x: Double(x) + 0.5, y: Double(y) + 0.5)) ? inner(x, y) : outer(x, y)
+                let i = (y * w + x) * 4
+                data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 255
+            }
+        }
+        return ShotPixels(width: w, height: h, data: data)
+    }
+
+    static func pixelateTests() {
+        let interior = CGRect(x: 30, y: 30, width: 40, height: 40)
+        // unique interior: pure green; the fringe: grays + reds
+        let px = pixels(w: 100, h: 100, interior: interior, { _, _ in [0, 255, 0] },
+                        { x, y in [UInt8(120 + x), UInt8(60 + y / 2), UInt8(60)] })
+        for size in [1, 2, 5, 20] {
+            let blocks = ShotPixelate.secureBlocks(px, px: interior, size: size)
+            let flat = blocks.flatMap { $0 }
+            let (cols, rows) = ShotPixelate.grid(interior, size: size)
+            check(blocks.count == rows && blocks.allSatisfy { $0.count == cols }, "size \(size): grid \(cols)×\(rows)")
+            let leaked = flat.contains { $0.g > 0.6 && $0.r < 0.3 }
+            check(!leaked, "size \(size): no block carries the hidden interior color")
+        }
+        // touching the image edge: the missing fringe is skipped, still no leak
+        let edge = pixels(w: 60, h: 60, interior: CGRect(x: 0, y: 0, width: 30, height: 30), { _, _ in [0, 255, 0] }, { _, _ in [200, 40, 40] })
+        let eb = ShotPixelate.secureBlocks(edge, px: CGRect(x: 0, y: 0, width: 30, height: 30), size: 2).flatMap { $0 }
+        check(!eb.contains { $0.g > 0.6 }, "rect at the image corner: no leak")
+        let retina = ShotPixelate.secureBlocks(px, px: interior, size: 2, scale: 2)
+        let pts = ShotPixelate.grid(CGRect(x: 0, y: 0, width: 20, height: 20), size: 2)
+        check(retina.count == pts.rows && retina.first?.count == pts.cols, "2x display: the block grid is in points")
+        let grid = ShotPixelate.grid(CGRect(x: 0, y: 0, width: 300, height: 120), size: 2)
+        check(grid.cols == 50 && grid.rows == 20, "block resolution = rect × 0.5 / (size + 1)")
+    }
+
+    // MARK: render
+
+    static func image(w: Int, h: Int, _ f: (Int, Int) -> [UInt8]) -> CGImage {
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        for y in 0..<h { for x in 0..<w {
+            let c = f(x, y), i = (y * w + x) * 4
+            data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 255
+        } }
+        let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        return ctx.makeImage()!
+    }
+
+    static func renderTests() {
+        // a 2x "display" 200×100 pt = 400×200 px; left half red, right half blue
+        let img = image(w: 400, h: 200) { x, _ in x < 200 ? [255, 0, 0] : [0, 0, 255] }
+        let canvas = ShotCanvas(base: img, scale: 2)
+        check(canvas.size == CGSize(width: 200, height: 100), "canvas size in points")
+        let crop = CGRect(x: 10, y: 20, width: 40, height: 30)
+        let out = ShotRenderer.render(canvas, crop: crop, objects: [])
+        check(out?.width == 80 && out?.height == 60, "output = rect × backing scale (\(out?.width ?? 0)×\(out?.height ?? 0))")
+        if let out, let p = ShotPixels(out) {
+            let c = p.color(5, 5)
+            check(c.r > 0.9 && c.b < 0.1, "crop of the left half is red")
+        }
+        // top-left origin: a crop at the top of a top/bottom split
+        let tb = image(w: 100, h: 100) { _, y in y < 50 ? [0, 255, 0] : [0, 0, 0] }
+        let tbc = ShotCanvas(base: tb, scale: 1)
+        if let o = ShotRenderer.render(tbc, crop: CGRect(x: 0, y: 0, width: 100, height: 10), objects: []),
+           let p = ShotPixels(o) {
+            check(p.color(50, 5).g > 0.9, "crop y is measured from the top")
+        }
+        let odd = ShotRenderer.render(ShotCanvas(base: img, scale: 2), crop: CGRect(x: 0.5, y: 0, width: 33.5, height: 17), objects: [])
+        check(odd?.width == 67 && odd?.height == 34, "fractional rect × scale")
+        check(ShotRenderer.render(canvas, crop: CGRect(x: 500, y: 500, width: 10, height: 10), objects: []) == nil, "off-canvas crop = nil")
+
+        // annotations land at native scale; every tool renders
+        let all: [ShotObject] = ShotTool.allCases.filter(\.isDrawing).map { t in
+            var o = ShotObject(tool: t, points: [CGPoint(x: 20, y: 20), CGPoint(x: 120, y: 80)], color: ShotColor(r: 0, g: 1, b: 0), size: 4)
+            if t == .text { o.text = "Hello\nworld"; o.points = [CGPoint(x: 20, y: 20)] }
+            if t == .pencil { o.points = [CGPoint(x: 1, y: 1), CGPoint(x: 5, y: 9), CGPoint(x: 30, y: 3)] }
+            return o
+        }
+        let full = ShotRenderer.render(canvas, crop: CGRect(x: 0, y: 0, width: 200, height: 100), objects: all)
+        check(full?.width == 400, "every tool renders")
+        // a filled rectangle's color at native scale
+        let rect = ShotObject(tool: .rectangle, points: [CGPoint(x: 10, y: 10), CGPoint(x: 30, y: 30)], color: ShotColor(r: 0, g: 1, b: 0), size: 0)
+        if let o = ShotRenderer.render(canvas, crop: CGRect(x: 0, y: 0, width: 50, height: 50), objects: [rect]), let p = ShotPixels(o) {
+            check(p.color(40, 40).g > 0.9 && p.color(70, 70).r > 0.9, "rectangle drawn at 2× in the right place")
+        }
+        // secure pixelate in the output: the hidden interior is gone
+        let secret = image(w: 100, h: 100) { x, y in (30..<70).contains(x) && (30..<70).contains(y) ? [0, 255, 0] : [180, 30, 30] }
+        let sc = ShotCanvas(base: secret, scale: 1)
+        let pix = ShotObject(tool: .pixelate, points: [CGPoint(x: 30, y: 30), CGPoint(x: 70, y: 70)], color: .black, size: 2)
+        if let o = ShotRenderer.render(sc, crop: CGRect(x: 0, y: 0, width: 100, height: 100), objects: [pix]), let p = ShotPixels(o) {
+            var leak = false
+            for y in 30..<70 { for x in 30..<70 where p.color(x, y).g > 0.6 { leak = true } }
+            check(!leak, "rendered secure pixelate shows no hidden pixel")
+        }
+        // the text box grows with the text
+        var t = ShotObject(tool: .text, points: [.zero], color: .black, size: 8, text: "a")
+        let small = ShotText.boxSize(t)
+        t.text = "a much longer line\nand a second"
+        let big = ShotText.boxSize(t)
+        check(big.width > small.width && big.height > small.height, "text box grows")
+    }
+
+    // MARK: files
+
+    static func fileTests() {
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 10; comps.day = 2; comps.hour = 14; comps.minute = 5
+        let date = Calendar.current.date(from: comps)!
+        check(ShotFiles.expand("%F_%H-%M", date: date) == "2026-10-02_14-05", "Flameshot's default pattern")
+        check(ShotFiles.expand("shot %Y/%m", date: date) == "shot 2026-10", "no '/' in a name")
+        let taken: Set<String> = ["/tmp/x/a.png", "/tmp/x/a 2.png"]
+        check(ShotFiles.uniquePath(dir: "/tmp/x", name: "a", ext: "png", exists: { taken.contains($0) }) == "/tmp/x/a 3.png", "clash → ' 3'")
+        check(ShotFiles.uniquePath(dir: "/tmp/x/", name: "b", ext: "png", exists: { taken.contains($0) }) == "/tmp/x/b.png", "free name kept")
+        check(ShotFiles.target("/tmp/x", pattern: "%F", format: "png", date: date, isDir: { _ in true }, exists: { _ in false })
+              == "/tmp/x/2026-10-02.png", "-p DIR → the pattern inside it")
+        check(ShotFiles.target("/tmp/y/shot", pattern: "%F", format: "jpg", date: date, isDir: { _ in false }, exists: { _ in false })
+              == "/tmp/y/shot.jpg", "-p FILE gets the format's extension")
+        check(ShotFiles.target("/tmp/y/s.png", pattern: "%F", format: "png", date: date, isDir: { _ in false }, exists: { _ in false })
+              == "/tmp/y/s.png", "-p FILE.png kept")
+    }
+
+    // MARK: args
+
+    static func argTests() {
+        if case .success(let a) = ShotArgs.parse([]) { check(a == ShotArgs(), "no args = gui") } else { check(false, "no args") }
+        if case .success(let a) = ShotArgs.parse(["gui", "-p", "/tmp", "-c", "-d", "500", "--region", "300x200+10+20", "-s", "--pin", "-r", "-g"]) {
+            check(a.mode == .gui && a.path == "/tmp" && a.clipboard && a.delayMs == 500 && a.region == "300x200+10+20"
+                  && a.acceptOnSelect && a.pin && a.raw && a.printGeometry && a.wantsReply, "every gui flag")
+        } else { check(false, "gui flags") }
+        if case .success(let a) = ShotArgs.parse(["screen", "-n", "1", "-c"]) {
+            check(a.mode == .screen && a.screenNumber == 1 && a.clipboard && !a.wantsReply, "screen -n")
+        } else { check(false, "screen") }
+        if case .success(let a) = ShotArgs.parse(["full", "--region", "screen0"]) { check(a.mode == .full && a.region == "screen0", "screenN region") }
+        if case .failure = ShotArgs.parse(["-d", "x"]) { check(true, "bad delay") } else { check(false, "bad delay accepted") }
+        if case .failure = ShotArgs.parse(["--bogus"]) { check(true, "unknown flag") } else { check(false, "unknown flag accepted") }
+        if case .failure = ShotArgs.parse(["--region", "12"]) { check(true, "bad region") } else { check(false, "bad region accepted") }
+        check(ShotArgs.parseRegion("300x200+10+20") == CGRect(x: 10, y: 20, width: 300, height: 200), "WxH+X+Y")
+        check(ShotArgs.parseRegion("300x200") == CGRect(x: 0, y: 0, width: 300, height: 200), "WxH")
+        check(ShotArgs.parseRegion("0x200+1+1") == nil, "zero width rejected")
+    }
+
+    // MARK: color
+
+    static func colorTests() {
+        check(ShotColor(hex: "#740096")?.hex == "#740096", "hex round trip")
+        check(ShotColor(hex: "#740096")?.isDark == true, "Flameshot purple is dark → white icons")
+        check(ShotColor(hex: "#ffff00")?.isDark == false, "yellow is light → black icons")
+        check(ShotColor(hex: "zz") == nil && ShotColor(hex: "#12345") == nil, "bad hex rejected")
+        let c = ShotColor(hex: "#3366cc")!
+        let hsv = c.hsv
+        check(ShotColor(h: hsv.h, s: hsv.s, v: hsv.v).hex == "#3366cc", "HSV round trip")
+    }
+}

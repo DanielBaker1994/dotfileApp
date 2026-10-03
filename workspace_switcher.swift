@@ -439,6 +439,50 @@ func sendLaunchMessage(_ name: String) -> Bool {
     return true
 }
 
+// write every byte (a PNG reply is larger than one socket buffer)
+func writeAll(_ fd: Int32, _ data: Data) {
+    data.withUnsafeBytes { raw in
+        guard var p = raw.baseAddress else { return }
+        var left = raw.count
+        while left > 0 {
+            let n = Darwin.write(fd, p, left)
+            if n <= 0 { if n < 0 && errno == EINTR { continue }; return }
+            left -= n
+            p += n
+        }
+    }
+}
+
+// a request whose answer comes back on the same connection (screenshot -r
+// / -g: the daemon answers when the user finishes). nil = no daemon or no
+// answer within `timeout` seconds; empty = the request ended without a result.
+func sendRequest(_ msg: String, timeout: Double) -> Data? {
+    let path = popupTmpDir() + settings.notesSocketName
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    var addr = makeUnixSockAddr(path)
+    let rc = withUnsafePointer(to: &addr) { ptr -> Int32 in
+        ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard rc == 0 else { return nil }
+    var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    let line = msg + "\n"
+    line.withCString { _ = write(fd, $0, strlen($0)) }
+    var out = Data()
+    var buf = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let n = read(fd, &buf, buf.count)
+        if n > 0 { out.append(contentsOf: buf[..<n]); continue }
+        if n < 0 && errno == EINTR { continue }
+        break
+    }
+    return out
+}
+
 // ONE daemon per socket. The first process holds an exclusive flock beside
 // the socket for its whole life (the kernel drops it however the process
 // ends; O_CLOEXEC so nvim / shells / python never inherit it and outlive
@@ -1335,6 +1379,10 @@ private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
     "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload", "in-palette",
     "panel",
+    // [screenshot]
+    "show-help", "show-side-panel-button", "show-size-badge", "magnifier", "square-magnifier",
+    "copy-on-double-click", "save-path-fixed", "save-after-copy", "copy-path-after-save",
+    "save-last-region", "reverse-arrow", "counter-outline", "insecure-pixelate",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
@@ -1347,6 +1395,9 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "vim-esc-close": 0...20, "esc-close": 0...20, "search-limit": 1...1_000_000,
     "dashboard-width": 600...8000, "dashboard-height": 400...8000, "dashboard-refresh": 2...3600,
     "split": 0.2...0.8, "context-tokens": 512...1_000_000, "focus-loss-delay": 0...5,
+    // [screenshot]
+    "contrast-opacity": 0...255, "jpeg-quality": 1...100, "undo-limit": 1...1000,
+    "button-size": 0...80, "arrow-style": 0...1, "delay": 0...60_000,
 ]
 private let configColorKeys: Set<String> = [
     "header-color", "background-color", "browser-background", "terminal-background",
@@ -1371,6 +1422,28 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         return ThemePreset.parse(name: key, value) == nil
             ? "expected 7, 8 or 13 hex colors: background, browser, terminal, header, text, dim, highlight[, accent[, accent2, success, warning, danger, info]]"
             : nil
+    }
+    if section == "screenshot" {
+        switch key {
+        case "return":
+            return ["copy", "save", "pin"].contains(value.lowercased()) ? nil : "'\(value)' is not one of copy | pin | save"
+        case "save-format":
+            return ["png", "jpg", "jpeg"].contains(value.lowercased()) ? nil : "'\(value)' is not one of jpg | png"
+        case "button-size":
+            if let n = Double(value), n > 0 && n < 20 { return "\(value): 0 (automatic) or 20…80" }
+        case "ui-color", "contrast-color", "draw-color":
+            if value.lowercased() == "theme" && key == "ui-color" { return nil }
+            return ShotColor(hex: value) == nil ? "'\(value)' is not a hex color (#RRGGBB)" : nil
+        case "user-colors":
+            let bad = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { $0.lowercased() != "picker" && ShotColor(hex: $0) == nil }
+            return bad.isEmpty ? nil : "not hex colors: \(bad.joined(separator: ", "))"
+        case "buttons":
+            let bad = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                .filter { ShotTool(rawValue: $0) == nil }
+            return bad.isEmpty ? nil : "unknown buttons: \(bad.joined(separator: ", "))"
+        default: break
+        }
     }
     if configBoolKeys.contains(key), tri(value) == nil {
         return "'\(value)' is not true/false"
@@ -2531,6 +2604,14 @@ final class SwitcherController: NSObject {
     var pathsWindow: PathsWindow?
     var clipboardPaths: ClipboardPaths?
     var pathsSeedObserver: NSObjectProtocol?
+    // /screenshot (Hyper+X): capture + annotate, a tool panel (Screenshot.swift)
+    lazy var screenshot: ScreenshotController = {
+        let s = ScreenshotController()
+        s.log = { [weak self] in self?.log($0) }
+        s.onSaved = { PathShelf.shared.add([$0], why: .screenshot) }
+        s.onOwnPasteboardWrite = { [weak self] in self?.clipboardPaths?.ownWrite() }
+        return s
+    }()
     private var iconCache: [String: NSImage] = [:]
     // All open sub-windows (note editor / jira list). Several can coexist
     // (notes + jira at the same time); each hides on Esc and removes itself.
@@ -3051,6 +3132,10 @@ final class SwitcherController: NSObject {
             log("launch: no command named '\(name)' in \(commandsConfName)")
             return
         }
+        if isToolPanel(cmd) {
+            openTool(cmd)
+            return
+        }
         if settings.sharedWindow && (cmd.kind == .note || cmd.name == "jira") {
             slot.open(cmd.kind == .note ? .notes : .jira)
             return
@@ -3243,8 +3328,14 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"not a tool panel: \(n)\"}"
                 }
                 openTool(cmd)
+            case _ where a.hasPrefix("screenshot:"):
+                // screenshot:show | select:X,Y,W,H | tool:NAME | draw:… | key:SPEC | copy | save:PATH | pin | close
+                if let err = screenshot.testDo(String(a.dropFirst(11))) {
+                    return "{\"error\":\"\(err)\"}"
+                }
             case _ where a.hasPrefix("tool-close:"):
                 let n = String(a.dropFirst(11))
+                if n == "screenshot" { screenshot.session?.finish(.abort) }
                 if n == "paths" { pathsWindow?.hide() }
                 else { subWindows.first { $0.config.name == n && $0.config.toolPanel }?.hide(restore: false) }
             case _ where a.hasPrefix("esc-hides:"):
@@ -3291,6 +3382,7 @@ final class SwitcherController: NSObject {
             "paths": pathsWindow?.testState ?? ["shown": false,
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
+            "screenshot": screenshot.testState,
             "activations": appActivations,
             // NOT `active`: a key non-activating panel (tool panel) reads as
             // NSApp.isActive while the other app stays frontmost
@@ -3334,6 +3426,32 @@ final class SwitcherController: NSObject {
                 if query == "ping" {
                     // a second launch checking that this daemon is alive
                     close(cfd)
+                    continue
+                }
+                if query == "screenshot-permission" {
+                    // bin/preflight.sh (also run by the Setup window): answered
+                    // HERE, never via the main thread
+                    let line = (ScreenshotController.permitted ? "granted" : "denied") + "\n"
+                    line.withCString { _ = Darwin.write(cfd, $0, strlen($0)) }
+                    close(cfd)
+                    continue
+                }
+                if query == "screenshot" || query.hasPrefix("screenshot\t") {
+                    // Hyper+X / the CLI: "screenshot<TAB>arg<TAB>arg…" (no
+                    // hotkeyPrep: the tool never asks AeroSpace anything).
+                    // -r / -g keep the connection open until the user is done.
+                    let words = query.split(separator: "\t").dropFirst().map(String.init)
+                    let wantsReply = (try? ShotArgs.parse(words).get())?.wantsReply ?? false
+                    if !wantsReply { close(cfd) }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { if wantsReply { close(cfd) }; return }
+                        self.screenshot.handle(words, reply: wantsReply ? { data in
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                if let data, !data.isEmpty { writeAll(cfd, data) }
+                                close(cfd)
+                            }
+                        } : nil)
+                    }
                     continue
                 }
                 if query == "state" || query.hasPrefix("do:") {
@@ -3961,7 +4079,7 @@ final class SwitcherController: NSObject {
     // popup raises itself on activation, so the shared window came along —
     // and they are never shared-window views.
     func isToolPanel(_ cmd: CommandSpec) -> Bool {
-        ["filefast", "paths", "prettyprint"].contains(cmd.name) || (cmd.kind == .output && cmd.panel)
+        ["filefast", "paths", "prettyprint", "screenshot"].contains(cmd.name) || (cmd.kind == .output && cmd.panel)
     }
 
     // ONE way to open a tool panel (the palette, `do:tool:NAME`)
@@ -3970,8 +4088,15 @@ final class SwitcherController: NSObject {
         case "filefast": openFileFastWindow(cmd)
         case "paths": showPaths(cmd)
         case "prettyprint": openPrettyPrintWindow(cmd)
+        case "screenshot": showScreenshot()
         default: openOutputWindow(cmd)
         }
+    }
+
+    // /screenshot from the palette: capture once the palette has left the
+    // screen (it must not be in the frozen image)
+    func showScreenshot() {
+        screenshot.trigger(ShotArgs(), extraDelay: 0.15)
     }
 
     // a tool panel already up (you clicked away to copy something): take the
@@ -5870,6 +5995,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         c.prewarmSlot()
+        // /screenshot: the overlay panels + ScreenCaptureKit's display list, ready for Hyper+X
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak c] in c?.screenshot.prewarm() }
         if AppInstall.requested || AppInstall.wantsSetupWindow {
             // first run / new version / not installed yet (an app install)
             SetupWindow.show(controller: c)

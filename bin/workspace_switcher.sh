@@ -91,6 +91,19 @@ fi
 # WS_DEBUG=1 logs the launch steps to $TMPDIR/ws-launch.log
 LOG(){ [ "${WS_DEBUG:-}" = "1" ] && echo "$(date '+%H:%M:%S') $*" >>"$TMP/ws-launch.log"; }
 
+case "$MODE" in screenshot)
+    # /screenshot (Hyper+X) with no daemon running (a warm daemon gets the
+    # binary's own ping): no window to move, just start it command-first
+    if WS_PING_ONLY=1 "$BIN" screenshot >/dev/null 2>&1; then
+        LOG "daemon ping: delivered (screenshot)"
+    else
+        build
+        pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
+        open -n -g "$APP" --args screenshot >/dev/null 2>&1 || LOG "LaunchServices launch FAILED"
+    fi
+    exit 0
+esac
+
 case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
     LOG "== invoke MODE=$MODE focused=[$LINE] =="
     # notes, files, jira and output windows are all views of ONE shared

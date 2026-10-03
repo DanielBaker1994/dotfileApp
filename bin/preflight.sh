@@ -168,6 +168,26 @@ else
         "Jira, Confluence and the notification counts need python3: run  xcode-select --install  (or  brew install python)." "term:xcode-select --install"
 fi
 
+# Screen Recording (/screenshot, Hyper+X): TCC grants it per app, in the
+# SYSTEM database (bin/grant-permissions.sh can't pre-grant it). Only the
+# app itself can tell: ask the running daemon over its socket.
+SHOT_ON="$(conf_value screenshot enabled)"
+if [ "$SHOT_ON" != false ]; then
+    SOCK_NAME="$(conf_value app notes-socket)"; SOCK_NAME="${SOCK_NAME:-ws-notes.sock}"
+    SOCK="${TMPDIR:-/tmp/}"; SOCK="${SOCK%/}/$SOCK_NAME"
+    SHOT_PERM=""
+    [ -S "$SOCK" ] && SHOT_PERM="$(echo screenshot-permission | nc -U -w 2 "$SOCK" 2>/dev/null | head -1)"
+    SHOT_PANE="url:x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    case "$SHOT_PERM" in
+        granted) add screen-recording features warn 1 "Screen Recording permission" "granted (/screenshot)" ;;
+        denied)  add screen-recording features warn 0 "Screen Recording permission" "not granted" \
+                     "/screenshot (Hyper+X) needs it: System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording ▸ turn on workspace-switcher." \
+                     "$SHOT_PANE" ;;
+        *)       add screen-recording features warn 0 "Screen Recording permission" "unknown (the app is not running)" \
+                     "Start the app, then check again. /screenshot (Hyper+X) needs Screen Recording." "$SHOT_PANE" ;;
+    esac
+fi
+
 VIM_BIN="$(conf_value notes vim-bin)"; VIM_BIN="${VIM_BIN:-nvim}"; VIM_BIN="${VIM_BIN/#\~/$HOME}"
 if command -v "$VIM_BIN" >/dev/null 2>&1; then
     add nvim features warn 1 "Neovim (notes editor)" "$(command -v "$VIM_BIN")"

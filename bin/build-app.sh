@@ -171,6 +171,10 @@ bundle_resources() {
         /^vim-bin[ \t]*=/ { print "vim-bin = \"nvim\""; next }
         # Jira needs a site + token first: off until "Enable Jira" in the menu
         sec == "[jira]" && /^enabled[ \t]*=/ { print "enabled = false"; next }
+        # /screenshot: Flameshot's defaults, not the owner's flameshot.ini
+        sec == "[screenshot]" && /^contrast-opacity[ \t]*=/ { print "contrast-opacity = 190"; next }
+        sec == "[screenshot]" && /^draw-color[ \t]*=/ { print "draw-color = \"#ff0000\""; next }
+        sec == "[screenshot]" && /^save-path[ \t]*=/ { print "save-path = \"~/Desktop\""; next }
         { print }' "$ROOT/commands.toml" > "$res/commands.default.toml"
     printf '%s\n' "$APP_VERSION" > "$res/VERSION"
     # sketchybar helpers, precompiled: an end user has no swiftc

@@ -315,6 +315,74 @@ return = "file"
 clipboard = true
 ignore-file = "config/paths.ignore"
 
+# /screenshot (Hyper+X): Flameshot-style capture + annotate (Screenshot.swift,
+# ScreenshotOverlay.swift, ScreenshotPin.swift). The screen freezes + dims,
+# drag a box, then the ring of round buttons: P pencil, D line, A arrow,
+# S rectangle, R filled rectangle, C circle, M marker, T text, counter,
+# B pixelate, I invert; wheel = size, right-click = colors, Space = side
+# panel, Cmd+C / Return copy, Cmd+S save, Pin, Esc unwinds one step at a
+# time. A tool panel: it never activates the app. Needs Screen Recording
+# (System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording).
+# CLI: workspace-switcher screenshot [gui|full|screen] [-p PATH] [-c] [-d MS]
+#      [--region WxH+X+Y|screenN] [--last-region] [-s] [--pin] [-r] [-g] [-n N]
+# Defaults are Flameshot's; this file carries the owner's flameshot.ini
+# (contrast-opacity 188, draw-color #288000, save-path /private/tmp).
+#   ui-color            buttons, handles, border ("theme" = the app's accent)
+#   contrast-opacity    0-255 veil over the unselected area
+#   user-colors         the right-click wheel ("picker" = the side panel)
+#   buttons             which ring buttons show, in order (size = the W/H badge;
+#                       also accept, size-increase, size-decrease)
+#   button-size         0 = system font line height x 2.2, else 20-80
+#   return              what Return / Accept does: copy | save | pin
+#   save-path-fixed     true = Cmd+S writes save-path/filename-pattern at once
+#   filename-pattern    strftime; a clash gets " 2", " 3"
+#   insecure-pixelate   true = real downscaled pixels (the default rebuilds the
+#                       blocks from the box's border only: nothing recoverable)
+[screenshot]
+enabled = true
+label = "Screenshot"
+type = "shell"
+icon = "camera"
+ui-color = "#740096"
+contrast-color = "#270032"
+contrast-opacity = 188
+draw-color = "#288000"
+user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
+buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, save, exit, pin"
+button-size = 0
+show-help = true
+show-side-panel-button = true
+show-size-badge = true
+magnifier = false
+square-magnifier = false
+copy-on-double-click = false
+return = "copy"
+save-path = "/private/tmp"
+save-path-fixed = false
+filename-pattern = "%F_%H-%M"
+save-format = "png"
+jpeg-quality = 75
+save-after-copy = false
+copy-path-after-save = false
+save-last-region = false
+undo-limit = 100
+arrow-style = 0
+reverse-arrow = false
+counter-outline = true
+insecure-pixelate = false
+delay = 0
+font = ""
+copy-toast = "Capture saved to clipboard"
+save-toast = "Capture saved as {}"
+permission-toast = "Screen Recording permission needed — opening Settings…"
+help-mouse = "Select screenshot area"
+help-save = "Save screenshot to a file"
+help-copy = "Copy selection to clipboard"
+help-wheel = "Change tool size"
+help-right-click = "Show color picker"
+help-space = "Open side panel"
+help-esc = "Exit"
+
 # Notes + voice in ONE window: every note tab (tabs, markdown images, paste)
 # plus the record/pause/stop meter bar when `voice = true`. Dictation lands
 # AT THE CURSOR of the active tab (vim pane: after the character under the
@@ -571,6 +639,7 @@ workspace-switcher = "*:app"
 "all: Hyper+S" = "switcher palette: search windows + commands"
 "all: Hyper+N" = "show the window on the view you were last in / hide it"
 "all: Hyper+T" = "notes terminal drawer (open + focus / close)"
+"all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
 "all: Cmd+W" = "hide the window"
 "all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (files · notes · AI · jira · confluence)"
 "all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
@@ -610,6 +679,23 @@ workspace-switcher = "*:app"
 "ai: Ctrl+Enter / Cmd+Enter" = "run the selected rule on your text"
 "ai: Cmd+L" = "focus your text"
 "ai: Esc" = "stop a running request (never closes)"
+"screenshot: Mouse drag" = "select an area (Shift = square); drag inside = move it"
+"screenshot: P D A S R C M T B I" = "pencil, line, arrow, rectangle, filled rectangle, circle, marker, text, pixelate, invert (again = off)"
+"screenshot: G" = "grab a color from the screen (Esc cancels)"
+"screenshot: Space" = "side panel (size, color, grid, text style, layers)"
+"screenshot: ← ↑ → ↓" = "move the selection 1 pt (Shift = resize, Cmd+Shift = from the center)"
+"screenshot: Cmd+A" = "select the whole display"
+"screenshot: Cmd+M" = "move-selection mode"
+"screenshot: Cmd+Z / Cmd+Shift+Z" = "undo / redo"
+"screenshot: Cmd+C / Ctrl+C / Return" = "copy and close (Return = [screenshot] return)"
+"screenshot: Cmd+S" = "save and close"
+"screenshot: Cmd+Return" = "finish the text being typed"
+"screenshot: Delete" = "delete the selected object"
+"screenshot: Mouse wheel" = "tool / object size (Cmd+wheel: the next counter number)"
+"screenshot: Right-click" = "color wheel"
+"screenshot: Shift while drawing" = "snap angles / square"
+"screenshot: Shift / Cmd + drag a handle" = "mirror resize / keep aspect"
+"screenshot: Esc / Cmd+Q" = "one step back (text, wheel, panel, object, tool), then exit"
 
 # Paste-and-format window: paste raw JSON or XML into the popup and it
 # re-renders itself formatted (debounced as you paste); the "copy contents"

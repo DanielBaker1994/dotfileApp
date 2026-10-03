@@ -53,6 +53,38 @@ if cliArgs.count > 1 {
         // the Setup & Health Check window (running daemon, else this launch)
         if sendLaunchMessage("setup") { exit(0) }
         AppInstall.requested = true
+    case "screenshot":
+        // Hyper+X / Flameshot-style CLI: `screenshot [gui|full|screen] [flags]`
+        // (ShotArgs). The words travel tab-separated (paths may hold spaces).
+        let words = Array(cliArgs.dropFirst(2))
+        let parsed: ShotArgs
+        switch ShotArgs.parse(words) {
+        case .success(let a): parsed = a
+        case .failure(let p):
+            FileHandle.standardError.write(Data("workspace-switcher screenshot: \(p.message)\n".utf8))
+            exit(2)
+        }
+        let msg = (["screenshot"] + words).joined(separator: "\t")
+        if parsed.wantsReply {
+            // -r (PNG on stdout) / -g ("W H X Y"): wait for the user to finish
+            guard let data = sendRequest(msg, timeout: 3600) else {
+                FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+                exit(1)
+            }
+            if data.isEmpty { exit(1) }   // aborted
+            FileHandle.standardOutput.write(data)
+            exit(0)
+        }
+        if sendLaunchMessage(msg) { exit(0) }
+        // no daemon: start it (as the hotkey modes do); it opens the capture
+        if getppid() != 1 {
+            let script = assetDir + "/bin/workspace_switcher.sh"
+            if FileManager.default.isExecutableFile(atPath: script) {
+                let argv: [UnsafeMutablePointer<CChar>?] = [strdup(script), strdup("screenshot"), nil]
+                execv(script, argv)
+            }
+        }
+        openCommand = "screenshot"
     case let mode where SwitcherController.hotkeyModes.contains(mode):
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->

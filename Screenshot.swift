@@ -1,0 +1,740 @@
+import AppKit
+import ScreenCaptureKit
+
+// /screenshot (Hyper+X): a Flameshot-style capture + annotate tool. A TOOL
+// PANEL (AGENT_CONTEXT "Tool panels"): it never activates the app, never
+// touches the shared window, and AeroSpace never sees its windows.
+//   ScreenshotAnnotations.swift  the model (tested: bin/run-tests.sh screenshot)
+//   ScreenshotOverlay.swift      the capture screen (panels, session, views)
+//   ScreenshotPin.swift          pinned captures
+//   this file                    config, capture, outputs, CLI, test hooks
+
+// MARK: - Config ([screenshot] in commands.toml)
+
+struct ScreenshotConfig {
+    var enabled = true
+    var uiColor = ShotColor(hex: "#740096")!
+    var contrastColor = ShotColor(hex: "#270032")!
+    var contrastOpacity = 190
+    var drawColor = ShotColor(hex: "#ff0000")!
+    var userColors: [ShotColor?] = []
+    var buttons: [ShotTool] = ShotTool.ring(ShotTool.defaultButtons, badge: true)
+    var buttonSize: CGFloat = 34
+    var showHelp = true
+    var showSidePanelButton = true
+    var magnifier = false
+    var squareMagnifier = false
+    var copyOnDoubleClick = false
+    var returnAction = "copy"
+    var savePath = "~/Desktop"
+    var savePathFixed = false
+    var filenamePattern = "%F_%H-%M"
+    var saveFormat = "png"
+    var jpegQuality = 75
+    var saveAfterCopy = false
+    var copyPathAfterSave = false
+    var saveLastRegion = false
+    var undoLimit = 100
+    var arrowStyle = 0
+    var reverseArrow = false
+    var counterOutline = true
+    var insecurePixelate = false
+    var delayMs = 0
+    var font = ""
+    var copyToast = "Capture saved to clipboard"
+    var saveToast = "Capture saved as {}"
+    var permissionToast = "Screen Recording permission needed — opening Settings…"
+    var failToast = "Screen capture failed"
+    var helpRows: [(String, String)] = []
+    var shortcuts: [(String, String)] = []
+
+    static let defaultUserColors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
+    static let helpKeys: [(key: String, label: String, text: String)] = [
+        ("help-mouse", "Mouse", "Select screenshot area"),
+        ("help-save", "⌘S", "Save screenshot to a file"),
+        ("help-copy", "⌘C", "Copy selection to clipboard"),
+        ("help-wheel", "Mouse Wheel", "Change tool size"),
+        ("help-right-click", "Right Click", "Show color picker"),
+        ("help-space", "Space", "Open side panel"),
+        ("help-esc", "Esc", "Exit"),
+    ]
+
+    static func load() -> ScreenshotConfig {
+        var c = ScreenshotConfig()
+        let lines = readConfigText().map(configLines) ?? []
+        var e: [String: String] = [:]
+        for x in configSectionEntries(lines, "screenshot") { e[x.key] = x.value }
+        func b(_ k: String, _ d: Bool) -> Bool { tri(e[k]) ?? d }
+        func i(_ k: String, _ d: Int, _ r: ClosedRange<Int>) -> Int {
+            guard let v = e[k].flatMap({ Double($0) }) else { return d }
+            return max(r.lowerBound, min(r.upperBound, Int(v)))
+        }
+        func s(_ k: String, _ d: String) -> String {
+            guard let v = e[k], !v.isEmpty else { return d }
+            return v
+        }
+        func col(_ k: String, _ d: ShotColor) -> ShotColor {
+            guard let v = e[k]?.trimmingCharacters(in: .whitespaces), !v.isEmpty else { return d }
+            if v.lowercased() == "theme" { return ShotColor(ACCENT) }
+            return ShotColor(hex: v) ?? d
+        }
+        c.enabled = b("enabled", true)
+        c.uiColor = col("ui-color", c.uiColor)
+        c.contrastColor = col("contrast-color", c.contrastColor)
+        c.contrastOpacity = i("contrast-opacity", 190, 0...255)
+        c.drawColor = col("draw-color", c.drawColor)
+        c.userColors = s("user-colors", defaultUserColors).split(separator: ",").compactMap { part -> ShotColor?? in
+            let v = part.trimmingCharacters(in: .whitespaces)
+            if v.lowercased() == "picker" { return .some(nil) }
+            return ShotColor(hex: v).map { .some($0) }
+        }
+        c.buttons = ShotTool.ring(s("buttons", ShotTool.defaultButtons), badge: b("show-size-badge", true))
+        let bs = i("button-size", 0, 0...80)
+        let font = NSFont.systemFont(ofSize: 13)
+        c.buttonSize = bs >= 20 ? CGFloat(bs)
+            : ButtonRing.defaultButtonSize(lineHeight: NSLayoutManager().defaultLineHeight(for: font))
+        c.showHelp = b("show-help", true)
+        c.showSidePanelButton = b("show-side-panel-button", true)
+        c.magnifier = b("magnifier", false)
+        c.squareMagnifier = b("square-magnifier", false)
+        c.copyOnDoubleClick = b("copy-on-double-click", false)
+        let r = s("return", "copy").lowercased()
+        c.returnAction = ["copy", "save", "pin"].contains(r) ? r : "copy"
+        c.savePath = s("save-path", "~/Desktop")
+        c.savePathFixed = b("save-path-fixed", false)
+        c.filenamePattern = s("filename-pattern", "%F_%H-%M")
+        let f = s("save-format", "png").lowercased()
+        c.saveFormat = ["jpg", "jpeg"].contains(f) ? "jpg" : "png"
+        c.jpegQuality = i("jpeg-quality", 75, 1...100)
+        c.saveAfterCopy = b("save-after-copy", false)
+        c.copyPathAfterSave = b("copy-path-after-save", false)
+        c.saveLastRegion = b("save-last-region", false)
+        c.undoLimit = i("undo-limit", 100, 1...1000)
+        c.arrowStyle = i("arrow-style", 0, 0...1)
+        c.reverseArrow = b("reverse-arrow", false)
+        c.counterOutline = b("counter-outline", true)
+        c.insecurePixelate = b("insecure-pixelate", false)
+        c.delayMs = i("delay", 0, 0...60_000)
+        c.font = e["font"] ?? ""
+        c.copyToast = e["copy-toast"] ?? c.copyToast
+        c.saveToast = e["save-toast"] ?? c.saveToast
+        c.permissionToast = s("permission-toast", c.permissionToast)
+        c.failToast = s("fail-toast", c.failToast)
+        c.helpRows = helpKeys.map { ($0.label, s($0.key, $0.text)) }
+        c.shortcuts = shortcutEntries.filter { $0.view == "screenshot" }.map { ($0.keys, $0.what) }
+        return c
+    }
+}
+
+extension ShotColor {
+    init(_ ns: NSColor) {
+        let c = ns.usingColorSpace(.sRGB) ?? ns
+        self.init(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent), a: Double(c.alphaComponent))
+    }
+}
+
+extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
+    }
+}
+
+// MARK: - Screen toast
+
+// The Raycast pill on its own tiny non-activating panel, bottom-center of a
+// screen (a shared-window toast would show that window).
+enum ScreenToast {
+    private static var panel: NSPanel?
+
+    static func show(_ text: String, on screen: NSScreen?, symbol: String? = "checkmark.circle.fill") {
+        guard !text.isEmpty, let scr = screen ?? NSScreen.main else { return }
+        panel?.orderOut(nil)
+        let pill = makeToastPill(text, symbol: symbol, colors: windowColors(), zoom: 1, maxWidth: scr.frame.width - 64)
+        let pad: CGFloat = 18
+        let w = pill.frame.width + pad * 2, h = pill.frame.height + pad * 2 + 6
+        let p = NSPanel(contentRect: NSRect(x: (scr.frame.midX - w / 2).rounded(), y: scr.frame.minY + 70, width: w, height: h),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = false
+        p.ignoresMouseEvents = true
+        p.hidesOnDeactivate = false
+        p.isReleasedWhenClosed = false
+        p.animationBehavior = .none
+        p.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        root.wantsLayer = true
+        p.contentView = root
+        pill.setFrameOrigin(CGPoint(x: pad, y: pad))
+        root.addSubview(pill)
+        p.orderFrontRegardless()
+        panel = p
+        animateToastPill(pill, rise: -6) {
+            p.orderOut(nil)
+            if panel === p { panel = nil }
+        }
+    }
+}
+
+// MARK: - Controller
+
+final class ScreenshotController {
+    var log: (String) -> Void = { wsLog($0) }
+    // a file the tool wrote (→ /paths) / the pasteboard write is ours (ClipboardPaths)
+    var onSaved: ((String) -> Void)?
+    var onOwnPasteboardWrite: (() -> Void)?
+
+    private var panels: [CGDirectDisplayID: ShotOverlayPanel] = [:]
+    private(set) var session: ShotSession?
+    private var reply: ((Data?) -> Void)?
+    private var content: SCShareableContent?
+    private var keyMonitor: Any?
+    private(set) var pins: [PinPanel] = []
+    private var permissionAsked = false
+    private var capturing = false
+    private var forcedSavePath: String?
+    private var lastOutput: [String: Any] = [:]
+    let statePath = NSHomeDirectory() + "/.cache/workspace-switcher/screenshot-state.json"
+
+    init() {
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.content = nil
+            if self.session == nil { self.prewarm() }
+        }
+    }
+
+    // MARK: prewarm
+
+    // one hidden overlay panel per display + the shareable content, so a
+    // hotkey pays only for the capture itself
+    func prewarm() {
+        let ids = Set(NSScreen.screens.compactMap(\.displayID))
+        for id in panels.keys where !ids.contains(id) { panels[id] = nil }
+        for s in NSScreen.screens {
+            guard let id = s.displayID else { continue }
+            if let p = panels[id] { p.fit(s) } else { panels[id] = ShotOverlayPanel(screen: s) }
+        }
+        if content == nil, CGPreflightScreenCaptureAccess() { fetchContent { _ in } }
+    }
+
+    private func fetchContent(_ done: @escaping (SCShareableContent?) -> Void) {
+        if let c = content { done(c); return }
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] c, err in
+            DispatchQueue.main.async {
+                if let err { self?.log("screenshot: shareable content: \(err.localizedDescription)") }
+                if let c { self?.content = c }
+                done(c)
+            }
+        }
+    }
+
+    // MARK: permission
+
+    static var permitted: Bool { CGPreflightScreenCaptureAccess() }
+
+    // false (and a toast + the Privacy pane) when Screen Recording is off:
+    // never an overlay of black / wallpaper-only pixels
+    private func checkPermission(_ cfg: ScreenshotConfig) -> Bool {
+        if Self.permitted { return true }
+        if !permissionAsked {
+            permissionAsked = true
+            CGRequestScreenCaptureAccess()
+        }
+        ScreenToast.show(cfg.permissionToast, on: mouseScreen, symbol: "exclamationmark.triangle.fill")
+        if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(u)
+        }
+        log("screenshot: no Screen Recording permission")
+        return false
+    }
+
+    var mouseScreen: NSScreen? {
+        NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+    }
+
+    // MARK: entry points
+
+    // `screenshot [gui|full|screen] [flags]` from the socket / CLI / palette.
+    // `reply` (when set) gets the result exactly once: PNG (-r), "W H X Y"
+    // (-g), else empty; nil = aborted / failed.
+    func handle(_ words: [String], reply: ((Data?) -> Void)? = nil) {
+        switch ShotArgs.parse(words) {
+        case .failure(let p):
+            log("screenshot: \(p.message)")
+            reply?(nil)
+        case .success(let a):
+            trigger(a, reply: reply)
+        }
+    }
+
+    func trigger(_ args: ShotArgs, reply: ((Data?) -> Void)? = nil, extraDelay: Double = 0) {
+        let cfg = ScreenshotConfig.load()
+        guard cfg.enabled else {
+            log("screenshot: [screenshot] enabled = false")
+            reply?(nil)
+            return
+        }
+        if session != nil || capturing {
+            // a second hotkey while it's up: the keyboard back to the overlay
+            if let d = session?.mouseDisplay { d.panel.orderFrontRegardless(); d.panel.makeKey() }
+            reply?(nil)
+            return
+        }
+        guard checkPermission(cfg) else { reply?(nil); return }
+        capturing = true
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let delay = Double(args.delayMs > 0 ? args.delayMs : cfg.delayMs) / 1000 + extraDelay
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            let screens = NSScreen.screens
+            let tc = DispatchTime.now().uptimeNanoseconds
+            self.capture(screens) { images in
+                self.capturing = false
+                let capMs = Double(DispatchTime.now().uptimeNanoseconds - tc) / 1_000_000
+                guard !images.isEmpty else {
+                    ScreenToast.show(cfg.failToast, on: self.mouseScreen, symbol: "exclamationmark.triangle.fill")
+                    self.log("screenshot: capture failed")
+                    reply?(nil)
+                    return
+                }
+                switch args.mode {
+                case .gui:
+                    self.begin(cfg, args, screens, images, reply: reply)
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000 - delay * 1000
+                    self.log(String(format: "screenshot: capture %.0f ms, %.0f ms to overlay", capMs, ms))
+                case .full, .screen:
+                    self.direct(cfg, args, screens, images, reply: reply)
+                    self.log(String(format: "screenshot %@: capture %.0f ms", args.mode.rawValue, capMs))
+                }
+            }
+        }
+    }
+
+    // MARK: capture
+
+    private func capture(_ screens: [NSScreen], _ done: @escaping ([CGDirectDisplayID: CGImage]) -> Void) {
+        fetchContent { [weak self] content in
+            guard let content else { done([:]); return }
+            let group = DispatchGroup()
+            let lock = NSLock()
+            var out: [CGDirectDisplayID: CGImage] = [:]
+            for s in screens {
+                guard let id = s.displayID, let d = content.displays.first(where: { $0.displayID == id }) else { continue }
+                let filter = SCContentFilter(display: d, excludingWindows: [])
+                let c = SCStreamConfiguration()
+                c.width = Int((s.frame.width * s.backingScaleFactor).rounded())
+                c.height = Int((s.frame.height * s.backingScaleFactor).rounded())
+                c.showsCursor = false
+                c.captureResolution = .best
+                group.enter()
+                SCScreenshotManager.captureImage(contentFilter: filter, configuration: c) { img, err in
+                    lock.lock()
+                    if let img { out[id] = img }
+                    lock.unlock()
+                    if let err { DispatchQueue.main.async { self?.log("screenshot: display \(id): \(err.localizedDescription)") } }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                // a display list gone stale (a monitor came / went): refetch next time
+                if out.count < screens.count { self?.content = nil }
+                done(out)
+            }
+        }
+    }
+
+    // MARK: session
+
+    private func begin(_ cfg: ScreenshotConfig, _ args: ShotArgs, _ screens: [NSScreen],
+                       _ images: [CGDirectDisplayID: CGImage], reply: ((Data?) -> Void)?) {
+        let s = ShotSession(cfg: cfg, args: args, statePath: statePath)
+        s.log = log
+        for scr in screens {
+            guard let id = scr.displayID, let img = images[id] else { continue }
+            let panel = panels[id] ?? ShotOverlayPanel(screen: scr)
+            panels[id] = panel
+            panel.fit(scr)
+            let canvas = ShotCanvas(base: img, scale: CGFloat(img.width) / max(1, scr.frame.width))
+            panel.setImage(img, scale: canvas.scale)
+            s.displays.append(ShotDisplay(screen: scr, id: id, canvas: canvas, panel: panel))
+        }
+        session = s
+        self.reply = reply
+        s.onFinish = { [weak self, weak s] o in
+            guard let self, let s else { return }
+            self.finish(s, o)
+        }
+        for d in s.displays { d.view.attach(s, d) }
+        for d in s.displays { d.panel.orderFrontRegardless() }
+        let key = s.mouseDisplay ?? s.displays[0]
+        key.panel.makeKey()
+        key.panel.makeFirstResponder(key.view)
+        installKeyMonitor()
+        // a region given up front (--region / --last-region)
+        if let r = initialRegion(args, s) { s.testSelect(r.rect, on: r.display) }
+        s.redrawAll()
+    }
+
+    private func initialRegion(_ a: ShotArgs, _ s: ShotSession) -> (rect: CGRect, display: ShotDisplay)? {
+        if let reg = a.region {
+            if reg.hasPrefix("screen"), let n = Int(reg.dropFirst(6)), s.displays.indices.contains(n) {
+                return (s.displays[n].bounds, s.displays[n])
+            }
+            if let g = ShotArgs.parseRegion(reg) {
+                for d in s.displays {
+                    let o = d.globalOrigin
+                    let local = g.offsetBy(dx: -o.x, dy: -o.y)
+                    if d.bounds.contains(CGPoint(x: local.minX, y: local.minY)) { return (local, d) }
+                }
+            }
+        }
+        if a.lastRegion, let l = s.state.lastRegion, let d = s.displays.first(where: { $0.id == l.display }) {
+            return (CGRect(x: l.x, y: l.y, width: l.w, height: l.h), d)
+        }
+        return nil
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] e in
+            guard let self else { return e }
+            if let s = self.session, !s.finished, e.window is ShotOverlayPanel {
+                return s.handleKey(e) ? nil : e
+            }
+            if let pin = e.window as? PinPanel {
+                return pin.handleKey(e) ? nil : e
+            }
+            return e
+        }
+    }
+    private func dropKeyMonitorIfIdle() {
+        guard session == nil, pins.isEmpty, let m = keyMonitor else { return }
+        NSEvent.removeMonitor(m)
+        keyMonitor = nil
+    }
+
+    // close every overlay; the keyboard returns to the frontmost app by
+    // itself (it was never taken from it: no activation)
+    func close() {
+        guard let s = session else { return }
+        for d in s.displays {
+            d.panel.orderOut(nil)
+            d.view.detach()
+            d.panel.setImage(nil, scale: 1)
+        }
+        session = nil
+        dropKeyMonitorIfIdle()
+    }
+
+    private func answer(_ d: Data?) {
+        let r = reply
+        reply = nil
+        r?(d)
+    }
+
+    // MARK: outputs
+
+    private func finish(_ s: ShotSession, _ o: ShotOutcome) {
+        let img = s.render()
+        let screen = s.active?.screen
+        let geom = s.globalSelection
+        // the selection's AppKit (bottom-left) frame: where a pin opens
+        var globalFrame: CGRect?
+        if let d = s.active, let r = s.selection {
+            globalFrame = CGRect(x: d.screen.frame.minX + r.minX, y: d.screen.frame.maxY - r.maxY, width: r.width, height: r.height)
+        }
+        if s.cfg.saveLastRegion, o != .abort, let d = s.active, let r = s.selection {
+            s.state.lastRegion = .init(display: d.id, x: Double(r.minX), y: Double(r.minY), w: Double(r.width), h: Double(r.height))
+            s.state.save(statePath)
+        }
+        let cfg = s.cfg, args = s.args
+        let forced = forcedSavePath
+        forcedSavePath = nil
+        close()
+        guard o != .abort, let img else {
+            log("screenshot: aborted")
+            lastOutput = ["outcome": "abort"]
+            answer(nil)
+            return
+        }
+        lastOutput = ["outcome": o.rawValue, "size": [img.width, img.height]]
+        var action = o
+        if o == .accept {
+            if args.pin { action = .pin }
+            else if args.path != nil || args.clipboard || args.raw || args.printGeometry { action = .accept }
+            else { action = ShotOutcome(rawValue: cfg.returnAction) ?? .copy }
+        }
+        switch action {
+        case .copy:
+            copy(img, cfg, screen)
+            if cfg.saveAfterCopy { save(img, cfg, screen, to: nil) }
+        case .save:
+            save(img, cfg, screen, to: forced ?? s.chosenSavePath ?? args.path)
+        case .pin:
+            pin(img, frame: globalFrame, cfg)
+        case .accept:
+            // explicit -p / -c (and -r / -g answer below)
+            if let p = args.path { save(img, cfg, screen, to: p) }
+            if args.clipboard { copy(img, cfg, screen) }
+        case .abort: break
+        }
+        if args.raw { answer(png(img)) }
+        else if args.printGeometry, let g = geom {
+            answer(Data("\(Int(g.width.rounded())) \(Int(g.height.rounded())) \(Int(g.minX.rounded())) \(Int(g.minY.rounded()))\n".utf8))
+        } else { answer(Data()) }
+        log("screenshot: \(action.rawValue) \(img.width)×\(img.height)")
+    }
+
+    // full / screen: no UI
+    private func direct(_ cfg: ScreenshotConfig, _ a: ShotArgs, _ screens: [NSScreen],
+                        _ images: [CGDirectDisplayID: CGImage], reply: ((Data?) -> Void)?) {
+        var img: CGImage?
+        var screen: NSScreen?
+        if a.mode == .screen {
+            let s = a.screenNumber.flatMap { screens.indices.contains($0) ? screens[$0] : nil } ?? mouseScreen
+            screen = s
+            img = s?.displayID.flatMap { images[$0] }
+        } else {
+            img = stitch(screens, images)
+            screen = mouseScreen
+        }
+        guard let img else { reply?(nil); return }
+        lastOutput = ["outcome": a.mode.rawValue, "size": [img.width, img.height]]
+        if let p = a.path { save(img, cfg, screen, to: p) }
+        if a.clipboard || (a.path == nil && !a.raw && !a.pin) { copy(img, cfg, screen) }
+        if a.pin, let s = screen {
+            pin(img, frame: CGRect(x: s.frame.minX, y: s.frame.minY, width: CGFloat(img.width) / s.backingScaleFactor,
+                                   height: CGFloat(img.height) / s.backingScaleFactor), cfg)
+        }
+        reply?(a.raw ? png(img) : Data())
+    }
+
+    // every display at its global place, at the largest backing scale
+    private func stitch(_ screens: [NSScreen], _ images: [CGDirectDisplayID: CGImage]) -> CGImage? {
+        let union = screens.reduce(CGRect.null) { $0.union($1.frame) }
+        guard !union.isNull else { return nil }
+        let scale = screens.map(\.backingScaleFactor).max() ?? 2
+        guard let ctx = CGContext(data: nil, width: Int(union.width * scale), height: Int(union.height * scale),
+                                  bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        for s in screens {
+            guard let id = s.displayID, let img = images[id] else { continue }
+            // AppKit frames are bottom-left like a CGContext: offset from the union
+            let r = CGRect(x: (s.frame.minX - union.minX) * scale, y: (s.frame.minY - union.minY) * scale,
+                           width: s.frame.width * scale, height: s.frame.height * scale)
+            ctx.draw(img, in: r)
+        }
+        return ctx.makeImage()
+    }
+
+    func png(_ img: CGImage) -> Data? {
+        NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
+    }
+
+    // ONE pasteboard item: PNG + TIFF (older apps)
+    func copy(_ img: CGImage, _ cfg: ScreenshotConfig, _ screen: NSScreen?) {
+        let rep = NSBitmapImageRep(cgImage: img)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        let item = NSPasteboardItem()
+        item.setData(png, forType: .png)
+        if let tiff = rep.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([item])
+        onOwnPasteboardWrite?()
+        lastOutput["copied"] = true
+        ScreenToast.show(cfg.copyToast, on: screen)
+    }
+
+    // to `path` (a directory → the pattern inside it), else save-path
+    func save(_ img: CGImage, _ cfg: ScreenshotConfig, _ screen: NSScreen?, to path: String?) {
+        let dir = ((path ?? cfg.savePath) as NSString).expandingTildeInPath
+        if path == nil { try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
+        let target = ShotFiles.target(dir, pattern: cfg.filenamePattern, format: cfg.saveFormat)
+        try? FileManager.default.createDirectory(atPath: (target as NSString).deletingLastPathComponent,
+                                                 withIntermediateDirectories: true)
+        write(img, to: target, cfg, screen)
+    }
+
+    private func write(_ img: CGImage, to path: String, _ cfg: ScreenshotConfig, _ screen: NSScreen?) {
+        let rep = NSBitmapImageRep(cgImage: img)
+        let ext = (path as NSString).pathExtension.lowercased()
+        let data = ["jpg", "jpeg"].contains(ext)
+            ? rep.representation(using: .jpeg, properties: [.compressionFactor: Double(cfg.jpegQuality) / 100])
+            : rep.representation(using: .png, properties: [:])
+        guard let data, (try? data.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil else {
+            ScreenToast.show("Could not save \((path as NSString).abbreviatingWithTildeInPath)", on: screen, symbol: "exclamationmark.triangle.fill")
+            log("screenshot: save failed: \(path)")
+            return
+        }
+        lastOutput["path"] = path
+        onSaved?(path)
+        if cfg.copyPathAfterSave {
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(path, forType: .string)
+            onOwnPasteboardWrite?()
+        }
+        ScreenToast.show(cfg.saveToast.replacingOccurrences(of: "{}", with: (path as NSString).abbreviatingWithTildeInPath), on: screen)
+        log("screenshot: saved \(path)")
+    }
+
+    func pin(_ img: CGImage, frame: CGRect?, _ cfg: ScreenshotConfig) {
+        let scale = mouseScreen?.backingScaleFactor ?? 2
+        let size = CGSize(width: CGFloat(img.width) / scale, height: CGFloat(img.height) / scale)
+        var f = frame ?? CGRect(origin: .zero, size: size)
+        if frame == nil, let s = mouseScreen { f.origin = CGPoint(x: s.frame.midX - size.width / 2, y: s.frame.midY - size.height / 2) }
+        let p = PinPanel(image: img, frame: f, ui: cfg.uiColor, contrast: cfg.contrastColor)
+        p.onClose = { [weak self] p in
+            self?.pins.removeAll { $0 === p }
+            self?.dropKeyMonitorIfIdle()
+        }
+        p.onCopy = { [weak self] img in self?.copy(img, ScreenshotConfig.load(), p.screen) }
+        p.onSave = { [weak self] img in
+            self?.save(img, ScreenshotConfig.load(), p.screen, to: nil)
+        }
+        pins.append(p)
+        installKeyMonitor()
+        p.present()
+    }
+
+    // MARK: tests (socket do:screenshot:… / state)
+
+    func testDo(_ a: String) -> String? {
+        let parts = a.split(separator: ":", maxSplits: 1).map(String.init)
+        let verb = parts.first ?? ""
+        let arg = parts.count > 1 ? parts[1] : ""
+        func nums(_ s: String) -> [CGFloat] { s.split(separator: ",").compactMap { Double($0) }.map { CGFloat($0) } }
+        switch verb {
+        case "show":
+            var args = ShotArgs()
+            args.delayMs = Int(arg) ?? 0
+            trigger(args)
+        case "select":
+            let n = nums(arg)
+            guard n.count == 4, let s = session else { return "select:X,Y,W,H (overlay up)" }
+            s.testSelect(CGRect(x: n[0], y: n[1], width: n[2], height: n[3]))
+        case "tool":
+            guard let s = session else { return "no overlay" }
+            if arg == "none" { s.forceTool(nil) }
+            else {
+                guard let t = ShotTool(rawValue: arg), t.isDrawing else { return "unknown tool \(arg)" }
+                s.forceTool(t)
+            }
+        case "draw":
+            let n = nums(arg)
+            guard n.count == 4, let s = session else { return "draw:X1,Y1,X2,Y2 (overlay + tool)" }
+            s.testDraw(CGPoint(x: n[0], y: n[1]), CGPoint(x: n[2], y: n[3]))
+        case "key":
+            guard let s = session, let e = Self.keyEvent(arg, window: s.mouseDisplay?.panel) else { return "key:SPEC (overlay up)" }
+            _ = s.handleKey(e)
+        case "copy": session?.finish(.copy)
+        case "accept": session?.finish(.accept)
+        case "pin": session?.finish(.pin)
+        case "save":
+            guard !arg.isEmpty else { return "save:PATH" }
+            forcedSavePath = arg
+            session?.finish(.save)
+        case "save-ok":
+            // the save card's Return (its field's action)
+            guard let f = session?.saveCard?.card.field else { return "no save card" }
+            f.sendAction(f.action, to: f.target)
+        case "close":
+            session?.finish(.abort)
+        case "unpin":
+            for p in pins { p.closePin() }
+        case "side-panel":
+            session?.toggleSidePanel()
+        default:
+            return "show[:MS] | select:X,Y,W,H | tool:NAME | draw:X1,Y1,X2,Y2 | key:SPEC | copy | accept | save:PATH | save-ok | pin | unpin | close | side-panel"
+        }
+        return nil
+    }
+
+    // "cmd+shift+z", "esc", "return", "left", "p", "space"
+    static func keyEvent(_ spec: String, window: NSWindow?) -> NSEvent? {
+        var mods: NSEvent.ModifierFlags = []
+        var key = ""
+        for part in spec.lowercased().split(separator: "+").map(String.init) {
+            switch part {
+            case "cmd": mods.insert(.command)
+            case "ctrl": mods.insert(.control)
+            case "shift": mods.insert(.shift)
+            case "opt", "alt": mods.insert(.option)
+            default: key = part
+            }
+        }
+        let named: [String: (UInt16, String)] = [
+            "esc": (53, "\u{1b}"), "return": (36, "\r"), "delete": (51, "\u{7f}"), "space": (49, " "),
+            "left": (123, "\u{F702}"), "right": (124, "\u{F703}"), "down": (125, "\u{F701}"), "up": (126, "\u{F700}"),
+            "/": (44, "/"),
+        ]
+        let letters: [Character: UInt16] = ["a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+                                            "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "o": 31,
+                                            "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46]
+        var code: UInt16, chars: String
+        if let n = named[key] { (code, chars) = n }
+        else if key.count == 1, let c = key.first, let k = letters[c] { code = k; chars = key }
+        else { return nil }
+        return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
+                                windowNumber: window?.windowNumber ?? 0, context: nil,
+                                characters: mods.contains(.shift) ? chars.uppercased() : chars,
+                                charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
+    }
+
+    var testState: [String: Any] {
+        var st: [String: Any] = ["shown": session != nil, "permission": Self.permitted, "pins": pins.count,
+                                 "last": lastOutput, "capturing": capturing]
+        st["pinWids"] = pins.map(\.windowNumber)
+        st["pinStates"] = pins.map { p -> [String: Any] in
+            ["wid": p.windowNumber, "alpha": (Double(p.alphaValue) * 100).rounded() / 100, "key": p.isKeyWindow,
+             "frame": [p.frame.minX, p.frame.minY, p.frame.width, p.frame.height].map { Int($0) }]
+        }
+        guard let s = session else { return st }
+        st["displays"] = s.displays.map { d -> [String: Any] in
+            let f = d.screen.frame
+            return ["id": Int(d.id), "frame": [f.minX, f.minY, f.width, f.height].map { Int($0) },
+                    "scale": d.canvas.scale, "key": d.panel.isKeyWindow, "wid": d.panel.windowNumber,
+                    "visible": d.panel.isVisible, "level": d.panel.level.rawValue]
+        }
+        if let a = s.active, let r = s.selection {
+            st["selection"] = ["display": Int(a.id), "x": r.minX, "y": r.minY, "w": r.width, "h": r.height]
+            st["buttons"] = a.view.ringFrames.map { t, f in ["name": t.rawValue, "x": f.minX, "y": f.minY, "w": f.width, "h": f.height] }
+        } else {
+            st["selection"] = NSNull()
+            st["buttons"] = []
+        }
+        st["tool"] = s.tool?.rawValue ?? NSNull()
+        st["moveMode"] = s.moveMode
+        st["size"] = s.activeSize ?? NSNull()
+        st["color"] = s.currentColor.hex
+        st["objects"] = s.doc.objects.map { o -> [String: Any] in
+            let b = o.bbox
+            var x: [String: Any] = ["type": o.tool.rawValue, "bbox": [b.minX, b.minY, b.width, b.height].map { Double($0) },
+                                    "color": o.color.hex, "size": o.size]
+            if o.tool == .counter { x["number"] = o.number }
+            return x
+        }
+        st["selected"] = s.doc.selected ?? NSNull()
+        st["canUndo"] = s.doc.canUndo
+        st["canRedo"] = s.doc.canRedo
+        st["sidePanel"] = s.sidePanelOpen
+        st["helpShown"] = s.displays.contains { $0.view.helpShown }
+        st["editingText"] = s.editing != nil
+        st["wheel"] = s.wheel != nil
+        st["grabbing"] = s.grabbing != nil
+        st["saveCard"] = s.saveCard.map { ["path": $0.card.field.stringValue, "key": $0.display.panel.isKeyWindow] } ?? NSNull()
+        return st
+    }
+}
+
+extension ShotSession {
+    // tests: set (not toggle) the tool
+    func forceTool(_ t: ShotTool?) {
+        if tool != t { setTool(t) }
+    }
+}

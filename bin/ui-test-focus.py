@@ -480,6 +480,32 @@ try:
             if not sh:
                 skip("tools: click checks need cliclick + the screen height")
 
+            # /screenshot: full-screen overlays at .screenSaver, still a tool
+            # panel — the app never activates, the shared view stays put
+            def shot(s):
+                return s.get("screenshot", {})
+            if not shot(state()).get("permission"):
+                skip("tools: screenshot: no Screen Recording permission")
+            else:
+                away()
+                a0 = state().get("activations")
+                do("screenshot:show")
+                ms, st = wait(lambda s: shot(s).get("shown")
+                              and any(d.get("key") for d in shot(s).get("displays", [])), 3)
+                timed("/screenshot -> overlay shown + key", ms, 400)
+                if ms is not None:
+                    st = unmoved("/screenshot opened", a0)
+                    wids = {d.get("wid") for d in shot(st).get("displays", [])}
+                    (bad if wids & set(our_windows()) else ok)("/screenshot: AeroSpace doesn't list the overlay")
+                    do("screenshot:select:200,200,300,200")
+                    st = state()
+                    names = [b["name"] for b in shot(st).get("buttons", [])]
+                    (ok if names[:3] == ["pencil", "line", "arrow"] else bad)(f"/screenshot: the ring starts pencil, line, arrow ({names[:3]})")
+                    do("screenshot:key:esc")   # one Esc with nothing open = exit
+                    ms, _ = wait(lambda s: not shot(s).get("shown"), 2)
+                    timed("/screenshot Esc -> closed", ms, 300)
+                    unmoved("/screenshot closed", a0)
+
         # in the shared window (app active), a tool on top: the hotkey
         # focuses the shared window, it doesn't hide it
         ensure_shown()

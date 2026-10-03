@@ -20,7 +20,7 @@ final class PathShelf {
     static let changed = Notification.Name("PathShelfChanged")
 
     enum Why: String {
-        case created, modified, downloaded, clipboard, filefast, copied
+        case created, modified, downloaded, clipboard, filefast, copied, screenshot
         // the trailing word on the popup's row
         var label: String {
             switch self {
@@ -30,6 +30,7 @@ final class PathShelf {
             case .clipboard: return "copied"
             case .filefast: return "filefast"
             case .copied: return "files view"
+            case .screenshot: return "screenshot"
             }
         }
     }

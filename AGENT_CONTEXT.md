@@ -65,7 +65,10 @@ files in the way, UNINSTALL.sh removes only links into the repo.
   `MACOS_MIN`, arm64 + not on the disk image (app), swiftc + git (repo).
   Warnings: Apple on-device model (`fm available` → AI view off), python3
   (never runs the CLT stub), nvim, Homebrew + each formula / cask, config
-  links, another install owning the home, a second copy of the app.
+  links, another install owning the home, a second copy of the app,
+  Screen Recording (/screenshot; asks the RUNNING daemon over its socket
+  — `screenshot-permission`, answered on the socket thread — since only
+  the app's own process can tell).
 - `SetupWindow.swift`: `AppInstall.ensureHome()` first thing in main.swift
   (marker check; runs setup-home.sh only when something changed),
   `SetupWindow` (rows from preflight JSON, Fix per row: `move-app`,
@@ -89,6 +92,7 @@ bin/ui-test.sh              # Full UI test suite (cliclick + osascript)
 bin/ui-test.sh --verbose
 bin/ui-test-focus.py        # show / hide / focus / follow-the-workspace, timed (~20 s)
 bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
+bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, render
 ```
 
 - `bin/ui-test-focus.py [single show hide follow stranded swap focus esc]`:
@@ -112,6 +116,9 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
 - `main.swift` — entry point (one-daemon lock hand-over)
 - `NvimRPC.swift` — the notes vim pane's msgpack-RPC client (AppKit-free;
   `bin/run-tests.sh nvim`)
+- `Screenshot.swift` + `ScreenshotOverlay.swift` + `ScreenshotPin.swift` +
+  `ScreenshotAnnotations.swift` — /screenshot, the Flameshot-style capture
+  tool (see "/screenshot" below; model tested by `bin/run-tests.sh screenshot`)
 - `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
   (see "/paths" below; `bin/run-tests.sh paths`)
 - `workspace_switcher.swift` — app logic (~9200 lines)
@@ -229,7 +236,7 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   activation happened (the other app stays frontmost) — never use it to
   tell "the user is in our window"; `userInOurWindow` skips a key tool
   panel (Hyper+N from one focuses the shared window).
-- Host: `isToolPanel(cmd)` (the three by name + output commands with
+- Host: `isToolPanel(cmd)` (filefast, paths, prettyprint, screenshot by name + output commands with
   `panel = true`, i.e. `[health-checks]`), `openTool` = the ONE opener
   (palette `accept` hides with `restore: false`; `do:tool:NAME`),
   `raiseToolPanel` (re-open: orderFrontRegardless + makeKey, no
@@ -280,6 +287,85 @@ bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
   launch + every reload; no `[paths]` = all feeds unhooked), `showPaths`,
   `pathsWindow`, `clipboardPaths`. Socket: `do:paths:show|hide|return|
   select:N`, state `paths` {shown, key, level, rows[{path, why}], frame}.
+
+## /screenshot — Flameshot-style capture (Hyper+X)
+
+- Spec: `PRD-screenshot.md`. Hyper+X (aerospace.toml) runs the binary
+  `workspace-switcher screenshot`; main.swift sends `screenshot<TAB>args…`
+  (tab-separated: paths may hold spaces); `-r` / `-g` use `sendRequest`
+  (the reply comes on the same connection when the user finishes; the
+  socket thread hands the fd to the session, never blocks the accept
+  loop); no daemon → `bin/workspace_switcher.sh screenshot` cold start.
+  Palette `/screenshot` = `openTool` → `showScreenshot` (0.15 s so the
+  palette isn't in the frozen image). `[screenshot]` in commands.toml
+  (read on every trigger via `ScreenshotConfig.load`; dist default =
+  Flameshot's values, build-app.sh awk).
+- `ScreenshotAnnotations.swift` (no AppKit, `bin/run-tests.sh screenshot`):
+  `ShotTool` (ring names, letters, symbols, tooltips, default sizes;
+  `ring(spec, badge:)` puts the W/H badge after the last drawing tool),
+  `ShotObject` / `ShotDocument` (SNAPSHOT undo, `undo-limit`, `coalesce`
+  for wheel notches, `updateLive` while dragging = one step on mouse-up,
+  counters renumbered after every change with per-bubble `numberOffset`),
+  `ButtonRing.layout` (port of Flameshot's ButtonHandler incl. the
+  all-blocked → inside fallback; a grown tiny selection is shifted on
+  screen first), `ShotSnap`, `ShotPixelate.secureBlocks` (blocks ONLY from
+  the 1-4 px band outside the rect, averaged + smoothed; grid in points),
+  `ShotRenderer` (ONE drawing path for the overlay and the output;
+  top-left point space; `render` = crop × backing scale), `ShotFiles`
+  (strftime pattern, " 2" clash suffix, `-p` dir/file), `ShotArgs`
+  (Flameshot's CLI), `ShotState` (`~/.cache/workspace-switcher/
+  screenshot-state.json`: per-tool sizes, color, text style, grid, last
+  region).
+- `Screenshot.swift`: `ScreenshotController` (`SwitcherController.screenshot`,
+  prewarmed 1.5 s after launch: one `ShotOverlayPanel` per display +
+  `SCShareableContent`, refreshed on screen changes). Trigger: permission
+  (`CGPreflightScreenCaptureAccess`; no → `CGRequestScreenCaptureAccess`
+  once, toast, Privacy pane, NO overlay) → optional delay →
+  `SCScreenshotManager.captureImage` per display in parallel (points ×
+  backing scale, no cursor) → `begin`. Log: `screenshot: capture N ms, M
+  ms to overlay` (≈ 90 / 115 ms on the owner's Mac). Outputs: copy = ONE
+  pasteboard item PNG + TIFF; save → `PathShelf` (`why = screenshot`) +
+  toast; pin → `PinPanel`; `ScreenToast` = the toast pill
+  (`makeToastPill` / `animateToastPill`, shared with
+  `PopupWindow.showToast`) on its own non-activating panel.
+- `ScreenshotOverlay.swift`: `ShotOverlayPanel` (borderless
+  `.nonactivatingPanel`, `.screenSaver` level — set AFTER
+  `isFloatingPanel`, which resets it to .floating — covers the menu bar /
+  sketchybar, `constrainFrameRect` passthrough); the frozen image is the
+  unflipped backdrop layer's `contents`, `ShotOverlayView` (flipped)
+  draws veil + selection + objects in dirty rects. `ShotSession` = the
+  brain: per-display selection (a drag on another display moves it there,
+  its drawings reset), mouse (handles: Shift mirror / Cmd aspect; drag
+  inside = move; a click on an object selects + moves it), keys
+  (`handleKey`, from the controller's local keyDown monitor: tool
+  letters, arrows, Cmd+C/S/A/M/Z/Q, Delete; anything else swallowed so
+  Cmd+Q never quits the daemon; a focused NSText gets typing +
+  `JiraEditKeys.route`), Esc chain: save card → text → shortcuts card →
+  color wheel → grab color → side panel → selected object → tool → close.
+  Views: `ShotButton` (80 ms emerge), help card, Tool Settings tab, size
+  indicator, `ShotWheelView` (right-click), `ShotLoupe` (G / magnifier),
+  `ShotTextField` (NSTextView in the object's font), `ShotSidePanel`
+  (size, color, HSV disc, hex, grid, text style, Layers), `ShotSaveCard`.
+- Save (spike A5): an `NSSavePanel` shown from the non-activating overlay
+  appears but never gets the keyboard (key window empty, the other app
+  stays frontmost); clicking it ACTIVATES the app. So Cmd+S opens
+  `ShotSaveCard` ON the overlay: a path field (save-path + pattern, stem
+  selected), Return saves, Esc closes only the card
+  (`sendsActionOnEndEditing = false`, or leaving the field saved).
+  `save-path-fixed` / `-p` skip it.
+- Permission: TCC Screen Recording lives in the SYSTEM database —
+  `bin/grant-permissions.sh` can't pre-grant it; the stable signing cert
+  keeps the grant across rebuilds. Granting it restarts the daemon.
+- Test hooks: `do:screenshot:show[:MS] | select:X,Y,W,H | tool:NAME|none |
+  draw:X1,Y1,X2,Y2 | key:SPEC (cmd+shift+z, esc, left…) | copy | accept |
+  save:PATH | save-ok | pin | unpin | close | side-panel`; state
+  `screenshot` {shown, permission, displays[{id, frame, scale, key, wid,
+  level}], selection, buttons[{name, x, y, w, h}], tool, size, color,
+  objects[{type, bbox, number}], selected, canUndo/Redo, sidePanel,
+  helpShown, editingText, wheel, grabbing, saveCard, pins, pinStates,
+  last {outcome, size, path, copied}}. `bin/ui-test-focus.py tools` has a
+  screenshot case (0 activations, frontmost unchanged, AeroSpace doesn't
+  list the overlay).
 
 ## AI view
 
@@ -735,7 +821,8 @@ Line numbers drift; grep the symbol names (they're stable).
   hide, elsewhere → focus) and Hyper+T. No per-view hotkeys (Hyper+F / J
   removed): views switch via Ctrl+Tab, header icons, the Hyper+S palette.
   The named modes (`notes|files|jira|confluence|ai`) remain as CLI / socket
-  messages.
+  messages. Hyper+X = `screenshot` (a tool panel, not a view: no
+  `hotkeyPrep`, never in `hotkeyModes`; see "/screenshot").
 
 - aerospace runs the app BINARY (`workspace-switcher window|terminal`),
   not the script: `main.swift` pings the socket (~20 ms) and exits. No
