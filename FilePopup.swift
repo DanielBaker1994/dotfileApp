@@ -161,10 +161,20 @@ final class FilePopupGrip: NSView {
     override func mouseUp(with event: NSEvent) { start = nil }
 }
 
+// the popup's border ring; clicks fall through to the content / grips
+final class FilePopupRing: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 enum FilePopup {
     private static var panel: FilePopupPanel?
     private static var resignObserver: NSObjectProtocol?
     private static let textLimit = 512 * 1024
+    // [app] preview-border / preview-border-width: a silver ring so the
+    // popup stands out (above all on the screen a capture was just taken of)
+    static let defaultBorder = NSColor(srgbRed: 0.867, green: 0.882, blue: 0.91, alpha: 1)
+    static var borderColor = defaultBorder
+    static var borderWidth: CGFloat = 2
 
     static let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "bmp"]
     static func isImage(_ path: String) -> Bool {
@@ -237,6 +247,17 @@ enum FilePopup {
         scroll.frame = box.bounds
         scroll.autoresizingMask = [.width, .height]
         box.addSubview(scroll)
+        // the ring: its own click-through view over the content (a border
+        // on the scroll view's own layer never shows — AppKit owns it)
+        if borderWidth > 0 {
+            let ring = FilePopupRing(frame: box.bounds)
+            ring.autoresizingMask = [.width, .height]
+            ring.wantsLayer = true
+            ring.layer?.cornerRadius = 8
+            ring.layer?.borderWidth = borderWidth
+            ring.layer?.borderColor = borderColor.cgColor
+            box.addSubview(ring)
+        }
         let g = FilePopupGrip.size, e = FilePopupGrip.edge
         let w = frame.width, h = frame.height
         // edges first, so the corners sit on top of them
@@ -330,8 +351,6 @@ enum FilePopup {
             let sv = zoomScroll(tv, NSRect(origin: .zero, size: frame.size))
             sv.drawsBackground = true
             sv.backgroundColor = colors.background.withAlphaComponent(1)
-            sv.layer?.borderWidth = 1
-            sv.layer?.borderColor = colors.border.withAlphaComponent(0.5).cgColor
             present(sv, frame: frame, parent: parent,
                     label: (path as NSString).lastPathComponent, text: tv)
         }

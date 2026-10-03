@@ -1122,6 +1122,8 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
     if vars["copy-toast"] != nil { settings.copyToast = str("copy-toast") ?? "" }
     if let v = str("terminal-app") { settings.terminalApp = v }
+    FilePopup.borderColor = hexColor(str("preview-border")) ?? FilePopup.defaultBorder
+    FilePopup.borderWidth = str("preview-border-width").flatMap { Double($0) }.map { CGFloat(max(0, min($0, 8))) } ?? 2
 }
 
 // MARK: - Theme presets (header icon menu ▸ Theme)
@@ -1388,7 +1390,7 @@ private let configBoolKeys: Set<String> = [
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
-    "shared-width": 400...8000, "shared-height": 300...8000,
+    "shared-width": 400...8000, "shared-height": 300...8000, "preview-border-width": 0...8,
     "terminal-height": 40...4000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,

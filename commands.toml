@@ -223,6 +223,10 @@ aero-log = "~/.cache/ws-aero.log"
 # Apple speech recognition locale for voice notes (BCP-47, e.g. en-US)
 voice-locale = "en-US"
 hide-on-focus-loss = false
+# the file / capture preview popup's ring (Enter on a picture or text file,
+# Hyper+X, pane-shot): hex color + width in points (0 = none)
+preview-border = "#dde1e8"
+preview-border-width = 2
 
 # [theme] — app-wide window colors as hex RRGGBB (every key optional; the
 # sketchybar `color-sources` + the built-in defaults fill any gaps). Edit
