@@ -58,6 +58,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | Thing | Where |
 | --- | --- |
 | Switcher popup | Hyper+S |
+| Every shortcut + setting (search, edit, rebind, clash report) | Hyper+/ — `bin/ws-settings` (`--help`: keys, settings, set, undo, bind, conflicts, export md, doctor) |
 | Notes / Jira / Voice / Health windows | menu-bar **wrench** icon |
 | Voice notes | red record button → dictation → text, pause/resume, live draft |
 | Menu-bar stack | sketchybar + borders (brew services) |

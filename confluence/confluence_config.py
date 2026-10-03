@@ -33,6 +33,8 @@ CONF_DIR = os.path.dirname(os.path.abspath(__file__))
 WS_ROOT = os.path.dirname(CONF_DIR)
 sys.path.insert(0, os.path.join(WS_ROOT, "jira"))
 import jira_config  # type: ignore  # noqa: E402  (write_json_600, ConfigError)
+sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
+import config_text  # type: ignore  # noqa: E402  (the commands.toml codec)
 
 HOME = os.path.expanduser("~")
 DEFAULT_CONFIG = os.path.join(HOME, ".config/confluence/config.json")
@@ -93,37 +95,19 @@ def section_value(section: str, key: str, path: str = COMMANDS_CONF) -> str | No
 
 def set_section_value(section: str, key: str, value: str | None, path: str = COMMANDS_CONF) -> None:
     """Set (None = remove) `key = value` in `[section]`, keeping every other
-    line as is; the section is appended when missing."""
-    with open(path, encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-    cur, start, end, at = None, None, len(lines), None
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        if s.startswith("[") and s.endswith("]"):
-            if cur == section:
-                end = i
-                break
-            cur = s[1:-1].strip()
-            if cur == section:
-                start = i
-        elif cur == section and (jira_config.config_entry(s) or ("",))[0] == key:
-            at = i
-    if at is not None:
-        if value is None:
-            del lines[at]
-        else:
-            lines[at] = jira_config.config_line(key, value)
-    elif value is not None:
-        if start is None:
-            lines += ["", f"[{section}]", jira_config.config_line(key, value)]
-        else:
-            while end > start + 1 and not lines[end - 1].strip():
-                end -= 1
-            lines.insert(end, jira_config.config_line(key, value))
-    tmp = path + ".tmp"
+    byte (pylib/config_text.config_setting = the app's configSetting); a
+    symlinked commands.toml is written through, never replaced."""
+    real = os.path.realpath(path)
+    with open(real, encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+    new = config_text.config_setting(lines, section, [(key, value)])
+    if new == lines:
+        return
+    tmp = real + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    os.replace(tmp, path)
+        fh.write("\n".join(new))
+    os.chmod(tmp, os.stat(real).st_mode & 0o7777)
+    os.replace(tmp, real)
 
 
 def config_path() -> str:

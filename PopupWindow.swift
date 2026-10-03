@@ -1430,6 +1430,7 @@ final class PopupTabsBar: NSView {
     var onCloseTab: ((Int) -> Void)?    // fired when a tab's ✕ badge is clicked
     var onCopyPath: ((Int) -> Void)?    // right-click a tab -> copy its path
     var menuFor: ((Int) -> NSMenu?)?    // right-click menu override (AI rule pills)
+    var pathTip: ((Int) -> String?)?    // hover tip for tab i (the file's full path)
     var closable = true                 // false = no ✕ badges
     private var tabH: CGFloat { 22 * zoom }
     // breathing room above/below the pills inside the (deeper) strip
@@ -1488,8 +1489,12 @@ final class PopupTabsBar: NSView {
             break
         }
         let tip = over.flatMap { i -> String? in
-            let t = pillRects()[i].title
-            return titles.firstIndex(of: t).flatMap { badge($0)?.tip }
+            let rects = pillRects()
+            let t = rects[i].title
+            if t == "+" { return nil }
+            let idx = i - (config.tabsAddButton ? 1 : 0)
+            let b = titles.firstIndex(of: t).flatMap { badge($0)?.tip }
+            return b ?? pathTip?(idx)
         }
         if toolTip != tip { toolTip = tip }
         if over != hoverIndex || overClose != hoverCloseIndex {
@@ -7380,6 +7385,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             relayoutTabs()
         }
     }
+    // hover tip per tab (the host returns the tab's full file path)
+    public var tabPathTip: ((Int) -> String?)? {
+        didSet { tabsBar?.pathTip = tabPathTip }
+    }
     // per-tab status badges, parallel to tabTitles (nil = none)
     public var tabBadges: [PopupTabBadge?] = [] {
         didSet {
@@ -7749,6 +7758,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         bar.onCopyPath = { [weak self] index in
             self?.onTabCopyPath?(index)
         }
+        bar.pathTip = { [weak self] i in self?.tabPathTip?(i) }
         return bar
     }
 

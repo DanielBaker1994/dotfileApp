@@ -839,7 +839,8 @@ func loadCommands() -> [CommandSpec] {
              "confluence", "ai", // their views read it directly (configSectionValue)
              "notifications",   // the sketchybar pill (notify/notify_poll.py)
              "pane-shot",       // the herdr pane capture (PaneShot.swift)
-             "setup":           // the Setup & Health Check window (SetupWindow.swift)
+             "setup",           // the Setup & Health Check window (SetupWindow.swift)
+             "settings-hub":    // ws-settings (settings_hub/, python)
             break               // never palette commands
         default:
             // enabled = true is required: no key, no command. Nothing shows
@@ -1569,6 +1570,50 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
         fail(0, "\(garbage) unparseable lines — the file looks corrupted")
     }
     return issues
+}
+
+// ws-settings (settings_hub/): the app's OWN validation, so the python tool
+// never copies ranges / enums. `config-schema` = the tables as JSON (offline
+// hints); `config-check SECTION KEY VALUE` = configValueProblem for one
+// value; `config-check --file PATH` = validateConfig on a whole file. Both
+// run before AppInstall / the daemon lock (main.swift): no side effects.
+func configSchemaJSON() -> String {
+    let obj: [String: Any] = [
+        "version": 1,
+        "boolKeys": configBoolKeys.sorted(),
+        "numberRanges": configNumberKeys.mapValues { [$0.lowerBound, $0.upperBound] },
+        "colorKeys": configColorKeys.sorted(),
+        "enumKeys": configEnumKeys.mapValues { $0.sorted() },
+    ]
+    let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data("{}".utf8)
+    return String(decoding: data, as: UTF8.self)
+}
+
+func configCheckCLI(_ args: [String]) -> Int32 {
+    func emit(_ obj: [String: Any]) {
+        let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data("{}".utf8)
+        print(String(decoding: data, as: UTF8.self))
+    }
+    if args.count == 2, args[0] == "--file" {
+        guard let text = try? String(contentsOfFile: (args[1] as NSString).expandingTildeInPath, encoding: .utf8) else {
+            emit(["ok": false, "issues": [["line": 0, "message": "can't read \(args[1])", "fatal": true]]])
+            return 1
+        }
+        let issues = validateConfig(text)
+        emit(["ok": !issues.contains(where: \.fatal),
+              "issues": issues.map { ["line": $0.line, "message": $0.message, "fatal": $0.fatal] }])
+        return 0
+    }
+    guard args.count == 3 else {
+        FileHandle.standardError.write(Data("usage: workspace-switcher config-check SECTION KEY VALUE | --file PATH\n".utf8))
+        return 2
+    }
+    if let problem = configValueProblem(section: args[0], key: args[1], value: args[2]) {
+        emit(["ok": false, "problem": problem])
+    } else {
+        emit(["ok": true])
+    }
+    return 0
 }
 
 // commands.toml as the app should see it: the file itself when it validates,
@@ -3486,6 +3531,36 @@ final class SwitcherController: NSObject {
                             }
                         }
                     }
+                    continue
+                }
+                if query == "reload" || query == "restart" {
+                    // ws-settings / `workspace-switcher reload|restart`: re-read
+                    // commands.toml (reload answers with the config's health);
+                    // restart = a fresh daemon for launch-only keys ([theme]…)
+                    var reply = "{\"ok\":false,\"error\":\"timeout\"}"
+                    let done = DispatchSemaphore(value: 0)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { done.signal(); return }
+                        if query == "restart" {
+                            reply = "{\"ok\":true,\"restarting\":true}"
+                            done.signal()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.restartDaemon() }
+                            return
+                        }
+                        self.reloadConfig()
+                        let issues: [[String: Any]] = (try? String(contentsOfFile: settings.commandsConfPath, encoding: .utf8))
+                            .map { validateConfig($0).map { ["line": $0.line, "message": $0.message, "fatal": $0.fatal] } } ?? []
+                        let obj: [String: Any] = ["ok": !configUsingBackup, "commands": self.commands.count,
+                                                  "usingBackup": configUsingBackup, "issues": issues]
+                        if let d = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) {
+                            reply = String(decoding: d, as: UTF8.self)
+                        }
+                        done.signal()
+                    }
+                    _ = done.wait(timeout: .now() + 10)
+                    let line = reply + "\n"
+                    line.withCString { _ = Darwin.write(cfd, $0, strlen($0)) }
+                    close(cfd)
                     continue
                 }
                 if query == "state" || query.hasPrefix("do:") {
@@ -6896,6 +6971,19 @@ extension SwitcherController {
     }
 
     // re-read commands.toml and rebuild the notes window from it
+    // a fresh daemon (launch-only settings: [theme], [app] socket names…):
+    // a shell waits for this process to go, then LaunchServices opens the
+    // bundle again in the background (one bundle id = one daemon)
+    func restartDaemon() {
+        let bundle = Bundle.main.bundlePath
+        log("restart requested: relaunching \(bundle)")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "while kill -0 \(getpid()) 2>/dev/null; do sleep 0.1; done; /usr/bin/open -n -g \"$0\"", bundle]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+
     func reloadConfig() {
         commands = loadCommands()
         configureRecentFiles()
@@ -6979,6 +7067,10 @@ extension SwitcherController {
             w.copyPathButtonLabel = ""          // copy path moved to right-click (tab/editor)
             w.copyConfigButtonLabel = ""        // config is opened via the icon click
             w.tabTitles = titles
+            w.tabPathTip = { [weak self] i in
+                guard let self, self.paths.indices.contains(i) else { return nil }
+                return (self.paths[i] as NSString).abbreviatingWithTildeInPath
+            }
             w.tabFooterText = ""
             // generic label in the drag header — the tab strip already shows the
             // individual note names; clicking the header still copies the path
@@ -8213,6 +8305,10 @@ extension SwitcherController {
             }
             applyFilterData()
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
+            w.tabPathTip = { [weak self] i in
+                guard let self, self.tabs.indices.contains(i) else { return nil }
+                return (self.tabs[i].path as NSString).abbreviatingWithTildeInPath
+            }
             w.onFilter = { [self] query in
                 visibleOffset = 0
                 return filteredRows(query: query)

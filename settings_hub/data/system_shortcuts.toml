@@ -1,0 +1,72 @@
+# macOS shortcuts that work in every app (System Settings ▸ Keyboard ▸
+# Keyboard Shortcuts). The clash check warns when another layer takes one.
+# keys = the same "Cmd+Shift+3" form as commands.toml [shortcuts].
+[[shortcut]]
+keys = "Cmd+Space"
+does = "Spotlight"
+[[shortcut]]
+keys = "Cmd+Opt+Space"
+does = "Finder search window"
+[[shortcut]]
+keys = "Cmd+Tab"
+does = "switch apps"
+[[shortcut]]
+keys = "Cmd+`"
+does = "next window of the app"
+[[shortcut]]
+keys = "Cmd+Shift+3"
+does = "screenshot: whole screen"
+[[shortcut]]
+keys = "Cmd+Shift+4"
+does = "screenshot: area"
+[[shortcut]]
+keys = "Cmd+Shift+5"
+does = "screenshot / recording toolbar"
+[[shortcut]]
+keys = "Ctrl+Up"
+does = "Mission Control"
+[[shortcut]]
+keys = "Ctrl+Down"
+does = "the app's windows"
+[[shortcut]]
+keys = "Ctrl+Left"
+does = "space to the left"
+[[shortcut]]
+keys = "Ctrl+Right"
+does = "space to the right"
+[[shortcut]]
+keys = "Ctrl+Space"
+does = "previous input source"
+[[shortcut]]
+keys = "Ctrl+Opt+Space"
+does = "next input source"
+[[shortcut]]
+keys = "Ctrl+Cmd+Space"
+does = "emoji & symbols"
+[[shortcut]]
+keys = "Cmd+Opt+Esc"
+does = "Force Quit"
+[[shortcut]]
+keys = "Ctrl+Cmd+Q"
+does = "lock screen"
+[[shortcut]]
+keys = "Cmd+Shift+Q"
+does = "log out"
+[[shortcut]]
+keys = "Cmd+Opt+D"
+does = "show / hide the Dock"
+[[shortcut]]
+keys = "Cmd+H"
+does = "hide the app"
+[[shortcut]]
+keys = "Cmd+Opt+H"
+does = "hide other apps"
+[[shortcut]]
+keys = "Cmd+M"
+does = "minimize"
+[[shortcut]]
+keys = "Cmd+Q"
+does = "quit the app"
+[[shortcut]]
+keys = "Ctrl+Cmd+F"
+does = "full screen"

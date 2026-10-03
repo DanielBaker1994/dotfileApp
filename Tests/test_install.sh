@@ -45,6 +45,11 @@ t "rules seeded" real_file "$WSH/rules/grammar-check.md"
 t "configs are copies, not links into the app" real_file "$WSH/config/aerospace/aerospace.toml"
 t "bin resolves into the bundle" is_link_to "$WSH/bin" "$APP/Contents/Resources/bin"
 t "jira resolves into the bundle" test -f "$WSH/jira/jira_poll.py"
+t "pylib + settings_hub resolve into the bundle" test -f "$WSH/pylib/config_text.py" -a -f "$WSH/settings_hub/cli.py"
+t "ws-settings reads the home's commands.toml" \
+    test "$("$WSH/bin/ws-settings" get settings-hub.window-title 2>/dev/null)" = ws-settings
+t "ws-settings lists the app's keys" bash -c "'$WSH/bin/ws-settings' keys --layer app --json | grep -q '\"layer\": \"app\"'"
+t "no __pycache__ written into the bundle" test -z "$(find "$APP" -name __pycache__ -print -quit)"
 t "hotkey path reaches the binary" test -x "$WSH/$APP_NAME.app/Contents/MacOS/$APP_NAME"
 t "marker says app" grep -q '^mode=app' "$WSH/.install"
 t "owner = app" test "$(bash "$SETUP" status)" = app

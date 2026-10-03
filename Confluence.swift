@@ -1573,6 +1573,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         case 2 where cmd:                                                // Cmd+D
             if rows.indices.contains(table.selectedRow) { toggleFavorite(row: table.selectedRow) }
         case 15 where cmd: runSearch()                                   // Cmd+R
+        case 44 where cmd: showShortcuts()                               // Cmd+/
         case 36 where cmd, 76 where cmd: openSelected()                  // Cmd+Return
         case 45 where ctrl: move(1)                                      // Ctrl+N
         case 35 where ctrl: move(-1)                                     // Ctrl+P
@@ -1619,20 +1620,21 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             if FileManager.default.fileExists(atPath: p) { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
         }
         menu.addItem(.separator())
-        add("Keyboard Shortcuts") { [weak self] in
-            self?.alert("Confluence Shortcuts", """
-            Return — search · ↑↓ / Ctrl+N/P — move through results
-            Return (in the list) / Cmd+Return / double-click — open in browser
-            Cmd+C / Shift+Cmd+C — copy link / title + link
-            Cmd+D or click ☆ — favorite · All / ★ Favorites buttons switch views
-            Favorites: type to filter, Return opens, Search looks inside them
-            Cmd+G / Shift+Cmd+G — next / previous match in the page
-            Cmd+L / Cmd+F — search box · Cmd+R — search again
-            Esc — close an open filter, else clear the query (else hide, if switched on)
-            Cmd+W / ✕ — hide the window
-            """, buttons: ["OK"]) { _ in }
-        }
+        add("Keyboard Shortcuts") { [weak self] in self?.showShortcuts() }
         popUpIconMenu(menu)
+    }
+
+    // commands.toml [shortcuts] "confluence: …" lines, then "all: …" (the
+    // AI view's card; ws-settings lists and edits the same lines)
+    private func showShortcuts() {
+        func lines(_ v: String) -> [String] {
+            shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
+        }
+        let own = lines("confluence"), all = lines("all")
+        let text = own + (all.isEmpty ? [] : ["", "Everywhere:"] + all)
+        alert("Confluence Shortcuts", text.isEmpty
+              ? "Add \"confluence: keys\" = \"what\" lines to [shortcuts] in commands.toml."
+              : text.joined(separator: "\n"), buttons: ["OK"]) { _ in }
     }
 }
 

@@ -10,6 +10,7 @@
 #   ./bin/run-tests.sh paths     run only the /paths shelf tests (ignore rules vs git, shelf, clipboard)
 #   ./bin/run-tests.sh screenshot run only the /screenshot model tests (button ring, undo, pixelate, render)
 #   ./bin/run-tests.sh ansi      run only the /pane-shot tests (ANSI parser, Ghostty theme, render, herdr JSON)
+#   ./bin/run-tests.sh settings  run the ws-settings tests (python; WS_LIVE=1 adds the running-daemon check)
 #   ./bin/run-tests.sh ai-live   run the shipped rules through fm's on-device model (slow; not in "all")
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,6 +65,10 @@ case "${1:-all}" in
         ;;
     ansi)
         run_test "$TESTS/test_ansi_render.swift"
+        ;;
+    settings)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_settings_hub.py"
         ;;
     ai-live)
         run_test "$TESTS/live_ai_rules.swift"

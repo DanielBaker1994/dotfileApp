@@ -42,7 +42,7 @@ files in the way, UNINSTALL.sh removes only links into the repo.
   the jira launchd agent). Repo install: the home is the checkout (or a link
   to it). App install (DMG): a real directory — the user's `commands.toml`,
   `rules/`, `config/` (copies seeded from the bundle, never links into the
-  signed app) + links `bin jira confluence notify vim install.conf` →
+  signed app) + links `bin jira confluence notify vim pylib settings_hub install.conf` →
   `workspace-switcher.app/Contents/Resources/…` (relative) and ONE absolute
   link `workspace-switcher.app` → the app. `.install` = marker (`mode`,
   `app`, `version`, `seed <sha> <file>`).
@@ -220,6 +220,92 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   tests: `python3 Tests/test_jira_poll.py`
 - `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
 
+## ws-settings — every shortcut + setting (Hyper+/)
+
+- Spec / plan: `PRD-settings-hub.md`, `PLAN-settings-hub.md` (owner
+  decisions). Standalone python (stdlib, ≥ 3.11 for `tomllib`):
+  `settings_hub/` + launcher `bin/ws-settings` (finds a python ≥ 3.11 —
+  AeroSpace's PATH has the CLT 3.9 — sets PYTHONDONTWRITEBYTECODE, `-B`).
+  Works with the app quit; the app is only asked to validate / apply.
+- ONE python codec: `pylib/config_text.py` (moved out of `jira_config.py`,
+  which re-exports `config_entry` / `config_line`; 3.9-compatible):
+  + `config_section_entries`, `config_setting` (= Swift `configSetting`),
+  `config_line_parts` / `config_set_line` (keep indent + trailing comment),
+  `config_entry_span` (rebind swaps only the key), `toml_array`.
+  `confluence_config.set_section_value` uses it (it used to drop comments
+  and replace a symlinked commands.toml with a file).
+- Readers (`readers.py`, each → `KeyRow`): `[shortcuts]` (label parser:
+  "Ctrl+Shift+H / J / K / L", "P D A", "Esc Esc", "1-9", gestures),
+  AeroSpace (the file AeroSpace reads; service-mode keys carry their entry
+  key; a binding that runs our binary is a `mirror_of` its `all:` row),
+  herdr `[keys]` + `[[keys.command]]` (prefix = `[keys] prefix` / ctrl+b; no
+  defaults), Ghostty `keybind` (`global:` = a global layer), vim (headless
+  `nvim --noplugin -u INIT` → `nvim_get_keymap` filtered to the init's sid,
+  cached by mtime; static `*map` parse as fallback). Settings
+  (`settings.py`): every `[section]` key, docs from the `#   key   text`
+  blocks (above the header + inside the body; the file-top "Section keys"
+  block as fallback), commented-out `# key = v` rows (`set: false`),
+  enums from `a | b | c` in the doc.
+- Writes (`writer.py`): realpath (a link stays a link), ONE hunk, the
+  app's `config-check --file` on the result, re-read + retry once on a
+  concurrent change, mkstemp + fsync + chmod + os.replace; un-comments a
+  `# key = …` in place, else after the section's last entry. Undo:
+  `~/.cache/workspace-switcher/settings-undo.json` (hunks, byte-identical).
+  Validation (`schema.py`) = the APP: `workspace-switcher config-check
+  SECTION KEY VALUE` (Swift `configValueProblem`, section rules included)
+  + `config-schema` (cached by binary mtime) offline; a doc-comment enum
+  miss is only a warning (`--force`). `[jira] enabled` goes through
+  `workspace-switcher jira-poll on|off`.
+- Apply (`apply.py`, per `settings.apply_mode`): socket / CLI `reload`
+  (`reloadConfig()`, replies `{ok, commands, usingBackup, issues}`; never
+  starts a daemon), `restart` (`restartDaemon()`: [theme] + launch-only
+  [app] keys), trigger sections ([screenshot], [pane-shot]) nothing, views
+  read on open ([confluence], [ai], [setup]), `sketchybar --reload`.
+  `config-schema` / `config-check` run at the very top of main.swift (no
+  AppInstall, no lock).
+- Rebind (`rebind.py`, AeroSpace + herdr only — app keys are Swift):
+  refuses a key taken in the same mode / layer, clash with another layer
+  needs `--force`, `aerospace reload-config --dry-run --no-gui` / `herdr
+  config check` after the write → auto-undo on failure, then
+  `aerospace reload-config` / `herdr server reload-config`.
+- Clashes (`conflicts.py`): global layers (AeroSpace main, Ghostty
+  `global:`, `data/system_shortcuts.toml`) beat every other layer; Ghostty
+  terminal keybinds beat herdr; same layer + view duplicates; app `all:` vs
+  a view (info). (herdr's resize_pane_* Opt+H/J/K/L were removed for the
+  AeroSpace focus clash; herdr resize mode = Ctrl+B, R.)
+- Picker (`tui/`): `Picker` = model (tests drive it), `View` = curses.
+  Keys decoded by hand (`keys.Decoder`: CSI / SS3 / kitty CSI-u /
+  bracketed paste / Alt as ESC-x); the picker pushes kitty "disambiguate"
+  (`CSI > 1 u`) so Cmd+X / Z / Shift+Z arrive — Ghostty keeps Cmd+A / Cmd+C
+  (select / copy its own selection); Cmd+V = bracketed paste. Ctrl+C =
+  copy (quits only with an empty search), Ctrl+V = pbpaste. Esc: editor →
+  search + filters → quit. Separators are ACS lines (a long "─" run becomes
+  REP, which Ghostty draws once). No LANG under `open` → forces a UTF-8
+  locale. Every cell is painted each frame (unwritten cells kept the
+  terminal's own bg). Mouse = SGR 1006 (`?1000h ?1006h`): `View.hits` =
+  (y, x0, x1, action) from the last draw — column headers sort
+  (`Picker.sort_by`: ▲ → ▼ → source order; `View.columns` is the ONE
+  layout for rows, headers and clicks), ⌃ ⌥ ⇧ ⌘ ★ ⚠ toggles, row click /
+  double-click (= Return), wheel. ⚠ / Alt+W = clashes first. Test hook
+  `WS_SETTINGS_STATE=FILE` (JSON after every key / click).
+- Hyper+/ = `ws-settings open`: focuses the window titled `ws-settings` if
+  AeroSpace lists it, else `[settings-hub] terminal-command` (default `open
+  -na Ghostty --args --title=… --command=…`: `-e` or ANY `--keybind` flag
+  makes Ghostty ask "Allow Ghostty to execute …?"), then waits for the
+  window and moves + focuses it on your workspace. Its own
+  `--macos-titlebar-style=transparent --macos-window-buttons=hidden
+  --background=<[theme] background>` = a plain strip in the picker's color
+  to drag by (the owner's config hides title bars → nothing to drag; the
+  picker draws on the terminal's default bg so strip + body match) and `--window-position-x/y` = centered: points
+  from the primary screen's visible top-left; screen size via JXA AppKit,
+  cached per `aerospace list-monitors`; window size from the picker's
+  last TIOCGWINSZ pixels (`settings-hub-size.json`). aerospace.toml float
+  rule by title sits BEFORE the Ghostty → workspace 1 rule. ~0.4-0.9 s
+  hotkey → painted (a cold Ghostty instance; the picker paints in ~20 ms).
+- Favorites: `settings-hub.json` in the home (gitignored). Tests:
+  `bin/run-tests.sh settings` (`Tests/test_settings_hub.py`: fixtures +
+  stubs, PTY-driven picker; `WS_LIVE=1` adds the running-daemon round trip).
+
 ## Tool panels — /filefast, /paths, /prettyprint, /health-checks
 
 - They act like their OWN apps, never part of the shared window. Root
@@ -285,8 +371,8 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `writeFiles` — one pasteboard item per file with `.fileURL` AND the path
   as `.string` (Cmd+V attaches in chat / mail apps, pastes the path in a
   terminal). Cmd+C path text (a filter-box selection wins), Cmd+Shift+C
-  file, Space (empty filter) / Cmd+Y Quick Look, Cmd+O, Cmd+R reveal,
-  Cmd+Delete forget a row, Esc / Cmd+W close.
+  file, Space (empty filter) / Cmd+Y Quick Look, Cmd+O, Cmd+R rename,
+  Cmd+Shift+R reveal, Cmd+Delete forget a row, Esc / Cmd+W close.
 - Controller: `configurePathShelf()` (from `configureRecentFiles`, i.e.
   launch + every reload; no `[paths]` = all feeds unhooked), `showPaths`,
   `pathsWindow`, `clipboardPaths`. Socket: `do:paths:show|hide|return|

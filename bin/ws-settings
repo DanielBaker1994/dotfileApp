@@ -1,0 +1,24 @@
+#!/bin/bash
+# ws-settings — every shortcut and setting of the workspace-switcher setup
+# (settings_hub/, PRD-settings-hub.md). `ws-settings --help`; Hyper+/ runs
+# `ws-settings open` (the picker in a floating Ghostty window).
+#
+# Needs python ≥ 3.11 (tomllib). AeroSpace / Ghostty start this with a bare
+# PATH where `python3` is the Command Line Tools' 3.9, so look further.
+set -u
+here="$(cd "$(dirname "$0")/.." && pwd)"     # NOT resolved: the home's link in app mode
+py=""
+for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        py="$c"; break
+    fi
+done
+if [ -z "$py" ]; then
+    echo "ws-settings: needs python 3.11 or newer (brew install python, or set WS_PYTHON)" >&2
+    exit 1
+fi
+# a __pycache__ inside the signed app bundle breaks its signature
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
+exec "$py" -B -m settings_hub "$@"

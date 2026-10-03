@@ -11,6 +11,19 @@ setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
 // in an app install is the bundle: point it at the user's file.
 if !isRepoBuild { setenv("WS_COMMANDS_CONF", settings.commandsConfPath, 0) }
 
+// ws-settings asks the app's own validation (no daemon, no AppInstall, no
+// lock: pure functions over the config tables)
+if CommandLine.arguments.count > 1 {
+    switch CommandLine.arguments[1] {
+    case "config-schema":
+        print(configSchemaJSON())
+        exit(0)
+    case "config-check":
+        exit(configCheckCLI(Array(CommandLine.arguments.dropFirst(2))))
+    default: break
+    }
+}
+
 // An app install (DMG): make sure ~/.config/workspace-switcher exists and
 // points at THIS app before anything reads commands.toml from it (a marker
 // check when nothing changed — a hotkey ping pays two file reads).
@@ -49,6 +62,20 @@ if cliArgs.count > 1 {
         if sendLaunchMessage(msg) { exit(0) }
         FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
         exit(1)
+    case "reload", "restart":
+        // re-read commands.toml / relaunch the daemon (ws-settings' apply
+        // step). Never STARTS a daemon: nothing running = nothing to apply.
+        guard let data = sendRequest(cliArgs[1], timeout: 15) else {
+            FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+            exit(1)
+        }
+        let reply = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if reply.isEmpty {
+            FileHandle.standardError.write(Data("the running workspace-switcher is too old for '\(cliArgs[1])': restart it once\n".utf8))
+            exit(1)
+        }
+        print(reply)
+        exit(reply.contains("\"ok\":true") ? 0 : 1)
     case "setup":
         // the Setup & Health Check window (running daemon, else this launch)
         if sendLaunchMessage("setup") { exit(0) }

@@ -128,6 +128,9 @@ on-window-detected = [
 #{ if = 'test %{app-bundle-id} = org.flameshot', run = ['layout floating'] },
 #{ if = 'test %{app-bundle-id} = com.apple.ActivityMonitor', run = ['move-node-to-workspace 1'] },
 #{ if = 'test %{app-bundle-id} = com.apple.TextEdit', run = ['move-node-to-workspace 1'] },
+# the ws-settings picker (Hyper+/) floats where you are — BEFORE the Ghostty
+# → workspace 1 rule, which would carry it off to 1
+{ if = 'test %{app-bundle-id} = com.mitchellh.ghostty && test %{window-title} = ws-settings', run = ['layout floating'] },
 { if = 'test %{app-bundle-id} = com.mitchellh.ghostty', run = ['move-node-to-workspace 1'] },
 { if = 'test %{app-bundle-id} = dev.zed.zed', run = ['move-node-to-workspace 2'] },
 { if = 'test %{app-bundle-id} = com.github.GitHubClient', run = ['move-node-to-workspace G'] },
@@ -214,9 +217,11 @@ W = ['main']
     # freeze + dim every display, drag a box, annotate, Cmd+C / Cmd+S / pin.
     # Same binary ping as N/T; the overlay never activates the app.
     alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher screenshot'
-    # Global window switcher: fuzzy-search all windows (fzf) in a Ghostty
-    # window that closes itself after you pick one. Works from any app.
-    # NOTE: not alt-space -- Option+Space is macOS's non-breaking-space char
+    # ws-settings: Hyper+/ — every shortcut + setting in one searchable list
+    # (bin/ws-settings open: focuses the picker if it's up, else opens it in
+    # a floating Ghostty window titled "ws-settings"; see the float rule)
+    alt-cmd-ctrl-shift-slash = 'exec-and-forget ~/.config/workspace-switcher/bin/ws-settings open'
+    # Tiles layout; again = flip horizontal / vertical
     alt-slash = 'layout tiles horizontal vertical'
     # Vertical counterpart of alt-slash: stack all windows vertically in the
     # focused container, then balance all window sizes in the workspace.

@@ -25,3 +25,6 @@ commands.toml.broken-*
 
 # which install owns ~/.config/workspace-switcher (bin/setup-home.sh)
 .install
+
+# ws-settings ★ favorites (user data; the home is this checkout in repo mode)
+settings-hub.json

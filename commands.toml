@@ -519,7 +519,7 @@ font = "SF Mono"
 resize = true
 # quick-navigate favorites shown as pinned pills in the browser (tilde ok);
 # the browser's ☆ Pin adds more.
-favorites = "~/notes, ~/Desktop"
+favorites = "~/notes, ~/Desktop /tmp/"
 # Recent + Arrived: pinned pills (first) listing files from ANYWHERE on this
 # Mac, newest first, with where they are and how long ago:
 #   Recent   everything created or changed (downloads, screenshots, scp /
@@ -663,7 +663,6 @@ copy-toast = "Copied to clipboard"
 # The workspace-switcher app shows notes / files / jira in ONE shared window
 # whose title follows the view, so its row always wears the app's own icon
 # (the kitchen sink) — not whichever view happens to be active.
-config = "~/.config/confluence/fake.json"
 [icons]
 workspace-switcher = "*:app"
 
@@ -678,12 +677,17 @@ workspace-switcher = "*:app"
 "all: Hyper+N" = "show the window on the view you were last in / hide it"
 "all: Hyper+T" = "notes terminal drawer (open + focus / close)"
 "all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
+"all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
 "all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (files · notes · AI · jira · confluence)"
 "all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
 "all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
 "all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
 "all: Cmd+/" = "this list"
+"palette: /" = "command mode (the \"/\" commands)"
+"palette: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the list"
+"palette: Return" = "go to the window / run the command"
+"palette: Esc" = "leave command mode, else close"
 "notes: Ctrl+J / Ctrl+K" = "move focus: editor ↔ files ↔ terminal"
 "notes: Cmd+S" = "save the note"
 "notes: Cmd+F" = "search the note"
@@ -704,6 +708,10 @@ workspace-switcher = "*:app"
 "files: Cmd+Shift+N" = "new folder"
 "files: Cmd+[ / Cmd+]" = "back / forward"
 "files: Cmd+Up" = "parent folder (Recent: the file's folder)"
+"files: Cmd+Down" = "open the selected row"
+"files: Cmd+Opt+V" = "move the copied files here"
+"files: Shift+↑ / Shift+↓" = "grow the selection"
+"files: Home / End / PgUp / PgDn" = "jump in the list"
 "files: Cmd+Shift+." = "show / hide hidden files"
 "files: **" = "in the filter: search every folder below"
 "files: term" = "in the filter + Return: a shell in that folder"
@@ -714,9 +722,30 @@ workspace-switcher = "*:app"
 "jira: ↑ ↓ / Ctrl+N / Ctrl+P / Tab" = "move through the rows"
 "jira: Ctrl+Space" = "tick the row (Cmd+K acts on ticked rows)"
 "jira: Esc" = "back (details, releases, config) / close the search"
+"jira: 1-9" = "in the Cmd+K menu: run that action"
 "ai: Ctrl+Enter / Cmd+Enter" = "run the selected rule on your text"
 "ai: Cmd+L" = "focus your text"
-"ai: Esc" = "stop a running request (never closes)"
+"ai: Esc" = "stop a running request; idle: hide (only when Esc Hides Window is on)"
+"ai: Cmd+/" = "this list"
+"confluence: Return" = "search; in the results: open in the browser"
+"confluence: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the results"
+"confluence: Cmd+Return" = "open in the browser"
+"confluence: Cmd+C / Cmd+Shift+C" = "copy the link / title + link"
+"confluence: Cmd+D" = "favorite (☆)"
+"confluence: Cmd+G / Cmd+Shift+G" = "next / previous match in the page"
+"confluence: Cmd+L / Cmd+F" = "focus the search box"
+"confluence: Cmd+R" = "search again"
+"confluence: Esc" = "close an open filter, else clear the query"
+"paths: ↑ ↓ / Ctrl+N / Ctrl+P" = "move (Shift = grow the selection)"
+"paths: Return" = "[paths] return: file | path | open"
+"paths: Cmd+C" = "copy the path text"
+"paths: Cmd+Shift+C" = "copy the file(s)"
+"paths: Space / Cmd+Y" = "Quick Look"
+"paths: Cmd+O" = "open"
+"paths: Cmd+R" = "rename"
+"paths: Cmd+Shift+R" = "reveal in Finder"
+"paths: Cmd+Delete" = "forget the row"
+"paths: Esc / Cmd+W" = "close"
 "screenshot: Mouse drag" = "select an area (Shift = square); drag inside = move it"
 "screenshot: P D A S R C M T B I" = "pencil, line, arrow, rectangle, filled rectangle, circle, marker, text, pixelate, invert (again = off)"
 "screenshot: G" = "grab a color from the screen (Esc cancels)"
@@ -841,3 +870,30 @@ title = "workspace-switcher — Setup & Health Check"
 intro = ""
 width = 640
 height = 620
+
+# ws-settings (Hyper+/, `bin/ws-settings`): every shortcut + setting of this
+# setup in one place — AeroSpace hotkeys, this file's [shortcuts] and
+# sections, herdr, Ghostty, the notes vim pane. Search, ★ favorites, clash
+# report, edit settings / rebind AeroSpace + herdr keys (one line at a time,
+# undo with `ws-settings undo`). Not a palette command. CLI: ws-settings --help
+#   layers            key sources shown, in this order: app, aerospace, herdr,
+#                     ghostty, vim
+#   aerospace-config  default: the file AeroSpace reads (~/.aerospace.toml, else
+#                     ~/.config/aerospace/aerospace.toml)
+#   herdr-config      default ~/.config/herdr/config.toml
+#   herdr-bin         default: herdr on PATH, else ~/.local/bin/herdr
+#   ghostty-config    default ~/.config/ghostty/config.ghostty
+#   vim-init          default: [notes] vim-init, else vim/notes-init.vim
+#   colors            theme (the [theme] colors) | terminal (its own colors)
+#   window-title      the picker window's title (the AeroSpace float rule matches it)
+#   terminal-command  how `ws-settings open` starts the picker: {title}, {cmd}
+#                     {x} {y} (the centered top-left)
+#                     and {bg} (--background= the [theme] background) are filled
+#                     in (default: a new Ghostty window, no window buttons: drag
+#                     it by the strip along the top)
+#   undo-limit        edits `ws-settings undo` remembers (default 20)
+[settings-hub]
+layers = "app, aerospace, herdr, ghostty, vim"
+colors = "theme"
+window-title = "ws-settings"
+undo-limit = 20
