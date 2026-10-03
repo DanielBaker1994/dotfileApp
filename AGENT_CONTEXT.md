@@ -119,6 +119,8 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 - `Screenshot.swift` + `ScreenshotOverlay.swift` + `ScreenshotPin.swift` +
   `ScreenshotAnnotations.swift` — /screenshot, the Flameshot-style capture
   tool (see "/screenshot" below; model tested by `bin/run-tests.sh screenshot`)
+- `PaneShot.swift` + `AnsiRender.swift` — `pane-shot`, the herdr pane's
+  full-height capture (see "/pane-shot" below; `bin/run-tests.sh ansi`)
 - `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
   (see "/paths" below; `bin/run-tests.sh paths`)
 - `workspace_switcher.swift` — app logic (~9200 lines)
@@ -190,7 +192,9 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `RecentFiles.ownChange`, snapshot patched synchronously, row keeps its
   place); other apps' renames pair old + new event by inode
   (`UseExtendedData`, `departed`) so a renamed folder keeps the files
-  listed inside it; `present` = exact-case check (case-only renames).
+  listed inside it; ONE name per file: `canonical` = the folder's
+  realpath + the name (store + seed; the /private/tmp scan skips symlinks —
+  /tmp/zzlink → /tmp listed every file twice); `present` = exact-case check (case-only renames).
   Tests: `bin/run-tests.sh recent` (`Tests/test_recent_files.swift`,
   `// sources:` header = compiled with the app's file; synthetic events +
   a live stream on a temp home).
@@ -287,6 +291,41 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   launch + every reload; no `[paths]` = all feeds unhooked), `showPaths`,
   `pathsWindow`, `clipboardPaths`. Socket: `do:paths:show|hide|return|
   select:N`, state `paths` {shown, key, level, rows[{path, why}], frame}.
+
+## /pane-shot — full-height capture of the focused herdr pane
+
+- Chrome's "full size screenshot" for a terminal pane: never scroll, lay
+  the text out again off screen. NOT Ghostty: herdr draws its whole UI as
+  one full-screen app inside Ghostty, so Ghostty's scrollback / search /
+  `write_scrollback_file` never hold one pane's history. herdr's server
+  does: `herdr pane read ID --source recent --format ansi --lines N` (SGR
+  colors, soft-wrapped at the pane width, ~15 ms). Server cap: 1000 rows
+  (`Herdr.maxLines`; `--lines 6000` over the raw socket still gets 1000).
+  Alternate-screen apps (nvim, htop) have no scrollback → the screen only.
+- `workspace-switcher pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
+  [--no-save] [--no-copy]` (main.swift → socket `pane-shot<TAB>args`, the
+  CLI waits for ONE reply line: saved path / `copied` / `error: …`). No
+  `--pane` = `herdr pane current` = herdr's focused pane (works from any
+  process; `Herdr.environment` drops `HERDR_PANE_ID` etc. a daemon started
+  from a pane would inherit). Rows = the pane's viewport + `[pane-shot]
+  lines` (200). `--file -` = stdin (the CLI writes a temp file).
+- `PaneShot.swift` (Foundation): `PaneShotArgs`, `PaneShotConfig`
+  (`[pane-shot]`, not a palette command), `Herdr` (JSON answers on stdout;
+  errors = `{"error":…}` on STDERR + exit 1). `AnsiRender.swift`
+  (Foundation + CoreText): `AnsiGrid.parse` (SGR incl. 256 / truecolor,
+  CR / tab / OSC handling, wide cells, trailing blank rows trimmed),
+  `AnsiTheme.ghostty` (`ghostty +show-config`: font, size, fg / bg, all
+  256 palette entries, bold-is-bright, display-p3), `AnsiRender.image`
+  (glyphs the font has are pinned to their cell with `CTFontDrawGlyphs`;
+  the rest = `CTLineDraw` fallback — which MOVES the text position, so it
+  is reset before every pinned glyph; 2×, 1× past 32k px).
+- Delivery: `ScreenshotController.paneShot` (end of Screenshot.swift) →
+  `copy` (PNG + TIFF, the toast) + `save` (`[screenshot] save-path` unless
+  `[pane-shot] save-path`, → /paths). Log `pane-shot ID: N rows, W×H px,
+  M ms` (260 rows ≈ 0.7 s, mostly the PNG + TIFF encode). State
+  `paneShot` {pane, title, rows, size, copied, path, ms | error}.
+- Trigger: a herdr `[[keys.command]] type = "shell"` binding running the
+  app binary (dotfiles), or anything else that can run the CLI.
 
 ## /screenshot — Flameshot-style capture (Hyper+X)
 

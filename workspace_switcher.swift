@@ -838,6 +838,7 @@ func loadCommands() -> [CommandSpec] {
              "app",             // already applied by applyAppConfigFromDisk()
              "confluence", "ai", // their views read it directly (configSectionValue)
              "notifications",   // the sketchybar pill (notify/notify_poll.py)
+             "pane-shot",       // the herdr pane capture (PaneShot.swift)
              "setup":           // the Setup & Health Check window (SetupWindow.swift)
             break               // never palette commands
         default:
@@ -1422,6 +1423,16 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         return ThemePreset.parse(name: key, value) == nil
             ? "expected 7, 8 or 13 hex colors: background, browser, terminal, header, text, dim, highlight[, accent[, accent2, success, warning, danger, info]]"
             : nil
+    }
+    if section == "pane-shot" {
+        switch key {
+        case "background":
+            return AnsiRGB(hex: value) == nil ? "'\(value)' is not a hex color (#RRGGBB)" : nil
+        case "lines":
+            guard let n = Int(value), (0...Herdr.maxLines).contains(n) else { return "\(value): 0…\(Herdr.maxLines) (herdr's cap)" }
+            return nil
+        default: break
+        }
     }
     if section == "screenshot" {
         switch key {
@@ -2608,7 +2619,12 @@ final class SwitcherController: NSObject {
     lazy var screenshot: ScreenshotController = {
         let s = ScreenshotController()
         s.log = { [weak self] in self?.log($0) }
-        s.onSaved = { PathShelf.shared.add([$0], why: .screenshot) }
+        s.onSaved = {
+            // the Recent stream ignores our own writes (IgnoreSelf): report
+            // the file, then the shelf row says "screenshot"
+            RecentFiles.shared.ownChange(from: nil, to: $0)
+            PathShelf.shared.add([$0], why: .screenshot)
+        }
         s.onOwnPasteboardWrite = { [weak self] in self?.clipboardPaths?.ownWrite() }
         return s
     }()
@@ -3383,6 +3399,7 @@ final class SwitcherController: NSObject {
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
             "screenshot": screenshot.testState,
+            "paneShot": screenshot.paneShotLast,
             "activations": appActivations,
             // NOT `active`: a key non-activating panel (tool panel) reads as
             // NSApp.isActive while the other app stays frontmost
@@ -3451,6 +3468,21 @@ final class SwitcherController: NSObject {
                                 close(cfd)
                             }
                         } : nil)
+                    }
+                    continue
+                }
+                if query == "pane-shot" || query.hasPrefix("pane-shot\t") {
+                    // `workspace-switcher pane-shot [flags]` (PaneShot.swift):
+                    // the CLI waits for ONE reply line (path / copied / error)
+                    let words = query.split(separator: "\t").dropFirst().map(String.init)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { close(cfd); return }
+                        self.screenshot.paneShot(words) { line in
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                writeAll(cfd, Data((line + "\n").utf8))
+                                close(cfd)
+                            }
+                        }
                     }
                     continue
                 }
@@ -5599,9 +5631,9 @@ final class SwitcherController: NSObject {
         applyBrowserSettings(&browserCfg)
         let fb = PopupFileBrowser(config: browserCfg, startDir: startDir,
                                   staticFavorites: fileBrowserFavorites())
-        fb.onOpen = { [weak self] path in
+        fb.onOpen = { [weak self, weak w] path in
             self?.log("\(tag): \(opened) \(path)")
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            FilePopup.open(path, over: w?.nativeWindow)
         }
         fb.onCopyPath = { [weak self] p in
             self?.copy(p, "path: \(p)")

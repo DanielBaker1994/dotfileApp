@@ -7819,7 +7819,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             self?.onCopyFilePath?()
         }
         tv.onOpenImage = { [weak self] path in
-            ImagePopup.show(path: path, over: self?.panel)
+            FilePopup.show(path: path, over: self?.panel)
         }
         tv.onPasteImage = { [weak self] img in
             guard let self, self.config.markdownImages,
@@ -7908,7 +7908,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if config.vimImageFile != nil {
             let ov = VimImageOverlay(frame: vv.frame)
             ov.onOpen = { [weak self] path in
-                ImagePopup.show(path: path, over: self?.panel)
+                FilePopup.show(path: path, over: self?.panel)
             }
             ov.onMenu = { [weak self, weak ov] path, event in
                 guard let self, let ov else { return }
@@ -10655,7 +10655,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         m.autoenablesItems = false
         let url = URL(fileURLWithPath: path)
         m.addItem(menuItem("Open Full Size") { [weak self] in
-            ImagePopup.show(path: path, over: self?.panel)
+            FilePopup.show(path: path, over: self?.panel)
         })
         m.addItem(.separator())
         m.addItem(menuItem("Copy Image Path") { [weak self] in

@@ -85,6 +85,37 @@ if cliArgs.count > 1 {
             }
         }
         openCommand = "screenshot"
+    case "pane-shot":
+        // the focused herdr pane (scrollback + screen) as one tall image,
+        // copied + saved by the daemon (PaneShot.swift). Prints the saved
+        // path ("copied" when not saved); errors → stderr, exit 1.
+        var words = Array(cliArgs.dropFirst(2))
+        switch PaneShotArgs.parse(words) {
+        case .success(let a):
+            if a.file == "-", let i = words.firstIndex(of: "-") {
+                // stdin → a temp file the daemon can read
+                let tmp = NSTemporaryDirectory() + "pane-shot-\(getpid()).ansi"
+                FileManager.default.createFile(atPath: tmp, contents: FileHandle.standardInput.readDataToEndOfFile())
+                words[i] = tmp
+            }
+        case .failure(let p):
+            FileHandle.standardError.write(Data("workspace-switcher pane-shot: \(p.message)\n".utf8))
+            exit(2)
+        }
+        guard let data = sendRequest((["pane-shot"] + words).joined(separator: "\t"), timeout: 60) else {
+            FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+            exit(1)
+        }
+        let line = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let tmp = words.first(where: { $0.hasPrefix(NSTemporaryDirectory() + "pane-shot-") }) {
+            try? FileManager.default.removeItem(atPath: tmp)
+        }
+        if line.isEmpty || line.hasPrefix("error: ") {
+            FileHandle.standardError.write(Data("workspace-switcher pane-shot: \(line.isEmpty ? "no answer" : String(line.dropFirst(7)))\n".utf8))
+            exit(1)
+        }
+        print(line)
+        exit(0)
     case let mode where SwitcherController.hotkeyModes.contains(mode):
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->

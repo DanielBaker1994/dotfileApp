@@ -334,6 +334,9 @@ ignore-file = "config/paths.ignore"
 #                       also accept, size-increase, size-decrease)
 #   button-size         0 = system font line height x 2.2, else 20-80
 #   return              what Return / Accept does: copy | save | pin
+#   preview             true (default) = after a copy / save the capture also
+#                       opens in the file preview popup (zoom, edge resize,
+#                       Esc closes); the clipboard / file are written either way
 #   save-path-fixed     true = Cmd+S writes save-path/filename-pattern at once
 #   filename-pattern    strftime; a clash gets " 2", " 3"
 #   insecure-pixelate   true = real downscaled pixels (the default rebuilds the
@@ -364,6 +367,7 @@ save-format = "png"
 jpeg-quality = 75
 save-after-copy = false
 copy-path-after-save = false
+preview = true
 save-last-region = false
 undo-limit = 100
 arrow-style = 0
@@ -382,6 +386,36 @@ help-wheel = "Change tool size"
 help-right-click = "Show color picker"
 help-space = "Open side panel"
 help-esc = "Exit"
+
+# /pane-shot: the focused herdr pane (its scrollback + the visible screen) as
+# ONE tall image, drawn off screen in Ghostty's font + colors (ghostty
+# +show-config), then copied + saved like a /screenshot capture (→ /paths).
+# Not a palette command. herdr keeps ≤ 1000 rows per read (its cap).
+# CLI: workspace-switcher pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
+#      [--no-save] [--no-copy]   (prints the saved path)
+#   lines               history rows above the screen (0 = the screen only)
+#   save / copy         what a capture does (flags override)
+#   preview             true (default) = also open the capture in the file
+#                       preview popup (zoom, resize, Esc closes); the copy /
+#                       save happen either way
+#   herdr-bin           the launchd PATH has no ~/.local/bin
+#   font / font-size / background   "" = Ghostty's
+#   save-path           "" = [screenshot] save-path
+#   toast               {n} = rows, {pane} = the pane's title ("" = none)
+[pane-shot]
+lines = 200
+save = true
+copy = true
+preview = true
+herdr-bin = "~/.local/bin/herdr"
+ghostty-bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
+font = ""
+font-size = ""
+background = ""
+padding = 16
+save-path = ""
+filename-pattern = "%F_%H-%M-%S pane"
+toast = "Screenshot of {pane} copied ({n} lines)"
 
 # Notes + voice in ONE window: every note tab (tabs, markdown images, paste)
 # plus the record/pause/stop meter bar when `voice = true`. Dictation lands

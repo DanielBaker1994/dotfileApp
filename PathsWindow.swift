@@ -366,7 +366,7 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
 
     private func open(_ rows: [Int]) {
         let paths = rows.filter { shown.indices.contains($0) }.map { shown[$0].path }
-        for p in paths { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+        for p in paths { FilePopup.open(p, over: window.nativeWindow) }
     }
 
     private func reveal() {

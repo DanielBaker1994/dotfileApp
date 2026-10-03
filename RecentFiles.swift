@@ -316,13 +316,13 @@ final class RecentFiles {
         let secs = days * 86400
         let changed = "kMDItemFSContentChangeDate >= $time.now(-\(secs)) || kMDItemDateAdded >= $time.now(-\(secs))"
         for p in run("/usr/bin/mdfind", ["-onlyin", home, changed]) where keep(p) {
-            if let t = stamp(p), t >= since { found[p] = t }
+            if let t = stamp(p), t >= since { found[Self.canonical(p)] = t }
         }
         // every file DOWNLOADED in that time, wherever it was saved
         if everywhere {
             let downloaded = "kMDItemDateAdded >= $time.now(-\(secs)) && kMDItemWhereFroms == \"*\""
             for p in run("/usr/bin/mdfind", [downloaded]) where inScope(p) && keep(p) {
-                if let t = stamp(p), t >= since { found[p] = t }
+                if let t = stamp(p), t >= since { found[Self.canonical(p)] = t }
             }
         }
         // /private/tmp: not Spotlight-indexed — two levels deep
@@ -331,6 +331,10 @@ final class RecentFiles {
             for n in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
                 let p = (dir as NSString).appendingPathComponent(n)
                 guard keep(p) else { continue }
+                // a symlink is not a second copy (/tmp/zzlink → /tmp listed
+                // every file twice): its target is listed under its own name
+                var ls = Darwin.stat()
+                guard lstat(p, &ls) == 0, ls.st_mode & S_IFMT != S_IFLNK else { continue }
                 var isDir: ObjCBool = false
                 guard fm.fileExists(atPath: p, isDirectory: &isDir) else { continue }
                 if let t = stamp(p), t >= since, !isDir.boolValue { found[p] = t }
@@ -342,6 +346,17 @@ final class RecentFiles {
             items[p] = Item(at: t, source: items[p]?.source ?? Self.origin(p))
         }
         trim()
+    }
+
+    // ONE name per file: its folder's real path + the name, as FSEvents
+    // reports it (a path through a symlinked folder — /tmp/zzlink/x with
+    // zzlink → /tmp — is /private/tmp/x). The file itself stays as named.
+    static func canonical(_ p: String) -> String {
+        let dir = (p as NSString).deletingLastPathComponent
+        guard let r = realpath(dir, nil) else { return p }
+        defer { free(r) }
+        let real = String(cString: r)
+        return real == dir ? p : (real as NSString).appendingPathComponent((p as NSString).lastPathComponent)
     }
 
     // newest of creation / modification
@@ -434,8 +449,9 @@ final class RecentFiles {
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
         let since = Date().timeIntervalSince1970 - Double(days) * 86400
         for d in arr {
-            if let p = d["path"] as? String, let t = d["at"] as? Double, t >= since, keep(p),
-               t > (items[p]?.at ?? 0) {
+            // (stores from before `canonical` hold the same file twice)
+            if let raw = d["path"] as? String, case let p = Self.canonical(raw), let t = d["at"] as? Double,
+               t >= since, keep(p), t > (items[p]?.at ?? 0) {
                 items[p] = Item(at: t, source: d["source"] as? String)
             }
         }

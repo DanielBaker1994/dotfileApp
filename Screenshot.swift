@@ -33,6 +33,7 @@ struct ScreenshotConfig {
     var jpegQuality = 75
     var saveAfterCopy = false
     var copyPathAfterSave = false
+    var preview = true
     var saveLastRegion = false
     var undoLimit = 100
     var arrowStyle = 0
@@ -108,6 +109,7 @@ struct ScreenshotConfig {
         c.jpegQuality = i("jpeg-quality", 75, 1...100)
         c.saveAfterCopy = b("save-after-copy", false)
         c.copyPathAfterSave = b("copy-path-after-save", false)
+        c.preview = b("preview", true)
         c.saveLastRegion = b("save-last-region", false)
         c.undoLimit = i("undo-limit", 100, 1...1000)
         c.arrowStyle = i("arrow-style", 0, 0...1)
@@ -195,6 +197,8 @@ final class ScreenshotController {
     private var capturing = false
     private var forcedSavePath: String?
     private var lastOutput: [String: Any] = [:]
+    // /pane-shot's last result (state `paneShot`)
+    private(set) var paneShotLast: [String: Any] = [:]
     let statePath = NSHomeDirectory() + "/.cache/workspace-switcher/screenshot-state.json"
 
     init() {
@@ -481,6 +485,9 @@ final class ScreenshotController {
             if args.clipboard { copy(img, cfg, screen) }
         case .abort: break
         }
+        // the capture in the quick-look popup too (copy / save untouched);
+        // not for a pin (already on screen) or a scripted -r / -g
+        if cfg.preview, action != .pin, !args.raw, !args.printGeometry { preview(img, screen) }
         if args.raw { answer(png(img)) }
         else if args.printGeometry, let g = geom {
             answer(Data("\(Int(g.width.rounded())) \(Int(g.height.rounded())) \(Int(g.minX.rounded())) \(Int(g.minY.rounded()))\n".utf8))
@@ -581,6 +588,14 @@ final class ScreenshotController {
         }
         ScreenToast.show(cfg.saveToast.replacingOccurrences(of: "{}", with: (path as NSString).abbreviatingWithTildeInPath), on: screen)
         log("screenshot: saved \(path)")
+    }
+
+    // the file browser's preview popup (FilePopup), sized in points
+    func preview(_ img: CGImage, _ screen: NSScreen?, label: String = "Screenshot") {
+        let scale = (screen ?? mouseScreen)?.backingScaleFactor ?? 2
+        let ns = NSImage(cgImage: img, size: NSSize(width: CGFloat(img.width) / scale,
+                                                    height: CGFloat(img.height) / scale))
+        FilePopup.show(image: ns, label: label, over: nil, on: screen ?? mouseScreen)
     }
 
     func pin(_ img: CGImage, frame: CGRect?, _ cfg: ScreenshotConfig) {
@@ -736,5 +751,136 @@ extension ShotSession {
     // tests: set (not toggle) the tool
     func forceTool(_ t: ShotTool?) {
         if tool != t { setTool(t) }
+    }
+}
+
+
+// MARK: - /pane-shot (PaneShot.swift)
+
+// a herdr pane's scrollback + screen as ONE tall image, delivered like a
+// capture: copy (one PNG + TIFF item) and save (→ /paths), one toast
+extension ScreenshotController {
+    struct PaneShotImage {
+        let image: CGImage
+        let rows: Int
+        let title: String
+        let pane: String?
+    }
+
+    // `pane-shot [flags]` from the socket / CLI. `reply` gets ONE line: the
+    // saved path, "copied", or "error: …".
+    func paneShot(_ words: [String], reply: ((String) -> Void)? = nil) {
+        let args: PaneShotArgs
+        switch PaneShotArgs.parse(words) {
+        case .success(let a): args = a
+        case .failure(let p):
+            reply?("error: \(p.message)")
+            return
+        }
+        var e: [String: String] = [:]
+        for x in configSectionEntries(readConfigText().map(configLines) ?? [], "pane-shot") { e[x.key] = x.value }
+        let cfg = PaneShotConfig(e)
+        let screen = mouseScreen
+        let scale = screen?.backingScaleFactor ?? 2
+        let start = Date()
+        // herdr + ghostty + the render (~50-300 ms) stay off the main thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Self.paneShotImage(args, cfg, scale: scale)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .failure(let f):
+                    self.paneShotLast = ["error": f.message]
+                    self.log("pane-shot: \(f.message)")
+                    ScreenToast.show(f.message, on: screen, symbol: "exclamationmark.triangle.fill")
+                    reply?("error: \(f.message)")
+                case .success(let shot):
+                    reply?(self.deliverPaneShot(shot, args, cfg, screen, since: start))
+                }
+            }
+        }
+    }
+
+    private func deliverPaneShot(_ shot: PaneShotImage, _ args: PaneShotArgs, _ cfg: PaneShotConfig,
+                                 _ screen: NSScreen?, since start: Date) -> String {
+        let copy = args.copy ?? cfg.copy, save = args.save ?? cfg.save
+        let toast = cfg.toast.replacingOccurrences(of: "{n}", with: String(shot.rows))
+            .replacingOccurrences(of: "{pane}", with: shot.title)
+        var sc = ScreenshotConfig.load()
+        sc.copyPathAfterSave = false          // the image is the clipboard's
+        sc.filenamePattern = cfg.filenamePattern
+        sc.saveFormat = "png"
+        if !cfg.savePath.isEmpty { sc.savePath = cfg.savePath }
+        lastOutput["path"] = nil
+        // save FIRST: the clipboard then carries the file too. One toast:
+        // the copy's, else the save's
+        if save {
+            sc.saveToast = copy ? "" : "Saved {}"
+            self.save(shot.image, sc, screen, to: nil)
+        }
+        let path = save ? lastOutput["path"] as? String : nil
+        if copy { copyImage(shot.image, file: path, toast: toast, screen) }
+        if cfg.preview { preview(shot.image, screen, label: shot.title) }
+        let ms = Int(Date().timeIntervalSince(start) * 1000)
+        paneShotLast = ["pane": shot.pane ?? "", "title": shot.title, "rows": shot.rows,
+                        "size": [shot.image.width, shot.image.height], "copied": copy, "path": path ?? "", "ms": ms]
+        log("pane-shot \(shot.pane ?? "file"): \(shot.rows) rows, \(shot.image.width)×\(shot.image.height) px, \(ms) ms")
+        if save && path == nil { return "error: could not save" }
+        return path ?? "copied"
+    }
+
+    // ONE pasteboard item: the PNG (image editors, Claude Code's Ctrl+V)
+    // + the saved file's URL (chat / mail apps attach the FILE — they
+    // shrink or drop a tall pasted bitmap). TIFF only for small images: a
+    // 1000-row capture's TIFF is ~100 MB.
+    private func copyImage(_ img: CGImage, file: String?, toast: String, _ screen: NSScreen?) {
+        let rep = NSBitmapImageRep(cgImage: img)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        let item = NSPasteboardItem()
+        item.setData(png, forType: .png)
+        if let file { item.setString(URL(fileURLWithPath: file).absoluteString, forType: .fileURL) }
+        if img.width * img.height <= 4_000_000, let tiff = rep.tiffRepresentation { item.setData(tiff, forType: .tiff) }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([item])
+        onOwnPasteboardWrite?()
+        ScreenToast.show(toast, on: screen)
+    }
+
+    // the pane's text (or --file) → Ghostty's theme → the image
+    static func paneShotImage(_ args: PaneShotArgs, _ cfg: PaneShotConfig, scale: CGFloat) -> Result<PaneShotImage, Herdr.Failure> {
+        let text: String, title: String, pane: String?
+        if let file = args.file {
+            let p = (file as NSString).expandingTildeInPath
+            guard let t = try? String(contentsOfFile: p, encoding: .utf8) else {
+                return .failure(Herdr.Failure(message: "can't read \(file)"))
+            }
+            (text, title, pane) = (t, (p as NSString).lastPathComponent, nil)
+        } else {
+            switch Herdr.pane(cfg.herdrBin, id: args.pane) {
+            case .failure(let f): return .failure(f)
+            case .success(let p):
+                let n = Herdr.lines(viewport: p.viewportRows, history: args.lines ?? cfg.lines, all: args.all)
+                switch Herdr.read(cfg.herdrBin, id: p.id, lines: n) {
+                case .failure(let f): return .failure(f)
+                case .success(let t): (text, title, pane) = (t, p.title, p.id)
+                }
+            }
+        }
+        let grid = AnsiGrid.parse(text)
+        guard !grid.rows.isEmpty else { return .failure(Herdr.Failure(message: "nothing to capture: \(title) is empty")) }
+        var theme = AnsiTheme()
+        let ghostty = (cfg.ghosttyBin as NSString).expandingTildeInPath
+        if FileManager.default.isExecutableFile(atPath: ghostty),
+           let r = try? runProcess(ghostty, ["+show-config"]), r.code == 0 {
+            theme = AnsiTheme.ghostty(r.out)
+        }
+        if !cfg.font.isEmpty { theme.fontName = cfg.font }
+        if cfg.fontSize > 0 { theme.fontSize = CGFloat(cfg.fontSize) }
+        if let bg = AnsiRGB(hex: cfg.background) { theme.background = bg }
+        guard let img = AnsiRender.image(grid, theme: theme, padding: CGFloat(cfg.padding), scale: scale) else {
+            return .failure(Herdr.Failure(message: "could not render \(grid.rows.count) rows"))
+        }
+        return .success(PaneShotImage(image: img, rows: grid.rows.count, title: title, pane: pane))
     }
 }

@@ -9,6 +9,7 @@
 #   ./bin/run-tests.sh filter    run only the list filter tests (parity + 20k-row keystroke timing)
 #   ./bin/run-tests.sh paths     run only the /paths shelf tests (ignore rules vs git, shelf, clipboard)
 #   ./bin/run-tests.sh screenshot run only the /screenshot model tests (button ring, undo, pixelate, render)
+#   ./bin/run-tests.sh ansi      run only the /pane-shot tests (ANSI parser, Ghostty theme, render, herdr JSON)
 #   ./bin/run-tests.sh ai-live   run the shipped rules through fm's on-device model (slow; not in "all")
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,6 +61,9 @@ case "${1:-all}" in
         ;;
     screenshot)
         run_test "$TESTS/test_screenshot.swift"
+        ;;
+    ansi)
+        run_test "$TESTS/test_ansi_render.swift"
         ;;
     ai-live)
         run_test "$TESTS/live_ai_rules.swift"

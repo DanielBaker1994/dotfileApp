@@ -290,6 +290,44 @@ func testLive() {
     again.configure(enabled: false, days: 7, limit: 200, excludes: [], everywhere: false)
 }
 
+// a folder reached through a symlink (/tmp/zzlink → /tmp) is ONE file per
+// name: the store's duplicates merge, the /private/tmp scan skips the link
+func testSymlinkedFolder() {
+    print("Symlinked folder:")
+    let home = makeHome("symlink")
+    write(home + "/real/a.txt")
+    try! fm.createSymbolicLink(atPath: home + "/link", withDestinationPath: home + "/real")
+    check(RecentFiles.canonical(home + "/link/a.txt") == home + "/real/a.txt", "canonical = the real folder")
+    check(RecentFiles.canonical(home + "/real/a.txt") == home + "/real/a.txt", "a real path is itself")
+    check(RecentFiles.canonical("/tmp/x") == "/private/tmp/x", "/tmp → /private/tmp")
+    let store = home + "/store/recent.json"
+    let now = Date().timeIntervalSince1970
+    write(store, String(decoding: try! JSONSerialization.data(withJSONObject: [
+        ["path": home + "/link/a.txt", "at": now], ["path": home + "/real/a.txt", "at": now - 5],
+    ]), as: UTF8.self))
+    let r = RecentFiles(home: home, store: store)
+    r.configure(enabled: true, days: 7, limit: 200, excludes: [], everywhere: false)
+    check(waitFor { paths(r).contains(home + "/real/a.txt") }, "the stored file is listed")
+    check(paths(r).filter { $0.hasSuffix("/a.txt") } == [home + "/real/a.txt"],
+          "once, under its real folder — got \(paths(r).filter { $0.hasSuffix("/a.txt") })")
+
+    // the startup scan of /private/tmp (two levels): a link to a folder
+    // there must not list that folder's files again
+    let dir = "/private/tmp/recent-test-scan-\(getpid())"
+    let link = "/private/tmp/recent-test-scanlink-\(getpid())"
+    write(dir + "/b.txt")
+    try? fm.removeItem(atPath: link)
+    try! fm.createSymbolicLink(atPath: link, withDestinationPath: dir)
+    r.configure(enabled: false, days: 7, limit: 200, excludes: [], everywhere: false)
+    let again = RecentFiles(home: home, store: home + "/store/recent2.json")
+    again.configure(enabled: true, days: 7, limit: 200, excludes: [], everywhere: false)
+    check(waitFor { paths(again).contains(dir + "/b.txt") }, "the scan lists the real file")
+    check(!paths(again).contains(link + "/b.txt"), "and not its copy through the link")
+    again.configure(enabled: false, days: 7, limit: 200, excludes: [], everywhere: false)
+    try? fm.removeItem(atPath: link)
+    try? fm.removeItem(atPath: dir)
+}
+
 @main
 struct RecentFilesTests {
     static func main() {
@@ -301,6 +339,7 @@ struct RecentFilesTests {
         testRemovedFolder()
         testAtomicSave()
         testLive()
+        testSymlinkedFolder()
         let base = tmpRoot
         for n in (try? fm.contentsOfDirectory(atPath: base)) ?? []
         where n.hasPrefix("recent-test-") && n.hasSuffix("-\(getpid())") {
