@@ -47,6 +47,12 @@ struct ScreenshotConfig {
     var permissionToast = "Screen Recording permission needed — opening Settings…"
     var failToast = "Screen capture failed"
     var helpRows: [(String, String)] = []
+    // Copy Text mode
+    var startText = false
+    var ocr = ShotOCRConfig()
+    var textToast = "Copied {} to clipboard"
+    var noTextToast = "No text found"
+    var helpTextRows: [(String, String)] = []
     var shortcuts: [(String, String)] = []
 
     static let defaultUserColors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
@@ -57,6 +63,12 @@ struct ScreenshotConfig {
         ("help-wheel", "Mouse Wheel", "Change tool size"),
         ("help-right-click", "Right Click", "Show color picker"),
         ("help-space", "Space", "Open side panel"),
+        ("help-copy-text", "Tab", "Copy text mode"),
+        ("help-esc", "Esc", "Exit"),
+    ]
+    static let helpTextKeys: [(key: String, label: String, text: String)] = [
+        ("help-text", "Mouse", "Drag over text to copy it"),
+        ("help-text-mode", "Tab", "Back to screenshot mode"),
         ("help-esc", "Esc", "Exit"),
     ]
 
@@ -123,6 +135,12 @@ struct ScreenshotConfig {
         c.permissionToast = s("permission-toast", c.permissionToast)
         c.failToast = s("fail-toast", c.failToast)
         c.helpRows = helpKeys.map { ($0.label, s($0.key, $0.text)) }
+        c.helpTextRows = helpTextKeys.map { ($0.label, s($0.key, $0.text)) }
+        c.startText = s("start-mode", "screenshot").lowercased() == "text"
+        c.ocr.languages = s("text-languages", "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        c.ocr.correction = b("text-correction", true)
+        c.textToast = e["text-toast"] ?? c.textToast
+        c.noTextToast = s("no-text-toast", c.noTextToast)
         c.shortcuts = shortcutEntries.filter { $0.view == "screenshot" }.map { ($0.keys, $0.what) }
         return c
     }
@@ -222,6 +240,20 @@ final class ScreenshotController {
             if let p = panels[id] { p.fit(s) } else { panels[id] = ShotOverlayPanel(screen: s) }
         }
         if content == nil, CGPreflightScreenCaptureAccess() { fetchContent { _ in } }
+        warmOCR()
+    }
+
+    // Copy Text's model, compiled once per process in the background (the
+    // first recognition otherwise stalls for ~50 s)
+    private var ocrWarm = false
+    private func warmOCR() {
+        guard !ocrWarm else { return }
+        ocrWarm = true
+        let cfg = ScreenshotConfig.load().ocr
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let ms = ShotOCR.warmUp(cfg)
+            DispatchQueue.main.async { self?.log("screenshot: text recognizer warm, \(ms) ms") }
+        }
     }
 
     private func fetchContent(_ done: @escaping (SCShareableContent?) -> Void) {
@@ -305,7 +337,7 @@ final class ScreenshotController {
                     return
                 }
                 switch args.mode {
-                case .gui:
+                case .gui, .text:
                     self.begin(cfg, args, screens, images, reply: reply)
                     let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000 - delay * 1000
                     self.log(String(format: "screenshot: capture %.0f ms, %.0f ms to overlay", capMs, ms))
@@ -442,7 +474,8 @@ final class ScreenshotController {
     // MARK: outputs
 
     private func finish(_ s: ShotSession, _ o: ShotOutcome) {
-        let img = s.render()
+        // Copy Text reads the screen's pixels, never the drawings over them
+        let img = s.render(objects: o != .text)
         let screen = s.active?.screen
         let geom = s.globalSelection
         // the selection's AppKit (bottom-left) frame: where a pin opens
@@ -464,6 +497,7 @@ final class ScreenshotController {
             answer(nil)
             return
         }
+        if o == .text { deliverText(img, cfg, args, screen); return }
         lastOutput = ["outcome": o.rawValue, "size": [img.width, img.height]]
         var action = o
         if o == .accept {
@@ -483,7 +517,7 @@ final class ScreenshotController {
             // explicit -p / -c (and -r / -g answer below)
             if let p = args.path { save(img, cfg, screen, to: p) }
             if args.clipboard { copy(img, cfg, screen) }
-        case .abort: break
+        case .abort, .text: break
         }
         // the capture in the quick-look popup too (copy / save untouched);
         // not for a pin (already on screen) or a scripted -r / -g
@@ -557,6 +591,42 @@ final class ScreenshotController {
         ScreenToast.show(cfg.copyToast, on: screen)
     }
 
+    // Copy Text: Vision off the main thread (≈ 100-300 ms; the overlay is
+    // already gone), then ONE string item + the toast. -r answers the text.
+    private func deliverText(_ img: CGImage, _ cfg: ScreenshotConfig, _ args: ShotArgs, _ screen: NSScreen?) {
+        let r = reply
+        reply = nil
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let text = ShotOCR.text(img, cfg.ocr)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let ms = Int(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
+                self.lastOutput = ["outcome": "text", "size": [img.width, img.height], "chars": text.count,
+                                   "text": String(text.prefix(4000)), "ms": ms]
+                if text.isEmpty {
+                    ScreenToast.show(cfg.noTextToast, on: screen, symbol: "exclamationmark.triangle.fill")
+                } else {
+                    self.copyText(text, cfg, screen)
+                }
+                r?(args.raw ? Data(text.utf8) : Data())
+                self.log("screenshot: text \(text.count) chars from \(img.width)×\(img.height), \(ms) ms")
+            }
+        }
+    }
+
+    func copyText(_ text: String, _ cfg: ScreenshotConfig, _ screen: NSScreen?) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        onOwnPasteboardWrite?()
+        lastOutput["copied"] = true
+        if !cfg.textToast.isEmpty {
+            ScreenToast.show(cfg.textToast.replacingOccurrences(of: "{}", with: ShotOCR.summary(text)), on: screen,
+                             symbol: "text.viewfinder")
+        }
+    }
+
     // to `path` (a directory → the pattern inside it), else save-path
     func save(_ img: CGImage, _ cfg: ScreenshotConfig, _ screen: NSScreen?, to path: String?) {
         let dir = ((path ?? cfg.savePath) as NSString).expandingTildeInPath
@@ -625,8 +695,9 @@ final class ScreenshotController {
         let arg = parts.count > 1 ? parts[1] : ""
         func nums(_ s: String) -> [CGFloat] { s.split(separator: ",").compactMap { Double($0) }.map { CGFloat($0) } }
         switch verb {
-        case "show":
+        case "show", "show-text":
             var args = ShotArgs()
+            if verb == "show-text" { args.mode = .text }
             args.delayMs = Int(arg) ?? 0
             trigger(args)
         case "select":
@@ -648,6 +719,10 @@ final class ScreenshotController {
             guard let s = session, let e = Self.keyEvent(arg, window: s.mouseDisplay?.panel) else { return "key:SPEC (overlay up)" }
             _ = s.handleKey(e)
         case "copy": session?.finish(.copy)
+        case "text": session?.finish(.text)
+        case "mode":
+            guard let s = session, arg == "text" || arg == "screenshot" else { return "mode:text|screenshot (overlay up)" }
+            if s.textMode != (arg == "text") { s.toggleTextMode() }
         case "accept": session?.finish(.accept)
         case "pin": session?.finish(.pin)
         case "save":
@@ -665,7 +740,7 @@ final class ScreenshotController {
         case "side-panel":
             session?.toggleSidePanel()
         default:
-            return "show[:MS] | select:X,Y,W,H | tool:NAME | draw:X1,Y1,X2,Y2 | key:SPEC | copy | accept | save:PATH | save-ok | pin | unpin | close | side-panel"
+            return "show[:MS] | show-text[:MS] | mode:text|screenshot | text | select:X,Y,W,H | tool:NAME | draw:X1,Y1,X2,Y2 | key:SPEC | copy | accept | save:PATH | save-ok | pin | unpin | close | side-panel"
         }
         return nil
     }
@@ -725,6 +800,10 @@ final class ScreenshotController {
         }
         st["tool"] = s.tool?.rawValue ?? NSNull()
         st["moveMode"] = s.moveMode
+        st["textMode"] = s.textMode
+        if let p = (s.mouseDisplay ?? s.displays.first)?.view.modePillFrame {
+            st["modePill"] = ["x": p.minX, "y": p.minY, "w": p.width, "h": p.height]
+        }
         st["size"] = s.activeSize ?? NSNull()
         st["color"] = s.currentColor.hex
         st["objects"] = s.doc.objects.map { o -> [String: Any] in

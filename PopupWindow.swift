@@ -10348,7 +10348,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
 
     // show (and focus) or hide the terminal drawer; showing a shown drawer
-    // just refocuses it (Hyper+T)
+    // just refocuses it
     public func setTerminalDrawer(_ show: Bool) {
         guard let drawer = terminalDrawer else { return }
         // manual recreate: if the drawer is coming back up with a dead shell

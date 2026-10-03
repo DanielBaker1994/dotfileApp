@@ -210,12 +210,9 @@ W = ['main']
     # the view you were last on (notes, AI, files, jira, confluence); switch
     # views inside it (Ctrl+Tab, header icons) or from the Hyper+S palette.
     alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher window'
-    # Notes terminal: Hyper+T — notes + its terminal drawer, focused; in the
-    # terminal already -> close the drawer, focus the notes editor.
-    alt-cmd-ctrl-shift-t = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher terminal'
     # Screenshot: Hyper+X (Flameshot's macOS default is Ctrl+Shift+X) —
     # freeze + dim every display, drag a box, annotate, Cmd+C / Cmd+S / pin.
-    # Same binary ping as N/T; the overlay never activates the app.
+    # Same binary ping as N; the overlay never activates the app.
     alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher screenshot'
     # ws-settings: Hyper+/ — every shortcut + setting in one searchable list
     # (bin/ws-settings open: focuses the picker if it's up, else opens it in

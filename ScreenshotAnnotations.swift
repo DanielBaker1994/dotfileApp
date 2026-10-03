@@ -21,6 +21,7 @@ enum ShotTool: String, CaseIterable {
     // the rest of the ring
     case badge = "size"            // W / H of the selection (Flameshot's selection indicator)
     case move, undo, redo, copy, save, accept, exit, pin
+    case copyText = "copy-text"   // OCR the selection → the clipboard (Copy Text mode)
     case sizeUp = "size-increase", sizeDown = "size-decrease"
 
     enum Kind { case draw, mode, action, info }
@@ -36,7 +37,7 @@ enum ShotTool: String, CaseIterable {
     }
     var isDrawing: Bool { kind == .draw }
     // closes the capture when used
-    var finishes: Bool { [.copy, .save, .accept, .exit, .pin].contains(self) }
+    var finishes: Bool { [.copy, .save, .accept, .exit, .pin, .copyText].contains(self) }
 
     // the single-letter key (capture mode, no modifier)
     var letter: Character? {
@@ -80,6 +81,7 @@ enum ShotTool: String, CaseIterable {
         case .accept: return "checkmark"
         case .exit: return "xmark"
         case .pin: return "pin.fill"
+        case .copyText: return "text.viewfinder"
         case .sizeUp: return "plus"
         case .sizeDown: return "minus"
         }
@@ -108,6 +110,7 @@ enum ShotTool: String, CaseIterable {
         case .accept: return "Accept the capture (Return)"
         case .exit: return "Leave the capture screen (⌘Q)"
         case .pin: return "Pin image on the desktop"
+        case .copyText: return "Copy the text in the selection (⇧⌘C)"
         case .sizeUp: return "Increase tool size"
         case .sizeDown: return "Decrease tool size"
         }
@@ -130,7 +133,7 @@ enum ShotTool: String, CaseIterable {
 
     // the ring's default order on macOS (12.1 observed): uploader / open-app
     // left out, accept + size buttons hidden
-    static let defaultButtons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, save, exit, pin"
+    static let defaultButtons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin"
 
     // `[screenshot] buttons` → the ring, in order; the size badge goes
     // right after the last drawing tool unless listed ("size") or hidden
@@ -1105,7 +1108,7 @@ enum ShotFiles {
 
 // `workspace-switcher screenshot [gui|full|screen] [flags]` (Flameshot's)
 struct ShotArgs: Equatable {
-    enum Mode: String { case gui, full, screen }
+    enum Mode: String { case gui, text, full, screen }   // text = gui in Copy Text mode
     var mode = Mode.gui
     var path: String?
     var clipboard = false
@@ -1117,6 +1120,8 @@ struct ShotArgs: Equatable {
     var raw = false
     var printGeometry = false
     var screenNumber: Int?
+
+    var isOverlay: Bool { mode == .gui || mode == .text }
 
     // the socket reply carries a result (-r / -g)
     var wantsReply: Bool { raw || printGeometry }

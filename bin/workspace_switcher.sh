@@ -9,7 +9,6 @@
 #   workspace_switcher.sh notes      open ONLY the notes window (no popup)
 #   workspace_switcher.sh jira       open ONLY the jira window (no popup)
 #   workspace_switcher.sh voice      open ONLY the voice-to-text window
-#   workspace_switcher.sh terminal   notes + its terminal drawer (Hyper+T)
 #   workspace_switcher.sh jira-poll [on|off|toggle|setup]
 #                                    THE jira switch ([jira] enabled + the
 #                                    launchd poll agent) — NOT the window
@@ -133,8 +132,7 @@ case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
         # attribution and would answer future pings forever)
         pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
         # cold start: Hyper+N ("window") opens the first view, files —
-        # main.swift maps it; only the terminal drawer needs notes
-        [ "$MODE" = "terminal" ] && MODE=notes
+        # main.swift maps it
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
             LOG "LaunchServices launch FAILED — voice permissions will be broken"
         fi

@@ -325,9 +325,11 @@ ignore-file = "config/paths.ignore"
 # S rectangle, R filled rectangle, C circle, M marker, T text, counter,
 # B pixelate, I invert; wheel = size, right-click = colors, Space = side
 # panel, Cmd+C / Return copy, Cmd+S save, Pin, Esc unwinds one step at a
-# time. A tool panel: it never activates the app. Needs Screen Recording
+# time. Copy Text mode (Tab / O / the pill at the top): drag over text → it
+# is recognized on device (Apple Vision) and copied; ⇧⌘C / the copy-text
+# button does the same for a screenshot selection. A tool panel: it never activates the app. Needs Screen Recording
 # (System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording).
-# CLI: workspace-switcher screenshot [gui|full|screen] [-p PATH] [-c] [-d MS]
+# CLI: workspace-switcher screenshot [gui|text|full|screen] [-p PATH] [-c] [-d MS]
 #      [--region WxH+X+Y|screenN] [--last-region] [-s] [--pin] [-r] [-g] [-n N]
 # Defaults are Flameshot's; this file carries the owner's flameshot.ini
 # (contrast-opacity 188, draw-color #288000, save-path /private/tmp).
@@ -338,6 +340,12 @@ ignore-file = "config/paths.ignore"
 #                       also accept, size-increase, size-decrease)
 #   button-size         0 = system font line height x 2.2, else 20-80
 #   return              what Return / Accept does: copy | save | pin
+#   start-mode          what Hyper+X opens in: screenshot | text (Copy Text)
+#   text-languages      OCR languages, comma-separated (en-US, de-DE …);
+#                       "" = detected automatically
+#   text-correction     true (default) = Vision's language correction
+#   text-toast          after Copy Text ({} = "3 lines" / "42 characters");
+#                       "" = no toast
 #   preview             true (default) = after a copy / save the capture also
 #                       opens in the file preview popup (zoom, edge resize,
 #                       Esc closes); the clipboard / file are written either way
@@ -355,7 +363,7 @@ contrast-color = "#270032"
 contrast-opacity = 188
 draw-color = "#288000"
 user-colors = "picker, #800000, #ff0000, #ffff00, #00ff00, #008000, #00ffff, #0000ff, #ff00ff, #800080"
-buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, save, exit, pin"
+buttons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin"
 button-size = 0
 show-help = true
 show-side-panel-button = true
@@ -364,6 +372,11 @@ magnifier = false
 square-magnifier = false
 copy-on-double-click = false
 return = "copy"
+start-mode = "screenshot"
+text-languages = ""
+text-correction = true
+text-toast = "Copied {} to clipboard"
+no-text-toast = "No text found"
 save-path = "/private/tmp"
 save-path-fixed = false
 filename-pattern = "%F_%H-%M"
@@ -389,7 +402,10 @@ help-copy = "Copy selection to clipboard"
 help-wheel = "Change tool size"
 help-right-click = "Show color picker"
 help-space = "Open side panel"
+help-copy-text = "Copy text mode"
 help-esc = "Exit"
+help-text = "Drag over text to copy it"
+help-text-mode = "Back to screenshot mode"
 
 # /pane-shot: the focused herdr pane (its scrollback + the visible screen) as
 # ONE tall image, drawn off screen in Ghostty's font + colors (ghostty
@@ -675,7 +691,6 @@ workspace-switcher = "*:app"
 [shortcuts]
 "all: Hyper+S" = "switcher palette: search windows + commands"
 "all: Hyper+N" = "show the window on the view you were last in / hide it"
-"all: Hyper+T" = "notes terminal drawer (open + focus / close)"
 "all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
 "all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
@@ -756,6 +771,8 @@ workspace-switcher = "*:app"
 "screenshot: Cmd+Z / Cmd+Shift+Z" = "undo / redo"
 "screenshot: Cmd+C / Ctrl+C / Return" = "copy and close (Return = [screenshot] return)"
 "screenshot: Cmd+S" = "save and close"
+"screenshot: Tab / O" = "Copy Text mode: drag over text → recognized + copied (Tab again = back)"
+"screenshot: Cmd+Shift+C" = "copy the TEXT in the selection (OCR) and close"
 "screenshot: Cmd+Return" = "finish the text being typed"
 "screenshot: Delete" = "delete the selected object"
 "screenshot: Mouse wheel" = "tool / object size (Cmd+wheel: the next counter number)"

@@ -1441,6 +1441,8 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         switch key {
         case "return":
             return ["copy", "save", "pin"].contains(value.lowercased()) ? nil : "'\(value)' is not one of copy | pin | save"
+        case "start-mode":
+            return ["screenshot", "text"].contains(value.lowercased()) ? nil : "'\(value)' is not one of screenshot | text"
         case "save-format":
             return ["png", "jpg", "jpeg"].contains(value.lowercased()) ? nil : "'\(value)' is not one of jpg | png"
         case "button-size":
@@ -3078,26 +3080,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // Hyper+T: the notes terminal drawer. Notes not on screen (or you're in
-    // another app) -> notes with the terminal up + focused; terminal up and
-    // you're in it -> close it, focus the editor; else open + focus it.
-    func slotToggleTerminal(userInIt: Bool?) {
-        let notesUp = slot.current == .notes && slot.isVisible
-        if !notesUp {
-            slot.open(.notes)
-            noteWindow?.setTerminalDrawer(true)
-            return
-        }
-        guard let w = noteWindow else { return }
-        let inIt = userInIt ?? (w.nativeWindow.isKeyWindow && NSApp.isActive)
-        if !inIt {
-            w.unpark(frame: nil)
-            w.setTerminalDrawer(true)
-        } else {
-            w.setTerminalDrawer(!w.terminalShown)
-        }
-    }
-
     // an opener about to show a slot window: place it at the shared frame
     func placeSlotWindow(_ w: PopupWindow) {
         guard settings.sharedWindow, slotView(of: w) != nil else { return }
@@ -3270,8 +3252,8 @@ final class SwitcherController: NSObject {
     }
 
     // the messages that show the shared window: "window" = Hyper+N (show the
-    // last view / hide), "terminal" = Hyper+T; the named views are CLI only
-    static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "terminal", "confluence", "ai"]
+    // last view / hide), the named views are CLI only
+    static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "confluence", "ai"]
 
     // what hotkeyPrep found at the keypress (handed to the main thread)
     struct HotkeyPrep {
@@ -3607,7 +3589,7 @@ final class SwitcherController: NSObject {
                             let path = String(name.dropFirst(5))
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
                         } else if settings.sharedWindow && Self.hotkeyModes.contains(name) {
-                            // Hyper+N (window) / Hyper+T, or a named view from the CLI
+                            // Hyper+N (window), or a named view from the CLI
                             self?.toggleCommand(name)
                         } else if name == "notes" {
                             self?.showNotes()
@@ -3877,17 +3859,6 @@ final class SwitcherController: NSObject {
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
             slot.toggle(userInIt: userInOurWindow(pid, name))
-            return
-        }
-        if name == "terminal" {
-            guard settings.sharedWindow else {
-                showNotes()
-                noteWindow?.setTerminalDrawer(true)
-                return
-            }
-            let (wid, pid) = readFocusFile()
-            if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
-            slotToggleTerminal(userInIt: userInOurWindow(pid, name))
             return
         }
         if name == "confluence" {

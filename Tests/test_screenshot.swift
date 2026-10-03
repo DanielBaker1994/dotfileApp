@@ -1,12 +1,14 @@
-// sources: ScreenshotAnnotations.swift
+// sources: ScreenshotAnnotations.swift ScreenshotText.swift
 // /screenshot's pure parts (ScreenshotAnnotations.swift): the button ring's
 // placement at every screen edge + its fallbacks, counter renumbering,
 // undo / redo limits, Shift snapping, secure pixelate (no hidden pixel
-// survives), the filename pattern + clash suffix, the output size, the CLI.
+// survives), the filename pattern + clash suffix, the output size, the CLI,
+// Copy Text (ScreenshotText.swift): reading order + real Vision OCR.
 // Usage: bin/run-tests.sh screenshot
 
 import Foundation
 import CoreGraphics
+import CoreText
 
 var passed = 0
 var failed = 0
@@ -33,6 +35,7 @@ struct ScreenshotTests {
         fileTests()
         argTests()
         colorTests()
+        ocrTests()
         print("screenshot: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }
@@ -47,7 +50,7 @@ struct ScreenshotTests {
     static func ringTests() {
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let ring = ShotTool.ring(ShotTool.defaultButtons, badge: true)
-        check(ring.count == 19, "default ring = 18 buttons + the size badge (\(ring.count))")
+        check(ring.count == 20, "default ring = 19 buttons (copy-text incl.) + the size badge (\(ring.count))")
         check(ring.firstIndex(of: .badge) == 11, "badge right after the last drawing tool")
         check(Array(ring.prefix(11)) == [.pencil, .line, .arrow, .selection, .rectangle, .circle, .marker, .text, .counter, .pixelate, .invert],
               "bottom-row tools in Flameshot's order")
@@ -329,6 +332,9 @@ struct ScreenshotTests {
             check(a.mode == .screen && a.screenNumber == 1 && a.clipboard && !a.wantsReply, "screen -n")
         } else { check(false, "screen") }
         if case .success(let a) = ShotArgs.parse(["full", "--region", "screen0"]) { check(a.mode == .full && a.region == "screen0", "screenN region") }
+        if case .success(let a) = ShotArgs.parse(["text", "-r"]) { check(a.mode == .text && a.isOverlay && a.raw, "text mode") } else { check(false, "text mode") }
+        check(ShotTool.ring(ShotTool.defaultButtons, badge: false).contains(.copyText), "copy-text in the default ring")
+        check(ShotTool.copyText.finishes && ShotTool.copyText.kind == .action, "copy-text is a finishing action")
         if case .failure = ShotArgs.parse(["-d", "x"]) { check(true, "bad delay") } else { check(false, "bad delay accepted") }
         if case .failure = ShotArgs.parse(["--bogus"]) { check(true, "unknown flag") } else { check(false, "unknown flag accepted") }
         if case .failure = ShotArgs.parse(["--region", "12"]) { check(true, "bad region") } else { check(false, "bad region accepted") }
@@ -347,5 +353,51 @@ struct ScreenshotTests {
         let c = ShotColor(hex: "#3366cc")!
         let hsv = c.hsv
         check(ShotColor(h: hsv.h, s: hsv.s, v: hsv.v).hex == "#3366cc", "HSV round trip")
+    }
+
+    // MARK: Copy Text
+
+    static func line(_ t: String, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat = 100, _ h: CGFloat = 20) -> ShotOCRLine {
+        ShotOCRLine(text: t, box: CGRect(x: x, y: y, width: w, height: h))
+    }
+
+    // black text on white at 2× (a Retina capture), top-left line origins
+    static func textImage(_ lines: [(String, CGFloat, CGFloat)], size: CGSize, font: CGFloat = 15) -> CGImage {
+        let k: CGFloat = 2
+        let ctx = CGContext(data: nil, width: Int(size.width * k), height: Int(size.height * k), bitsPerComponent: 8,
+                            bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: size.width * k, height: size.height * k))
+        let f = CTFontCreateWithName("Helvetica" as CFString, font * k, nil)
+        for (t, x, y) in lines {
+            let attr = NSAttributedString(string: t, attributes: [kCTFontAttributeName as NSAttributedString.Key: f,
+                                                                   kCTForegroundColorAttributeName as NSAttributedString.Key: CGColor(red: 0, green: 0, blue: 0, alpha: 1)])
+            let l = CTLineCreateWithAttributedString(attr)
+            ctx.textPosition = CGPoint(x: x * k, y: (size.height - y - font) * k)
+            CTLineDraw(l, ctx)
+        }
+        return ctx.makeImage()!
+    }
+
+    static func ocrTests() {
+        // layout (pure)
+        check(ShotOCR.join([]) == "", "nothing → empty")
+        check(ShotOCR.join([line("second", 0, 30), line("first", 0, 0)]) == "first\nsecond", "rows top → bottom")
+        check(ShotOCR.join([line("right", 200, 2), line("left", 0, 0)]) == "left right", "one row, left → right")
+        check(ShotOCR.join([line("a", 0, 0), line("b", 0, 25), line("c", 0, 90)]) == "a\nb\n\nc", "a tall gap = a paragraph")
+        check(ShotOCR.join([line("  pad  ", 0, 0)]) == "pad", "trimmed")
+        check(ShotOCR.summary("one line") == "8 characters" && ShotOCR.summary("a\nb\nc") == "3 lines", "toast summary")
+
+        // real Vision, on device
+        let img = textImage([("Copy Text reads the screen", 20, 20), ("Second line here", 20, 48),
+                             ("A new paragraph", 20, 120)], size: CGSize(width: 420, height: 170))
+        let got = ShotOCR.text(img)
+        check(got == "Copy Text reads the screen\nSecond line here\n\nA new paragraph", "OCR + layout, got: \(got.debugDescription)")
+        // a one-line crop (upscaled before Vision)
+        let small = textImage([("Invoice 4815162342", 4, 4)], size: CGSize(width: 200, height: 24), font: 12)
+        let s2 = ShotOCR.text(small)
+        check(s2 == "Invoice 4815162342", "small crop, got: \(s2.debugDescription)")
+        check(ShotOCR.text(textImage([], size: CGSize(width: 100, height: 100))) == "", "blank → no text")
     }
 }

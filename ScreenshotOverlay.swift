@@ -7,7 +7,7 @@ import AppKit
 // Tool-panel rules (AGENT_CONTEXT "Tool panels"): non-activating panels,
 // never NSApp.activate, no didBecomeActive observer.
 
-enum ShotOutcome: String { case copy, save, pin, accept, abort }
+enum ShotOutcome: String { case copy, save, pin, accept, abort, text }   // text = OCR → clipboard
 
 // MARK: - Panel
 
@@ -101,6 +101,8 @@ final class ShotSession {
     private(set) var selection: CGRect?            // in the active display's points
     private(set) var tool: ShotTool?
     private(set) var moveMode = false
+    // Copy Text mode (Tab / O / the mode pill): a drag = OCR → clipboard
+    private(set) var textMode = false
     private(set) var color: ShotColor
     private(set) var counterOffset = 0
     var sidePanelOpen: Bool { active.map { $0.view.sidePanel != nil } ?? false }
@@ -137,6 +139,7 @@ final class ShotSession {
         color = state.color.flatMap { ShotColor(hex: $0) } ?? cfg.drawColor
         // the text tool's font: the side panel's pick, else [screenshot] font
         if state.style.family.isEmpty { state.style.family = cfg.font }
+        textMode = args.mode == .text || (args.mode == .gui && cfg.startText)
     }
 
     // MARK: state
@@ -205,6 +208,21 @@ final class ShotSession {
         doc.selected = nil
         redrawAll()
     }
+    // the selection + its drawings stay: switching back shows the ring again
+    func toggleTextMode() {
+        commitText()
+        closeWheel()
+        if grabbing != nil { cancelGrab() }
+        if sidePanelOpen { toggleSidePanel(open: false) }
+        if shortcutsShown { hideShortcuts() }
+        textMode.toggle()
+        tool = nil
+        moveMode = false
+        doc.selected = nil
+        for d in displays { d.view.invalidate(nil) }
+        redrawAll()
+    }
+
     func toggleMoveMode() {
         commitText()
         moveMode.toggle()
@@ -295,6 +313,13 @@ final class ShotSession {
             return
         }
         if editing != nil { commitText(); return }
+        if textMode {
+            drag = .selecting(start: p)
+            select(CGRect(origin: p, size: .zero), on: d)
+            d.view.ringHidden = true
+            redrawAll()
+            return
+        }
         let inActive = d === active
         // copy on double-click (inside the selection, no tool)
         if e.clickCount == 2, inActive, let s = selection, s.contains(p) {
@@ -387,6 +412,7 @@ final class ShotSession {
         case .none: break
         case .selecting:
             if let s = selection, s.width < 2 || s.height < 2 { select(nil, on: active) }
+            if textMode, selection != nil { finish(.text); return }
             if args.acceptOnSelect, selection != nil { finish(.accept); return }
         case .resizing, .movingSelection: break
         case .drawing(var o):
@@ -628,6 +654,15 @@ final class ShotSession {
         if shortcutsShown { hideShortcuts(); return true }
         if cmd && ch == "q" { finish(.abort); return true }
         if cmd && ch == "/" { showShortcuts(); return true }
+        if code == 48 && !cmd && !ctrl && !opt { toggleTextMode(); return true }   // Tab
+        if cmd && shift && ch == "c" { finish(.text); return true }
+        if textMode {
+            if (cmd || ctrl) && ch == "c" { finish(.text); return true }
+            if code == 36 || code == 76 { finish(.text); return true }
+            if cmd && ch == "a" { selectAll(); finish(.text); return true }   // the whole screen's text
+            if !cmd && !ctrl && !opt && ch == "o" { toggleTextMode() }
+            return true   // no tools, no drawing keys in this mode
+        }
         if (cmd || ctrl) && ch == "c" && !shift { finish(.copy); return true }
         if cmd && ch == "s" { requestSave(); return true }
         if cmd && ch == "a" { selectAll(); return true }
@@ -650,6 +685,7 @@ final class ShotSession {
         if !cmd && !ctrl && !opt {
             if ch == " " { toggleSidePanel(); return true }
             if ch == "g" { startGrab(); return true }
+            if ch == "o" { toggleTextMode(); return true }
             if let c = ch.first, let t = ShotTool.forLetter(c) { setTool(t); return true }
         }
         // nothing else reaches the app (Cmd+W, Cmd+H … would act on the daemon)
@@ -685,6 +721,7 @@ final class ShotSession {
         case .accept: finish(.accept)
         case .exit: finish(.abort)
         case .pin: finish(.pin)
+        case .copyText: finish(.text)
         case .sizeUp: changeSize(1)
         case .sizeDown: changeSize(-1)
         default: break
@@ -741,9 +778,9 @@ final class ShotSession {
     }
 
     // the output image: the selection at native scale + every object
-    func render() -> CGImage? {
+    func render(objects: Bool = true) -> CGImage? {
         guard let d = active, let s = selection else { return nil }
-        return ShotRenderer.render(d.canvas, crop: s, objects: doc.objects)
+        return ShotRenderer.render(d.canvas, crop: s, objects: objects ? doc.objects : [])
     }
 
     // MARK: test hooks
@@ -777,7 +814,9 @@ final class ShotOverlayView: NSView {
     private var buttons: [ShotButton] = []
     private var ringTools: [ShotTool] = []
     private var help: ShotHelpCard?
+    private var helpIsText = false
     private var tab: ShotToolTab?
+    private var modePill: ShotModePill?
     private(set) var sidePanel: ShotSidePanel?
     private var indicator: ShotSizeIndicator?
     private var wheelView: ShotWheelView?
@@ -814,14 +853,14 @@ final class ShotOverlayView: NSView {
         for v in subviews { v.removeFromSuperview() }
         buttons = []
         ringTools = []
-        help = nil; tab = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
+        help = nil; tab = nil; modePill = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
         needsDisplay = true
         layoutChrome()
     }
     func detach() {
         for v in subviews { v.removeFromSuperview() }
         buttons = []
-        help = nil; tab = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
+        help = nil; tab = nil; modePill = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
         session = nil
         display = nil
     }
@@ -880,6 +919,14 @@ final class ShotOverlayView: NSView {
         }
         // the border + 8 round handles (60% of the button size)
         ctx.setStrokeColor(cfg.uiColor.cgColor)
+        if s.textMode {
+            // Copy Text: a dashed marquee, no handles (a drag always starts anew)
+            ctx.setLineWidth(2)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.stroke(sel.insetBy(dx: -1, dy: -1))
+            ctx.setLineDash(phase: 0, lengths: [])
+            return
+        }
         ctx.setLineWidth(1)
         ctx.stroke(sel.insetBy(dx: -0.5, dy: -0.5))
         if !s.isDragging || ringHidden {
@@ -918,9 +965,11 @@ final class ShotOverlayView: NSView {
         let mine = s.active === d ? s.selection : nil
         // help card: centered on the screen under the mouse, no selection anywhere
         let showHelp = cfg.showHelp && s.selection == nil && s.mouseDisplay === d
+        if help != nil && helpIsText != s.textMode { help?.removeFromSuperview(); help = nil }
         if showHelp {
             if help == nil {
-                let h = ShotHelpCard(rows: cfg.helpRows, ui: cfg.uiColor)
+                let h = ShotHelpCard(rows: s.textMode ? cfg.helpTextRows : cfg.helpRows, ui: cfg.uiColor)
+                helpIsText = s.textMode
                 addSubview(h, positioned: .below, relativeTo: nil)
                 help = h
             }
@@ -933,7 +982,26 @@ final class ShotOverlayView: NSView {
             help = nil
         }
         // "Tool Settings": the left edge, centered vertically
-        let showTab = cfg.showSidePanelButton && sidePanel == nil && (mine != nil || (s.selection == nil && s.mouseDisplay === d))
+        // the mode pill (Screenshot | Copy Text): top-center of the mouse's
+        // display, out of the way while a drag runs
+        if s.mouseDisplay === d && !s.isDragging {
+            if modePill == nil {
+                let m = ShotModePill(ui: cfg.uiColor) { [weak s] text in
+                    if let s, s.textMode != text { s.toggleTextMode() }
+                }
+                addSubview(m)
+                modePill = m
+            }
+            if let m = modePill {
+                m.textMode = s.textMode
+                let top = max(window?.screen.map { $0.frame.maxY - $0.visibleFrame.maxY } ?? 0, 24)
+                m.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2).rounded(), y: top + 12)
+            }
+        } else {
+            modePill?.removeFromSuperview()
+            modePill = nil
+        }
+        let showTab = !s.textMode && cfg.showSidePanelButton && sidePanel == nil && (mine != nil || (s.selection == nil && s.mouseDisplay === d))
         if showTab {
             if tab == nil {
                 let t = ShotToolTab(ui: cfg.uiColor) { [weak s] in s?.toggleSidePanel(open: true) }
@@ -946,7 +1014,7 @@ final class ShotOverlayView: NSView {
             tab = nil
         }
         // the ring
-        guard let sel = mine, !ringHidden else {
+        guard let sel = mine, !ringHidden, !s.textMode else {
             for b in buttons { b.isHidden = true }
             if mine == nil { buttons.forEach { $0.removeFromSuperview() }; buttons = [] }
             return
@@ -978,6 +1046,7 @@ final class ShotOverlayView: NSView {
         buttons.filter { !$0.isHidden }.map { ($0.tool, $0.frame) }
     }
     var helpShown: Bool { help != nil }
+    var modePillFrame: CGRect? { modePill?.frame }
 
     // MARK: transient views
 
@@ -1294,6 +1363,70 @@ final class ShotToolTab: NSView {
         ctx.rotate(by: .pi / 2)
         (text as NSString).draw(at: CGPoint(x: -sz.width / 2, y: -sz.height / 2), withAttributes: attrs)
         ctx.restoreGState()
+    }
+}
+
+// "Screenshot | Copy Text": the overlay's mode switch (Tab / O toggle it)
+final class ShotModePill: NSView {
+    private let ui: ShotColor
+    private let action: (Bool) -> Void
+    private let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private let segments: [(symbol: String, title: String)] = [("camera", "Screenshot"), ("text.viewfinder", "Copy Text")]
+    private var widths: [CGFloat] = []
+    var textMode = false { didSet { if textMode != oldValue { needsDisplay = true } } }
+
+    init(ui: ShotColor, action: @escaping (Bool) -> Void) {
+        self.ui = ui
+        self.action = action
+        super.init(frame: .zero)
+        widths = segments.map { ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) + 16 + 6 + 24 }
+        frame = NSRect(x: 0, y: 0, width: widths.reduce(8, +), height: 34)
+        wantsLayer = true
+        layer?.cornerRadius = 17
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        layer?.borderWidth = 1
+        toolTip = "Switch mode (Tab)"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
+    override func cursorUpdate(with event: NSEvent) { NSCursor.arrow.set() }
+    override func mouseUp(with event: NSEvent) {
+        let x = convert(event.locationInWindow, from: nil).x
+        action(x >= 4 + (widths.first ?? 0))
+    }
+
+    private func segmentRect(_ i: Int) -> CGRect {
+        let x = 4 + widths.prefix(i).reduce(0, +)
+        return CGRect(x: x, y: 4, width: widths[i], height: bounds.height - 8)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (i, seg) in segments.enumerated() {
+            let r = segmentRect(i)
+            let on = (i == 1) == textMode
+            if on, let ctx = NSGraphicsContext.current?.cgContext {
+                ctx.setFillColor(ui.cgColor)
+                ctx.addPath(CGPath(roundedRect: r, cornerWidth: r.height / 2, cornerHeight: r.height / 2, transform: nil))
+                ctx.fillPath()
+            }
+            let fg: NSColor = on ? (ui.isDark ? .white : .black) : NSColor.white.withAlphaComponent(0.75)
+            let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold).applying(.init(paletteColors: [fg]))
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
+            let tw = (seg.title as NSString).size(withAttributes: attrs)
+            let content = 16 + 6 + tw.width
+            var x = r.minX + (r.width - content) / 2
+            if let img = NSImage(systemSymbolName: seg.symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+                let s = img.size
+                img.draw(in: CGRect(x: x + (16 - s.width) / 2, y: r.midY - s.height / 2, width: s.width, height: s.height),
+                         from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
+            x += 16 + 6
+            (seg.title as NSString).draw(at: CGPoint(x: x, y: r.midY - tw.height / 2), withAttributes: attrs)
+        }
     }
 }
 

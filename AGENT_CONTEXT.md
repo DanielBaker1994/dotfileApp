@@ -471,6 +471,19 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   indicator, `ShotWheelView` (right-click), `ShotLoupe` (G / magnifier),
   `ShotTextField` (NSTextView in the object's font), `ShotSidePanel`
   (size, color, HSV disc, hex, grid, text style, Layers), `ShotSaveCard`.
+- Copy Text mode (OCR, ScreenOCR-style): `ScreenshotText.swift` (Foundation
+  + Vision, no AppKit) — `ShotOCR.recognize` (`VNRecognizeTextRequest`
+  .accurate, auto language unless `text-languages`; crops < 64 px tall
+  upscaled 2×) + `ShotOCR.join` (rows by vertical center, left → right, a
+  gap taller than a line = blank line). Overlay: `ShotSession.textMode`
+  (Tab / O / `ShotModePill` top-center; `start-mode`, CLI `screenshot
+  text`): no ring / tab, dashed marquee, mouse-up = `finish(.text)`;
+  ⇧⌘C / ring `copy-text` from screenshot mode. `ShotOutcome.text` →
+  `ScreenshotController.deliverText`: the crop WITHOUT drawings, Vision off
+  main, one `.string` item (`copyText`, `onOwnPasteboardWrite`), toast
+  `text-toast` / `no-text-toast`; `-r` answers the text. Hooks:
+  `do:screenshot:show-text | mode:text|screenshot | text`; state
+  `textMode`, `modePill`, `last {outcome: text, chars, text, ms}`.
 - Save (spike A5): an `NSSavePanel` shown from the non-activating overlay
   appears but never gets the keyboard (key window empty, the other app
   stays frontmost); clicking it ACTIVATES the app. So Cmd+S opens
@@ -939,11 +952,11 @@ Line numbers drift; grep the symbol names (they're stable).
    bar (single Esc closes bar), Esc (streak), Cmd+S, Cmd+O.
 4. list navigation (Up/Down/Tab/C-n/C-p/Return), then Esc (streak).
 
-## Hotkey fast path (Hyper+N / T)
+## Hotkey fast path (Hyper+N)
 
-- ONLY two window hotkeys besides Hyper+S: Hyper+N = `window`
+- ONLY one window hotkey besides Hyper+S: Hyper+N = `window`
   (`SharedWindow.toggle`: hidden → the view you were LAST on (`last`), in it →
-  hide, elsewhere → focus) and Hyper+T. No per-view hotkeys (Hyper+F / J
+  hide, elsewhere → focus). No per-view hotkeys (Hyper+F / J
   removed): views switch via Ctrl+Tab, header icons, the Hyper+S palette.
   The named modes (`notes|files|jira|confluence|ai`) remain as CLI / socket
   messages. Hyper+X = `screenshot` (a tool panel, not a view: no
@@ -979,9 +992,8 @@ Line numbers drift; grep the symbol names (they're stable).
   no script) and the daemon watches it (DispatchSource vnode, no poll).
 - The script builds only when no daemon answers / `WS_BUILD_ONLY`;
   `./build.sh` runs `build-app.sh` itself. `WS_DEBUG=1` → `$TMPDIR/ws-launch.log`.
-- Hyper+T (`terminal` → `slotToggleTerminal`): notes hidden / you're
-  elsewhere → notes + terminal drawer focused; in it → drawer toggles (close
-  = editor focused). `PopupWindow.setTerminalDrawer(_:)`.
+- Hyper+T was removed (no binding, no `terminal` mode). The notes terminal
+  drawer: Cmd+Opt+T / menu / `do:toggle-terminal`. `PopupWindow.setTerminalDrawer(_:)`.
 - Drawer bookkeeping: `drawerInsetNow` counts only what the window really
   grew (clamped at screen height), so closing a drawer never shrinks it more;
   a resize only ever lowers it. Drawer-mode file browser is bottom-anchored,
@@ -1026,6 +1038,34 @@ Line numbers drift; grep the symbol names (they're stable).
   focus only walks tiles (reach popups by hotkey), or place the window so
   its center lands clearly on one side of a tile.
 
+## Adding / removing a global hotkey (checklist)
+
+A Hyper+KEY hotkey (Hyper = alt-cmd-ctrl-shift, caps_lock via Karabiner) touches
+these places — grep the key / mode name in all of them (Hyper+T removal is the
+worked example):
+
+1. `config/aerospace/aerospace.toml` — the `alt-cmd-ctrl-shift-KEY =
+   'exec-and-forget …/workspace-switcher MODE'` binding (+ its comment). The
+   repo copy; `~/.config/aerospace` is a symlink. Check with
+   `aerospace reload-config --dry-run --no-gui`, apply with `--no-gui`.
+2. `workspace_switcher.swift` — `SwitcherController.hotkeyModes` (message
+   names that run `hotkeyPrep`; `main.swift` pings the socket for these),
+   `toggleCommand(name)` (per-mode handler), the socket dispatch that calls
+   it (`hotkeyModes.contains(name)`), and any helper (e.g. `slotToggle…`).
+3. `main.swift` — cold-start `openCommand` mapping (`window` → files);
+   `bin/workspace_switcher.sh` — usage header + its cold-start `MODE` remap.
+4. `commands.toml` `[shortcuts]` — the `"all: Hyper+KEY" = "…"` row (feeds
+   Keyboard Shortcuts… and the ws-settings hub, which reads aerospace.toml
+   itself, so no hub change).
+5. Docs: this file ("Hotkey fast path", "Keyboard shortcuts"), `PRD-*.md`
+   examples, `.claude/skills/ui-check/SKILL.md` if a `do:` hook is named there.
+6. NOT part of it: in-window shortcuts (`PopupWindow.handleKey`, menu-bar
+   `key:` items such as Cmd+Opt+T), `do:ACTION` test hooks, Karabiner (dotfiles
+   repo; only Hyper+S/J/N-style bindings live there — caps_lock → Hyper is
+   generic, no per-key entry).
+7. Tool-panel hotkeys (Hyper+X) are NOT in `hotkeyModes` (no `hotkeyPrep`).
+8. After the edit: `./build.sh --build-only`, then reload aerospace.
+
 ## Keyboard shortcuts (user-facing)
 
 - Esc: hides a view only where its kitchen sink "Esc Hides Window" is on
@@ -1067,7 +1107,6 @@ Line numbers drift; grep the symbol names (they're stable).
   `selectedRows`): Shift-click / Shift+Up/Down range, Cmd-click toggle; a
   drag or right-click inside it acts on all of it; setting `rows` clears it.
 - Ctrl+J/K: move focus between editor / browser / terminal panes.
-- Hyper+T: notes terminal drawer (show + focus / close → editor).
 
 ## Theme system (keep every window on it)
 
