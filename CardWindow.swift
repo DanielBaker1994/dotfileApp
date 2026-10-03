@@ -21,8 +21,8 @@ final class CardNSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func sendEvent(_ event: NSEvent) {
-        headerTracker.track(event, in: self, band: headerBand) { p in
-            self.onHeaderClick?(NSPoint(x: p.x, y: self.frame.height - p.y))
+        if let p = headerTracker.track(event, in: self, band: headerBand) {
+            onHeaderClick?(NSPoint(x: p.x, y: frame.height - p.y))
         }
         super.sendEvent(event)
     }

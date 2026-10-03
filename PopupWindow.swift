@@ -853,9 +853,13 @@ protocol HeaderClickWindow: NSWindow {
 struct HeaderClickTracker {
     private var down: NSPoint?
 
-    mutating func track(_ event: NSEvent, in window: NSWindow, band: CGFloat,
-                        onClick: ((NSPoint) -> Void)?) {
-        guard band > 0 else { return }
+    // Returns the click point instead of calling back from inside the
+    // mutation: a click handler may pop up a menu (the kitchen sink), whose
+    // tracking loop routes more events into the window's sendEvent — a
+    // callback made while `self` is still being mutated is a Swift
+    // exclusivity violation (crash) on that re-entry.
+    mutating func track(_ event: NSEvent, in window: NSWindow, band: CGFloat) -> NSPoint? {
+        guard band > 0 else { return nil }
         let loc = event.locationInWindow
         switch event.type {
         case .leftMouseDown:
@@ -869,13 +873,12 @@ struct HeaderClickTracker {
             if let d = down {
                 down = nil
                 let up = NSEvent.mouseLocation
-                if abs(up.x - d.x) < 4, abs(up.y - d.y) < 4 {
-                    onClick?(loc)
-                }
+                if abs(up.x - d.x) < 4, abs(up.y - d.y) < 4 { return loc }
             }
         default:
             break
         }
+        return nil
     }
 }
 
@@ -902,7 +905,7 @@ public class PopupBaseWindow: NSWindow, EscapableWindow, HeaderClickWindow {
     public override var canBecomeMain: Bool { true }
 
     public override func sendEvent(_ event: NSEvent) {
-        headerTracker.track(event, in: self, band: headerClickBand, onClick: onHeaderClick)
+        if let p = headerTracker.track(event, in: self, band: headerClickBand) { onHeaderClick?(p) }
         super.sendEvent(event)
     }
 
@@ -931,7 +934,7 @@ public final class PopupPanel: NSPanel, EscapableWindow, HeaderClickWindow {
     private var headerTracker = HeaderClickTracker()
 
     public override func sendEvent(_ event: NSEvent) {
-        headerTracker.track(event, in: self, band: headerClickBand, onClick: onHeaderClick)
+        if let p = headerTracker.track(event, in: self, band: headerClickBand) { onHeaderClick?(p) }
         super.sendEvent(event)
     }
 
@@ -2826,12 +2829,36 @@ final class PopupTextView: NSTextView {
         onTextChange?()
     }
 
+    // click on a rendered photo -> full-size popup
+    var onOpenImage: ((String) -> Void)?
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 1, let lm = layoutManager, let tc = textContainer,
+           let path = imagePath(at: convert(event.locationInWindow, from: nil), lm, tc) {
+            onOpenImage?(path)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+    // the picture drawn exactly under `pt` (not the character nearest to it)
+    private func imagePath(at pt: NSPoint, _ lm: NSLayoutManager, _ tc: NSTextContainer) -> String? {
+        let o = textContainerOrigin
+        let p = NSPoint(x: pt.x - o.x, y: pt.y - o.y)
+        let g = lm.glyphIndex(for: p, in: tc, fractionOfDistanceThroughGlyph: nil)
+        guard lm.boundingRect(forGlyphRange: NSRange(location: g, length: 1), in: tc).contains(p) else { return nil }
+        return absolutePathAt?(lm.characterIndexForGlyph(at: g))
+    }
+
     // right-click on a rendered photo: copy its ABSOLUTE file path
     override func menu(for event: NSEvent) -> NSMenu? {
         let m = NSMenu()
         let pt = convert(event.locationInWindow, from: nil)
         let idx = characterIndexForInsertion(at: pt)
         if let path = absolutePathAt?(idx) {
+            let full = NSMenuItem(title: "Open Full Size", action: #selector(openFullSize(_:)),
+                                  keyEquivalent: "")
+            full.target = self
+            full.representedObject = path
+            m.addItem(full)
             let item = NSMenuItem(title: "copy image path",
                                   action: #selector(copyImagePath(_:)),
                                   keyEquivalent: "")
@@ -2867,6 +2894,10 @@ final class PopupTextView: NSTextView {
     var onOpenFileAtPath: (() -> Void)?
     @objc private func openFileAtPath(_ sender: NSMenuItem) {
         onOpenFileAtPath?()
+    }
+
+    @objc private func openFullSize(_ sender: NSMenuItem) {
+        if let path = sender.representedObject as? String { onOpenImage?(path) }
     }
 
     @objc private func copyImagePath(_ sender: NSMenuItem) {
@@ -6790,8 +6821,28 @@ final class VimImageOverlay: NSView {
     private var views: [NSView] = []   // top-level children (image or clip)
     private var cache: [String: (mtime: Date, image: NSImage)] = [:]
 
+    // click a picture = full-size popup; right-click = its menu. Everything
+    // outside the pictures stays click-through so vim keeps the mouse.
+    var onOpen: ((String) -> Void)?
+    var onMenu: ((String, NSEvent) -> Void)?
+    private var hits: [(rect: NSRect, path: String)] = []
+
     override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let p = convert(point, from: superview)
+        return hits.contains { $0.rect.contains(p) } ? self : nil
+    }
+    private func path(at event: NSEvent) -> String? {
+        let p = convert(event.locationInWindow, from: nil)
+        return hits.first { $0.rect.contains(p) }?.path
+    }
+    override func mouseDown(with event: NSEvent) {
+        if let p = path(at: event) { onOpen?(p) }
+    }
+    override func rightMouseDown(with event: NSEvent) {
+        if let p = path(at: event) { onMenu?(p, event) }
+    }
+    override var acceptsFirstResponder: Bool { false }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -6817,6 +6868,7 @@ final class VimImageOverlay: NSView {
     private func relayout() {
         views.forEach { $0.removeFromSuperview() }
         views = []
+        hits = []
         let limit = CGFloat(textRows) * cell.height
         for it in items {
             guard let img = image(it.path), img.size.width > 0, img.size.height > 0 else { continue }
@@ -6844,10 +6896,12 @@ final class VimImageOverlay: NSView {
                 clip.addSubview(iv)
                 addSubview(clip)
                 views.append(clip)
+                hits.append((clip.frame, it.path))
                 continue
             }
             addSubview(iv)
             views.append(iv)
+            hits.append((iv.frame, it.path))
         }
     }
 }
@@ -7764,6 +7818,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         tv.onCopyFilePath = { [weak self] in
             self?.onCopyFilePath?()
         }
+        tv.onOpenImage = { [weak self] path in
+            ImagePopup.show(path: path, over: self?.panel)
+        }
         tv.onPasteImage = { [weak self] img in
             guard let self, self.config.markdownImages,
                   let rel = self.imageSaver?(img) else { return }
@@ -7850,6 +7907,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         scroll.isHidden = true
         if config.vimImageFile != nil {
             let ov = VimImageOverlay(frame: vv.frame)
+            ov.onOpen = { [weak self] path in
+                ImagePopup.show(path: path, over: self?.panel)
+            }
+            ov.onMenu = { [weak self, weak ov] path, event in
+                guard let self, let ov else { return }
+                NSMenu.popUpContextMenu(self.imageMenu(path), with: event, for: ov)
+            }
             backdrop.addSubview(ov, positioned: .above, relativeTo: vv)
             vimImageOverlay = ov
         }
@@ -10583,6 +10647,39 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
               ["v", "V", "\u{16}"].contains(m) else { return false }
         vimRemote(cut ? "\"+d" : "\"+y")
         return true
+    }
+
+    // right-click on a picture in the note: the obvious actions
+    fileprivate func imageMenu(_ path: String) -> NSMenu {
+        let m = NSMenu()
+        m.autoenablesItems = false
+        let url = URL(fileURLWithPath: path)
+        m.addItem(menuItem("Open Full Size") { [weak self] in
+            ImagePopup.show(path: path, over: self?.panel)
+        })
+        m.addItem(.separator())
+        m.addItem(menuItem("Copy Image Path") { [weak self] in
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(path, forType: .string)
+            self?.showToast("Copied image path", symbol: "doc.on.clipboard")
+        })
+        m.addItem(menuItem("Copy Image") { [weak self] in
+            guard let img = NSImage(contentsOf: url) else { return }
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.writeObjects([img])
+            self?.showToast("Copied image", symbol: "photo")
+        })
+        m.addItem(menuItem("Reveal in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        })
+        m.addItem(menuItem("Open in Default App") { NSWorkspace.shared.open(url) })
+        if onCopyFilePath != nil {
+            m.addItem(.separator())
+            m.addItem(menuItem("Copy File Path") { [weak self] in self?.onCopyFilePath?() })
+        }
+        return m
     }
 
     // right-click menu for the vim pane (the host builds it: it knows the

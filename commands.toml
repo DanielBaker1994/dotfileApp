@@ -185,7 +185,7 @@ shell = "/opt/homebrew/bin/bash"
 shell-args = "--login -i"
 # font for the embedded terminal (Nerd Font for powerline glyphs) + its size
 terminal-font = "Courier New"
-terminal-font-size = 13
+terminal-font-size = 24
 # Font ▸ Install Font… catalog: "Label|brew cask|type" entries, type is
 # nerd | mono | sans | serif | display (picks the submenu group). Clicking one
 # runs `brew install --cask <cask>` in the background, then offers to use it.
@@ -429,7 +429,7 @@ vim-mode = true
 vim-bin = "/opt/homebrew/bin/nvim"
 # vim-init = ~/.config/nvim/init.lua
 start-drawer = "none"
-font-size = 13
+font-size = 16
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
