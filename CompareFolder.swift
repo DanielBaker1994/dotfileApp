@@ -88,6 +88,9 @@ final class FolderNode {
     var left: FolderSideInfo?
     var right: FolderSideInfo?
     var status: FolderStatus = .same
+    // `.same` decided by size + modified time alone (content never read):
+    // shown apart so a matching timestamp never passes for equal bytes
+    var sameByMetadata = false
     var newer: FolderNewer = .none
     var children: [FolderNode] = []
     weak var parent: FolderNode?
@@ -144,7 +147,7 @@ final class FolderTree {
 
     // MARK: summary
 
-    struct Counts { var different = 0, unimportant = 0, leftOnly = 0, rightOnly = 0, same = 0, unknown = 0, error = 0 }
+    struct Counts { var different = 0, unimportant = 0, leftOnly = 0, rightOnly = 0, same = 0, sameByMetadata = 0, unknown = 0, error = 0 }
     // files only (a folder is its content)
     func counts() -> Counts {
         var c = Counts()
@@ -154,7 +157,7 @@ final class FolderTree {
             case .unimportant: c.unimportant += 1
             case .leftOnly: c.leftOnly += 1
             case .rightOnly: c.rightOnly += 1
-            case .same: c.same += 1
+            case .same: c.same += 1; if n.sameByMetadata { c.sameByMetadata += 1 }
             case .unknown: c.unknown += 1
             case .error: c.error += 1
             }
@@ -371,6 +374,7 @@ enum FolderScan {
 
     // the quick test for one node (files; a folder's color comes from `settle`)
     static func classify(_ n: FolderNode, left lp: String?, right rp: String?, _ o: FolderOptions) {
+        n.sameByMetadata = false
         switch (n.left, n.right) {
         case (.some, nil): n.status = .leftOnly; return
         case (nil, .some): n.status = .rightOnly; return
@@ -397,6 +401,7 @@ enum FolderScan {
         case "never": n.status = timesMatch ? .same : .different
         default: n.status = timesMatch ? .same : .unknown        // auto: same size, different time
         }
+        n.sameByMetadata = n.status == .same
     }
 
     // a node's status after an operation touched it: stat both sides again
@@ -477,6 +482,7 @@ enum FolderContent {
 
     // apply one answer to its node
     static func apply(_ a: Answer, to n: FolderNode) {
+        n.sameByMetadata = false
         switch a {
         case .same: n.status = .same
         case .different: n.status = .different

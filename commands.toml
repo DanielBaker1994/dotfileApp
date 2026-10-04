@@ -372,7 +372,7 @@ magnifier = false
 square-magnifier = false
 copy-on-double-click = false
 return = "copy"
-start-mode = "screenshot"
+start-mode = "text"
 text-languages = ""
 text-correction = true
 text-toast = "Copied {} to clipboard"
@@ -487,7 +487,7 @@ font-size = 16
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
-paths = "~/notes, ~/.config/workspace-switcher/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/workspace-switcher/rules/grammar-check.md, ~/notes/retirement.md"
+paths = "~/notes, ~/.config/workspace-switcher/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/workspace-switcher/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt"
 # window 20% wider (640 -> 768) and the notepad ~30% taller; max-height lets
 # the taller window actually apply (the 60%-of-screen cap would clamp it)
 width = 768
@@ -727,6 +727,18 @@ cancel-button-label = "Cancel"
 changed-label = "{} changed on disk — and you have edits here"
 reload-button-label = "Reload"
 keep-button-label = "Keep Mine"
+sync-button-label = "Sync…"
+same-by-date-label = "{} by date/size only"
+same-by-date-hint-label = "dim = : same size + time, bytes not read ([compare] content = always reads them)"
+shortcuts-title-label = "Compare Shortcuts"
+clash-one-label = "1 item already exists on the {} side"
+clash-label = "{} items already exist on the other side"
+clash-info-label = "Replace puts the old ones in the Trash (⌘Z brings them back)."
+replace-button-label = "Replace"
+keep-both-button-label = "Keep Both"
+skip-button-label = "Skip Existing"
+sync-info-label = "Replaced and removed items go to the Trash; ⌘Z undoes the whole run."
+sync-run-button-label = "Synchronize"
 
 # [icons] — app icons for the workspace switcher rows. Normal apps keep their
 # real macOS icons; ONLY apps listed here get overrides, matched by app name
@@ -828,7 +840,7 @@ workspace-switcher = "*:app"
 "compare-folders: Cmd+Down / Cmd+Up" = "into the folder pair (Set as Base Folder) / both sides up one level"
 "compare-folders: Cmd+[ / Cmd+]" = "back / forward through the base folders"
 "compare-folders: drag a row across" = "copy to the other side (Cmd = move); files from Finder land in the folder under the drop"
-"compare-folders: Synchronize (⟳ toolbar, Cmd+K)" = "Update Right / Left / Both, Mirror to Right / Left — after a preview; Cmd+Z undoes the whole run"
+"compare-folders: Sync… button / Cmd+K" = "Update Right / Left / Both, Mirror to Right / Left — after a preview; Cmd+Z undoes the whole run"
 "compare-folders: Cmd+Z" = "undo this session's last copy / move / trash / rename / sync (the file browser keeps its own)"
 "compare: right-click a line ▸ Align With" = "pick a line, then one on the other side: they share a row (Clear All Alignments undoes)"
 "compare: right-click ▸ Convert Side" = "trim trailing whitespace / line endings → LF · CRLF · CR (Cmd+Z undoes)"

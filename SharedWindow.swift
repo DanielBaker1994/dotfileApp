@@ -431,8 +431,11 @@ final class SharedWindow {
         let ids = Self.navIcons.map(\.id)
         guard !ids.isEmpty else { return }
         let n = ids.count
-        let i = current.flatMap(Self.navOn).flatMap { ids.firstIndex(of: $0) } ?? (dir > 0 ? -1 : n)
-        navClicked(ids[((i + dir) % n + n) % n])
+        let ci = current.flatMap(Self.navOn).flatMap { ids.firstIndex(of: $0) }
+        let i = ci ?? (dir > 0 ? -1 : n)
+        let next = ids[((i + dir) % n + n) % n]
+        controller.log("cycle: current=\(current?.rawValue ?? "nil") currentNav=\(ci.map(String.init) ?? "nil") ids=\(ids) dir=\(dir) next=\(next)")
+        navClicked(next)
     }
 
     func navClicked(_ id: Int) {

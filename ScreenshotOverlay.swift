@@ -114,6 +114,7 @@ final class ShotSession {
     var chosenSavePath: String?                    // the save card's answer
     var finished = false
     var onFinish: ((ShotOutcome) -> Void)?
+    var onRecent: (() -> Void)?
     var log: (String) -> Void = { _ in }
     private var ringNew = true                      // the next ring show animates (new selection)
     private var lastWheel = Date.distantPast
@@ -722,6 +723,7 @@ final class ShotSession {
         case .exit: finish(.abort)
         case .pin: finish(.pin)
         case .copyText: finish(.text)
+        case .recent: onRecent?()
         case .sizeUp: changeSize(1)
         case .sizeDown: changeSize(-1)
         default: break
@@ -817,6 +819,7 @@ final class ShotOverlayView: NSView {
     private var helpIsText = false
     private var tab: ShotToolTab?
     private var modePill: ShotModePill?
+    private var recentBtn: ShotRecentButton?
     private(set) var sidePanel: ShotSidePanel?
     private var indicator: ShotSizeIndicator?
     private var wheelView: ShotWheelView?
@@ -992,14 +995,25 @@ final class ShotOverlayView: NSView {
                 addSubview(m)
                 modePill = m
             }
+            let top = max(window?.screen.map { $0.frame.maxY - $0.visibleFrame.maxY } ?? 0, 24)
             if let m = modePill {
                 m.textMode = s.textMode
-                let top = max(window?.screen.map { $0.frame.maxY - $0.visibleFrame.maxY } ?? 0, 24)
                 m.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2).rounded(), y: top + 12)
+            }
+            // recent screenshots button: right of the mode pill
+            if recentBtn == nil {
+                let r = ShotRecentButton(ui: cfg.uiColor) { [weak s] in s?.pressed(.recent) }
+                addSubview(r)
+                recentBtn = r
+            }
+            if let m = modePill, let r = recentBtn {
+                r.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2 + m.frame.width + 8).rounded(), y: top + 16)
             }
         } else {
             modePill?.removeFromSuperview()
             modePill = nil
+            recentBtn?.removeFromSuperview()
+            recentBtn = nil
         }
         let showTab = !s.textMode && cfg.showSidePanelButton && sidePanel == nil && (mine != nil || (s.selection == nil && s.mouseDisplay === d))
         if showTab {
@@ -1371,7 +1385,7 @@ final class ShotModePill: NSView {
     private let ui: ShotColor
     private let action: (Bool) -> Void
     private let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-    private let segments: [(symbol: String, title: String)] = [("camera", "Screenshot"), ("text.viewfinder", "Copy Text")]
+    private let segments: [(symbol: String, title: String)] = [("text.viewfinder", "Copy Text"), ("camera", "Screenshot")]
     private var widths: [CGFloat] = []
     var textMode = false { didSet { if textMode != oldValue { needsDisplay = true } } }
 
@@ -1407,7 +1421,7 @@ final class ShotModePill: NSView {
     override func draw(_ dirtyRect: NSRect) {
         for (i, seg) in segments.enumerated() {
             let r = segmentRect(i)
-            let on = (i == 1) == textMode
+            let on = (i == 0) == textMode
             if on, let ctx = NSGraphicsContext.current?.cgContext {
                 ctx.setFillColor(ui.cgColor)
                 ctx.addPath(CGPath(roundedRect: r, cornerWidth: r.height / 2, cornerHeight: r.height / 2, transform: nil))
@@ -1426,6 +1440,41 @@ final class ShotModePill: NSView {
             }
             x += 16 + 6
             (seg.title as NSString).draw(at: CGPoint(x: x, y: r.midY - tw.height / 2), withAttributes: attrs)
+        }
+    }
+}
+
+
+// small clock button next to the mode pill (always visible, even in text mode)
+final class ShotRecentButton: NSView {
+    private let ui: ShotColor
+    private let action: () -> Void
+    private let size: CGFloat = 28
+
+    init(ui: ShotColor, action: @escaping () -> Void) {
+        self.ui = ui
+        self.action = action
+        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        wantsLayer = true
+        layer?.cornerRadius = size / 2
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        layer?.borderWidth = 1
+        toolTip = "Recent screenshots (R)"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
+    override func cursorUpdate(with event: NSEvent) { NSCursor.arrow.set() }
+    override func mouseUp(with event: NSEvent) { action() }
+    override func draw(_ dirtyRect: NSRect) {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        if let img = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+            let s = img.size
+            img.draw(in: CGRect(x: (bounds.width - s.width) / 2, y: (bounds.height - s.height) / 2, width: s.width, height: s.height),
+                     from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
     }
 }

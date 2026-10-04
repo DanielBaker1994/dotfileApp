@@ -20,7 +20,7 @@ enum ShotTool: String, CaseIterable {
     case pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert
     // the rest of the ring
     case badge = "size"            // W / H of the selection (Flameshot's selection indicator)
-    case move, undo, redo, copy, save, accept, exit, pin
+    case move, undo, redo, copy, save, accept, exit, pin, recent
     case copyText = "copy-text"   // OCR the selection → the clipboard (Copy Text mode)
     case sizeUp = "size-increase", sizeDown = "size-decrease"
 
@@ -81,6 +81,7 @@ enum ShotTool: String, CaseIterable {
         case .accept: return "checkmark"
         case .exit: return "xmark"
         case .pin: return "pin.fill"
+        case .recent: return "clock"
         case .copyText: return "text.viewfinder"
         case .sizeUp: return "plus"
         case .sizeDown: return "minus"
@@ -110,6 +111,7 @@ enum ShotTool: String, CaseIterable {
         case .accept: return "Accept the capture (Return)"
         case .exit: return "Leave the capture screen (⌘Q)"
         case .pin: return "Pin image on the desktop"
+        case .recent: return "Recent screenshots"
         case .copyText: return "Copy the text in the selection (⇧⌘C)"
         case .sizeUp: return "Increase tool size"
         case .sizeDown: return "Decrease tool size"
@@ -133,7 +135,7 @@ enum ShotTool: String, CaseIterable {
 
     // the ring's default order on macOS (12.1 observed): uploader / open-app
     // left out, accept + size buttons hidden
-    static let defaultButtons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin"
+    static let defaultButtons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin, recent"
 
     // `[screenshot] buttons` → the ring, in order; the size badge goes
     // right after the last drawing tool unless listed ("size") or hidden

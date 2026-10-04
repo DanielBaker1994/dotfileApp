@@ -189,6 +189,33 @@ struct FolderTests {
         let t3 = FolderScan.run(left: L, right: R, options: always)
         check(node(t3, "same.txt")?.status == .unknown, "always: even equal times are checked")
 
+        // a "same" from size + time alone is flagged (bytes never read): the
+        // view shows it dim and counts it apart, so it never passes for equal
+        let ML = tmp + "/ML", MR = tmp + "/MR"
+        write(ML + "/masked.txt", "x\n", mtime: t0)
+        write(MR + "/masked.txt", "y\n", mtime: t0)                      // same size + time, other bytes
+        write(ML + "/touched.txt", "z\n", mtime: t0)
+        write(MR + "/touched.txt", "z\n", mtime: t0 + 500)
+        let tm = FolderScan.run(left: ML, right: MR, options: FolderOptions())
+        check(node(tm, "masked.txt")?.status == .same && node(tm, "masked.txt")?.sameByMetadata == true,
+              "auto: same size + time = same, flagged as metadata-only")
+        check(tm.counts().sameByMetadata == 1, "counts: one same by date/size (\(tm.counts().sameByMetadata))")
+        let mp = tm.pending
+        let msem = DispatchSemaphore(value: 0)
+        var mans: [Int: FolderContent.Answer] = [:]
+        FolderContent.run(tree: tm, nodes: mp, imp: o.importance, queue: q, cancelled: { false },
+                          batch: { for (id, a) in $0 { mans[id] = a } }, done: { msem.signal() })
+        msem.wait()
+        for n in mp { if let a = mans[n.id] { FolderContent.apply(a, to: n) } }
+        tm.settle()
+        check(node(tm, "touched.txt")?.status == .same && node(tm, "touched.txt")?.sameByMetadata == false,
+              "a same read from the bytes is not flagged")
+        let tma = FolderScan.run(left: ML, right: MR, options: always)
+        check(node(tma, "masked.txt")?.status == .unknown && node(tma, "masked.txt")?.sameByMetadata == false,
+              "always: nothing is same by metadata")
+        var mnever = FolderOptions(); mnever.content = "never"
+        check(FolderScan.run(left: ML, right: MR, options: mnever).counts().sameByMetadata == 1, "never: metadata-only same is flagged")
+
         // rows
         var v = FolderTree.View()
         let all = tree.rows(v)

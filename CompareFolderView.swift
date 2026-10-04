@@ -17,6 +17,10 @@ protocol FolderHost: AnyObject {
     func folderLog(_ s: String)
     func folderOpenNote(_ path: String)
     func folderSwapped(old: FolderSession, new: FolderSession)   // new roots (swap, base folder, back / up): the session's pair changes
+    // a themed question in the window (`CardWindowController.confirm`)
+    func folderConfirm(_ title: String, info: String, accessory: NSView?, choices: [ConfirmOverlay.Choice],
+                       defaultIndex: Int, cancelIndex: Int, then: @escaping (Int) -> Void)
+    func folderPrompt(_ title: String, info: String, text: String, ok: String, then: @escaping (String?) -> Void)
 }
 
 // a thread-safe generation counter: a newer scan makes older ones stop
@@ -163,6 +167,11 @@ final class FolderTreeView: NSView, NSDraggingSource {
             let r = NSRect(x: 0, y: CGFloat(i) * rowH, width: bounds.width, height: rowH)
             let isCursor = i == s.cursor
             let marked = s.marked.contains(n.id)
+            // the opaque color under the row's text: names, dates and the
+            // glyph are lifted to contrast with it (4.5:1) in every preset
+            var under = colors.base
+            if marked { under = colors.over(colors.highlight, 0.35, on: under) }
+            if isCursor { under = colors.over(colors.highlight, 0.6, on: under) }
             if marked {
                 colors.highlight.withAlphaComponent(0.35).setFill()
                 r.fill()
@@ -183,13 +192,13 @@ final class FolderTreeView: NSView, NSDraggingSource {
                     NSRect(x: x0, y: r.minY + 1, width: paneW, height: rowH - 2).fill()
                     continue
                 }
-                let col = color(n, side)
+                let col = colors.ensure(color(n, side), on: under)
                 var x = x0 + 8 + CGFloat(row.depth) * 16
                 if n.isDir && !n.kindMismatch {
                     if !s.view.flatten {
                         let open = n.expanded || (s.view.filter != .all || !s.view.nameFilter.isEmpty)
                         ("\(open ? "▾" : "▸")" as NSString).draw(at: NSPoint(x: x, y: r.minY + 3),
-                                                              withAttributes: [.font: small, .foregroundColor: colors.dim])
+                                                              withAttributes: [.font: small, .foregroundColor: colors.ensure(colors.dim, on: under, 3)])
                     }
                 }
                 x += 14
@@ -213,7 +222,7 @@ final class FolderTreeView: NSView, NSDraggingSource {
                                                           .foregroundColor: col, .paragraphStyle: p])
                 var mx = x0 + paneW - 8
                 let date = Self.dateFmt.string(from: Date(timeIntervalSince1970: info.mtime)) as NSString
-                let dattrs: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: n.isDir && n.status != .same ? colors.dim : col.withAlphaComponent(0.85)]
+                let dattrs: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: n.isDir && n.status != .same ? colors.ensure(colors.dim, on: under) : col]
                 mx -= dateW
                 date.draw(at: NSPoint(x: mx, y: r.minY + 4), withAttributes: dattrs)
                 if !info.isDir {
@@ -224,8 +233,12 @@ final class FolderTreeView: NSView, NSDraggingSource {
             }
             // center glyph
             let g = Self.glyph(n) as NSString
+            // a "=" from size + time alone is dim: only read bytes earn the bright one
+            // (3:1: a status mark, kept visibly dimmer than the 4.5:1 text)
+            let gc = n.status == .same && n.sameByMetadata ? colors.ensure(colors.dim, on: under, 3)
+                : colors.ensure(color(n, .left), on: under)
             let ga: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 13, weight: .bold),
-                                                     .foregroundColor: color(n, .left)]
+                                                     .foregroundColor: gc]
             let gs = g.size(withAttributes: ga)
             g.draw(at: NSPoint(x: paneW + (gutterW - gs.width) / 2, y: r.minY + (rowH - gs.height) / 2), withAttributes: ga)
             _ = tree
@@ -388,13 +401,17 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         label(summary, size: 12, weight: .semibold, color: colors.text)
         toolbar.addSubview(summary)
         flatten = button("list.bullet.indent", "Ignore folder structure: list every file by its path") { [weak self] in self?.toggleFlatten() }
-        syncButton = button("arrow.triangle.2.circlepath", "Synchronize… (Update / Mirror, with a preview)") { [weak self] in self?.showSyncMenu() }
+        // Synchronize can trash files: a WORDED raised button set apart from the
+        // icon row (its circular arrows read as Rescan's when it was one of them)
+        syncButton = button("arrow.triangle.2.circlepath", "Synchronize… (Update / Mirror, with a preview) — ⌘K") { [weak self] in self?.showSyncMenu() }
+        syncButton.title = (host?.folderConfig ?? CompareConfig()).label("sync-button", "Sync…")
+        syncButton.flat = false
+        toolbar.addSubview(syncButton)
         buttons = [
             button("chevron.up", "Previous difference (⌃P)") { [weak self] in self?.jumpDiff(-1) },
             button("chevron.down", "Next difference (⌃N)") { [weak self] in self?.jumpDiff(1) },
             button("arrow.right.to.line", "Copy the selection to the right (⌃R)") { [weak self] in self?.copy(from: .left) },
             button("arrow.left.to.line", "Copy the selection to the left (⌃L)") { [weak self] in self?.copy(from: .right) },
-            syncButton,
             flatten,
             button("arrow.up.and.down.text.horizontal", "Expand / collapse all (⌥→ / ⌥←)") { [weak self] in self?.toggleAll() },
             button("chevron.backward", "Back (⌘[)") { [weak self] in self?.goBack() },
@@ -446,7 +463,11 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
             btn.frame = NSRect(x: bx, y: (tbH - 26) / 2, width: 26, height: 26)
             bx -= 2
         }
-        let nw: CGFloat = min(220, max(120, (b.width - segW - 28 * CGFloat(buttons.count)) * 0.3))
+        let sw = syncButton.fittingWidth()
+        bx -= 10
+        syncButton.frame = NSRect(x: bx - sw, y: (tbH - 26) / 2, width: sw, height: 26)
+        bx -= sw
+        let nw: CGFloat = min(220, max(120, (b.width - segW - 28 * CGFloat(buttons.count) - sw) * 0.3))
         nameBox.frame = NSRect(x: bx - nw - 6, y: (tbH - JiraTheme.height) / 2, width: nw, height: JiraTheme.height)
         summary.frame = NSRect(x: filterSeg.frame.maxX + 14, y: (tbH - 18) / 2,
                                width: max(40, nameBox.frame.minX - filterSeg.frame.maxX - 24), height: 18)
@@ -606,7 +627,8 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         headerL.text = tilde(s.leftRoot)
         headerR.text = tilde(s.rightRoot)
         summary.stringValue = summaryText(s)
-        summary.textColor = s.tree.map { $0.counts().different + $0.counts().leftOnly + $0.counts().rightOnly == 0 && !s.scanning && !s.checking } == true
+        summary.textColor = s.tree.map { let c = $0.counts()
+            return c.different + c.leftOnly + c.rightOnly + c.sameByMetadata == 0 && !s.scanning && !s.checking } == true
             ? colors.tone(.success) : colors.text
         status.stringValue = statusText(s)
         emptyHint.stringValue = s.scanning ? "scanning…" : s.tree != nil && s.rows.isEmpty
@@ -626,11 +648,16 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         if c.leftOnly > 0 { parts.append("\(c.leftOnly) left only") }
         if c.rightOnly > 0 { parts.append("\(c.rightOnly) right only") }
         if c.unknown > 0 { parts.append("\(c.unknown) unchecked") }
-        if c.same > 0 { parts.append("\(c.same) same") }
+        let byDate = c.sameByMetadata > 0 ? " (" + byDateLabel(c.sameByMetadata) + ")" : ""
+        if c.same > 0 { parts.append("\(c.same) same" + byDate) }
         if c.error > 0 { parts.append("\(c.error) unreadable") }
         if parts.isEmpty { return "empty" }
-        if c.different + c.leftOnly + c.rightOnly + c.unknown + c.unimportant == 0 { return "Identical — \(c.same) files" }
+        if c.different + c.leftOnly + c.rightOnly + c.unknown + c.unimportant == 0 { return "Identical — \(c.same) files" + byDate }
         return parts.joined(separator: " · ")
+    }
+
+    private func byDateLabel(_ n: Int) -> String {
+        (host?.folderConfig ?? CompareConfig()).label("same-by-date", "{} by date/size only", String(n))
     }
 
     private func statusText(_ s: FolderSession) -> String {
@@ -642,6 +669,10 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
             if !t.errors.isEmpty { bits.append("\(t.errors.count) folder(s) unreadable") }
             if !s.view.nameFilter.isEmpty { bits.append("names: \(s.view.nameFilter)") }
             if s.view.flatten { bits.append("flat") }
+            if t.counts().sameByMetadata > 0 {
+                bits.append((host?.folderConfig ?? CompareConfig()).label(
+                    "same-by-date-hint", "dim = : same size + time, bytes not read ([compare] content = always reads them)"))
+            }
         }
         if !s.status.isEmpty { bits.insert(s.status, at: 0) }
         return bits.joined(separator: "  ·  ")
@@ -1010,19 +1041,21 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
             }
         }
         if clashes > 0, let c = testClash { run(c); return }
-        guard clashes > 0, let w = host?.folderWindow else { run(.replace); return }
-        let a = NSAlert()
-        a.messageText = clashes == 1 ? "1 item already exists on the \(from.other.rawValue) side" : "\(clashes) items already exist on the \(from.other.rawValue) side"
-        a.informativeText = "Replace puts the old ones in the Trash (⌘Z brings them back)."
-        a.addButton(withTitle: "Replace")
-        a.addButton(withTitle: "Keep Both")
-        a.addButton(withTitle: "Skip Existing")
-        a.addButton(withTitle: "Cancel")
-        a.beginSheetModal(for: w) { r in
-            switch r {
-            case .alertFirstButtonReturn: run(.replace)
-            case .alertSecondButtonReturn: run(.keepBoth)
-            case .alertThirdButtonReturn: run(.skip)
+        guard clashes > 0, let host else { run(.replace); return }
+        let cfg = host.folderConfig
+        // Cancel is the default (Return): Replace has to be picked on purpose
+        host.folderConfirm(
+            clashes == 1 ? cfg.label("clash-one", "1 item already exists on the {} side", from.other.rawValue)
+                         : cfg.label("clash", "{} items already exist on the other side", String(clashes)),
+            info: cfg.label("clash-info", "Replace puts the old ones in the Trash (⌘Z brings them back)."),
+            accessory: nil,
+            choices: [(cfg.label("replace-button", "Replace"), .danger), (cfg.label("keep-both-button", "Keep Both"), .normal),
+                      (cfg.label("skip-button", "Skip Existing"), .normal), (cfg.label("cancel-button", "Cancel"), .primary)],
+            defaultIndex: 3, cancelIndex: 3) { i in
+            switch i {
+            case 0: run(.replace)
+            case 1: run(.keepBoth)
+            case 2: run(.skip)
             default: break
             }
         }
@@ -1044,13 +1077,12 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
     }
 
     func beginRename() {
-        guard let s = session, let t = s.tree, let w = host?.folderWindow, let n = targets().first,
+        guard let s = session, let t = s.tree, let host, let n = targets().first,
               (s.focus == .left ? n.left : n.right) != nil else { return }
         let path = t.path(n, s.focus)
-        let f = NSTextField(string: (path as NSString).lastPathComponent)
-        jiraFormSheet(on: w, title: "Rename", info: tilde(path), rows: [("Name", f)], ok: "Rename", first: f) { [weak self] ok in
-            let name = f.stringValue.trimmingCharacters(in: .whitespaces)
-            guard ok, !name.isEmpty, !name.contains("/"), name != (path as NSString).lastPathComponent else { return }
+        host.folderPrompt("Rename", info: tilde(path), text: (path as NSString).lastPathComponent, ok: "Rename") { [weak self] answer in
+            let name = (answer ?? "").trimmingCharacters(in: .whitespaces)
+            guard answer != nil, !name.isEmpty, !name.contains("/"), name != (path as NSString).lastPathComponent else { return }
             let to = ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(name)
             do {
                 try FileManager.default.moveItem(atPath: path, toPath: to)
@@ -1065,16 +1097,15 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
     }
 
     func newFolder() {
-        guard let s = session, let t = s.tree, let w = host?.folderWindow else { return }
+        guard let s = session, let t = s.tree, let host else { return }
         let n = targets().first
         let base: String
         if let n, n.isDir, (s.focus == .left ? n.left : n.right) != nil { base = t.path(n, s.focus) }
         else if let n { base = (t.path(n, s.focus) as NSString).deletingLastPathComponent }
         else { base = s.focus == .left ? s.leftRoot : s.rightRoot }
-        let f = NSTextField(string: "untitled folder")
-        jiraFormSheet(on: w, title: "New Folder", info: "in \(tilde(base))", rows: [("Name", f)], ok: "Create", first: f) { [weak self] ok in
-            let name = f.stringValue.trimmingCharacters(in: .whitespaces)
-            guard ok, !name.isEmpty, !name.contains("/") else { return }
+        host.folderPrompt("New Folder", info: "in \(tilde(base))", text: "untitled folder", ok: "Create") { [weak self] answer in
+            let name = (answer ?? "").trimmingCharacters(in: .whitespaces)
+            guard answer != nil, !name.isEmpty, !name.contains("/") else { return }
             let out = FileOps.create(name, in: base, folder: true, undo: s.undo)
             self?.finish(s, "created \(name)", out)
         }
@@ -1190,7 +1221,7 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
     }
 
     func previewSync(_ mode: SyncMode) {
-        guard let s = session, let t = s.tree, let w = host?.folderWindow else { return }
+        guard let s = session, let t = s.tree, let host else { return }
         if s.scanning || s.checking { s.status = "wait for the scan to finish, then synchronize"; sync(); return }
         let plan = SyncPlan.make(t, mode, nameFilter: s.view.nameFilter)
         lastPlan = (mode, plan)
@@ -1200,23 +1231,75 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
             return
         }
         let toR = plan.copies.filter { $0.to == .right }.count, toL = plan.copies.count - toR
+        let replaces = plan.copies.filter(\.replaces).count
+        // the Trash leads: it is the part of a run you can lose files to
         var head: [String] = []
+        if !plan.trash.isEmpty { head.append("\(plan.trash.count) to the Trash") }
         if toR > 0 { head.append("\(toR) to the right") }
         if toL > 0 { head.append("\(toL) to the left") }
-        if !plan.trash.isEmpty { head.append("\(plan.trash.count) to the Trash") }
-        var lines = plan.copies.prefix(14).map { "\($0.to == .right ? "→" : "←")  \($0.rel)\($0.replaces ? "  (replaces)" : "")" }
-        lines += plan.trash.prefix(max(0, 14 - lines.count)).map { "🗑  \($0.side.rawValue): \($0.rel)" }
-        let total = plan.copies.count + plan.trash.count
-        if total > lines.count { lines.append("… and \(total - lines.count) more") }
-        if !plan.skipped.isEmpty { lines += ["", "Skipped (differ, neither newer): \(plan.skipped.count)"] }
-        let a = NSAlert()
-        a.messageText = "\(mode.title): " + head.joined(separator: ", ")
-        a.informativeText = mode.explain + " Replaced and removed items go to the Trash; ⌘Z undoes the whole run.\n\n" + lines.joined(separator: "\n")
-        a.addButton(withTitle: "Synchronize")
-        a.addButton(withTitle: "Cancel")
-        a.beginSheetModal(for: w) { [weak self] r in
-            if r == .alertFirstButtonReturn { self?.runSync(mode, plan) }
+        let cfg = host.folderConfig
+        let risky = !plan.trash.isEmpty || replaces > 0
+        // Cancel is the default (Return); the run's button is red when it
+        // trashes or overwrites anything
+        host.folderConfirm(
+            "\(mode.title): " + head.joined(separator: ", "),
+            info: mode.explain + " " + cfg.label("sync-info", "Replaced and removed items go to the Trash; ⌘Z undoes the whole run."),
+            accessory: syncPreview(plan, replaces: replaces),
+            choices: [(cfg.label("sync-run-button", "Synchronize"), risky ? .danger : .normal),
+                      (cfg.label("cancel-button", "Cancel"), .primary)],
+            defaultIndex: 1, cancelIndex: 1) { [weak self] i in
+            if i == 0 { self?.runSync(mode, plan) }
         }
+    }
+
+    // the run in a recessed well, Trash first: what goes, what is
+    // overwritten, then the rest (palette hues lifted to text contrast)
+    private func syncPreview(_ plan: SyncPlan, replaces: Int) -> NSView {
+        let c = colors
+        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        let bold = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
+        let wellBg = c.over(c.mantle, c.isLight ? 0.55 : 0.6, on: ConfirmOverlay.fill(c))    // = ButtonStyle.inputFill
+        let danger = c.ensure(c.tone(.danger), on: wellBg), warn = c.ensure(c.tone(.warning), on: wellBg)
+        let plain = c.ensure(c.text, on: wellBg), quiet = c.ensure(c.over(c.text, 0.7, on: wellBg), on: wellBg)
+        let out = NSMutableAttributedString()
+        func line(_ t: String, _ col: NSColor, _ f: NSFont? = nil) {
+            if out.length > 0 { out.append(NSAttributedString(string: "\n")) }
+            out.append(NSAttributedString(string: t, attributes: [.font: f ?? font, .foregroundColor: col]))
+        }
+        let cap = 14
+        var shown = 0
+        if !plan.trash.isEmpty {
+            line("Moved to the Trash (\(plan.trash.count))", danger, bold)
+            for t in plan.trash.prefix(cap) { line("  ✕  \(t.side.rawValue): \(t.rel)", danger); shown += 1 }
+        }
+        let ordered = plan.copies.filter(\.replaces) + plan.copies.filter { !$0.replaces }
+        if !ordered.isEmpty, shown < cap {
+            line(replaces > 0 ? "Copied (\(plan.copies.count), \(replaces) overwrite — old copies to the Trash)"
+                              : "Copied (\(plan.copies.count))", plain, bold)
+            for cp in ordered.prefix(cap - shown) {
+                line("  \(cp.to == .right ? "→" : "←")  \(cp.rel)" + (cp.replaces ? "  (overwrites)" : ""),
+                     cp.replaces ? warn : plain)
+                shown += 1
+            }
+        }
+        let total = plan.copies.count + plan.trash.count
+        if total > shown { line("  … and \(total - shown) more", quiet) }
+        if !plan.skipped.isEmpty { line("Skipped (differ, neither newer): \(plan.skipped.count)", quiet) }
+        let well = NSView()
+        well.wantsLayer = true
+        well.layer?.backgroundColor = ButtonStyle.inputFill(c).cgColor
+        well.layer?.borderColor = ButtonStyle.inputStroke(c).cgColor
+        well.layer?.borderWidth = 1
+        well.layer?.cornerRadius = 6
+        let f = NSTextField(labelWithAttributedString: out)
+        f.lineBreakMode = .byTruncatingMiddle
+        f.isSelectable = false
+        let h = ceil(f.intrinsicContentSize.height)
+        f.frame = NSRect(x: 10, y: 8, width: 424, height: h)
+        f.autoresizingMask = [.width]
+        well.frame.size = NSSize(width: 444, height: h + 16)
+        well.addSubview(f)
+        return well
     }
 
     // copies (old targets → Trash), then the Trash; ONE undo step

@@ -196,16 +196,23 @@ final class ComparePaneView: NSView {
         return out
     }
 
-    func attributed(_ text: String, color: NSColor, marks: [CharDiff.Mark], c: PopupColors) -> NSMutableAttributedString {
-        let a = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
+    // `bg` = the opaque color the line sits on (row tint + cursor), so the
+    // text, the marks' text and their underline are lifted to contrast with
+    // what is really under them: 4.5:1 text, 3:1 underline, every preset
+    func attributed(_ text: String, color: NSColor, marks: [CharDiff.Mark], c: PopupColors,
+                    bg: NSColor) -> NSMutableAttributedString {
+        let a = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: c.ensure(color, on: bg),
+                                                                     .paragraphStyle: para])
         let len = a.length
         for mk in marks {
             let r = NSIntersectionRange(mk.range, NSRange(location: 0, length: len))
             guard r.length > 0 else { continue }
             let hue = c.tone(mk.important ? .danger : .info)
-            a.addAttributes([.backgroundColor: hue.withAlphaComponent(0.35),
-                             .underlineStyle: NSUnderlineStyle.single.rawValue,
-                             .underlineColor: hue], range: r)
+            let markBg = c.over(hue, 0.22, on: bg)
+            a.addAttributes([.backgroundColor: markBg,
+                             .foregroundColor: c.ensure(color, on: markBg),
+                             .underlineStyle: NSUnderlineStyle.thick.rawValue,
+                             .underlineColor: c.ensure(hue, on: markBg, 3)], range: r)
         }
         return a
     }
@@ -288,11 +295,14 @@ final class ComparePaneView: NSView {
                 hue.withAlphaComponent(row.important ? 0.15 : 0.13).setFill()
                 rect.fill()
             }
+            // the opaque color under this side's text (tints + cursor laid on the card)
+            var under = diff ? c.over(hue, row.important ? 0.15 : 0.13, on: c.base) : c.base
             // cursor row: the highlight pill + accent edge on the focused side
             if d == s.cursor {
                 let on = side == s.focus
                 c.highlight.withAlphaComponent(on ? 0.55 : 0.22).setFill()
                 rect.fill()
+                under = c.over(c.highlight, on ? 0.55 : 0.22, on: under)
                 if on {
                     c.accentOn.setFill()
                     NSRect(x: px, y: y, width: 3, height: rowH).fill()
@@ -300,11 +310,12 @@ final class ComparePaneView: NSView {
             } else if selected && side == s.focus {
                 c.accentOn.withAlphaComponent(0.16).setFill()
                 rect.fill()
+                under = c.over(c.accentOn, 0.16, on: under)
             }
             guard line >= 0 else { continue }
             // line number
             let num = String(line + 1) as NSString
-            let numAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: c.dim.withAlphaComponent(0.75)]
+            let numAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: c.ensure(c.dim, on: under)]
             let nw = num.size(withAttributes: numAttrs).width
             num.draw(at: NSPoint(x: px + lineNoW - nw - 4, y: y + 2), withAttributes: numAttrs)
             // text, clipped to its column, scrolled by hOffset
@@ -313,7 +324,7 @@ final class ComparePaneView: NSView {
             guard !text.isEmpty else { continue }
             let showWS = host?.paneShowWhitespace ?? false
             let a = attributed(showWS ? text.replacingOccurrences(of: " ", with: "·") : text, color: c.text,
-                               marks: side == .left ? mk.0 : mk.1, c: c)
+                               marks: side == .left ? mk.0 : mk.1, c: c, bg: under)
             if showWS { dimWhitespace(a, original: text, c: c) }
             NSGraphicsContext.saveGraphicsState()
             NSRect(x: tr.minX - 2, y: y, width: tr.width + 2, height: rowH).clip()
@@ -347,11 +358,11 @@ final class ComparePaneView: NSView {
                 ("→" as NSString).draw(at: NSPoint(x: paneW + 3, y: y + 1), withAttributes: attrs)
                 ("←" as NSString).draw(at: NSPoint(x: paneW + gutterW - 15, y: y + 1), withAttributes: attrs)
             } else {
-                hue.withAlphaComponent(0.8).setFill()
+                c.ensure(hue, on: c.mantle, 3).setFill()             // a 3:1 mark on the gutter
                 NSRect(x: paneW + gutterW / 2 - 2, y: y + 4, width: 4, height: rowH - 8).fill()
             }
         } else if diff {
-            hue.withAlphaComponent(0.8).setFill()
+            c.ensure(hue, on: c.mantle, 3).setFill()
             NSRect(x: paneW + gutterW / 2 - 2, y: y + 4, width: 4, height: rowH - 8).fill()
         }
     }
@@ -525,11 +536,12 @@ final class CompareDetails: NSView {
             let line = row.line(side)
             (side == .left ? "L" : "R" as NSString).draw(at: NSPoint(x: 10, y: y), withAttributes: labelAttrs)
             let num = line >= 0 ? String(line + 1) : "—"
-            (num as NSString).draw(at: NSPoint(x: 26, y: y), withAttributes: [.font: pane.font, .foregroundColor: c.dim])
+            (num as NSString).draw(at: NSPoint(x: 26, y: y), withAttributes: [.font: pane.font,
+                                                                             .foregroundColor: c.ensure(c.dim, on: c.mantle)])
             guard line >= 0 else { continue }
             let text = side == .left ? s.model.left.lines[line] : s.model.right.lines[line]
             let a = pane.attributed(text.replacingOccurrences(of: "\t", with: "→"), color: c.text,
-                                    marks: side == .left ? mk.left : mk.right, c: c)
+                                    marks: side == .left ? mk.left : mk.right, c: c, bg: c.mantle)
             NSGraphicsContext.saveGraphicsState()
             NSRect(x: 80, y: y, width: bounds.width - 90, height: pane.rowH).clip()
             a.draw(at: NSPoint(x: 80, y: y))

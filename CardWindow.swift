@@ -40,6 +40,10 @@ class CardWindowController: NSObject, NSWindowDelegate {
     // the whole shared window, Ctrl+Tab / Ctrl+Shift+Tab = next / previous view
     var onSlotHide: (() -> Void)?
     var onCycleView: ((Int) -> Void)?
+    // the themed Cmd+/ card (`showShortcutsCard`), over the whole window
+    var shortcutsCard: ShortcutsOverlay?
+    // the themed question over the window (`confirm`), instead of an NSAlert
+    var confirmCard: ConfirmOverlay?
     private var slotNavClick: ((Int) -> Void)?
 
     init(controller: SwitcherController, frame: NSRect, title: String, minSize: NSSize) {
@@ -221,11 +225,19 @@ class CardWindowController: NSObject, NSWindowDelegate {
 
     // the key monitor's whole path (nil = used); test hooks feed it too
     func routeKey(_ e: NSEvent) -> NSEvent? {
+        if let c = confirmCard, window.isKeyWindow {                     // a question owns the keys
+            if c.handleKey(e.keyCode, e.modifierFlags.intersection(.deviceIndependentFlagsMask)) { return nil }
+            return editKey(e)                                             // its text field: typing + edit keys
+        }
         if keyBeforeSheet(e) { return nil }
         if let sheet = window.attachedSheet {
-            return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
+            return sheet.isKeyWindow ? editKey(e, in: sheet) : e
         }
         guard window.isKeyWindow else { return e }
+        if let card = shortcutsCard {                                     // the card owns the keys
+            _ = card.handleKey(e.keyCode, e.modifierFlags.intersection(.deviceIndependentFlagsMask))
+            return nil
+        }
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let cmd = mods.contains(.command)
         if mods.contains(.control) && !cmd && e.keyCode == 48, let cycle = onCycleView {
@@ -234,7 +246,19 @@ class CardWindowController: NSObject, NSWindowDelegate {
         }
         if cmd && e.keyCode == 13 { closeOrHide(); return nil }          // Cmd+W
         if handleKey(e) { return nil }
-        return JiraEditKeys.route(e, in: window) ? nil : e
+        return editKey(e)
+    }
+
+    // rule.md #1 for a text field in the card. Cmd+A/X/C/V: the app's Edit
+    // menu (NSText selectors) answers them BEFORE this monitor runs (the app
+    // is active while a card window is key), so routing them too pasted
+    // TWICE — they pass through. Cmd+Z stays routed: the menu's Undo targets
+    // UndoManager.undo, which no responder answers. Ctrl+C/V: no menu item.
+    func editKey(_ e: NSEvent, in w: NSWindow? = nil) -> NSEvent? {
+        let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.contains(.command), !mods.contains(.control), NSApp.isActive,
+           [0, 7, 8, 9].contains(e.keyCode) { return e }
+        return JiraEditKeys.route(e, in: w ?? window) ? nil : e
     }
 
     // a web preview has focus: Cmd+C / Cmd+A like any document
@@ -264,3 +288,203 @@ class CardWindowController: NSObject, NSWindowDelegate {
 }
 
 extension CardWindowController: SlotMember {}
+
+// MARK: - Keyboard shortcuts card
+
+extension CardWindowController {
+    // commands.toml [shortcuts] rows as the shared themed card (the one the
+    // notes / files / jira views show); empty groups are dropped
+    func showShortcutsCard(_ groups: [ShortcutsOverlay.Group], colors: PopupColors, title: String = "Keyboard Shortcuts") {
+        let gs = groups.filter { !$0.items.isEmpty }
+        guard let root = window.contentView, !gs.isEmpty else { return }
+        closeShortcutsCard()
+        let o = ShortcutsOverlay(groups: gs, colors: colors, zoom: 1, in: root, title: title)
+        o.onClose = { [weak self] in self?.closeShortcutsCard() }
+        shortcutsCard = o
+    }
+
+    func closeShortcutsCard() {
+        shortcutsCard?.removeFromSuperview()
+        shortcutsCard = nil
+    }
+}
+
+// MARK: - Confirm card
+
+// A question asked INSIDE the card, in the theme (an NSAlert sheet is drawn
+// by the system: its own colors, its own blue default). The default button
+// is the accent-filled one; Tab / ← → move the focus ring, Return / Space
+// press the focused button, Esc = `cancel`. A click outside does nothing:
+// the answer has to be a button.
+final class ConfirmOverlay: NSView {
+    typealias Choice = (title: String, role: ThemedPushButton.Role)
+    // the card's own fill (callers building an accessory measure against it)
+    static func fill(_ c: PopupColors) -> NSColor {
+        let b = ButtonStyle.opaque(c.background)
+        return b.blended(withFraction: 0.25, of: .black) ?? b
+    }
+    let input: JiraInputBox?                            // a one-line answer (rename, new folder)
+    private let buttons: [ThemedPushButton]
+    private let cancelIndex: Int
+    private var focusIndex: Int { didSet { for (i, b) in buttons.enumerated() { b.keyFocus = i == focusIndex } } }
+    private var answer: ((Int) -> Void)?
+    private var targets: [ClosureTarget] = []          // buttons don't retain their targets
+
+    private final class Card: NSView {
+        override var isFlipped: Bool { true }
+        override func mouseDown(with e: NSEvent) {}
+    }
+
+    init(title: String, info: String, input: JiraInputBox? = nil, accessory: NSView?, choices: [Choice],
+         defaultIndex: Int, cancelIndex: Int, colors c: PopupColors, in root: NSView, then: @escaping (Int) -> Void) {
+        self.input = input
+        self.cancelIndex = cancelIndex
+        focusIndex = defaultIndex
+        answer = then
+        buttons = choices.map { ch in
+            let b = ThemedPushButton(title: ch.title, target: nil, action: nil)
+            b.role = ch.role
+            b.colors = c
+            b.isBordered = false
+            return b
+        }
+        super.init(frame: root.bounds)
+        autoresizingMask = [.width, .height]
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.3).cgColor
+
+        let pad: CGFloat = 18, w = min(480, root.bounds.width - 40), inner = w - pad * 2
+        let card = Card()
+        card.wantsLayer = true
+        let fill = Self.fill(c)
+        card.layer?.backgroundColor = fill.withAlphaComponent(0.98).cgColor
+        card.layer?.cornerRadius = 12
+        card.layer?.borderColor = c.text.withAlphaComponent(0.15).cgColor
+        card.layer?.borderWidth = 1
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.4
+        card.layer?.shadowRadius = 18
+
+        func label(_ t: String, _ f: NSFont, _ col: NSColor) -> NSTextField {
+            let l = NSTextField(wrappingLabelWithString: t)
+            l.font = f
+            l.textColor = col
+            l.preferredMaxLayoutWidth = inner
+            l.isSelectable = false
+            let h = l.sizeThatFits(NSSize(width: inner, height: .greatestFiniteMagnitude)).height
+            l.frame.size = NSSize(width: inner, height: ceil(h))
+            return l
+        }
+        var y = pad
+        let t = label(title, .systemFont(ofSize: 14, weight: .semibold), c.ensure(c.text, on: fill))
+        t.frame.origin = NSPoint(x: pad, y: y)
+        card.addSubview(t)
+        y = t.frame.maxY + 6
+        if !info.isEmpty {
+            let i = label(info, .systemFont(ofSize: 12), c.ensure(c.over(c.text, 0.78, on: fill), on: fill))
+            i.frame.origin = NSPoint(x: pad, y: y)
+            card.addSubview(i)
+            y = i.frame.maxY
+        }
+        if let box = input {
+            y += 12
+            box.colors = c
+            box.frame = NSRect(x: pad, y: y, width: inner, height: JiraTheme.height)
+            card.addSubview(box)
+            y = box.frame.maxY
+        }
+        if let acc = accessory {
+            y += 12
+            acc.frame = NSRect(x: pad, y: y, width: inner, height: acc.frame.height)
+            card.addSubview(acc)
+            y = acc.frame.maxY
+        }
+        y += 18
+        // buttons right-aligned, in the order given (the caller puts the
+        // default last, where macOS keeps it)
+        var x = w - pad
+        for b in buttons.reversed() {
+            let bw = max(84, b.intrinsicContentSize.width)
+            x -= bw
+            b.frame = NSRect(x: x, y: y, width: bw, height: 28)
+            x -= 8
+            card.addSubview(b)
+        }
+        y += 28 + pad
+        card.frame = NSRect(x: ((root.bounds.width - w) / 2).rounded(),
+                            y: ((root.bounds.height - y) / 2).rounded(), width: w, height: y)
+        card.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        addSubview(card)
+        targets = buttons.indices.map { i in ClosureTarget { [weak self] in self?.finish(i) } }
+        for (b, t) in zip(buttons, targets) { b.target = t; b.action = #selector(ClosureTarget.run) }
+        buttons[defaultIndex].keyFocus = true             // didSet doesn't run inside init
+        root.addSubview(self, positioned: .above, relativeTo: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func mouseDown(with e: NSEvent) {}
+
+    func finish(_ i: Int) {
+        guard let a = answer else { return }
+        answer = nil
+        removeFromSuperview()
+        a(i)
+    }
+    func cancel() { finish(cancelIndex) }
+
+    // true = used; false = a key for the text field (typing, edit keys)
+    func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        let n = buttons.count
+        if input != nil {
+            switch code {
+            case 53: cancel()                                              // Esc
+            case 36, 76: finish(focusIndex)                                // Return / Enter
+            case 48: break                                                 // Tab stays in the card
+            default: return false
+            }
+            return true
+        }
+        switch code {
+        case 53: cancel()                                                  // Esc
+        case 36, 76, 49: finish(focusIndex)                                // Return / Enter / Space
+        case 48: focusIndex = (focusIndex + (mods.contains(.shift) ? n - 1 : 1)) % n   // Tab
+        case 123: focusIndex = max(0, focusIndex - 1)                      // ←
+        case 124: focusIndex = min(n - 1, focusIndex + 1)                  // →
+        default: break                                                     // swallowed
+        }
+        return true
+    }
+}
+
+extension CardWindowController {
+    // a one-line answer in the card (rename, new folder): `text` comes in
+    // with its stem selected; `then` gets the answer, nil when cancelled
+    func prompt(_ title: String, info: String, text: String, ok: String, colors: PopupColors,
+                then: @escaping (String?) -> Void) {
+        let box = JiraInputBox(placeholder: "")
+        box.field.stringValue = text
+        confirm(title, info: info, input: box, choices: [("Cancel", .normal), (ok, .primary)],
+                defaultIndex: 1, cancelIndex: 0, colors: colors) { i in
+            then(i == 1 ? box.field.stringValue : nil)
+        }
+        window.makeFirstResponder(box.field)
+        let stem = ((text as NSString).deletingPathExtension as NSString).length
+        box.field.currentEditor()?.selectedRange = NSRange(location: 0, length: stem > 0 ? stem : (text as NSString).length)
+    }
+
+    // ask in the card: `then` gets the pressed choice's index (Esc = cancelIndex)
+    func confirm(_ title: String, info: String = "", input: JiraInputBox? = nil, accessory: NSView? = nil,
+                 choices: [ConfirmOverlay.Choice], defaultIndex: Int, cancelIndex: Int, colors: PopupColors,
+                 then: @escaping (Int) -> Void) {
+        guard let root = window.contentView else { return }
+        confirmCard?.cancel()
+        closeShortcutsCard()
+        confirmCard = ConfirmOverlay(title: title, info: info, input: input, accessory: accessory, choices: choices,
+                                     defaultIndex: defaultIndex, cancelIndex: cancelIndex, colors: colors,
+                                     in: root) { [weak self] i in
+            self?.confirmCard = nil
+            then(i)
+        }
+    }
+}
+

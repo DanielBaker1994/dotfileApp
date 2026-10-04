@@ -134,7 +134,12 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   header clicks, `setSlotNav`, the shared keys (sheet edit keys, Ctrl+Tab,
   Cmd+W; subclasses override `handleKey` / `keyBeforeSheet`), the kitchen
   sink's head (`iconMenu(view:)` / `popUpIconMenu`) and `SlotMember`
-  (subclasses override `didShow`)
+  (subclasses override `didShow`). Questions: `confirm(…)` / `prompt(…)`
+  (`ConfirmOverlay`), Cmd+/ card: `showShortcutsCard` (`ShortcutsOverlay`).
+  Edit keys: `editKey` — Cmd+A/X/C/V pass through to the Edit menu (it
+  fires BEFORE local monitors: routing them too pasted twice), Cmd+Z and
+  Ctrl+C/V are routed (`JiraEditKeys`). Text on a tint: `PopupColors.over` +
+  `ensure` (4.5:1 against the real composited background)
 - `ConfigText.swift` — commands.toml's one-line TOML codec (`configEntry`,
   `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
 - `ProcessRun.swift` — `runProcess`: run a program to completion, stdin fed,
@@ -672,6 +677,21 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   {rel, status, newer, depth, dir, expanded, left, right}}. Log `compare folder:
   N items, scan M ms`. Tests: `bin/run-tests.sh compare` (test_compare_folder.swift:
   pairing, statuses, content + rules, roll-up, filters, `FileOps.place` + undo).
+- Folder Compare safety: `FolderNode.sameByMetadata` = a `.same` from size +
+  mtime alone (auto / never; cleared by a content answer) → dim "=", summary
+  "N same (M by date/size only)", no green "Identical", status hint
+  (`same-by-date[-hint]-label`). Questions are themed cards IN the window,
+  never NSAlerts: `CardWindowController.confirm(…)` → `ConfirmOverlay`
+  (CardWindow.swift; owns every key in `routeKey`: Tab / ← → focus ring,
+  Return / Space press, Esc = cancelIndex; default button = `.primary`,
+  risky = `.danger`): clash (Cancel default, Replace red), sync preview
+  (Cancel default; Trash first in danger, overwrites in warning, in a
+  recessed well; Synchronize red when it trashes or overwrites), unsaved
+  close (Save default, Don't Save red). Cmd+/ = `showShortcutsCard` → the
+  shared `ShortcutsOverlay` (PopupWindow.swift; also what PopupWindow's
+  `showShortcuts` draws), current mode's group first. Sync is a worded
+  raised button (`sync-button-label`), apart from the icon row. State
+  `compare.sheet` covers the card, `shortcutsCard`; `sheet-cancel` cancels it.
 - Folder Compare undo: each `FolderSession` owns a `FileOps.UndoStack`
   (`undo`, carried to its successors), so its Cmd+Z never takes back a file
   browser op; `FileOps.shared` = the browser's. Every FileOps call takes

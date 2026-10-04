@@ -111,6 +111,12 @@ enum CompareRecent {
 
     static func remove(_ e: CompareRecentEntry) { save(load().filter { $0 != e }) }
 
+    static func clearAll() {
+        try? FileManager.default.removeItem(atPath: pastedDir)
+        try? FileManager.default.createDirectory(atPath: pastedDir, withIntermediateDirectories: true)
+        try? Data("[]".utf8).write(to: URL(fileURLWithPath: path))
+    }
+
     static func save(_ all: [CompareRecentEntry]) {
         // a snapshot nothing lists any more goes away
         let keep = Set(all.flatMap { [$0.left, $0.right] })
@@ -138,20 +144,34 @@ enum CompareRecent {
 // the start page's Recent list, drawn (cursor pill + accent edge like every list)
 final class CompareRecentList: NSView {
     var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
-    var rows: [CompareRecentEntry] = [] { didSet { selection = min(selection, max(0, rows.count - 1)); needsDisplay = true } }
+    var rows: [CompareRecentEntry] = [] {
+        didSet { selection = min(selection, max(0, rows.count - 1)); needsDisplay = true; refreshMissing() }
+    }
     var selection = 0 { didSet { needsDisplay = true } }
     var onOpen: ((Int) -> Void)?
     var menuFor: ((Int) -> NSMenu?)?
     let rowH: CGFloat = 28
     override var isFlipped: Bool { true }
 
+    private var missingCache: [Int: Bool] = [:]  // row index → has a missing file
     private func tilde(_ p: String) -> String { (p as NSString).abbreviatingWithTildeInPath }
+
+    private func refreshMissing() {
+        missingCache.removeAll()
+        for (i, e) in rows.enumerated() {
+            let leftGone = !CompareRecent.isPasted(e.left) && !FileManager.default.fileExists(atPath: e.left)
+            let rightGone = !CompareRecent.isPasted(e.right) && !FileManager.default.fileExists(atPath: e.right)
+            missingCache[i] = leftGone || rightGone
+        }
+    }
 
     override func draw(_ dirty: NSRect) {
         let font = NSFont.systemFont(ofSize: 12.5, weight: .medium), small = NSFont.systemFont(ofSize: 11.5)
+        let warnFont = NSFont.systemFont(ofSize: 12, weight: .bold)
         for (i, e) in rows.enumerated() {
             let r = NSRect(x: 0, y: CGFloat(i) * rowH, width: bounds.width, height: rowH)
             guard r.intersects(dirty) else { continue }
+            let missing = missingCache[i] ?? false
             if i == selection {
                 let pill = NSBezierPath(roundedRect: r.insetBy(dx: 2, dy: 2), xRadius: 6, yRadius: 6)
                 colors.highlight.withAlphaComponent(0.6).setFill()
@@ -164,8 +184,11 @@ final class CompareRecentList: NSView {
             let rn = pr ? "pasted text" : (e.right as NSString).lastPathComponent
             let name = ln == rn ? ln : "\(ln) ⇆ \(rn)"
             let y = r.minY + 6
-            (name as NSString).draw(in: NSRect(x: 14, y: y, width: 220, height: 18),
-                                    withAttributes: [.font: font, .foregroundColor: colors.text])
+            let nameAttrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: missing ? colors.tone(.danger).withAlphaComponent(0.7) : colors.text
+            ]
+            (name as NSString).draw(in: NSRect(x: 14, y: y, width: 220, height: 18), withAttributes: nameAttrs)
             let dirs = "\(pl ? "(clipboard)" : tilde((e.left as NSString).deletingLastPathComponent))  ⇆  \(pr ? "(clipboard)" : tilde((e.right as NSString).deletingLastPathComponent))"
             let p = NSMutableParagraphStyle()
             p.lineBreakMode = .byTruncatingMiddle
@@ -173,7 +196,18 @@ final class CompareRecentList: NSView {
                                     withAttributes: [.font: small, .foregroundColor: colors.dim, .paragraphStyle: p])
             let age = CompareRecent.age(e.used) as NSString
             let attrs: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: colors.dim]
-            age.draw(at: NSPoint(x: bounds.width - 12 - age.size(withAttributes: attrs).width, y: y + 1), withAttributes: attrs)
+            let ageW = age.size(withAttributes: attrs).width
+            var ageX = bounds.width - 12 - ageW
+            if missing {
+                let warn = "!" as NSString
+                let warnAttrs: [NSAttributedString.Key: Any] = [.font: warnFont, .foregroundColor: colors.tone(.danger)]
+                let warnW = warn.size(withAttributes: warnAttrs).width
+                let gap: CGFloat = 4
+                ageX -= warnW + gap
+                warn.draw(at: NSPoint(x: ageX, y: y + 1), withAttributes: warnAttrs)
+                ageX -= gap
+            }
+            age.draw(at: NSPoint(x: ageX, y: y + 1), withAttributes: attrs)
         }
     }
     override func mouseDown(with e: NSEvent) {
@@ -1116,6 +1150,14 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
 
     var folderWindow: NSWindow { window }
     var folderColors: PopupColors { colors }
+    func folderPrompt(_ title: String, info: String, text: String, ok: String, then: @escaping (String?) -> Void) {
+        prompt(title, info: info, text: text, ok: ok, colors: colors, then: then)
+    }
+    func folderConfirm(_ title: String, info: String, accessory: NSView?, choices: [ConfirmOverlay.Choice],
+                       defaultIndex: Int, cancelIndex: Int, then: @escaping (Int) -> Void) {
+        confirm(title, info: info, accessory: accessory, choices: choices,
+                defaultIndex: defaultIndex, cancelIndex: cancelIndex, colors: colors, then: then)
+    }
     var folderConfig: CompareConfig { cfg }
     func folderChanged() {
         pills?.titles = sessions.map(\.label)
@@ -1287,19 +1329,17 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         let s = sessions[i]
         guard s.isDirty, !force else { removeSession(i); return }
         if selected != i { select(i) }
-        let a = NSAlert()
-        a.messageText = cfg.label("unsaved", "Save changes to {}?", s.label)
-        a.informativeText = cfg.label("unsaved-info", "Your edits are lost if you don't save them.")
-        a.addButton(withTitle: cfg.label("save-button", "Save"))
-        a.addButton(withTitle: cfg.label("discard-button", "Don't Save"))
-        a.addButton(withTitle: cfg.label("cancel-button", "Cancel"))
-        a.beginSheetModal(for: window) { [weak self] r in
+        // Save is the default (Return), Don't Save is red, Esc = Cancel
+        confirm(cfg.label("unsaved", "Save changes to {}?", s.label),
+                info: cfg.label("unsaved-info", "Your edits are lost if you don't save them."),
+                choices: [(cfg.label("discard-button", "Don't Save"), .danger),
+                          (cfg.label("cancel-button", "Cancel"), .normal),
+                          (cfg.label("save-button", "Save"), .primary)],
+                defaultIndex: 2, cancelIndex: 1, colors: colors) { [weak self] i in
             guard let self, let idx = self.sessions.firstIndex(where: { $0 === s }) else { return }
-            switch r {
-            case .alertFirstButtonReturn:
-                self.saveAll(s) { ok in if ok { self.removeSession(idx) } }
-            case .alertSecondButtonReturn:
-                self.removeSession(idx)
+            switch i {
+            case 2: self.saveAll(s) { ok in if ok { self.removeSession(idx) } }
+            case 0: self.removeSession(idx)
             default: break
             }
         }
@@ -1375,6 +1415,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         m.addItem(menuItem("Copy Paths") { copyText("\(e.left)\n\(e.right)") })
         m.addItem(.separator())
         m.addItem(menuItem("Remove from Recent") { [weak self] in CompareRecent.remove(e); self?.reloadRecent() })
+        m.addItem(menuItem("Clear All Recents") { [weak self] in CompareRecent.clearAll(); self?.recentAll = []; self?.recentList.rows = [] })
         return m
     }
 
@@ -2337,19 +2378,21 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         popUpIconMenu(menu)
     }
 
-    // commands.toml [shortcuts] "compare: …" lines, then "all: …"
+    // commands.toml [shortcuts] as the shared themed card: the mode you are
+    // in first ("compare: …" Text, "compare-folders: …" Folder), the other
+    // mode next, then "all: …"
     private func showShortcuts() {
-        func lines(_ v: String) -> [String] {
-            shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
+        func items(_ v: String) -> [(keys: String, what: String)] {
+            shortcutEntries.filter { $0.view == v }.map { ($0.keys, $0.what) }
         }
-        let own = lines("compare"), folders = lines("compare-folders"), all = lines("all")
-        let text = own + (folders.isEmpty ? [] : ["", "Folder Compare:"] + folders) + (all.isEmpty ? [] : ["", "Everywhere:"] + all)
-        let a = NSAlert()
-        a.messageText = "Compare Shortcuts"
-        a.informativeText = text.isEmpty ? "Add \"compare: keys\" = \"what\" lines to [shortcuts] in commands.toml."
-            : text.joined(separator: "\n")
-        a.addButton(withTitle: "OK")
-        a.beginSheetModal(for: window) { _ in }
+        let text: ShortcutsOverlay.Group = ("Text Compare", items("compare"))
+        let folder: ShortcutsOverlay.Group = ("Folder Compare", items("compare-folders"))
+        let modes = session?.folder != nil ? [folder, text] : [text, folder]
+        var groups = modes + [("Everywhere", items("all"))]
+        if !groups.contains(where: { !$0.items.isEmpty }) {
+            groups = [("Compare", [("Cmd+/", "add \"compare: keys\" = \"what\" lines to [shortcuts] in commands.toml")])]
+        }
+        showShortcutsCard(groups, colors: colors, title: cfg.label("shortcuts-title", "Compare Shortcuts"))
     }
 
     // MARK: keys (CardWindowController's monitor: sheets, Ctrl+Tab, Cmd+W first)
@@ -2469,7 +2512,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         var st: [String: Any] = [
             "shown": window.isVisible, "key": window.isKeyWindow, "sub": isSub,
             "startPage": session == nil, "selected": selected ?? -1,
-            "sheet": window.attachedSheet != nil,
+            "sheet": window.attachedSheet != nil || confirmCard != nil,
+            "shortcutsCard": shortcutsCard != nil,
             "sessions": sessions.map { s -> [String: Any] in
                 ["kind": s.folder != nil ? "folder" : "text", "left": s.path[.left] ?? s.name(.left), "right": s.path[.right] ?? s.name(.right),
                  "dirtyL": s.dirty(.left), "dirtyR": s.dirty(.right), "git": s.git, "waiting": !s.waiters.isEmpty]
@@ -2559,6 +2603,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             if (parts.count > 1 && parts[1] == "on") != showWhitespace { toggleWhitespace() }
         case "sheet-cancel":
             if let sh = window.attachedSheet { window.endSheet(sh, returnCode: .alertThirdButtonReturn) }
+            confirmCard?.cancel()
+            closeShortcutsCard()
         case "paste":
             // paste:left|right:TEXT (\n = newline)
             guard parts.count > 2, let sd = side(parts[1]) else { return "paste:left|right:TEXT" }

@@ -197,6 +197,81 @@ enum ScreenToast {
     }
 }
 
+// MARK: - Recent screenshots panel
+
+final class ShotRecentPanel: NSPanel {
+    private let recentView: ShotRecentView
+    
+    init(recent: [ShotRecentEntry], ui: NSColor, onSelect: @escaping (String) -> Void) {
+        recentView = ShotRecentView(entries: recent, ui: ui, onSelect: onSelect)
+        let w = CGFloat(min(360, max(200, recent.reduce(0) { max($0, $1.path.count) })))
+        let h = CGFloat(min(recent.count, 10)) * 24 + 20
+        let rect = NSRect(x: 0, y: 0, width: w, height: h)
+        super.init(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: false)
+        contentView = recentView
+        isFloatingPanel = true
+        level = .screenSaver
+        hidesOnDeactivate = false
+        backgroundColor = .clear
+        isOpaque = false
+    }
+}
+
+struct ShotRecentEntry {
+    var path: String
+    var name: String
+    var at: Date
+}
+
+final class ShotRecentView: NSView {
+    private let entries: [ShotRecentEntry]
+    private let ui: NSColor
+    private let onSelect: (String) -> Void
+    private let rowH: CGFloat = 24
+    
+    init(entries: [ShotRecentEntry], ui: NSColor, onSelect: @escaping (String) -> Void) {
+        self.entries = entries
+        self.ui = ui
+        self.onSelect = onSelect
+        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: CGFloat(entries.count) * 24 + 20))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+    
+    override func draw(_ dirty: NSRect) {
+        let bg = NSColor(white: 0.12, alpha: 0.95)
+        let r = NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8)
+        bg.setFill(); r.fill()
+        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        let dimFont = NSFont.systemFont(ofSize: 10.5)
+        for (i, e) in entries.enumerated() {
+            let row = NSRect(x: 4, y: CGFloat(i) * rowH + 4, width: bounds.width - 8, height: rowH)
+            guard row.intersects(dirty) else { continue }
+            (e.name as NSString).draw(in: NSRect(x: 8, y: row.minY + 3, width: bounds.width - 16, height: 16),
+                                      withAttributes: [.font: font, .foregroundColor: NSColor.white])
+            let age = ageString(e.at)
+            let p = NSMutableParagraphStyle(); p.alignment = .right
+            (age as NSString).draw(in: NSRect(x: 8, y: row.minY + 3, width: bounds.width - 16, height: 16),
+                                   withAttributes: [.font: dimFont, .foregroundColor: NSColor(white: 0.5, alpha: 1), .paragraphStyle: p])
+        }
+    }
+    override func mouseDown(with e: NSEvent) {
+        let pt = convert(e.locationInWindow, from: nil)
+        let i = Int((pt.y - 4) / rowH)
+        guard entries.indices.contains(i) else { return }
+        onSelect(entries[i].path)
+    }
+    
+    private func ageString(_ d: Date) -> String {
+        let s = Date().timeIntervalSince(d)
+        if s < 60 { return "just now" }
+        if s < 3600 { return "\(Int(s / 60))m ago" }
+        if s < 86400 { return "\(Int(s / 3600))h ago" }
+        let f = DateFormatter(); f.dateFormat = s < 7 * 86400 ? "EEE" : "MM-dd"
+        return f.string(from: d)
+    }
+}
+
 // MARK: - Controller
 
 final class ScreenshotController {
@@ -217,6 +292,7 @@ final class ScreenshotController {
     private var lastOutput: [String: Any] = [:]
     // /pane-shot's last result (state `paneShot`)
     private(set) var paneShotLast: [String: Any] = [:]
+    private var recentPanel: ShotRecentPanel?
     let statePath = NSHomeDirectory() + "/.cache/workspace-switcher/screenshot-state.json"
 
     init() {
@@ -403,6 +479,10 @@ final class ScreenshotController {
             guard let self, let s else { return }
             self.finish(s, o)
         }
+        s.onRecent = { [weak self, weak s] in
+            guard let self, let s else { return }
+            self.showRecentScreenshots(s)
+        }
         for d in s.displays { d.view.attach(s, d) }
         for d in s.displays { d.panel.orderFrontRegardless() }
         let key = s.mouseDisplay ?? s.displays[0]
@@ -455,6 +535,8 @@ final class ScreenshotController {
     // close every overlay; the keyboard returns to the frontmost app by
     // itself (it was never taken from it: no activation)
     func close() {
+        recentPanel?.close()
+        recentPanel = nil
         guard let s = session else { return }
         for d in s.displays {
             d.panel.orderOut(nil)
@@ -470,6 +552,35 @@ final class ScreenshotController {
         reply = nil
         r?(d)
     }
+
+    // MARK: recent screenshots
+
+    private func showRecentScreenshots(_ s: ShotSession) {
+        let entries = PathShelf.shared.entries().filter { $0.why == .screenshot }.prefix(10)
+        guard !entries.isEmpty else { return }
+        recentPanel?.close()
+        let shotEntries = entries.map { e in
+            ShotRecentEntry(path: e.path, name: (e.path as NSString).lastPathComponent, at: Date(timeIntervalSince1970: e.at))
+        }
+        let ui = NSColor(calibratedRed: s.cfg.uiColor.r, green: s.cfg.uiColor.g, blue: s.cfg.uiColor.b, alpha: s.cfg.uiColor.a)
+        let panel = ShotRecentPanel(recent: shotEntries, ui: ui) { [weak self] path in
+            guard let self else { return }
+            self.recentPanel?.close()
+            self.recentPanel = nil
+            // Quick Look the file
+            if FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+            }
+        }
+        // Place near the mouse or center of main screen
+        if let md = s.mouseDisplay ?? s.displays.first {
+            panel.setFrameOrigin(CGPoint(x: md.screen.frame.midX - panel.frame.width / 2, y: md.screen.frame.midY - panel.frame.height / 2))
+        }
+        panel.orderFrontRegardless()
+        panel.makeKey()
+        recentPanel = panel
+    }
+
 
     // MARK: outputs
 

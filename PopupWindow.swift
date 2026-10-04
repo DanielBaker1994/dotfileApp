@@ -486,6 +486,26 @@ public extension PopupColors {
         case .info: return readable(palette.info)
         }
     }
+    // `top` laid over `bottom` at `alpha`: the opaque color a tint really
+    // shows (contrast is measured against this, never against the card)
+    func over(_ top: NSColor, _ alpha: CGFloat, on bottom: NSColor) -> NSColor {
+        let b = ButtonStyle.opaque(bottom)
+        return b.blended(withFraction: alpha, of: ButtonStyle.opaque(top)) ?? b
+    }
+    // `fg` pushed away from `bg` (toward black or white, whichever side
+    // contrasts) until it reaches `ratio`: text on a tint stays readable in
+    // every preset, light ones included, and keeps as much of its hue as it can
+    func ensure(_ fg: NSColor, on bg: NSColor, _ ratio: CGFloat = 4.5) -> NSColor {
+        let b = ButtonStyle.opaque(bg)
+        let pole: NSColor = ButtonStyle.contrast(.black, b) >= ButtonStyle.contrast(.white, b) ? .black : .white
+        var out = ButtonStyle.opaque(fg)
+        var step = 0
+        while ButtonStyle.contrast(out, b) < ratio, step < 12 {
+            out = out.blended(withFraction: 0.15, of: pole) ?? out
+            step += 1
+        }
+        return out
+    }
     // hairline between regions (header/tab strip, table rows)
     var hairline: NSColor { text.withAlphaComponent(isLight ? 0.12 : 0.08) }
     // the card's outline: the accent sunk into the card, so every theme gets
@@ -3059,6 +3079,8 @@ final class ThemedPushButton: NSButton, PopupThemeable {
     enum Role { case normal, primary, danger }
     var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
     var role: Role = .normal { didSet { needsDisplay = true } }
+    // keyboard focus drawn by the owner (a confirm card moves it with Tab)
+    var keyFocus = false { didSet { needsDisplay = true } }
     private var hover = false
     private var tracking: NSTrackingArea?
     func applyColors(_ c: PopupColors) { colors = c }
@@ -3087,8 +3109,10 @@ final class ThemedPushButton: NSButton, PopupThemeable {
     override func draw(_ dirtyRect: NSRect) {
         let c = colors
         let st: ButtonState = !isEnabled ? .idle : isHighlighted ? .pressed : hover ? .hover : .idle
-        let r = bounds.insetBy(dx: 1, dy: 1)
-        let path = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
+        // keyboard focus: the fill steps in so the accent ring reads even
+        // around an accent-filled (primary) button
+        let r = bounds.insetBy(dx: keyFocus ? 3.5 : 1, dy: keyFocus ? 3.5 : 1)
+        let path = NSBezierPath(roundedRect: r, xRadius: keyFocus ? 4 : 6, yRadius: keyFocus ? 4 : 6)
         var fg: NSColor
         switch role {
         case .primary:
@@ -3112,6 +3136,12 @@ final class ThemedPushButton: NSButton, PopupThemeable {
             fg = c.text
         }
         if !isEnabled { fg = fg.withAlphaComponent(0.4) }
+        if keyFocus {
+            ButtonStyle.focusStroke(c).setStroke()
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 7, yRadius: 7)
+            ring.lineWidth = 2
+            ring.stroke()
+        }
         let attrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: fg]
         let sz = (title as NSString).size(withAttributes: attrs)
         (title as NSString).draw(at: NSPoint(x: (bounds.midX - sz.width / 2).rounded(),
@@ -9843,159 +9873,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // "Keyboard Shortcuts…" (kitchen sink menu / Cmd+/): a themed card over
     // the window, one group per section; keys drawn as key caps. Esc /
     // Return / a click outside closes just the card; ↑↓ / Ctrl+N/P scroll.
-    public typealias ShortcutGroup = (title: String, items: [(keys: String, what: String)])
+    public typealias ShortcutGroup = ShortcutRows
     public var onShowShortcuts: (() -> Void)?
-    private var shortcutsSheet: NSView?
-    private weak var shortcutsScroll: NSScrollView?
-
-    private final class ShortcutsBackdrop: NSView {
-        var onClick: (() -> Void)?
-        override func mouseDown(with e: NSEvent) { onClick?() }
-    }
-    // clicks on the card itself must not reach the backdrop (= close)
-    private final class ShortcutsCard: NSView {
-        override func mouseDown(with e: NSEvent) {}
-    }
-
-    private final class ShortcutsListView: NSView {
-        let groups: [ShortcutGroup]
-        let c: PopupColors
-        let z: CGFloat
-        override var isFlipped: Bool { true }
-        init(groups: [ShortcutGroup], colors: PopupColors, zoom: CGFloat, width: CGFloat) {
-            self.groups = groups
-            c = colors
-            z = zoom
-            super.init(frame: NSRect(x: 0, y: 0, width: width, height: 0))
-            frame.size.height = contentHeight
-        }
-        required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
-
-        private var rowH: CGFloat { 27 * z }
-        private var headH: CGFloat { 30 * z }
-        var contentHeight: CGFloat {
-            groups.reduce(6 * z) { $0 + headH + CGFloat($1.items.count) * rowH } + 8 * z
-        }
-        private var capFont: NSFont { .monospacedSystemFont(ofSize: 11 * z, weight: .medium) }
-        private func capsWidth(_ keys: String) -> CGFloat {
-            let parts = keys.components(separatedBy: " / ")
-            let slash = ("/" as NSString).size(withAttributes: [.font: capFont]).width + 8 * z
-            return parts.reduce(0) { $0 + ($1 as NSString).size(withAttributes: [.font: capFont]).width + 12 * z }
-                + CGFloat(max(0, parts.count - 1)) * slash
-        }
-        override func draw(_ dirtyRect: NSRect) {
-            let pad = 14 * z
-            // one key column for every group: the widest caps, at most ~half
-            let keyCol = min(bounds.width * 0.5,
-                             groups.flatMap(\.items).map { capsWidth($0.keys) }.max() ?? 0) + pad + 16 * z
-            let headFont = NSFont.systemFont(ofSize: 10 * z, weight: .bold)
-            let textFont = NSFont.systemFont(ofSize: 12.5 * z)
-            let trunc = NSMutableParagraphStyle()
-            trunc.lineBreakMode = .byTruncatingTail
-            var y = 6 * z
-            for g in groups {
-                (g.title.uppercased() as NSString).draw(
-                    at: NSPoint(x: pad, y: y + headH - 18 * z),
-                    withAttributes: [.font: headFont, .foregroundColor: c.accentOn, .kern: 0.8])
-                y += headH
-                for it in g.items {
-                    var x = pad
-                    let capH = 19 * z
-                    let capY = y + (rowH - capH) / 2
-                    for (i, part) in it.keys.components(separatedBy: " / ").enumerated() {
-                        if i > 0 {
-                            let a: [NSAttributedString.Key: Any] = [.font: capFont, .foregroundColor: c.dim]
-                            let sz = ("/" as NSString).size(withAttributes: a)
-                            ("/" as NSString).draw(at: NSPoint(x: x + 4 * z, y: capY + (capH - sz.height) / 2),
-                                                   withAttributes: a)
-                            x += sz.width + 8 * z
-                        }
-                        let a: [NSAttributedString.Key: Any] = [.font: capFont, .foregroundColor: c.text]
-                        let sz = (part as NSString).size(withAttributes: a)
-                        let cap = NSRect(x: x, y: capY, width: sz.width + 12 * z, height: capH)
-                        let path = NSBezierPath(roundedRect: cap, xRadius: 5 * z, yRadius: 5 * z)
-                        c.mantle.setFill()
-                        path.fill()
-                        c.hairline.setStroke()
-                        path.lineWidth = 1
-                        path.stroke()
-                        (part as NSString).draw(at: NSPoint(x: cap.minX + 6 * z, y: cap.midY - sz.height / 2),
-                                                withAttributes: a)
-                        x = cap.maxX
-                    }
-                    let tx = max(keyCol, x + 12 * z)
-                    let lineH = textFont.ascender - textFont.descender
-                    (it.what as NSString).draw(
-                        with: NSRect(x: tx, y: y + (rowH - lineH) / 2, width: bounds.width - tx - pad, height: lineH),
-                        options: [.usesLineFragmentOrigin],
-                        attributes: [.font: textFont, .foregroundColor: c.text, .paragraphStyle: trunc])
-                    y += rowH
-                }
-            }
-        }
-    }
+    private var shortcutsSheet: ShortcutsOverlay?
 
     public func showShortcuts(_ groups: [ShortcutGroup]) {
         guard let root = panel.contentView, !groups.isEmpty else { return }
         closeShortcuts()
         closeActionPicker()
-        let c = config.colors
-        let z = zoom
-        let back = ShortcutsBackdrop(frame: root.bounds)
-        back.autoresizingMask = [.width, .height]
-        back.wantsLayer = true
-        back.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
-        back.onClick = { [weak self] in self?.closeShortcuts() }
-
-        let titleH = 40 * z
-        let w = min(640 * z, root.bounds.width - 40)
-        let list = ShortcutsListView(groups: groups, colors: c, zoom: z, width: w)
-        let h = min(titleH + list.contentHeight, root.bounds.height - 60)
-        let card = ShortcutsCard(frame: NSRect(x: ((root.bounds.width - w) / 2).rounded(),
-                                        y: ((root.bounds.height - h) / 2).rounded(), width: w, height: h))
-        card.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
-        card.wantsLayer = true
-        let fill = (c.background.usingColorSpace(.sRGB) ?? c.background)
-            .blended(withFraction: 0.25, of: .black) ?? c.background
-        card.layer?.backgroundColor = fill.withAlphaComponent(0.98).cgColor
-        card.layer?.cornerRadius = 12 * z
-        card.layer?.borderColor = c.text.withAlphaComponent(0.15).cgColor
-        card.layer?.borderWidth = 1
-        card.layer?.shadowColor = NSColor.black.cgColor
-        card.layer?.shadowOpacity = 0.4
-        card.layer?.shadowRadius = 18
-        back.addSubview(card)
-
-        // title (top of the card; the card itself isn't flipped)
-        let t = NSTextField(labelWithString: "Keyboard Shortcuts")
-        t.font = .systemFont(ofSize: 14 * z, weight: .semibold)
-        t.textColor = c.text
-        t.sizeToFit()
-        t.frame.origin = NSPoint(x: 14 * z, y: h - titleH / 2 - t.frame.height / 2)
-        card.addSubview(t)
-        let hint = NSTextField(labelWithString: "esc to close")
-        hint.font = .systemFont(ofSize: 11 * z)
-        hint.textColor = c.dim
-        hint.sizeToFit()
-        hint.frame.origin = NSPoint(x: w - hint.frame.width - 14 * z, y: h - titleH / 2 - hint.frame.height / 2)
-        card.addSubview(hint)
-        let rule = NSView(frame: NSRect(x: 0, y: h - titleH, width: w, height: 1))
-        rule.wantsLayer = true
-        rule.layer?.backgroundColor = c.hairline.cgColor
-        card.addSubview(rule)
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: w, height: h - titleH))
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.documentView = list
-        card.addSubview(scroll)
-        list.scroll(.zero)
-
-        root.addSubview(back, positioned: .above, relativeTo: nil)
-        shortcutsSheet = back
-        shortcutsScroll = scroll
+        let o = ShortcutsOverlay(groups: groups, colors: config.colors, zoom: zoom, in: root)
+        o.onClose = { [weak self] in self?.closeShortcuts() }
+        shortcutsSheet = o
         escStreak = 0
     }
 
@@ -10006,26 +9894,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
 
     private func shortcutsKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
-        let ctrl = mods.contains(.control)
-        var dy: CGFloat = 0
-        switch (code, ctrl) {
-        case (53, _), (36, _), (76, _), (49, false), (12, false):   // Esc Return Space q
-            closeShortcuts()
-            return true
-        case (44, _) where mods.contains(.command):                 // Cmd+/ again
-            closeShortcuts()
-            return true
-        case (125, _), (45, true), (38, true): dy = 60 * zoom      // ↓ / C-n / C-j
-        case (126, _), (35, true), (40, true): dy = -60 * zoom     // ↑ / C-p / C-k
-        default: return true   // swallowed while the card is up
-        }
-        if let sv = shortcutsScroll, let doc = sv.documentView {
-            let clip = sv.contentView
-            let maxY = max(0, doc.frame.height - clip.bounds.height)
-            clip.scroll(to: NSPoint(x: 0, y: min(maxY, max(0, clip.bounds.origin.y + dy))))
-            sv.reflectScrolledClipView(clip)
-        }
-        return true
+        shortcutsSheet?.handleKey(code, mods) ?? false
     }
 
     // MARK: Toast
@@ -11707,5 +11576,187 @@ func animateToastPill(_ pill: NSView, rise: CGFloat, done: (() -> Void)? = nil) 
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             pill.animator().alphaValue = 0
         }, completionHandler: { if let done { done() } else { pill.removeFromSuperview() } })
+    }
+}
+
+// MARK: - Keyboard shortcuts card (shared)
+
+// The themed Cmd+/ card over a window: one group per section, keys drawn as
+// key caps. PopupWindow views and the card windows (Compare, AI, …) show
+// the same one. Esc / Return / Space / q / Cmd+/ or a click outside close
+// it (`onClose`); ↑↓ / Ctrl+N/P scroll; every other key is swallowed.
+public typealias ShortcutRows = (title: String, items: [(keys: String, what: String)])
+
+final class ShortcutsOverlay: NSView {
+    typealias Group = ShortcutRows
+    var onClose: (() -> Void)?
+    private weak var scroll: NSScrollView?
+    private let z: CGFloat
+
+    // clicks on the card itself must not reach the backdrop (= close)
+    private final class Card: NSView {
+        override func mouseDown(with e: NSEvent) {}
+    }
+
+    init(groups: [Group], colors c: PopupColors, zoom: CGFloat, in root: NSView,
+         title: String = "Keyboard Shortcuts") {
+        z = zoom
+        super.init(frame: root.bounds)
+        autoresizingMask = [.width, .height]
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
+
+        let titleH = 40 * z
+        let w = min(640 * z, root.bounds.width - 40)
+        let list = ShortcutsListView(groups: groups, colors: c, zoom: z, width: w)
+        let h = min(titleH + list.contentHeight, root.bounds.height - 60)
+        let card = Card(frame: NSRect(x: ((root.bounds.width - w) / 2).rounded(),
+                                      y: ((root.bounds.height - h) / 2).rounded(), width: w, height: h))
+        card.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        card.wantsLayer = true
+        let fill = (c.background.usingColorSpace(.sRGB) ?? c.background)
+            .blended(withFraction: 0.25, of: .black) ?? c.background
+        card.layer?.backgroundColor = fill.withAlphaComponent(0.98).cgColor
+        card.layer?.cornerRadius = 12 * z
+        card.layer?.borderColor = c.text.withAlphaComponent(0.15).cgColor
+        card.layer?.borderWidth = 1
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.4
+        card.layer?.shadowRadius = 18
+        addSubview(card)
+
+        // title row (the card itself isn't flipped: y counts from the bottom)
+        let t = NSTextField(labelWithString: title)
+        t.font = .systemFont(ofSize: 14 * z, weight: .semibold)
+        t.textColor = c.text
+        t.sizeToFit()
+        t.frame.origin = NSPoint(x: 14 * z, y: h - titleH / 2 - t.frame.height / 2)
+        card.addSubview(t)
+        let hint = NSTextField(labelWithString: "esc to close")
+        hint.font = .systemFont(ofSize: 11 * z)
+        hint.textColor = c.dim
+        hint.sizeToFit()
+        hint.frame.origin = NSPoint(x: w - hint.frame.width - 14 * z, y: h - titleH / 2 - hint.frame.height / 2)
+        card.addSubview(hint)
+        let rule = NSView(frame: NSRect(x: 0, y: h - titleH, width: w, height: 1))
+        rule.wantsLayer = true
+        rule.layer?.backgroundColor = c.hairline.cgColor
+        card.addSubview(rule)
+
+        let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: w, height: h - titleH))
+        sv.drawsBackground = false
+        sv.hasVerticalScroller = true
+        sv.autohidesScrollers = true
+        sv.borderType = .noBorder
+        sv.documentView = list
+        card.addSubview(sv)
+        list.scroll(.zero)
+        scroll = sv
+        root.addSubview(self, positioned: .above, relativeTo: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    override func mouseDown(with e: NSEvent) { onClose?() }
+
+    // true = used (always, while the card is up)
+    func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        let ctrl = mods.contains(.control)
+        var dy: CGFloat = 0
+        switch (code, ctrl) {
+        case (53, _), (36, _), (76, _), (49, false), (12, false):   // Esc Return Space q
+            onClose?()
+            return true
+        case (44, _) where mods.contains(.command):                 // Cmd+/ again
+            onClose?()
+            return true
+        case (125, _), (45, true), (38, true): dy = 60 * z          // ↓ / C-n / C-j
+        case (126, _), (35, true), (40, true): dy = -60 * z         // ↑ / C-p / C-k
+        default: return true
+        }
+        if let sv = scroll, let doc = sv.documentView {
+            let clip = sv.contentView
+            let maxY = max(0, doc.frame.height - clip.bounds.height)
+            clip.scroll(to: NSPoint(x: 0, y: min(maxY, max(0, clip.bounds.origin.y + dy))))
+            sv.reflectScrolledClipView(clip)
+        }
+        return true
+    }
+}
+
+private final class ShortcutsListView: NSView {
+    let groups: [ShortcutsOverlay.Group]
+    let c: PopupColors
+    let z: CGFloat
+    override var isFlipped: Bool { true }
+    init(groups: [ShortcutsOverlay.Group], colors: PopupColors, zoom: CGFloat, width: CGFloat) {
+        self.groups = groups
+        c = colors
+        z = zoom
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+        frame.size.height = contentHeight
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    private var rowH: CGFloat { 27 * z }
+    private var headH: CGFloat { 30 * z }
+    var contentHeight: CGFloat {
+        groups.reduce(6 * z) { $0 + headH + CGFloat($1.items.count) * rowH } + 8 * z
+    }
+    private var capFont: NSFont { .monospacedSystemFont(ofSize: 11 * z, weight: .medium) }
+    private func capsWidth(_ keys: String) -> CGFloat {
+        let parts = keys.components(separatedBy: " / ")
+        let slash = ("/" as NSString).size(withAttributes: [.font: capFont]).width + 8 * z
+        return parts.reduce(0) { $0 + ($1 as NSString).size(withAttributes: [.font: capFont]).width + 12 * z }
+            + CGFloat(max(0, parts.count - 1)) * slash
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let pad = 14 * z
+        // one key column for every group: the widest caps, at most ~half
+        let keyCol = min(bounds.width * 0.5,
+                         groups.flatMap(\.items).map { capsWidth($0.keys) }.max() ?? 0) + pad + 16 * z
+        let headFont = NSFont.systemFont(ofSize: 10 * z, weight: .bold)
+        let textFont = NSFont.systemFont(ofSize: 12.5 * z)
+        let trunc = NSMutableParagraphStyle()
+        trunc.lineBreakMode = .byTruncatingTail
+        var y = 6 * z
+        for g in groups {
+            (g.title.uppercased() as NSString).draw(
+                at: NSPoint(x: pad, y: y + headH - 18 * z),
+                withAttributes: [.font: headFont, .foregroundColor: c.accentOn, .kern: 0.8])
+            y += headH
+            for it in g.items {
+                var x = pad
+                let capH = 19 * z
+                let capY = y + (rowH - capH) / 2
+                for (i, part) in it.keys.components(separatedBy: " / ").enumerated() {
+                    if i > 0 {
+                        let a: [NSAttributedString.Key: Any] = [.font: capFont, .foregroundColor: c.dim]
+                        let sz = ("/" as NSString).size(withAttributes: a)
+                        ("/" as NSString).draw(at: NSPoint(x: x + 4 * z, y: capY + (capH - sz.height) / 2),
+                                               withAttributes: a)
+                        x += sz.width + 8 * z
+                    }
+                    let a: [NSAttributedString.Key: Any] = [.font: capFont, .foregroundColor: c.text]
+                    let sz = (part as NSString).size(withAttributes: a)
+                    let cap = NSRect(x: x, y: capY, width: sz.width + 12 * z, height: capH)
+                    let path = NSBezierPath(roundedRect: cap, xRadius: 5 * z, yRadius: 5 * z)
+                    c.mantle.setFill()
+                    path.fill()
+                    c.hairline.setStroke()
+                    path.lineWidth = 1
+                    path.stroke()
+                    (part as NSString).draw(at: NSPoint(x: cap.minX + 6 * z, y: cap.midY - sz.height / 2),
+                                            withAttributes: a)
+                    x = cap.maxX
+                }
+                let tx = max(keyCol, x + 12 * z)
+                let lineH = textFont.ascender - textFont.descender
+                (it.what as NSString).draw(
+                    with: NSRect(x: tx, y: y + (rowH - lineH) / 2, width: bounds.width - tx - pad, height: lineH),
+                    options: [.usesLineFragmentOrigin],
+                    attributes: [.font: textFont, .foregroundColor: c.text, .paragraphStyle: trunc])
+                y += rowH
+            }
+        }
     }
 }
