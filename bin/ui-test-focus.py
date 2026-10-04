@@ -18,6 +18,10 @@ Checks:
   focus     another window focused, `aerospace focus` ours -> key: latency
             (the "slow focus while it's open" path)
   esc       Esc with the view's "Esc Hides Window" off = stays; on = hides
+  compare   the Compare view dismisses like every view (PRD-compare.md KR6):
+            ✕ / Cmd+W / Hyper+N / focus loss hide + park (session, edits and
+            scroll kept), Esc steps back from compareText then hides only
+            with "Esc Hides Window" on, Ctrl+Tab cycles through it, same frame
   tools     the "/" tool panels (prettyprint, health-checks, filefast,
             paths) act like their own apps: opening, re-running and
             clicking one never activates the app (the shared window never
@@ -398,6 +402,146 @@ try:
             esc()
             ms, _ = wait(lambda s: not s["visible"], 2)
             timed("Esc with \"Esc Hides Window\" on -> hidden", ms, 150)
+
+    # ------------------------------------------------------------ compare
+    if want("compare"):
+        def keys(script):
+            return subprocess.run(["osascript", "-e", f'tell application "System Events" to {script}'],
+                                  capture_output=True).returncode == 0
+        def cmp(st):
+            return st.get("compare", {})
+        def in_compare(st, v="compare"):
+            return st.get("view") == v and shown_and_key(st)
+        tmpd = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"ws-compare-test-{os.getpid()}")
+        os.makedirs(tmpd, exist_ok=True)
+        la, lb = os.path.join(tmpd, "left.txt"), os.path.join(tmpd, "right.txt")
+        open(la, "w").write("".join(f"line {i}\n" for i in range(300)))
+        open(lb, "w").write("".join((f"LINE {i}\n" if i % 40 == 7 else f"line {i}\n") for i in range(300)))
+        scriptable = keys("return 1")
+        if not st0.get("views", {}).get("compare") and "Compare" not in st0.get("paletteCommands", []):
+            skip("compare: [compare] enabled is not true")
+        else:
+            ensure_shown()
+            do(f"compare:open:{la}|{lb}")
+            ms, st = wait(lambda s: in_compare(s) and cmp(s).get("current", {}).get("sections", 0) > 0, 3)
+            (ok if ms is not None else bad)(f"compare: a pair opens in the view ({cmp(st).get('current', {}).get('sections')} sections)")
+            frame_files = None
+            do("open:files")
+            _, stf = wait(lambda s: s["view"] == "files" and shown_and_key(s), 2)
+            frame_files = cur(stf).get("frame")
+            # Ctrl+Tab: the cycle goes through Compare (real keys)
+            if scriptable:
+                do("open:compare")
+                wait(in_compare, 2)
+                keys("key code 48 using control down")
+                ms1, st = wait(lambda s: s["view"] not in ("compare", "") and shown_and_key(s), 2)
+                keys("key code 48 using {control down, shift down}")
+                ms2, st = wait(in_compare, 2)
+                (ok if ms1 is not None and ms2 is not None else bad)("compare: Ctrl+Tab leaves it, Ctrl+Shift+Tab comes back")
+            else:
+                do("cycle")
+                skip("compare: Ctrl+Tab via System Events not scriptable (Accessibility)")
+            do("open:compare")
+            ms, st = wait(in_compare, 2)
+            f = cur(st).get("frame")
+            (ok if f == frame_files else bad)(f"compare: same frame as files ({f} vs {frame_files})")
+            wid = cur(st).get("wid")
+            wins = our_windows()
+            ws_now = aero("list-workspaces", "--focused")
+            (ok if wid in wins and wins[wid][0] == ws_now else bad)(f"compare: AeroSpace lists it on the focused workspace ({wins.get(wid)})")
+            # unsaved edit + scroll survive every hide
+            do("compare:cursor:200")
+            do("compare:edit:left:edited by the test\\n")
+            st = state()
+            want_state = (cmp(st).get("current", {}).get("cursorRow"), cmp(st).get("current", {}).get("scrollY"))
+            (ok if cmp(st).get("sessions") and cmp(st)["sessions"][-1].get("dirtyL") else bad)("compare: the edit marks the left side dirty")
+
+            def kept(label):
+                st = state()
+                c = cmp(st).get("current", {})
+                got = (c.get("cursorRow"), c.get("scrollY"))
+                dirty = cmp(st).get("sessions", [{}])[-1].get("dirtyL")
+                (ok if got == want_state and dirty else bad)(f"compare: {label} brought back the same session (cursor/scroll {got} vs {want_state}, dirty {dirty})")
+
+            # Hyper+N (the hotkey binary) in it -> hidden; again -> back on Compare
+            hotkey()
+            ms, _ = wait(lambda s: not s["visible"], 2)
+            timed("compare: Hyper+N while in it -> hidden", ms, 250)
+            time.sleep(0.3)
+            hotkey()
+            ms, st = wait(in_compare, 3)
+            timed("compare: Hyper+N again -> back on Compare", ms, 300)
+            kept("Hyper+N")
+            # Cmd+W (real key)
+            if scriptable:
+                keys('keystroke "w" using command down')
+                ms, _ = wait(lambda s: not s["visible"], 2)
+                timed("compare: Cmd+W -> hidden", ms, 250)
+                time.sleep(0.3)
+                hotkey()
+                wait(in_compare, 3)
+                kept("Cmd+W, then Hyper+N")
+            # ✕ (a real click on the header)
+            close = cmp(state()).get("close")
+            if shutil.which("cliclick") and close:
+                subprocess.run(["cliclick", f"c:{close[0]},{close[1]}"], capture_output=True)
+                ms, _ = wait(lambda s: not s["visible"], 2)
+                timed("compare: ✕ -> hidden", ms, 300)
+                time.sleep(0.3)
+                hotkey()
+                wait(in_compare, 3)
+                kept("✕, then Hyper+N")
+            else:
+                skip("compare: ✕ click (no cliclick)")
+            # focus loss
+            other = [l.split("|")[0] for l in aero("list-windows", "--workspace", "focused", "--format",
+                                                    "%{window-id}|%{app-pid}").splitlines()
+                     if l.split("|")[1] != str(state().get("pid"))]
+            if other:
+                aero("focus", "--window-id", other[0])
+                time.sleep(0.8)
+                vis = state().get("visible")
+                if state().get("hideOnFocusLoss"):
+                    (ok if not vis else bad)("compare: focus loss hides it (Hide When Focus Is Lost on)")
+                else:
+                    (ok if vis else bad)("compare: focus loss leaves it up (Hide When Focus Is Lost off)")
+                hotkey()
+                wait(in_compare, 3)
+                kept("focus loss, then Hyper+N")
+            else:
+                skip("compare: focus loss (no other window on this workspace)")
+            # Esc: back from compareText, then hide only with the switch on
+            if scriptable:
+                do(f"compare:open-sub:{la}|{lb}")
+                wait(lambda s: in_compare(s, "compareText"), 2)
+                keys("key code 53")
+                ms, _ = wait(lambda s: s.get("view") == "compare" and s["visible"], 2)
+                timed("compare: Esc in compareText -> back to compare", ms, 200)
+                do("esc-hides:compare:off")
+                wait(in_compare, 2)
+                keys("key code 53")
+                time.sleep(0.5)
+                (ok if state().get("visible") else bad)("compare: Esc at the top with \"Esc Hides Window\" off: stays")
+                do("esc-hides:compare:on")
+                wait(in_compare, 2)
+                keys("key code 53")
+                ms, _ = wait(lambda s: not s["visible"], 2)
+                timed("compare: Esc with \"Esc Hides Window\" on -> hidden", ms, 200)
+                hotkey()
+                wait(in_compare, 3)
+                kept("Esc hide, then Hyper+N")
+            else:
+                skip("compare: Esc via System Events not scriptable")
+            # a dirty session asks before closing (a sheet), Cancel keeps it
+            n = len(cmp(state()).get("sessions", []))
+            do("compare:close-session")
+            ms, st = wait(lambda s: cmp(s).get("sheet"), 2)
+            (ok if ms is not None else bad)("compare: closing a dirty session asks with a sheet")
+            do("compare:sheet-cancel")
+            ms, st = wait(lambda s: not cmp(s).get("sheet"), 2)
+            (ok if len(cmp(st).get("sessions", [])) == n else bad)("compare: Cancel keeps the session")
+            do("compare:close-session:force")
+        shutil.rmtree(tmpd, ignore_errors=True)
 
     # ------------------------------------------------------------ tools
     if want("tools"):

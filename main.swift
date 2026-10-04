@@ -143,6 +143,58 @@ if cliArgs.count > 1 {
         }
         print(line)
         exit(0)
+    case "compare" where cliArgs.count > 2:
+        // `compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]` (CompareWindow.swift):
+        // paths made absolute HERE (the daemon's cwd is not ours); --wait
+        // blocks until that session closes or the window hides (git difftool)
+        var words: [String] = []
+        var wait = false
+        var i = 2
+        var paths = 0
+        while i < cliArgs.count {
+            let w = cliArgs[i]
+            if w == "--wait" { wait = true } else if (w == "--title1" || w == "--title2") && i + 1 < cliArgs.count {
+                words += [w, cliArgs[i + 1].replacingOccurrences(of: "\t", with: " ")]
+                i += 1
+            } else if w.hasPrefix("-") && w.count > 1 {
+                FileHandle.standardError.write(Data("usage: workspace-switcher compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]\n".utf8))
+                exit(2)
+            } else {
+                let abs = w.hasPrefix("/") ? w : FileManager.default.currentDirectoryPath + "/" + w
+                words.append((abs as NSString).standardizingPath)
+                paths += 1
+            }
+            i += 1
+        }
+        guard (1...2).contains(paths) else {
+            FileHandle.standardError.write(Data("usage: workspace-switcher compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]\n".utf8))
+            exit(2)
+        }
+        let msg = (["compare"] + (wait ? ["--wait"] : []) + words).joined(separator: "\t")
+        // no daemon: start it (LaunchServices) and hand the request over once it answers
+        func deliver() -> Data? {
+            if wait { return sendRequest(msg, timeout: 7 * 86400) }
+            return sendLaunchMessage(msg) ? Data() : nil
+        }
+        var reply = deliver()
+        if reply == nil {
+            let bundle = Bundle.main.bundlePath
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            p.arguments = ["-g", bundle]
+            try? p.run()
+            p.waitUntilExit()
+            let deadline = Date().addingTimeInterval(15)
+            while reply == nil && Date() < deadline {
+                usleep(200_000)
+                if sendLaunchMessage("ping") { reply = deliver() }
+            }
+        }
+        guard reply != nil else {
+            FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+            exit(1)
+        }
+        exit(0)
     case let mode where SwitcherController.hotkeyModes.contains(mode):
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->

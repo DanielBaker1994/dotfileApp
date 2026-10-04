@@ -24,6 +24,9 @@ import AppKit
 //                       never resizes the window)
 //   ai                  fm (Apple's on-device model) driven by rule files
 //                       (AIWindow.swift); shares the frame
+//   compare             Beyond Compare-style Text Compare (CompareWindow
+//                       .swift); compareText = a text compare pushed on it
+//                       (back / Esc return to the view under it)
 //
 // Focus goes back to what was focused when the window was SUMMONED, and only
 // when the whole window hides — never on a view switch (per-window restore
@@ -37,10 +40,12 @@ import AppKit
 // [app] shared-window = false brings back separate windows.
 
 enum SlotView: String {
-    case notes, files, jira, detail, releases, config, output, confluence, ai
+    case notes, files, jira, detail, releases, config, output, confluence, ai, compare, compareText
     var isJira: Bool { [.jira, .detail, .releases, .config].contains(self) }
-    // a view you step back out of (Esc / back): jira's sub-views, output
-    var isSub: Bool { [.detail, .releases, .config, .output].contains(self) }
+    var isCompare: Bool { self == .compare || self == .compareText }
+    // a view you step back out of (Esc / back): jira's sub-views, output,
+    // a text compare pushed on the compare view
+    var isSub: Bool { [.detail, .releases, .config, .output, .compareText].contains(self) }
 }
 
 // a window that can live in the shared window
@@ -64,8 +69,8 @@ extension PopupWindow: SlotMember {
 final class SharedWindow {
     // header button ids (every member's chrome)
     static let navNotes = 60, navJira = 61, navHome = 62, navBack = 63, navFiles = 64, navConfluence = 65,
-               navAI = 66
-    static let navIDs: Set<Int> = [navNotes, navJira, navHome, navBack, navFiles, navConfluence, navAI]
+               navAI = 66, navCompare = 67
+    static let navIDs: Set<Int> = [navNotes, navJira, navHome, navBack, navFiles, navConfluence, navAI, navCompare]
 
     private unowned let controller: SwitcherController
     private(set) var current: SlotView?     // the visible view (nil = hidden)
@@ -282,7 +287,7 @@ final class SharedWindow {
         if let cur = current, isVisible {
             if cur != v { stack.append(cur) }
         } else {
-            stack = v.isJira ? [.jira] : []
+            stack = v.isJira ? [.jira] : v == .compareText ? [.compare] : []
         }
         stack.removeAll { $0 == v }
         present(v)
@@ -292,13 +297,15 @@ final class SharedWindow {
     // hide only when the view's "Esc Hides Window" is on)
     func back(esc: Bool = false) {
         while let prev = stack.popLast() {
-            if controller.slotMember(prev) != nil || prev == .jira {
+            if controller.slotMember(prev) != nil || prev == .jira || prev == .compare {
                 open(prev)
                 return
             }
         }
         if let cur = current, cur.isJira, cur != .jira {
             open(.jira)
+        } else if current == .compareText {
+            open(.compare)
         } else if let cur = current {
             if esc { escapeAtTop(cur) } else { hide("back from the first view") }
         }
@@ -399,7 +406,7 @@ final class SharedWindow {
 
     // the views with an "Esc Hides Window" switch (their kitchen sink);
     // jira's sub-views step back with Esc and follow jira's switch
-    static let escViews: [SlotView] = [.files, .notes, .ai, .jira, .confluence]
+    static let escViews: [SlotView] = [.files, .notes, .ai, .jira, .confluence, .compare]
 
     // Esc reached the top of view `v` (no search to clear, nothing to step
     // back from): hide the window if the view's switch is on, else nothing
@@ -412,7 +419,7 @@ final class SharedWindow {
     func memberGone(_ v: SlotView) {
         stack.removeAll { $0 == v }
         if current == v { current = nil }
-        if last == v { last = v.isJira ? .jira : .files }
+        if last == v { last = v.isJira ? .jira : v == .compareText ? .compare : .files }
         if lastJira == v { lastJira = .jira }
     }
 
@@ -435,6 +442,7 @@ final class SharedWindow {
         case Self.navJira: current?.isJira == true ? home() : hotkey(.jira)
         case Self.navConfluence: current == .confluence ? () : open(.confluence)
         case Self.navAI: current == .ai ? () : open(.ai)
+        case Self.navCompare: current == .compare ? () : open(.compare)
         case Self.navHome: home()
         case Self.navBack: back()
         default: break
@@ -442,17 +450,18 @@ final class SharedWindow {
     }
 
     // the view switcher: files (first, the default view) / notes / AI /
-    // jira / confluence as icons just right of the kitchen sink (the app's
-    // icon menu), top-left in every view
+    // jira / confluence / compare as icons just right of the kitchen sink
+    // (the app's icon menu), top-left in every view
     static var navIcons: [(image: NSImage, id: Int, tip: String)] {
         [(filesNavIcon, navFiles, "Files"), (notesNavIcon, navNotes, "Notes")]
             + (aiEnabled() ? [(aiNavIcon, navAI, "AI view")] : [])
             + [(jiraNavIcon, navJira, "Jira")]
             + (confluenceEnabled() ? [(confluenceNavIcon, navConfluence, "Confluence search")] : [])
+            + (compareEnabled() ? [(compareNavIcon, navCompare, "Compare")] : [])
     }
 
     // the view's own nav words (right-hand bar, never beside the switcher):
-    // jira sub-views get home + back, output views back
+    // jira sub-views get home + back, output views + compareText back
     static func navButtons(for v: SlotView) -> [(String, Int)] {
         (v.isSub ? [("back", navBack)] : [])
             + (v.isJira && v.isSub ? [("home", navHome)] : [])
@@ -464,6 +473,7 @@ final class SharedWindow {
         case .files: return navFiles
         case .confluence: return navConfluence
         case .ai: return navAI
+        case .compare, .compareText: return navCompare
         case _ where v.isJira: return navJira
         default: return nil
         }

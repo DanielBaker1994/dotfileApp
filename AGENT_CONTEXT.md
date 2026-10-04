@@ -121,6 +121,9 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   tool (see "/screenshot" below; model tested by `bin/run-tests.sh screenshot`)
 - `PaneShot.swift` + `AnsiRender.swift` — `pane-shot`, the herdr pane's
   full-height capture (see "/pane-shot" below; `bin/run-tests.sh ansi`)
+- `CompareText.swift` + `ComparePane.swift` + `CompareWindow.swift` — the
+  Compare view (Text Compare; see "Compare view" below; engine tested by
+  `bin/run-tests.sh compare`)
 - `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
   (see "/paths" below; `bin/run-tests.sh paths`)
 - `workspace_switcher.swift` — app logic (~9200 lines)
@@ -555,6 +558,84 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   (`[shortcuts] "ai: …"`), Esc = stop a run (never closes), Cmd+C/A in the
   preview, rest → `JiraEditKeys.route`.
 
+## Compare view (PRD-compare.md; phases 0 + 1 = Text Compare)
+
+- Files: `CompareText.swift` (Foundation only): `TextSide` (decode: UTF-8 ±
+  BOM, UTF-16 LE/BE with BOM, else Latin-1; NUL in the first 8 KB = binary;
+  per-line `EOL` incl. `none` for a last line without newline; `encoded()`
+  is byte-exact, nil when Latin-1 can't hold an edit → saved as UTF-8),
+  `Importance` (`key(line, eol)` = the comparison key; `.exact` = git's
+  view), `LineDiff` (a PORT of git's xhistogram.c + xdl_change_compact +
+  the indent heuristic; Myers via CollectionDifference where git falls
+  back; a work list, no recursion), `TextCompare` (rows `CompareRow` l/r
+  line or -1 filler, kind same/changed/leftOnly/rightOnly + `important`;
+  sections = runs of `isDiff` rows; `replace` → `TextSide.replace` →
+  `rediff` = only ± `rediffContext` (50) same rows around the edit;
+  `copyRows` / `copySection` = Ctrl+R / L; per-side undo stacks), `CharDiff`
+  (the old AI `WordDiff`, moved here: `diff` / `changes` for the AI view,
+  `marks` = changed spans for drawing), `BinaryCompare`.
+  `ComparePane.swift`: `CompareSession` (one pair + view state: filter →
+  `visible` display rows, cursor/anchor/focus, dirty = side's undo count vs
+  `cleanDepth`, `waiters` for `--wait`, DispatchSource `watchers`),
+  `ComparePaneView` (ONE flipped document view draws both sides + the
+  gutter → synced scroll; dirty-rect rows only; marks cached per
+  `version`), `CompareThumbnail` (1 px wide bitmap, cached), `CompareDetails`
+  (line details), `CompareEditor` (the section editor: NSTextView laid over
+  one side's section; text = lines each + "\n"; commits on click away,
+  Ctrl+N/P, Esc, Cmd+S, park). `CompareWindow.swift`: `CompareConfig`
+  (`[compare]` read once per open/show; `*-label` strings), `CompareRecent`
+  (`~/.cache/workspace-switcher/compare-recent.json`; git + pasted sessions
+  never stored), `CompareWindow` (a `CardWindowController`; `current` =
+  `.compare` with session pills + "+" start page, `sub` = `.compareText`).
+- Shared window: `SlotView.compare` (nav id 67 `navCompare`, after
+  confluence in `navIcons`, `compareEnabled()`), `.compareText` (`isSub`,
+  `push` puts `.compare` under it, `back` returns to it), `.compare` in
+  `escViews`. Dismissal = the shared paths (✕ / Cmd+W → `onSlotHide`,
+  Hyper+N `toggle`, focus loss `checkFocusLoss`, Ctrl+Tab via
+  `CardWindowController.routeKey`). Esc chain (`CompareWindow.escape`): find
+  bar / path field / section editor → a running diff (> 60k lines runs off
+  main, `diffGen`) → row selection → `.compareText` back → `escapeAtTop`.
+  `slotPark(stopVoice:)`: commits the editor; a whole-window hide answers
+  every `--wait` and drops clean git sessions.
+- Entry: palette `/compare` (`paletteCommands`, `showCompare`), header icon,
+  menu bar "Compare…", `FileListPane.onCompare` / `comparePick` (file
+  browser + /paths right-click: "Select for Compare", "Compare to “NAME”",
+  "Compare" with two marked; files only until Folder Compare), drops on a
+  pane, clipboard (an empty side takes Cmd+V; right-click "Paste Clipboard
+  Here"), CLI `workspace-switcher compare [--wait] [--title1 T] [--title2 T]
+  LEFT [RIGHT]` (main.swift makes paths absolute, socket `compare<TAB>…`;
+  `--wait` = `sendRequest`, the daemon writes `done` when the session closes
+  or the window hides; no daemon → `open -g` the app + retry). git:
+  `difftool.ws.cmd = …/workspace-switcher compare --wait --title1 "$BASE"
+  "$LOCAL" "$REMOTE"`. `compare` alone = a hotkey mode (`hotkeyModes`).
+- Keys: `CompareWindow.handleKey` (§7.2.4 of the PRD; `[shortcuts]
+  "compare: …"` rows, Cmd+/ sheet). Cmd+K = an NSMenu of every action
+  (card windows have no `showActionPicker`). Typing / Return / double-click
+  opens the section editor; inside it the text view owns the keys (edit
+  keys via `JiraEditKeys.route`).
+- Config `[compare]`: enabled, in-palette, label, esc-close, font /
+  font-size (default notes), context-lines, tab-width, ignore-* (importance
+  defaults), gutter-arrows, max-lines, recent, `*-label`; content /
+  time-tolerance / exclude / use-gitignore / ignore-file are for Folder
+  Compare (phase 2). Validation: `configValueProblem` section "compare"
+  (`recent` is a count here, a switch in [files]) + `configNumberKeys`.
+- Log: `compare text: N lines (both sides), diff M ms, paint P ms (open →
+  painted T ms)`, `compare edit: N rows, re-diff M ms`.
+- Hooks: `do:compare:open:L|R`, `open-sub:L|R` (push `.compareText`),
+  `paste:left|right:TEXT` (`\n`), `edit:left|right:TEXT`, `next`, `prev`,
+  `copy-right`, `copy-left`, `filter:NAME`, `swap`, `save:left|right`,
+  `back`, `undo`, `redo`, `cursor:N`, `select:N`, `start`, `close-session[:force]`,
+  `close-all`, `sheet-cancel`, `key:SPEC` (through `routeKey`). State
+  `compare` {view, sessions, startPage, sheet, close (✕ in cliclick
+  coords), current {sections, important, unimportant, cursorRow, filter,
+  focus, rows[0..50], editing, scrollY, …}, subView, folder: null}.
+- Tests: `bin/run-tests.sh compare` (round trips, importance, rows, copy +
+  undo, windowed re-diff fuzz vs full diff, ≥ 50-pair parity corpus vs `git
+  diff --no-index --histogram --indent-heuristic -U0` from seeded mutations
+  of repo files + repo history, timings); `bin/ui-test-focus.py compare`.
+- Not yet: Folder Compare (phase 2), session restore / recovery copies,
+  word wrap, visible whitespace (phase 3 per the PRD).
+
 ## Notifications pill (sketchybar)
 
 - `config/sketchybar/plugins/notifications.sh` (sourced AFTER status.sh →
@@ -958,7 +1039,7 @@ Line numbers drift; grep the symbol names (they're stable).
   (`SharedWindow.toggle`: hidden → the view you were LAST on (`last`), in it →
   hide, elsewhere → focus). No per-view hotkeys (Hyper+F / J
   removed): views switch via Ctrl+Tab, header icons, the Hyper+S palette.
-  The named modes (`notes|files|jira|confluence|ai`) remain as CLI / socket
+  The named modes (`notes|files|jira|confluence|ai|compare`) remain as CLI / socket
   messages. Hyper+X = `screenshot` (a tool panel, not a view: no
   `hotkeyPrep`, never in `hotkeyModes`; see "/screenshot").
 

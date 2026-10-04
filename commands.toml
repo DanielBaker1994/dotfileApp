@@ -669,6 +669,59 @@ font = ""
 # toast after ⧉ Copy
 copy-toast = "Copied to clipboard"
 
+# [compare] — Beyond Compare-style Text Compare (CompareWindow.swift); a
+# shared-window view (header icon ⇆, Hyper+S /compare, file browser / /paths
+# right-click "Select for Compare" → "Compare to …", `workspace-switcher
+# compare [--wait] A B`, git difftool). Keys:
+#   enabled          true | false: the view, its nav icon, palette entry
+#   esc-close        0 | 1 | 2: "Esc Hides Window" (0 = never; default [app] esc-close)
+#   font / font-size the panes' monospaced font (default: the notes font)
+#   context-lines    lines around a difference in the Context filter
+#   tab-width        spaces per tab when drawing
+#   ignore-leading-ws / ignore-trailing-ws / ignore-embedded-ws / ignore-case /
+#   ignore-line-endings / ignore-blank-lines   importance switches (true = unimportant)
+#   gutter-arrows    hover | always | off
+#   max-lines        past this a text pair gets a byte compare only
+#   recent           how many recent pairs the start page keeps
+#   content / time-tolerance / exclude / use-gitignore / ignore-file
+#                    Folder Compare (PRD phase 2; read once it exists)
+#   *-label          the view's words ({} = the variable part)
+[compare]
+enabled = true
+in-palette = true
+label = "Compare"
+esc-close = 0
+context-lines = 3
+tab-width = 4
+ignore-leading-ws = true
+ignore-trailing-ws = true
+ignore-embedded-ws = false
+ignore-case = false
+ignore-line-endings = true
+ignore-blank-lines = false
+gutter-arrows = hover
+max-lines = 200000
+recent = 30
+content = auto
+time-tolerance = 2
+exclude = ".git, node_modules, .DS_Store, .build"
+use-gitignore = true
+ignore-file = "~/.config/workspace-switcher/config/compare.ignore"
+same-label = "Identical"
+same-text-label = "Same text — files differ in {}"
+binary-label = "Binary files {}"
+too-large-label = "Too large for Text Compare ([compare] max-lines): {}"
+empty-label = "Both sides are empty — paste text (⌘V), drop files, or open them (⌘O)"
+folder-label = "Folder Compare is not built yet (PRD phase 2): {} is a folder"
+unsaved-label = "Save changes to {}?"
+unsaved-info-label = "Your edits are lost if you don't save them."
+save-button-label = "Save"
+discard-button-label = "Don't Save"
+cancel-button-label = "Cancel"
+changed-label = "{} changed on disk — and you have edits here"
+reload-button-label = "Reload"
+keep-button-label = "Keep Mine"
+
 # [icons] — app icons for the workspace switcher rows. Normal apps keep their
 # real macOS icons; ONLY apps listed here get overrides, matched by app name
 # plus window-title substrings. Line format:
@@ -685,7 +738,7 @@ workspace-switcher = "*:app"
 # [shortcuts] — the kitchen sink menu's "Keyboard Shortcuts…" list (also
 # Cmd+/ in any view). One line per shortcut, shown in file order:
 #   view: keys = what it does
-# view = all (every view, listed under "Everywhere") | notes | files | jira | ai.
+# view = all (every view, listed under "Everywhere") | notes | files | jira | ai | compare.
 # Several keys for one action: separate them with " / ". Write Cmd+Plus /
 # Cmd+Minus for Cmd+= / Cmd+- (the first "=" ends the key).
 [shortcuts]
@@ -694,7 +747,7 @@ workspace-switcher = "*:app"
 "all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
 "all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
-"all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (files · notes · AI · jira · confluence)"
+"all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (files · notes · AI · jira · confluence · compare)"
 "all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
 "all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
 "all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
@@ -742,6 +795,25 @@ workspace-switcher = "*:app"
 "ai: Cmd+L" = "focus your text"
 "ai: Esc" = "stop a running request; idle: hide (only when Esc Hides Window is on)"
 "ai: Cmd+/" = "this list"
+"compare: Ctrl+N / Ctrl+P" = "next / previous difference"
+"compare: Ctrl+R / Ctrl+L" = "copy the section (or selected rows) to the right / left"
+"compare: Ctrl+Opt+R / Ctrl+Opt+L" = "copy the current line to the right / left"
+"compare: Return / typing / double-click" = "edit the section on the focused side (Esc / click away = done)"
+"compare: Tab / ← →" = "focus the other side"
+"compare: ↑ ↓ / PgUp PgDn / Home End" = "move the cursor (Shift = select rows)"
+"compare: Cmd+Z / Cmd+Shift+Z" = "undo / redo (edits, copies)"
+"compare: Cmd+S / Cmd+Opt+S" = "save the focused side / both"
+"compare: Cmd+O" = "open a file into the focused side"
+"compare: Cmd+L" = "type a path for the focused side"
+"compare: Cmd+V" = "an empty side: paste the clipboard as its text"
+"compare: Cmd+1 / 2 / 3 / 4" = "show all / differences / same / context"
+"compare: Cmd+F / Cmd+G / Cmd+Shift+G" = "find / next / previous"
+"compare: Ctrl+G" = "go to line"
+"compare: Cmd+Opt+X" = "swap sides"
+"compare: F5" = "reload + compare again"
+"compare: Cmd+K" = "every action by name"
+"compare: Esc" = "close find / path / editor, stop a compare, back; idle: hide (only when Esc Hides Window is on)"
+"compare: Cmd+/" = "this list"
 "confluence: Return" = "search; in the results: open in the browser"
 "confluence: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the results"
 "confluence: Cmd+Return" = "open in the browser"

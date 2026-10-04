@@ -215,22 +215,26 @@ class CardWindowController: NSObject, NSWindowDelegate {
     // the edit-key routing.
     private func installKeys() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self else { return e }
-            if self.keyBeforeSheet(e) { return nil }
-            if let sheet = self.window.attachedSheet {
-                return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
-            }
-            guard self.window.isKeyWindow else { return e }
-            let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let cmd = mods.contains(.command)
-            if mods.contains(.control) && !cmd && e.keyCode == 48, let cycle = self.onCycleView {
-                cycle(mods.contains(.shift) ? -1 : 1)                        // Ctrl+Tab: next view
-                return nil
-            }
-            if cmd && e.keyCode == 13 { self.closeOrHide(); return nil }     // Cmd+W
-            if self.handleKey(e) { return nil }
-            return JiraEditKeys.route(e, in: self.window) ? nil : e
+            self?.routeKey(e) ?? e
         }
+    }
+
+    // the key monitor's whole path (nil = used); test hooks feed it too
+    func routeKey(_ e: NSEvent) -> NSEvent? {
+        if keyBeforeSheet(e) { return nil }
+        if let sheet = window.attachedSheet {
+            return sheet.isKeyWindow && JiraEditKeys.route(e, in: sheet) ? nil : e
+        }
+        guard window.isKeyWindow else { return e }
+        let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let cmd = mods.contains(.command)
+        if mods.contains(.control) && !cmd && e.keyCode == 48, let cycle = onCycleView {
+            cycle(mods.contains(.shift) ? -1 : 1)                        // Ctrl+Tab: next view
+            return nil
+        }
+        if cmd && e.keyCode == 13 { closeOrHide(); return nil }          // Cmd+W
+        if handleKey(e) { return nil }
+        return JiraEditKeys.route(e, in: window) ? nil : e
     }
 
     // a web preview has focus: Cmd+C / Cmd+A like any document

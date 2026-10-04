@@ -836,7 +836,7 @@ func loadCommands() -> [CommandSpec] {
             iconRules = parseIconRules(s.vars)
         case "shortcuts",       // collected line by line below (order matters)
              "app",             // already applied by applyAppConfigFromDisk()
-             "confluence", "ai", // their views read it directly (configSectionValue)
+             "confluence", "ai", "compare", // their views read it directly (configSectionValue)
              "notifications",   // the sketchybar pill (notify/notify_poll.py)
              "pane-shot",       // the herdr pane capture (PaneShot.swift)
              "setup",           // the Setup & Health Check window (SetupWindow.swift)
@@ -1402,6 +1402,8 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     // [screenshot]
     "contrast-opacity": 0...255, "jpeg-quality": 1...100, "undo-limit": 1...1000,
     "button-size": 0...80, "arrow-style": 0...1, "delay": 0...60_000,
+    // [compare]
+    "context-lines": 0...1000, "tab-width": 1...16, "time-tolerance": 0...86_400, "max-lines": 1000...5_000_000,
 ]
 private let configColorKeys: Set<String> = [
     "header-color", "background-color", "browser-background", "terminal-background",
@@ -1434,6 +1436,22 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         case "lines":
             guard let n = Int(value), (0...Herdr.maxLines).contains(n) else { return "\(value): 0…\(Herdr.maxLines) (herdr's cap)" }
             return nil
+        default: break
+        }
+    }
+    if section == "compare" {
+        switch key {
+        case "content":
+            return ["auto", "always", "never"].contains(value.lowercased()) ? nil : "'\(value)' is not one of auto | always | never"
+        case "gutter-arrows":
+            return ["hover", "always", "off"].contains(value.lowercased()) ? nil : "'\(value)' is not one of hover | always | off"
+        case "recent":
+            // a count here ([files] recent is a switch)
+            guard let n = Int(value), (0...500).contains(n) else { return "\(value): 0…500 (recent pairs kept)" }
+            return nil
+        case "ignore-leading-ws", "ignore-trailing-ws", "ignore-embedded-ws", "ignore-case",
+             "ignore-line-endings", "ignore-blank-lines", "use-gitignore":
+            return tri(value) == nil ? "'\(value)' is not true/false" : nil
         default: break
         }
     }
@@ -2943,6 +2961,7 @@ final class SwitcherController: NSObject {
         views.append(.files)
         if jiraEnabledInConfig() { views.append(.jira) }
         if confluenceEnabled() { views.append(.confluence) }
+        if compareEnabled() { views.append(.compare) }
         func step(_ rest: ArraySlice<SlotView>, _ wait: Double) {
             guard let v = rest.first else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
@@ -2977,6 +2996,8 @@ final class SwitcherController: NSObject {
         case .config: return JiraDashboardWindow.current
         case .confluence: return ConfluenceWindow.current
         case .ai: return AIWindow.current
+        case .compare: return CompareWindow.current
+        case .compareText: return CompareWindow.sub
         }
     }
 
@@ -2988,6 +3009,7 @@ final class SwitcherController: NSObject {
         case .jira, .detail, .releases, .config: return "jira"
         case .confluence: return "confluence"
         case .ai: return "ai"
+        case .compare, .compareText: return "compare"
         case .output: return currentOutputName.flatMap { n in commands.first { $0.windowName == n }?.name }
         }
     }
@@ -3062,6 +3084,9 @@ final class SwitcherController: NSObject {
         case .ai:
             guard aiEnabled() else { return false }
             AIWindow.create(controller: self, frame: frame)
+        case .compare:
+            guard compareEnabled() else { return false }
+            CompareWindow.create(controller: self, frame: frame)
         default:
             return false
         }
@@ -3253,7 +3278,7 @@ final class SwitcherController: NSObject {
 
     // the messages that show the shared window: "window" = Hyper+N (show the
     // last view / hide), the named views are CLI only
-    static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "confluence", "ai"]
+    static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "confluence", "ai", "compare"]
 
     // what hotkeyPrep found at the keypress (handed to the main thread)
     struct HotkeyPrep {
@@ -3373,6 +3398,12 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"not a tool panel: \(n)\"}"
                 }
                 openTool(cmd)
+            case _ where a.hasPrefix("compare:"):
+                // compare:open:LEFT|RIGHT | open-sub:LEFT|RIGHT | paste:left|right:TEXT | next | prev |
+                // copy-right | copy-left | filter:NAME | swap | save:left|right | back | close-session | key:SPEC …
+                if let err = compareTestDo(String(a.dropFirst(8))) {
+                    return "{\"error\":\"\(err)\"}"
+                }
             case _ where a.hasPrefix("screenshot:"):
                 // screenshot:show | select:X,Y,W,H | tool:NAME | draw:… | key:SPEC | copy | save:PATH | pin | close
                 if let err = screenshot.testDo(String(a.dropFirst(11))) {
@@ -3400,7 +3431,7 @@ final class SwitcherController: NSObject {
             }
         }
         var views: [String: Any] = [:]
-        for v in [SlotView.notes, .files, .jira, .detail, .releases, .config, .output, .confluence, .ai] {
+        for v in [SlotView.notes, .files, .jira, .detail, .releases, .config, .output, .confluence, .ai, .compare, .compareText] {
             guard let m = slotMember(v) else { continue }
             if let p = m as? PopupWindow {
                 var st = p.testState
@@ -3428,6 +3459,12 @@ final class SwitcherController: NSObject {
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
             "screenshot": screenshot.testState,
+            "compare": { () -> [String: Any] in
+                var st = CompareWindow.current?.testState ?? ["shown": false, "sessions": [Any]()]
+                st["view"] = slot.current?.isCompare == true ? slot.current!.rawValue : ""
+                if let sub = CompareWindow.sub { st["subView"] = sub.testState }
+                return st
+            }(),
             "paneShot": screenshot.paneShotLast,
             "activations": appActivations,
             // NOT `active`: a key non-activating panel (tool panel) reads as
@@ -3494,6 +3531,26 @@ final class SwitcherController: NSObject {
                         self.screenshot.handle(words, reply: wantsReply ? { data in
                             DispatchQueue.global(qos: .userInitiated).async {
                                 if let data, !data.isEmpty { writeAll(cfd, data) }
+                                close(cfd)
+                            }
+                        } : nil)
+                    }
+                    continue
+                }
+                if query.hasPrefix("compare\t") {
+                    // `workspace-switcher compare [--wait] [--title1 T] [--title2 T] A [B]`:
+                    // --wait keeps the connection until the session closes or the window hides
+                    let words = query.split(separator: "\t", omittingEmptySubsequences: false).dropFirst().map(String.init)
+                    let wait = words.contains("--wait")
+                    if !wait { close(cfd) }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { if wait { close(cfd) }; return }
+                        var done = false
+                        self.handleCompareMessage(words, reply: wait ? {
+                            guard !done else { return }
+                            done = true
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                writeAll(cfd, Data("done\n".utf8))
                                 close(cfd)
                             }
                         } : nil)
@@ -3703,6 +3760,9 @@ final class SwitcherController: NSObject {
         if aiEnabled(), listed("ai") {
             all.append(Self.slotCommand("ai", label: configSectionValue("ai", "label") ?? "AI View"))
         }
+        if compareEnabled(), listed("compare") {
+            all.append(Self.slotCommand("compare", label: configSectionValue("compare", "label") ?? "Compare"))
+        }
         return all
     }
 
@@ -3768,6 +3828,7 @@ final class SwitcherController: NSObject {
                 // /confluence and /ai open the shared window's views
                 if cmd.name == "confluence" { showConfluence(); break }
                 if cmd.name == "ai" { showAI(); break }
+                if cmd.name == "compare" { showCompare(); break }
                 commandRunner?.run(cmd.script ?? "") { out in
                     self.log("cmd '\(cmd.name)' -> \(out)")
                 }
@@ -3870,6 +3931,17 @@ final class SwitcherController: NSObject {
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
             slot.hotkey(.confluence, userInIt: userInOurWindow(pid, name))
+            return
+        }
+        if name == "compare" {
+            guard compareEnabled() else {
+                log("compare: [compare] enabled is not true — ignored")
+                return
+            }
+            guard settings.sharedWindow else { showCompare(); return }
+            let (wid, pid) = readFocusFile()
+            if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
+            slot.hotkey(.compare, userInIt: userInOurWindow(pid, name))
             return
         }
         if name == "ai" {
@@ -5215,7 +5287,7 @@ final class SwitcherController: NSObject {
     // the apps the global switches own. NOT the Hyper+S popup or the "/"
     // palette's popup-only windows (filefast, output, prettyprint, jira
     // config): those keep their own `sticky` / `float`.
-    static let sharedViews: [SlotView] = [.notes, .files, .jira, .detail, .releases, .confluence, .ai]
+    static let sharedViews: [SlotView] = [.notes, .files, .jira, .detail, .releases, .confluence, .ai, .compare]
 
     // "Keyboard Shortcuts…" (every view's kitchen sink menu; Cmd+/ too):
     // commands.toml [shortcuts] — this view's first, then "Everywhere"
@@ -5704,6 +5776,8 @@ final class SwitcherController: NSObject {
     func configureRecentFiles() {
         let cmd = commands.first(where: { $0.kind == .files })
         FileDrag.onFileOp = { RecentFiles.shared.ownChange(from: $0, to: $1) }
+        // the file lists' "Select for Compare" / "Compare to …" (the Compare view)
+        FileListPane.onCompare = compareEnabled() ? { [weak self] a, b in self?.showCompare([a, b]) } : nil
         RecentFiles.shared.configure(enabled: cmd?.recent ?? true, days: cmd?.recentDays ?? 7,
                                      limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [],
                                      everywhere: cmd?.recentEverywhere ?? true)
@@ -6070,6 +6144,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 c.showConfluence()
             } else if name == "ai" {
                 c.showAI()
+            } else if name == "compare" {
+                c.showCompare()
             } else {
                 c.showCommand(name)
             }
@@ -6153,6 +6229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         addMenuItem(menu, "Confluence Setup…", #selector(MenuTarget.openConfluenceSetup(_:)), key: "")
         // the AI view (fm) — [ai] enabled; hidden while off
         addMenuItem(menu, "AI (Grammar Check…)", #selector(MenuTarget.openAI(_:)), key: "")
+        // the Compare view — [compare] enabled; hidden while off
+        addMenuItem(menu, "Compare…", #selector(MenuTarget.openCompare(_:)), key: "")
         menu.addItem(.separator())
 
         // Settings submenu with toggleable config options
@@ -6320,6 +6398,8 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 item.isHidden = !confluenceEnabled()
             case #selector(openAI(_:)):
                 item.isHidden = !aiEnabled()
+            case #selector(openCompare(_:)):
+                item.isHidden = !compareEnabled()
             case #selector(toggleHealthChecks(_:)):
                 item.state = windowState(for: "health-checks", controller: controller)
             case #selector(toggleVimMode(_:)):
@@ -6431,6 +6511,10 @@ final class MenuTarget: NSObject, NSMenuDelegate {
 
     @objc func openAI(_ sender: Any?) {
         MenuTarget.controller?.showAI()
+    }
+
+    @objc func openCompare(_ sender: Any?) {
+        MenuTarget.controller?.showCompare()
     }
 
     @objc func toggleHealthChecks(_ sender: Any?) {
@@ -8995,6 +9079,70 @@ extension SwitcherController {
             ConfluenceWindow.current?.showStandalone()
         }
         if setup { ConfluenceWindow.current?.showSetup() }
+    }
+
+    // the Compare view (Hyper+S /compare, the header icon, the menu, the
+    // file browser's "Compare to …", `workspace-switcher compare A B`).
+    // `paths` empty = just the view; files open a Text Compare session.
+    func showCompare(_ paths: [String] = [], titles: [CompareSide: String] = [:], git: Bool = false,
+                     waiter: (() -> Void)? = nil) {
+        guard compareEnabled() else { waiter?(); return }
+        if settings.sharedWindow {
+            if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
+            slot.open(.compare)
+        } else {
+            CompareWindow.create(controller: self, frame: nil)
+            CompareWindow.current?.showStandalone()
+        }
+        guard !paths.isEmpty, let w = CompareWindow.current else { if !paths.isEmpty { waiter?() }; return }
+        w.openPair(paths[0], paths.count > 1 ? paths[1] : nil, titles: titles, git: git, waiter: waiter)
+    }
+
+    // `compare<TAB>[--wait]<TAB>[--title1<TAB>T]…<TAB>LEFT[<TAB>RIGHT]` (main.swift)
+    func handleCompareMessage(_ words: [String], reply: (() -> Void)?) {
+        var paths: [String] = []
+        var titles: [CompareSide: String] = [:]
+        var i = 0
+        while i < words.count {
+            switch words[i] {
+            case "--wait": break
+            case "--title1" where i + 1 < words.count: titles[.left] = words[i + 1]; i += 1
+            case "--title2" where i + 1 < words.count: titles[.right] = words[i + 1]; i += 1
+            default: paths.append(words[i])
+            }
+            i += 1
+        }
+        showCompare(paths, titles: titles, git: reply != nil, waiter: reply)
+    }
+
+    // do:compare:… (testQuery)
+    func compareTestDo(_ a: String) -> String? {
+        let parts = a.split(separator: ":", maxSplits: 1).map(String.init)
+        switch parts.first ?? "" {
+        case "open", "open-sub":
+            // open:LEFT|RIGHT (either may be empty)
+            let ps = (parts.count > 1 ? parts[1] : "").split(separator: "|", omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+            let l = ps.first.flatMap { $0.isEmpty ? nil : $0 }, r = ps.count > 1 && !ps[1].isEmpty ? ps[1] : nil
+            if parts[0] == "open" {
+                showCompare()
+                CompareWindow.current?.openPair(l, r)
+            } else {
+                // a text compare pushed on the view (Folder Compare's Return, phase 2)
+                showCompare()
+                let sub = CompareWindow.createSub(controller: self, frame: slot.currentFrame())
+                sub.openPair(l, r)
+                slot.push(.compareText)
+            }
+            return nil
+        case "back":
+            slot.back(esc: true)
+            return nil
+        default:
+            let w = slot.current == .compareText ? CompareWindow.sub : CompareWindow.current
+            guard let w else { return "the compare view isn't open" }
+            return w.testDo(a)
+        }
     }
 
     // the AI view (Hyper+S /ai, the menu, `workspace-switcher ai`)

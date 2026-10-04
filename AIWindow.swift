@@ -27,135 +27,7 @@ private func aiPath(_ key: String, _ fallback: String) -> String {
 
 // (rule files: AIRule in AIFormat.swift)
 
-// MARK: - word diff
-
-enum WordDiff {
-    enum Kind { case same, del, ins }
-    struct Op { var kind: Kind; var text: String }
-
-    // words (letters / digits, inner ' and ’ kept: they're), runs of
-    // whitespace, and every other character on its own
-    static func tokens(_ s: String) -> [String] {
-        var out: [String] = []
-        var cur = ""
-        var curKind = 0     // 1 word, 2 space
-        let chars = Array(s)
-        func flush() { if !cur.isEmpty { out.append(cur); cur = "" }; curKind = 0 }
-        for (i, ch) in chars.enumerated() {
-            let isWord = ch.isLetter || ch.isNumber
-                || ((ch == "'" || ch == "’") && curKind == 1 && i + 1 < chars.count && chars[i + 1].isLetter)
-            let k = isWord ? 1 : ch.isWhitespace ? 2 : 3
-            if k == 3 { flush(); out.append(String(ch)); continue }
-            if k != curKind { flush(); curKind = k }
-            cur.append(ch)
-        }
-        flush()
-        return out
-    }
-
-    // lines incl. their newline (the fallback for very long texts)
-    static func lines(_ s: String) -> [String] {
-        var out: [String] = []
-        var cur = ""
-        for ch in s { cur.append(ch); if ch == "\n" { out.append(cur); cur = "" } }
-        if !cur.isEmpty { out.append(cur) }
-        return out
-    }
-
-    // LCS over tokens (lines when the table would be huge), then each run
-    // of changes is written deletions first, insertions second
-    static func diff(_ a: String, _ b: String) -> [Op] {
-        var x = tokens(a), y = tokens(b)
-        if x.count * y.count > 6_000_000 { x = lines(a); y = lines(b) }
-        let n = x.count, m = y.count
-        // common prefix / suffix first: most edits are small
-        var pre = 0
-        while pre < n && pre < m && x[pre] == y[pre] { pre += 1 }
-        var suf = 0
-        while suf < n - pre && suf < m - pre && x[n - 1 - suf] == y[m - 1 - suf] { suf += 1 }
-        let xs = Array(x[pre..<(n - suf)]), ys = Array(y[pre..<(m - suf)])
-        var raw: [Op] = x[..<pre].map { Op(kind: .same, text: $0) }
-        let r = xs.count, c = ys.count
-        if r > 0 || c > 0 {
-            // L[i][j] = LCS of xs[i...] and ys[j...]
-            let w = c + 1
-            var L = [Int32](repeating: 0, count: (r + 1) * w)
-            if r > 0 && c > 0 {
-                for i in stride(from: r - 1, through: 0, by: -1) {
-                    for j in stride(from: c - 1, through: 0, by: -1) {
-                        L[i * w + j] = xs[i] == ys[j] ? L[(i + 1) * w + j + 1] + 1
-                            : max(L[(i + 1) * w + j], L[i * w + j + 1])
-                    }
-                }
-            }
-            var i = 0, j = 0
-            while i < r || j < c {
-                if i < r && j < c && xs[i] == ys[j] {
-                    raw.append(Op(kind: .same, text: xs[i])); i += 1; j += 1
-                } else if j < c && (i == r || L[i * w + j + 1] >= L[(i + 1) * w + j]) {
-                    raw.append(Op(kind: .ins, text: ys[j])); j += 1
-                } else {
-                    raw.append(Op(kind: .del, text: xs[i])); i += 1
-                }
-            }
-        }
-        raw += x[(n - suf)...].map { Op(kind: .same, text: $0) }
-        return group(raw)
-    }
-
-    // a lone space between two changes joins them ("their going" ->
-    // "They're gone" reads as one replacement, not two), then each change
-    // run = its deletions, then its insertions
-    private static func group(_ raw: [Op]) -> [Op] {
-        var ops = raw
-        var k = 1
-        while k < ops.count - 1 {
-            if ops[k].kind == .same, ops[k].text.allSatisfy({ $0 == " " }),
-               ops[k - 1].kind != .same, ops[k + 1].kind != .same {
-                let t = ops[k].text
-                ops.replaceSubrange(k...k, with: [Op(kind: .del, text: t), Op(kind: .ins, text: t)])
-                k += 2
-            } else { k += 1 }
-        }
-        var out: [Op] = []
-        var del = "", ins = ""
-        func flush() {
-            if del.allSatisfy(\.isWhitespace) && ins.allSatisfy(\.isWhitespace) {
-                // spacing only (a table re-padded): not a change worth marking
-                if !ins.isEmpty {
-                    if let last = out.last, last.kind == .same { out[out.count - 1].text += ins }
-                    else { out.append(Op(kind: .same, text: ins)) }
-                }
-            } else {
-                if !del.isEmpty { out.append(Op(kind: .del, text: del)) }
-                if !ins.isEmpty { out.append(Op(kind: .ins, text: ins)) }
-            }
-            del = ""; ins = ""
-        }
-        for o in ops {
-            switch o.kind {
-            case .del: del += o.text
-            case .ins: ins += o.text
-            case .same:
-                flush()
-                if let last = out.last, last.kind == .same { out[out.count - 1].text += o.text }
-                else { out.append(o) }
-            }
-        }
-        flush()
-        return out
-    }
-
-    // how many separate changes (a replacement counts once)
-    static func changes(_ ops: [Op]) -> Int {
-        var n = 0
-        var inChange = false
-        for o in ops {
-            if o.kind == .same { inChange = false } else if !inChange { n += 1; inChange = true }
-        }
-        return n
-    }
-}
+// (the word diff: CharDiff in CompareText.swift)
 
 // MARK: - text view with a placeholder
 
@@ -867,7 +739,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             setStatus("The model dropped \(result.missing) code block\(result.missing == 1 ? "" : "s") — check before sending"
                 + partsNote, tone: .warning)
         } else if answerDiff {
-            let n = WordDiff.changes(WordDiff.diff(answerInput, answer))
+            let n = CharDiff.changes(CharDiff.diff(answerInput, answer))
             setStatus((n == 0 ? "No changes ✓ · \(secs)" : "\(n) change\(n == 1 ? "" : "s") · \(secs)") + partsNote,
                       tone: n == 0 ? .success : nil)
         } else {
@@ -931,7 +803,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             output.textStorage?.setAttributedString(NSAttributedString(string: answer, attributes: base))
             return
         }
-        let ops = WordDiff.diff(answerInput, answer)
+        let ops = CharDiff.diff(answerInput, answer)
         let s = NSMutableAttributedString()
         let danger = colors.tone(.danger), success = colors.tone(.success)
         for o in ops {

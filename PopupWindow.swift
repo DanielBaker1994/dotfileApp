@@ -3248,6 +3248,11 @@ final class FileListPane: NSView, NSDraggingSource {
         case trash, duplicate, copy, cut, paste, newFolder, newFile, quickLook, enclosing, toggleHidden
     }
     var onAction: ((Action) -> Void)?
+    // the Compare view (CompareWindow.swift): "Select for Compare" on one
+    // row, then "Compare to “NAME”" on another; "Compare" with exactly two
+    // marked. One pick for every list (file browser, /paths). nil = off.
+    static var onCompare: ((String, String) -> Void)?
+    static var comparePick: String?
     // which actions apply right now (paste needs files on the clipboard…)
     var canPerform: ((Action) -> Bool)?
     var hiddenShown: (() -> Bool)?
@@ -3667,6 +3672,7 @@ final class FileListPane: NSView, NSDraggingSource {
             if real { add("Show in Enclosing Folder", .enclosing) }
             menu.addItem(menuItem("Open Terminal Here", #selector(rowOpenTerminal(_:)), idx))
         }
+        addCompareItems(menu, idx, many: many, real: real)
         if real {
             menu.addItem(NSMenuItem.separator())
             if !many, onRename != nil { menu.addItem(menuItem("Rename…", #selector(rowRename(_:)), idx)) }
@@ -3677,6 +3683,33 @@ final class FileListPane: NSView, NSDraggingSource {
         addFolderItems()
         if menu.items.count == before + 1 { menu.removeItem(at: before) }
         NSMenu.popUpContextMenu(menu, with: e, for: self)
+    }
+
+    // Select for Compare / Compare to “NAME” / Compare (two marked files;
+    // folders wait for Folder Compare)
+    private func addCompareItems(_ menu: NSMenu, _ idx: Int, many: Bool, real: Bool) {
+        guard let compare = Self.onCompare, real else { return }
+        var items: [NSMenuItem] = []
+        func item(_ t: String, _ f: @escaping () -> Void) {
+            let i = ClosureMenuItem(t, f)
+            items.append(i)
+        }
+        if many {
+            let paths = marked.sorted().compactMap { rows.indices.contains($0) ? rows[$0] : nil }.filter { !$0.isDir }.map(\.path)
+            if marked.count == 2, paths.count == 2 { item("Compare") { compare(paths[0], paths[1]) } }
+        } else if !rows[idx].isDir {
+            let path = rows[idx].path
+            if let pick = Self.comparePick, pick != path {
+                item("Compare to “\((pick as NSString).lastPathComponent)”") {
+                    Self.comparePick = nil
+                    compare(pick, path)
+                }
+            }
+            item("Select for Compare") { Self.comparePick = path }
+        }
+        guard !items.isEmpty else { return }
+        menu.addItem(NSMenuItem.separator())
+        items.forEach(menu.addItem)
     }
 
     @objc private func rowAction(_ sender: NSMenuItem) {
