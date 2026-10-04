@@ -35,6 +35,9 @@ final class CompareSession {
     var changedOnDisk: [CompareSide: Bool] = [:]
     var watchers: [CompareSide: DispatchSourceFileSystemObject] = [:]
     var status = ""                             // the last action's word (saved, copied…)
+    var folder: FolderSession?                  // a Folder Compare session (the text model stays empty)
+    var recovered = false                       // unsaved text brought back after a restart
+    var recoveryVersion: [CompareSide: Int] = [:]   // `version` last written to the recovery copy
 
     init(model: TextCompare) {
         self.model = model
@@ -79,6 +82,7 @@ final class CompareSession {
     }
 
     func name(_ s: CompareSide) -> String {
+        if let f = folder { return ((s == .left ? f.leftRoot : f.rightRoot) as NSString).lastPathComponent + "/" }
         if let t = title[s], !t.isEmpty { return (t as NSString).lastPathComponent }
         if let p = path[s] { return (p as NSString).lastPathComponent }
         return model.side(s).lines.isEmpty ? "(empty)" : "(clipboard)"
@@ -86,6 +90,7 @@ final class CompareSession {
 
     // the pill: "a.txt ⇆ b.txt"
     var label: String {
+        if let f = folder { return (git ? "(git) " : "") + f.label }
         let l = name(.left), r = name(.right)
         return (git ? "(git) " : "") + (l == r ? l : "\(l) ⇆ \(r)")
     }
@@ -102,6 +107,8 @@ protocol ComparePaneHost: AnyObject {
     var paneColors: PopupColors { get }
     var paneGutterArrows: String { get }        // hover | always | off
     var paneTabWidth: Int { get }
+    var paneShowWhitespace: Bool { get }        // spaces as ·, tabs as →
+    var paneAlignPick: (side: CompareSide, line: Int)? { get }   // Align With: the line picked first
     func paneClicked(row: Int, side: CompareSide, col: Int, clicks: Int, shift: Bool)
     func paneDragged(to row: Int)
     func paneGutterCopy(section: Int, from: CompareSide)
@@ -189,7 +196,7 @@ final class ComparePaneView: NSView {
         return out
     }
 
-    func attributed(_ text: String, color: NSColor, marks: [CharDiff.Mark], c: PopupColors) -> NSAttributedString {
+    func attributed(_ text: String, color: NSColor, marks: [CharDiff.Mark], c: PopupColors) -> NSMutableAttributedString {
         let a = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para])
         let len = a.length
         for mk in marks {
@@ -201,6 +208,30 @@ final class ComparePaneView: NSView {
                              .underlineColor: hue], range: r)
         }
         return a
+    }
+
+    // visible whitespace: the · that stand for spaces are dimmed
+    private func dimWhitespace(_ a: NSMutableAttributedString, original: String, c: PopupColors) {
+        let u = Array(original.utf16)
+        for (i, ch) in u.enumerated() where ch == 32 {
+            a.addAttribute(.foregroundColor, value: c.dim.withAlphaComponent(0.6), range: NSRange(location: i, length: 1))
+        }
+    }
+
+    // → at each tab's visual column (monospaced: column × charW)
+    private func drawTabs(_ text: String, x: CGFloat, y: CGFloat, c: PopupColors) {
+        guard text.contains("\t") else { return }
+        let tw = max(1, host?.paneTabWidth ?? 4)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: c.dim.withAlphaComponent(0.6)]
+        var col = 0
+        for ch in text {
+            if ch == "\t" {
+                ("→" as NSString).draw(at: NSPoint(x: x + CGFloat(col) * charW, y: y), withAttributes: attrs)
+                col = (col / tw + 1) * tw
+            } else {
+                col += 1
+            }
+        }
     }
 
     override func draw(_ dirty: NSRect) {
@@ -280,12 +311,30 @@ final class ComparePaneView: NSView {
             let tr = textRect(side, row: d)
             let text = side == .left ? s.model.left.lines[line] : s.model.right.lines[line]
             guard !text.isEmpty else { continue }
-            let color = diff && row.kind != .changed ? c.text : c.text
-            let a = attributed(text, color: color, marks: side == .left ? mk.0 : mk.1, c: c)
+            let showWS = host?.paneShowWhitespace ?? false
+            let a = attributed(showWS ? text.replacingOccurrences(of: " ", with: "·") : text, color: c.text,
+                               marks: side == .left ? mk.0 : mk.1, c: c)
+            if showWS { dimWhitespace(a, original: text, c: c) }
             NSGraphicsContext.saveGraphicsState()
             NSRect(x: tr.minX - 2, y: y, width: tr.width + 2, height: rowH).clip()
             a.draw(at: NSPoint(x: tr.minX - hOffset, y: y + 2))
+            if showWS { drawTabs(text, x: tr.minX - hOffset, y: y + 2, c: c) }
             NSGraphicsContext.restoreGraphicsState()
+        }
+        // Align With: an anchor row gets a rule across both sides; a picked line an outline
+        if s.model.isAnchor(row: m) {
+            c.tone(.accent2).withAlphaComponent(0.8).setFill()
+            NSRect(x: 0, y: y, width: bounds.width, height: 1.5).fill()
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10, weight: .bold), .foregroundColor: c.tone(.accent2)]
+            ("⚓︎" as NSString).draw(at: NSPoint(x: paneW + gutterW / 2 - 5, y: y + 2), withAttributes: attrs)
+        }
+        if let pick = host?.paneAlignPick, row.line(pick.side) == pick.line {
+            let r = NSRect(x: paneX(pick.side) + 1, y: y + 1, width: paneW - 2, height: rowH - 2)
+            let path = NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3)
+            path.lineWidth = 1.5
+            path.setLineDash([4, 3], count: 2, phase: 0)
+            c.tone(.accent2).setStroke()
+            path.stroke()
         }
         // gutter: → / ← on the first row of a section (hover / cursor / always)
         if diff, let si = s.model.section(at: m), s.model.sections[si].rows.lowerBound == m || d == 0 {

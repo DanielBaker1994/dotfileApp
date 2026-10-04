@@ -669,7 +669,7 @@ font = ""
 # toast after ⧉ Copy
 copy-toast = "Copied to clipboard"
 
-# [compare] — Beyond Compare-style Text Compare (CompareWindow.swift); a
+# [compare] — Beyond Compare-style Text + Folder Compare (CompareWindow.swift); a
 # shared-window view (header icon ⇆, Hyper+S /compare, file browser / /paths
 # right-click "Select for Compare" → "Compare to …", `workspace-switcher
 # compare [--wait] A B`, git difftool). Keys:
@@ -683,9 +683,15 @@ copy-toast = "Copied to clipboard"
 #   gutter-arrows    hover | always | off
 #   max-lines        past this a text pair gets a byte compare only
 #   recent           how many recent pairs the start page keeps
-#   content / time-tolerance / exclude / use-gitignore / ignore-file
-#                    Folder Compare (PRD phase 2; read once it exists)
-#   *-label          the view's words ({} = the variable part)
+#   content          auto | always | never: Folder Compare's byte check (auto = same size, different time)
+#   time-tolerance   seconds two modified times may differ and still be "same"
+#   exclude          names / globs Folder Compare never scans (comma list)
+#   use-gitignore    true | false: honor .gitignore / .ignore (like /paths)
+#   ignore-file      extra gitignore-syntax file
+#   *-label          the view's words ({} = the variable part; recovered-label = the status after a restart
+#                    brought back unsaved edits)
+#   Open sessions + unsaved text survive a restart: ~/.cache/workspace-switcher/compare-sessions.json
+#   + compare-recovery/ (git difftool sessions are never kept)
 [compare]
 enabled = true
 in-palette = true
@@ -712,7 +718,7 @@ same-text-label = "Same text — files differ in {}"
 binary-label = "Binary files {}"
 too-large-label = "Too large for Text Compare ([compare] max-lines): {}"
 empty-label = "Both sides are empty — paste text (⌘V), drop files, or open them (⌘O)"
-folder-label = "Folder Compare is not built yet (PRD phase 2): {} is a folder"
+folder-label = "Folder Compare needs a folder on both sides: {}"
 unsaved-label = "Save changes to {}?"
 unsaved-info-label = "Your edits are lost if you don't save them."
 save-button-label = "Save"
@@ -805,12 +811,27 @@ workspace-switcher = "*:app"
 "compare: Cmd+S / Cmd+Opt+S" = "save the focused side / both"
 "compare: Cmd+O" = "open a file into the focused side"
 "compare: Cmd+L" = "type a path for the focused side"
-"compare: Cmd+V" = "an empty side: paste the clipboard as its text"
+"compare: Cmd+V" = "paste the clipboard into the focused side (a file is opened; text replaces the side, Cmd+Z undoes)"
 "compare: Cmd+1 / 2 / 3 / 4" = "show all / differences / same / context"
 "compare: Cmd+F / Cmd+G / Cmd+Shift+G" = "find / next / previous"
 "compare: Ctrl+G" = "go to line"
 "compare: Cmd+Opt+X" = "swap sides"
 "compare: F5" = "reload + compare again"
+"compare-folders: ↑ ↓ / → ← / Return" = "move / expand + collapse (Opt = all below) / open a file pair in Text Compare (Esc = back)"
+"compare-folders: Ctrl+N / Ctrl+P" = "next / previous differing file"
+"compare-folders: Ctrl+R / Ctrl+L" = "copy the selection to the right / left (Ctrl+Opt = move)"
+"compare-folders: Cmd+1 … 6" = "all / differences / same / orphans / left newer / right newer"
+"compare-folders: Cmd+F" = "filter names (*.swift, !*.o)"
+"compare-folders: Cmd+Delete / F2 / Cmd+Shift+N" = "trash / rename / new folder on the focused side (Cmd+Z undoes)"
+"compare-folders: Tab / Cmd+Opt+X / F5" = "focus the other side / swap sides / scan again"
+"compare-folders: Space / Cmd+Y" = "Quick Look the selection (Space / Esc closes it)"
+"compare-folders: Cmd+Down / Cmd+Up" = "into the folder pair (Set as Base Folder) / both sides up one level"
+"compare-folders: Cmd+[ / Cmd+]" = "back / forward through the base folders"
+"compare-folders: drag a row across" = "copy to the other side (Cmd = move); files from Finder land in the folder under the drop"
+"compare-folders: Synchronize (⟳ toolbar, Cmd+K)" = "Update Right / Left / Both, Mirror to Right / Left — after a preview; Cmd+Z undoes the whole run"
+"compare-folders: Cmd+Z" = "undo this session's last copy / move / trash / rename / sync (the file browser keeps its own)"
+"compare: right-click a line ▸ Align With" = "pick a line, then one on the other side: they share a row (Clear All Alignments undoes)"
+"compare: right-click ▸ Convert Side" = "trim trailing whitespace / line endings → LF · CRLF · CR (Cmd+Z undoes)"
 "compare: Cmd+K" = "every action by name"
 "compare: Esc" = "close find / path / editor, stop a compare, back; idle: hide (only when Esc Hides Window is on)"
 "compare: Cmd+/" = "this list"

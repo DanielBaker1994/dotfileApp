@@ -69,6 +69,7 @@ case "${1:-all}" in
         ;;
     compare)
         run_test "$TESTS/test_compare.swift"
+        run_test "$TESTS/test_compare_folder.swift"
         ;;
     settings)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3

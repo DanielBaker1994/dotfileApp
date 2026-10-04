@@ -89,6 +89,9 @@ struct CompareRecentEntry: Equatable {
 
 enum CompareRecent {
     static var path: String { NSHomeDirectory() + "/.cache/workspace-switcher/compare-recent.json" }
+    // snapshots of pasted sides (a Recent row opens them like files)
+    static var pastedDir: String { NSHomeDirectory() + "/.cache/workspace-switcher/compare-pasted" }
+    static func isPasted(_ p: String) -> Bool { p.hasPrefix(pastedDir + "/") }
 
     static func load() -> [CompareRecentEntry] {
         guard let d = FileManager.default.contents(atPath: path),
@@ -109,6 +112,11 @@ enum CompareRecent {
     static func remove(_ e: CompareRecentEntry) { save(load().filter { $0 != e }) }
 
     static func save(_ all: [CompareRecentEntry]) {
+        // a snapshot nothing lists any more goes away
+        let keep = Set(all.flatMap { [$0.left, $0.right] })
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: pastedDir)) ?? [] where !keep.contains(pastedDir + "/" + f) {
+            try? FileManager.default.removeItem(atPath: pastedDir + "/" + f)
+        }
         let arr = all.map { ["left": $0.left, "right": $0.right, "kind": "text", "used": $0.used.timeIntervalSince1970] as [String: Any] }
         guard let d = try? JSONSerialization.data(withJSONObject: arr, options: [.prettyPrinted]) else { return }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
@@ -151,12 +159,14 @@ final class CompareRecentList: NSView {
                 colors.accentOn.setFill()
                 NSRect(x: r.minX + 2, y: r.minY + 5, width: 3, height: r.height - 10).fill()
             }
-            let ln = (e.left as NSString).lastPathComponent, rn = (e.right as NSString).lastPathComponent
+            let pl = CompareRecent.isPasted(e.left), pr = CompareRecent.isPasted(e.right)
+            let ln = pl ? "pasted text" : (e.left as NSString).lastPathComponent
+            let rn = pr ? "pasted text" : (e.right as NSString).lastPathComponent
             let name = ln == rn ? ln : "\(ln) ⇆ \(rn)"
             let y = r.minY + 6
             (name as NSString).draw(in: NSRect(x: 14, y: y, width: 220, height: 18),
                                     withAttributes: [.font: font, .foregroundColor: colors.text])
-            let dirs = "\(tilde((e.left as NSString).deletingLastPathComponent))  ⇆  \(tilde((e.right as NSString).deletingLastPathComponent))"
+            let dirs = "\(pl ? "(clipboard)" : tilde((e.left as NSString).deletingLastPathComponent))  ⇆  \(pr ? "(clipboard)" : tilde((e.right as NSString).deletingLastPathComponent))"
             let p = NSMutableParagraphStyle()
             p.lineBreakMode = .byTruncatingMiddle
             (dirs as NSString).draw(in: NSRect(x: 240, y: y + 1, width: max(40, bounds.width - 350), height: 18),
@@ -210,7 +220,7 @@ final class CompareHeaderLabel: NSView {
 
 // MARK: - the window
 
-final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDelegate, NSTextFieldDelegate {
+final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NSTextViewDelegate, NSTextFieldDelegate {
     private static var live: CompareWindow?
     private static var subLive: CompareWindow?
     static var current: CompareWindow? { live }
@@ -231,13 +241,14 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     private var pills: PopupTabsBar!
     // start page
     private let start = ConfPane()
-    private let leftBox = JiraInputBox(placeholder: "Left: a file path (Tab completes) — or leave empty and paste")
-    private let rightBox = JiraInputBox(placeholder: "Right: a file path — or leave empty and paste")
+    private let leftBox = JiraInputBox(placeholder: "Left: a file or folder path (Tab completes)")
+    private let rightBox = JiraInputBox(placeholder: "Right: a file or folder path")
     private let leftLabel = NSTextField(labelWithString: "Left")
     private let rightLabel = NSTextField(labelWithString: "Right")
     private var browseL: ThemeButton!
     private var browseR: ThemeButton!
     private let compareButton = ThemedPushButton(title: "Compare  ⏎", target: nil, action: nil)
+    private let pasteButton = ThemedPushButton(title: "Compare Pasted Text…", target: nil, action: nil)
     private let recentTitle = NSTextField(labelWithString: "RECENT")
     private let recentFilter = JiraInputBox(placeholder: "filter")
     private let recentList = CompareRecentList()
@@ -246,6 +257,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     private var recentAll: [CompareRecentEntry] = []
     // text compare
     private let body = ConfPane()
+    private lazy var folderPage = FolderPage(host: self)
     private let toolbar = ConfPane()
     private let filterSeg = ConfSegmented(CompareFilter.allCases.map(\.title))
     private let summary = NSTextField(labelWithString: "")
@@ -269,6 +281,9 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     private let emptyHint = NSTextField(labelWithString: "")
     private var editor: CompareEditor?
     private var showDetails = UserDefaults.standard.object(forKey: "compareDetails") as? Bool ?? true
+    private var showWhitespace = UserDefaults.standard.bool(forKey: "compareWhitespace")
+    // Align With: the first line picked (side + line); the other side's pick aligns
+    private var alignPick: (side: CompareSide, line: Int)?
     private var targets: [ClosureTarget] = []
     private var diffGen = 0
     private var diffRunning = false
@@ -307,6 +322,12 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         if frame != nil { window.setFrame(f, display: false) }
         applyConfig()
         showPage()
+        if !sub {
+            restoreSessions()
+            NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.persistNow()
+            }
+        }
     }
 
     // the shared window brought the view back
@@ -327,12 +348,18 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     override func slotPark(stopVoice: Bool) {
         commitEditor()
         super.slotPark(stopVoice: stopVoice)
-        if stopVoice { finishWaiters() }
+        if stopVoice {
+            finishWaiters()
+            // hidden from the pushed Text Compare: the view under it (a git
+            // --dir-diff folder session) is done too
+            if isSub { CompareWindow.current?.finishWaiters() }
+        }
+        persistNow()
     }
 
     func windowWillClose(_ notification: Notification) { finishWaiters() }
 
-    private func finishWaiters() {
+    func finishWaiters() {
         for s in sessions where !s.waiters.isEmpty {
             let w = s.waiters
             s.waiters = []
@@ -390,6 +417,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         buildText()
         r.addSubview(start)
         r.addSubview(body)
+        r.addSubview(folderPage.root)
+        folderPage.root.isHidden = true
         r.onLayout = { [weak self] b in self?.layoutAll(b) }
         return r
     }
@@ -401,8 +430,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             box.field.delegate = self
             start.addSubview(box)
         }
-        browseL = button("folder", "Choose the left file…") { [weak self] in self?.browse(into: self?.leftBox) }
-        browseR = button("folder", "Choose the right file…") { [weak self] in self?.browse(into: self?.rightBox) }
+        browseL = button("folder", "Choose the left file or folder…") { [weak self] in self?.browse(into: self?.leftBox) }
+        browseR = button("folder", "Choose the right file or folder…") { [weak self] in self?.browse(into: self?.rightBox) }
         start.addSubview(browseL)
         start.addSubview(browseR)
         let t = ClosureTarget { [weak self] in self?.compareFromStart() }
@@ -410,8 +439,14 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         compareButton.target = t
         compareButton.action = #selector(ClosureTarget.run)
         compareButton.role = .primary
-        compareButton.toolTip = "Files on both sides → Text Compare. One side empty: it takes a paste (⌘V) or a drop."
+        compareButton.toolTip = "Files on both sides → Text Compare. Folders on both sides → Folder Compare."
         start.addSubview(compareButton)
+        let pt = ClosureTarget { [weak self] in self?.startPasted() }
+        targets.append(pt)
+        pasteButton.target = pt
+        pasteButton.action = #selector(ClosureTarget.run)
+        pasteButton.toolTip = "Compare text instead of files: the clipboard goes in the left pane, paste the other side with ⌘V (or type in either pane)."
+        start.addSubview(pasteButton)
         label(recentTitle, size: 11, weight: .bold)
         start.addSubview(recentTitle)
         recentFilter.field.delegate = self
@@ -518,6 +553,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         let rest = NSRect(x: 0, y: top, width: b.width, height: b.height - top)
         start.frame = rest
         body.frame = rest
+        folderPage.root.frame = rest
     }
 
     private func layoutStart(_ b: NSRect) {
@@ -532,7 +568,10 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             y += JiraTheme.height + 12
         }
         let cw = compareButton.intrinsicContentSize.width + 10
-        compareButton.frame = NSRect(x: x + (w - cw) / 2 + lw / 2, y: y, width: cw, height: 28)
+        let pw = pasteButton.intrinsicContentSize.width + 10
+        let bx = x + (w - (cw + 10 + pw)) / 2 + lw / 2
+        compareButton.frame = NSRect(x: bx, y: y, width: cw, height: 28)
+        pasteButton.frame = NSRect(x: bx + cw + 10, y: y, width: pw, height: 28)
         y += 40
         startHint.frame = NSRect(x: x, y: y, width: w, height: startHint.stringValue.isEmpty ? 0 : 34)
         y += startHint.stringValue.isEmpty ? 6 : 40
@@ -602,9 +641,12 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     // MARK: pages
 
     private func showPage() {
+        persistSoon()
         let onStart = session == nil
+        let isFolder = session?.folder != nil
         start.isHidden = !onStart
-        body.isHidden = onStart
+        body.isHidden = onStart || isFolder
+        folderPage.root.isHidden = !isFolder
         pills.titles = sessions.map(\.label)
         pills.badges = sessions.map { $0.isDirty ? PopupTabBadge(tone: .warning, text: "", tip: "unsaved changes") : nil }
         pills.selected = selected ?? -1
@@ -622,7 +664,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     private func select(_ i: Int) {
         guard sessions.indices.contains(i) else { return }
         commitEditor()
-        session.map { $0.scrollY = scroll.contentView.bounds.origin.y }
+        session.map { if $0.folder == nil { $0.scrollY = scroll.contentView.bounds.origin.y } }
         selected = i
         closeFind()
         cancelPathEdit()
@@ -633,6 +675,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     // the selected session onto the panes
     private func bindSession() {
         guard let s = session else { return }
+        if let f = s.folder {
+            folderPage.bind(f)
+            window.makeFirstResponder(folderPage.tree)
+            return
+        }
         pane.invalidateMarks()
         sizePane()
         layoutText(body.bounds)
@@ -645,6 +692,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
 
     // everything that reads the session: pills, headers, summary, status, thumbnail
     private func syncAll() {
+        persistSoon()
         guard let s = session else {
             showPage()
             return
@@ -652,6 +700,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         pills.titles = sessions.map(\.label)
         pills.badges = sessions.map { $0.isDirty ? PopupTabBadge(tone: .warning, text: "", tip: "unsaved changes") : nil }
         pills.selected = selected ?? -1
+        if s.folder != nil { return }       // the folder page paints itself (FolderPage.sync)
         filterSeg.selected = CompareFilter.allCases.firstIndex(of: s.filter) ?? 0
         for (h, side) in [(headerL, CompareSide.left), (headerR, .right)] {
             h.text = s.title[side].map { "\($0)  ·  \(s.path[side].map(tilde) ?? "")" } ?? s.path[side].map(tilde)
@@ -738,6 +787,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     var paneColors: PopupColors { colors }
     var paneGutterArrows: String { cfg.gutterArrows }
     var paneTabWidth: Int { cfg.tabWidth }
+    var paneShowWhitespace: Bool { showWhitespace }
+    var paneAlignPick: (side: CompareSide, line: Int)? { alignPick }
 
     func paneClicked(row: Int, side: CompareSide, col: Int, clicks: Int, shift: Bool) {
         guard let s = session else { return }
@@ -796,20 +847,29 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     // Folders are phase 2: refused with a word on the start page.
     @discardableResult
     func openPair(_ left: String?, _ right: String?, titles: [CompareSide: String] = [:], git: Bool = false,
-                  waiter: (() -> Void)? = nil) -> CompareSession? {
+                  waiter: (() -> Void)? = nil, then: ((CompareSession) -> Void)? = nil) -> CompareSession? {
         let t0 = DispatchTime.now().uptimeNanoseconds
         cfg = CompareConfig.load()
         let fm = FileManager.default
-        for p in [left, right].compactMap({ $0 }) {
-            var dir: ObjCBool = false
-            if fm.fileExists(atPath: p, isDirectory: &dir), dir.boolValue {
-                showStartPage()
-                startHint.stringValue = cfg.label("folder", "Folder Compare is not built yet (PRD phase 2): {} is a folder", tilde(p))
-                startHint.textColor = colors.tone(.warning)
-                root.needsLayout = true
-                waiter?()
-                return nil
+        func isDir(_ p: String?) -> Bool? {
+            guard let p else { return nil }
+            var d: ObjCBool = false
+            return fm.fileExists(atPath: p, isDirectory: &d) ? d.boolValue : false
+        }
+        let dirs = [left, right].compactMap(isDir)
+        if dirs.contains(true) {
+            // folders: both sides must be folders
+            if let l = left, let r = right, isDir(l) == true, isDir(r) == true {
+                return openFolders(l, r, titles: titles, git: git, waiter: waiter)
             }
+            showStartPage()
+            let one = [left, right].compactMap { $0 }.count == 1
+            startHint.stringValue = cfg.label("folder", "Folder Compare needs a folder on both sides: {}",
+                                              one ? "only one was given" : "a folder can't be compared with a file")
+            startHint.textColor = colors.tone(.warning)
+            root.needsLayout = true
+            waiter?()
+            return nil
         }
         let s = CompareSession(model: TextCompare())
         s.git = git
@@ -831,6 +891,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             s.model = model
             s.refresh(context: self.cfg.contextLines)
             if let first = model.sections.first { s.cursor = s.displayRow(first.rows.lowerBound) }
+            then?(s)
             self.showPage()
             self.bindSession()
             self.scrollCursorVisible(center: true)
@@ -842,7 +903,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             self.controller?.log(String(format: "compare text: %d lines, diff %.0f ms, paint %.0f ms (open → painted %.0f ms)",
                                         lines, diffMs, paint, total))
         }
-        if let l = left, let r = right, !git, !s.isBinary { CompareRecent.add(l, r, limit: cfg.recentLimit) }
+        if let l = left, let r = right, !git, !s.isBinary, !restoring { CompareRecent.add(l, r, limit: cfg.recentLimit) }
         startHint.stringValue = ""
         let l = loaded[.left] ?? TextSide(), r = loaded[.right] ?? TextSide()
         if lines > 60_000 {
@@ -873,6 +934,235 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         return s
     }
 
+    // two folders: a Folder Compare session (the scan streams in on its own)
+    @discardableResult
+    func openFolders(_ left: String, _ right: String, titles: [CompareSide: String] = [:], git: Bool = false,
+                     waiter: (() -> Void)? = nil) -> CompareSession? {
+        cfg = CompareConfig.load()
+        commitEditor()
+        let s = CompareSession(model: TextCompare())
+        s.git = git
+        s.title = titles
+        s.path = [.left: left, .right: right]
+        s.folder = FolderSession(left: left, right: right)
+        s.folder?.alwaysContent = git
+        sessions.append(s)
+        selected = sessions.count - 1
+        if let waiter { s.waiters.append(waiter) }
+        if !git && !restoring { CompareRecent.add(left, right, limit: cfg.recentLimit) }
+        startHint.stringValue = ""
+        closeFind()
+        cancelPathEdit()
+        showPage()
+        bindSession()
+        return s
+    }
+
+    // MARK: session restore + recovery copies (PRD §7.3.4)
+    //
+    // compare-sessions.json = the open sessions (pairs, filters, cursor,
+    // importance, alignments); compare-recovery/ = the text of every side
+    // with unsaved edits (and pasted sides), written 2 s after the last
+    // change, on hide and on quit. A restart brings them back as
+    // "unsaved (recovered)"; a save / discard drops the copy. git sessions
+    // (temp files) are never kept.
+
+    static var stateDir: String { NSHomeDirectory() + "/.cache/workspace-switcher" }
+    static var sessionsPath: String { stateDir + "/compare-sessions.json" }
+    static var recoveryDir: String { stateDir + "/compare-recovery" }
+    private var persistWork: DispatchWorkItem?
+    private var restoring = false
+
+    private func persistSoon() {
+        guard !isSub, !restoring else { return }
+        persistWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.persistNow() }
+        persistWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: w)
+    }
+
+    func persistNow() {
+        guard !isSub, !restoring else { return }
+        persistWork?.cancel()
+        persistWork = nil
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: Self.recoveryDir, withIntermediateDirectories: true)
+        var keep = Set<String>()
+        var out: [[String: Any]] = []
+        var sel: Int?
+        for s in sessions where !s.git {
+            if s === session { sel = out.count }
+            var o: [String: Any] = [:]
+            if let f = s.folder {
+                o["kind"] = "folder"
+                o["left"] = f.leftRoot
+                o["right"] = f.rightRoot
+                o["filter"] = f.view.filter.rawValue
+                o["flatten"] = f.view.flatten
+                o["names"] = f.view.nameFilter
+                o["hidden"] = f.hidden
+                o["exclude"] = f.extraExclude
+                if f.rows.indices.contains(f.cursor) { o["cursorKey"] = f.rows[f.cursor].node.key }
+                out.append(o)
+                continue
+            }
+            o["kind"] = "text"
+            o["filter"] = s.filter.rawValue
+            o["cursor"] = s.cursor
+            o["focus"] = s.focus.rawValue
+            let i = s.model.importance
+            o["importance"] = [i.leadingWS, i.trailingWS, i.embeddedWS, i.ignoreCase, i.lineEndings, i.blankLines, s.model.ignoreUnimportant]
+            o["anchors"] = s.model.anchors.map { [$0.l, $0.r] }
+            for side in [CompareSide.left, .right] {
+                let k = side.rawValue
+                if let p = s.path[side] { o[k] = p }
+                if let t = s.title[side] { o[k + "Title"] = t }
+                let pasted = s.path[side] == nil && !s.model.side(side).lines.isEmpty
+                guard s.dirty(side) || pasted, s.binary[side] == nil, s.tooLarge[side] == nil else { continue }
+                let file = Self.recoveryDir + "/\(s.id)-\(k).txt"
+                if s.recoveryVersion[side] != s.version || !fm.fileExists(atPath: file) {
+                    let t = s.model.side(side)
+                    let data = t.encoded() ?? Data(t.text.utf8)
+                    try? data.write(to: URL(fileURLWithPath: file), options: .atomic)
+                    s.recoveryVersion[side] = s.version
+                }
+                keep.insert(file)
+                o[k + "Recovery"] = file
+                o[k + "Pasted"] = pasted
+            }
+            out.append(o)
+        }
+        // a copy no session needs any more (saved, discarded, closed) goes
+        for f in (try? fm.contentsOfDirectory(atPath: Self.recoveryDir)) ?? [] where !keep.contains(Self.recoveryDir + "/" + f) {
+            try? fm.removeItem(atPath: Self.recoveryDir + "/" + f)
+        }
+        let obj: [String: Any] = ["sessions": out, "selected": sel ?? -1]
+        if let d = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
+            try? d.write(to: URL(fileURLWithPath: Self.sessionsPath), options: .atomic)
+        }
+    }
+
+    private func restoreSessions() {
+        guard let d = FileManager.default.contents(atPath: Self.sessionsPath),
+              let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+              let arr = obj["sessions"] as? [[String: Any]], !arr.isEmpty else { return }
+        restoring = true
+        let fm = FileManager.default
+        func isDir(_ p: String) -> Bool { var b: ObjCBool = false; return fm.fileExists(atPath: p, isDirectory: &b) && b.boolValue }
+        var recoveredSides = 0
+        for e in arr {
+            if e["kind"] as? String == "folder" {
+                guard let l = e["left"] as? String, let r = e["right"] as? String, isDir(l), isDir(r),
+                      let s = openFolders(l, r), let f = s.folder else { continue }
+                f.view.filter = FolderFilter(rawValue: e["filter"] as? String ?? "") ?? .all
+                f.view.flatten = e["flatten"] as? Bool ?? false
+                f.view.nameFilter = e["names"] as? String ?? ""
+                f.hidden = e["hidden"] as? Bool ?? true
+                f.extraExclude = e["exclude"] as? [String] ?? []
+                f.cursorKey = e["cursorKey"] as? String
+                continue
+            }
+            var paths: [CompareSide: String] = [:], recovery: [CompareSide: (file: String, pasted: Bool)] = [:]
+            var titles: [CompareSide: String] = [:]
+            for side in [CompareSide.left, .right] {
+                let k = side.rawValue
+                if let p = e[k] as? String, fm.fileExists(atPath: p), !isDir(p) { paths[side] = p }
+                if let t = e[k + "Title"] as? String { titles[side] = t }
+                if let f = e[k + "Recovery"] as? String, fm.fileExists(atPath: f) {
+                    let pasted = e[k + "Pasted"] as? Bool ?? false
+                    // a file that is gone keeps its unsaved text as a pasted side
+                    recovery[side] = (f, pasted || paths[side] == nil)
+                }
+            }
+            guard !paths.isEmpty || !recovery.isEmpty else { continue }
+            openPair(paths[.left], paths[.right], titles: titles) { s in
+                if let b = e["importance"] as? [Bool], b.count == 7 {
+                    let imp = Importance(leadingWS: b[0], trailingWS: b[1], embeddedWS: b[2], ignoreCase: b[3], lineEndings: b[4], blankLines: b[5])
+                    if imp != s.model.importance { s.model.setImportance(imp) }
+                    if b[6] != s.model.ignoreUnimportant { s.model.setIgnoreUnimportant(b[6]) }
+                }
+                for (side, r) in recovery {
+                    guard let data = fm.contents(atPath: r.file) else { continue }
+                    let t = TextSide.decode(data) ?? TextSide(text: String(decoding: data, as: UTF8.self))
+                    if r.pasted {
+                        s.path[side] = nil
+                        s.model.setSide(side, t)
+                        s.markClean(side)
+                        continue
+                    }
+                    let cur = s.model.side(side)
+                    guard cur.lines != t.lines || cur.eols != t.eols else { continue }    // saved after all
+                    s.willEdit(side)
+                    s.model.replace(side, 0..<cur.lines.count, lines: t.lines, eols: t.eols)
+                    s.recovered = true
+                    recoveredSides += 1
+                }
+                for a in (e["anchors"] as? [[Int]]) ?? [] where a.count == 2 { s.model.align(left: a[0], right: a[1]) }
+                s.filter = CompareFilter(rawValue: e["filter"] as? String ?? "") ?? .all
+                s.focus = CompareSide(rawValue: e["focus"] as? String ?? "") ?? .left
+                s.refresh(context: self.cfg.contextLines)
+                s.cursor = min(max(0, e["cursor"] as? Int ?? 0), max(0, s.displayCount - 1))
+                if s.recovered { s.status = self.cfg.label("recovered", "unsaved changes recovered after a restart — ⌘S saves, ⌘Z undoes") }
+            }
+        }
+        restoring = false
+        let sel = obj["selected"] as? Int ?? -1
+        if sessions.indices.contains(sel) { select(sel) } else if !sessions.isEmpty { select(sessions.count - 1) }
+        controller?.log("compare: restored \(sessions.count) session(s), \(recoveredSides) side(s) with recovered edits")
+        persistSoon()
+    }
+
+    // MARK: FolderHost
+
+    var folderWindow: NSWindow { window }
+    var folderColors: PopupColors { colors }
+    var folderConfig: CompareConfig { cfg }
+    func folderChanged() {
+        pills?.titles = sessions.map(\.label)
+        persistSoon()
+    }
+    func folderLog(_ s: String) { controller?.log(s) }
+    func folderOpenNote(_ path: String) { controller?.openNoteFile(path) }
+
+    // Return / double-click on a file pair: a Text Compare ON the view (Esc = back,
+    // same row). Without the shared window it opens as another session here.
+    func folderOpenPair(_ left: String?, _ right: String?) {
+        guard let c = controller, !isSub, settings.sharedWindow else { _ = openPair(left, right); return }
+        let sub = CompareWindow.createSub(controller: c, frame: c.slot.currentFrame())
+        sub.openSubPair(left, right)
+        c.slot.push(.compareText)
+    }
+
+    // the pushed Text Compare: the same pair again keeps its edits + scroll;
+    // another pair replaces the clean sessions
+    func openSubPair(_ left: String?, _ right: String?) {
+        if let s = sessions.first(where: { $0.path[.left] == left && $0.path[.right] == right && $0.folder == nil }),
+           let i = sessions.firstIndex(where: { $0 === s }) {
+            select(i)
+            return
+        }
+        for i in sessions.indices.reversed() where !sessions[i].isDirty {
+            let old = sessions.remove(at: i)
+            old.stopWatching()
+            let w = old.waiters
+            old.waiters = []
+            w.forEach { $0() }
+        }
+        selected = nil
+        _ = openPair(left, right)
+    }
+
+    func folderSwapped(old: FolderSession, new: FolderSession) {
+        guard let i = sessions.firstIndex(where: { $0.folder === old }) else { return }
+        let s = sessions[i]
+        old.gen.bump()
+        s.folder = new
+        s.path = [.left: new.leftRoot, .right: new.rightRoot]
+        if !s.git { CompareRecent.add(new.leftRoot, new.rightRoot, limit: cfg.recentLimit) }
+        showPage()
+        bindSession()
+    }
+
     // read a side's file: text, binary (byte compare) or too large
     private func load(_ p: String, into s: CompareSession, side: CompareSide) -> TextSide? {
         guard let d = FileManager.default.contents(atPath: p) else {
@@ -894,7 +1184,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         guard let s = session else { _ = openPair(side == .left ? p : nil, side == .right ? p : nil); return }
         var dir: ObjCBool = false
         if FileManager.default.fileExists(atPath: p, isDirectory: &dir), dir.boolValue {
-            s.status = cfg.label("folder", "Folder Compare is not built yet (PRD phase 2): {} is a folder", tilde(p))
+            s.status = cfg.label("folder", "Folder Compare needs a folder on both sides: {}", "\(tilde(p)) is a folder")
             syncAll()
             return
         }
@@ -912,11 +1202,22 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         if let l = s.path[.left], let r = s.path[.right], !s.git { CompareRecent.add(l, r, limit: cfg.recentLimit) }
     }
 
-    // pasted text as one side (an empty pane's Cmd+V, "Paste Clipboard Here")
+    // pasted text as one side (a pane's Cmd+V, "Paste Clipboard Here"). An empty
+    // side takes it as its content; a side with text is REPLACED by an
+    // undoable edit (Cmd+Z brings the old text back)
     func setPasted(_ text: String, _ side: CompareSide) {
-        if session == nil { openPair(nil, nil) }
+        if session == nil || session?.folder != nil { openPair(nil, nil) }
         guard let s = session else { return }
         commitEditor()
+        let had = s.model.side(side).lines.count
+        if had > 0 && s.binary[side] == nil && s.tooLarge[side] == nil {
+            let lines = TextSide(text: text).lines
+            s.willEdit(side)
+            s.model.replace(side, 0..<had, with: lines)
+            s.status = "replaced the \(side.rawValue) side (⌘Z undoes)"
+            modelChanged(s)
+            return
+        }
         s.watchers[side]?.cancel()
         s.watchers[side] = nil
         s.path[side] = nil
@@ -938,9 +1239,30 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         syncAll()
     }
 
+    // a pair with pasted text isn't lost with its pill: both sides are written
+    // as snapshot files (file-backed sides keep their path) → one Recent row
+    private func rememberPasted(_ s: CompareSession) {
+        guard s.folder == nil, !s.git, !s.isBinary, cfg.recentLimit > 0 else { return }
+        let sides: [CompareSide] = [.left, .right]
+        guard sides.contains(where: { s.path[$0] == nil && !s.model.side($0).lines.isEmpty }),
+              sides.allSatisfy({ s.path[$0] != nil || !s.model.side($0).lines.isEmpty }) else { return }
+        var out: [CompareSide: String] = [:]
+        for side in sides {
+            if let p = s.path[side] { out[side] = p; continue }
+            guard let d = s.model.side(side).encoded() ?? Optional(Data(s.model.side(side).lines.joined(separator: "\n").utf8)) else { return }
+            let p = CompareRecent.pastedDir + "/\(Int(Date().timeIntervalSince1970))-\(s.id)-\(side.rawValue).txt"
+            try? FileManager.default.createDirectory(atPath: CompareRecent.pastedDir, withIntermediateDirectories: true)
+            guard (try? d.write(to: URL(fileURLWithPath: p))) != nil else { return }
+            out[side] = p
+        }
+        if let l = out[.left], let r = out[.right] { CompareRecent.add(l, r, limit: cfg.recentLimit) }
+    }
+
     private func removeSession(_ i: Int) {
         guard sessions.indices.contains(i) else { return }
         let s = sessions.remove(at: i)
+        s.folder?.gen.bump()
+        rememberPasted(s)
         s.stopWatching()
         let w = s.waiters
         s.waiters = []
@@ -1001,6 +1323,17 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         openPair(l.isEmpty ? nil : l, r.isEmpty ? nil : r)
     }
 
+    // "Compare Pasted Text…": a text session; the clipboard (when it is text) is the left side
+    private func startPasted() {
+        let pb = NSPasteboard.general
+        let text = pb.string(forType: .string) ?? ""
+        guard let s = openPair(nil, nil) else { return }
+        if !text.isEmpty { setPasted(text, .left) }
+        s.focus = text.isEmpty ? .left : .right
+        s.status = cfg.label("paste-next", "paste the other text into the {} side (⌘V), or type in either pane", s.focus.rawValue)
+        syncAll()
+    }
+
     private func expand(_ s: String) -> String {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? "" : (t as NSString).expandingTildeInPath
@@ -1049,7 +1382,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         guard let box else { return }
         let p = NSOpenPanel()
         p.canChooseFiles = true
-        p.canChooseDirectories = false
+        p.canChooseDirectories = true
         p.allowsMultipleSelection = false
         p.beginSheetModal(for: window) { r in
             guard r == .OK, let u = p.url else { return }
@@ -1319,6 +1652,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
 
     func swapSides() {
         guard let s = session else { return }
+        if s.folder != nil { folderPage.swapSides(); return }
         commitEditor()
         s.model.swapSides()
         s.path = [.left: s.path[.right], .right: s.path[.left]].compactMapValues { $0 }
@@ -1338,6 +1672,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     // in the undo stack only if it isn't reloaded — so edited sides are kept)
     func reload() {
         guard let s = session else { return }
+        if s.folder != nil { folderPage.rescan(); return }
         commitEditor()
         var kept: [String] = []
         for side in [CompareSide.left, .right] {
@@ -1356,6 +1691,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
 
     func undo(redo: Bool = false) {
         guard let s = session else { return }
+        if s.folder != nil { if !redo { folderPage.undo() }; return }
         commitEditor()
         let side = redo ? nil : (s.model.undoStack.contains { $0.0 == s.focus } ? s.focus : nil)
         let e = redo ? s.model.redo() : s.model.undo(side)
@@ -1688,6 +2024,27 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         })
         m.addItem(menuItem("Find…  (⌘F)") { [weak self] in self?.openFind(.find) })
         m.addItem(.separator())
+        // Align With (BC): pick a line on one side, then its partner on the other
+        let mrow = s.displayCount > 0 ? s.modelRow(row) : -1
+        let line = mrow >= 0 ? s.model.rows[mrow].line(side) : -1
+        if let pick = alignPick, pick.side != side, line >= 0 {
+            m.addItem(menuItem("Align With Picked \(pick.side == .left ? "Left" : "Right") Line \(pick.line + 1)") { [weak self] in
+                self?.alignWith(side: side, line: line)
+            })
+            m.addItem(menuItem("Cancel Align With") { [weak self] in self?.alignPick = nil; self?.pane.needsDisplay = true })
+        } else {
+            m.addItem(menuItem("Align With…  (pick this line, then one on the other side)", enabled: line >= 0) { [weak self] in
+                self?.alignWith(side: side, line: line)
+            })
+        }
+        if s.model.isAnchor(row: mrow) {
+            m.addItem(menuItem("Remove This Alignment") { [weak self] in self?.clearAlignment(row: mrow) })
+        }
+        if !s.model.anchors.isEmpty {
+            m.addItem(menuItem("Clear All Alignments (\(s.model.anchors.count))") { [weak self] in self?.clearAlignment(row: nil) })
+        }
+        m.addItem(convertMenuItem(side))
+        m.addItem(.separator())
         let path = s.path[side]
         m.addItem(menuItem("Copy Path", enabled: path != nil) { if let path { copyText(path) } })
         m.addItem(menuItem("Reveal in Finder", enabled: path != nil) {
@@ -1701,6 +2058,73 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             self.save(s, side)
         })
         return m
+    }
+
+    // MARK: Align With, Convert (phase 3)
+
+    // the first call picks a line; a call on the other side aligns the two
+    func alignWith(side: CompareSide, line: Int) {
+        guard let s = session, line >= 0 else { return }
+        if let pick = alignPick, pick.side != side {
+            alignPick = nil
+            commitEditor()
+            let l = side == .left ? line : pick.line, r = side == .left ? pick.line : line
+            s.model.align(left: l, right: r)
+            s.status = "aligned left \(l + 1) with right \(r + 1)"
+            modelChanged(s, keepCursor: true)
+            if let row = s.model.rows.firstIndex(where: { Int($0.l) == l && Int($0.r) == r }) { moveCursor(s.displayRow(row)) }
+            return
+        }
+        alignPick = (side, line)
+        s.status = "Align With: now pick a line on the \(side.other.rawValue) side (right-click ▸ Align With Picked…)"
+        pane.needsDisplay = true
+        syncAll()
+    }
+
+    func clearAlignment(row: Int?) {
+        guard let s = session else { return }
+        commitEditor()
+        alignPick = nil
+        s.model.clearAlignment(row: row)
+        s.status = row == nil ? "alignments cleared" : "alignment removed"
+        modelChanged(s, keepCursor: true)
+    }
+
+    func trimTrailing(_ side: CompareSide) {
+        guard let s = session, s.binary[side] == nil, s.tooLarge[side] == nil else { return }
+        commitEditor()
+        s.willEdit(side)
+        let n = s.model.trimTrailingWhitespace(side)
+        s.status = n == 0 ? "no trailing whitespace on the \(side.rawValue) side" : "trimmed \(n) line\(n == 1 ? "" : "s") on the \(side.rawValue) (⌘Z undoes)"
+        modelChanged(s, keepCursor: true)
+    }
+
+    func convertEOL(_ side: CompareSide, _ eol: EOL) {
+        guard let s = session, s.binary[side] == nil, s.tooLarge[side] == nil else { return }
+        commitEditor()
+        s.willEdit(side)
+        let n = s.model.convertLineEndings(side, to: eol)
+        s.status = n == 0 ? "the \(side.rawValue) side already ends lines with \(eol.label)"
+            : "converted \(n) line ending\(n == 1 ? "" : "s") to \(eol.label) on the \(side.rawValue) (⌘Z undoes)"
+        modelChanged(s, keepCursor: true)
+    }
+
+    private func convertMenuItem(_ side: CompareSide) -> NSMenuItem {
+        let sub = NSMenu()
+        sub.addItem(menuItem("Trim Trailing Whitespace") { [weak self] in self?.trimTrailing(side) })
+        sub.addItem(.separator())
+        for eol in [EOL.lf, .crlf, .cr] {
+            sub.addItem(menuItem("Line Endings → \(eol.label)") { [weak self] in self?.convertEOL(side, eol) })
+        }
+        let it = NSMenuItem(title: "Convert \(side == .left ? "Left" : "Right") Side", action: nil, keyEquivalent: "")
+        it.submenu = sub
+        return it
+    }
+
+    private func toggleWhitespace() {
+        showWhitespace.toggle()
+        UserDefaults.standard.set(showWhitespace, forKey: "compareWhitespace")
+        pane.needsDisplay = true
     }
 
     private func selectSection() {
@@ -1774,13 +2198,48 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     private func actionPicker() {
         let m = NSMenu()
         for (title, f) in actions() { m.addItem(menuItem(title, f)) }
-        let p = NSPoint(x: body.bounds.midX - 120, y: body.bounds.minY + 60)
-        m.popUp(positioning: nil, at: p, in: body)
+        let host = session?.folder != nil ? folderPage.root : body
+        let p = NSPoint(x: host.bounds.midX - 120, y: host.bounds.minY + 60)
+        m.popUp(positioning: nil, at: p, in: host)
     }
 
     private func actions() -> [(String, () -> Void)] {
         var a: [(String, () -> Void)] = [("New Comparison (start page)", { [weak self] in self?.showStartPage() })]
         guard session != nil else { return a }
+        if session?.folder != nil {
+            let f = folderPage
+            return a + [
+                ("Next Difference  ⌃N", { f.jumpDiff(1) }),
+                ("Previous Difference  ⌃P", { f.jumpDiff(-1) }),
+                ("Open Pair (Text Compare)  ⏎", { if let s = f.session { f.activate(s.cursor) } }),
+                ("Copy to Right  ⌃R", { f.copy(from: .left) }),
+                ("Copy to Left  ⌃L", { f.copy(from: .right) }),
+                ("Move to Right  ⌃⌥R", { f.transfer(from: .left, move: true) }),
+                ("Move to Left  ⌃⌥L", { f.transfer(from: .right, move: true) }),
+                ("Rename…  F2", { f.beginRename() }),
+                ("New Folder…  ⌘⇧N", { f.newFolder() }),
+                ("Move to Trash  ⌘⌫", { f.trash() }),
+                ("Undo  ⌘Z", { f.undo() }),
+                ("Show All  ⌘1", { f.setFilter(.all) }),
+                ("Show Differences  ⌘2", { f.setFilter(.diffs) }),
+                ("Show Same  ⌘3", { f.setFilter(.same) }),
+                ("Show Orphans  ⌘4", { f.setFilter(.orphans) }),
+                ("Show Left Newer  ⌘5", { f.setFilter(.leftNewer) }),
+                ("Show Right Newer  ⌘6", { f.setFilter(.rightNewer) }),
+                ("Ignore Folder Structure (flatten)", { f.toggleFlatten() }),
+                ("Filter Names  ⌘F", { f.focusNameBox() }),
+                ("Swap Sides  ⌘⌥X", { f.swapSides() }),
+                ("Scan Again  F5", { f.rescan() }),
+                ("Quick Look  Space", { f.toggleQuickLook() }),
+                ("Set as Base Folder  ⌘↓", { if let s = f.session { f.setBase(s.cursor, side: nil) } }),
+                ("Up One Level  ⌘↑", { f.upOneLevel() }),
+                ("Back  ⌘[", { f.goBack() }),
+                ("Forward  ⌘]", { f.goForward() }),
+            ] + SyncMode.allCases.map { m in ("Synchronize: \(m.title)…", { f.previewSync(m) }) } + [
+                ("Close Session", { [weak self] in if let i = self?.selected { self?.closeSession(i) } }),
+                ("Keyboard Shortcuts  ⌘/", { [weak self] in self?.showShortcuts() }),
+            ]
+        }
         a += [
             ("Next Difference  ⌃N", { [weak self] in self?.jumpSection(1) }),
             ("Previous Difference  ⌃P", { [weak self] in self?.jumpSection(-1) }),
@@ -1804,6 +2263,15 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             ("Swap Sides  ⌘⌥X", { [weak self] in self?.swapSides() }),
             ("Reload  F5", { [weak self] in self?.reload() }),
             ("Toggle Line Details", { [weak self] in self?.toggleDetails() }),
+            ("Show Whitespace (toggle)", { [weak self] in self?.toggleWhitespace() }),
+            ("Align With… (pick the cursor line, then one on the other side)", { [weak self] in
+                guard let self, let s = self.session, s.displayCount > 0 else { return }
+                self.alignWith(side: s.focus, line: s.model.rows[s.modelRow(s.cursor)].line(s.focus))
+            }),
+            ("Clear All Alignments", { [weak self] in self?.clearAlignment(row: nil) }),
+            ("Trim Trailing Whitespace (Focused Side)", { [weak self] in if let s = self?.session { self?.trimTrailing(s.focus) } }),
+            ("Convert Line Endings to LF (Focused Side)", { [weak self] in if let s = self?.session { self?.convertEOL(s.focus, .lf) } }),
+            ("Convert Line Endings to CRLF (Focused Side)", { [weak self] in if let s = self?.session { self?.convertEOL(s.focus, .crlf) } }),
             ("Close Session", { [weak self] in if let i = self?.selected { self?.closeSession(i) } }),
             ("Keyboard Shortcuts  ⌘/", { [weak self] in self?.showShortcuts() }),
         ]
@@ -1834,6 +2302,24 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         add("Save Both", enabled: session?.isDirty == true) { [weak self] in if let s = self?.session { self?.saveAll(s) { _ in } } }
         menu.addItem(.separator())
         add("Show Line Details", state: showDetails) { [weak self] in self?.toggleDetails() }
+        add("Show Whitespace", state: showWhitespace) { [weak self] in self?.toggleWhitespace() }
+        if let s = session, s.folder == nil {
+            menu.addItem(convertMenuItem(.left))
+            menu.addItem(convertMenuItem(.right))
+            add("Clear All Alignments", enabled: !s.model.anchors.isEmpty) { [weak self] in self?.clearAlignment(row: nil) }
+        }
+        if let f = session?.folder {
+            let sync = NSMenu()
+            for m in SyncMode.allCases {
+                sync.addItem(menuItem(m.title + "…") { [weak self] in self?.folderPage.previewSync(m) })
+            }
+            let si = NSMenuItem(title: "Synchronize", action: nil, keyEquivalent: "")
+            si.submenu = sync
+            menu.addItem(si)
+            add("Back", enabled: !f.back.isEmpty) { [weak self] in self?.folderPage.goBack() }
+            add("Forward", enabled: !f.forward.isEmpty) { [weak self] in self?.folderPage.goForward() }
+            add("Up One Level") { [weak self] in self?.folderPage.upOneLevel() }
+        }
         let arrows = NSMenu()
         for mode in ["hover", "always", "off"] {
             arrows.addItem(menuItem(mode.capitalized, state: cfg.gutterArrows == mode) { [weak self] in
@@ -1856,8 +2342,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         func lines(_ v: String) -> [String] {
             shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
         }
-        let own = lines("compare"), all = lines("all")
-        let text = own + (all.isEmpty ? [] : ["", "Everywhere:"] + all)
+        let own = lines("compare"), folders = lines("compare-folders"), all = lines("all")
+        let text = own + (folders.isEmpty ? [] : ["", "Folder Compare:"] + folders) + (all.isEmpty ? [] : ["", "Everywhere:"] + all)
         let a = NSAlert()
         a.messageText = "Compare Shortcuts"
         a.informativeText = text.isEmpty ? "Add \"compare: keys\" = \"what\" lines to [shortcuts] in commands.toml."
@@ -1874,6 +2360,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     private func escape() {
         if findMode != .none { closeFind(); return }
         if pathEditSide != nil { cancelPathEdit(); return }
+        if session?.folder != nil, folderPage.escape() { return }
         if commitEditor() { session?.status = ""; syncAll(); return }
         if diffRunning {
             diffGen += 1
@@ -1907,6 +2394,10 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             if !inText, code == 125 || code == 126 { moveRecent(code == 125 ? 1 : -1); return true }
             return false
         }
+        if s.folder != nil {
+            if ctrl && !cmd && code == 48 { return false }
+            return folderPage.handleKey(e)
+        }
         // the section editor: typing is its own; these leave / act on it
         if inEditor {
             if ctrl && !cmd && (code == 45 || code == 35) { jumpSection(code == 45 ? 1 : -1); return true }
@@ -1937,8 +2428,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         case 96: reload()                                                         // F5
         case 8 where cmd || ctrl: copyRowsText()                                  // Cmd+C / Ctrl+C
         case 9 where cmd || ctrl:                                                 // Cmd+V / Ctrl+V: an empty pane takes the paste
-            if s.model.side(s.focus).lines.isEmpty { pasteClipboard(into: s.focus) }
-            else { s.status = "paste into an empty side, or right-click ▸ Paste Clipboard Here to replace this one"; syncAll() }
+            pasteClipboard(into: s.focus)
         case 0 where cmd:                                                         // Cmd+A: every row
             s.anchor = 0
             s.cursor = max(0, s.displayCount - 1)
@@ -1981,7 +2471,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             "startPage": session == nil, "selected": selected ?? -1,
             "sheet": window.attachedSheet != nil,
             "sessions": sessions.map { s -> [String: Any] in
-                ["kind": "text", "left": s.path[.left] ?? s.name(.left), "right": s.path[.right] ?? s.name(.right),
+                ["kind": s.folder != nil ? "folder" : "text", "left": s.path[.left] ?? s.name(.left), "right": s.path[.right] ?? s.name(.right),
                  "dirtyL": s.dirty(.left), "dirtyR": s.dirty(.right), "git": s.git, "waiting": !s.waiters.isEmpty]
             },
             "recent": recentList.rows.count,
@@ -2008,9 +2498,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
                 "summary": summary.stringValue, "status": s.status, "scrollY": Int(scroll.contentView.bounds.origin.y),
                 "leftLines": m.left.lines.count, "rightLines": m.right.lines.count, "displayRows": s.displayCount,
                 "canUndo": m.canUndo, "banner": !banner.isHidden,
+                "anchors": m.anchors.map { [$0.l + 1, $0.r + 1] }, "alignPick": alignPick.map { "\($0.side.rawValue):\($0.line + 1)" } ?? NSNull(),
+                "eol": [m.left.eolLabel, m.right.eolLabel], "whitespace": showWhitespace, "recovered": s.recovered,
             ] as [String: Any]
         }
-        st["folder"] = NSNull()
+        st["folder"] = session?.folder != nil ? folderPage.testState : NSNull()
         return st
     }
 
@@ -2018,6 +2510,9 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
     func testDo(_ a: String) -> String? {
         func side(_ w: String) -> CompareSide? { CompareSide(rawValue: w) }
         let parts = a.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        if parts[0].hasPrefix("folder-") {
+            return folderPage.testDo(String(parts[0].dropFirst(7)), arg: parts.count > 1 ? (parts.count > 2 ? parts[1] + ":" + parts[2] : parts[1]) : "")
+        }
         switch parts[0] {
         case "next": jumpSection(1)
         case "prev": jumpSection(-1)
@@ -2028,6 +2523,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
         case "undo": undo()
         case "redo": undo(redo: true)
         case "start": showStartPage()
+        case "start-paste": startPasted()
         case "edit-begin": beginEdit()
         case "edit-commit": commitEditor()
         case "filter":
@@ -2044,6 +2540,23 @@ final class CompareWindow: CardWindowController, ComparePaneHost, NSTextViewDele
             closeSession(i, force: parts.count > 1 && parts[1] == "force")
         case "close-all":
             while !sessions.isEmpty { removeSession(0) }
+        case "align":
+            // align:L,R = left line L onto right line R (1-based, as shown)
+            let n = (parts.count > 1 ? parts[1] : "").split(separator: ",").compactMap { Int($0) }
+            guard n.count == 2 else { return "align:LEFT,RIGHT (1-based lines)" }
+            alignPick = nil
+            alignWith(side: .left, line: n[0] - 1)
+            alignWith(side: .right, line: n[1] - 1)
+        case "align-clear": clearAlignment(row: nil)
+        case "trim":
+            guard parts.count > 1, let sd = side(parts[1]) else { return "trim:left|right" }
+            trimTrailing(sd)
+        case "eol":
+            let e: [String: EOL] = ["lf": .lf, "crlf": .crlf, "cr": .cr]
+            guard parts.count > 2, let sd = side(parts[1]), let eol = e[parts[2]] else { return "eol:left|right:lf|crlf|cr" }
+            convertEOL(sd, eol)
+        case "whitespace":
+            if (parts.count > 1 && parts[1] == "on") != showWhitespace { toggleWhitespace() }
         case "sheet-cancel":
             if let sh = window.attachedSheet { window.endSheet(sh, returnCode: .alertThirdButtonReturn) }
         case "paste":

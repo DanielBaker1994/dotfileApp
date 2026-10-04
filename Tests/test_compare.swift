@@ -237,6 +237,58 @@ func testEdits() {
     print("  windowed re-diff matched a full diff after \(sameAsFull)/\(edits) random edits")
 }
 
+// MARK: phase 3: Align With, trim trailing whitespace, line endings
+
+func testPhase3() {
+    // Align With: force left "x" onto right "y" (the diff would leave them apart)
+    var a = TextCompare(left: side("a\nx\nb\nc\n"), right: side("a\nb\nc\ny\n"))
+    let before = a.rows.count
+    a.align(left: 1, right: 3)
+    let row = a.rows.firstIndex { $0.l == 1 }!
+    check(a.rows[row].r == 3 && a.rows[row].kind == .changed, "align: left 1 sits on right 3")
+    check(a.isAnchor(row: row), "align: the row is an anchor")
+    check(consistent(a), "align: rows consistent")
+    check(a.rows.count >= before, "align: fillers around the anchor")
+    // an edit above the anchor moves it; one on it drops it
+    a.replace(.left, 0..<0, with: ["new"])
+    check(a.anchors.first.map { $0.l == 2 && $0.r == 3 } == true, "align: the anchor follows an edit above it")
+    check(consistent(a), "align: rows consistent after an edit")
+    a.undo()
+    check(a.anchors.first.map { $0.l == 1 } == true, "align: undo moves it back")
+    a.replace(.left, 0..<3, lines: ["A", "X", "B"], eols: [.lf, .lf, .lf])
+    check(a.anchors.first.map { $0.l == 1 && $0.r == 3 } == true, "align: a line-for-line rewrite keeps the anchor")
+    a.replace(.left, 1..<2, with: [])
+    check(a.anchors.isEmpty, "align: deleting the anchored line drops it")
+    a.clearAlignment()
+    check(a.anchors.isEmpty && a.rows == TextCompare(left: a.left, right: a.right).rows, "align: cleared = the plain diff")
+    // a crossing anchor is replaced
+    var c = TextCompare(left: side("1\n2\n3\n"), right: side("1\n2\n3\n"))
+    c.align(left: 0, right: 2)
+    c.align(left: 2, right: 0)
+    check(c.anchors.count == 1 && c.anchors[0].l == 2, "align: a crossing anchor is dropped")
+    check(consistent(c), "align: crossing rows consistent")
+    var w = TextCompare(left: side("1\n2\n"), right: side("1\n2\n"))
+    w.align(left: 1, right: 0)
+    w.swapSides()
+    check(w.anchors.first.map { $0.l == 0 && $0.r == 1 } == true, "align: swap sides flips the anchor")
+
+    // trim trailing whitespace: one undo step, byte-exact undo
+    let raw = "a  \r\nb\t\r\nc\r\nd "
+    var t = TextCompare(left: TextSide.decode(Data(raw.utf8))!, right: side("a\nb\nc\nd\n"))
+    let orig = t.left.encoded()
+    check(t.trimTrailingWhitespace(.left) == 3, "trim: three lines changed")
+    check(t.left.lines == ["a", "b", "c", "d"] && t.left.eols == [.crlf, .crlf, .crlf, .none], "trim keeps the line endings")
+    check(t.trimTrailingWhitespace(.left) == 0, "trim twice: nothing")
+    t.undo()
+    check(t.left.encoded() == orig, "trim undo: byte-exact")
+    // line endings
+    check(t.convertLineEndings(.left, to: .lf) == 3, "convert: three endings")
+    check(t.left.eols == [.lf, .lf, .lf, .none], "convert keeps a last line without newline")
+    check(consistent(t), "convert: rows consistent")
+    t.undo()
+    check(t.left.encoded() == orig, "convert undo: byte-exact")
+}
+
 struct SplitMix {
     var state: UInt64
     init(seed: UInt64) { state = seed }
@@ -455,6 +507,7 @@ struct Main {
         testImportance()
         testRows()
         testEdits()
+        testPhase3()
         testParity()
         testTimings()
         try? fm.removeItem(atPath: tmp)

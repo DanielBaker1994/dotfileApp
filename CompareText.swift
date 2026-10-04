@@ -202,6 +202,14 @@ struct TextSide {
         return e
     }
 
+    // lines AND their endings given (trim whitespace, convert line endings)
+    mutating func replace(_ range: Range<Int>, lines new: [String], eols newEols: [EOL]) -> TextEdit {
+        let e = TextEdit(start: range.lowerBound, old: Array(lines[range]), oldEols: Array(eols[range]),
+                         new: new, newEols: newEols)
+        apply(e)
+        return e
+    }
+
     // exactly the lines + endings of an edit (undo / redo)
     mutating func apply(_ e: TextEdit, reverse: Bool = false) {
         let r = e.start..<(e.start + (reverse ? e.new.count : e.old.count))
@@ -628,6 +636,9 @@ struct TextCompare {
     // undo / redo: (side, edit)
     private(set) var undoStack: [(CompareSide, TextEdit)] = []
     private(set) var redoStack: [(CompareSide, TextEdit)] = []
+    // Align With: line pairs the user forced onto one row (left line, right
+    // line), increasing on both sides; the diff runs between them
+    private(set) var anchors: [(l: Int, r: Int)] = []
     static let undoLimit = 500
     // the context the windowed re-diff keeps around an edit
     static let rediffContext = 50
@@ -664,12 +675,61 @@ struct TextCompare {
         intern.reserveCapacity(left.lines.count + right.lines.count)
         keysL = keys(left, 0..<left.lines.count)
         keysR = keys(right, 0..<right.lines.count)
+        anchors = anchors.filter { $0.l < left.lines.count && $0.r < right.lines.count }
         rows = buildRows(0..<left.lines.count, 0..<right.lines.count)
         computeSections()
     }
 
-    // rows for left lines `la` against right lines `ra` (absolute indices)
+    // rows for left lines `la` against right lines `ra` (absolute indices);
+    // an Align With anchor inside both ranges splits the diff there
     private func buildRows(_ la: Range<Int>, _ ra: Range<Int>) -> [CompareRow] {
+        let inside = anchors.filter { la.contains($0.l) && ra.contains($0.r) }
+        guard !inside.isEmpty else { return diffRows(la, ra) }
+        var out: [CompareRow] = []
+        var l0 = la.lowerBound, r0 = ra.lowerBound
+        for a in inside where a.l >= l0 && a.r >= r0 {
+            out += diffRows(l0..<a.l, r0..<a.r)
+            out.append(CompareRow(l: Int32(a.l), r: Int32(a.r), kind: rawEqual(a.l, a.r) ? .same : .changed,
+                                  important: keysL[a.l] != keysR[a.r]))
+            l0 = a.l + 1
+            r0 = a.r + 1
+        }
+        out += diffRows(l0..<la.upperBound, r0..<ra.upperBound)
+        return out
+    }
+
+    // MARK: Align With
+
+    // put left line `l` and right line `r` on one row. An anchor that would
+    // cross it (before on one side, after on the other) is dropped
+    mutating func align(left l: Int, right r: Int) {
+        guard left.lines.indices.contains(l), right.lines.indices.contains(r) else { return }
+        anchors.removeAll { $0.l == l || $0.r == r || ($0.l < l) != ($0.r < r) }
+        anchors.append((l, r))
+        anchors.sort { $0.l < $1.l }
+        rows = buildRows(0..<left.lines.count, 0..<right.lines.count)
+        computeSections()
+    }
+
+    // drop every anchor (or the one on a row) and diff again
+    mutating func clearAlignment(row: Int? = nil) {
+        if let row, rows.indices.contains(row) {
+            let rr = rows[row]
+            anchors.removeAll { $0.l == Int(rr.l) && $0.r == Int(rr.r) }
+        } else {
+            anchors = []
+        }
+        rows = buildRows(0..<left.lines.count, 0..<right.lines.count)
+        computeSections()
+    }
+
+    func isAnchor(row: Int) -> Bool {
+        guard rows.indices.contains(row) else { return false }
+        let rr = rows[row]
+        return anchors.contains { $0.l == Int(rr.l) && $0.r == Int(rr.r) }
+    }
+
+    private func diffRows(_ la: Range<Int>, _ ra: Range<Int>) -> [CompareRow] {
         let A = Array(keysL[la]), B = Array(keysR[ra])
         let hs = LineDiff.hunks(A, B, textA: Array(left.lines[la]), textB: Array(right.lines[ra]))
         var out: [CompareRow] = []
@@ -882,6 +942,44 @@ struct TextCompare {
         return e
     }
 
+    // lines and endings both given: one undo step
+    @discardableResult
+    mutating func replace(_ side: CompareSide, _ range: Range<Int>, lines new: [String], eols: [EOL]) -> TextEdit {
+        let e: TextEdit
+        if side == .left { e = left.replace(range, lines: new, eols: eols) } else { e = right.replace(range, lines: new, eols: eols) }
+        applied(side, e)
+        undoStack.append((side, e))
+        if undoStack.count > Self.undoLimit { undoStack.removeFirst() }
+        redoStack = []
+        return e
+    }
+
+    // Convert ▸ Trim Trailing Whitespace: one undo step; the lines changed
+    @discardableResult
+    mutating func trimTrailingWhitespace(_ s: CompareSide) -> Int {
+        let t = side(s)
+        func trimmed(_ l: String) -> String {
+            var u = Array(l.utf8)
+            while let c = u.last, c == 32 || c == 9 { u.removeLast() }
+            return String(decoding: u, as: UTF8.self)
+        }
+        let changed = t.lines.indices.filter { t.lines[$0].utf8.last == 32 || t.lines[$0].utf8.last == 9 }
+        guard let lo = changed.first, let hi = changed.last else { return 0 }
+        replace(s, lo..<(hi + 1), lines: t.lines[lo...hi].map(trimmed), eols: Array(t.eols[lo...hi]))
+        return changed.count
+    }
+
+    // Convert ▸ Line Endings: every line ending of the side becomes `eol`
+    // (a last line without one keeps having none); one undo step
+    @discardableResult
+    mutating func convertLineEndings(_ s: CompareSide, to eol: EOL) -> Int {
+        let t = side(s)
+        let changed = t.eols.indices.filter { t.eols[$0] != .none && t.eols[$0] != eol }
+        guard eol != .none, let lo = changed.first, let hi = changed.last else { return 0 }
+        replace(s, lo..<(hi + 1), lines: Array(t.lines[lo...hi]), eols: t.eols[lo...hi].map { $0 == .none ? .none : eol })
+        return changed.count
+    }
+
     // an edit already in the side's lines: keys + rows follow
     private mutating func applied(_ side: CompareSide, _ e: TextEdit, reverse: Bool = false) {
         let oldCount = reverse ? e.new.count : e.old.count
@@ -891,7 +989,22 @@ struct TextCompare {
         for (i, l) in newLines.enumerated() { ks.append(id(importance.key(l, newEols[i]))) }
         let r = e.start..<(e.start + oldCount)
         if side == .left { keysL.replaceSubrange(r, with: ks) } else { keysR.replaceSubrange(r, with: ks) }
-        rediff(side, start: e.start, oldCount: oldCount, newCount: newLines.count)
+        if anchors.isEmpty {
+            rediff(side, start: e.start, oldCount: oldCount, newCount: newLines.count)
+            return
+        }
+        // with Align With anchors: they follow the edit (one inside it goes),
+        // then a full diff (the windowed one could cut an anchor in half)
+        let delta = newLines.count - oldCount
+        anchors = anchors.compactMap { a in
+            let v = side == .left ? a.l : a.r
+            // a line-for-line rewrite (trim, line endings) keeps it; else an edit over it drops it
+            if v >= e.start && v < e.start + oldCount { return oldCount == newLines.count ? a : nil }
+            guard v >= e.start + oldCount else { return a }
+            return side == .left ? (a.l + delta, a.r) : (a.l, a.r + delta)
+        }
+        rows = buildRows(0..<left.lines.count, 0..<right.lines.count)
+        computeSections()
     }
 
     // the windowed re-diff: rows from the last `rediffContext` unchanged
@@ -1006,6 +1119,7 @@ struct TextCompare {
 
     mutating func swapSides() {
         swap(&left, &right)
+        anchors = anchors.map { ($0.r, $0.l) }
         undoStack = undoStack.map { ($0.0.other, $0.1) }
         redoStack = redoStack.map { ($0.0.other, $0.1) }
         recompute()
@@ -1014,6 +1128,7 @@ struct TextCompare {
     // a side's text replaced wholesale (reload, paste, open a file)
     mutating func setSide(_ s: CompareSide, _ t: TextSide) {
         if s == .left { left = t } else { right = t }
+        anchors = []
         undoStack.removeAll { $0.0 == s }
         redoStack.removeAll { $0.0 == s }
         recompute()

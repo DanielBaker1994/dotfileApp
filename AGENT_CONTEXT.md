@@ -558,7 +558,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   (`[shortcuts] "ai: …"`), Esc = stop a run (never closes), Cmd+C/A in the
   preview, rest → `JiraEditKeys.route`.
 
-## Compare view (PRD-compare.md; phases 0 + 1 = Text Compare)
+## Compare view (PRD-compare.md; Text Compare + Folder Compare)
 
 - Files: `CompareText.swift` (Foundation only): `TextSide` (decode: UTF-8 ±
   BOM, UTF-16 LE/BE with BOM, else Latin-1; NUL in the first 8 KB = binary;
@@ -600,7 +600,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 - Entry: palette `/compare` (`paletteCommands`, `showCompare`), header icon,
   menu bar "Compare…", `FileListPane.onCompare` / `comparePick` (file
   browser + /paths right-click: "Select for Compare", "Compare to “NAME”",
-  "Compare" with two marked; files only until Folder Compare), drops on a
+  "Compare" with two marked; two files or two folders), drops on a
   pane, clipboard (an empty side takes Cmd+V; right-click "Paste Clipboard
   Here"), CLI `workspace-switcher compare [--wait] [--title1 T] [--title2 T]
   LEFT [RIGHT]` (main.swift makes paths absolute, socket `compare<TAB>…`;
@@ -633,8 +633,90 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   undo, windowed re-diff fuzz vs full diff, ≥ 50-pair parity corpus vs `git
   diff --no-index --histogram --indent-heuristic -U0` from seeded mutations
   of repo files + repo history, timings); `bin/ui-test-focus.py compare`.
-- Not yet: Folder Compare (phase 2), session restore / recovery copies,
-  word wrap, visible whitespace (phase 3 per the PRD).
+- Pasted text: start page "Compare Pasted Text…" (`startPasted`: the clipboard
+  = left, focus right); Cmd+V into ANY pane (`pasteClipboard` → `setPasted`: an
+  empty side takes it, a side with text is REPLACED by an undoable
+  `model.replace`; a copied file opens instead). A pair with a pasted side
+  becomes a Recent row when its session closes (`rememberPasted`: both sides
+  written to `~/.cache/workspace-switcher/compare-pasted/`, pruned by
+  `CompareRecent.save`; the row reads "pasted text ⇆ …"). Hook
+  `do:compare:start-paste`.
+- Folder Compare: `CompareFolder.swift` (Foundation only: `FolderScan.run` =
+  both trees walked off main + paired by relative path — case per volume,
+  NFC = NFD, symlinks as links; quick test = size + mtime ± `time-tolerance`;
+  `FolderTree.settle` = a folder's color is what is below it, `unknown` until
+  the content answers; `FolderContent` = 1 MB byte compare with early exit +
+  the Text Compare normalizer for "unimportant" (blue); `FolderTree.rows` =
+  filter / flatten / name filter (`*.swift, !*.o`)). `CompareFolderView.swift`:
+  `FolderSession`, `FolderTreeView` (ONE drawn view for both sides + the glyph
+  column), `FolderPage` (toolbar, keys, menus, file actions). A folder session
+  is a `CompareSession` with `.folder` set (text model empty); `openPair` sends
+  two folders to `openFolders`, folder + file refuses with a hint. Return /
+  double-click on a file pair = `folderOpenPair` → `createSub` +
+  `openSubPair` + `slot.push(.compareText)` (Esc = `slot.back`, the folder
+  keeps its cursor + expansion). Actions go through `FileOps.place` (copy /
+  move to the mirrored path, parents made, clash = Replace (old → Trash) /
+  Keep Both / Skip from a sheet, ONE undo record `.group`); a folder pair is
+  merged (only differing / orphan children move), identical items skipped.
+  After any op the page rescans (`rescan(keepStatus:)`, expansion + cursor by
+  key; `contentCache` by path + size + mtime avoids re-reading). Trash / rename
+  / new folder act on the focused side (Tab). Cmd+Z = `FileOps.undo()` (the
+  GLOBAL stack, shared with the file browser). Config: `content`,
+  `time-tolerance`, `exclude`, `use-gitignore`, `ignore-file`. Hooks:
+  `do:compare:open:A|B` (folders too), `folder-filter:NAME`, `folder-flatten`,
+  `folder-names:GLOBS`, `folder-expand:all|none`, `folder-select:REL`,
+  `folder-copy|move:right|left[:replace|keep|skip]` (TO that side; the clash
+  answer is pre-set), `folder-trash`, `folder-undo`, `folder-open`,
+  `folder-focus`, `folder-rescan`, `folder-hidden`; state `compare.folder`
+  {left, right, scanning, checking, filter, counts, summary, status, rows[0..200]
+  {rel, status, newer, depth, dir, expanded, left, right}}. Log `compare folder:
+  N items, scan M ms`. Tests: `bin/run-tests.sh compare` (test_compare_folder.swift:
+  pairing, statuses, content + rules, roll-up, filters, `FileOps.place` + undo).
+- Folder Compare undo: each `FolderSession` owns a `FileOps.UndoStack`
+  (`undo`, carried to its successors), so its Cmd+Z never takes back a file
+  browser op; `FileOps.shared` = the browser's. Every FileOps call takes
+  `undo:` (default shared); `UndoStack.collapse(since:_:)` makes a multi-step
+  run (Synchronize) ONE step.
+- Phase 3 (folders): Space / Cmd+Y = Quick Look (`FolderPage.toggleQuickLook`,
+  QLPreviewPanel data source like /paths). New roots = a successor session
+  via `FolderHost.folderSwapped` (view, rules, undo kept): `setBase` (right-click
+  Set as [Left / Right] Base Folder, Cmd+Down), `upOneLevel` (Cmd+Up),
+  `goBack` / `goForward` (Cmd+[ / ], `back` / `forward` stacks of root pairs).
+  Drag: `FolderTreeView` is a drag source (`FileDrag.begin`, file URLs, Finder
+  too) and a drop target: our rows on the other side = `transfer` (Cmd = move),
+  Finder files = `FileOps.transfer` into the folder under the drop. Synchronize
+  (toolbar ⟳, Cmd+K, kitchen sink): `SyncPlan.make(tree, SyncMode, nameFilter:)`
+  (CompareFolder.swift: Update Right / Left / Both = newer + orphans, ties
+  skipped; Mirror = every difference + the far side's orphans to the Trash) →
+  NSAlert preview sheet → `runSync` (place with clash replace, trash, collapse).
+  Links: a symlink facing a regular file compares by its TARGET
+  (`FolderSideInfo.asFile`); git sessions force `content = always`
+  (`alwaysContent`: git writes the left copies at run time). `git difftool -d`
+  verified for real: links edited through, hide → git returns (also from the
+  pushed `.compareText`: `slotPark` finishes `CompareWindow.current`'s waiters).
+- Phase 3 (text): Align With = `TextCompare.anchors` (left/right line pairs;
+  `buildRows` diffs between them; any anchor → full re-diff on edits, anchors
+  shift, a line-for-line rewrite keeps them); right-click Align With… / Align
+  With Picked Line (`alignPick`, dashed outline; anchor rows get a ⚓︎ rule).
+  Convert ▸ `trimTrailingWhitespace` / `convertLineEndings` (one undo step,
+  `replace(_:_:lines:eols:)` = exact endings). Show Whitespace (kitchen sink,
+  UserDefaults `compareWhitespace`): spaces as dim ·, tabs as →.
+- Restore: `persistSoon` (2 s debounce from `showPage` / `syncAll` /
+  `folderChanged`) / `persistNow` (park, willTerminate) write
+  `compare-sessions.json` (pairs, titles, filters, cursor, importance,
+  anchors; folder view + cursor key; git sessions never) + `compare-recovery/`
+  (`ID-side.txt` = the side's own encoding: dirty sides and pasted sides; files
+  no session needs are pruned). `restoreSessions()` (main window init) reopens
+  them (`openPair(…, then:)` applies importance, recovery as ONE undoable
+  replace → dirty + `recovered`, anchors, filter, cursor); Recent untouched
+  while `restoring`. Status `recovered-label`.
+- Hooks (phase 3): `folder-sync:MODE[:preview]` (state `folder.syncPlan`),
+  `folder-base:REL[:left|right]`, `folder-up|back|forward`, `folder-quicklook`
+  (state `quickLook`), `folder-drop:SIDE[:PATHS]` (no paths = drag across);
+  `align:L,R` (1-based), `align-clear`, `trim:SIDE`, `eol:SIDE:lf|crlf|cr`,
+  `whitespace:on|off`; state `current.anchors / eol / recovered`,
+  `folder.canUndo / sharedCanUndo / back / forward`.
+- Not built: word wrap, syntax highlighting (phase 3 "if wanted"), Isolate.
 
 ## Notifications pill (sketchybar)
 

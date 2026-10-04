@@ -3685,8 +3685,8 @@ final class FileListPane: NSView, NSDraggingSource {
         NSMenu.popUpContextMenu(menu, with: e, for: self)
     }
 
-    // Select for Compare / Compare to “NAME” / Compare (two marked files;
-    // folders wait for Folder Compare)
+    // Select for Compare / Compare to “NAME” / Compare (two marked files, or
+    // two marked folders — never one of each)
     private func addCompareItems(_ menu: NSMenu, _ idx: Int, many: Bool, real: Bool) {
         guard let compare = Self.onCompare, real else { return }
         var items: [NSMenuItem] = []
@@ -3694,12 +3694,16 @@ final class FileListPane: NSView, NSDraggingSource {
             let i = ClosureMenuItem(t, f)
             items.append(i)
         }
+        func isDir(_ p: String) -> Bool {
+            var d: ObjCBool = false
+            return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
+        }
         if many {
-            let paths = marked.sorted().compactMap { rows.indices.contains($0) ? rows[$0] : nil }.filter { !$0.isDir }.map(\.path)
-            if marked.count == 2, paths.count == 2 { item("Compare") { compare(paths[0], paths[1]) } }
-        } else if !rows[idx].isDir {
+            let sel = marked.sorted().compactMap { rows.indices.contains($0) ? rows[$0] : nil }
+            if sel.count == 2, sel[0].isDir == sel[1].isDir { item("Compare") { compare(sel[0].path, sel[1].path) } }
+        } else {
             let path = rows[idx].path
-            if let pick = Self.comparePick, pick != path {
+            if let pick = Self.comparePick, pick != path, isDir(pick) == rows[idx].isDir {
                 item("Compare to “\((pick as NSString).lastPathComponent)”") {
                     Self.comparePick = nil
                     compare(pick, path)
