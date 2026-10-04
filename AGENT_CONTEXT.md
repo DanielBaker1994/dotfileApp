@@ -638,6 +638,11 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   undo, windowed re-diff fuzz vs full diff, ≥ 50-pair parity corpus vs `git
   diff --no-index --histogram --indent-heuristic -U0` from seeded mutations
   of repo files + repo history, timings); `bin/ui-test-focus.py compare`.
+- Recent rows: ONE click opens; `CompareRecentList.refreshMissing` (per side,
+  re-run on every open) → ⚠ + "missing" + the gone side struck through +
+  tooltip; opening one explains itself in `showStartHint` (sets
+  `start.needsLayout` — root alone left the hint 0 pt tall = "nothing
+  happens"). Right-click ▸ Remove All Missing.
 - Pasted text: start page "Compare Pasted Text…" (`startPasted`: the clipboard
   = left, focus right); Cmd+V into ANY pane (`pasteClipboard` → `setPasted`: an
   empty side takes it, a side with text is REPLACED by an undoable
@@ -1135,6 +1140,41 @@ Line numbers drift; grep the symbol names (they're stable).
    bar (single Esc closes bar), Esc (streak), Cmd+S, Cmd+O.
 4. list navigation (Up/Down/Tab/C-n/C-p/Return), then Esc (streak).
 
+## Quiet look (Figma direction B + C picks)
+
+- Figma file `ZIkTJn7JSbPs6XSNF4a3Zi` (B = Quiet Page, C = Native Glass).
+  Applied: `[app] header-style = "quiet"`; notes tabs = a left SIDEBAR
+  (`PopupTabsBar.vertical`, `PopupConfig.tabsSidebarWidth` ← `[notes]
+  sidebar-width`, 0 = the old strip): mantle card, NOTES label + "+",
+  rows icon · name · last write (✕ on hover), scroll wheel; the editor
+  sits right of it (`editorLeftInset` / `editorTabStripHeight` in
+  PopupWindow), drawers keep the full width. Remaining strips (jira, AI,
+  compare sessions): active tab = text + 2pt accent underline, no solid
+  pill. View switcher (C): capsule track, current view on a raised chip
+  (`drawNavIcons`). No title in any shared-window header (C):
+  `themedRoot` sets `headerTitle = nil`, AI no longer pushes the rule name.
+- Sidebar everywhere (`PopupTabsBar.vertical`, 34pt rows, PINNED section =
+  `pinned` / `onPinned` / `pinnedMenu`, `rowIcon`, status `badges` as dot +
+  text, right edge drags = `onWidthChange` → each host saves its
+  `sidebar-width`): notes (+ the browser's pinned folders), jira list
+  (`listLeft` / `layoutListSidebar` shift field, filters, rows), AI rules,
+  Files (`PopupFileBrowser.useSidebar`: pinned + Places = Recent, Arrived,
+  Home, Desktop, Documents, Downloads), Confluence (Search / Favorites),
+  Compare sessions. No editor focus ring in notes. Buttons: only
+  `.primary` is filled; normal / danger = outlines (`ThemedPushButton`).
+  Jira detail: no header title, the page's first line = KEY — summary.
+- Prose mode (NotesProse.swift): ⌘⇧P / the Prose | nvim switch (bottom
+  right) / Esc back; `ProseRender` = pandoc (`RichText.pandocHTML`) else
+  `basic`; `[notes] prose-font / prose-font-size / prose-width`.
+- /screenshot recents: `ShotHistory` keeps every copied / saved / pinned
+  capture (`[screenshot] history`, 20) in ~/.cache/workspace-switcher/
+  screenshots; clock button / ⌘R → `ShotRecentPanel` thumbnail grid
+  (click = reopen as a pin; right-click Copy / Open / Reveal / Delete).
+  The clock button was invisible (untinted template symbol) and dropped
+  after the first session (`recentBtn` not reset in attach/detach).
+- `PopupChrome.redrawAll` runs before NSApp exists (parseAppConfig at
+  launch) — guarded; a non-default header-style crashed launch.
+
 ## Hotkey fast path (Hyper+N)
 
 - ONLY one window hotkey besides Hyper+S: Hyper+N = `window`
@@ -1313,7 +1353,8 @@ worked example):
   hide-on-focus-loss`; `setGlobalHideOnFocusLoss` drops the views'
   `sticky`), Header Style ▸. No float / tile item (AeroSpace decides).
   Per view (its own menu): "Esc Hides Window" (`escHidesMenuItem`).
-- `HeaderStyle` (PopupWindow.swift, `[app] header-style`: flat / edge /
+- `HeaderStyle` (PopupWindow.swift, `[app] header-style`: quiet (the card's
+  own color + hairline — Figma direction B, the owner's setting) / flat / edge /
   stripe / tinted / glow / aurora): `PopupChrome.drawHeaderBackground`, built
   from the header color + accent + accent2; setting `current` redraws every
   chrome; the submenu previews on hover (`HeaderStylePreviewDelegate`).

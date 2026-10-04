@@ -32,6 +32,7 @@ struct ScreenshotConfig {
     var saveFormat = "png"
     var jpegQuality = 75
     var saveAfterCopy = false
+    var history = 20            // recent captures kept for ⌘R / the clock button (0 = off)
     var copyPathAfterSave = false
     var preview = true
     var saveLastRegion = false
@@ -113,6 +114,7 @@ struct ScreenshotConfig {
         c.copyOnDoubleClick = b("copy-on-double-click", false)
         let r = s("return", "copy").lowercased()
         c.returnAction = ["copy", "save", "pin"].contains(r) ? r : "copy"
+        c.history = i("history", 20, 0...500)
         c.savePath = s("save-path", "~/Desktop")
         c.savePathFixed = b("save-path-fixed", false)
         c.filenamePattern = s("filename-pattern", "%F_%H-%M")
@@ -197,23 +199,48 @@ enum ScreenToast {
     }
 }
 
-// MARK: - Recent screenshots panel
+// MARK: - Recent screenshots (history + panel)
 
-final class ShotRecentPanel: NSPanel {
-    private let recentView: ShotRecentView
-    
-    init(recent: [ShotRecentEntry], ui: NSColor, onSelect: @escaping (String) -> Void) {
-        recentView = ShotRecentView(entries: recent, ui: ui, onSelect: onSelect)
-        let w = CGFloat(min(360, max(200, recent.reduce(0) { max($0, $1.path.count) })))
-        let h = CGFloat(min(recent.count, 10)) * 24 + 20
-        let rect = NSRect(x: 0, y: 0, width: w, height: h)
-        super.init(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: false)
-        contentView = recentView
-        isFloatingPanel = true
-        level = .screenSaver
-        hidesOnDeactivate = false
-        backgroundColor = .clear
-        isOpaque = false
+// Every capture that leaves the overlay (copy, save, pin) is also kept as a
+// PNG in ~/.cache/workspace-switcher/screenshots — the newest `[screenshot]
+// history` (default 20; 0 = off) — so the clock button / ⌘R can reopen it
+// even when it only ever went to the clipboard.
+enum ShotHistory {
+    static var dir: String { NSHomeDirectory() + "/.cache/workspace-switcher/screenshots" }
+    private static let queue = DispatchQueue(label: "ws.shot-history", qos: .utility)
+
+    static func record(_ img: CGImage, limit: Int) {
+        guard limit > 0 else { return }
+        queue.async {
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let f = DateFormatter()
+            f.dateFormat = "yyyyMMdd-HHmmss-SSS"
+            let path = dir + "/shot-\(f.string(from: Date())).png"
+            guard let data = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return }
+            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            for old in entries().dropFirst(limit) { try? fm.removeItem(atPath: old.path) }
+        }
+    }
+
+    // newest first
+    static func entries() -> [ShotRecentEntry] {
+        let fm = FileManager.default
+        let names = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+        return names.filter { $0.hasPrefix("shot-") && $0.hasSuffix(".png") }.sorted(by: >).map { n in
+            let p = dir + "/" + n
+            let at = ((try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date) ?? Date()
+            return ShotRecentEntry(path: p, name: n, at: at)
+        }
+    }
+
+    static func thumbnail(_ path: String, maxPixels: Int) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ] as CFDictionary)
     }
 }
 
@@ -223,51 +250,167 @@ struct ShotRecentEntry {
     var at: Date
 }
 
+// the grid of recent captures over the overlay: click = reopen (a pin),
+// right-click = Pin / Copy / Open / Reveal / Delete, Esc closes
+final class ShotRecentPanel: NSPanel {
+    let grid: ShotRecentView
+    var onEscape: (() -> Void)?
+
+    init(recent: [ShotRecentEntry], ui: NSColor) {
+        grid = ShotRecentView(entries: recent, ui: ui)
+        super.init(contentRect: NSRect(origin: .zero, size: grid.frame.size),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        contentView = grid
+        isFloatingPanel = true
+        level = .screenSaver + 1     // above the overlay (AFTER isFloatingPanel)
+        hidesOnDeactivate = false
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+    }
+    override var canBecomeKey: Bool { true }
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { onEscape?() } else { super.keyDown(with: event) }
+    }
+}
+
 final class ShotRecentView: NSView {
-    private let entries: [ShotRecentEntry]
+    private(set) var entries: [ShotRecentEntry]
     private let ui: NSColor
-    private let onSelect: (String) -> Void
-    private let rowH: CGFloat = 24
-    
-    init(entries: [ShotRecentEntry], ui: NSColor, onSelect: @escaping (String) -> Void) {
+    var onOpen: ((ShotRecentEntry) -> Void)?
+    var onMenu: ((ShotRecentEntry) -> NSMenu?)?
+    var onOpenFolder: (() -> Void)?
+    private var thumbs: [String: CGImage] = [:]
+    private var hover: Int?
+    private var tracking: NSTrackingArea?
+    static let cols = 4
+    private let cellW: CGFloat = 172, cellH: CGFloat = 132, gap: CGFloat = 10, pad: CGFloat = 16, headH: CGFloat = 40
+
+    init(entries: [ShotRecentEntry], ui: NSColor) {
         self.entries = entries
         self.ui = ui
-        self.onSelect = onSelect
-        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: CGFloat(entries.count) * 24 + 20))
+        let cols = CGFloat(Self.cols)
+        let rows = CGFloat(max(1, Int(ceil(Double(entries.count) / Double(Self.cols)))))
+        let w = pad * 2 + cols * cellW + (cols - 1) * gap
+        let h = headH + pad + min(3.5, rows) * (cellH + gap) - gap + pad
+        super.init(frame: NSRect(x: 0, y: 0, width: w, height: entries.isEmpty ? headH + 70 : h))
+        loadThumbs()
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
-    
-    override func draw(_ dirty: NSRect) {
-        let bg = NSColor(white: 0.12, alpha: 0.95)
-        let r = NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8)
-        bg.setFill(); r.fill()
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
-        let dimFont = NSFont.systemFont(ofSize: 10.5)
-        for (i, e) in entries.enumerated() {
-            let row = NSRect(x: 4, y: CGFloat(i) * rowH + 4, width: bounds.width - 8, height: rowH)
-            guard row.intersects(dirty) else { continue }
-            (e.name as NSString).draw(in: NSRect(x: 8, y: row.minY + 3, width: bounds.width - 16, height: 16),
-                                      withAttributes: [.font: font, .foregroundColor: NSColor.white])
-            let age = ageString(e.at)
-            let p = NSMutableParagraphStyle(); p.alignment = .right
-            (age as NSString).draw(in: NSRect(x: 8, y: row.minY + 3, width: bounds.width - 16, height: 16),
-                                   withAttributes: [.font: dimFont, .foregroundColor: NSColor(white: 0.5, alpha: 1), .paragraphStyle: p])
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private func loadThumbs() {
+        let paths = entries.map(\.path)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            for p in paths {
+                let t = ShotHistory.thumbnail(p, maxPixels: 400)
+                DispatchQueue.main.async { self?.thumbs[p] = t; self?.needsDisplay = true }
+            }
         }
     }
-    override func mouseDown(with e: NSEvent) {
-        let pt = convert(e.locationInWindow, from: nil)
-        let i = Int((pt.y - 4) / rowH)
-        guard entries.indices.contains(i) else { return }
-        onSelect(entries[i].path)
+    func remove(_ e: ShotRecentEntry) {
+        entries.removeAll { $0.path == e.path }
+        needsDisplay = true
     }
-    
-    private func ageString(_ d: Date) -> String {
+    private var headerFolderRect: NSRect { NSRect(x: bounds.width - pad - 96, y: 9, width: 96, height: 24) }
+    private func cell(_ i: Int) -> NSRect {
+        let c = CGFloat(i % Self.cols), r = CGFloat(i / Self.cols)
+        return NSRect(x: pad + c * (cellW + gap), y: headH + pad + r * (cellH + gap) - scrollY, width: cellW, height: cellH)
+    }
+    private var scrollY: CGFloat = 0
+    private var contentH: CGFloat {
+        let rows = CGFloat(Int(ceil(Double(entries.count) / Double(Self.cols))))
+        return rows * (cellH + gap) - gap + pad * 2
+    }
+    override func scrollWheel(with e: NSEvent) {
+        let visible = bounds.height - headH
+        scrollY = max(0, min(scrollY - e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 1 : 10), max(0, contentH - visible)))
+        needsDisplay = true
+    }
+    private func index(at p: NSPoint) -> Int? {
+        guard p.y > headH else { return nil }
+        return entries.indices.first { cell($0).contains(p) }
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(t)
+        tracking = t
+    }
+    override func mouseMoved(with e: NSEvent) {
+        let i = index(at: convert(e.locationInWindow, from: nil))
+        if i != hover { hover = i; needsDisplay = true }
+    }
+    override func mouseExited(with e: NSEvent) { hover = nil; needsDisplay = true }
+    override func cursorUpdate(with event: NSEvent) { NSCursor.arrow.set() }
+    override func mouseUp(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        if headerFolderRect.contains(p) { onOpenFolder?(); return }
+        if let i = index(at: p) { onOpen?(entries[i]) }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let i = index(at: convert(event.locationInWindow, from: nil)) else { return nil }
+        return onMenu?(entries[i])
+    }
+
+    override func draw(_ dirty: NSRect) {
+        let bg = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
+        NSColor(white: 0.10, alpha: 0.96).setFill(); bg.fill()
+        NSColor.white.withAlphaComponent(0.12).setStroke(); bg.lineWidth = 1; bg.stroke()
+        let title = "Recent screenshots" as NSString
+        title.draw(at: NSPoint(x: pad, y: 12), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.white])
+        let f = headerFolderRect
+        NSColor.white.withAlphaComponent(0.08).setFill()
+        NSBezierPath(roundedRect: f, xRadius: 6, yRadius: 6).fill()
+        let ft = "Open Folder" as NSString
+        let fa: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
+                                                 .foregroundColor: NSColor.white.withAlphaComponent(0.85)]
+        let fs = ft.size(withAttributes: fa)
+        ft.draw(at: NSPoint(x: f.midX - fs.width / 2, y: f.midY - fs.height / 2), withAttributes: fa)
+        if entries.isEmpty {
+            ("No screenshots yet — copy, save or pin a capture and it shows up here." as NSString)
+                .draw(in: NSRect(x: pad, y: headH + 16, width: bounds.width - pad * 2, height: 40), withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.white.withAlphaComponent(0.55)])
+            return
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: NSRect(x: 0, y: headH, width: bounds.width, height: bounds.height - headH)).addClip()
+        let ageAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10.5),
+                                                       .foregroundColor: NSColor.white.withAlphaComponent(0.6)]
+        for (i, e) in entries.enumerated() {
+            let c = cell(i)
+            guard c.intersects(dirty) else { continue }
+            let img = NSRect(x: c.minX, y: c.minY, width: c.width, height: c.height - 20)
+            let well = NSBezierPath(roundedRect: img, xRadius: 8, yRadius: 8)
+            NSColor.white.withAlphaComponent(0.05).setFill(); well.fill()
+            if let t = thumbs[e.path] {
+                let tw = CGFloat(t.width), th = CGFloat(t.height)
+                let k = min((img.width - 8) / tw, (img.height - 8) / th)
+                let r = NSRect(x: img.midX - tw * k / 2, y: img.midY - th * k / 2, width: tw * k, height: th * k)
+                NSGraphicsContext.saveGraphicsState()
+                well.addClip()
+                NSImage(cgImage: t, size: r.size).draw(in: r, from: .zero, operation: .sourceOver, fraction: 1,
+                                                       respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high.rawValue])
+                NSGraphicsContext.restoreGraphicsState()
+            }
+            if hover == i {
+                ui.setStroke(); well.lineWidth = 2; well.stroke()
+            }
+            (age(e.at) as NSString).draw(at: NSPoint(x: c.minX + 2, y: img.maxY + 4), withAttributes: ageAttrs)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func age(_ d: Date) -> String {
         let s = Date().timeIntervalSince(d)
         if s < 60 { return "just now" }
-        if s < 3600 { return "\(Int(s / 60))m ago" }
-        if s < 86400 { return "\(Int(s / 3600))h ago" }
-        let f = DateFormatter(); f.dateFormat = s < 7 * 86400 ? "EEE" : "MM-dd"
+        if s < 3600 { return "\(Int(s / 60)) min ago" }
+        let f = DateFormatter()
+        f.dateFormat = Calendar.current.isDateInToday(d) ? "'today' HH:mm" : "MMM d, HH:mm"
         return f.string(from: d)
     }
 }
@@ -556,25 +699,57 @@ final class ScreenshotController {
     // MARK: recent screenshots
 
     private func showRecentScreenshots(_ s: ShotSession) {
-        let entries = PathShelf.shared.entries().filter { $0.why == .screenshot }.prefix(10)
-        guard !entries.isEmpty else { return }
-        recentPanel?.close()
-        let shotEntries = entries.map { e in
-            ShotRecentEntry(path: e.path, name: (e.path as NSString).lastPathComponent, at: Date(timeIntervalSince1970: e.at))
+        if let open = recentPanel { open.close(); recentPanel = nil; return }   // the button toggles it
+        let ui = NSColor(calibratedRed: s.cfg.uiColor.r, green: s.cfg.uiColor.g, blue: s.cfg.uiColor.b, alpha: 1)
+        let panel = ShotRecentPanel(recent: ShotHistory.entries(), ui: ui)
+        let closePanel = { [weak self] in
+            self?.recentPanel?.close()
+            self?.recentPanel = nil
+            if let s = self?.session, let d = s.mouseDisplay ?? s.displays.first { d.panel.makeKey() }
         }
-        let ui = NSColor(calibratedRed: s.cfg.uiColor.r, green: s.cfg.uiColor.g, blue: s.cfg.uiColor.b, alpha: s.cfg.uiColor.a)
-        let panel = ShotRecentPanel(recent: shotEntries, ui: ui) { [weak self] path in
-            guard let self else { return }
-            self.recentPanel?.close()
-            self.recentPanel = nil
-            // Quick Look the file
-            if FileManager.default.fileExists(atPath: path) {
-                NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-            }
+        panel.onEscape = closePanel
+        // reopen = leave the overlay and pin the capture on screen (⌘C
+        // copies it from there, Esc / ✕ closes it)
+        panel.grid.onOpen = { [weak self, weak s] e in
+            guard let self, let s else { return }
+            guard let img = ShotHistory.thumbnail(e.path, maxPixels: 100_000) else { return }
+            let cfg = s.cfg
+            self.finish(s, .abort)
+            self.pin(img, frame: nil, cfg)
+            self.log("screenshot: reopened \(e.name)")
         }
-        // Place near the mouse or center of main screen
+        panel.grid.onOpenFolder = {
+            NSWorkspace.shared.open(URL(fileURLWithPath: ShotHistory.dir))
+        }
+        panel.grid.onMenu = { [weak self, weak s, weak panel] e in
+            let m = NSMenu()
+            m.addItem(menuItem("Reopen as Pin") { panel?.grid.onOpen?(e) })
+            m.addItem(menuItem("Copy") {
+                guard let self, let s, let img = ShotHistory.thumbnail(e.path, maxPixels: 100_000) else { return }
+                let cfg = s.cfg, scr = s.mouseDisplay?.screen
+                self.finish(s, .abort)
+                self.copy(img, cfg, scr)
+            })
+            m.addItem(menuItem("Open in Preview") {
+                if let s { self?.finish(s, .abort) }
+                NSWorkspace.shared.open(URL(fileURLWithPath: e.path))
+            })
+            m.addItem(menuItem("Reveal in Finder") {
+                if let s { self?.finish(s, .abort) }
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: e.path)])
+            })
+            m.addItem(.separator())
+            m.addItem(menuItem("Delete") {
+                try? FileManager.default.removeItem(atPath: e.path)
+                panel?.grid.remove(e)
+            })
+            return m
+        }
+        // centered on the screen under the pointer
         if let md = s.mouseDisplay ?? s.displays.first {
-            panel.setFrameOrigin(CGPoint(x: md.screen.frame.midX - panel.frame.width / 2, y: md.screen.frame.midY - panel.frame.height / 2))
+            let f = md.screen.frame
+            panel.setFrameOrigin(CGPoint(x: (f.midX - panel.frame.width / 2).rounded(),
+                                         y: (f.midY - panel.frame.height / 2).rounded()))
         }
         panel.orderFrontRegardless()
         panel.makeKey()
@@ -630,6 +805,7 @@ final class ScreenshotController {
             if args.clipboard { copy(img, cfg, screen) }
         case .abort, .text: break
         }
+        ShotHistory.record(img, limit: cfg.history)
         // the capture in the quick-look popup too (copy / save untouched);
         // not for a pin (already on screen) or a scripted -r / -g
         if cfg.preview, action != .pin, !args.raw, !args.printGeometry { preview(img, screen) }
@@ -655,6 +831,7 @@ final class ScreenshotController {
         }
         guard let img else { reply?(nil); return }
         lastOutput = ["outcome": a.mode.rawValue, "size": [img.width, img.height]]
+        ShotHistory.record(img, limit: cfg.history)
         if let p = a.path { save(img, cfg, screen, to: p) }
         if a.clipboard || (a.path == nil && !a.raw && !a.pin) { copy(img, cfg, screen) }
         if a.pin, let s = screen {

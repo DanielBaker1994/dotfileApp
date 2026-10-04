@@ -655,6 +655,7 @@ final class ShotSession {
         if shortcutsShown { hideShortcuts(); return true }
         if cmd && ch == "q" { finish(.abort); return true }
         if cmd && ch == "/" { showShortcuts(); return true }
+        if cmd && ch == "r" { pressed(.recent); return true }   // recent captures
         if code == 48 && !cmd && !ctrl && !opt { toggleTextMode(); return true }   // Tab
         if cmd && shift && ch == "c" { finish(.text); return true }
         if textMode {
@@ -856,14 +857,14 @@ final class ShotOverlayView: NSView {
         for v in subviews { v.removeFromSuperview() }
         buttons = []
         ringTools = []
-        help = nil; tab = nil; modePill = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
+        help = nil; tab = nil; modePill = nil; recentBtn = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
         needsDisplay = true
         layoutChrome()
     }
     func detach() {
         for v in subviews { v.removeFromSuperview() }
         buttons = []
-        help = nil; tab = nil; modePill = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
+        help = nil; tab = nil; modePill = nil; recentBtn = nil; sidePanel = nil; indicator = nil; wheelView = nil; loupe = nil; shortcuts = nil
         session = nil
         display = nil
     }
@@ -1460,7 +1461,7 @@ final class ShotRecentButton: NSView {
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
         layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
         layer?.borderWidth = 1
-        toolTip = "Recent screenshots (R)"
+        toolTip = "Recent screenshots (⌘R)"
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
@@ -1471,7 +1472,15 @@ final class ShotRecentButton: NSView {
     override func mouseUp(with event: NSEvent) { action() }
     override func draw(_ dirtyRect: NSRect) {
         let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-        if let img = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+        // a template symbol draws black — tint it white, or it vanishes
+        // into its own black disc (the button looked like it wasn't there)
+        if let base = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
+            let img = NSImage(size: base.size, flipped: false) { r in
+                base.draw(in: r)
+                NSColor.white.set()
+                r.fill(using: .sourceAtop)
+                return true
+            }
             let s = img.size
             img.draw(in: CGRect(x: (bounds.width - s.width) / 2, y: (bounds.height - s.height) / 2, width: s.width, height: s.height),
                      from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)

@@ -103,6 +103,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private let spinner = NSProgressIndicator()
     private let splitter = PaneSplitter()
     private var split: CGFloat = 0.5
+    private var sidebarW: CGFloat = 0
     private var toast: NSView?
 
     // state
@@ -251,7 +252,26 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         pills.onSelect = { [weak self] i in self?.select(i) }
         pills.onAddTab = { [weak self] in self?.newRule() }
         pills.menuFor = { [weak self] i in self?.pillMenu(i) }
-        pills.toolTip = "Rules — one .md file each (right-click: edit, reveal, duplicate, delete)"
+        // the rules as a sidebar (`[ai] sidebar-width`, 0 = a strip); its
+        // edge drags to resize, the width is saved on release
+        sidebarW = aiNumber("sidebar-width", 210)
+        if sidebarW > 0 {
+            pills.vertical = true
+            pills.sectionTitle = "Rules"
+            pills.rowIcon = { _ in "wand.and.stars" }
+            pills.pathTip = { [weak self] i in
+                guard let self, self.rules.indices.contains(i) else { return nil }
+                return (self.rules[i].path as NSString).abbreviatingWithTildeInPath
+            }
+            pills.onWidthChange = { [weak self] w, done in
+                guard let self else { return }
+                self.sidebarW = w.rounded()
+                self.body?.needsLayout = true
+                if done { saveConfigValue(section: "ai", key: "sidebar-width", value: String(Int(self.sidebarW))) }
+            }
+        } else {
+            pills.toolTip = "Rules — one .md file each (right-click: edit, reveal, duplicate, delete)"
+        }
         root.addSubview(pills)
 
         cmdLine.onClick = { [weak self] in self?.copyCommand() }
@@ -308,6 +328,14 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
 
         splitter.onFractionChange = { [weak self] f in
             guard let self else { return }
+            var f = f
+            if self.pills.vertical {
+                // the splitter measures across the whole view; the panes
+                // start right of the sidebar
+                let full = root.bounds.width, left = self.sidebarW + 4 + 12
+                let avail = max(1, full - self.sidebarW - 4 - 24 - 10)
+                f = min(0.8, max(0.2, (f * full - left) / avail))
+            }
             self.split = f
             UserDefaults.standard.set(Double(f), forKey: Self.splitKey)
             root.needsLayout = true
@@ -317,12 +345,28 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         return root
     }
 
-    private func layoutAll(_ b: NSRect) {
+    private func layoutAll(_ full: NSRect) {
         let pad: CGFloat = 12
-        let pillsH = pills.heightNeeded(forWidth: b.width) + 6
-        pills.frame = NSRect(x: 0, y: 4, width: b.width, height: pillsH)
+        // sidebar: the rules down the left, everything else beside it
+        var b = full
         let cmdH: CGFloat = 22
-        cmdLine.frame = NSRect(x: 0, y: pills.frame.maxY, width: b.width, height: cmdH)
+        if pills.vertical {
+            pills.frame = NSRect(x: 0, y: 0, width: sidebarW, height: full.height)
+            b = NSRect(x: 0, y: 0, width: max(200, full.width - sidebarW - 4), height: full.height)
+            cmdLine.frame = NSRect(x: sidebarW + 4, y: 6, width: b.width, height: cmdH)
+        } else {
+            let pillsH = pills.heightNeeded(forWidth: b.width) + 6
+            pills.frame = NSRect(x: 0, y: 4, width: b.width, height: pillsH)
+            cmdLine.frame = NSRect(x: 0, y: pills.frame.maxY, width: b.width, height: cmdH)
+        }
+        defer {
+            // shift the content right of the sidebar
+            if pills.vertical {
+                for v in [leftBox, rightBox, splitter, runButton, spinner, tokens, status] as [NSView] {
+                    v.frame.origin.x += sidebarW + 4
+                }
+            }
+        }
         let footH: CGFloat = 44
         let top = cmdLine.frame.maxY + 6
         let bodyH = max(80, b.height - top - footH)
@@ -417,14 +461,10 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         guard let r = rule else {
             cmdLine.text = "no rules in \(rulesDir) — press + to make one"
             cmdLine.warning = ""
-            chrome?.headerTitle = "AI"
-            chrome?.needsDisplay = true
             return
         }
         cmdLine.text = r.preview
         cmdLine.warning = r.warnings.joined(separator: ", ")
-        chrome?.headerTitle = "AI · " + r.name
-        chrome?.needsDisplay = true
         input.placeholder = r.placeholder.isEmpty ? "Type or paste your text — Ctrl+Enter runs it" : r.placeholder
         modeSeg.items = modes.map(\.title)
         if !modes.contains(mode) { mode = .markdown }

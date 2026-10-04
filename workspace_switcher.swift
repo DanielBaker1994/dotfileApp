@@ -775,6 +775,10 @@ struct CommandSpec {
     var voiceLive = true
     var terminal = false          // note: embedded shell drawer at the bottom
     var terminalHeight: CGFloat = 240
+    var sidebarWidth: CGFloat = 210   // note: the tabs as a left sidebar (0 = a strip under the header)
+    var proseFont: String?            // note: reading view font stack (CSS)
+    var proseFontSize: CGFloat = 0
+    var proseWidth: CGFloat = 0
     var terminalDir: String?      // note: starting directory for the embedded shell
     var terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
     // per-window text palette (Theme ▸ presets); nil = the [theme] colors
@@ -1011,6 +1015,10 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.voiceLive = tri(vars["voice-live"]) ?? true
     s.terminal = tri(vars["terminal"]) ?? false
     if num(vars["terminal-height"]) > 0 { s.terminalHeight = num(vars["terminal-height"]) }
+    if vars["sidebar-width"] != nil { s.sidebarWidth = num(vars["sidebar-width"]) }
+    s.proseFont = vars["prose-font"].flatMap { $0.isEmpty ? nil : $0 }
+    s.proseFontSize = num(vars["prose-font-size"])
+    s.proseWidth = num(vars["prose-width"])
     s.terminalDir = vars["terminal-dir"]
     s.terminalBackground = hexColor(vars["terminal-background"])
     s.terminalForeground = hexColor(vars["terminal-foreground"])
@@ -1392,7 +1400,7 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
     "shared-width": 400...8000, "shared-height": 300...8000, "preview-border-width": 0...8,
-    "terminal-height": 40...4000, "font-size": 6...96, "terminal-font-size": 6...96,
+    "terminal-height": 40...4000, "sidebar-width": 0...600, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
     "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
@@ -4138,7 +4146,7 @@ final class SwitcherController: NSObject {
         detailRow = row
         if let existing = subWindows.first(where: { $0.config.name == settings.detailWindowName }) {
             existing.setEditorText(text)
-            existing.chromeHeaderTitle = key
+            existing.chromeHeaderTitle = nil
             if settings.sharedWindow {
                 slot.push(.detail)       // in place of the list; Esc = back
             } else {
@@ -4167,7 +4175,9 @@ final class SwitcherController: NSObject {
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
         w.editorText = text
-        w.chromeHeaderTitle = key
+        // no title in the header bar: the issue names itself on the page's
+        // first line (detailText)
+        w.chromeHeaderTitle = nil
         w.headerIcon = jiraAppIcon
         // no config button here — the header carries "copy key" + "open in
         // browser" instead (the row-level browser action now lives here)
@@ -4209,6 +4219,11 @@ final class SwitcherController: NSObject {
         let shown = [cmd.primary, cmd.content, cmd.detail, cmd.trailing, cmd.body]
             .compactMap { $0 }
         var out: [String] = []
+        // the page's own title line (the header bar carries none)
+        let key = row.fields["key"] ?? ""
+        let name = row.fields["summary"] ?? row.fields["title"] ?? row.title
+        let head = [key, name].filter { !$0.isEmpty }.joined(separator: " — ")
+        if !head.isEmpty { out.append(head); out.append("") }
         for k in shown {
             if let v = row.fields[k], !v.isEmpty {
                 out.append("\(k): \(v)")
@@ -4797,6 +4812,7 @@ final class SwitcherController: NSObject {
         cfg.copyToast = settings.copyToast
         cfg.tabs = true
         cfg.tabsAddButton = true
+        cfg.tabsSidebarWidth = cmd.sidebarWidth
         cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
         // `start-drawer` (browser | terminal | none) picks the pane open on
@@ -5623,6 +5639,17 @@ final class SwitcherController: NSObject {
         session.install()
         subWindows.append(w)
         w.tabFooterText = ""
+        w.onSidebarWidthChange = { width in
+            saveConfigValue(section: cmd.name, key: "sidebar-width", value: String(Int(width)))
+        }
+        w.tabRowIcon = { [weak w] i in
+            guard let w, w.tabTitles.indices.contains(i) else { return nil }
+            let name = w.tabTitles[i].lowercased()
+            if name.hasPrefix("release") || name.contains("blacklist_release") { return "shippingbox" }
+            if name.hasPrefix("favorites") { return "star" }
+            if name.hasPrefix("search") { return "magnifyingglass" }
+            return "list.bullet.rectangle"
+        }
         placeSlotWindow(w)
         w.quietShow = slotPrewarming
         w.show()
@@ -5648,6 +5675,11 @@ final class SwitcherController: NSObject {
         cfg.showSearchBar = true
         cfg.dragHeader = true
         cfg.tabs = tabCount > 1
+        // jira: its sources as a sidebar (drag its edge; `sidebar-width`)
+        if isJira {
+            cfg.tabsSidebarWidth = cmd.sidebarWidth
+            cfg.tabsSidebarTitle = "Lists"
+        }
         cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.scrollableRows = true
         cfg.dynamicHeight = false
@@ -5923,6 +5955,11 @@ final class SwitcherController: NSObject {
         let fb = makeFileBrowser(cfg, startDir: root, in: w,
                                  tag: "files '\(cmd.name)'", opened: "opened")
         w.installFileBrowser(fb, drawer: false)
+        // the places + pinned folders down the left (drag its edge; `sidebar-width`)
+        fb.useSidebar(width: cmd.sidebarWidth)
+        fb.onSidebarWidthChange = { width in
+            saveConfigValue(section: cmd.name, key: "sidebar-width", value: String(Int(width)))
+        }
         // files opens on Recent (the latest download / screenshot);
         // [files] start = root keeps the old folder start
         if cmd.startRecent { fb.showRecent() }
@@ -7141,6 +7178,19 @@ extension SwitcherController {
                 host.showShortcuts(on: w, view: "notes")
             }
             w.onAddTab = { [self] in addTab() }
+            // prose mode: the current note as a reading page (⌘⇧P / the
+            // Prose | Edit switch); previews (rtf, docx, images) have none
+            if let f = cmd.proseFont { w.proseFont = f }
+            if cmd.proseFontSize > 0 { w.proseFontSize = cmd.proseFontSize }
+            if cmd.proseWidth > 0 { w.proseWidth = cmd.proseWidth }
+            w.proseProvider = { [weak self] in
+                guard let self, !noteIsPreview(self.currentPath),
+                      let text = try? String(contentsOfFile: self.currentPath, encoding: .utf8) else { return nil }
+                return ProseSource(markdown: text, path: self.currentPath)
+            }
+            w.onSidebarWidthChange = { [cmd] width in
+                saveConfigValue(section: cmd.name, key: "sidebar-width", value: String(Int(width)))
+            }
             // clicking the ACTIVE note tab copies that note's absolute path
             w.onTabClick = { [self] index in
                 guard index == w.selectedTab, index < paths.count else { return }

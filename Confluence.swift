@@ -410,6 +410,11 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private let spinner = NSProgressIndicator()
     private let splitter = PaneSplitter()
     private var split: CGFloat = 0.42
+    // Search / Favorites as a left sidebar (`[confluence] sidebar-width`,
+    // 0 = the old segmented control in the strip); its edge drags to resize
+    private var sidebar: PopupTabsBar?
+    private var sidebarW: CGFloat = 0
+    private var left: CGFloat { sidebar != nil ? sidebarW + 4 : 0 }
 
     // preview
     private let preview = ConfPane()
@@ -549,7 +554,27 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         sortChoice.prefix = "Sort: "
         sortChoice.onPick = { [weak self] _ in self?.criteriaChanged() }
         // how to search, top-left; the box under it, full width; filters below
-        let top = row([scopeSeg, modeSeg, titleToggle, searchButton, NSView()])
+        sidebarW = configSectionValue("confluence", "sidebar-width").flatMap { Double($0) }.map { CGFloat($0) } ?? 210
+        if sidebarW > 0 {
+            var pcfg = PopupConfig(name: "confluence-sidebar")
+            pcfg.colors = colors
+            let bar = PopupTabsBar(config: pcfg)
+            bar.vertical = true
+            bar.closable = false
+            bar.sectionTitle = "Confluence"
+            bar.titles = ["Search", "Favorites"]
+            bar.rowIcon = { $0 == 0 ? "magnifyingglass" : "star" }
+            bar.onSelect = { [weak self] i in self?.setScope(i == 0 ? .search : .favorites) }
+            bar.onWidthChange = { [weak self, weak root] w, done in
+                guard let self else { return }
+                self.sidebarW = w.rounded()
+                root?.needsLayout = true
+                if done { saveConfigValue(section: "confluence", key: "sidebar-width", value: String(Int(self.sidebarW))) }
+            }
+            root.addSubview(bar)
+            sidebar = bar
+        }
+        let top = row((sidebar == nil ? [scopeSeg] : []) + [modeSeg, titleToggle, searchButton, NSView()])
         let middle = row([textBox])
         textBox.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let bottom = row([spaces, people, typeChoice, modChoice, sortChoice, NSView()])
@@ -605,6 +630,12 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         for b in [moreButton, cqlButton, curlButton] { root.addSubview(b) }
         splitter.onFractionChange = { [weak self] f in
             guard let self else { return }
+            var f = f
+            if self.sidebar != nil {
+                // measured across the whole view; the panes start right of the sidebar
+                let full = root.bounds.width
+                f = min(0.8, max(0.2, (f * full - self.left) / max(1, full - self.left)))
+            }
             self.split = f
             UserDefaults.standard.set(Double(f), forKey: Self.splitKey)
             root.needsLayout = true
@@ -644,7 +675,17 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         return root
     }
 
-    private func layoutAll(_ b: NSRect) {
+    private func layoutAll(_ full: NSRect) {
+        sidebar?.frame = NSRect(x: 0, y: 0, width: sidebarW, height: full.height)
+        let b = NSRect(x: 0, y: 0, width: max(300, full.width - left), height: full.height)
+        defer {
+            // everything else sits right of the sidebar
+            if left > 0 {
+                for v in [strip, tableScroll, spinner, curlButton, cqlButton, moreButton, status, splitter, preview] as [NSView] {
+                    v.frame.origin.x += left
+                }
+            }
+        }
         let stripH: CGFloat = 10 + JiraTheme.height * 3 + 8 * 2 + 10
         strip.frame = NSRect(x: 0, y: 0, width: b.width, height: stripH)
         let bodyY = stripH
@@ -891,6 +932,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private func setScope(_ s: Scope) {
         scope = s
         scopeSeg.selected = s == .search ? 0 : 1
+        sidebar?.selected = s == .search ? 0 : 1
         searchButton.toolTip = s == .search ? "Search (Return)" : "Search inside your favorites' text"
         if s == .favorites {
             loadFavorites(show: true)

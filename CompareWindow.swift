@@ -153,25 +153,44 @@ final class CompareRecentList: NSView {
     let rowH: CGFloat = 28
     override var isFlipped: Bool { true }
 
-    private var missingCache: [Int: Bool] = [:]  // row index → has a missing file
+    // row index → which sides point at a file that no longer exists
+    private var missingCache: [Int: (left: Bool, right: Bool)] = [:]
     private func tilde(_ p: String) -> String { (p as NSString).abbreviatingWithTildeInPath }
+    func isMissing(_ i: Int) -> Bool { missingCache[i].map { $0.left || $0.right } ?? false }
+    func missingPaths(_ i: Int) -> [String] {
+        guard rows.indices.contains(i), let m = missingCache[i] else { return [] }
+        return (m.left ? [rows[i].left] : []) + (m.right && rows[i].right != rows[i].left ? [rows[i].right] : [])
+    }
 
-    private func refreshMissing() {
+    // re-checked whenever the rows are set and every time the start page shows
+    func refreshMissing() {
         missingCache.removeAll()
+        let fm = FileManager.default
         for (i, e) in rows.enumerated() {
-            let leftGone = !CompareRecent.isPasted(e.left) && !FileManager.default.fileExists(atPath: e.left)
-            let rightGone = !CompareRecent.isPasted(e.right) && !FileManager.default.fileExists(atPath: e.right)
-            missingCache[i] = leftGone || rightGone
+            missingCache[i] = (!fm.fileExists(atPath: e.left), !fm.fileExists(atPath: e.right))
         }
+        removeAllToolTips()
+        for i in rows.indices where isMissing(i) {
+            addToolTip(NSRect(x: 0, y: CGFloat(i) * rowH, width: max(bounds.width, 2000), height: rowH),
+                       owner: self, userData: nil)
+        }
+        needsDisplay = true
+    }
+    @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+                    userData data: UnsafeMutableRawPointer?) -> String {
+        let i = Int(point.y / rowH)
+        let gone = missingPaths(i)
+        return gone.isEmpty ? "" : "Can't open: no longer exists\n" + gone.map(tilde).joined(separator: "\n")
     }
 
     override func draw(_ dirty: NSRect) {
         let font = NSFont.systemFont(ofSize: 12.5, weight: .medium), small = NSFont.systemFont(ofSize: 11.5)
-        let warnFont = NSFont.systemFont(ofSize: 12, weight: .bold)
+        let warnFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
         for (i, e) in rows.enumerated() {
             let r = NSRect(x: 0, y: CGFloat(i) * rowH, width: bounds.width, height: rowH)
             guard r.intersects(dirty) else { continue }
-            let missing = missingCache[i] ?? false
+            let gone = missingCache[i] ?? (false, false)
+            let missing = gone.left || gone.right
             if i == selection {
                 let pill = NSBezierPath(roundedRect: r.insetBy(dx: 2, dy: 2), xRadius: 6, yRadius: 6)
                 colors.highlight.withAlphaComponent(0.6).setFill()
@@ -184,28 +203,53 @@ final class CompareRecentList: NSView {
             let rn = pr ? "pasted text" : (e.right as NSString).lastPathComponent
             let name = ln == rn ? ln : "\(ln) ⇆ \(rn)"
             let y = r.minY + 6
+            // a pair with a vanished side: ⚠ before the name, the name dimmed,
+            // the missing side's folder struck through in the danger hue
+            var nameX: CGFloat = 14
+            if missing {
+                ButtonStyle.symbol("exclamationmark.triangle.fill", in: NSRect(x: 12, y: r.minY, width: 16, height: r.height),
+                                   color: colors.tone(.danger), size: 11)
+                nameX = 32
+            }
             let nameAttrs: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: missing ? colors.tone(.danger).withAlphaComponent(0.7) : colors.text
+                .foregroundColor: missing ? colors.dim : colors.text
             ]
-            (name as NSString).draw(in: NSRect(x: 14, y: y, width: 220, height: 18), withAttributes: nameAttrs)
-            let dirs = "\(pl ? "(clipboard)" : tilde((e.left as NSString).deletingLastPathComponent))  ⇆  \(pr ? "(clipboard)" : tilde((e.right as NSString).deletingLastPathComponent))"
+            let np = NSMutableParagraphStyle()
+            np.lineBreakMode = .byTruncatingMiddle
+            var na = nameAttrs
+            na[.paragraphStyle] = np
+            (name as NSString).draw(in: NSRect(x: nameX, y: y, width: 234 - nameX, height: 18), withAttributes: na)
             let p = NSMutableParagraphStyle()
             p.lineBreakMode = .byTruncatingMiddle
-            (dirs as NSString).draw(in: NSRect(x: 240, y: y + 1, width: max(40, bounds.width - 350), height: 18),
-                                    withAttributes: [.font: small, .foregroundColor: colors.dim, .paragraphStyle: p])
+            let base: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: colors.dim, .paragraphStyle: p]
+            var goneAttrs = base
+            goneAttrs[.foregroundColor] = colors.dim.withAlphaComponent(0.6)
+            goneAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            goneAttrs[.strikethroughColor] = colors.tone(.danger).withAlphaComponent(0.7)
+            let dl = pl ? "(clipboard)" : tilde((e.left as NSString).deletingLastPathComponent)
+            let dr = pr ? "(clipboard)" : tilde((e.right as NSString).deletingLastPathComponent)
+            let dirs = NSMutableAttributedString()
+            if dl == dr && gone.left == gone.right {
+                // both in one folder: say it once
+                dirs.append(NSAttributedString(string: dl, attributes: gone.left ? goneAttrs : base))
+            } else {
+                dirs.append(NSAttributedString(string: dl, attributes: gone.left ? goneAttrs : base))
+                dirs.append(NSAttributedString(string: "  ⇆  ", attributes: base))
+                dirs.append(NSAttributedString(string: dr, attributes: gone.right ? goneAttrs : base))
+            }
+            dirs.draw(in: NSRect(x: 240, y: y + 1, width: max(40, bounds.width - 350), height: 18))
             let age = CompareRecent.age(e.used) as NSString
             let attrs: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: colors.dim]
             let ageW = age.size(withAttributes: attrs).width
             var ageX = bounds.width - 12 - ageW
             if missing {
-                let warn = "!" as NSString
-                let warnAttrs: [NSAttributedString.Key: Any] = [.font: warnFont, .foregroundColor: colors.tone(.danger)]
-                let warnW = warn.size(withAttributes: warnAttrs).width
-                let gap: CGFloat = 4
-                ageX -= warnW + gap
-                warn.draw(at: NSPoint(x: ageX, y: y + 1), withAttributes: warnAttrs)
-                ageX -= gap
+                let tag = "missing" as NSString
+                let tagAttrs: [NSAttributedString.Key: Any] = [.font: warnFont, .foregroundColor: colors.tone(.danger)]
+                // "missing" at the right edge, the age just left of it
+                let tw = tag.size(withAttributes: tagAttrs).width
+                tag.draw(at: NSPoint(x: bounds.width - 12 - tw, y: y + 1), withAttributes: tagAttrs)
+                ageX -= tw + 10
             }
             age.draw(at: NSPoint(x: ageX, y: y + 1), withAttributes: attrs)
         }
@@ -214,7 +258,9 @@ final class CompareRecentList: NSView {
         let i = Int(convert(e.locationInWindow, from: nil).y / rowH)
         guard rows.indices.contains(i) else { return }
         selection = i
-        if e.clickCount == 2 { onOpen?(i) }
+        // one click opens (a start page's list of links); a missing pair
+        // explains itself instead of doing nothing
+        if e.clickCount == 1 { onOpen?(i) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let i = Int(convert(event.locationInWindow, from: nil).y / rowH)
@@ -273,6 +319,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     // chrome
     private var root: ConfPane!
     private var pills: PopupTabsBar!
+    private var sidebarW: CGFloat = 0
     // start page
     private let start = ConfPane()
     private let leftBox = JiraInputBox(placeholder: "Left: a file or folder path (Tab completes)")
@@ -446,6 +493,23 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             return "\(s.path[.left] ?? s.name(.left))\n\(s.path[.right] ?? s.name(.right))"
         }
         pills.isHidden = isSub
+        // the sessions as a left sidebar (`[compare] sidebar-width`, 0 = pills);
+        // "+" beside the label = the start page; its edge drags to resize
+        sidebarW = isSub ? 0 : (configSectionValue("compare", "sidebar-width").flatMap { Double($0) }.map { CGFloat($0) } ?? 210)
+        if sidebarW > 0 {
+            pills.vertical = true
+            pills.sectionTitle = "Compares"
+            pills.rowIcon = { [weak self] i in
+                guard let self, self.sessions.indices.contains(i) else { return nil }
+                return self.sessions[i].folder != nil ? "folder" : "arrow.left.arrow.right"
+            }
+            pills.onWidthChange = { [weak self, weak r] w, done in
+                guard let self else { return }
+                self.sidebarW = w.rounded()
+                r?.needsLayout = true
+                if done { saveConfigValue(section: "compare", key: "sidebar-width", value: String(Int(self.sidebarW))) }
+            }
+        }
         r.addSubview(pills)
         buildStart()
         buildText()
@@ -579,6 +643,14 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
 
     private func layoutAll(_ b: NSRect) {
         var top: CGFloat = 0
+        if !isSub, pills.vertical {
+            pills.frame = NSRect(x: 0, y: 0, width: sidebarW, height: b.height)
+            let rest = NSRect(x: sidebarW + 4, y: 0, width: max(300, b.width - sidebarW - 4), height: b.height)
+            start.frame = rest
+            body.frame = rest
+            folderPage.root.frame = rest
+            return
+        }
         if !isSub {
             let h = pills.heightNeeded(forWidth: b.width) + 6
             pills.frame = NSRect(x: 0, y: 4, width: b.width, height: h)
@@ -898,10 +970,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             }
             showStartPage()
             let one = [left, right].compactMap { $0 }.count == 1
-            startHint.stringValue = cfg.label("folder", "Folder Compare needs a folder on both sides: {}",
-                                              one ? "only one was given" : "a folder can't be compared with a file")
-            startHint.textColor = colors.tone(.warning)
-            root.needsLayout = true
+            showStartHint(cfg.label("folder", "Folder Compare needs a folder on both sides: {}",
+                                              one ? "only one was given" : "a folder can't be compared with a file"), .warning)
             waiter?()
             return nil
         }
@@ -1355,9 +1425,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             return
         }
         for p in [l, r] where !p.isEmpty && !FileManager.default.fileExists(atPath: p) {
-            startHint.stringValue = "No such file: \(tilde(p))"
-            startHint.textColor = colors.tone(.danger)
-            root.needsLayout = true
+            showStartHint("No such file: \(tilde(p))", .danger)
             return
         }
         openPair(l.isEmpty ? nil : l, r.isEmpty ? nil : r)
@@ -1379,6 +1447,15 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return t.isEmpty ? "" : (t as NSString).expandingTildeInPath
     }
 
+    // the message line under the start page's buttons (sized by layoutStart,
+    // so the START page must lay out again — root alone left it 0 pt tall)
+    private func showStartHint(_ text: String, _ tone: PopupTone) {
+        startHint.stringValue = text
+        startHint.textColor = colors.tone(tone)
+        root.needsLayout = true
+        start.needsLayout = true
+    }
+
     private func reloadRecent() {
         recentAll = CompareRecent.load()
         filterRecent()
@@ -1394,11 +1471,12 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private func openRecent(_ i: Int) {
         guard recentList.rows.indices.contains(i) else { return }
         let e = recentList.rows[i]
-        let missing = [e.left, e.right].filter { !FileManager.default.fileExists(atPath: $0) }
+        recentList.refreshMissing()
+        let missing = recentList.missingPaths(i)
         if !missing.isEmpty {
-            startHint.stringValue = "Gone: \(missing.map(tilde).joined(separator: ", "))"
-            startHint.textColor = colors.tone(.danger)
-            root.needsLayout = true
+            let names = missing.map { "“\(($0 as NSString).lastPathComponent)”" }.joined(separator: " and ")
+            showStartHint("Can't open: \(names) \(missing.count == 1 ? "no longer exists" : "no longer exist") "
+                          + "(hover the row for the full path). Right-click ▸ Remove from Recent or Remove All Missing.", .danger)
             return
         }
         openPair(e.left, e.right)
@@ -1415,6 +1493,15 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         m.addItem(menuItem("Copy Paths") { copyText("\(e.left)\n\(e.right)") })
         m.addItem(.separator())
         m.addItem(menuItem("Remove from Recent") { [weak self] in CompareRecent.remove(e); self?.reloadRecent() })
+        let fm = FileManager.default
+        let gone = CompareRecent.load().filter { !fm.fileExists(atPath: $0.left) || !fm.fileExists(atPath: $0.right) }
+        if !gone.isEmpty {
+            m.addItem(menuItem("Remove All Missing (\(gone.count))") { [weak self] in
+                CompareRecent.save(CompareRecent.load().filter { fm.fileExists(atPath: $0.left) && fm.fileExists(atPath: $0.right) })
+                self?.showStartHint("", .dim)
+                self?.reloadRecent()
+            })
+        }
         m.addItem(menuItem("Clear All Recents") { [weak self] in CompareRecent.clearAll(); self?.recentAll = []; self?.recentList.rows = [] })
         return m
     }

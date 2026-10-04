@@ -50,7 +50,7 @@ struct ScreenshotTests {
     static func ringTests() {
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let ring = ShotTool.ring(ShotTool.defaultButtons, badge: true)
-        check(ring.count == 20, "default ring = 19 buttons (copy-text incl.) + the size badge (\(ring.count))")
+        check(ring.count == 21, "default ring = 20 buttons (copy-text + recent incl.) + the size badge (\(ring.count))")
         check(ring.firstIndex(of: .badge) == 11, "badge right after the last drawing tool")
         check(Array(ring.prefix(11)) == [.pencil, .line, .arrow, .selection, .rectangle, .circle, .marker, .text, .counter, .pixelate, .invert],
               "bottom-row tools in Flameshot's order")

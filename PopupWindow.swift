@@ -703,6 +703,10 @@ public struct PopupConfig {
     // a trailing "+" pill on the tab strip that fires onAddTab (e.g. create a
     // new note pad)
     public var tabsAddButton: Bool = false
+    // edit mode: > 0 = the tabs are a vertical sidebar this wide down the
+    // left of the editor instead of a strip under the header
+    public var tabsSidebarWidth: CGFloat = 0
+    public var tabsSidebarTitle = "Notes"
 
     // scrollable rows: the row list lives in a scroll view, the window height
     // is capped at maxHeight, and overflowing rows scroll instead of clipping.
@@ -1441,7 +1445,7 @@ final class PopupTabsBar: NSView {
         return dotW + 5 * zoom + tw
     }
     var selected = 0 {
-        didSet { needsDisplay = true }
+        didSet { needsDisplay = true; if vertical, selected != oldValue { revealSelected() } }
     }
     var onSelect: ((Int) -> Void)?      // fired when a DIFFERENT tab is clicked
     var onClick: ((Int) -> Void)?       // fired for EVERY tab click (host uses
@@ -1452,6 +1456,258 @@ final class PopupTabsBar: NSView {
     var menuFor: ((Int) -> NSMenu?)?    // right-click menu override (AI rule pills)
     var pathTip: ((Int) -> String?)?    // hover tip for tab i (the file's full path)
     var closable = true                 // false = no ✕ badges
+    // sidebar mode (`[notes|jira|ai] sidebar-width`): the same tabs as a
+    // vertical list in a rounded mantle card down the left edge — optional
+    // PINNED folders on top, then a section label with the "+" beside it,
+    // one row per tab (icon · name · badge or last write; ✕ on hover). The
+    // rows scroll; the card's right edge drags to resize (onWidthChange).
+    var vertical = false
+    var sectionTitle = "Notes"
+    // pinned folders (notes: the file browser's favorites); click → onPinned
+    var pinned: [String] = [] { didSet { needsDisplay = true; clampScroll() } }
+    var onPinned: ((String) -> Void)?
+    var pinnedTitle = "Pinned"
+    var pinnedSelected: String? { didSet { needsDisplay = true } }   // the open folder
+    var pinnedMenu: ((String) -> NSMenu?)?
+    var maxPinnedShown = 5
+    // SF Symbol per row (nil = picked from the title's extension)
+    var rowIcon: ((Int) -> String?)?
+    // live width while dragging the edge; `done` on mouse-up (persist then)
+    var onWidthChange: ((CGFloat, _ done: Bool) -> Void)?
+    var minWidth: CGFloat = 140, maxWidth: CGFloat = 480
+    private var vScroll: CGFloat = 0
+    private var vRowH: CGFloat { 34 * zoom }
+    private var vPinRowH: CGFloat { 30 * zoom }
+    private var resizing: (startX: CGFloat, startW: CGFloat)?
+    private var vCard: NSRect {
+        NSRect(x: 8, y: 6, width: max(0, bounds.width - 8), height: max(0, bounds.height - 14))
+    }
+    private var vPinnedHeadRect: NSRect? {
+        guard !pinned.isEmpty else { return nil }
+        let c = vCard
+        return NSRect(x: c.minX, y: c.minY + 6, width: c.width, height: 24 * zoom)
+    }
+    private func vPinnedRows() -> [(rect: NSRect, path: String)] {
+        guard let h = vPinnedHeadRect else { return [] }
+        let c = vCard
+        return pinned.prefix(maxPinnedShown).enumerated().map { i, p in
+            (NSRect(x: c.minX + 6, y: h.maxY + 2 + CGFloat(i) * (vPinRowH + 1), width: max(0, c.width - 12), height: vPinRowH), p)
+        }
+    }
+    private var vHeadRect: NSRect {
+        let c = vCard
+        let top = vPinnedRows().last.map { $0.rect.maxY + 10 } ?? c.minY + 6
+        return NSRect(x: c.minX, y: top, width: c.width, height: 24 * zoom)
+    }
+    private var vAddRect: NSRect {
+        let h = vHeadRect
+        return NSRect(x: h.maxX - 8 - 22 * zoom, y: h.midY - 11 * zoom, width: 22 * zoom, height: 22 * zoom)
+    }
+    // the scrolling list area under the section label
+    private var vListRect: NSRect {
+        let c = vCard, top = vHeadRect.maxY + 4
+        return NSRect(x: c.minX + 6, y: top, width: max(0, c.width - 12), height: max(0, c.maxY - 6 - top))
+    }
+    // the draggable right edge of the card
+    private var vResizeRect: NSRect { NSRect(x: bounds.maxX - 6, y: 0, width: 6, height: bounds.height) }
+    private var vContentH: CGFloat { CGFloat(titles.count) * (vRowH + 1) }
+    // visible rows: (rect, tab index, ✕ rect)
+    private func vRows() -> [(rect: NSRect, index: Int, close: NSRect?)] {
+        let l = vListRect
+        var out: [(NSRect, Int, NSRect?)] = []
+        for i in titles.indices {
+            let r = NSRect(x: l.minX, y: l.minY + CGFloat(i) * (vRowH + 1) - vScroll, width: l.width, height: vRowH)
+            guard r.maxY > l.minY, r.minY < l.maxY else { continue }
+            let close = NSRect(x: r.maxX - closeSize - 6 * zoom, y: r.midY - closeSize / 2,
+                               width: closeSize, height: closeSize)
+            out.append((r, i, closable && onCloseTab != nil ? close : nil))
+        }
+        return out
+    }
+    private func clampScroll() {
+        vScroll = max(0, min(vScroll, vContentH - vListRect.height))
+    }
+    // bring the selected row into view (selection from the keyboard / host)
+    func revealSelected() {
+        guard vertical, titles.indices.contains(selected) else { return }
+        let l = vListRect
+        let top = CGFloat(selected) * (vRowH + 1)
+        if top < vScroll { vScroll = top }
+        else if top + vRowH > vScroll + l.height { vScroll = top + vRowH - l.height }
+        clampScroll()
+        needsDisplay = true
+    }
+    override func scrollWheel(with event: NSEvent) {
+        guard vertical else { return super.scrollWheel(with: event) }
+        let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 10
+        vScroll -= dy
+        clampScroll()
+        needsDisplay = true
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if vertical, onWidthChange != nil { addCursorRect(vResizeRect, cursor: .resizeLeftRight) }
+    }
+    // last-write time per tab file (from pathTip), cached for a few seconds
+    private var mtimeCache: [String: (text: String, at: Date)] = [:]
+    private func vMeta(_ i: Int) -> String {
+        guard let p = pathTip?(i), !p.isEmpty else { return "" }
+        if let hit = mtimeCache[p], Date().timeIntervalSince(hit.at) < 5 { return hit.text }
+        let full = (p as NSString).expandingTildeInPath
+        var text = ""
+        if let d = (try? FileManager.default.attributesOfItem(atPath: full))?[.modificationDate] as? Date {
+            let f = DateFormatter()
+            f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "MMM d"
+            text = f.string(from: d)
+        }
+        mtimeCache[p] = (text, Date())
+        return text
+    }
+    private func vIcon(_ i: Int) -> String {
+        if let s = rowIcon?(i) { return s }
+        switch (titles[i] as NSString).pathExtension.lowercased() {
+        case "md", "markdown", "txt", "": return "doc.text"
+        case "json", "toml", "yaml", "yml", "cfg", "conf", "ini", "plist": return "gearshape"
+        case "log": return "list.bullet.rectangle"
+        case "swift", "py", "js", "ts", "sh", "rb", "go", "rs", "c", "h": return "chevron.left.forwardslash.chevron.right"
+        default: return "doc"
+        }
+    }
+    private func vSectionLabel(_ text: String, in head: NSRect) {
+        let labAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10 * zoom, weight: .semibold),
+            .foregroundColor: config.colors.dim, .kern: 0.8,
+        ]
+        let lab = text.uppercased() as NSString
+        let lsz = lab.size(withAttributes: labAttrs)
+        lab.draw(at: NSPoint(x: head.minX + 14, y: head.midY - lsz.height / 2), withAttributes: labAttrs)
+    }
+    private func drawVertical() {
+        let c = config.colors
+        let card = vCard
+        guard card.width > 0, card.height > 0 else { return }
+        c.mantle.setFill()
+        NSBezierPath(roundedRect: card, xRadius: 12 * zoom, yRadius: 12 * zoom).fill()
+        let radius = config.buttonRadius * zoom
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingMiddle
+        // PINNED folders
+        if let ph = vPinnedHeadRect {
+            vSectionLabel(pinnedTitle, in: ph)
+            for (k, (r, path)) in vPinnedRows().enumerated() {
+                let sel = pinnedSelected == path
+                if sel || hoverIndex == -10 - k {
+                    (sel ? c.surface1 : c.surface0).setFill()
+                    NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+                }
+                ButtonStyle.symbol("folder", in: NSRect(x: r.minX + 8 * zoom, y: r.minY, width: 16 * zoom, height: r.height),
+                                   color: sel ? c.accentOn : c.dim, size: 11 * zoom)
+                let name = (path as NSString).abbreviatingWithTildeInPath as NSString
+                let a: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12.5 * zoom, weight: sel ? .semibold : .regular),
+                                                        .foregroundColor: c.text, .paragraphStyle: para]
+                let sz = name.size(withAttributes: a)
+                name.draw(in: NSRect(x: r.minX + 30 * zoom, y: r.midY - sz.height / 2,
+                                     width: max(0, r.width - 38 * zoom), height: sz.height), withAttributes: a)
+            }
+        }
+        // section label + "+"
+        let head = vHeadRect
+        vSectionLabel(sectionTitle, in: head)
+        if config.tabsAddButton {
+            let r = vAddRect
+            let st: ButtonState = pressedIndex == -2 ? .pressed : hoverIndex == -2 ? .hover : .idle
+            ButtonStyle.draw(r, st, c, radius: radius, flat: true)
+            ButtonStyle.plus(in: r, color: ButtonStyle.text(st, c), arm: 4.5 * zoom)
+        }
+        // rows, clipped to the list area
+        let list = vListRect
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: list).addClip()
+        for (r, i, close) in vRows() {
+            let sel = i == selected, hov = hoverIndex == i
+            if sel || hov {
+                (sel ? c.surface1 : c.surface0).setFill()
+                NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+            }
+            ButtonStyle.symbol(vIcon(i), in: NSRect(x: r.minX + 8 * zoom, y: r.minY, width: 16 * zoom, height: r.height),
+                               color: sel ? c.accentOn : c.dim, size: 11 * zoom)
+            let showClose = close != nil && hov
+            let b = badge(i)
+            let meta = showClose ? "" : (b.map { $0.text } ?? vMeta(i))
+            let metaAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10 * zoom, weight: .regular),
+                .foregroundColor: c.dim,
+            ]
+            let msz = (meta as NSString).size(withAttributes: metaAttrs)
+            var right = showClose ? close!.minX - 4 : r.maxX - 8 * zoom - (meta.isEmpty ? 0 : msz.width + 8 * zoom)
+            if !meta.isEmpty {
+                (meta as NSString).draw(at: NSPoint(x: r.maxX - 8 * zoom - msz.width, y: r.midY - msz.height / 2),
+                                        withAttributes: metaAttrs)
+            }
+            // a status badge's dot sits just left of its text
+            if let b, !showClose {
+                let dot = NSRect(x: right - dotW, y: r.midY - dotW / 2, width: dotW, height: dotW)
+                c.tone(b.tone).setFill()
+                NSBezierPath(ovalIn: dot).fill()
+                right = dot.minX - 6 * zoom
+            }
+            let tAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12.5 * zoom, weight: sel ? .semibold : .regular),
+                .foregroundColor: c.text, .paragraphStyle: para,
+            ]
+            let tx = r.minX + 30 * zoom
+            let tsz = (titles[i] as NSString).size(withAttributes: tAttrs)
+            (titles[i] as NSString).draw(in: NSRect(x: tx, y: r.midY - tsz.height / 2,
+                                                    width: max(0, right - tx), height: tsz.height),
+                                         withAttributes: tAttrs)
+            if showClose, let close {
+                if hoverCloseIndex == i {
+                    c.tone(.danger).withAlphaComponent(0.22).setFill()
+                    NSBezierPath(ovalIn: close).fill()
+                }
+                ButtonStyle.cross(in: close, color: hoverCloseIndex == i ? c.tone(.danger) : c.dim, arm: 3 * zoom)
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        // a thin scroll hint when rows overflow
+        if vContentH > list.height + 1 {
+            let frac = list.height / vContentH
+            let h = max(20, list.height * frac)
+            let y = list.minY + (list.height - h) * (vScroll / max(1, vContentH - list.height))
+            c.dim.withAlphaComponent(0.35).setFill()
+            NSBezierPath(roundedRect: NSRect(x: card.maxX - 4, y: y, width: 2.5, height: h),
+                         xRadius: 1.25, yRadius: 1.25).fill()
+        }
+        // the resize edge lights up while hovered / dragged
+        if onWidthChange != nil, resizing != nil || hoverIndex == -3 {
+            c.accentOn.withAlphaComponent(0.6).setFill()
+            NSBezierPath(roundedRect: NSRect(x: card.maxX - 2, y: card.minY + 12, width: 2, height: card.height - 24),
+                         xRadius: 1, yRadius: 1).fill()
+        }
+    }
+    // what's under the point: tab index ≥ 0, -2 = the "+", -3 = the resize
+    // edge, -10-k = pinned folder k; `close` = on that row's ✕
+    private func vHit(_ p: NSPoint) -> (index: Int, close: Bool)? {
+        if onWidthChange != nil, vResizeRect.contains(p) { return (-3, false) }
+        if config.tabsAddButton, vAddRect.contains(p) { return (-2, false) }
+        for (k, (r, _)) in vPinnedRows().enumerated() where r.contains(p) { return (-10 - k, false) }
+        guard vListRect.contains(p) else { return nil }
+        for (r, i, close) in vRows() where r.contains(p) {
+            return (i, close.map { $0.insetBy(dx: -2, dy: -2).contains(p) } ?? false)
+        }
+        return nil
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard vertical, let rs = resizing else { return super.mouseDragged(with: event) }
+        let x = convert(event.locationInWindow, from: nil).x
+        let w = max(minWidth, min(maxWidth, rs.startW + (x - rs.startX)))
+        onWidthChange?(w, false)
+        needsDisplay = true
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if vertical { clampScroll(); window?.invalidateCursorRects(for: self) }
+    }
     private var tabH: CGFloat { 22 * zoom }
     // breathing room above/below the pills inside the (deeper) strip
     private var vpad: CGFloat { 4 * zoom }
@@ -1501,6 +1757,24 @@ final class PopupTabsBar: NSView {
     }
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        if vertical {
+            let hit = vHit(p)
+            let over = hit?.index, overClose = hit?.close == true ? hit?.index : nil
+            let tip: String? = over.flatMap { i in
+                if i >= 0 { return badge(i)?.tip ?? pathTip?(i) }
+                if i == -2 { return "New" }
+                if i == -3 { return "Drag to resize" }
+                let k = -10 - i
+                return pinned.indices.contains(k) ? "Open \((pinned[k] as NSString).abbreviatingWithTildeInPath) in the file browser" : nil
+            }
+            if toolTip != tip { toolTip = tip }
+            if over != hoverIndex || overClose != hoverCloseIndex {
+                hoverIndex = over
+                hoverCloseIndex = overClose
+                needsDisplay = true
+            }
+            return
+        }
         var over: Int?
         var overClose: Int?
         for (i, (rect, title, close)) in pillRects().enumerated() where rect.contains(p) {
@@ -1551,7 +1825,8 @@ final class PopupTabsBar: NSView {
 
     // Full height this bar needs so every pill is visible (wraps to rows).
     func heightNeeded(forWidth width: CGFloat) -> CGFloat {
-        CGFloat(rowCount(forWidth: width)) * (tabH + gap) - gap + vpad * 2
+        if vertical { return frame.height }
+        return CGFloat(rowCount(forWidth: width)) * (tabH + gap) - gap + vpad * 2
     }
 
     // Wrapped layout of every pill; the "+" add button is first. Each tab pill
@@ -1581,6 +1856,7 @@ final class PopupTabsBar: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if vertical { return drawVertical() }
         let c = config.colors
         let radius = config.buttonRadius * zoom
         // the strip sits one level DEEPER than the card (mantle), like a
@@ -1598,16 +1874,19 @@ final class PopupTabsBar: NSView {
             let st: ButtonState = pressedIndex == i ? .pressed
                 : isSelectedTab ? (hovered ? .onHover : .on)
                 : hovered ? .hover : .idle
-            // active tab: a SOLID accent pill with deep text (the current
-            // window in a themed tmux status line); others stay flat
+            // active tab (quiet look): full-strength text over a 2pt accent
+            // underline — no filled pill, so only one thing on screen is
+            // ever solid; others stay flat and dim until hovered
             let fg: NSColor
             if isSelectedTab {
-                let pill = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
-                                        xRadius: radius, yRadius: radius)
-                (hovered ? c.accentOn.blended(withFraction: 0.12, of: c.onAccent) ?? c.accentOn
-                         : c.accentOn).setFill()
-                pill.fill()
-                fg = c.onAccent
+                if hovered {
+                    c.surface0.setFill()
+                    NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).fill()
+                }
+                let u = NSRect(x: rect.minX + 6 * zoom, y: rect.maxY - 2, width: rect.width - 12 * zoom, height: 2)
+                c.accentOn.setFill()
+                NSBezierPath(roundedRect: u, xRadius: 1, yRadius: 1).fill()
+                fg = c.text
             } else {
                 ButtonStyle.draw(rect, st, c, radius: radius, flat: true)
                 fg = ButtonStyle.text(st, c)
@@ -1639,13 +1918,6 @@ final class PopupTabsBar: NSView {
                 let dot = NSRect(x: x, y: labelRect.midY - dotW / 2, width: dotW, height: dotW)
                 c.tone(b.tone).setFill()
                 NSBezierPath(ovalIn: dot).fill()
-                if isSelectedTab {
-                    // keep the hue readable on the solid accent pill
-                    c.onAccent.withAlphaComponent(0.55).setStroke()
-                    let ring = NSBezierPath(ovalIn: dot.insetBy(dx: -0.5, dy: -0.5))
-                    ring.lineWidth = 1
-                    ring.stroke()
-                }
                 x += dotW + 5 * zoom
                 ts.draw(at: NSPoint(x: x, y: labelRect.midY - tsz.height / 2), withAttributes: attrs)
                 x += tsz.width + 5 * zoom
@@ -1659,24 +1931,50 @@ final class PopupTabsBar: NSView {
             // ✕ on the selected tab and the hovered one; its own hover disc
             if let close, isSelectedTab || hovered {
                 if hoverCloseIndex == i {
-                    (isSelectedTab ? c.onAccent.withAlphaComponent(0.18)
-                                   : c.tone(.danger).withAlphaComponent(0.22)).setFill()
+                    c.tone(.danger).withAlphaComponent(0.22).setFill()
                     NSBezierPath(ovalIn: close).fill()
                 }
-                let xc = isSelectedTab ? c.onAccent.withAlphaComponent(hoverCloseIndex == i ? 1 : 0.7)
-                    : hoverCloseIndex == i ? c.tone(.danger) : c.dim.withAlphaComponent(0.8)
+                let xc = hoverCloseIndex == i ? c.tone(.danger) : c.dim.withAlphaComponent(0.8)
                 ButtonStyle.cross(in: close, color: xc, arm: 3 * zoom)
             }
         }
     }
 
     override func mouseUp(with event: NSEvent) {
+        if resizing != nil {
+            resizing = nil
+            onWidthChange?(bounds.width, true)
+            needsDisplay = true
+        }
         if pressedIndex != nil { pressedIndex = nil; needsDisplay = true }
         super.mouseUp(with: event)
     }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        if vertical {
+            guard let hit = vHit(p) else { return }
+            if hit.index == -3 {
+                resizing = (convert(event.locationInWindow, from: nil).x, bounds.width)
+                needsDisplay = true
+            } else if hit.index <= -10 {
+                let k = -10 - hit.index
+                if pinned.indices.contains(k) { onPinned?(pinned[k]) }
+            } else if hit.index == -2 {
+                pressedIndex = -2
+                needsDisplay = true
+                onAddTab?()
+            } else if hit.close {
+                onCloseTab?(hit.index)
+            } else {
+                onClick?(hit.index)
+                if hit.index != selected {
+                    selected = hit.index
+                    onSelect?(hit.index)
+                }
+            }
+            return
+        }
         // the ✕ badge has priority over selecting the tab
         for (i, (rect, title, close)) in pillRects().enumerated() where rect.contains(p) {
             pressedIndex = i
@@ -1703,27 +2001,51 @@ final class PopupTabsBar: NSView {
     // copy-path header button in favor of this)
     override func rightMouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        for (rect, title, _) in pillRects() where rect.contains(p) {
-            guard title != "+", let i = titles.firstIndex(of: title) else { break }
-            if let menuFor, let menu = menuFor(i) {
+        var target: Int?
+        if vertical {
+            if let hit = vHit(p), hit.index <= -10, pinned.indices.contains(-10 - hit.index),
+               let menu = pinnedMenu?(pinned[-10 - hit.index]) {
                 NSMenu.popUpContextMenu(menu, with: event, for: self)
                 return
             }
-            let item = NSMenuItem(title: "Copy Path",
-                                  action: #selector(copyPath(_:)),
-                                  keyEquivalent: "")
-            item.target = self
-            item.representedObject = i
-            let menu = NSMenu()
-            menu.addItem(item)
+            if let hit = vHit(p), hit.index >= 0 { target = hit.index }
+        } else {
+            for (rect, title, _) in pillRects() where rect.contains(p) {
+                if title != "+" { target = titles.firstIndex(of: title) }
+                break
+            }
+        }
+        guard let i = target else { return super.rightMouseDown(with: event) }
+        if let menuFor, let menu = menuFor(i) {
             NSMenu.popUpContextMenu(menu, with: event, for: self)
             return
         }
-        super.rightMouseDown(with: event)
+        let menu = NSMenu()
+        func add(_ title: String, _ sel: Selector) {
+            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            item.target = self
+            item.representedObject = i
+            menu.addItem(item)
+        }
+        add("Copy Path", #selector(copyPath(_:)))
+        if let path = pathTip?(i), !path.isEmpty { add("Reveal in Finder", #selector(revealPath(_:))) }
+        if closable, onCloseTab != nil {
+            menu.addItem(.separator())
+            add("Close", #selector(closeTabItem(_:)))
+        }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
     @objc private func copyPath(_ sender: NSMenuItem) {
         guard let i = sender.representedObject as? Int else { return }
         onCopyPath?(i)
+    }
+    @objc private func revealPath(_ sender: NSMenuItem) {
+        guard let i = sender.representedObject as? Int, let p = pathTip?(i) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: (p as NSString).expandingTildeInPath)])
+    }
+    @objc private func closeTabItem(_ sender: NSMenuItem) {
+        guard let i = sender.representedObject as? Int else { return }
+        onCloseTab?(i)
     }
 }
 
@@ -3121,16 +3443,24 @@ final class ThemedPushButton: NSButton, PopupThemeable {
              : st == .hover ? a.blended(withFraction: 0.12, of: .white) ?? a : a).setFill()
             path.fill()
             fg = c.onAccent
+        // quiet look: only the primary is filled — the others are outlines
+        // that take a faint fill under the pointer
         case .danger:
             let d = c.tone(.danger)
-            d.withAlphaComponent(st == .pressed ? 0.32 : st == .hover ? 0.24 : 0.15).setFill()
-            path.fill()
+            if st != .idle {
+                d.withAlphaComponent(st == .pressed ? 0.2 : 0.1).setFill()
+                path.fill()
+            }
+            d.withAlphaComponent(0.55).setStroke()
+            path.lineWidth = 1
+            path.stroke()
             fg = d
         case .normal:
-            ButtonStyle.fill(st == .idle ? .hover : st == .hover ? .pressed : .onHover, c).setFill()
-            if st == .pressed { ButtonStyle.fill(.pressed, c).setFill() }
-            path.fill()
-            ButtonStyle.inputStroke(c).setStroke()
+            if st != .idle {
+                (st == .pressed ? c.surface1 : c.surface0).setFill()
+                path.fill()
+            }
+            c.dim.withAlphaComponent(0.4).setStroke()
             path.lineWidth = 1
             path.stroke()
             fg = c.text
@@ -4211,6 +4541,83 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     private let previewList: FileListPane
     private let previewListScroll = NSScrollView()
     private var favPills: [ThemeButton] = []
+    // Files view (useSidebar): the pills become a left sidebar — PINNED
+    // folders, then PLACES (the virtual lists + the standard folders)
+    private var sidebar: PopupTabsBar?
+    private var sidebarW: CGFloat = 0
+    public var onSidebarWidthChange: ((CGFloat) -> Void)?
+    private lazy var places: [(title: String, symbol: String, path: String)] = {
+        let h = NSHomeDirectory()
+        return [("Home", "house", h), ("Desktop", "menubar.dock.rectangle", h + "/Desktop"),
+                ("Documents", "doc", h + "/Documents"), ("Downloads", "arrow.down.circle", h + "/Downloads")]
+            .filter { FileManager.default.fileExists(atPath: $0.2) }
+    }()
+    public func useSidebar(width: CGFloat) {
+        guard width > 0, sidebar == nil else { return }
+        sidebarW = width
+        var cfg = config
+        cfg.tabsAddButton = false
+        let bar = PopupTabsBar(config: cfg)
+        bar.vertical = true
+        bar.closable = false
+        bar.sectionTitle = "Places"
+        bar.maxPinnedShown = 12
+        bar.rowIcon = { [weak self] i in
+            guard let self else { return nil }
+            if i < self.virtualLists.count { return self.virtualLists[i].symbol }
+            let k = i - self.virtualLists.count
+            return self.places.indices.contains(k) ? self.places[k].symbol : "folder"
+        }
+        bar.onSelect = { [weak self] i in
+            guard let self else { return }
+            if i < self.virtualLists.count { self.showVirtual(i); return }
+            let k = i - self.virtualLists.count
+            if self.places.indices.contains(k) { self.cd(self.places[k].path) }
+        }
+        bar.onPinned = { [weak self] path in
+            guard let self, FileManager.default.fileExists(atPath: path) else { return }
+            self.cd(path)
+        }
+        bar.pinnedMenu = { [weak self] path in
+            let m = NSMenu()
+            m.addItem(menuItem("Open") { self?.cd(path) })
+            m.addItem(menuItem("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            })
+            m.addItem(menuItem("Copy Path") { copyText(path) })
+            if self?.pinnedFavorites.contains(path) == true {
+                m.addItem(.separator())
+                m.addItem(menuItem("Unpin") { self?.unpin(path) })
+            }
+            return m
+        }
+        bar.onWidthChange = { [weak self] w, done in
+            guard let self else { return }
+            self.sidebarW = w.rounded()
+            self.needsLayout = true
+            if done { self.onSidebarWidthChange?(self.sidebarW) }
+        }
+        addSubview(bar)
+        sidebar = bar
+        rebuildPills()
+    }
+    private func unpin(_ path: String) {
+        pinnedFavorites.removeAll { $0 == path }
+        saveFavorites()
+        rebuildPills()
+        updateStarTitle()
+        onFavoritesChanged?()
+    }
+    private func syncSidebar() {
+        guard let bar = sidebar else { return }
+        bar.titles = virtualLists.map(\.title) + places.map(\.title)
+        bar.pinned = shownFavorites
+        bar.pinnedSelected = inRecent ? nil : cwd
+        if let v = virtualIndex { bar.selected = v }
+        else if let k = places.firstIndex(where: { $0.path == cwd }) { bar.selected = virtualLists.count + k }
+        else { bar.selected = -1 }
+        bar.needsDisplay = true
+    }
     private static let imageExts = Set(["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "pdf"])
     private static let textLimit = 262144
     // previews load OFF the main thread (a Recent list is mostly screenshots
@@ -4569,7 +4976,11 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         }
     }
     private func layoutPanes() {
-        let w = bounds.width
+        let full = bounds.width
+        // the sidebar (Files view) takes the left edge, full height
+        let left: CGFloat = sidebar != nil ? sidebarW + 4 : 0
+        sidebar?.frame = NSRect(x: 0, y: 0, width: sidebarW, height: bounds.height)
+        let w = full
         let toolbarY: CGFloat = 4
         let toolbarH: CGFloat = 24
         // pin first (left), then parent, then the sort pair (sort-key
@@ -4578,7 +4989,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         // every button is sized by its own label (equal side padding); the
         // pin button reserves its longer "Pinned" label so toggling it never
         // shifts the row
-        let x0: CGFloat = 8
+        let x0: CGFloat = 8 + left
         starButton.frame = NSRect(x: x0, y: toolbarY,
                                   width: max(starButton.fittingWidth(for: "Pin"),
                                              starButton.fittingWidth(for: "Pinned")),
@@ -4593,20 +5004,20 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
                                               orderButton.fittingWidth(for: "Desc")),
                                    height: toolbarH)
         searchField.frame = NSRect(x: orderButton.frame.maxX + 10, y: toolbarY,
-                                   width: max(60, w - orderButton.frame.maxX - 10 - x0),
+                                   width: max(60, w - orderButton.frame.maxX - 10 - 8),
                                    height: toolbarH)
         // favorites wrap to as many lines as their paths need
         let favY = toolbarY + toolbarH + 5
         let favH = layoutFavorites(from: favY)
         let listY = favY + favH + 4
         let bottomH: CGFloat = 18
-        statusLine.frame = NSRect(x: 8, y: bounds.height - bottomH + 1,
-                                  width: max(0, w - 16), height: bottomH - 3)
+        statusLine.frame = NSRect(x: 8 + left, y: bounds.height - bottomH + 1,
+                                  width: max(0, w - 16 - left), height: bottomH - 3)
         let splitW: CGFloat = 6
         // the split is draggable; clamp so neither pane gets tiny
-        let splitX = min(max(splitFraction * w, 200), max(200, w - 200))
+        let splitX = min(max(splitFraction * w, left + 200), max(left + 200, w - 200))
         let contentH = max(0, bounds.height - listY - bottomH)
-        listScroll.frame = NSRect(x: 0, y: listY, width: splitX, height: contentH)
+        listScroll.frame = NSRect(x: left, y: listY, width: splitX - left, height: contentH)
         splitter.frame = NSRect(x: splitX, y: listY, width: splitW, height: contentH)
         let previewX = splitX + splitW
         let previewW = max(0, w - previewX)
@@ -5915,6 +6326,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
             try? data.write(to: favURL)
         }
     }
+    // the pinned folders (config + starred) for the notes sidebar; it hears
+    // about every pin / unpin through onFavoritesChanged
+    public var favoriteFolders: [String] { mergedFavorites() }
+    public var onFavoritesChanged: (() -> Void)?
     // config favorites + starred, deduped, order-preserving
     private func mergedFavorites() -> [String] {
         var out: [String] = []
@@ -5941,6 +6356,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         saveFavorites()
         rebuildPills()
         updateStarTitle()
+        onFavoritesChanged?()
         onStatus?(shownFavorites.contains(cwd) ? "★ pinned \(displayPath(cwd))" : "unpinned \(displayPath(cwd))")
     }
     private func updateStarTitle() {
@@ -5953,6 +6369,12 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         for p in favPills { p.removeFromSuperview() }
         favPills = []
         shownFavorites = mergedFavorites()
+        if sidebar != nil {
+            syncSidebar()
+            updateStarTitle()
+            needsLayout = true
+            return
+        }
         for (i, v) in virtualLists.enumerated() {
             let r = ThemeButton(config: config, title: v.title, symbol: v.symbol)
             r.isOn = virtualIndex == i
@@ -6136,10 +6558,11 @@ final class PopupStatusBar: NSView {
 // card, the tab strip and the panes below them. Every style is built from
 // the window's own theme (header color, accent, accent2), never fixed hues.
 public enum HeaderStyle: String, CaseIterable {
-    case flat, edge, stripe, tinted, glow, aurora
+    case quiet, flat, edge, stripe, tinted, glow, aurora
 
     public var label: String {
         switch self {
+        case .quiet: return "Quiet"
         case .flat: return "Flat"
         case .edge: return "Accent Edge"
         case .stripe: return "Accent Stripe"
@@ -6212,7 +6635,8 @@ final class PopupChrome: NSView {
         didSet { needsDisplay = true }
     }
     var navOn: Int? { didSet { if navOn != oldValue { needsDisplay = true } } }
-    private let navSize: CGFloat = 26
+    private let navSize: CGFloat = 24   // segment height
+    private let navW: CGFloat = 32      // segment width (capsule)
     private var navTipRects: [NSRect] = []
     // addToolTip does NOT retain its owner: a temporary NSString was freed
     // and the tooltip timer crashed messaging it — keep them alive here
@@ -6220,8 +6644,8 @@ final class PopupChrome: NSView {
     func navRect(_ i: Int) -> NSRect {
         let x0 = headerIcon != nil ? iconButtonRect.maxX + 6
             : config.headerCloseButton ? closeButtonRect.maxX + 6 : 6
-        return NSRect(x: x0 + CGFloat(i) * (navSize + 2), y: (dragHeaderHeight - navSize) / 2,
-                      width: navSize, height: navSize)
+        return NSRect(x: x0 + 3 + CGFloat(i) * (navW + 2), y: (dragHeaderHeight - navSize) / 2,
+                      width: navW, height: navSize)
     }
     // left-to-right segment order by button id (copy path=1, copy config=2,
     // copy rows=3, host buttons = their id). nil = default (copy buttons
@@ -6451,7 +6875,7 @@ final class PopupChrome: NSView {
     // full width the header needs (left icon + meta + title pill + every
     // button at full label): the window grows to this rather than clip text
     func neededWidth() -> CGFloat {
-        var w: CGFloat = 34 + CGFloat(navIcons.count) * (navSize + 2) + (navIcons.isEmpty ? 0 : 10)
+        var w: CGFloat = 34 + CGFloat(navIcons.count) * (navW + 2) + 6 + (navIcons.isEmpty ? 0 : 10)
         let metaAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10),
         ]
@@ -6474,7 +6898,10 @@ final class PopupChrome: NSView {
             if let c = v as? PopupChrome { c.needsDisplay = true }
             v.subviews.forEach(walk)
         }
-        for w in NSApp.windows { if let v = w.contentView { walk(v) } }
+        // the style is read from commands.toml before NSApplication exists
+        // (NSApp is nil then — nothing is on screen to restyle anyway)
+        guard let app = NSApp else { return }
+        for w in app.windows { if let v = w.contentView { walk(v) } }
     }
 
     // the header strip in HeaderStyle.current: the fill, then its bottom edge
@@ -6492,6 +6919,11 @@ final class PopupChrome: NSView {
             NSRect(x: 0, y: header.maxY - width, width: header.width, height: width).fill()
         }
         switch HeaderStyle.current {
+        case .quiet:
+            // no band: the header IS the card (its own color), set off only
+            // by a hairline — the content comes forward, the chrome steps back
+            config.colors.background.setFill(); header.fill()
+            bottomLine(config.colors.hairline, 1)
         case .flat:
             base.setFill(); header.fill()
             bottomLine(config.colors.hairline, 1)
@@ -6715,22 +7147,41 @@ final class PopupChrome: NSView {
 
     // the view switcher's icons (their rects join extraButtonRects)
     private func drawNavIcons() {
-        // view switcher: one quiet well, a solid chip under the current
-        // view, a hover chip under the pointer; icons keep their colors
+        // view switcher: the views lumped together in ONE capsule track (a
+        // segmented control); the current view sits on a raised chip with a
+        // soft shadow, the pointer gets a faint one
+        let c = config.colors
         let first = navRect(0), last = navRect(navIcons.count - 1)
-        let well = NSRect(x: first.minX - 2, y: first.minY - 2,
-                          width: last.maxX - first.minX + 4, height: first.height + 4)
-        ButtonStyle.draw(well, .idle, config.colors, radius: config.buttonRadius + 1, flat: true)
+        let well = NSRect(x: first.minX - 3, y: first.minY - 3,
+                          width: last.maxX - first.minX + 6, height: first.height + 6)
+        c.text.withAlphaComponent(c.isLight ? 0.07 : 0.06).setFill()
+        NSBezierPath(roundedRect: well, xRadius: well.height / 2, yRadius: well.height / 2).fill()
         var tips: [NSRect] = []
         for (i, n) in navIcons.enumerated() {
             let r = navRect(i)
             let on = navOn == n.id, hov = hoveredSegment == n.id
-            if on || hov {
-                ButtonStyle.draw(r, on ? (hov ? .onHover : .on) : .hover, config.colors,
-                                 radius: config.buttonRadius)
+            let chip = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
+            if on {
+                NSGraphicsContext.saveGraphicsState()
+                let sh = NSShadow()
+                sh.shadowColor = NSColor.black.withAlphaComponent(c.isLight ? 0.18 : 0.35)
+                sh.shadowOffset = NSSize(width: 0, height: -1)
+                sh.shadowBlurRadius = 2.5
+                sh.set()
+                (c.isLight ? NSColor.white
+                           : c.surface1.blended(withFraction: hov ? 0.10 : 0.04, of: ButtonStyle.opaque(c.text)) ?? c.surface1)
+                    .setFill()
+                chip.fill()
+                NSGraphicsContext.restoreGraphicsState()
+                c.text.withAlphaComponent(c.isLight ? 0.08 : 0.10).setStroke()
+                chip.lineWidth = 0.5
+                chip.stroke()
+            } else if hov {
+                c.text.withAlphaComponent(0.08).setFill()
+                chip.fill()
             }
             // the other views read a touch quieter than the current one
-            let isz: CGFloat = 18
+            let isz: CGFloat = 16
             popupDrawImage(n.image, in: NSRect(x: r.midX - isz / 2, y: r.midY - isz / 2,
                                                width: isz, height: isz),
                            fraction: on || hov ? 1 : 0.7)
@@ -7288,6 +7739,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var terminalRestarter: TerminalAutoRestart?
     // vim mode: the chrome-less editor terminal that replaces the text view
     private var vimView: LocalProcessTerminalView?
+    // notes prose mode (NotesProse.swift): the reading page over the editor
+    // and its Prose | Edit switch; the host hands over the note to render
+    private var proseView: ProseView?
+    private var proseSwitch: ProseModeSwitch?
+    public private(set) var proseShown = false
+    public var proseFont = "Literata, ui-serif, \"New York\", Georgia, serif"
+    public var proseFontSize: CGFloat = 17
+    public var proseWidth: CGFloat = 640
+    public var proseProvider: (() -> ProseSource?)? {
+        didSet { installProseSwitch() }
+    }
     private var vimRestarter: TerminalAutoRestart?
     // set while the window is being torn down so an exiting editor is NOT
     // relaunched
@@ -7452,6 +7914,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             relayoutTabs()
         }
     }
+    // sidebar tabs: the SF Symbol for row i (nil = by file extension)
+    public var tabRowIcon: ((Int) -> String?)?
     // hover tip per tab (the host returns the tab's full file path)
     public var tabPathTip: ((Int) -> String?)? {
         didSet { tabsBar?.pathTip = tabPathTip }
@@ -7469,6 +7933,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             tabsBar?.selected = selectedTab
             tabsBar?.needsDisplay = true
             onTabChange?(selectedTab)
+            if proseShown { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.refreshProse() } }
         }
     }
     // dim metadata line in the tab strip under the selected file's pill
@@ -7594,7 +8059,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let z = zoom
         guard let backdrop = panel.contentView else { return }
         if config.editMode {
-            if let bar = tabsBar {
+            if let bar = tabsBar, !sidebarTabs {
                 bar.frame = NSRect(x: 0, y: config.headerHeight * z + 2,
                                    width: backdrop.bounds.width,
                                    height: config.tabBarHeight * z)
@@ -7604,18 +8069,18 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             layoutFileBrowser()
         } else {
             let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
-            let fieldFrame = NSRect(x: config.padding + 10,
+            let fieldFrame = NSRect(x: listLeft + config.padding + 10,
                                     y: headerOffset + config.padding + 2,
-                                    width: config.width - 2 * (config.padding + 10),
+                                    width: config.width - listLeft - 2 * (config.padding + 10),
                                     height: 24 * z)
             field.frame = fieldFrame
             var cb = fieldFrame.maxY + 4
             if let bar = filterBar {
-                bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
+                bar.frame = NSRect(x: listLeft, y: cb, width: backdrop.bounds.width - listLeft,
                                    height: config.filterBarHeight * z)
                 cb += config.filterBarHeight * z + 2
             }
-            if let bar = tabsBar {
+            if let bar = tabsBar, !sidebarTabs {
                 bar.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width,
                                    height: config.tabBarHeight * z)
                 cb += config.tabBarHeight * z + 2
@@ -7826,6 +8291,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             self?.onTabCopyPath?(index)
         }
         bar.pathTip = { [weak self] i in self?.tabPathTip?(i) }
+        bar.onWidthChange = { [weak self] w, done in self?.setSidebarWidth(w, done: done) }
+        bar.rowIcon = { [weak self] i in self?.tabRowIcon?(i) }
+        bar.sectionTitle = config.tabsSidebarTitle
         return bar
     }
 
@@ -7845,7 +8313,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // edit mode: the plain-text editor below the drag header (+ tab strip),
     // the vim pane over it, the find bar, the status strip, the shell drawer
     private func buildEditor(in backdrop: NSView) {
-        let topY = config.headerHeight * zoom + (config.tabs ? config.tabBarHeight * zoom + 2 : 0)
+        let topY = config.headerHeight * zoom + editorTabStripHeight
         let scroll = NSScrollView(frame: NSRect(x: 0, y: topY,
                                                 width: backdrop.bounds.width,
                                                 height: backdrop.bounds.height - topY))
@@ -7922,6 +8390,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if config.tabs {
             let bar = makeTabsBar(frame: NSRect(x: 0, y: config.headerHeight * zoom + 2,
                                                 width: backdrop.bounds.width, height: config.tabBarHeight * zoom))
+            if config.tabsSidebarWidth > 0 {
+                bar.vertical = true
+                bar.autoresizingMask = []
+                bar.frame = NSRect(x: 0, y: config.headerHeight * zoom,
+                                   width: config.tabsSidebarWidth * zoom,
+                                   height: max(0, backdrop.bounds.height - config.headerHeight * zoom))
+            }
             backdrop.addSubview(bar)
             tabsBar = bar
         }
@@ -8156,7 +8631,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 filterBar = bar
                 bottom += config.filterBarHeight * zoom + 2
             }
-            if config.tabs {
+            if config.tabs && config.tabsSidebarWidth > 0 {
+                // the tabs as a sidebar down the left (laid out by
+                // layoutListSidebar; nothing stacks under the field)
+                let bar = makeTabsBar(frame: NSRect(x: 0, y: 0, width: config.tabsSidebarWidth * zoom, height: 100))
+                bar.vertical = true
+                bar.autoresizingMask = []
+                host.addSubview(bar)
+                tabsBar = bar
+            } else if config.tabs {
                 let bar = makeTabsBar(frame: NSRect(x: 0, y: bottom, width: config.width,
                                                     height: config.tabBarHeight * zoom))
                 host.addSubview(bar)
@@ -9244,6 +9727,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if panel.attachedSheet != nil { return sheetEditKey(code, mods) }
         if let r = paneFocusKey(code, mods) { return r }
         if let r = viewCycleKey(code, mods) { return r }
+        if code == 35, mods.contains(.command), mods.contains(.shift), proseProvider != nil {
+            setProse(!proseShown)
+            return true
+        }
         if let r = paneResizeKey(code, mods) { return r }
         if let vv = focusedVim() { return vimPaneKey(vv, code, mods) }
         if let term = focusedTerm() { return terminalKey(term, code, mods) }
@@ -9255,6 +9742,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // a host hook / an overlay that owns the keyboard, Cmd+/
     private func overlayKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
         if let hook = onKeyPreview, hook(code, mods) { return true }
+        // reading view: Esc goes back to the editor
+        if proseShown, code == 53, mods.intersection([.command, .control, .option]).isEmpty {
+            setProse(false)
+            return true
+        }
         // an open action picker owns the keyboard (its Esc never counts
         // toward the window's Esc-streak close)
         if actionPicker != nil { return actionPickerKey(code, mods) }
@@ -10079,8 +10571,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // then the browser give up space (down to their minimums).
     private func fitDrawersToWindow() {
         guard config.editMode, let backdrop = panel.contentView else { return }
-        let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
-        let topY = config.headerHeight * zoom + tabH + 2 + findBarHeight()
+        let topY = config.headerHeight * zoom + editorTabStripHeight + findBarHeight()
         let meter = (chrome?.meterEnabled ?? false) ? chrome!.meterBarHeight + 4 : 0
         let status = !(statusBar?.isHidden ?? true) ? statusBarHeight + 4 : 0
         let avail = backdrop.bounds.height - topY - meter - status - 4
@@ -10122,8 +10613,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if let backdrop = panel.contentView {
             let cb = chromeBottom > 0 ? chromeBottom : 0
             let h = max(40, backdrop.bounds.height - cb)
-            if scroll.frame.origin.y != cb || abs(scroll.frame.height - h) > 0.5 {
-                scroll.frame = NSRect(x: 0, y: cb, width: backdrop.bounds.width, height: h)
+            let x = listLeft, sw = max(80, backdrop.bounds.width - listLeft)
+            if scroll.frame.origin.y != cb || abs(scroll.frame.height - h) > 0.5
+                || scroll.frame.origin.x != x || abs(scroll.frame.width - sw) > 0.5 {
+                scroll.frame = NSRect(x: x, y: cb, width: sw, height: h)
+            }
+            layoutListSidebar()
+            if sidebarTabs, let fb = filterBar {
+                fb.frame.origin.x = listLeft
+                fb.frame.size.width = sw
             }
         }
         // apply the WIDTH first: contentHeight measures at the live width, so
@@ -11046,6 +11544,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         layoutFileBrowser()
         layoutTerminal()
         layoutEditorScroll()
+        // notes sidebar: the browser's pinned folders on top; a click opens
+        // the browser drawer there
+        if drawer, sidebarTabs, let bar = tabsBar {
+            bar.pinned = fb.favoriteFolders
+            fb.onFavoritesChanged = { [weak bar, weak fb] in bar?.pinned = fb?.favoriteFolders ?? [] }
+            bar.onPinned = { [weak self] path in
+                guard let self, let fb = self.fileBrowser else { return }
+                if !self.fileBrowserShown { self.toggleFileBrowser() }
+                fb.cd(path)
+            }
+        }
     }
 
     public func toggleFileBrowser() {
@@ -11151,8 +11660,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                               height: h)
         } else {
             // fill the content area below the drag header / tabs
-            let tabH = (tabsBar?.frame.height ?? 0)
-            let topY = config.headerHeight * zoom + tabH + 2
+            let topY = config.headerHeight * zoom
+                + (sidebarTabs ? 2 : (tabsBar?.frame.height ?? 0) + 2)
             fb.frame = NSRect(x: 0, y: topY, width: backdrop.bounds.width,
                               height: max(40, backdrop.bounds.height - topY))
         }
@@ -11169,10 +11678,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         terminalFocusBorder?.isHidden = true
         switch focusedPane {
         case .editor:
-            if let scroll = editorScroll, let eb = editorFocusBorder {
-                eb.frame = scroll.frame
-                eb.isHidden = false
-            }
+            // no ring around the editor: it is the page, not a pane among
+            // others (the drawers still light up when they take the keys)
+            break
         case .browser:
             if let fb = fileBrowser, let bb = browserFocusBorder, fileBrowserShown {
                 bb.frame = fb.frame
@@ -11307,16 +11815,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     private func layoutFindBar() {
         guard let ff = findField, let backdrop = panel.contentView else { return }
-        let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
-        let y = config.headerHeight * zoom + tabH + 4
+        let y = config.headerHeight * zoom + editorTabStripHeight + 2
         let h: CGFloat = 24
         if ff.isHidden {
             ff.frame = .zero
             findCountLabel?.frame = .zero
             return
         }
-        ff.frame = NSRect(x: 12, y: y,
-                          width: max(120, backdrop.bounds.width - 24 - 56),
+        let x0 = editorLeftInset + 12
+        ff.frame = NSRect(x: x0, y: y,
+                          width: max(120, backdrop.bounds.width - x0 - 12 - 56),
                           height: h)
         findCountLabel?.frame = NSRect(x: backdrop.bounds.width - 50, y: y,
                                        width: 42, height: h)
@@ -11351,11 +11859,84 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                               height: h)
     }
 
+    // notes: the tabs are a left sidebar (config.tabsSidebarWidth)
+    private var sidebarTabs: Bool { tabsBar?.vertical == true }
+    // list mode: everything right of the sidebar (field, filters, rows)
+    private var listLeft: CGFloat { sidebarTabs ? config.tabsSidebarWidth * zoom + 4 : 0 }
+    // the sidebar runs from under the header (+ top accessory) to the bottom
+    private func layoutListSidebar() {
+        guard !config.editMode, sidebarTabs, let bar = tabsBar, let backdrop = panel.contentView else { return }
+        let top = (config.dragHeader ? config.headerHeight * zoom : 0) + topAccessoryHeight
+        bar.frame = NSRect(x: 0, y: top, width: config.tabsSidebarWidth * zoom,
+                           height: max(0, backdrop.bounds.height - top))
+        bar.needsDisplay = true
+    }
+    // drag the sidebar's edge: live re-layout, persisted by the host on done
+    public var onSidebarWidthChange: ((CGFloat) -> Void)?
+    private func setSidebarWidth(_ w: CGFloat, done: Bool) {
+        config.tabsSidebarWidth = (w / zoom).rounded()
+        if config.editMode {
+            layoutEditorScroll()
+            layoutFindBar()
+        } else {
+            layoutForZoom()
+            layoutSearchField()
+        }
+        if done { onSidebarWidthChange?(config.tabsSidebarWidth) }
+    }
+    // what the tab strip takes above the editor (+ its 2pt gap); the sidebar
+    // takes none — it sits beside the editor instead (`editorLeftInset`)
+    private var editorTabStripHeight: CGFloat {
+        if config.tabsSidebarWidth > 0 && config.tabs { return 2 }
+        return (tabsBar?.frame.height ?? config.tabBarHeight * zoom) + 2
+    }
+    private var editorLeftInset: CGFloat { sidebarTabs ? config.tabsSidebarWidth * zoom + 4 : 0 }
+
+    private func installProseSwitch() {
+        guard config.editMode, proseProvider != nil, proseSwitch == nil, let backdrop = panel.contentView else { return }
+        let sw = ProseModeSwitch(colors: config.colors, editLabel: config.vimEditorExecutable != nil ? "nvim" : "Edit")
+        sw.onChange = { [weak self] on in self?.setProse(on) }
+        if let chrome { backdrop.addSubview(sw, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(sw) }
+        proseSwitch = sw
+        layoutEditorScroll()
+    }
+
+    // ⌘⇧P / the switch: the note as a reading page, or back to editing
+    public func setProse(_ on: Bool) {
+        guard config.editMode, let backdrop = panel.contentView else { return }
+        proseSwitch?.prose = on
+        if !on {
+            guard proseShown else { return }
+            proseShown = false
+            proseView?.isHidden = true
+            if let ed = primaryEditor { panel.makeFirstResponder(ed); focusedPane = .editor }
+            return
+        }
+        // the vim pane autosaves, but flush now so the page is current
+        if vimView != nil, vimPaneActive { vimCommand("silent! update") }
+        guard let src = proseProvider?() else { proseSwitch?.prose = false; return }
+        let pv = proseView ?? {
+            let v = ProseView(frame: editorScroll?.frame ?? backdrop.bounds)
+            if let sw = proseSwitch { backdrop.addSubview(v, positioned: .below, relativeTo: sw) } else { backdrop.addSubview(v) }
+            proseView = v
+            return v
+        }()
+        proseShown = true
+        pv.isHidden = false
+        layoutEditorScroll()
+        pv.show(src, colors: config.colors, font: proseFont, size: proseFontSize * zoom, width: proseWidth)
+        panel.makeFirstResponder(pv.web)
+    }
+    // a tab switch while reading: re-render the newly shown note
+    private func refreshProse() {
+        guard proseShown, let src = proseProvider?() else { return }
+        proseView?.show(src, colors: config.colors, font: proseFont, size: proseFontSize * zoom, width: proseWidth)
+    }
+
     private func layoutEditorScroll() {
         guard config.editMode, let scroll = editorScroll,
               let backdrop = panel.contentView else { return }
-        let tabH = tabsBar?.frame.height ?? config.tabBarHeight * zoom
-        let topY = config.headerHeight * zoom + tabH + 2 + findBarHeight()
+        let topY = config.headerHeight * zoom + editorTabStripHeight + findBarHeight()
         // the voice meter/record strip owns the bottom of the window: stop the
         // editor above it so the caret (and the last dictated line) is never
         // hidden behind the record button
@@ -11371,6 +11952,20 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let status = statusVisible ? statusBarHeight + 4 : 0
         scroll.frame.origin.y = topY
         scroll.frame.size.height = max(40, backdrop.bounds.height - topY - meter - drawer - status)
+        scroll.frame.origin.x = editorLeftInset
+        scroll.frame.size.width = max(80, backdrop.bounds.width - editorLeftInset)
+        proseView?.frame = scroll.frame
+        if let sw = proseSwitch {
+            sw.frame.origin = NSPoint(x: scroll.frame.maxX - sw.frame.width - 16, y: scroll.frame.maxY - sw.frame.height - 10)
+        }
+        if sidebarTabs, let bar = tabsBar {
+            // the sidebar runs from the header down to the editor's bottom
+            // (the drawers below keep the full width)
+            let top = config.headerHeight * zoom
+            bar.frame = NSRect(x: 0, y: top, width: config.tabsSidebarWidth * zoom,
+                               height: max(0, scroll.frame.maxY - top))
+            bar.needsDisplay = true
+        }
         // the vim pane mirrors the text view's frame (inset like its text)
         if let vv = vimView {
             vv.frame = scroll.frame.insetBy(dx: 8, dy: 4)
@@ -11415,10 +12010,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // instead of the bar floating centered above a left-aligned pill row.
     private func layoutSearchField() {
         guard !config.editMode, let backdrop = panel.contentView else { return }
-        let w = backdrop.bounds.width
+        let w = backdrop.bounds.width - listLeft
         let inset = config.padding + 10
         let fieldW = max(50, (w - 2 * inset) * config.searchWidthFraction)
-        let x = inset
+        let x = listLeft + inset
         let headerOffset = ((config.dragHeader) ? config.headerHeight * zoom + 4 : 0) + topAccessoryHeight
         let y = headerOffset + config.padding + 2
         field.frame = NSRect(x: x, y: y, width: fieldW, height: 24)

@@ -124,7 +124,9 @@ class CardWindowController: NSObject, NSWindowDelegate {
         let ch = PopupChrome(config: cfg)
         ch.dragHeaderHeight = cfg.headerHeight
         ch.headerIcon = icon
-        ch.headerTitle = title
+        // no title in the header bar (the view switcher already says where
+        // you are; the content names itself) — `title` stays the window's
+        ch.headerTitle = nil
         ch.copyPathLabel = ""
         ch.copyConfigLabel = ""
         chrome = ch

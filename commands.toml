@@ -164,7 +164,8 @@
 #                       (their `sticky` is ignored). Every view's icon menu +
 #                       the menu bar lead with "Global Window Options ▸ Hide
 #                       When Focus Is Lost"
-#   header-style        the drag header's look, every window at once: flat
+#   header-style        the drag header's look, every window at once: quiet
+#                       (the card's own color + a hairline, no band) | flat
 #                       (default) | edge (accent rule under it) | stripe
 #                       (accent ribbon on top) | tinted | glow | aurora
 #                       (accent → accent2 gradient). Icon menu ▸ Header Style
@@ -178,6 +179,7 @@
 #                       Default: org.flameshot, pl.maketheweb.cleanshotx,
 #                       cc.ffitch.shottr, com.skitch.skitch
 [app]
+header-style = "quiet"
 # shell used to run palette commands (persistent runner + output windows)
 shell = "/opt/homebrew/bin/bash"
 # args for the embedded terminal's shell (--login -i sources ~/.bash_profile
@@ -354,6 +356,8 @@ ignore-file = "config/paths.ignore"
 #   insecure-pixelate   true = real downscaled pixels (the default rebuilds the
 #                       blocks from the box's border only: nothing recoverable)
 [screenshot]
+# recent captures kept for the clock button / ⌘R (0 = off)
+history = 20
 enabled = true
 label = "Screenshot"
 type = "shell"
@@ -463,6 +467,15 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #   start-drawer        browser | terminal | none — the drawer open at launch
 #                       (default none: the file browser starts closed; its
 #                       header button / icon menu ▸ Start With toggles it).
+#   sidebar-width       the open notes as a list down the left edge, this
+#                       many points wide (default 210; "+" beside the NOTES
+#                       label adds one, hover a row for its ✕, right-click
+#                       for Copy Path / Reveal / Close). 0 = the old tab strip
+#   prose-font          the reading view's font (CSS stack; default "Literata,
+#                       ui-serif, New York, Georgia, serif"). ⌘⇧P or the
+#                       Prose | nvim switch at the bottom right; Esc goes back
+#   prose-font-size     reading view text size (default 17)
+#   prose-width         reading column width in points (default 640)
 [notes]
 terminal-background = "A6111720"
 enabled = true
@@ -484,6 +497,7 @@ vim-bin = "/opt/homebrew/bin/nvim"
 # vim-init = ~/.config/nvim/init.lua
 start-drawer = "none"
 font-size = 16
+sidebar-width = 210
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
