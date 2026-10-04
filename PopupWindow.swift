@@ -6577,6 +6577,119 @@ public enum HeaderStyle: String, CaseIterable {
     }
 }
 
+// MARK: - Capsule (the view switcher's look, shared)
+
+// ONE look for grouped controls (Figma direction C): a soft capsule TRACK
+// holding pill-shaped segments; the current one sits on a raised chip with
+// a small shadow, the pointer gets a faint one. Used by the view switcher,
+// segmented controls (ConfSegmented), the prose switch and CapsuleButtons.
+enum CapsuleStyle {
+    static func track(_ r: NSRect, _ c: PopupColors) {
+        let p = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
+        c.text.withAlphaComponent(c.isLight ? 0.07 : 0.06).setFill()
+        p.fill()
+    }
+    static func chip(_ r: NSRect, _ c: PopupColors, on: Bool, hover: Bool) {
+        let chip = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
+        if on {
+            NSGraphicsContext.saveGraphicsState()
+            let sh = NSShadow()
+            sh.shadowColor = NSColor.black.withAlphaComponent(c.isLight ? 0.18 : 0.35)
+            sh.shadowOffset = NSSize(width: 0, height: -1)
+            sh.shadowBlurRadius = 2.5
+            sh.set()
+            (c.isLight ? NSColor.white
+                       : c.surface1.blended(withFraction: hover ? 0.10 : 0.04, of: ButtonStyle.opaque(c.text)) ?? c.surface1)
+                .setFill()
+            chip.fill()
+            NSGraphicsContext.restoreGraphicsState()
+            c.text.withAlphaComponent(c.isLight ? 0.08 : 0.10).setStroke()
+            chip.lineWidth = 0.5
+            chip.stroke()
+        } else if hover {
+            c.text.withAlphaComponent(0.08).setFill()
+            chip.fill()
+        }
+    }
+    // an ACTION chip: the primary one is accent-filled
+    static func primaryChip(_ r: NSRect, _ c: PopupColors, hover: Bool, pressed: Bool) {
+        let a = c.accentOn
+        (pressed ? a.blended(withFraction: 0.18, of: .black) ?? a
+                 : hover ? a.blended(withFraction: 0.12, of: .white) ?? a : a).setFill()
+        NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2).fill()
+    }
+}
+
+// a capsule of ACTION buttons (e.g. Compare ⏎ | Compare Pasted Text…):
+// the primary one accent-filled, the rest plain chips that light on hover
+final class CapsuleButtons: NSView, PopupThemeable {
+    struct Item { var title: String; var symbol: String?; var primary: Bool; var action: () -> Void }
+    var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
+    var items: [Item] { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
+    private var hover: Int?
+    private var pressed: Int?
+    private let font = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+    override var isFlipped: Bool { true }
+    func applyColors(_ c: PopupColors) { colors = c }
+
+    init(_ items: [Item]) {
+        self.items = items
+        super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private var widths: [CGFloat] {
+        items.map { ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) + ($0.symbol == nil ? 30 : 48) }
+    }
+    override var intrinsicContentSize: NSSize { NSSize(width: widths.reduce(8, +) + CGFloat(max(0, items.count - 1)) * 2, height: 34) }
+    private func rect(_ i: Int) -> NSRect {
+        let x = 4 + widths.prefix(i).reduce(0, +) + CGFloat(i) * 2
+        return NSRect(x: x, y: 4, width: widths[i], height: bounds.height - 8)
+    }
+    override func draw(_ dirty: NSRect) {
+        let c = colors
+        CapsuleStyle.track(bounds.insetBy(dx: 0.5, dy: 0.5), c)
+        for (i, it) in items.enumerated() {
+            let r = rect(i)
+            let fg: NSColor
+            if it.primary {
+                CapsuleStyle.primaryChip(r, c, hover: hover == i, pressed: pressed == i)
+                fg = c.onAccent
+            } else {
+                CapsuleStyle.chip(r, c, on: false, hover: hover == i || pressed == i)
+                fg = hover == i ? c.text : c.text.withAlphaComponent(0.85)
+            }
+            var x = r.minX + 15
+            if let sym = it.symbol {
+                ButtonStyle.symbol(sym, in: NSRect(x: x, y: r.minY, width: 14, height: r.height), color: fg, size: 11)
+                x += 18
+            }
+            let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
+            let sz = (it.title as NSString).size(withAttributes: a)
+            (it.title as NSString).draw(at: NSPoint(x: x, y: r.midY - sz.height / 2), withAttributes: a)
+        }
+    }
+    private func index(_ e: NSEvent) -> Int? {
+        let p = convert(e.locationInWindow, from: nil)
+        return items.indices.first { rect($0).contains(p) }
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseMoved(with e: NSEvent) { let i = index(e); if i != hover { hover = i; needsDisplay = true } }
+    override func mouseExited(with e: NSEvent) { hover = nil; needsDisplay = true }
+    override func mouseDown(with e: NSEvent) { pressed = index(e); needsDisplay = true }
+    override func mouseUp(with e: NSEvent) {
+        let i = index(e)
+        let was = pressed
+        pressed = nil
+        needsDisplay = true
+        if let i, i == was { items[i].action() }
+    }
+}
+
 // MARK: - Chrome (drag + resize overlay)
 
 // Transparent overlay above the content that owns the window chrome: resize
@@ -7154,32 +7267,12 @@ final class PopupChrome: NSView {
         let first = navRect(0), last = navRect(navIcons.count - 1)
         let well = NSRect(x: first.minX - 3, y: first.minY - 3,
                           width: last.maxX - first.minX + 6, height: first.height + 6)
-        c.text.withAlphaComponent(c.isLight ? 0.07 : 0.06).setFill()
-        NSBezierPath(roundedRect: well, xRadius: well.height / 2, yRadius: well.height / 2).fill()
+        CapsuleStyle.track(well, c)
         var tips: [NSRect] = []
         for (i, n) in navIcons.enumerated() {
             let r = navRect(i)
             let on = navOn == n.id, hov = hoveredSegment == n.id
-            let chip = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
-            if on {
-                NSGraphicsContext.saveGraphicsState()
-                let sh = NSShadow()
-                sh.shadowColor = NSColor.black.withAlphaComponent(c.isLight ? 0.18 : 0.35)
-                sh.shadowOffset = NSSize(width: 0, height: -1)
-                sh.shadowBlurRadius = 2.5
-                sh.set()
-                (c.isLight ? NSColor.white
-                           : c.surface1.blended(withFraction: hov ? 0.10 : 0.04, of: ButtonStyle.opaque(c.text)) ?? c.surface1)
-                    .setFill()
-                chip.fill()
-                NSGraphicsContext.restoreGraphicsState()
-                c.text.withAlphaComponent(c.isLight ? 0.08 : 0.10).setStroke()
-                chip.lineWidth = 0.5
-                chip.stroke()
-            } else if hov {
-                c.text.withAlphaComponent(0.08).setFill()
-                chip.fill()
-            }
+            CapsuleStyle.chip(r, c, on: on, hover: hov)
             // the other views read a touch quieter than the current one
             let isz: CGFloat = 16
             popupDrawImage(n.image, in: NSRect(x: r.midX - isz / 2, y: r.midY - isz / 2,
@@ -7745,8 +7838,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var proseSwitch: ProseModeSwitch?
     public private(set) var proseShown = false
     public var proseFont = "Literata, ui-serif, \"New York\", Georgia, serif"
-    public var proseFontSize: CGFloat = 17
-    public var proseWidth: CGFloat = 640
+    public var proseFontSize: CGFloat = 19
+    public var proseWidth: CGFloat = 900
     public var proseProvider: (() -> ProseSource?)? {
         didSet { installProseSwitch() }
     }
@@ -9729,6 +9822,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if let r = viewCycleKey(code, mods) { return r }
         if code == 35, mods.contains(.command), mods.contains(.shift), proseProvider != nil {
             setProse(!proseShown)
+            return true
+        }
+        if code == 31, mods.contains(.command), mods.contains(.shift), proseProvider != nil {
+            popOutProse()
             return true
         }
         if let r = paneResizeKey(code, mods) { return r }
@@ -11896,6 +11993,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         guard config.editMode, proseProvider != nil, proseSwitch == nil, let backdrop = panel.contentView else { return }
         let sw = ProseModeSwitch(colors: config.colors, editLabel: config.vimEditorExecutable != nil ? "nvim" : "Edit")
         sw.onChange = { [weak self] on in self?.setProse(on) }
+        sw.onPopOut = { [weak self] in self?.popOutProse() }
         if let chrome { backdrop.addSubview(sw, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(sw) }
         proseSwitch = sw
         layoutEditorScroll()
@@ -11926,6 +12024,12 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         layoutEditorScroll()
         pv.show(src, colors: config.colors, font: proseFont, size: proseFontSize * zoom, width: proseWidth)
         panel.makeFirstResponder(pv.web)
+    }
+    // the reading page in its own floating window (⌘⇧O / the ⤢ chip)
+    public func popOutProse() {
+        if vimView != nil, vimPaneActive { vimCommand("silent! update") }
+        guard let src = proseProvider?() else { return }
+        ProseWindow.show(path: src.path, colors: config.colors, font: proseFont, size: proseFontSize, width: proseWidth)
     }
     // a tab switch while reading: re-render the newly shown note
     private func refreshProse() {

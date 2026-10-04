@@ -216,6 +216,7 @@ final class ProseModeSwitch: NSView {
     var prose = false { didSet { needsDisplay = true } }
     var editLabel = "Edit"
     var onChange: ((Bool) -> Void)?
+    var onPopOut: (() -> Void)?          // the ⤢ chip: the page in its own floating window
     private var hover: Int?
     private var tracking: NSTrackingArea?
     private let labels: [(String, String)]
@@ -226,14 +227,15 @@ final class ProseModeSwitch: NSView {
         self.editLabel = editLabel
         labels = [("text.alignleft", "Prose"), ("chevron.left.forwardslash.chevron.right", editLabel)]
         super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 28))
-        frame.size.width = segW.reduce(6, +)
-        toolTip = "Reading view ⌘⇧P — Esc goes back to the editor"
+        frame.size.width = segW.reduce(6, +) + 34
+        toolTip = "Reading view ⌘⇧P — Esc goes back to the editor; ⤢ opens it in a floating window"
     }
     required init?(coder: NSCoder) { fatalError() }
 
     private var font: NSFont { .systemFont(ofSize: 11.5, weight: .medium) }
     private var segW: [CGFloat] { labels.map { ($0.1 as NSString).size(withAttributes: [.font: font]).width + 38 } }
     private func seg(_ i: Int) -> NSRect {
+        if i == 2 { return NSRect(x: bounds.width - 3 - 30, y: 3, width: 30, height: bounds.height - 6) }
         let x = 3 + segW.prefix(i).reduce(0, +)
         return NSRect(x: x, y: 3, width: segW[i], height: bounds.height - 6)
     }
@@ -246,41 +248,33 @@ final class ProseModeSwitch: NSView {
     }
     override func mouseMoved(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
-        let h = (0..<2).first { seg($0).contains(p) }
+        let h = (0..<3).first { seg($0).contains(p) }
         if h != hover { hover = h; needsDisplay = true }
     }
     override func mouseExited(with e: NSEvent) { hover = nil; needsDisplay = true }
     override func mouseDown(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
-        guard let i = (0..<2).first(where: { seg($0).contains(p) }) else { return }
+        guard let i = (0..<3).first(where: { seg($0).contains(p) }) else { return }
+        if i == 2 { onPopOut?(); return }
         let want = i == 0
         if want != prose { prose = want; onChange?(want) }
     }
     override func draw(_ dirty: NSRect) {
         let c = colors
         let track = bounds.insetBy(dx: 0.5, dy: 0.5)
+        // over the editor: a solid mantle under the capsule's tint so text
+        // behind it never shows through
         c.mantle.setFill()
         NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
-        c.text.withAlphaComponent(0.08).setStroke()
-        NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).stroke()
+        CapsuleStyle.track(track, c)
+        // ⤢ pop out
+        let pr = seg(2)
+        CapsuleStyle.chip(pr, c, on: false, hover: hover == 2)
+        ButtonStyle.symbol("rectangle.portrait.and.arrow.right", in: pr, color: hover == 2 ? c.text : c.dim, size: 11)
         for i in 0..<2 {
             let r = seg(i)
             let on = (i == 0) == prose
-            let chip = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
-            if on {
-                NSGraphicsContext.saveGraphicsState()
-                let sh = NSShadow()
-                sh.shadowColor = NSColor.black.withAlphaComponent(c.isLight ? 0.15 : 0.3)
-                sh.shadowOffset = NSSize(width: 0, height: -1)
-                sh.shadowBlurRadius = 2
-                sh.set()
-                (c.isLight ? NSColor.white : c.surface1).setFill()
-                chip.fill()
-                NSGraphicsContext.restoreGraphicsState()
-            } else if hover == i {
-                c.text.withAlphaComponent(0.06).setFill()
-                chip.fill()
-            }
+            CapsuleStyle.chip(r, c, on: on, hover: hover == i)
             let fg = on ? c.text : c.dim
             ButtonStyle.symbol(labels[i].0, in: NSRect(x: r.minX + 8, y: r.minY, width: 14, height: r.height), color: on ? c.accentOn : fg, size: 10)
             let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
@@ -288,5 +282,94 @@ final class ProseModeSwitch: NSView {
             let sz = s.size(withAttributes: a)
             s.draw(at: NSPoint(x: r.minX + 26, y: r.midY - sz.height / 2), withAttributes: a)
         }
+    }
+}
+
+// The reading page on its own: a lean floating window (Figma B's "present"
+// idea) — no chrome but a thin draggable title strip, follows the note as
+// it is saved (1 s check), ⌘+ / ⌘− size, Esc / ⌘W close. A non-activating
+// panel like the tool panels: opening it never drags the shared window up.
+final class ProseWindow: NSPanel {
+    private static var open: [ProseWindow] = []
+    private let page = ProseView(frame: .zero)
+    private let path: String
+    private let colors: PopupColors
+    private let font: String
+    private var size: CGFloat
+    private let width: CGFloat
+    private var stamp: Date?
+    private var timer: Timer?
+
+    static func show(path: String, colors: PopupColors, font: String, size: CGFloat, width: CGFloat) {
+        if let w = open.first(where: { $0.path == path }) { w.orderFrontRegardless(); w.makeKey(); return }
+        let w = ProseWindow(path: path, colors: colors, font: font, size: size, width: width)
+        open.append(w)
+        w.orderFrontRegardless()
+        w.makeKey()
+    }
+
+    private init(path: String, colors: PopupColors, font: String, size: CGFloat, width: CGFloat) {
+        self.path = path
+        self.colors = colors
+        self.font = font
+        self.size = size
+        self.width = width
+        let scr = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
+        let w = min(scr.width * 0.6, width + 160), h = scr.height * 0.8
+        super.init(contentRect: NSRect(x: scr.midX - w / 2, y: scr.midY - h / 2, width: w, height: h),
+                   styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
+                   backing: .buffered, defer: false)
+        title = (path as NSString).lastPathComponent
+        titlebarAppearsTransparent = true
+        titleVisibility = .hidden
+        isMovableByWindowBackground = true
+        isFloatingPanel = true
+        level = .floating
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+        backgroundColor = colors.base
+        collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+        // lean: only the close button
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
+        page.frame = contentView?.bounds ?? .zero
+        page.autoresizingMask = [.width, .height]
+        contentView?.addSubview(page)
+        render()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshIfChanged() }
+    }
+
+    private func mtime() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+    }
+    private func render() {
+        stamp = mtime()
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        page.show(ProseSource(markdown: text, path: path), colors: colors, font: font, size: size, width: width)
+    }
+    private func refreshIfChanged() {
+        if mtime() != stamp { render() }
+    }
+    override var canBecomeKey: Bool { true }
+    override func cancelOperation(_ sender: Any?) { close() }
+    override func performKeyEquivalent(with e: NSEvent) -> Bool {
+        guard e.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: e) }
+        switch e.charactersIgnoringModifiers ?? "" {
+        case "w": close(); return true
+        case "=", "+": size = min(40, size + 1); render(); return true
+        case "-": size = max(10, size - 1); render(); return true
+        case "c": page.web.evaluateJavaScript("document.execCommand('copy')"); return true
+        case "a": page.web.evaluateJavaScript("document.execCommand('selectAll')"); return true
+        default: return super.performKeyEquivalent(with: e)
+        }
+    }
+    override func keyDown(with e: NSEvent) {
+        if e.keyCode == 53 { close() } else { super.keyDown(with: e) }
+    }
+    override func close() {
+        timer?.invalidate()
+        timer = nil
+        Self.open.removeAll { $0 === self }
+        super.close()
     }
 }

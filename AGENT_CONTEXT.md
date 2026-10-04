@@ -1166,6 +1166,16 @@ Line numbers drift; grep the symbol names (they're stable).
 - Prose mode (NotesProse.swift): ⌘⇧P / the Prose | nvim switch (bottom
   right) / Esc back; `ProseRender` = pandoc (`RichText.pandocHTML`) else
   `basic`; `[notes] prose-font / prose-font-size / prose-width`.
+- Capsule look everywhere (`CapsuleStyle` track + raised chip, PopupWindow.swift):
+  view switcher, `ConfSegmented` / `ConfToggle` (compare + folder filters,
+  AI preview modes, Confluence), the prose switch, and `CapsuleButtons`
+  (action capsule; primary = accent chip): Compare's start actions and the
+  Recent header's Clear Missing (N) / Clear All. Recent rows: ✕ on hover
+  (`CompareRecentList.onRemove`). Start page: the folder button sits LEFT
+  of each path field.
+- Prose: default 19 px / 900 pt column; ⤢ chip / ⌘⇧O = `ProseWindow`
+  (non-activating floating panel, follows the file's mtime every 1 s,
+  Esc / ⌘W close, ⌘± size, close button only).
 - /screenshot recents: `ShotHistory` keeps every copied / saved / pinned
   capture (`[screenshot] history`, 20) in ~/.cache/workspace-switcher/
   screenshots; clock button / ⌘R → `ShotRecentPanel` thumbnail grid

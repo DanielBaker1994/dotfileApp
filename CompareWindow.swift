@@ -150,7 +150,27 @@ final class CompareRecentList: NSView {
     var selection = 0 { didSet { needsDisplay = true } }
     var onOpen: ((Int) -> Void)?
     var menuFor: ((Int) -> NSMenu?)?
+    var onRemove: ((Int) -> Void)?       // the row's ✕ (shown on hover)
     let rowH: CGFloat = 28
+    private var hover: Int?
+    private var hoverX = false
+    private func xRect(_ i: Int) -> NSRect {
+        NSRect(x: bounds.width - 30, y: CGFloat(i) * rowH + (rowH - 20) / 2, width: 20, height: 20)
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseMoved(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        let i = Int(p.y / rowH)
+        let h = rows.indices.contains(i) ? i : nil
+        let x = h.map { xRect($0).insetBy(dx: -3, dy: -3).contains(p) } ?? false
+        if h != hover || x != hoverX { hover = h; hoverX = x; needsDisplay = true }
+    }
+    override func mouseExited(with e: NSEvent) { hover = nil; hoverX = false; needsDisplay = true }
     override var isFlipped: Bool { true }
 
     // row index → which sides point at a file that no longer exists
@@ -238,18 +258,29 @@ final class CompareRecentList: NSView {
                 dirs.append(NSAttributedString(string: "  ⇆  ", attributes: base))
                 dirs.append(NSAttributedString(string: dr, attributes: gone.right ? goneAttrs : base))
             }
-            dirs.draw(in: NSRect(x: 240, y: y + 1, width: max(40, bounds.width - 350), height: 18))
             let age = CompareRecent.age(e.used) as NSString
             let attrs: [NSAttributedString.Key: Any] = [.font: small, .foregroundColor: colors.dim]
             let ageW = age.size(withAttributes: attrs).width
-            var ageX = bounds.width - 12 - ageW
+            let rightEdge = bounds.width - 12 - (hover == i && onRemove != nil ? 28 : 0)
+            var ageX = rightEdge - ageW
             if missing {
                 let tag = "missing" as NSString
                 let tagAttrs: [NSAttributedString.Key: Any] = [.font: warnFont, .foregroundColor: colors.tone(.danger)]
                 // "missing" at the right edge, the age just left of it
                 let tw = tag.size(withAttributes: tagAttrs).width
-                tag.draw(at: NSPoint(x: bounds.width - 12 - tw, y: y + 1), withAttributes: tagAttrs)
+                tag.draw(at: NSPoint(x: rightEdge - tw, y: y + 1), withAttributes: tagAttrs)
                 ageX -= tw + 10
+            }
+            // the folders take what's left of the age / tag cluster
+            dirs.draw(in: NSRect(x: 240, y: y + 1, width: max(40, ageX - 14 - 240), height: 18))
+            // the ✕ takes the right end on hover (age / "missing" step left)
+            if hover == i, onRemove != nil {
+                let xr = xRect(i)
+                if hoverX {
+                    colors.tone(.danger).withAlphaComponent(0.2).setFill()
+                    NSBezierPath(ovalIn: xr).fill()
+                }
+                ButtonStyle.cross(in: xr, color: hoverX ? colors.tone(.danger) : colors.dim, arm: 3.5)
             }
             age.draw(at: NSPoint(x: ageX, y: y + 1), withAttributes: attrs)
         }
@@ -257,6 +288,10 @@ final class CompareRecentList: NSView {
     override func mouseDown(with e: NSEvent) {
         let i = Int(convert(e.locationInWindow, from: nil).y / rowH)
         guard rows.indices.contains(i) else { return }
+        if onRemove != nil, xRect(i).insetBy(dx: -3, dy: -3).contains(convert(e.locationInWindow, from: nil)) {
+            onRemove?(i)
+            return
+        }
         selection = i
         // one click opens (a start page's list of links); a missing pair
         // explains itself instead of doing nothing
@@ -328,8 +363,9 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private let rightLabel = NSTextField(labelWithString: "Right")
     private var browseL: ThemeButton!
     private var browseR: ThemeButton!
-    private let compareButton = ThemedPushButton(title: "Compare  ⏎", target: nil, action: nil)
-    private let pasteButton = ThemedPushButton(title: "Compare Pasted Text…", target: nil, action: nil)
+    // Compare ⏎ | Compare Pasted Text… in one capsule; Recent's own pair
+    private var startActions: CapsuleButtons!
+    private var recentActions: CapsuleButtons!
     private let recentTitle = NSTextField(labelWithString: "RECENT")
     private let recentFilter = JiraInputBox(placeholder: "filter")
     private let recentList = CompareRecentList()
@@ -532,26 +568,29 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         browseR = button("folder", "Choose the right file or folder…") { [weak self] in self?.browse(into: self?.rightBox) }
         start.addSubview(browseL)
         start.addSubview(browseR)
-        let t = ClosureTarget { [weak self] in self?.compareFromStart() }
-        targets.append(t)
-        compareButton.target = t
-        compareButton.action = #selector(ClosureTarget.run)
-        compareButton.role = .primary
-        compareButton.toolTip = "Files on both sides → Text Compare. Folders on both sides → Folder Compare."
-        start.addSubview(compareButton)
-        let pt = ClosureTarget { [weak self] in self?.startPasted() }
-        targets.append(pt)
-        pasteButton.target = pt
-        pasteButton.action = #selector(ClosureTarget.run)
-        pasteButton.toolTip = "Compare text instead of files: the clipboard goes in the left pane, paste the other side with ⌘V (or type in either pane)."
-        start.addSubview(pasteButton)
+        startActions = CapsuleButtons([
+            .init(title: "Compare  ⏎", symbol: "arrow.left.arrow.right", primary: true) { [weak self] in self?.compareFromStart() },
+            .init(title: "Compare Pasted Text…", symbol: "doc.on.clipboard", primary: false) { [weak self] in self?.startPasted() },
+        ])
+        startActions.colors = colors
+        startActions.toolTip = "Compare: files on both sides → Text Compare, folders → Folder Compare. "
+            + "Pasted Text: the clipboard goes in the left pane, paste the other side with ⌘V."
+        start.addSubview(startActions)
         label(recentTitle, size: 11, weight: .bold)
         start.addSubview(recentTitle)
+        recentActions = CapsuleButtons([])
+        recentActions.colors = colors
+        start.addSubview(recentActions)
         recentFilter.field.delegate = self
         start.addSubview(recentFilter)
         recentList.colors = colors
         recentList.onOpen = { [weak self] i in self?.openRecent(i) }
         recentList.menuFor = { [weak self] i in self?.recentMenu(i) }
+        recentList.onRemove = { [weak self] i in
+            guard let self, self.recentList.rows.indices.contains(i) else { return }
+            CompareRecent.remove(self.recentList.rows[i])
+            self.reloadRecent()
+        }
         recentScroll.documentView = recentList
         recentScroll.drawsBackground = false
         recentScroll.hasVerticalScroller = true
@@ -667,21 +706,22 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         let w = min(b.width - pad * 2, 900)
         let x = (b.width - w) / 2
         var y: CGFloat = 26
+        // Left / Right: the label, the folder button (left: closest to
+        // reach), then the path field
         for (l, box, br) in [(leftLabel, leftBox, browseL!), (rightLabel, rightBox, browseR!)] {
             l.frame = NSRect(x: x, y: y + 5, width: lw, height: 18)
-            box.frame = NSRect(x: x + lw, y: y, width: w - lw - bw - 6, height: JiraTheme.height + 2)
-            br.frame = NSRect(x: x + w - bw, y: y, width: bw, height: JiraTheme.height + 2)
+            br.frame = NSRect(x: x + lw, y: y, width: bw, height: JiraTheme.height + 2)
+            box.frame = NSRect(x: x + lw + bw + 6, y: y, width: w - lw - bw - 6, height: JiraTheme.height + 2)
             y += JiraTheme.height + 12
         }
-        let cw = compareButton.intrinsicContentSize.width + 10
-        let pw = pasteButton.intrinsicContentSize.width + 10
-        let bx = x + (w - (cw + 10 + pw)) / 2 + lw / 2
-        compareButton.frame = NSRect(x: bx, y: y, width: cw, height: 28)
-        pasteButton.frame = NSRect(x: bx + cw + 10, y: y, width: pw, height: 28)
-        y += 40
+        let aw = startActions.intrinsicContentSize.width
+        startActions.frame = NSRect(x: x + (w - aw) / 2 + lw / 2, y: y - 2, width: aw, height: 34)
+        y += 42
         startHint.frame = NSRect(x: x, y: y, width: w, height: startHint.stringValue.isEmpty ? 0 : 34)
         y += startHint.stringValue.isEmpty ? 6 : 40
-        recentTitle.frame = NSRect(x: x, y: y + 5, width: 100, height: 16)
+        recentTitle.frame = NSRect(x: x, y: y + 5, width: 64, height: 16)
+        let rw = recentActions.intrinsicContentSize.width
+        recentActions.frame = NSRect(x: x + 66, y: y - 4, width: recentActions.items.isEmpty ? 0 : rw, height: 30)
         recentFilter.frame = NSRect(x: x + w - 220, y: y, width: 220, height: JiraTheme.height)
         y += JiraTheme.height + 8
         recentScroll.frame = NSRect(x: x, y: y, width: w, height: max(40, b.height - y - 14))
@@ -1459,6 +1499,19 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private func reloadRecent() {
         recentAll = CompareRecent.load()
         filterRecent()
+        let fm = FileManager.default
+        let missing = recentAll.filter { !fm.fileExists(atPath: $0.left) || !fm.fileExists(atPath: $0.right) }.count
+        var items: [CapsuleButtons.Item] = []
+        if missing > 0 {
+            items.append(.init(title: "Clear Missing (\(missing))", symbol: "exclamationmark.triangle", primary: false) { [weak self] in
+                self?.clearMissingRecents()
+            })
+        }
+        if !recentAll.isEmpty {
+            items.append(.init(title: "Clear All", symbol: "trash", primary: false) { [weak self] in self?.clearAllRecents() })
+        }
+        recentActions?.items = items
+        start.needsLayout = true
     }
 
     private func filterRecent() {
@@ -1476,10 +1529,22 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if !missing.isEmpty {
             let names = missing.map { "“\(($0 as NSString).lastPathComponent)”" }.joined(separator: " and ")
             showStartHint("Can't open: \(names) \(missing.count == 1 ? "no longer exists" : "no longer exist") "
-                          + "(hover the row for the full path). Right-click ▸ Remove from Recent or Remove All Missing.", .danger)
+                          + "(hover the row for the full path). Click the row's ✕ or Clear Missing to drop it.", .danger)
             return
         }
         openPair(e.left, e.right)
+    }
+
+    private func clearMissingRecents() {
+        let fm = FileManager.default
+        CompareRecent.save(CompareRecent.load().filter { fm.fileExists(atPath: $0.left) && fm.fileExists(atPath: $0.right) })
+        showStartHint("", .dim)
+        reloadRecent()
+    }
+    private func clearAllRecents() {
+        CompareRecent.clearAll()
+        showStartHint("", .dim)
+        reloadRecent()
     }
 
     private func recentMenu(_ i: Int) -> NSMenu {

@@ -1,0 +1,472 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-04T13:56:31.777607+00:00",
+  "title": "Design System: workspace-switcher",
+  "extensions": {
+    "colorMeta": {
+      "base": {
+        "role": "neutral",
+        "displayName": "Macchiato Base",
+        "canonical": "oklch(27.9% 0.035 276.9)",
+        "tonalRamp": [
+          "#080A17",
+          "#212435",
+          "#3D4055",
+          "#5C6076",
+          "#7D8198",
+          "#9FA4BC",
+          "#C3C8DF",
+          "#E9EDFF"
+        ]
+      },
+      "mantle": {
+        "role": "neutral",
+        "displayName": "Mantle Well",
+        "canonical": "oklch(24.0% 0.029 278.1)",
+        "tonalRamp": [
+          "#090A15",
+          "#222432",
+          "#3E4152",
+          "#5D6072",
+          "#7E8194",
+          "#A0A4B7",
+          "#C5C8DB",
+          "#EAEDFE"
+        ],
+        "derived": "base blended 22% toward black (light themes: 7.7% toward text)"
+      },
+      "crust": {
+        "role": "neutral",
+        "displayName": "Crust Band",
+        "canonical": "oklch(20.8% 0.022 276.3)",
+        "tonalRamp": [
+          "#090B13",
+          "#22242F",
+          "#3F414E",
+          "#5E606E",
+          "#7E8190",
+          "#A1A4B3",
+          "#C5C8D7",
+          "#EBEEFB"
+        ],
+        "derived": "base blended 42% toward black (light themes: 14.7% toward text)"
+      },
+      "header": {
+        "role": "neutral",
+        "displayName": "Header Crust",
+        "canonical": "oklch(21.9% 0.025 280.7)",
+        "tonalRamp": [
+          "#090A14",
+          "#232430",
+          "#3F4150",
+          "#5E6070",
+          "#7F8192",
+          "#A2A4B5",
+          "#C6C8D8",
+          "#EBEDFC"
+        ]
+      },
+      "surface0": {
+        "role": "neutral",
+        "displayName": "Surface 0",
+        "canonical": "oklch(34.2% 0.036 275.6)",
+        "tonalRamp": [
+          "#080A17",
+          "#202435",
+          "#3C4155",
+          "#5B6076",
+          "#7C8198",
+          "#9EA4BC",
+          "#C3C8DF",
+          "#E9EDFF"
+        ],
+        "derived": "base blended 9% toward text"
+      },
+      "surface1": {
+        "role": "neutral",
+        "displayName": "Surface 1",
+        "canonical": "oklch(38.8% 0.036 276.2)",
+        "tonalRamp": [
+          "#080A17",
+          "#212435",
+          "#3D4155",
+          "#5B6076",
+          "#7C8198",
+          "#9EA4BC",
+          "#C3C8DF",
+          "#E9EDFF"
+        ],
+        "derived": "base blended 16% toward text"
+      },
+      "highlight": {
+        "role": "neutral",
+        "displayName": "Highlight Slate",
+        "canonical": "oklch(40.6% 0.031 257.7)",
+        "tonalRamp": [
+          "#050B15",
+          "#1D2633",
+          "#384352",
+          "#576273",
+          "#778395",
+          "#99A6B9",
+          "#BECADC",
+          "#E5EFFF"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Moonlit Text",
+        "canonical": "oklch(87.1% 0.048 273.7)",
+        "tonalRamp": [
+          "#07091B",
+          "#1E233A",
+          "#3A405C",
+          "#58607D",
+          "#7981A0",
+          "#9BA4C4",
+          "#C0C8E7",
+          "#E6EDFF"
+        ]
+      },
+      "dim": {
+        "role": "neutral",
+        "displayName": "Dusk Dim",
+        "canonical": "oklch(69.0% 0.043 274.5)",
+        "tonalRamp": [
+          "#070A1A",
+          "#1F2338",
+          "#3B4059",
+          "#5A607A",
+          "#7A819D",
+          "#9CA4C1",
+          "#C1C8E4",
+          "#E7EDFF"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Lavender Signal",
+        "canonical": "oklch(77.2% 0.126 303.9)",
+        "tonalRamp": [
+          "#15002C",
+          "#320D51",
+          "#512B77",
+          "#714C9B",
+          "#936EBF",
+          "#B690E5",
+          "#D9B6FF",
+          "#FDDEFF"
+        ]
+      },
+      "accent2": {
+        "role": "secondary",
+        "displayName": "Periwinkle Link",
+        "canonical": "oklch(75.0% 0.110 263.8)",
+        "tonalRamp": [
+          "#00042F",
+          "#0A2055",
+          "#223E7C",
+          "#405F9F",
+          "#6081C4",
+          "#81A4EA",
+          "#A8C9FF",
+          "#D0EFFF"
+        ]
+      },
+      "success": {
+        "role": "tertiary",
+        "displayName": "Sage Success",
+        "canonical": "oklch(83.5% 0.108 138.2)",
+        "tonalRamp": [
+          "#001200",
+          "#042F00",
+          "#204E0B",
+          "#406F2F",
+          "#619250",
+          "#83B572",
+          "#A9D99A",
+          "#D2FDC5"
+        ]
+      },
+      "warning": {
+        "role": "tertiary",
+        "displayName": "Wheat Warning",
+        "canonical": "oklch(87.9% 0.074 84.8)",
+        "tonalRamp": [
+          "#160700",
+          "#342100",
+          "#543E05",
+          "#755E2B",
+          "#977F4D",
+          "#BBA26E",
+          "#DEC697",
+          "#FFECC2"
+        ]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "Coral Danger",
+        "canonical": "oklch(73.7% 0.125 11.2)",
+        "tonalRamp": [
+          "#280003",
+          "#4E0017",
+          "#751A31",
+          "#9A3D4F",
+          "#C15F6F",
+          "#E88291",
+          "#FFAAB6",
+          "#FFD3DE"
+        ]
+      },
+      "info": {
+        "role": "tertiary",
+        "displayName": "Seafoam Info",
+        "canonical": "oklch(82.1% 0.076 184.1)",
+        "tonalRamp": [
+          "#00120E",
+          "#002F29",
+          "#004F47",
+          "#216F66",
+          "#479187",
+          "#6BB5AA",
+          "#95D8CE",
+          "#C2FCF3"
+        ]
+      },
+      "outline": {
+        "role": "neutral",
+        "displayName": "Accent Outline",
+        "canonical": "oklch(56.4% 0.086 299.5)",
+        "tonalRamp": [
+          "#100223",
+          "#2B1A45",
+          "#493669",
+          "#68568B",
+          "#8A77AF",
+          "#AD99D4",
+          "#D0BEF6",
+          "#F5E5FF"
+        ],
+        "derived": "accentOn blended 45% into base, alpha 0.85"
+      },
+      "browser-pane": {
+        "role": "neutral",
+        "displayName": "Browser Pane",
+        "canonical": "oklch(46.6% 0.035 262.3) / alpha 0.55",
+        "tonalRamp": [
+          "#050B17",
+          "#1C2535",
+          "#384255",
+          "#566276",
+          "#778398",
+          "#99A6BC",
+          "#BECADF",
+          "#E4EFFF"
+        ]
+      },
+      "terminal-pane": {
+        "role": "neutral",
+        "displayName": "Terminal Pane",
+        "canonical": "oklch(46.6% 0.035 262.3) / alpha 0.78",
+        "tonalRamp": [
+          "#050B17",
+          "#1C2535",
+          "#384255",
+          "#566276",
+          "#778398",
+          "#99A6BC",
+          "#BECADF",
+          "#E4EFFF"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "editor": {
+        "displayName": "Editor",
+        "purpose": "Notes, Compare, AI panes; user-sized, zooms."
+      },
+      "toast": {
+        "displayName": "Toast",
+        "purpose": "Confirmation pill."
+      },
+      "input": {
+        "displayName": "Input",
+        "purpose": "Filter bars, search fields."
+      },
+      "row": {
+        "displayName": "Row",
+        "purpose": "List / table / file rows."
+      },
+      "button": {
+        "displayName": "Button",
+        "purpose": "Chips, tabs, header segments (idle)."
+      },
+      "button-on": {
+        "displayName": "Button On",
+        "purpose": "Active tab / on toggle — weight marks state."
+      },
+      "meta": {
+        "displayName": "Meta",
+        "purpose": "Dim header counts and timestamps."
+      }
+    },
+    "shadows": [
+      {
+        "name": "toast",
+        "value": "0 2px 8px rgba(0,0,0,0.25)",
+        "purpose": "Toast pill."
+      },
+      {
+        "name": "action-picker",
+        "value": "0 0 14px rgba(0,0,0,0.35)",
+        "purpose": "Cmd+K action picker."
+      },
+      {
+        "name": "overlay-card",
+        "value": "0 0 18px rgba(0,0,0,0.40)",
+        "purpose": "Shortcuts card / in-window overlays."
+      },
+      {
+        "name": "window",
+        "value": "system window shadow",
+        "purpose": "The card over the desktop."
+      }
+    ],
+    "motion": [
+      {
+        "name": "toast-in",
+        "value": "0.18s fade + rise",
+        "purpose": "Toast appears."
+      },
+      {
+        "name": "toast-out",
+        "value": "0.25s fade",
+        "purpose": "Toast leaves after a 1.4s hold."
+      },
+      {
+        "name": "button-emerge",
+        "value": "80ms",
+        "purpose": "/screenshot ring buttons."
+      }
+    ],
+    "notes": [
+      "Frontmatter colors are the default theme (Catppuccin Macchiato); 29 presets + [themes] swap them live.",
+      "Every chrome size multiplies by zoom (Cmd+±)."
+    ]
+  },
+  "components": [
+    {
+      "name": "Card with Header",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "The shared-window card: crust drag header (Flat style) over the base card, accent outline.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-header\"><span class=\"ds-x\">✕</span><span class=\"ds-title\">notes</span><span class=\"ds-meta\">12 files</span></div><div class=\"ds-card-body\">Card content</div></div>",
+      "css": ".ds-card{font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;width:320px;background:#24273A;border:1px solid rgba(125,106,161,.85);border-radius:9px;overflow:hidden;color:#CAD3F5;box-shadow:0 10px 30px rgba(0,0,0,.35)}.ds-header{height:30px;background:#181926;border-bottom:1px solid rgba(202,211,245,.08);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:10.5px}.ds-x{color:#939AB7;cursor:pointer}.ds-x:hover{color:#ED8796}.ds-title{flex:1;text-align:center;font-weight:500}.ds-meta{font-size:9px;color:#939AB7}.ds-card-body{padding:8px;font-size:11px}"
+    },
+    {
+      "name": "Tab Strip",
+      "kind": "nav",
+      "refersTo": "tab-active",
+      "description": "Mantle strip; the active tab is a solid accent pill with crust text.",
+      "html": "<div class=\"ds-tabs\"><button class=\"ds-tab ds-tab-on\">jiras</button><button class=\"ds-tab\">releases<i class=\"ds-dot\"></i></button><button class=\"ds-tab\">search</button></div>",
+      "css": ".ds-tabs{font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;display:flex;gap:3px;padding:4px;background:#1C1E2D}.ds-tab{all:unset;font-size:10.5px;font-weight:500;color:#939AB7;padding:4px 10px;border-radius:4px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}.ds-tab:hover{background:rgba(202,211,245,.11);color:rgba(202,211,245,.92)}.ds-tab-on,.ds-tab-on:hover{background:#C6A0F6;color:#151722;font-weight:600}.ds-tab:focus-visible{outline:2px solid #C6A0F6;outline-offset:1px}.ds-dot{width:7px;height:7px;border-radius:50%;background:#EED49F}"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Borderless chip: text-color ghost fill, dim label, brightens on hover.",
+      "html": "<button class=\"ds-btn\">copy path</button>",
+      "css": ".ds-btn{all:unset;font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;font-size:10.5px;font-weight:500;color:#939AB7;background:rgba(202,211,245,.06);padding:4px 10px;border-radius:4px;cursor:pointer;transition:background .12s,color .12s}.ds-btn:hover{background:rgba(202,211,245,.11);color:rgba(202,211,245,.92)}.ds-btn:active{background:rgba(202,211,245,.16)}.ds-btn:focus-visible{outline:2px solid #C6A0F6;outline-offset:1px}"
+    },
+    {
+      "name": "On Button",
+      "kind": "button",
+      "refersTo": "button-on",
+      "description": "Active toggle / applied filter: accent-tinted fill, accent semibold label.",
+      "html": "<button class=\"ds-btn-on\">Title only</button>",
+      "css": ".ds-btn-on{all:unset;font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;font-size:10.5px;font-weight:600;color:#C6A0F6;background:rgba(198,160,246,.22);padding:4px 10px;border-radius:4px;cursor:pointer;transition:background .12s}.ds-btn-on:hover{background:rgba(198,160,246,.30)}.ds-btn-on:focus-visible{outline:2px solid #C6A0F6;outline-offset:1px}"
+    },
+    {
+      "name": "Input Well",
+      "kind": "input",
+      "refersTo": "input-well",
+      "description": "Recessed mantle well with a hairline; focus swaps the hairline for the accent.",
+      "html": "<input class=\"ds-input\" placeholder=\"filter…\">",
+      "css": ".ds-input{font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;font-size:12px;color:#CAD3F5;background:rgba(28,30,45,.6);border:1px solid rgba(202,211,245,.12);border-radius:6px;padding:6px 9px;width:240px;outline:none;transition:border-color .12s}.ds-input::placeholder{color:#939AB7}.ds-input:focus,.ds-input:focus-visible{border-color:#C6A0F6}.ds-input::selection{background:#3F4A5A;color:#CAD3F5}"
+    },
+    {
+      "name": "List Rows",
+      "kind": "custom",
+      "refersTo": "row-cursor",
+      "description": "30pt rows; cursor = highlight pill + 3pt accent edge, hover = ghost fill.",
+      "html": "<div class=\"ds-list\"><div class=\"ds-row\">AGENT_CONTEXT.md</div><div class=\"ds-row ds-row-cur\">DESIGN.md</div><div class=\"ds-row\">PRODUCT.md</div></div>",
+      "css": ".ds-list{font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;width:280px;background:#24273A;padding:4px 0}.ds-row{position:relative;height:28px;margin:1px 4px;padding:0 10px;display:flex;align-items:center;font-size:11px;color:#CAD3F5;border-radius:4px;overflow:hidden;cursor:default}.ds-row:hover{background:rgba(202,211,245,.11)}.ds-row-cur,.ds-row-cur:hover{background:#3F4A5A}.ds-row-cur::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:#C6A0F6}"
+    },
+    {
+      "name": "Toast",
+      "kind": "custom",
+      "refersTo": "toast",
+      "description": "Bottom-center confirmation pill: crust, hairline, success glyph.",
+      "html": "<div class=\"ds-toast\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\"><path d=\"M3 8.5l3 3 7-7\" stroke=\"#A6DA95\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>Copied ~/DESIGN.md to clipboard</div>",
+      "css": ".ds-toast{font-family:-apple-system,'SF Pro Text',system-ui,sans-serif;display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:#CAD3F5;background:rgba(21,23,34,.94);border:1px solid rgba(202,211,245,.10);border-radius:999px;padding:7px 14px;box-shadow:0 2px 8px rgba(0,0,0,.25);animation:ds-rise .18s ease-out}@keyframes ds-rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Terminal Card",
+    "overview": "workspace-switcher is a floating card that wears your terminal theme.\nSurfaces are stacked like a tmux or Catppuccin port, deepest first: the\nheader strip is the darkest band (crust), toolbars, tab strips and input\nwells sit one step in (mantle), the card is the base, and raised controls\nfloat just above it (surface). Nothing uses a system colour. Every pixel\ncomes from the active theme preset, so switching from Macchiato to Tokyo\nNight or Paper recolours every view, the embedded shell's ANSI palette and\nthe nvim pane together.\n\nThe look is dense and quiet. Text is small (10.5–13 pt), rows are 30 pt,\nand chrome is thin hairlines rather than boxes. Colour carries meaning, not\ndecoration. The one accent marks what is *selected or active*: the active\ntab, the cursor row's edge, an \"on\" toggle, a focus ring. The five palette\nhues (accent2, success, warning, danger, info) mark *state*: links and fuzzy\nmatches, Jira statuses, poll health, the ✕ hover. The card floats over a\nblurred desktop, so the system is translucent at the edges and solid where\nyou read.",
+    "keyCharacteristics": [
+      "Depth by tone, not shadow: crust < mantle < base < surface.",
+      "One accent marks selection; palette hues mark status.",
+      "Every colour is derived from the theme, with contrast lifted in code",
+      "Small, dense, system-font UI; monospace only where text is edited.",
+      "Thin hairlines (text at 8–12% opacity) separate regions; boxes are rare."
+    ],
+    "rules": [
+      {
+        "name": "The Theme-Only Rule",
+        "body": "No `NSColor.systemX`, `controlAccentColor` or default selection colours. Draw with `PopupColors` tokens or a `tone(_:)`, because the machine's accent colour once made selections unreadable.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Accent Rule",
+        "body": "The accent means \"this is the selected or active one\". Status never borrows it; selection never borrows a status hue.",
+        "section": "colors"
+      },
+      {
+        "name": "The Contrast-in-Code Rule",
+        "body": "A new themed colour goes through `readable`, `accentOn` or `onAccent`. Text drawn on a tint goes through `ensure(fg, on: over(tint, alpha, on: base))`, which measures it against the opaque colour it actually sits on: 4.5:1 for text, 3:1 for marks. It must survive all 29 presets, including Paper and Solarized Light.",
+        "section": "colors"
+      },
+      {
+        "name": "The Zoom Rule",
+        "body": "Every size multiplies by `zoom` (Cmd+±). Never place a fixed point size in chrome without `* zoom`.",
+        "section": "typography"
+      },
+      {
+        "name": "The Weight-Marks-State Rule",
+        "body": "Active means semibold plus accent, never a bigger size. Sizes stay on the scale above.",
+        "section": "typography"
+      },
+      {
+        "name": "The Recessed-Field Rule",
+        "body": "Text inputs sink (mantle with a hairline) and buttons rise (a ghost fill). A field never looks like a button. Focus swaps the hairline for the accent.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do draw with `PopupColors` tokens and `tone(_:)`, and push live changes through `PopupThemeable` / `pushColors()`.",
+      "Do layer surfaces crust < mantle < base < surface0/1, and keep inputs recessed and buttons raised.",
+      "Do mark the cursor row with the highlight pill plus a 3 pt accent edge, and the active tab with the solid accent pill.",
+      "Do scale every chrome size by `zoom`.",
+      "Do check a new colour against light presets (Paper, Latte, Solarized Light) as well as dark ones."
+    ],
+    "donts": [
+      "Don't use system colours, the macOS accent colour, or AppKit default selection and bezel styles.",
+      "Don't use the accent for status, or a status hue for selection.",
+      "Don't add shadows to elements inside the card. Depth there is tonal.",
+      "Don't resize the shared window when switching views.",
+      "Don't use capsule chips (the toast is the only pill) or corners above 4 pt on in-card controls."
+    ]
+  }
+}

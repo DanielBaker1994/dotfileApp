@@ -136,25 +136,27 @@ final class ConfSegmented: NSView, PopupThemeable {
     override var isFlipped: Bool { true }
     func applyColors(_ c: PopupColors) { colors = c }
 
+    private var hover: Int?
     private var widths: [CGFloat] {
-        items.map { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) + 20 }
+        items.map { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) + 22 }
     }
     override var intrinsicContentSize: NSSize {
-        NSSize(width: widths.reduce(4, +), height: JiraTheme.height)
+        NSSize(width: widths.reduce(6, +) + CGFloat(max(0, items.count - 1)) * 2, height: JiraTheme.height + 4)
     }
     private func rect(_ i: Int) -> NSRect {
         let w = widths
-        let x = 2 + w.prefix(i).reduce(0, +)
-        return NSRect(x: x, y: 2, width: w[i], height: bounds.height - 4)
+        let x = 3 + w.prefix(i).reduce(0, +) + CGFloat(i) * 2
+        return NSRect(x: x, y: 3, width: w[i], height: bounds.height - 6)
     }
+    // the capsule look (CapsuleStyle): track + a raised chip under the pick
     override func draw(_ dirty: NSRect) {
-        JiraTheme.drawInput(bounds, colors, hover: false, focused: false)
+        CapsuleStyle.track(bounds.insetBy(dx: 0.5, dy: 0.5), colors)
         for (i, t) in items.enumerated() {
             let r = rect(i)
             let on = i == selected
-            if on { ButtonStyle.draw(r, .on, colors, radius: JiraTheme.radius - 1) }
+            CapsuleStyle.chip(r, colors, on: on, hover: hover == i)
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: font, .foregroundColor: on ? ButtonStyle.text(.on, colors) : colors.dim]
+                .font: font, .foregroundColor: on ? colors.text : hover == i ? colors.text.withAlphaComponent(0.9) : colors.dim]
             let sz = (t as NSString).size(withAttributes: attrs)
             (t as NSString).draw(at: NSPoint(x: r.midX - sz.width / 2, y: r.midY - sz.height / 2), withAttributes: attrs)
         }
@@ -168,14 +170,16 @@ final class ConfSegmented: NSView, PopupThemeable {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect],
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                        owner: self, userInfo: nil))
     }
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let i = items.indices.first { rect($0).contains(p) }
         toolTip = i.flatMap { $0 < tips.count ? tips[$0] : nil }
+        if i != hover { hover = i; needsDisplay = true }
     }
+    override func mouseExited(with event: NSEvent) { hover = nil; needsDisplay = true }
 }
 
 // on / off button (Title only)
@@ -199,8 +203,10 @@ final class ConfToggle: NSView, PopupThemeable {
     }
     override func draw(_ dirty: NSRect) {
         let st: ButtonState = isOn ? .on : .idle
-        ButtonStyle.draw(bounds, st, colors, radius: JiraTheme.radius)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: ButtonStyle.text(isOn ? .on : .hover, colors)]
+        // a one-chip capsule: track, raised when on
+        CapsuleStyle.track(bounds.insetBy(dx: 0.5, dy: 0.5), colors)
+        if isOn { CapsuleStyle.chip(bounds.insetBy(dx: 3, dy: 3), colors, on: true, hover: false) }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: isOn ? colors.text : colors.dim]
         let sz = (title as NSString).size(withAttributes: attrs)
         (title as NSString).draw(at: NSPoint(x: bounds.midX - sz.width / 2, y: bounds.midY - sz.height / 2),
                                  withAttributes: attrs)
