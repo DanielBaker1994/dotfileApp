@@ -1687,7 +1687,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
 }
 
 // WKUserContentController retains its handlers: break the cycle
-private final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     weak var target: WKScriptMessageHandler?
     init(_ t: WKScriptMessageHandler) { target = t }
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {

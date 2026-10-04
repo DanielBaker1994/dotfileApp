@@ -226,7 +226,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller";
   `jira_log.py` = debug.log + raw response dumps);
   tests: `python3 Tests/test_jira_poll.py`
-- `vim/notes-init.vim` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
+- `vim/init.lua` — nvim pane init (theme vars `g:ws_*` from `vimArgs`)
 
 ## ws-settings — every shortcut + setting (Hyper+/)
 
@@ -1385,7 +1385,7 @@ worked example):
 - `[app] esc-close` default 0 (Esc never hides); per-section `esc-close`
   (alias `vim-esc-close`) = the view's "Esc Hides Window".
 - `[app] copy-toast` default `Copied {} to clipboard` (`{}` = ~-path; empty = off).
-- Vim pane (`vim/notes-init.vim`): `number` + `cursorline` on; cursor-line
+- Vim pane (`vim/init.lua`): `number` + `cursorline` on; cursor-line
   color `g:ws_line` = highlight color blended 50% toward the card color.
 
 ## Verifying vim-pane changes without UI tests

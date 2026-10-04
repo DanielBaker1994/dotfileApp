@@ -159,16 +159,25 @@ enum ProseRender {
 }
 
 // the reading page itself (a WKWebView painted in the card color)
-final class ProseView: NSView {
+final class ProseView: NSView, WKScriptMessageHandler {
     let web: WKWebView
     var onLinkClick: ((URL) -> Void)?
+    var onOpenImage: ((String) -> Void) = { FilePopup.show(path: $0, over: nil) }
     private var lastPath = ""
     private var gen = 0
 
     override init(frame: NSRect) {
         let cfg = WKWebViewConfiguration()
+        // double-click a picture -> its full-size popup (like the nvim view)
+        cfg.userContentController.addUserScript(WKUserScript(source: """
+            document.addEventListener('dblclick', function (e) {
+              var t = e.target;
+              if (t && t.tagName === 'IMG') window.webkit.messageHandlers.wsImage.postMessage(t.src);
+            });
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web = WKWebView(frame: frame, configuration: cfg)
         super.init(frame: frame)
+        cfg.userContentController.add(WeakScriptHandler(self), name: "wsImage")
         web.autoresizingMask = [.width, .height]
         web.frame = bounds
         web.setValue(false, forKey: "drawsBackground")
@@ -176,6 +185,11 @@ final class ProseView: NSView {
         wantsLayer = true
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        guard let s = m.body as? String, let u = URL(string: s), u.isFileURL else { return }
+        onOpenImage(u.path)
+    }
 
     // render off the main thread (pandoc), keep the scroll spot on a reload
     // of the same note
@@ -351,6 +365,20 @@ final class ProseWindow: NSPanel {
         if mtime() != stamp { render() }
     }
     override var canBecomeKey: Bool { true }
+    // double-click the top strip = fill the screen / back (the Apple title bar
+    // gesture; the page covers the transparent title bar, so catch it here)
+    private var restoreFrame: NSRect?
+    override func sendEvent(_ e: NSEvent) {
+        if e.type == .leftMouseDown, e.clickCount == 2, e.locationInWindow.y > frame.height - 28 {
+            if let r = restoreFrame { setFrame(r, display: true, animate: true); restoreFrame = nil }
+            else if let scr = screen ?? NSScreen.main {
+                restoreFrame = frame
+                setFrame(scr.visibleFrame, display: true, animate: true)
+            }
+            return
+        }
+        super.sendEvent(e)
+    }
     override func cancelOperation(_ sender: Any?) { close() }
     override func performKeyEquivalent(with e: NSEvent) -> Bool {
         guard e.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: e) }

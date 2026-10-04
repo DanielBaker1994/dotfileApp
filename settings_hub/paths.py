@@ -96,7 +96,7 @@ def vim_init() -> str:
     own = hub("vim-init") or section("notes").get("vim-init", "")
     if own:
         return expand(own)
-    return os.path.join(ROOT, "vim", "notes-init.vim")
+    return os.path.join(ROOT, "vim", "init.lua")
 
 
 def vim_bin() -> str:

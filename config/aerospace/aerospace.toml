@@ -89,7 +89,7 @@ automatically-unhide-macos-hidden-apps = true
 # even when they are invisible.
 # This config option is only available since 'config-version = 2'
 # Fallback value (if you omit the key): persistent-workspaces = []
-persistent-workspaces = ["G", "M", "Y", "W", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+persistent-workspaces = ["G", "M", "Y", "W", "N", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 # A callback that runs every time binding mode changes
 # See: https://nikitabobko.github.io/AeroSpace/guide#binding-modes
@@ -190,6 +190,7 @@ G = ['main']
 M = ['main']
 Y = ['main']
 W = ['main']
+N = ['main']
 9 = ['secondary', 'main']
 # <<< monitor-layout
 
@@ -258,6 +259,10 @@ W = ['main']
     alt-m = 'workspace M'
     alt-y = 'workspace Y'
     alt-w = 'workspace W'
+    # N = the workspace-switcher's dedicated space (persistent, empty by
+    # default). The app window itself still follows the focused workspace
+    # (Hyper+N); alt-n just parks you on N when you want a clean desktop.
+    alt-n = 'workspace N'
 
     alt-shift-1 = 'move-node-to-workspace 1 --focus-follows-window'
     alt-shift-2 = 'move-node-to-workspace 2 --focus-follows-window'
@@ -272,6 +277,7 @@ W = ['main']
     alt-shift-m = 'move-node-to-workspace M --focus-follows-window'
     alt-shift-y = 'move-node-to-workspace Y --focus-follows-window'
     alt-shift-w = 'move-node-to-workspace W --focus-follows-window'
+    alt-shift-n = 'move-node-to-workspace N --focus-follows-window'
 
     # See: https://nikitabobko.github.io/AeroSpace/commands#workspace-back-and-forth
     alt-tab = 'workspace-back-and-forth'

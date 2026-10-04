@@ -37,7 +37,7 @@ over many places, and each one has its own format:
 | `commands.toml` other sections | ~20 sections, hundreds of settings (`[app]`, `[theme]`, `[screenshot]`, `[jira]`…), documented in `#` comments above each section | one-line TOML (`configEntry` / `config_entry` codec) | the app + python side |
 | `config/aerospace/aerospace.toml` | the global hotkeys: Hyper+S/N/T/X (they start the app), `alt-*` focus / move / workspace keys, service mode | real TOML | AeroSpace |
 | `~/.config/herdr/config.toml` (→ dotfiles) | terminal multiplexer keys (`[keys]`, `[[keys.command]]`, incl. the pane-shot binding) | real TOML | herdr |
-| `vim/notes-init.vim` | the notes vim pane's own maps | vimscript | nvim |
+| `vim/init.lua` | the notes vim pane's own maps | lua | nvim |
 | Swift code (`handleKey`, `PathsWindow`, `Confluence`, …) | keys that are real but **not** listed in `[shortcuts]` (e.g. /paths Cmd+Shift+C, Confluence Cmd+D / Cmd+G) | code | the app |
 
 **The problem.** To answer "what key does X?" or "what does Hyper+T do?" you
@@ -192,7 +192,7 @@ closes.
 | `aerospace` | `config/aerospace/aerospace.toml` (`tomllib`) `[mode.main.binding]`, `[mode.service.binding]` | `alt-cmd-ctrl-shift-x` → **Hyper+X**. `exec-and-forget …workspace-switcher window` → action text from a small map (`window` → "show / hide the window"), the rest shown raw. Service-mode keys get view `service`. |
 | `app` | `commands.toml` `[shortcuts]` via `config_entry` | `"view: keys" = "what"`, in file order. Read-only binding (it's a label); the **text** is editable. |
 | `herdr` | `~/.dotfiles/herdr/config.toml` `[keys]` + `[[keys.command]]` | lists (`["prefix+h","ctrl+h"]`) → one row per chord. `prefix` shown as herdr's prefix key. Path from `[settings-hub] herdr-config` (default `~/.config/herdr/config.toml`). Only configured keys, not herdr's defaults. |
-| `vim` | `vim/notes-init.vim` `*map` lines | best effort, read-only, view `notes (vim)`. |
+| `vim` | `vim/init.lua` `*map` lines | best effort, read-only, view `notes (vim)`. |
 
 Chords are normalized to one form (`Cmd+Shift+K`) for search, filters and
 clash checks. The original text is kept for display and writing back.

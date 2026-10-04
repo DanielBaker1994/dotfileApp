@@ -668,7 +668,7 @@ public struct PopupConfig {
     // replaced by the (~-abbreviated) path. Empty = no toast.
     public var copyToast: String = "Copied {} to clipboard"
     // vim pane: JSON file the editor writes inline-image placements to
-    // (vim/notes-init.vim); the window draws the images over those rows
+    // (vim/init.lua); the window draws the images over those rows
     public var vimImageFile: String?
     // show the standard window close button (red traffic light). By default
     // it's hidden on titled windows (Esc closes instead); set true to show it
@@ -6335,10 +6335,25 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         var out: [String] = []
         var seen = Set<String>()
         for raw in staticFavorites + pinnedFavorites {
-            let p = (raw as NSString).expandingTildeInPath
-            if seen.insert(p).inserted { out.append(p) }
+            for p in Self.favoriteFolders(from: raw) where seen.insert(p).inserted { out.append(p) }
         }
         return out
+    }
+    // One favorites entry -> real folders. A missing comma glues two paths
+    // ("~/Desktop /tmp/"): a path component never holds " /" or " ~/" as two
+    // folders' worth, so an entry that isn't a folder as written is split
+    // there. Anything that still isn't an existing folder is dropped, so a
+    // typo never becomes a pill that opens an empty browser.
+    static func favoriteFolders(from raw: String) -> [String] {
+        func isDir(_ p: String) -> Bool {
+            var d: ObjCBool = false
+            return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
+        }
+        let whole = (raw as NSString).expandingTildeInPath
+        if isDir(whole) { return [whole] }
+        let parts = raw.replacingOccurrences(of: #"\s+(?=[/~])"#, with: "\n", options: .regularExpression)
+            .split(separator: "\n").map { ($0.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath }
+        return parts.filter(isDir)
     }
     private func toggleStar() {
         guard !inRecent else { return }
@@ -10920,7 +10935,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // terminal font, else the system mono
     static func vimFont(_ c: PopupConfig) -> NSFont {
         let size = c.editorFontSize * c.zoom
-        if let n = c.fontName, let f = NSFont(name: n, size: size), f.isFixedPitch { return f }
+        // a Nerd Font family without "Mono" has double-width icons and isn't
+        // fixed-pitch: use its Mono sibling rather than dropping to terminalFont
+        if let n = c.fontName {
+            for name in [n, n + " Mono"] {
+                if let f = NSFont(name: name, size: size), f.isFixedPitch { return f }
+            }
+        }
         if let f = NSFont(name: c.terminalFont, size: size) { return f }
         return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
@@ -11492,7 +11513,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         panel.level = on ? .floating : .normal
     }
 
-    // `let g:ws_…` for the vim pane's palette roles (vim/notes-init.vim)
+    // `let g:ws_…` for the vim pane's palette roles (vim/init.lua)
     public static func vimPaletteLets(_ c: PopupColors) -> [String] {
         func hex(_ x: NSColor) -> String {
             let s = ButtonStyle.opaque(x)
@@ -11641,17 +11662,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         layoutFileBrowser()
         layoutTerminal()
         layoutEditorScroll()
-        // notes sidebar: the browser's pinned folders on top; a click opens
-        // the browser drawer there
-        if drawer, sidebarTabs, let bar = tabsBar {
-            bar.pinned = fb.favoriteFolders
-            fb.onFavoritesChanged = { [weak bar, weak fb] in bar?.pinned = fb?.favoriteFolders ?? [] }
-            bar.onPinned = { [weak self] path in
-                guard let self, let fb = self.fileBrowser else { return }
-                if !self.fileBrowserShown { self.toggleFileBrowser() }
-                fb.cd(path)
-            }
-        }
+        // notes sidebar: files only. No pinned folders, so nothing opens the
+        // browser drawer (toggleFileBrowser stays, but has no trigger).
     }
 
     public func toggleFileBrowser() {

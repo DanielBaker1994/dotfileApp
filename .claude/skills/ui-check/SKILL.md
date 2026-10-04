@@ -18,7 +18,7 @@ The daemon answers two test messages on `$TMPDIR/ws-notes.sock`
   `accessory`, `pane`, `tabs`, `selectedTab`, `responder` (class name).
 - `do:ACTION` → runs it, answers the state afterwards. ACTION = `cycle`,
   `cycle-back`, `hide`, `back`, `home`, `toggle`, `toggle-terminal`,
-  `toggle-browser`, `reset-size`, `open:VIEW`, `header-style:STYLE` (live only),
+  `reset-size`, `open:VIEW`, `header-style:STYLE` (live only),
   `esc-hides:VIEW:on|off` (writes the view's `esc-close`),
   `paths:show|hide|return|select:N` (the /paths shelf popup; state `paths`
   = {shown, key, level, rows[{path, why}], frame}).

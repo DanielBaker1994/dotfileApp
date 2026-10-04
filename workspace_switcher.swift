@@ -1437,6 +1437,16 @@ private func configValueProblem(section: String, key: String, value: String) -> 
             ? "expected 7, 8 or 13 hex colors: background, browser, terminal, header, text, dim, highlight[, accent[, accent2, success, warning, danger, info]]"
             : nil
     }
+    if key == "favorites" {
+        // each comma-separated entry must be one folder ("~/a /b" = a missing comma)
+        for e in value.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !e.isEmpty {
+            var d: ObjCBool = false
+            if !(FileManager.default.fileExists(atPath: (e as NSString).expandingTildeInPath, isDirectory: &d) && d.boolValue) {
+                return "'\(e)' is not a folder (separate favorites with commas)"
+            }
+        }
+        return nil
+    }
     if section == "pane-shot" {
         switch key {
         case "background":
@@ -3379,7 +3389,6 @@ final class SwitcherController: NSObject {
             case "home": slot.home()
             case "toggle": slot.toggle()
             case "toggle-terminal": noteWindow?.toggleTerminalDrawer()
-            case "toggle-browser": noteWindow?.toggleFileBrowser()
             case "reset-size": noteWindow?.resetToDefaultSize()
             case _ where a.hasPrefix("open:"):
                 guard let v = SlotView(rawValue: String(a.dropFirst(5))) else {
@@ -3644,10 +3653,10 @@ final class SwitcherController: NSObject {
                         if let prep { self?.applyHotkeyPrep(prep) }
                         if name == "reset-size" {
                             self?.noteWindow?.resetToDefaultSize()
-                        } else if name == "toggle-terminal" || name == "toggle-browser" {
+                        } else if name == "toggle-terminal" {
                             // drawer toggles on the notes window (scripts/tests)
                             guard let w = self?.noteWindow else { return }
-                            if name == "toggle-terminal" { w.toggleTerminalDrawer() } else { w.toggleFileBrowser() }
+                            w.toggleTerminalDrawer()
                         } else if name.hasPrefix("open:") {
                             // "open:<absolute path>" opens that file as a
                             // notes tab (same as Finder's "Open in Notes")
@@ -4025,11 +4034,11 @@ final class SwitcherController: NSObject {
         rebuildNoteWindow()
     }
 
-    // Launch args for the notes vim pane. The bundled vim/notes-init.vim
+    // Launch args for the notes vim pane. The bundled vim/init.lua
     // (chrome-less, autosaving, transparent) is used unless commands.toml
-    // `vim-init` names another file; with the bundled init, personal plugins
-    // are skipped so a broken plugin can never block the pane with a
-    // "Press ENTER" prompt. Theme colors are handed in as g:ws_* variables.
+    // `vim-init` names another file; the bundled init takes ~/.config/nvim off the
+    // runtimepath so personal plugins never load and can never block the pane
+    // with a "Press ENTER" prompt. Theme colors are handed in as g:ws_* variables.
     func vimArgs(for cmd: CommandSpec, socket: String, file: String?) -> [String] {
         var a: [String] = []
         let isNvim = (cmd.vimBin as NSString).lastPathComponent.hasPrefix("nvim")
@@ -4038,9 +4047,9 @@ final class SwitcherController: NSObject {
         if let custom, FileManager.default.fileExists(atPath: custom) {
             a += ["-u", custom]
         } else {
-            let bundled = assetDir + "/vim/notes-init.vim"
+            let bundled = assetDir + "/vim/init.lua"
             if FileManager.default.fileExists(atPath: bundled) {
-                a += ["--noplugin", "-u", bundled]
+                a += ["-u", bundled]
             }
         }
         func rgb(_ c: NSColor) -> String {
@@ -4851,7 +4860,7 @@ final class SwitcherController: NSObject {
             let exe = resolveBinary(cmd.vimBin) ?? cmd.vimBin
             cfg.vimEditorExecutable = exe
             cfg.vimEditorSocket = vimSocket
-            // inline-image placements the editor writes (vim/notes-init.vim)
+            // inline-image placements the editor writes (vim/init.lua)
             cfg.vimImageFile = (vimSocket as NSString).deletingPathExtension + ".images.json"
             cfg.vimEditorArgs = vimArgs(for: cmd, socket: vimSocket,
                                         file: noteIsPreview(firstNote) ? nil : firstNote)
@@ -6243,7 +6252,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Drawer toggles (affect the key/focused window)
         addMenuItem(menu, "Toggle Terminal", #selector(MenuTarget.toggleTerminal(_:)), key: "t", modifiers: [.command, .option])
-        addMenuItem(menu, "Toggle File Browser", #selector(MenuTarget.toggleFileBrowser(_:)), key: "b", modifiers: [.command, .option])
         menu.addItem(.separator())
 
         // Window toggles
@@ -6422,8 +6430,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
             switch item.action {
             case #selector(toggleTerminal(_:)):
                 item.state = (keyPopup?.terminalShown ?? false) ? .on : .off
-            case #selector(toggleFileBrowser(_:)):
-                item.state = (keyPopup?.fileBrowserShown ?? false) ? .on : .off
             case #selector(toggleNotes(_:)):
                 item.state = windowState(for: "notes", controller: controller)
             case #selector(toggleJira(_:)):
@@ -6504,15 +6510,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
             // Update the header button state to match
             // (header button id 10 = terminal toggle)
             pw.setHeaderButtonOn(10, pw.terminalShown)
-        }
-    }
-
-    @objc func toggleFileBrowser(_ sender: Any?) {
-        if let pw = keyPopupWindow() {
-            pw.toggleFileBrowser()
-            // Update the header button state to match
-            // (header button id 20 = file browser toggle)
-            pw.setHeaderButtonOn(20, pw.fileBrowserShown)
         }
     }
 
@@ -7413,9 +7410,6 @@ extension SwitcherController {
                     w.toggleTerminalDrawer()
                 }
             }
-            toggleItem("Toggle File Browser", w.fileBrowserShown) { [w] in
-                w.toggleFileBrowser()
-            }
             if cmd.voice {
                 let micShown = w.meterEnabled
                 toggleItem(micShown ? "Mute Microphone" : "Enable Microphone", micShown) { [w] in
@@ -7469,7 +7463,7 @@ extension SwitcherController {
             chooser.informativeText = "Open an existing file, or create a new note:"
             chooser.addButton(withTitle: "Open Existing…")
             chooser.addButton(withTitle: "New Note")
-            chooser.addButton(withTitle: "Cancel")
+            chooser.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
             chooser.beginSheetModal(for: panel) { [self] response in
                 switch response {
                 case .alertFirstButtonReturn:

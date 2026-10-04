@@ -1,0 +1,115 @@
+{
+  "markdown_custom": {
+    "prefix": "markdown_css_header",
+    "body": [
+      "# Markdown Title Here",
+      "",
+      "Markdown Paragraph Here",
+      "",
+      "---",
+      "",
+      ""
+    ]
+  }
+  ,
+  "markdown_bash_block": {
+    "prefix": "markdown_bash_block",
+    "body": [
+      "```bash",
+      "echo ${HOME}",
+      "```"
+    ]
+  },
+  "markdown_python_block": {
+    "prefix": "markdown_python_block",
+    "body": [
+      "```python",
+      "if 5 > 2:",
+      "    print(\"Five is greater than two!\")",
+      "```"
+    ]
+  },
+  "markdown_lua_block": {
+    "prefix": "markdown_lua_block",
+    "body": [
+      "```lua",
+      "local dirs = { vim.fn.stdpath('config') }",
+      "for _, p in ipairs(parts) do",
+      "    if p:match(\"%S\") then table.insert(dirs, p) end",
+      "end",
+      "return dirs",
+      "```"
+    ]
+  },
+  "markdown_cpp_block": {
+    "prefix": "markdown_cpp_block",
+    "body": [
+      "```cpp",
+      "#include <iostream>",
+      "int main(){ std::cout << \"hello\"; }",
+      "```"
+    ]
+  },
+  "markdown_log_block": {
+    "prefix": "markdown_log_block",
+    "body": [
+      "```log",
+      "[WARN] example warning",
+      "[ERROR] example error",
+      "```"
+    ]
+  },
+  "markdown_file_block": {
+    "prefix": "markdown_file_block",
+    "body": [
+      "```{.file}",
+      "/path/to/some/file.txt",
+      "~/.config/markdown_generator/friendly_document_styling.css",
+      "```"
+    ]
+  },
+  "markdown_image_block": {
+    "prefix": "markdown_image_block",
+    "body": [
+      "![](/path/to/image.png)"
+    ]
+  },
+  "markdown_admonition_warning": {
+    "prefix": "markdown_admonition_warning",
+    "body": [
+      "> [!WARNING]",
+      "> WARNING on a very long line still going 1233456788"
+    ]
+  },
+  "markdown_admonition_error": {
+    "prefix": "markdown_admonition_error",
+    "body": [
+      "> [!ERROR]",
+      "> ERROR I wanted two lines.",
+      "> But this renders on one line."
+    ]
+  },
+  "markdown_admonition_tip": {
+    "prefix": "markdown_admonition_tip",
+    "body": [
+      "> [!TIP]",
+      "> TIP on a very long line still going 1233456788 abcdefghijklmnopqrstuvwxyz"
+    ]
+  },
+  "markdown_admonition_info": {
+    "prefix": "markdown_admonition_info",
+    "body": [
+      "> [!INFO]",
+      "> INFO on a very long line still going 1233456788 abcdefghijklmnopqrstuvwxyz"
+    ]
+  },
+  "markdown_admonition_file": {
+    "prefix": "markdown_admonition_file",
+    "body": [
+      "> [!FILE]",
+      "> ~/.config/markdown_generator/friendly_document_styling.css",
+      ">",
+      "> /tmp/directory/test.txt"
+    ]
+  }
+}

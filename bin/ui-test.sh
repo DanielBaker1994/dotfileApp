@@ -101,7 +101,7 @@ status_item_count() {
 # --- daemon state over the socket (no AppleScript, no sleeps) ---------------
 # `state` answers one JSON line (SwitcherController.testQuery); `do:ACTION`
 # runs cycle | cycle-back | hide | back | home | toggle | toggle-terminal |
-# toggle-browser | reset-size | open:VIEW and answers the state afterwards.
+# reset-size | open:VIEW and answers the state afterwards.
 WS_SOCK="${TMPDIR%/}/$(sed -nE 's/^notes-socket *= *"?([^"]*)"?.*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../commands.toml" | head -1)"
 [[ "$WS_SOCK" == */ ]] && WS_SOCK="${TMPDIR%/}/ws-notes.sock"
 ws_query() { echo "$1" | nc -U -w 3 "$WS_SOCK" 2>/dev/null; }
