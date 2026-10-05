@@ -164,7 +164,7 @@ final class SharedWindow {
                 }
             }
             let mouse = NSEvent.mouseLocation
-            let vis = (targetNSScreen ?? NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame
+            let vis = (targetNSScreen ?? NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.gapFrame
                 ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
             let w = min(settings.sharedWidth, vis.width - 40), h = min(settings.sharedHeight, vis.height - 40)
             return NSRect(x: vis.midX - w / 2, y: vis.midY - h / 2, width: w, height: h)
@@ -199,7 +199,7 @@ final class SharedWindow {
     // `r` (on `from`) at the same relative spot on `to`, inside its visible
     // frame (a smaller screen shrinks it to fit)
     static func place(_ r: NSRect, from: NSScreen, to: NSScreen) -> NSRect {
-        let fv = from.visibleFrame, tv = to.visibleFrame
+        let fv = from.gapFrame, tv = to.gapFrame
         let w = min(r.width, tv.width), h = min(r.height, tv.height)
         var x = r.minX, y = r.minY
         if from != to {
@@ -428,13 +428,10 @@ final class SharedWindow {
     // Ctrl+Tab / Ctrl+Shift+Tab: the next / previous view in header-icon
     // order, wrapping (a view with no icon, e.g. output, starts at the ends)
     func cycle(_ dir: Int) {
-        let ids = Self.navIcons.map(\.id)
-        guard !ids.isEmpty else { return }
-        let n = ids.count
-        let ci = current.flatMap(Self.navOn).flatMap { ids.firstIndex(of: $0) }
-        let i = ci ?? (dir > 0 ? -1 : n)
-        let next = ids[((i + dir) % n + n) % n]
-        controller.log("cycle: current=\(current?.rawValue ?? "nil") currentNav=\(ci.map(String.init) ?? "nil") ids=\(ids) dir=\(dir) next=\(next)")
+        // only the two daily views: notes ⇄ files; from any other view
+        // (confluence, jira, …) jump to files (icon position 0)
+        let next = current == .files ? Self.navNotes : Self.navFiles
+        controller.log("cycle: current=\(current?.rawValue ?? "nil") dir=\(dir) next=\(next)")
         navClicked(next)
     }
 
@@ -452,15 +449,15 @@ final class SharedWindow {
         }
     }
 
-    // the view switcher: files (first, the default view) / notes / AI /
-    // jira / confluence / compare as icons just right of the kitchen sink
+    // the view switcher: files (first, the default view) / notes /
+    // jira / confluence / compare / AI as icons just right of the kitchen sink
     // (the app's icon menu), top-left in every view
     static var navIcons: [(image: NSImage, id: Int, tip: String)] {
         [(filesNavIcon, navFiles, "Files"), (notesNavIcon, navNotes, "Notes")]
-            + (aiEnabled() ? [(aiNavIcon, navAI, "AI view")] : [])
             + [(jiraNavIcon, navJira, "Jira")]
             + (confluenceEnabled() ? [(confluenceNavIcon, navConfluence, "Confluence search")] : [])
             + (compareEnabled() ? [(compareNavIcon, navCompare, "Compare")] : [])
+            + (aiEnabled() ? [(aiNavIcon, navAI, "AI view")] : [])
     }
 
     // the view's own nav words (right-hand bar, never beside the switcher):

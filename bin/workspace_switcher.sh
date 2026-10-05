@@ -5,7 +5,7 @@
 #
 # Usage:
 #   workspace_switcher.sh            toggle the main popup
-#   workspace_switcher.sh window     show the shared window on its last view / hide it (Hyper+N)
+#   workspace_switcher.sh window     show the shared window on its last view / hide it
 #   workspace_switcher.sh notes      open ONLY the notes window (no popup)
 #   workspace_switcher.sh jira       open ONLY the jira window (no popup)
 #   workspace_switcher.sh voice      open ONLY the voice-to-text window
@@ -131,7 +131,7 @@ case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
         # drop any zombie/stale daemon (a pre-fix daemon keeps its broken
         # attribution and would answer future pings forever)
         pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
-        # cold start: Hyper+N ("window") opens the first view, files —
+        # cold start: "window" opens the first view, files —
         # main.swift maps it
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
             LOG "LaunchServices launch FAILED — voice permissions will be broken"

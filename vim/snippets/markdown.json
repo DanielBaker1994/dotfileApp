@@ -10,8 +10,7 @@
       "",
       ""
     ]
-  }
-  ,
+  },
   "markdown_bash_block": {
     "prefix": "markdown_bash_block",
     "body": [
@@ -74,42 +73,39 @@
       "![](/path/to/image.png)"
     ]
   },
-  "markdown_admonition_warning": {
-    "prefix": "markdown_admonition_warning",
+  "markdown_alert_note": {
+    "prefix": "markdown_alert_note",
     "body": [
-      "> [!WARNING]",
-      "> WARNING on a very long line still going 1233456788"
+      "> [!NOTE]",
+      "> $0"
     ]
   },
-  "markdown_admonition_error": {
-    "prefix": "markdown_admonition_error",
-    "body": [
-      "> [!ERROR]",
-      "> ERROR I wanted two lines.",
-      "> But this renders on one line."
-    ]
-  },
-  "markdown_admonition_tip": {
-    "prefix": "markdown_admonition_tip",
+  "markdown_alert_tip": {
+    "prefix": "markdown_alert_tip",
     "body": [
       "> [!TIP]",
-      "> TIP on a very long line still going 1233456788 abcdefghijklmnopqrstuvwxyz"
+      "> $0"
     ]
   },
-  "markdown_admonition_info": {
-    "prefix": "markdown_admonition_info",
+  "markdown_alert_important": {
+    "prefix": "markdown_alert_important",
     "body": [
-      "> [!INFO]",
-      "> INFO on a very long line still going 1233456788 abcdefghijklmnopqrstuvwxyz"
+      "> [!IMPORTANT]",
+      "> $0"
     ]
   },
-  "markdown_admonition_file": {
-    "prefix": "markdown_admonition_file",
+  "markdown_alert_warning": {
+    "prefix": "markdown_alert_warning",
     "body": [
-      "> [!FILE]",
-      "> ~/.config/markdown_generator/friendly_document_styling.css",
-      ">",
-      "> /tmp/directory/test.txt"
+      "> [!WARNING]",
+      "> $0"
+    ]
+  },
+  "markdown_alert_caution": {
+    "prefix": "markdown_alert_caution",
+    "body": [
+      "> [!CAUTION]",
+      "> $0"
     ]
   }
 }

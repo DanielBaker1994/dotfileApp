@@ -6,13 +6,25 @@ import Foundation
 import Darwin
 import UniformTypeIdentifiers
 
+extension NSScreen {
+    // visibleFrame minus the top / bottom margins ([app] margin-*), the
+    // equivalent of AeroSpace's outer.top / outer.bottom for floating windows
+    var gapFrame: NSRect {
+        let top = localizedName.lowercased().contains("built-in") ? settings.marginTopBuiltin : settings.marginTop
+        var v = visibleFrame
+        v.size.height = max(100, v.height - top - settings.marginBottom)
+        v.origin.y += settings.marginBottom
+        return v
+    }
+}
+
 // Keep a frame fully inside the screen's visible area (used by both the
 // popup window and the chrome/backdrop drag-resize handlers so the scrollbar
 // and bottom pills never go off-screen).
 func clampToScreen(_ f: NSRect) -> NSRect {
     let screen = NSScreen.screens.first { $0.frame.contains(f.origin) }
         ?? NSScreen.main!
-    let vis = screen.visibleFrame
+    let vis = screen.gapFrame
     var r = f
     r.size.width = min(r.width, vis.width - 8)
     r.size.height = min(r.height, vis.height - 8)
@@ -4960,20 +4972,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         searchField.layer?.borderWidth = part == .filter ? 2 : 1
         searchField.layer?.borderColor = (part == .filter ? ButtonStyle.focusStroke(c)
                                           : ButtonStyle.inputStroke(c)).cgColor
-        partRing.layer?.borderColor = ButtonStyle.focusStroke(c).withAlphaComponent(0.9).cgColor
-        var ring: NSRect?
-        switch part {
-        case .list: ring = listScroll.frame
-        case .preview: ring = previewListScroll.isHidden ? previewScroll.frame : previewListScroll.frame
-        case .filter, nil: ring = nil
-        }
-        if let r = ring, r.width > 8, r.height > 8 {
-            partRing.frame = r.insetBy(dx: 3, dy: 3)
-            partRing.isHidden = false
-            addSubview(partRing, positioned: .above, relativeTo: nil)
-        } else {
-            partRing.isHidden = true
-        }
+        partRing.isHidden = true
     }
     private func layoutPanes() {
         let full = bounds.width
@@ -5133,10 +5132,12 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     }
     // trailing column follows the sort: dates when sorting by date, else size
     private func decorate(_ e: inout Entry) {
+        let size = e.isDir ? "" : Self.humanSize(e.size)
+        func withSize(_ date: String) -> String { size.isEmpty ? date : date + "  ·  " + size }
         switch sortKey {
-        case .modified: e.trailingText = e.name == ".." ? "" : Self.shortDate(e.modified)
-        case .created: e.trailingText = e.name == ".." ? "" : Self.shortDate(e.created)
-        default: e.trailingText = e.isDir ? "" : Self.humanSize(e.size)
+        case .modified: e.trailingText = e.name == ".." ? "" : withSize(Self.shortDate(e.modified))
+        case .created: e.trailingText = e.name == ".." ? "" : withSize(Self.shortDate(e.created))
+        default: e.trailingText = size
         }
         e.trailingWidth = e.trailingText.isEmpty ? 0 : (e.trailingText as NSString)
             .size(withAttributes: [.font: NSFont.systemFont(ofSize: 10)]).width
@@ -12041,7 +12042,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public func popOutProse() {
         if vimView != nil, vimPaneActive { vimCommand("silent! update") }
         guard let src = proseProvider?() else { return }
-        ProseWindow.show(path: src.path, colors: config.colors, font: proseFont, size: proseFontSize, width: proseWidth)
+        ProseProcess.launch(path: src.path, colors: config.colors, font: proseFont, size: proseFontSize, width: proseWidth)
     }
     // a tab switch while reading: re-render the newly shown note
     private func refreshProse() {

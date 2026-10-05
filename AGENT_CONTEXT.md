@@ -154,7 +154,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   releases / config) with back + home in the RIGHT header bar (ids 63/62,
   after the view's own buttons). Header, every view: ✕ · kitchen sink (the
   app's icon menu, `appIcon`, `[app] app-icon`) · view switcher ICONS
-  files / notes / AI / jira / confluence — files first + the default view
+  files / notes / jira / confluence / compare / AI — files first + the default view
   (`PopupChrome.navIcons` / `navOn`, ids 60/64/61,
   `[app] notes-icon` / `files-icon` / `jira-icon`) — set in `decorate`.
   Views share the DRAWER-LESS frame (`slotBaseFrame` = `PopupWindow.baseFrame`;
@@ -515,7 +515,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 
 ## AI view
 
-- `AIWindow.swift` — `AIWindow` (a `CardWindowController`; `SlotMember`, view `.ai`, nav id 66 placed RIGHT AFTER notes
+- `AIWindow.swift` — `AIWindow` (a `CardWindowController`; `SlotMember`, view `.ai`, nav id 66 placed LAST
   in `SharedWindow.navIcons`, `[app] ai-icon` ("" = violet sparkles glyph);
   shares the frame). `[ai]` in commands.toml: enabled, fm-bin, pandoc-bin,
   rules-dir, context-tokens (4096), split, font / font-size, copy-toast.
@@ -1166,6 +1166,10 @@ Line numbers drift; grep the symbol names (they're stable).
 - Prose mode (NotesProse.swift): ⌘⇧P / the Prose | nvim switch (bottom
   right) / Esc back; `ProseRender` = pandoc (`RichText.pandocHTML`) else
   `basic`; `[notes] prose-font / prose-font-size / prose-width`.
+  Alerts: ONLY GitHub's five (`> [!NOTE|TIP|IMPORTANT|WARNING|CAUTION]`) —
+  pandoc gfm's built-in `alerts` → `div.note` …; `ProseRender.alertCSS`
+  (palette tones), `RichText.styled` inlines them for Outlook / Webex. Same
+  syntax as the dotfiles PDF builder (`-f gfm`, no Lua filter) + nvim.
 - Capsule look everywhere (`CapsuleStyle` track + raised chip, PopupWindow.swift):
   view switcher, `ConfSegmented` / `ConfToggle` (compare + folder filters,
   AI preview modes, Confluence), the prose switch, and `CapsuleButtons`
@@ -1173,9 +1177,11 @@ Line numbers drift; grep the symbol names (they're stable).
   Recent header's Clear Missing (N) / Clear All. Recent rows: ✕ on hover
   (`CompareRecentList.onRemove`). Start page: the folder button sits LEFT
   of each path field.
-- Prose: default 19 px / 900 pt column; ⤢ chip / ⌘⇧O = `ProseWindow`
-  (non-activating floating panel, follows the file's mtime every 1 s,
-  Esc / ⌘W close, ⌘± size, close button only).
+- Prose: default 19 px / 900 pt column; ⤢ chip / ⌘⇧O = `ProseProcess.launch`
+  → a SEPARATE process (`workspace-switcher prose --colors HEX,… FILE`, handled
+  at the top of main.swift: no daemon, no lock; one per file) showing a
+  `ProseWindow` (floating panel, follows the file's mtime every 1 s, Esc / ⌘W /
+  the themed ✕ top-left close it, ⌘± size; closing the last one ends the process).
 - /screenshot recents: `ShotHistory` keeps every copied / saved / pinned
   capture (`[screenshot] history`, 20) in ~/.cache/workspace-switcher/
   screenshots; clock button / ⌘R → `ShotRecentPanel` thumbnail grid
@@ -1185,9 +1191,9 @@ Line numbers drift; grep the symbol names (they're stable).
 - `PopupChrome.redrawAll` runs before NSApp exists (parseAppConfig at
   launch) — guarded; a non-default header-style crashed launch.
 
-## Hotkey fast path (Hyper+N)
+## Hotkey fast path (no window hotkey)
 
-- ONLY one window hotkey besides Hyper+S: Hyper+N = `window`
+- NO window hotkey (Hyper+N and the aerospace app rule were removed): the window opens from the Hyper+S palette's LAST entry "Workspace Switcher" (`window`) or by launching the app (one daemon: `acquireDaemonLock` forwards a second launch). `window`
   (`SharedWindow.toggle`: hidden → the view you were LAST on (`last`), in it →
   hide, elsewhere → focus). No per-view hotkeys (Hyper+F / J
   removed): views switch via Ctrl+Tab, header icons, the Hyper+S palette.
@@ -1305,8 +1311,9 @@ worked example):
   (`esc-close` per section, default `[app] esc-close` = 0 = never; 1 =
   single, 2 = double-tap). Jira / output: Esc = back first. The switcher
   palette always closes on one Esc. Find bar: one Esc.
-- Ctrl+Tab / Ctrl+Shift+Tab: next/prev shared-window VIEW in header-icon
-  order (`SharedWindow.cycle`; every member's `onCycleView`), wraps. Not
+- Ctrl+Tab / Ctrl+Shift+Tab: toggles files ⇄ notes only; from any
+  other view it jumps to files (`SharedWindow.cycle`; every member's
+  `onCycleView`; direction ignored). Other views: header icons / palette. Not
   while a sheet / popover / Cmd+K picker / shortcuts card is up. Notes and
   jira source tabs are click-only now.
 - File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's

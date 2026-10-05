@@ -1334,6 +1334,37 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     // a file into one side of the current session (Cmd+O, a drop, the path field)
     func openFile(_ p: String, into side: CompareSide) {
         guard let s = session else { _ = openPair(side == .left ? p : nil, side == .right ? p : nil); return }
+        commitEditor()
+        if s.folder == nil, s.dirty(side) {
+            askDiscard(s, side, what: cfg.label("replace-info", "Opening {} replaces them.", "“\((p as NSString).lastPathComponent)”")) { [weak self] in
+                self?.placeFile(p, into: side)
+            }
+            return
+        }
+        placeFile(p, into: side)
+    }
+
+    // unsaved edits on one side stand in the way of a replacement: Save is the
+    // default (Return), Discard is red, Esc = Cancel
+    private func askDiscard(_ s: CompareSession, _ side: CompareSide, what: String, then go: @escaping () -> Void) {
+        let name = (s.path[side] as NSString?)?.lastPathComponent ?? side.rawValue
+        confirm(cfg.label("unsaved-side", "Unsaved changes in {}", "“\(name)”"),
+                info: what,
+                choices: [(cfg.label("discard-button", "Discard"), .danger),
+                          (cfg.label("cancel-button", "Cancel"), .normal),
+                          (cfg.label("save-button", "Save"), .primary)],
+                defaultIndex: 2, cancelIndex: 1, colors: colors) { [weak self] i in
+            guard let self, self.session === s else { return }
+            switch i {
+            case 2: self.save(side) { ok in if ok { go() } }
+            case 0: go()
+            default: break
+            }
+        }
+    }
+
+    private func placeFile(_ p: String, into side: CompareSide) {
+        guard let s = session else { return }
         var dir: ObjCBool = false
         if FileManager.default.fileExists(atPath: p, isDirectory: &dir), dir.boolValue {
             s.status = cfg.label("folder", "Folder Compare needs a folder on both sides: {}", "\(tilde(p)) is a folder")
@@ -2134,6 +2165,18 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     }
 
     private func resolveBanner(keep: Bool) {
+        guard let s = session, let side = bannerSide else { return }
+        if !keep, s.dirty(side), s.path[side] != nil {
+            // Reload throws the side's edits away: ask first
+            askDiscard(s, side, what: cfg.label("reload-info", "Reloading brings back the file as it is on disk.")) { [weak self] in
+                self?.applyBanner(keep: false)
+            }
+            return
+        }
+        applyBanner(keep: keep)
+    }
+
+    private func applyBanner(keep: Bool) {
         guard let s = session, let side = bannerSide else { return }
         s.changedOnDisk[side] = nil
         if !keep, let p = s.path[side] {

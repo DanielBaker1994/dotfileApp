@@ -149,6 +149,9 @@
 #                       monitor. false = separate windows.
 #   shared-width / shared-height   first size of the shared window (default
 #                       1100 x 640); after that it keeps the size you leave it
+#   margin-top / margin-top-builtin / margin-bottom   gaps kept above / below
+#                       floating windows (AeroSpace [gaps] only moves tiles);
+#                       -builtin = the notch screen. Match outer.top / bottom.
 #   esc-close           rapid Esc presses that hide a window (default 0 =
 #                       never; 1 = single Esc, 2 = double-tap). A view's own
 #                       `esc-close` overrides it — kitchen sink ▸ "Esc Hides
@@ -179,6 +182,9 @@
 #                       Default: org.flameshot, pl.maketheweb.cleanshotx,
 #                       cc.ffitch.shottr, com.skitch.skitch
 [app]
+margin-top = 48
+margin-top-builtin = 15
+margin-bottom = 10
 header-style = "quiet"
 # shell used to run palette commands (persistent runner + output windows)
 shell = "/opt/homebrew/bin/bash"
@@ -573,8 +579,8 @@ favorites = "~/notes, ~/Desktop, /tmp"
 start = "recent"
 
 # THE SWITCH: enabled = true shows the window, anything else hides it
-sort = "created"
-sort-order = "asc"
+sort = "size"
+sort-order = "desc"
 background-color = "C71E1E2E"
 header-color = "11111B"
 browser-background = "991E1E2E"
@@ -634,7 +640,7 @@ font = "SF Mono"
 body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
-sidebar-width = 250
+sidebar-width = 245
 # Jira Config window (menu bar ▸ Open Jira Config Window): size + how often
 # it re-reads status (seconds). Unset = 1080 x 720, every 5s.
 # dashboard-width = 1080
@@ -778,11 +784,10 @@ workspace-switcher = "*:app"
 # Cmd+Minus for Cmd+= / Cmd+- (the first "=" ends the key).
 [shortcuts]
 "all: Hyper+S" = "switcher palette: search windows + commands"
-"all: Hyper+N" = "show the window on the view you were last in / hide it"
 "all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
 "all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
-"all: Ctrl+Tab / Ctrl+Shift+Tab" = "next / previous app (files · notes · AI · jira · confluence · compare)"
+"all: Ctrl+Tab / Ctrl+Shift+Tab" = "toggle files ⇄ notes (from any other view: jump to files)"
 "all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
 "all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
 "all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"

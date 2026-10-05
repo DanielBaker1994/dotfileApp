@@ -109,14 +109,6 @@ key-mapping.preset = 'qwerty'
 # properly; the dialog heuristic floats those now.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
-  # workspace-switcher (notes / files / jira / AI / confluence, its
-  # dialogs): v_accordion. The app never tiles or floats itself — this rule
-  # is the one place that decides (v_accordion can't un-float a window the
-  # dialog heuristic floated). Each view is its own window, re-detected on
-  # every show / view switch, so this runs often: keep it first and cheap.
-  # The Hyper+S palette and the "/" tool panels (filefast, paths,
-  # prettyprint, health-checks) are NSPanels: AeroSpace never sees them.
-  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout v_accordion'] },
   # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
   # before the Microsoft float rule below)
   { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
@@ -202,18 +194,12 @@ N = ['main']
 
     # Workspace switcher popup: Hyper+S (Hyper = all four modifiers;
     # AeroSpace has no `hyper` keyword, so it's spelled out as
-    # alt-cmd-ctrl-shift). Hyper+N/T run the app BINARY directly (a ~20ms
-    # socket ping; no bash) — the running daemon records the focused window
-    # and moves our window onto the current workspace itself (never spawns
-    # a duplicate).
+    # alt-cmd-ctrl-shift). The window itself has no hotkey: open it from the
+    # palette (Hyper+S, last entry) or launch the app.
     alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
-    # Hyper+N = THE show / hide key for the shared window: it comes back on
-    # the view you were last on (notes, AI, files, jira, confluence); switch
-    # views inside it (Ctrl+Tab, header icons) or from the Hyper+S palette.
-    alt-cmd-ctrl-shift-n = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher window'
     # Screenshot: Hyper+X (Flameshot's macOS default is Ctrl+Shift+X) —
     # freeze + dim every display, drag a box, annotate, Cmd+C / Cmd+S / pin.
-    # Same binary ping as N; the overlay never activates the app.
+    # Runs the app BINARY directly (a ~20ms socket ping); the overlay never activates the app.
     alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher screenshot'
     # ws-settings: Hyper+/ — every shortcut + setting in one searchable list
     # (bin/ws-settings open: focuses the picker if it's up, else opens it in
@@ -259,9 +245,8 @@ N = ['main']
     alt-m = 'workspace M'
     alt-y = 'workspace Y'
     alt-w = 'workspace W'
-    # N = the workspace-switcher's dedicated space (persistent, empty by
-    # default). The app window itself still follows the focused workspace
-    # (Hyper+N); alt-n just parks you on N when you want a clean desktop.
+    # N = a dedicated space (persistent, empty by default); alt-n just
+    # parks you on N when you want a clean desktop.
     alt-n = 'workspace N'
 
     alt-shift-1 = 'move-node-to-workspace 1 --focus-follows-window'

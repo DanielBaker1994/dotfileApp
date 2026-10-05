@@ -112,7 +112,15 @@ enum RichText {
             + "border-radius:3px;color:#1f2328\">")
         sub(#"<p>"#, "<p style=\"margin:0 0 8px 0\">")
         sub(#"<(ul|ol)>"#, "<$1 style=\"margin:0 0 8px 0;padding-left:22px\">")
-        sub(#"<blockquote>"#, "<blockquote style=\"margin:0 0 8px 0;padding-left:10px;border-left:3px solid #c8c8c8;color:#555\">")
+        // GitHub alerts (pandoc gfm `alerts`): classes don't survive a paste
+        for (name, color, tint) in [("note", "#0969da", "#eef5fd"), ("tip", "#1a7f37", "#eef8f0"),
+                                    ("important", "#8250df", "#f4effc"), ("warning", "#9a6700", "#fdf6e6"),
+                                    ("caution", "#cf222e", "#fdeff0")] {
+            sub(#"<div class="\#(name)">\s*<div class="title">\s*<p[^>]*>"#,
+                "<div style=\"margin:0 0 8px 0;padding:6px 10px;border-left:3px solid \(color);background:\(tint)\">"
+                + "<div><p style=\"margin:0 0 4px 0;font-weight:bold;color:\(color)\">")
+        }
+        sub(#"<blockquote>"#,"<blockquote style=\"margin:0 0 8px 0;padding-left:10px;border-left:3px solid #c8c8c8;color:#555\">")
         sub(#"<h1([^>]*)>"#, "<h1$1 style=\"font-size:16pt;margin:10px 0 6px 0\">")
         sub(#"<h2([^>]*)>"#, "<h2$1 style=\"font-size:14pt;margin:10px 0 6px 0\">")
         sub(#"<h([3-6])([^>]*)>"#, "<h$1$2 style=\"font-size:12pt;margin:8px 0 4px 0\">")

@@ -20,6 +20,9 @@ if CommandLine.arguments.count > 1 {
         exit(0)
     case "config-check":
         exit(configCheckCLI(Array(CommandLine.arguments.dropFirst(2))))
+    case "prose":
+        // the pop-out reading page: its own process, no daemon, no lock
+        ProseProcess.run(Array(CommandLine.arguments.dropFirst(2)))
     default: break
     }
 }
@@ -213,7 +216,7 @@ if cliArgs.count > 1 {
                 execv(script, argv)
             }
         }
-        // cold start: Hyper+N ("window") opens the default view, files
+        // cold start: "window" opens the default view, files
         openCommand = cliArgs[1] == "window" ? "files" : cliArgs[1]
     default:
         break

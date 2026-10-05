@@ -102,6 +102,20 @@ enum ProseRender {
         return basic(md)
     }
 
+    // GitHub alerts (> [!NOTE] …): pandoc gfm's `alerts` emits
+    // <div class="note"><div class="title"><p>Note</p></div>…</div>
+    static func alertCSS(_ c: PopupColors) -> String {
+        let tones: [(String, PopupTone)] = [("note", .info), ("tip", .success), ("important", .accent2),
+                                            ("warning", .warning), ("caution", .danger)]
+        return tones.map { name, t in
+            let hex = css(c.tone(t))
+            return "div.\(name) { margin: 0 0 .9em; padding: .55em 1em .1em; border-left: 3px solid \(hex);"
+                + " background: \(hex)14; border-radius: 6px; }"
+                + " div.\(name) > .title p { margin: 0 0 .3em; color: \(hex); font-weight: 600;"
+                + " font-family: -apple-system, system-ui; font-size: .85em; }"
+        }.joined(separator: "\n")
+    }
+
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
         var body = fragment(src.markdown)
         // the meta line: under the first heading when the note starts with one
@@ -139,6 +153,7 @@ enum ProseRender {
         pre { background: \(well); padding: 12px 14px; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
         pre code { background: none; padding: 0; color: \(css(c.tone(.accent2))); }
         blockquote { margin: 0 0 .9em; padding-left: 14px; border-left: 2px solid \(accent); color: \(dim); }
+        \(alertCSS(c))
         hr { border: 0; border-top: 1px solid \(rule); margin: 1.6em 0; }
         ul, ol { padding-left: 1.4em; margin: 0 0 .9em; }
         li { margin: .2em 0; }
@@ -305,6 +320,8 @@ final class ProseModeSwitch: NSView {
 // panel like the tool panels: opening it never drags the shared window up.
 final class ProseWindow: NSPanel {
     private static var open: [ProseWindow] = []
+    // true in the `workspace-switcher prose` process: closing the last window ends it
+    static var standalone = false
     private let page = ProseView(frame: .zero)
     private let path: String
     private let colors: PopupColors
@@ -331,7 +348,7 @@ final class ProseWindow: NSPanel {
         let scr = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1400, height: 900)
         let w = min(scr.width * 0.6, width + 160), h = scr.height * 0.8
         super.init(contentRect: NSRect(x: scr.midX - w / 2, y: scr.midY - h / 2, width: w, height: h),
-                   styleMask: [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel],
+                   styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                    backing: .buffered, defer: false)
         title = (path as NSString).lastPathComponent
         titlebarAppearsTransparent = true
@@ -342,13 +359,16 @@ final class ProseWindow: NSPanel {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         backgroundColor = colors.base
-        collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
-        // lean: only the close button
-        standardWindowButton(.miniaturizeButton)?.isHidden = true
-        standardWindowButton(.zoomButton)?.isHidden = true
+        collectionBehavior = [.fullScreenAuxiliary]
+        // lean: the themed ✕ below replaces the traffic lights
+        for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { standardWindowButton(b)?.isHidden = true }
         page.frame = contentView?.bounds ?? .zero
         page.autoresizingMask = [.width, .height]
         contentView?.addSubview(page)
+        let x = ProseCloseButton(colors: colors) { [weak self] in self?.close() }
+        x.frame = NSRect(x: 12, y: (contentView?.bounds.height ?? h) - 34, width: 22, height: 22)
+        x.autoresizingMask = [.minYMargin]
+        contentView?.addSubview(x)
         render()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshIfChanged() }
     }
@@ -399,5 +419,122 @@ final class ProseWindow: NSPanel {
         timer = nil
         Self.open.removeAll { $0 === self }
         super.close()
+        if Self.standalone, Self.open.isEmpty { NSApp.terminate(nil) }
+    }
+}
+
+// The ✕ top-left: the app header's glyph (ghost chip, danger on hover).
+final class ProseCloseButton: NSView {
+    private let colors: PopupColors
+    private let action: () -> Void
+    private var hover = false { didSet { needsDisplay = true } }
+    init(colors: PopupColors, action: @escaping () -> Void) {
+        self.colors = colors
+        self.action = action
+        super.init(frame: .zero)
+        toolTip = "Close (Esc)"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with e: NSEvent) { hover = true }
+    override func mouseExited(with e: NSEvent) { hover = false }
+    override func mouseDown(with e: NSEvent) {}
+    override func mouseUp(with e: NSEvent) { if bounds.contains(convert(e.locationInWindow, from: nil)) { action() } }
+    override func draw(_ dirty: NSRect) {
+        let dot = bounds.insetBy(dx: 3, dy: 3)
+        let fg: NSColor
+        if hover {
+            let danger = colors.tone(.danger)
+            danger.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            fg = ButtonStyle.readable(on: danger, preferred: colors.crust)
+        } else {
+            ButtonStyle.draw(dot, .idle, colors, radius: dot.height / 2, flat: true)
+            fg = colors.dim
+        }
+        let r: CGFloat = 3.2
+        let x = NSBezierPath()
+        x.move(to: NSPoint(x: dot.midX - r, y: dot.midY - r)); x.line(to: NSPoint(x: dot.midX + r, y: dot.midY + r))
+        x.move(to: NSPoint(x: dot.midX + r, y: dot.midY - r)); x.line(to: NSPoint(x: dot.midX - r, y: dot.midY + r))
+        x.lineWidth = 1.6
+        x.lineCapStyle = .round
+        fg.setStroke()
+        x.stroke()
+    }
+}
+
+// Pop-out as its OWN PROCESS (`workspace-switcher prose …`): the page has no
+// tie to the app that opened it — move it, keep it when the daemon restarts.
+// Colors travel as hex on the command line; one process per file.
+enum ProseProcess {
+    private static var children: [String: Process] = [:]
+
+    private static func hex(_ c: NSColor) -> String {
+        let s = c.usingColorSpace(.sRGB) ?? c
+        return String(format: "%02X%02X%02X%02X", Int(round(s.redComponent * 255)), Int(round(s.greenComponent * 255)),
+                      Int(round(s.blueComponent * 255)), Int(round(s.alphaComponent * 255)))
+    }
+    private static func color(_ h: Substring) -> NSColor? {
+        guard h.count == 8, let v = UInt32(h, radix: 16) else { return nil }
+        return NSColor(srgbRed: CGFloat(v >> 24) / 255, green: CGFloat((v >> 16) & 255) / 255,
+                       blue: CGFloat((v >> 8) & 255) / 255, alpha: CGFloat(v & 255) / 255)
+    }
+
+    static func launch(path: String, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) {
+        if let p = children[path], p.isRunning {
+            NSRunningApplication(processIdentifier: p.processIdentifier)?.activate(options: [.activateIgnoringOtherApps])
+            return
+        }
+        guard let exe = Bundle.main.executablePath else { return }
+        let all = [c.background, c.border, c.text, c.dim, c.highlight, c.accent] + c.palette.all
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = ["prose", "--colors", all.map(hex).joined(separator: ","), "--font", font,
+                       "--size", String(Double(size)), "--width", String(Double(width)), path]
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run(); children[path] = p } catch { ProseWindow.show(path: path, colors: c, font: font, size: size, width: width) }
+    }
+
+    // the child's entry (main.swift): never returns
+    static func run(_ args: [String]) -> Never {
+        var colors = PopupColors(), font = "", size: CGFloat = 19, width: CGFloat = 900, path = ""
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--colors" where i + 1 < args.count:
+                let cs = args[i + 1].split(separator: ",").compactMap(color)
+                if cs.count == 11, let pal = PopupPalette(Array(cs[6...])) {
+                    colors = PopupColors(background: cs[0], border: cs[1], text: cs[2], dim: cs[3],
+                                         highlight: cs[4], accent: cs[5], palette: pal)
+                }
+                i += 1
+            case "--font" where i + 1 < args.count: font = args[i + 1]; i += 1
+            case "--size" where i + 1 < args.count: size = CGFloat(Double(args[i + 1]) ?? 19); i += 1
+            case "--width" where i + 1 < args.count: width = CGFloat(Double(args[i + 1]) ?? 900); i += 1
+            default: path = args[i]
+            }
+            i += 1
+        }
+        guard FileManager.default.fileExists(atPath: path) else {
+            FileHandle.standardError.write(Data("usage: workspace-switcher prose [--colors …] [--font F] [--size N] [--width N] FILE.md\n".utf8))
+            exit(2)
+        }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let menu = NSMenu()
+        let item = NSMenuItem()
+        menu.addItem(item)
+        app.mainMenu = menu
+        ProseWindow.standalone = true
+        ProseWindow.show(path: path, colors: colors, font: font, size: size, width: width)
+        app.activate(ignoringOtherApps: true)
+        app.run()
+        exit(0)
     }
 }

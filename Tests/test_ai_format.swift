@@ -88,6 +88,14 @@ struct Main {
         let ask = AIRule.load(rules + "/ask.md")
         check(ask.warnings.isEmpty && !ask.diff && ask.prompt.isEmpty, "Ask: plain, free-form")
 
+        // --- GitHub alerts: pandoc gfm's divs get inline styles (classes don't survive a paste)
+        if RichText.available, let h = RichText.html("> [!WARNING]\n> Mind the gap\n", for: .outlook) {
+            check(!h.contains("class=\"warning\"") && h.contains("border-left:3px solid #9a6700"),
+                  "warning alert styled inline: \(h)")
+            check(h.contains("font-weight:bold;color:#9a6700\">Warning") && h.contains("Mind the gap"),
+                  "alert title + body kept: \(h)")
+        }
+
         print("test_ai_format: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

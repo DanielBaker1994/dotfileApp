@@ -111,6 +111,11 @@ struct AppSettings {
     var preload = true
     var sharedWidth: CGFloat = 1100
     var sharedHeight: CGFloat = 640
+    // floating windows keep AeroSpace's outer gaps top / bottom (AeroSpace only
+    // applies [gaps] to tiles): points inside the screen's visibleFrame
+    var marginTop: CGFloat = 0
+    var marginTopBuiltin: CGFloat = 0
+    var marginBottom: CGFloat = 0
     var shell = "/opt/homebrew/bin/bash"
     // args for the embedded terminal's shell: --login -i sources the profile
     // AND rc files so aliases/functions (zoxide, etc.) work there
@@ -1128,6 +1133,9 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = tri(str("preload")) { settings.preload = v }
     if let v = str("shared-width"), let n = Double(v), n >= 400 { settings.sharedWidth = CGFloat(n) }
     if let v = str("shared-height"), let n = Double(v), n >= 300 { settings.sharedHeight = CGFloat(n) }
+    if let v = str("margin-top"), let n = Double(v) { settings.marginTop = CGFloat(max(0, n)) }
+    if let v = str("margin-top-builtin"), let n = Double(v) { settings.marginTopBuiltin = CGFloat(max(0, n)) }
+    if let v = str("margin-bottom"), let n = Double(v) { settings.marginBottom = CGFloat(max(0, n)) }
     if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
     if vars["copy-toast"] != nil { settings.copyToast = str("copy-toast") ?? "" }
     if let v = str("terminal-app") { settings.terminalApp = v }
@@ -1399,7 +1407,7 @@ private let configBoolKeys: Set<String> = [
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
-    "shared-width": 400...8000, "shared-height": 300...8000, "preview-border-width": 0...8,
+    "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "preview-border-width": 0...8,
     "terminal-height": 40...4000, "sidebar-width": 0...600, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
@@ -2892,6 +2900,29 @@ final class SwitcherController: NSObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.appActivations += 1 }
+        // Reaching the auto-hidden menu bar makes macOS hand activation back
+        // to the app that was frontmost before us (our panel is key WITHOUT
+        // that app being deactivated) — AeroSpace follows it to ITS workspace
+        // ("workspace N → 1"). No click, cursor in the menu-bar strip, our
+        // window still key: take activation back and refocus our window.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.processIdentifier != getpid() else { return }
+            let p = NSEvent.mouseLocation
+            self.log("activated \(app.bundleIdentifier ?? "?") — mouse (\(Int(p.x)), \(Int(p.y))), key window: \(NSApp.keyWindow.map { "\($0.windowNumber) visible=\($0.isVisible)" } ?? "none"), buttons \(NSEvent.pressedMouseButtons)")
+            guard let w = NSApp.keyWindow, w.isVisible,
+                  Self.sharedViews.contains(where: { self.slotMember($0)?.slotWindow === w }) else { return }
+            let nearTop = NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) }
+                .map { $0.frame.maxY - p.y <= 40 } ?? false
+            let clicked = self.lastOtherAppClick.map { Date().timeIntervalSince($0) < 1.0 } ?? false
+            guard nearTop, !clicked, NSEvent.pressedMouseButtons == 0 else { return }
+            self.log("\(app.bundleIdentifier ?? "?") took activation as the menu bar opened — taking it back")
+            NSApp.activate(ignoringOtherApps: true)
+            let wid = String(w.windowNumber)
+            DispatchQueue.global(qos: .userInitiated).async { _ = aerospaceCall(["focus", "--window-id", wid]) }
+        }
         watchFocusBridge()
     }
 
@@ -3780,6 +3811,10 @@ final class SwitcherController: NSObject {
         if compareEnabled(), listed("compare") {
             all.append(Self.slotCommand("compare", label: configSectionValue("compare", "label") ?? "Compare"))
         }
+        // always last: show the shared window on the view you were last on
+        if settings.sharedWindow {
+            all.append(Self.slotCommand("window", label: "Workspace Switcher"))
+        }
         return all
     }
 
@@ -3846,6 +3881,7 @@ final class SwitcherController: NSObject {
                 if cmd.name == "confluence" { showConfluence(); break }
                 if cmd.name == "ai" { showAI(); break }
                 if cmd.name == "compare" { showCompare(); break }
+                if cmd.name == "window" { toggleCommand("window"); break }
                 commandRunner?.run(cmd.script ?? "") { out in
                     self.log("cmd '\(cmd.name)' -> \(out)")
                 }
