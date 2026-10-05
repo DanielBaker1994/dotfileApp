@@ -724,6 +724,9 @@ public struct PopupConfig {
     // left of the editor instead of a strip under the header
     public var tabsSidebarWidth: CGFloat = 0
     public var tabsSidebarTitle = "Notes"
+    // list mode: > 0 = a read-only inspector this wide on the right that
+    // follows the highlighted row (Cmd+I shows / hides it); 0 = none
+    public var inspectorWidth: CGFloat = 0
 
     // scrollable rows: the row list lives in a scroll view, the window height
     // is capped at maxHeight, and overflowing rows scroll instead of clipping.
@@ -7620,8 +7623,56 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             rowView.selection = selection
             rowView.needsDisplay = true
             scrollSelectionIntoView()
+            onSelectionChanged?(selection)
         }
     }
+    // the inspector (config.inspectorWidth): the host fills it per row
+    public var onSelectionChanged: ((Int) -> Void)?
+    public var onInspectorOpen: (() -> Void)?
+    public var inspectorContent: PopupInspectorContent? { didSet { inspectorView?.content = inspectorContent } }
+    private var inspectorView: PopupInspectorView?
+    private var inspectorKey: String { "inspectorShown." + config.name }
+    public var inspectorShown: Bool {
+        guard config.inspectorWidth > 0, !config.editMode else { return false }
+        return (UserDefaults.standard.object(forKey: inspectorKey) as? Bool) ?? true
+    }
+    // what the inspector takes off the right of the list
+    private var listRight: CGFloat { inspectorShown ? config.inspectorWidth * zoom : 0 }
+    public func toggleInspector() {
+        guard config.inspectorWidth > 0, !config.editMode else { return }
+        UserDefaults.standard.set(!inspectorShown, forKey: inspectorKey)
+        layoutForZoom()
+        layoutSearchField()
+        layoutScrollDocument()
+        onSelectionChanged?(selection)
+    }
+    private func layoutInspector() {
+        guard let backdrop = panel.contentView else { return }
+        guard inspectorShown else { inspectorView?.isHidden = true; return }
+        let v = inspectorView ?? {
+            let v = PopupInspectorView(colors: config.colors, zoom: { [weak self] in self?.zoom ?? 1 })
+            v.onOpen = { [weak self] in self?.onInspectorOpen?() }
+            v.content = inspectorContent
+            backdrop.addSubview(v)
+            inspectorView = v
+            // the row highlighted before the panel existed
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.onSelectionChanged?(self.selection)
+            }
+            return v
+        }()
+        v.isHidden = false
+        let top = (config.dragHeader ? config.headerHeight * zoom : 0) + topAccessoryHeight
+        let w = min(config.inspectorWidth * zoom, backdrop.bounds.width * 0.6)
+        let f = NSRect(x: backdrop.bounds.width - w, y: top, width: w, height: max(0, backdrop.bounds.height - top))
+        if v.frame != f { v.frame = f }
+        // above the rows, under the header chrome
+        if let chrome, v.superview === backdrop, backdrop.subviews.last !== chrome {
+            backdrop.addSubview(v, positioned: .below, relativeTo: chrome)
+        }
+    }
+
 
     // MARK: Copy selection (config.selectableRows)
 
@@ -8185,12 +8236,12 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
             let fieldFrame = NSRect(x: listLeft + config.padding + 10,
                                     y: headerOffset + config.padding + 2,
-                                    width: config.width - listLeft - 2 * (config.padding + 10),
+                                    width: config.width - listLeft - listRight - 2 * (config.padding + 10),
                                     height: 24 * z)
             field.frame = fieldFrame
             var cb = fieldFrame.maxY + 4
             if let bar = filterBar {
-                bar.frame = NSRect(x: listLeft, y: cb, width: backdrop.bounds.width - listLeft,
+                bar.frame = NSRect(x: listLeft, y: cb, width: backdrop.bounds.width - listLeft - listRight,
                                    height: config.filterBarHeight * z)
                 cb += config.filterBarHeight * z + 2
             }
@@ -9162,6 +9213,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         onCopyRows = nil
         onCommandK = nil
         onCommandF = nil
+        onSelectionChanged = nil
+        onInspectorOpen = nil
         closeActionPicker()
         onHeaderButton = nil
         onMeterRecord = nil
@@ -10121,6 +10174,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             hook()
             return true
         }
+        // Cmd+I: show / hide the inspector (lists that have one)
+        if cmd && code == 34, config.inspectorWidth > 0, !config.editMode {
+            toggleInspector()
+            return true
+        }
         if cmd && code == 3, !config.editMode, let hook = onCommandF {
             hook()
             return true
@@ -10731,12 +10789,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if let backdrop = panel.contentView {
             let cb = chromeBottom > 0 ? chromeBottom : 0
             let h = max(40, backdrop.bounds.height - cb)
-            let x = listLeft, sw = max(80, backdrop.bounds.width - listLeft)
+            let x = listLeft, sw = max(80, backdrop.bounds.width - listLeft - listRight)
             if scroll.frame.origin.y != cb || abs(scroll.frame.height - h) > 0.5
                 || scroll.frame.origin.x != x || abs(scroll.frame.width - sw) > 0.5 {
                 scroll.frame = NSRect(x: x, y: cb, width: sw, height: h)
             }
             layoutListSidebar()
+            layoutInspector()
             if sidebarTabs, let fb = filterBar {
                 fb.frame.origin.x = listLeft
                 fb.frame.size.width = sw
@@ -12132,7 +12191,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // instead of the bar floating centered above a left-aligned pill row.
     private func layoutSearchField() {
         guard !config.editMode, let backdrop = panel.contentView else { return }
-        let w = backdrop.bounds.width - listLeft
+        let w = backdrop.bounds.width - listLeft - listRight
         let inset = config.padding + 10
         let fieldW = max(50, (w - 2 * inset) * config.searchWidthFraction)
         let x = listLeft + inset

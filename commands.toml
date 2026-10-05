@@ -641,6 +641,9 @@ body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
 sidebar-width = 245
+# the issue panel on the right of the list: key, state chips, description and
+# people of the highlighted row. Cmd+I shows / hides it, 0 = never.
+inspector-width = 340
 # Jira Config window (menu bar ▸ Open Jira Config Window): size + how often
 # it re-reads status (seconds). Unset = 1080 x 720, every 5s.
 # dashboard-width = 1080
@@ -691,6 +694,13 @@ font-size = 14
 font = ""
 # toast after ⧉ Copy
 copy-toast = "Copied to clipboard"
+background-color = 303446
+header-color = 232634
+text-color = "C6D0F5"
+dim-color = "A5ADCE"
+highlight-color = "51576D"
+accent-color = "CA9EE6"
+palette = "8CAAEE, A6D189, E5C890, E78284, 81C8BE"
 
 # [compare] — Beyond Compare-style Text + Folder Compare (CompareWindow.swift); a
 # shared-window view (header icon ⇆, Hyper+S /compare, file browser / /paths
@@ -833,6 +843,7 @@ workspace-switcher = "*:app"
 "files: term" = "in the filter + Return: a shell in that folder"
 "files: Esc Esc" = "hide"
 "jira: Cmd+F" = "live search (from the search strip: close it)"
+"jira: Cmd+I" = "show / hide the issue panel (Return opens the full detail)"
 "jira: Cmd+K" = "actions: copy, copy URL + title, open in browser"
 "jira: Return / double-click" = "ticket details"
 "jira: ↑ ↓ / Ctrl+N / Ctrl+P / Tab" = "move through the rows"

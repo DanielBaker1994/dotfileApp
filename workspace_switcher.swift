@@ -780,6 +780,7 @@ struct CommandSpec {
     var voiceLive = true
     var terminal = false          // note: embedded shell drawer at the bottom
     var terminalHeight: CGFloat = 240
+    var inspectorWidth: CGFloat = 340 // jira: the issue panel on the right (0 = none; Cmd+I)
     var sidebarWidth: CGFloat = 210   // note: the tabs as a left sidebar (0 = a strip under the header)
     var proseFont: String?            // note: reading view font stack (CSS)
     var proseFontSize: CGFloat = 0
@@ -1021,6 +1022,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.terminal = tri(vars["terminal"]) ?? false
     if num(vars["terminal-height"]) > 0 { s.terminalHeight = num(vars["terminal-height"]) }
     if vars["sidebar-width"] != nil { s.sidebarWidth = num(vars["sidebar-width"]) }
+    if vars["inspector-width"] != nil { s.inspectorWidth = num(vars["inspector-width"]) }
     s.proseFont = vars["prose-font"].flatMap { $0.isEmpty ? nil : $0 }
     s.proseFontSize = num(vars["prose-font-size"])
     s.proseWidth = num(vars["prose-width"])
@@ -1408,7 +1410,7 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
     "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "preview-border-width": 0...8,
-    "terminal-height": 40...4000, "sidebar-width": 0...600, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
+    "terminal-height": 40...4000, "sidebar-width": 0...600, "inspector-width": 0...800, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
     "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
@@ -4127,6 +4129,36 @@ final class SwitcherController: NSObject {
         }
     }
 
+    // what the list's issue panel shows for a row (an issue or a release)
+    func jiraInspectorContent(_ row: FieldRow) -> PopupInspectorContent {
+        func f(_ k: String) -> String { row.fields[k] ?? "" }
+        let status = f("status"), priority = f("priority")
+        func statusTone(_ s: String) -> PopupTone {
+            let l = s.lowercased()
+            if ["done", "closed", "resolved", "released", "complete"].contains(where: l.contains) { return .success }
+            if l.contains("review") || l.contains("test") || l.contains("block") { return .warning }
+            if l.contains("progress") || l.contains("develop") { return .accent }
+            return .dim
+        }
+        func priorityTone(_ s: String) -> PopupTone {
+            let l = s.lowercased()
+            if ["highest", "high", "critical", "blocker", "major"].contains(where: l.contains) { return .danger }
+            if l.contains("medium") { return .warning }
+            return .dim
+        }
+        var chips: [(text: String, tone: PopupTone)] = []
+        if !status.isEmpty { chips.append((status, statusTone(status))) }
+        if !priority.isEmpty { chips.append((priority, priorityTone(priority))) }
+        let updated = f("updated").replacingOccurrences(of: "T", with: " ")
+        return PopupInspectorContent(
+            key: f("key").isEmpty ? row.title : f("key"),
+            title: f("title").isEmpty ? (f("summary").isEmpty ? row.title : f("summary")) : f("title"),
+            chips: chips,
+            fields: [("Assignee", f("assignee")), ("Reporter", f("reporter")), ("Release", f("releaseLabel")),
+                     ("Project", f("project")), ("Labels", f("labels")), ("Updated", String(updated.prefix(16)))],
+            body: f("description"))
+    }
+
     // The release view: a jira table window with one tab per release
     // (releases.json order; a blacklisted release only when it is the one
     // opened), each holding that release's issues — same columns, filters,
@@ -5831,6 +5863,7 @@ final class SwitcherController: NSObject {
         if isJira {
             cfg.tabsSidebarWidth = cmd.sidebarWidth
             cfg.tabsSidebarTitle = "Lists"
+            cfg.inspectorWidth = cmd.inspectorWidth
         }
         cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.scrollableRows = true
@@ -8563,6 +8596,19 @@ extension SwitcherController {
                 w.setRows(filteredRows(query: w.currentQuery))
             }
             w.onTabChange = { [self] index in selectTab(index) }
+            // the issue panel follows the highlighted row (Cmd+I hides it)
+            if isJira && cmd.inspectorWidth > 0 {
+                w.onSelectionChanged = { [weak w, host] index in
+                    guard let w else { return }
+                    let row = w.rows.indices.contains(index) ? w.rows[index] as? FieldRow : nil
+                    w.inspectorContent = row.flatMap { $0.loadMore ? nil : host.jiraInspectorContent($0) }
+                }
+                w.onInspectorOpen = { [self] in
+                    guard w.rows.indices.contains(w.selection), let row = w.rows[w.selection] as? FieldRow,
+                          !row.loadMore else { return }
+                    host.openRow(row, cmd: cmd, isJira: isJira)
+                }
+            }
             // clicking the ACTIVE tab copies that source's absolute path
             w.onTabClick = { [self] index in
                 guard index == w.selectedTab, index < tabs.count else { return }
