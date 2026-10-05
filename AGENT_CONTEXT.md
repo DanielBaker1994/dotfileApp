@@ -1182,7 +1182,7 @@ Line numbers drift; grep the symbol names (they're stable).
   → a SEPARATE process (`workspace-switcher prose --colors HEX,… FILE`, handled
   at the top of main.swift: no daemon, no lock; one per file) showing a
   `ProseWindow` (floating panel, follows the file's mtime every 1 s, Esc / ⌘W /
-  the themed ✕ top-left close it, ⌘± size; closing the last one ends the process).
+  the themed ✕ top-left close it, ⌘= ⌘- ⌘0 + trackpad pinch zoom (`ProseView.zoom` = WKWebView pageZoom, kept as `proseZoom`; two-finger double-tap = 100%); closing the last one ends the process).
 - /screenshot recents: `ShotHistory` keeps every copied / saved / pinned
   capture (`[screenshot] history`, 20) in ~/.cache/workspace-switcher/
   screenshots; clock button / ⌘R → `ShotRecentPanel` thumbnail grid

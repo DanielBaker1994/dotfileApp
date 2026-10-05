@@ -201,6 +201,31 @@ final class ProseView: NSView, WKScriptMessageHandler {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    // Mac-style zoom: Cmd+= / Cmd+- / Cmd+0, a trackpad pinch, a two-finger
+    // double-tap (back to 100%). The page reflows (WKWebView.pageZoom), no
+    // pandoc run; the last level is kept across launches.
+    static let zoomKey = "proseZoom"
+    var onZoom: ((CGFloat) -> Void)?
+    var zoom: CGFloat {
+        get { web.pageZoom }
+        set {
+            web.pageZoom = min(4, max(0.5, newValue))
+            onZoom?(web.pageZoom)
+        }
+    }
+    func restoreZoom() {
+        let z = CGFloat(UserDefaults.standard.double(forKey: Self.zoomKey))
+        if z > 0 { web.pageZoom = min(4, max(0.5, z)) }
+    }
+    func zoom(by factor: CGFloat) { zoom = zoom * factor }
+    func resetZoom() { zoom = 1 }
+    func saveZoom() { UserDefaults.standard.set(Double(web.pageZoom), forKey: Self.zoomKey) }
+    override func magnify(with e: NSEvent) {
+        zoom(by: 1 + e.magnification)
+        if e.phase == .ended || e.phase == .cancelled { saveZoom() }
+    }
+    override func smartMagnify(with e: NSEvent) { resetZoom(); saveZoom() }
+
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
         guard let s = m.body as? String, let u = URL(string: s), u.isFileURL else { return }
         onOpenImage(u.path)
@@ -365,6 +390,7 @@ final class ProseWindow: NSPanel {
         page.frame = contentView?.bounds ?? .zero
         page.autoresizingMask = [.width, .height]
         contentView?.addSubview(page)
+        page.restoreZoom()
         let x = ProseCloseButton(colors: colors) { [weak self] in self?.close() }
         x.frame = NSRect(x: 12, y: (contentView?.bounds.height ?? h) - 34, width: 22, height: 22)
         x.autoresizingMask = [.minYMargin]
@@ -397,6 +423,9 @@ final class ProseWindow: NSPanel {
             }
             return
         }
+        // the pinch never reaches the page's own view reliably: take it here
+        if e.type == .magnify { page.magnify(with: e); return }
+        if e.type == .smartMagnify { page.smartMagnify(with: e); return }
         super.sendEvent(e)
     }
     override func cancelOperation(_ sender: Any?) { close() }
@@ -404,8 +433,9 @@ final class ProseWindow: NSPanel {
         guard e.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: e) }
         switch e.charactersIgnoringModifiers ?? "" {
         case "w": close(); return true
-        case "=", "+": size = min(40, size + 1); render(); return true
-        case "-": size = max(10, size - 1); render(); return true
+        case "=", "+": page.zoom(by: 1.1); page.saveZoom(); return true
+        case "-": page.zoom(by: 1 / 1.1); page.saveZoom(); return true
+        case "0": page.resetZoom(); page.saveZoom(); return true
         case "c": page.web.evaluateJavaScript("document.execCommand('copy')"); return true
         case "a": page.web.evaluateJavaScript("document.execCommand('selectAll')"); return true
         default: return super.performKeyEquivalent(with: e)
@@ -526,9 +556,16 @@ enum ProseProcess {
             exit(2)
         }
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
+        // a REGULAR app, like the daemon (15015cf): it owns the menu bar while
+        // active. An accessory app can't — revealing the auto-hidden menu bar
+        // activated the last regular app and took the page's focus with it.
+        app.setActivationPolicy(.regular)
         let menu = NSMenu()
         let item = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        item.submenu = appMenu
         menu.addItem(item)
         app.mainMenu = menu
         ProseWindow.standalone = true
