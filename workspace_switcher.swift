@@ -4246,15 +4246,40 @@ final class SwitcherController: NSObject {
         let name = row.fields["summary"] ?? row.fields["title"] ?? row.title
         let head = [key, name].filter { !$0.isEmpty }.joined(separator: " — ")
         if !head.isEmpty { out.append(head); out.append("") }
-        for k in shown {
-            if let v = row.fields[k], !v.isEmpty {
-                out.append("\(k): \(v)")
+        // an issue reads as a card: its state on one line, its people on the
+        // next, the description under a heading, everything else last
+        var used = Set<String>()
+        if row.fields["status"] != nil {
+            used.formUnion(["key", "title", "summary"])
+            func line(_ keys: [(String, String)]) {
+                let parts = keys.compactMap { k, label -> String? in
+                    guard let v = row.fields[k], !v.isEmpty else { return nil }
+                    used.insert(k)
+                    return "\(label): \(v)"
+                }
+                if !parts.isEmpty { out.append(parts.joined(separator: "   ·   ")); out.append("") }
+            }
+            line([("status", "Status"), ("priority", "Priority"), ("releaseLabel", "Release")])
+            line([("assignee", "Assignee"), ("reporter", "Reporter"), ("project", "Project"), ("updated", "Updated")])
+            if let d = row.fields["description"], !d.isEmpty {
+                used.insert("description")
+                out.append("Description")
+                out.append(String(repeating: "─", count: 11))
+                out.append(d)
                 out.append("")
             }
+        } else {
+            for k in shown {
+                if let v = row.fields[k], !v.isEmpty {
+                    out.append("\(k): \(v)")
+                    out.append("")
+                }
+            }
+            used.formUnion(shown)
         }
         out.append("--- all fields ---")
         for (k, v) in row.fields.sorted(by: { $0.key < $1.key })
-        where !k.hasPrefix("__") && !shown.contains(k) && !v.isEmpty {
+        where !k.hasPrefix("__") && !used.contains(k) && !v.isEmpty {
             out.append("\(k): \(v)")
         }
         return out.joined(separator: "\n")

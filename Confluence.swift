@@ -600,13 +600,13 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             root.addSubview(bar)
             sidebar = bar
         }
-        let top = row((sidebar == nil ? [scopeSeg] : []) + [modeSeg, titleToggle, searchButton, NSView()])
-        let middle = row([textBox])
+        // two rows: the box with how to match and Search; the filters under it
+        let top = row((sidebar == nil ? [scopeSeg] : []) + [textBox, modeSeg, titleToggle, searchButton])
         textBox.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let bottom = row([spaces, people, typeChoice, modChoice, sortChoice, NSView()])
-        spaces.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        people.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        for s in [top, middle, bottom] {
+        spaces.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        people.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        for s in [top, bottom] {
             s.translatesAutoresizingMaskIntoConstraints = false
             strip.addSubview(s)
             NSLayoutConstraint.activate([
@@ -616,8 +616,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         }
         NSLayoutConstraint.activate([
             top.topAnchor.constraint(equalTo: strip.topAnchor, constant: 10),
-            middle.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 8),
-            bottom.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 8),
+            bottom.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 8),
         ])
         strip.fill = colors.mantle.withAlphaComponent(0.55)
         root.addSubview(strip)
@@ -712,7 +711,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
                 }
             }
         }
-        let stripH: CGFloat = 10 + JiraTheme.height * 3 + 8 * 2 + 10
+        let stripH: CGFloat = 10 + JiraTheme.height * 2 + 8 + 10
         strip.frame = NSRect(x: 0, y: 0, width: b.width, height: stripH)
         let bodyY = stripH
         let bodyH = b.height - stripH

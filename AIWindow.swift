@@ -77,6 +77,67 @@ final class AICommandLine: NSView, PopupThemeable {
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
+// the steps of a run (the rule, then each `then:`), one chip each:
+// waiting → running → done / warning / failed
+final class AIPipelineStrip: NSView, PopupThemeable {
+    enum State { case waiting, running, done, warn, failed }
+    var colors = JiraTheme.system { didSet { needsDisplay = true } }
+    private(set) var items: [(name: String, state: State, note: String)] = []
+    override var isFlipped: Bool { true }
+    func applyColors(_ c: PopupColors) { colors = c }
+
+    func set(_ names: [String]) {
+        items = names.map { ($0, .waiting, "") }
+        needsDisplay = true
+    }
+    func mark(_ i: Int, _ state: State, note: String = "") {
+        guard items.indices.contains(i) else { return }
+        items[i].state = state
+        items[i].note = note
+        toolTip = items.compactMap { $0.note.isEmpty ? nil : "\($0.name): \($0.note)" }.joined(separator: "\n")
+        needsDisplay = true
+    }
+    /// everything before `i` is done, `i` is running, the rest waits
+    func running(_ i: Int) {
+        for k in items.indices {
+            if k < i { if items[k].state == .waiting || items[k].state == .running { items[k].state = .done } }
+            else { items[k].state = k == i ? .running : .waiting; items[k].note = "" }
+        }
+        needsDisplay = true
+    }
+
+    override func draw(_ dirty: NSRect) {
+        let font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        var x: CGFloat = 2
+        let h: CGFloat = 22, y = (bounds.height - h) / 2
+        for (i, it) in items.enumerated() {
+            let (glyph, tone): (String, NSColor) = {
+                switch it.state {
+                case .waiting: return ("\(i + 1)", colors.dim)
+                case .running: return ("…", colors.accent)
+                case .done: return ("✓", colors.tone(.success))
+                case .warn: return ("!", colors.tone(.warning))
+                case .failed: return ("✕", colors.tone(.danger))
+                }
+            }()
+            let label = NSAttributedString(string: "\(glyph)  \(it.name)", attributes: [.font: font, .foregroundColor: tone])
+            let w = label.size().width + 20
+            if x + w > bounds.width { break }
+            let r = NSRect(x: x, y: y, width: w, height: h)
+            let path = NSBezierPath(roundedRect: r, xRadius: h / 2, yRadius: h / 2)
+            tone.withAlphaComponent(it.state == .waiting ? 0.08 : 0.16).setFill()
+            path.fill()
+            label.draw(at: NSPoint(x: r.minX + 10, y: r.midY - label.size().height / 2))
+            x = r.maxX
+            if i + 1 < items.count {
+                let arrow = NSAttributedString(string: "→", attributes: [.font: font, .foregroundColor: colors.dim])
+                arrow.draw(at: NSPoint(x: x + 6, y: y + (h - arrow.size().height) / 2))
+                x += 12 + arrow.size().width
+            }
+        }
+    }
+}
+
 // MARK: - the window
 
 final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDelegate {
@@ -88,6 +149,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private var body: ConfPane!
     private var pills: PopupTabsBar!
     private let cmdLine = AICommandLine()
+    private let strip = AIPipelineStrip()
     private let leftBox = ConfPane(), rightBox = ConfPane()
     private let leftTitle = NSTextField(labelWithString: "Your text")
     private let rightTitle = NSTextField(labelWithString: "Output")
@@ -282,6 +344,8 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         cmdLine.onClick = { [weak self] in self?.copyCommand() }
         cmdLine.toolTip = "The command this rule runs — click to copy it (with your text) for a shell"
         root.addSubview(cmdLine)
+        strip.toolTip = ""
+        root.addSubview(strip)
 
         for (box, title) in [(leftBox, leftTitle), (rightBox, rightTitle)] {
             box.fill = colors.mantle.withAlphaComponent(0.45)
@@ -367,13 +431,14 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         defer {
             // shift the content right of the sidebar
             if pills.vertical {
-                for v in [leftBox, rightBox, splitter, runButton, spinner, tokens, status] as [NSView] {
+                for v in [strip, leftBox, rightBox, splitter, runButton, spinner, tokens, status] as [NSView] {
                     v.frame.origin.x += sidebarW + 4
                 }
             }
         }
         let footH: CGFloat = 44
-        let top = cmdLine.frame.maxY + 6
+        strip.frame = NSRect(x: pad, y: cmdLine.frame.maxY + 4, width: max(0, b.width - pad * 2), height: 28)
+        let top = strip.frame.maxY + 4
         let bodyH = max(80, b.height - top - footH)
         let gap: CGFloat = 10
         let avail = b.width - pad * 2 - gap
@@ -470,6 +535,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         }
         cmdLine.text = r.preview
         cmdLine.warning = r.warnings.joined(separator: ", ")
+        if process == nil { strip.set(AIRule.chain(r).map(\.name)) }
         input.placeholder = r.placeholder.isEmpty ? "Type or paste your text — Ctrl+Enter runs it" : r.placeholder
         modeSeg.items = modes.map(\.title)
         if !modes.contains(mode) { mode = .markdown }
@@ -622,6 +688,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         if let r = rule { rules[selected] = AIRule.load(r.path); applyRule(loadInput: false) }
         guard let picked = rule else { newRule(); return }
         steps = AIRule.chain(picked)
+        strip.set(steps.map(\.name))
         let r = steps[0]
         cmdLine.warning = r.warnings.joined(separator: ", ")
         if available == false { setStatus(unavailableWhy, tone: .danger); return }
@@ -656,6 +723,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private func startStep(_ i: Int, text: String) {
         let r = steps[i]
         stepIndex = i
+        strip.running(i)
         stepInput = r.prepare(text)
         let budget = TokenBudget.partBudget(instructions: r.instructions(guarded: guardCode != nil) + r.prompt)
         parts = r.chunk ? TokenBudget.parts(stepInput, budget: budget) : [stepInput]
@@ -751,12 +819,16 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             let line = err.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
                 .last(where: { !$0.isEmpty }) ?? "exit \(code)"
             stepNotes.append("“\(step.name)” failed (\(stripANSI(line)))")
+            strip.mark(stepIndex, .failed, note: stripANSI(line))
             stepText = stepInput
             code = 0
         } else if code == 0 {
             let a = step.accept(input: stepInput, answer: stepText)
             stepText = a.text
             if let n = a.note { stepNotes.append(n) }
+            strip.mark(stepIndex, a.note == nil ? .done : .warn, note: a.note ?? "")
+        } else {
+            strip.mark(stepIndex, .failed)
         }
         streamData = Data()
         if code == 0, stepIndex + 1 < steps.count {
@@ -801,6 +873,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         spinner.stopAnimation(nil)
         spinner.isHidden = true
         runButton.title = "Run  ⌃↩"
+        strip.set(strip.items.map(\.name))
         if !quiet { setStatus("Stopped") }
     }
 

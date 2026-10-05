@@ -366,6 +366,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     // Compare ⏎ | Compare Pasted Text… in one capsule; Recent's own pair
     private var startActions: CapsuleButtons!
     private var recentActions: CapsuleButtons!
+    private var suggestActions: CapsuleButtons!
+    private let suggestTitle = NSTextField(labelWithString: "READY")
     private let recentTitle = NSTextField(labelWithString: "RECENT")
     private let recentFilter = JiraInputBox(placeholder: "filter")
     private let recentList = CompareRecentList()
@@ -578,6 +580,12 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         startActions.toolTip = "Compare: files on both sides → Text Compare, folders → Folder Compare. "
             + "Pasted Text: the clipboard goes in the left pane, paste the other side with ⌘V."
         start.addSubview(startActions)
+        label(suggestTitle, size: 11, weight: .bold)
+        start.addSubview(suggestTitle)
+        suggestActions = CapsuleButtons([])
+        suggestActions.colors = colors
+        suggestActions.toolTip = "What you were just doing: one click fills a side (or opens the pair)"
+        start.addSubview(suggestActions)
         label(recentTitle, size: 11, weight: .bold)
         start.addSubview(recentTitle)
         recentActions = CapsuleButtons([])
@@ -721,6 +729,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         y += 42
         startHint.frame = NSRect(x: x, y: y, width: w, height: startHint.stringValue.isEmpty ? 0 : 34)
         y += startHint.stringValue.isEmpty ? 6 : 40
+        let sg = suggestActions.items.isEmpty
+        suggestTitle.isHidden = sg
+        suggestTitle.frame = NSRect(x: x, y: y + 6, width: 64, height: 16)
+        suggestActions.frame = NSRect(x: x + 66, y: y - 2, width: sg ? 0 : min(w - 66, suggestActions.intrinsicContentSize.width), height: 34)
+        if !sg { y += 42 }
         recentTitle.frame = NSRect(x: x, y: y + 5, width: 64, height: 16)
         let rw = recentActions.intrinsicContentSize.width
         recentActions.frame = NSRect(x: x + 66, y: y - 4, width: recentActions.items.isEmpty ? 0 : rw, height: 30)
@@ -1529,7 +1542,42 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         start.needsLayout = true
     }
 
+    // "READY": what the user was just doing, one click each. A path marked in
+    // the file browser, files copied in Finder, text on the clipboard.
+    private func refreshSuggestions() {
+        var items: [CapsuleButtons.Item] = []
+        let fm = FileManager.default
+        func fill(_ path: String) {
+            let t = tilde(path)
+            if leftBox.field.stringValue.isEmpty { leftBox.field.stringValue = t }
+            else if rightBox.field.stringValue.isEmpty { rightBox.field.stringValue = t }
+            else { rightBox.field.stringValue = t }
+            window.makeFirstResponder(leftBox.field.stringValue.isEmpty || rightBox.field.stringValue.isEmpty ? leftBox.field : rightBox.field)
+            if !leftBox.field.stringValue.isEmpty && !rightBox.field.stringValue.isEmpty { compareFromStart() }
+            refreshSuggestions()
+        }
+        if let pick = FileListPane.comparePick, fm.fileExists(atPath: pick),
+           expand(leftBox.field.stringValue) != pick, expand(rightBox.field.stringValue) != pick {
+            items.append(.init(title: "Marked: " + (pick as NSString).lastPathComponent, symbol: "checkmark.circle", primary: false) { fill(pick) })
+        }
+        let pb = NSPasteboard.general
+        let urls = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        if !urls.isEmpty {
+            let paths = Array(urls.prefix(2).map(\.path))
+            let title = paths.count == 2 ? "Clipboard: 2 files" : "Clipboard: " + (paths[0] as NSString).lastPathComponent
+            items.append(.init(title: title, symbol: "doc.on.clipboard", primary: false) { paths.forEach(fill) })
+        } else if let text = pb.string(forType: .string), !text.isEmpty {
+            let n = text.split(separator: "\n", omittingEmptySubsequences: false).count
+            items.append(.init(title: "Clipboard text · \(n) line\(n == 1 ? "" : "s")", symbol: "doc.on.clipboard", primary: false) { [weak self] in
+                self?.startPasted()
+            })
+        }
+        suggestActions?.items = items
+        start.needsLayout = true
+    }
+
     private func reloadRecent() {
+        refreshSuggestions()
         recentAll = CompareRecent.load()
         filterRecent()
         let fm = FileManager.default
