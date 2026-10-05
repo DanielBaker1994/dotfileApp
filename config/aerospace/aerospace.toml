@@ -111,7 +111,7 @@ key-mapping.preset = 'qwerty'
 on-window-detected = [
   # workspace-switcher: a regular TILED window on workspace N (first rule,
   # so nothing below can float it; the dialog heuristic is overridden too)
-  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout tiling', 'move-node-to-workspace N'] },
+  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout tiling', 'move-node-to-workspace N --focus-follows-window'] },
   # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
   # before the Microsoft float rule below)
   { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },

@@ -25,13 +25,18 @@ func clampToScreen(_ f: NSRect) -> NSRect {
     let screen = NSScreen.screens.first { $0.frame.contains(f.origin) }
         ?? NSScreen.main!
     let vis = screen.gapFrame
+    // AeroSpace tiles the window to EXACTLY the gap frame (on a notch screen
+    // that is a half-point rect the window server rounds): shrinking it or
+    // nudging it by rounding makes AeroSpace re-apply its tile, we clamp
+    // again → the window shakes forever. Only pull back a real overshoot.
+    let slack: CGFloat = 2
     var r = f
-    r.size.width = min(r.width, vis.width - 8)
-    r.size.height = min(r.height, vis.height - 8)
-    if r.origin.x < vis.minX { r.origin.x = vis.minX }
-    if r.origin.y < vis.minY { r.origin.y = vis.minY }
-    if r.maxX > vis.maxX { r.origin.x = vis.maxX - r.width }
-    if r.maxY > vis.maxY { r.origin.y = vis.maxY - r.height }
+    if r.width > vis.width + slack { r.size.width = vis.width }
+    if r.height > vis.height + slack { r.size.height = vis.height }
+    if r.origin.x < vis.minX - slack { r.origin.x = vis.minX }
+    if r.origin.y < vis.minY - slack { r.origin.y = vis.minY }
+    if r.maxX > vis.maxX + slack { r.origin.x = vis.maxX - r.width }
+    if r.maxY > vis.maxY + slack { r.origin.y = vis.maxY - r.height }
     return r
 }
 
