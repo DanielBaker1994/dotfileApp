@@ -199,6 +199,8 @@ class CardWindowController: NSObject, NSWindowDelegate {
         if let c = controller {
             c.addGlobalWindowItems(to: menu)
             menu.addItem(.separator())
+            c.addCardThemeMenu(to: menu, view: view)
+            menu.addItem(.separator())
             if onSlotHide != nil {
                 menu.addItem(c.escHidesMenuItem(view))
                 menu.addItem(.separator())

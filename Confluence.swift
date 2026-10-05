@@ -43,14 +43,32 @@ func confluenceSetting(_ key: String, _ fallback: CGFloat) -> CGFloat {
 
 // [confluence] colors over the theme (same keys as [jira]); none set = the
 // Jira window's palette, so the Atlassian views read as one family
-func confluenceColors() -> PopupColors {
+func confluenceColors() -> PopupColors { cardColors("confluence") }
+
+// a card view's palette: its own [section] color keys (Theme ▸ presets write
+// them), else the Jira window's
+// a Theme ▸ preset being hovered (not saved): the card builds in its look
+var cardThemeOverride: [String: ThemePreset] = [:]
+
+func cardHeaderColor(_ section: String) -> NSColor {
+    cardThemeOverride[section]?.header ?? hexColor(configSectionValue(section, "header-color")) ?? jiraHeaderColor
+}
+
+func cardColors(_ section: String) -> PopupColors {
+    if let p = cardThemeOverride[section] {
+        var c = PopupColors(background: p.background.withAlphaComponent(1), border: BORDER,
+                            text: p.text, dim: p.dim, highlight: p.highlight, accent: p.accent,
+                            palette: p.palette)
+        c.border = c.outline
+        return c
+    }
     let keys = ["background-color", "text-color", "dim-color", "highlight-color", "accent-color", "palette"]
-    guard keys.contains(where: { configSectionValue("confluence", $0) != nil }) else { return jiraWindowColors() }
-    let v = { (k: String) in hexColor(configSectionValue("confluence", k)) }
+    guard keys.contains(where: { configSectionValue(section, $0) != nil }) else { return jiraWindowColors() }
+    let v = { (k: String) in hexColor(configSectionValue(section, k)) }
     var c = PopupColors(background: v("background-color").map { ($0.usingColorSpace(.sRGB) ?? $0).withAlphaComponent(1) } ?? BAR,
                         border: BORDER, text: v("text-color") ?? TEXT, dim: v("dim-color") ?? DIM,
                         highlight: v("highlight-color") ?? GROUP_BG, accent: v("accent-color") ?? ACCENT,
-                        palette: parsePalette(configSectionValue("confluence", "palette")) ?? THEME_PALETTE)
+                        palette: parsePalette(configSectionValue(section, "palette")) ?? THEME_PALETTE)
     if v("accent-color") != nil || THEME["border"] == nil { c.border = c.outline }
     return c
 }
@@ -468,6 +486,8 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
 
     // MARK: open
 
+    static func discard() { live = nil }
+
     static func create(controller: SwitcherController, frame: NSRect?) {
         guard live == nil else { return }
         let w = ConfluenceWindow(controller: controller, frame: frame)
@@ -495,7 +515,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         if split < 0.2 || split > 0.8 { split = confluenceSetting("split", 0.42) }
         PopupThemeDefaults.colors = colors
         window.contentView = themedRoot(buildContent(), name: "confluence", colors: colors,
-                                        headerColor: hexColor(configSectionValue("confluence", "header-color")) ?? jiraHeaderColor,
+                                        headerColor: cardHeaderColor("confluence"),
                                         icon: confluenceAppIcon, title: "Confluence")
         if frame != nil { window.setFrame(f, display: false) }
         restoreCriteria()

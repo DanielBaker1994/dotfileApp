@@ -2900,29 +2900,6 @@ final class SwitcherController: NSObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.appActivations += 1 }
-        // Reaching the auto-hidden menu bar makes macOS hand activation back
-        // to the app that was frontmost before us (our panel is key WITHOUT
-        // that app being deactivated) — AeroSpace follows it to ITS workspace
-        // ("workspace N → 1"). No click, cursor in the menu-bar strip, our
-        // window still key: take activation back and refocus our window.
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.processIdentifier != getpid() else { return }
-            let p = NSEvent.mouseLocation
-            self.log("activated \(app.bundleIdentifier ?? "?") — mouse (\(Int(p.x)), \(Int(p.y))), key window: \(NSApp.keyWindow.map { "\($0.windowNumber) visible=\($0.isVisible)" } ?? "none"), buttons \(NSEvent.pressedMouseButtons)")
-            guard let w = NSApp.keyWindow, w.isVisible,
-                  Self.sharedViews.contains(where: { self.slotMember($0)?.slotWindow === w }) else { return }
-            let nearTop = NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) }
-                .map { $0.frame.maxY - p.y <= 40 } ?? false
-            let clicked = self.lastOtherAppClick.map { Date().timeIntervalSince($0) < 1.0 } ?? false
-            guard nearTop, !clicked, NSEvent.pressedMouseButtons == 0 else { return }
-            self.log("\(app.bundleIdentifier ?? "?") took activation as the menu bar opened — taking it back")
-            NSApp.activate(ignoringOtherApps: true)
-            let wid = String(w.windowNumber)
-            DispatchQueue.global(qos: .userInitiated).async { _ = aerospaceCall(["focus", "--window-id", wid]) }
-        }
         watchFocusBridge()
     }
 
@@ -3389,7 +3366,7 @@ final class SwitcherController: NSObject {
         let me = String(getpid())
         var moved: [String] = []
         for f in table {
-            guard f[1] == me, !cur.isEmpty, f[2] != cur, f[5] != settings.switcherWindowName else { continue }
+            guard f[1] == me, !cur.isEmpty, f[2] != cur, f[2] != "N", f[5] != settings.switcherWindowName else { continue }  // N = its home (aerospace.toml rule)
             _ = aerospaceCall(["move-node-to-workspace", "--window-id", f[0], cur])
             moved.append(f[0])
         }
@@ -5306,6 +5283,111 @@ final class SwitcherController: NSObject {
         log("theme reset for [\(section)] — back to system defaults")
     }
 
+    // Theme ▸ for the card views (Confluence, AI, Compare): the presets write
+    // the section's color keys, then the card is rebuilt in place (its colors
+    // are read at build time). Compare's sessions ride through persistNow /
+    // restoreSessions.
+    func addCardThemeMenu(to menu: NSMenu, view: SlotView) {
+        let section: String
+        switch view {
+        case .confluence: section = "confluence"
+        case .ai: section = "ai"
+        case .compare, .compareText: section = "compare"
+        default: return
+        }
+        let themeMenu = NSMenu(title: "Theme")
+        let presets = ThemePreset.all()
+        let toneTitles: [ThemePreset.Tone: String] = [.mid: "Mid Tones", .dark: "Dark", .light: "Light"]
+        // hovering a preset previews it (the card is rebuilt in that look);
+        // closing the menu without a pick puts the saved look back
+        let preview = ThemePreviewDelegate(
+            onHighlight: { [weak self] tag in
+                guard let self else { return }
+                let p = tag.flatMap { presets.indices.contains($0) ? presets[$0] : nil }
+                guard cardThemeOverride[section]?.name != p?.name else { return }
+                cardThemeOverride[section] = p
+                self.rebuildCard(view)
+            },
+            onClose: { [weak self] in
+                guard let self, cardThemeOverride[section] != nil else { return }
+                cardThemeOverride[section] = nil
+                self.rebuildCard(view)
+            })
+        themeMenu.delegate = preview
+        themePreviewDelegate = preview
+        let order = presets.indices.sorted {
+            let a = presets[$0], b = presets[$1]
+            if a.tone != b.tone { return a.tone.rawValue < b.tone.rawValue }
+            return a.background.relativeLuminance > b.background.relativeLuminance
+        }
+        var lastTone: ThemePreset.Tone?
+        for i in order {
+            let p = presets[i]
+            if p.tone != lastTone {
+                if lastTone != nil { themeMenu.addItem(.separator()) }
+                themeMenu.addItem(.sectionHeader(title: toneTitles[p.tone] ?? ""))
+                lastTone = p.tone
+            }
+            let item = menuItem(p.name) { [weak self] in
+                preview.committed = true
+                cardThemeOverride[section] = nil
+                self?.applyCardTheme(p, section: section, view: view)
+            }
+            item.tag = i
+            item.representedObject = i   // a preset row (hover previews it)
+            item.image = p.swatch()
+            themeMenu.addItem(item)
+        }
+        themeMenu.addItem(.separator())
+        themeMenu.addItem(menuItem("Reset to Defaults") { [weak self] in
+            preview.committed = true
+            cardThemeOverride[section] = nil
+            self?.applyCardTheme(nil, section: section, view: view)
+        })
+        let item = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        item.submenu = themeMenu
+        menu.addItem(item)
+    }
+
+    private func applyCardTheme(_ p: ThemePreset?, section: String, view: SlotView) {
+        var kv: [(String, String?)]
+        if let p {
+            kv = [("background-color", hexString(p.background.withAlphaComponent(1))),
+                  ("header-color", hexString(p.header)),
+                  ("text-color", hexString(p.text)), ("dim-color", hexString(p.dim)),
+                  ("highlight-color", hexString(p.highlight)), ("accent-color", hexString(p.accent)),
+                  ("palette", paletteString(p.palette))]
+        } else {
+            kv = ["background-color", "header-color", "text-color", "dim-color",
+                  "highlight-color", "accent-color", "palette"].map { ($0, nil) }
+        }
+        saveConfigValues(section: section, kv)
+        log("card theme '\(p?.name ?? "reset")' applied to [\(section)]")
+        rebuildCard(view)
+    }
+
+    // drop a card view and build it again (same frame, still current)
+    func rebuildCard(_ view: SlotView) {
+        let v: SlotView = view == .compareText ? .compare : view
+        let wasCurrent = slot.current == view || slot.current == v
+        let f = slot.currentFrame()
+        let w: CardWindowController?
+        switch v {
+        case .confluence: w = ConfluenceWindow.current
+        case .ai: w = AIWindow.current
+        default: w = CompareWindow.current
+        }
+        (w as? CompareWindow)?.persistNow()
+        if view == .compareText, let sub = CompareWindow.sub { sub.window.orderOut(nil) }
+        w?.window.orderOut(nil)
+        switch v {
+        case .confluence: ConfluenceWindow.discard()
+        case .ai: AIWindow.discard()
+        default: CompareWindow.discard()
+        }
+        if wasCurrent, ensureSlotMember(v, frame: f) { slot.present(v) }
+    }
+
     // "Global Window Options ▸" — the FIRST item of every view's icon menu
     // (notes, files, jira, confluence, ai) and of the menu-bar menu; it
     // changes every view of the shared window at once:
@@ -6193,7 +6275,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // a regular app: it owns the menu bar while active (an accessory
+        // app can't — revealing the auto-hidden menu bar activated the last
+        // regular app and AeroSpace followed it to its workspace)
+        NSApp.setActivationPolicy(.regular)
         installMainMenu()
         installCrashHandler()
         // diag: log the TCC state the process actually sees + how it was
@@ -6244,8 +6329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // a second double-click in Finder while the daemon runs (accessory app,
-    // no Dock icon): open the window
+    // a Dock click / second double-click in Finder while the daemon runs:
+    // open the window
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { controller?.showCommand("files") }
         return false

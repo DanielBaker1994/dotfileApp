@@ -102,13 +102,16 @@ focus-follows-mouse.enabled = false
 # See https://nikitabobko.github.io/AeroSpace/guide#key-mapping
 key-mapping.preset = 'qwerty'
 
-# Floating: workspace-switcher, Finder, Preview, Webex and the Microsoft
+# Floating: Finder, Preview, Webex and the Microsoft
 # stack. Everything else tiles by default — the OLD catch-all `true ->
 # layout tiling` rule is gone because it also force-tiled app dialogs (Word
 # "Save or Don't Save", NSAlert popups, etc.), which then couldn't be focused
 # properly; the dialog heuristic floats those now.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
+  # workspace-switcher: a regular TILED window on workspace N (first rule,
+  # so nothing below can float it; the dialog heuristic is overridden too)
+  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout tiling', 'move-node-to-workspace N'] },
   # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
   # before the Microsoft float rule below)
   { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
@@ -280,7 +283,7 @@ N = ['main']
     f = ['layout floating tiling', 'mode main'] # Toggle between floating and tiling layout
     backspace = ['close-all-windows-but-current', 'mode main']
     # flip which monitor owns 1-8 + letters vs 9 (bin/aerospace-monitors.sh)
-    m = ['exec-and-forget ~/.config/workspace-switcher/bin/aerospace-monitors.sh toggle', 'mode main']
+    #m = ['exec-and-forget ~/.config/workspace-switcher/bin/aerospace-monitors.sh toggle', 'mode main']
 
     # sticky is not yet supported https://github.com/nikitabobko/AeroSpace/issues/2
     #s = ['layout sticky tiling', 'mode main']

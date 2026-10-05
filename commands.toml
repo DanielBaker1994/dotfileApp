@@ -289,7 +289,7 @@ terminal = "4F5A6EC7"
 [filefast]
 enabled = true
 sticky = true
-float = true
+float = false
 type = "shell"
 label = "Create File"
 icon = "notes"
@@ -321,7 +321,7 @@ type = "shell"
   label = "Find Recent Files"
 icon = "folder"
 sticky = true
-float = true
+float = false
 limit = 25
 return = "file"
 clipboard = true
@@ -580,7 +580,7 @@ start = "recent"
 
 # THE SWITCH: enabled = true shows the window, anything else hides it
 sort = "size"
-sort-order = "desc"
+sort-order = "asc"
 background-color = "C71E1E2E"
 header-color = "11111B"
 browser-background = "991E1E2E"
@@ -597,13 +597,13 @@ type = "list"
 name = "jira"
 title = ""
 # Tokyo Night (Theme ▸ presets rewrite these)
-header-color = "99191A21"
-background-color = "99282A36"
-text-color = "F8F8F2"
-dim-color = "A4AACC"
-highlight-color = "44475A"
-accent-color = "BD93F9"
-palette = "FF79C6, 50FA7B, F1FA8C, FF5555, 8BE9FD"
+header-color = "9911111B"
+background-color = "991E1E2E"
+text-color = "CDD6F4"
+dim-color = "A6ADC8"
+highlight-color = "45475A"
+accent-color = "CBA6F7"
+palette = "89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"
 # a directory — every .json/.tsv file inside becomes a tab
 sources = "~/.cache/workspace-switcher/jira_json"
 # table mode: spreadsheet rows under a sticky header. columns = one line of
@@ -762,6 +762,14 @@ keep-both-button-label = "Keep Both"
 skip-button-label = "Skip Existing"
 sync-info-label = "Replaced and removed items go to the Trash; ⌘Z undoes the whole run."
 sync-run-button-label = "Synchronize"
+background-color = 192330
+header-color = "0F141C"
+text-color = "CDCECF"
+dim-color = "AEAFB0"
+highlight-color = "2B3B51"
+accent-color = "719CD6"
+palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
+sidebar-width = 245
 
 # [icons] — app icons for the workspace switcher rows. Normal apps keep their
 # real macOS icons; ONLY apps listed here get overrides, matched by app name

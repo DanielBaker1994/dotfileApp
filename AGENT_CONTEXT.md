@@ -171,11 +171,12 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `focusLeft(w)` → `hide(…, restoreFocus: false)` (parks, never tears down);
   within 1s of a view swap it was stolen (aerospace focusing the next
   window) → the view is re-shown instead.
-  Float vs tile is NOT the app's: aerospace.toml's first on-window-detected
-  rule decides for every window of the bundle id (now `layout v_accordion`,
-  which can't un-float: AeroSpace still lists the shared window as
-  floating); members sit at `.normal` level (`present` normalizes Jira
-  Config's popUpMenu+1). No `[app] float`, no layout / retile IPC. Tool
+  The shared window is a regular TILED window: aerospace.toml's FIRST
+  on-window-detected rule (`dev.danielbaker.workspace-switcher` → `layout
+  tiling`) puts every window of the bundle id in the tiling tree (verified:
+  same tile across view swaps); members sit at `.normal` level (`present`
+  normalizes Jira Config's popUpMenu+1). No `[app] float`, no layout /
+  retile IPC. Tool
   panels (below) are invisible to AeroSpace.
   AeroSpace's closed-windows cache (its lock-screen defence, AeroSpace
   `closedWindowsCache.swift`): an ordered-out window = a closed one → it
@@ -1264,9 +1265,8 @@ Line numbers drift; grep the symbol names (they're stable).
   "right of". The shared window's center also moves with its frame
   (notes drawers). With 2+ tiles it belongs to the
   tile under its center, not the one that looks "behind" it.
-- Our windows are placed by the aerospace.toml rule `test %{app-bundle-id} =
-  dev.danielbaker.workspace-switcher → layout v_accordion` (first rule; it
-  can't un-float, so the shared window still reports floating). Finder,
+- Our windows are TILED by the aerospace.toml rule `test %{app-bundle-id} =
+  dev.danielbaker.workspace-switcher → layout tiling` (first rule). Finder,
   Preview, Webex and every `com.microsoft.*` but VS Code tile into
   v_accordion. The tool panels are NSPanels: AeroSpace never sees them.
 - Monitors: `bin/aerospace-monitors.sh main|inverse|toggle|status` rewrites

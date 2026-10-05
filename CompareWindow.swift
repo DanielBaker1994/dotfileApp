@@ -343,7 +343,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     static var sub: CompareWindow? { subLive }
 
     let isSub: Bool
-    private var colors = jiraWindowColors()
+    private var colors = cardColors("compare")
     private var cfg = CompareConfig.load()
 
     // sessions (pills); nil selection = the start page
@@ -407,6 +407,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
 
     // MARK: open
 
+    static func discard() { live = nil }
+
     static func create(controller: SwitcherController, frame: NSRect?) {
         guard live == nil else { return }
         live = CompareWindow(controller: controller, frame: frame, sub: false)
@@ -434,7 +436,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
                    minSize: NSSize(width: 640, height: 380))
         PopupThemeDefaults.colors = colors
         window.contentView = themedRoot(buildContent(), name: "compare", colors: colors,
-                                        headerColor: hexColor(c.entries["header-color"]) ?? jiraHeaderColor,
+                                        headerColor: cardHeaderColor("compare"),
                                         icon: compareAppIcon, title: sub ? "Text Compare" : "Compare")
         if frame != nil { window.setFrame(f, display: false) }
         applyConfig()

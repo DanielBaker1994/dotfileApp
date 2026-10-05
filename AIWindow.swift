@@ -83,7 +83,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private static var live: AIWindow?
     static var current: AIWindow? { live }
 
-    private var colors = jiraWindowColors()
+    private var colors = cardColors("ai")
 
     private var body: ConfPane!
     private var pills: PopupTabsBar!
@@ -154,6 +154,10 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
 
     // MARK: open
 
+    // a theme rebuild keeps what was typed
+    private static var carriedInput: String?
+    static func discard() { carriedInput = live?.input.string; live = nil }
+
     static func create(controller: SwitcherController, frame: NSRect?) {
         guard live == nil else { return }
         live = AIWindow(controller: controller, frame: frame)
@@ -183,13 +187,14 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         target = PasteTarget(rawValue: UserDefaults.standard.integer(forKey: Self.targetKey)) ?? .outlook
         PopupThemeDefaults.colors = colors
         window.contentView = themedRoot(buildContent(), name: "ai", colors: colors,
-                                        headerColor: hexColor(configSectionValue("ai", "header-color")) ?? jiraHeaderColor,
+                                        headerColor: cardHeaderColor("ai"),
                                         icon: aiAppIcon, title: "AI")
         if frame != nil { window.setFrame(f, display: false) }
         reloadRules()
         watchRulesDir()
         checkAvailable()
         setMode(mode)
+        if let t = Self.carriedInput { input.string = t; Self.carriedInput = nil }
     }
 
     // MARK: build
