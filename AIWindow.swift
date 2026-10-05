@@ -366,7 +366,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
 
         // the paste preview: the same HTML Copy writes, on a mock surface
         let wc = WKWebViewConfiguration()
-        web = WKWebView(frame: .zero, configuration: wc)
+        web = QuietWebView(frame: .zero, configuration: wc)
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         web.isHidden = true
@@ -380,7 +380,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             self.setMode(self.modes[i])
         }
         hook(copyButton, #selector(copyAnswer), tip: "Copy as rich text for the target")
-        copyButton.role = .primary
         for v in [modeSeg, copyButton] as [NSView] { rightBox.addSubview(v) }
 
         hook(runButton, #selector(runClicked), tip: "Run the rule on your text (Ctrl+Enter)")

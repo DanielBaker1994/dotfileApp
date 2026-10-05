@@ -444,7 +444,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private let preview = ConfPane()
     private let pTitle = NSTextField(labelWithString: "")
     private let pMeta = NSTextField(labelWithString: "")
-    private let pStar = ThemedPushButton(title: "☆", target: nil, action: nil)
+    private let pStar = ThemedPushButton(title: "", target: nil, action: nil)
     private let pOpen = ThemedPushButton(title: "Open in Browser", target: nil, action: nil)
     private let pCopy = ThemedPushButton(title: "Copy Link", target: nil, action: nil)
     private let hitsBar = ConfPane()
@@ -672,6 +672,9 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         label(pTitle, size: 15, weight: .semibold, color: colors.text)
         label(pMeta)
         hook(pStar, #selector(starPreview), tip: "Favorite (Cmd+D)")
+        pOpen.capsule = true
+        pCopy.capsule = true
+        pStar.chipSymbol = "star"   // the icon chip: same look as the other round glyph buttons
         hook(pOpen, #selector(openSelected), tip: "Open the page in your browser (Return)")
         hook(pCopy, #selector(copyLink), tip: "Copy the page link (Cmd+C)")
         hook(hitPrev, #selector(prevHit), tip: "Previous match (Shift+Cmd+G)")
@@ -682,7 +685,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         let wc = WKWebViewConfiguration()
         wc.setURLSchemeHandler(images, forURLScheme: ConfluenceImageLoader.scheme)
         wc.userContentController.add(WeakScriptHandler(self), name: "ws")
-        web = WKWebView(frame: .zero, configuration: wc)
+        web = QuietWebView(frame: .zero, configuration: wc)
         web.navigationDelegate = self
         web.setValue(false, forKey: "drawsBackground")
         hint.font = .systemFont(ofSize: 13)
@@ -723,11 +726,14 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         let fy = b.height - footH + 5
         spinner.frame = NSRect(x: 12, y: fy + 3, width: 16, height: 16)
         var x = leftW - 10
+        // Copy CQL | Copy curl = one joined pair, Load more a capsule beside it
+        cqlButton.segment = .first
+        curlButton.segment = .last
         for btn in [curlButton, cqlButton, moreButton] {
-            let w = btn.intrinsicContentSize.width
+            let w = btn.intrinsicContentSize.width - (btn === moreButton ? 0 : 8)
             x -= w
             btn.frame = NSRect(x: x, y: fy, width: w, height: 22)
-            x -= 6
+            x -= btn === curlButton ? 0 : 6
         }
         status.frame = NSRect(x: 32, y: fy + 3, width: max(40, x - 36), height: 16)
         splitter.frame = NSRect(x: leftW, y: bodyY, width: 6, height: bodyH)
@@ -737,7 +743,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         // header: title / meta | ☆ Open Copy
         var bx = pw - 12
         for btn in [pCopy, pOpen, pStar] {
-            let w = max(28, btn.intrinsicContentSize.width)
+            let w = btn === pStar ? 22 : max(28, btn.intrinsicContentSize.width)
             bx -= w
             btn.frame = NSRect(x: bx, y: 12, width: w, height: 22)
             bx -= 6
@@ -1265,7 +1271,8 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
 
     private func updatePreviewStar() {
         let fav = rows.first { $0.id == previewID }?.favorite ?? false
-        pStar.title = fav ? "★" : "☆"
+        pStar.chipSymbol = fav ? "star.fill" : "star"
+        pStar.chipOn = fav
         pStar.toolTip = fav ? "Remove from favorites (Cmd+D)" : "Add to favorites (Cmd+D)"
     }
 

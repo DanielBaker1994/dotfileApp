@@ -3323,6 +3323,10 @@ final class ThemeButton: NSView {
     // "on" state (e.g. pinned): rendered with the raised active fill so an
     // active toggle reads clearly against the idle buttons
     var isOn = false { didSet { needsDisplay = true } }
+    // part of a joined group (Finder's Sort / View control): one rounded
+    // rect split by hairlines — only the outer corners round
+    enum Segment { case alone, first, middle, last }
+    var segment: Segment = .alone { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
     private var down = false
     private var hover = false
@@ -3375,7 +3379,23 @@ final class ThemeButton: NSView {
         let st: ButtonState = down ? .pressed
             : isOn ? (hover ? .onHover : .on)
             : hover ? .hover : .idle
-        ButtonStyle.draw(bounds, st, config.colors, radius: config.buttonRadius, flat: flat)
+        if segment == .alone {
+            ButtonStyle.draw(bounds, st, config.colors, radius: config.buttonRadius, flat: flat)
+        } else {
+            let rad: CGFloat = 8
+            let ext = NSRect(x: segment == .first ? 0 : -rad, y: 0,
+                             width: bounds.width + (segment == .first ? 0 : rad) + (segment == .last ? 0 : rad),
+                             height: bounds.height).insetBy(dx: 0, dy: 0.5)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: bounds).setClip()
+            ButtonStyle.fill(st, config.colors).setFill()
+            NSBezierPath(roundedRect: ext, xRadius: rad, yRadius: rad).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            if segment != .first {
+                config.colors.text.withAlphaComponent(0.14).setFill()
+                NSRect(x: 0, y: 5, width: 1, height: bounds.height - 10).fill()
+            }
+        }
         let color = ButtonStyle.text(st, config.colors)
         if let symbol, title.isEmpty, !chevron {
             ButtonStyle.symbol(symbol, in: bounds, color: color, size: config.buttonFontSize + 0.5)
@@ -3421,6 +3441,18 @@ final class ThemedPushButton: NSButton, PopupThemeable {
     enum Role { case normal, primary, danger }
     var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
     var role: Role = .normal { didSet { needsDisplay = true } }
+    // pill shape (full-height radius) — the capsule look the switchers use
+    // (every ThemedPushButton: the primary is accent-TINTED, never solid)
+    var capsule = true { didSet { needsDisplay = true } }
+    // a full-width action ROW: tinted fill, label left, `keycap` chip right
+    // (the Jira panel's "Open full detail  ⏎")
+    var rowStyle = false { didSet { needsDisplay = true } }
+    var keycap: String? { didSet { needsDisplay = true } }
+    // part of a joined pair (Copy CQL | Copy curl): outer corners only
+    var segment: ThemeButton.Segment = .alone { didSet { needsDisplay = true } }
+    // icon-only chip: a round, accent-tinted glyph button (SF Symbol name)
+    var chipSymbol: String? { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
+    var chipOn = false { didSet { needsDisplay = true } }
     // keyboard focus drawn by the owner (a confirm card moves it with Tab)
     var keyFocus = false { didSet { needsDisplay = true } }
     private var hover = false
@@ -3431,8 +3463,9 @@ final class ThemedPushButton: NSButton, PopupThemeable {
         .systemFont(ofSize: controlSize == .small ? 11 : 12, weight: .semibold)
     }
     override var intrinsicContentSize: NSSize {
+        if chipSymbol != nil { return NSSize(width: 26, height: 26) }
         let w = (title as NSString).size(withAttributes: [.font: labelFont]).width
-        return NSSize(width: ceil(w) + (controlSize == .small ? 20 : 26),
+        return NSSize(width: ceil(w) + (controlSize == .small ? 20 : 26) + (capsule ? 8 : 0),
                       height: controlSize == .small ? 22 : 26)
     }
     override var title: String { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
@@ -3454,15 +3487,43 @@ final class ThemedPushButton: NSButton, PopupThemeable {
         // keyboard focus: the fill steps in so the accent ring reads even
         // around an accent-filled (primary) button
         let r = bounds.insetBy(dx: keyFocus ? 3.5 : 1, dy: keyFocus ? 3.5 : 1)
-        let path = NSBezierPath(roundedRect: r, xRadius: keyFocus ? 4 : 6, yRadius: keyFocus ? 4 : 6)
+        let rad: CGFloat = rowStyle ? 9 : capsule || chipSymbol != nil ? r.height / 2 : (keyFocus ? 4 : 6)
+        let path = NSBezierPath(roundedRect: r, xRadius: rad, yRadius: rad)
         var fg: NSColor
+        if segment != .alone {
+            let ext = NSRect(x: segment == .first ? 0 : -rad, y: 0,
+                             width: bounds.width + (segment == .first ? 0 : rad) + (segment == .last ? 0 : rad),
+                             height: bounds.height).insetBy(dx: 0, dy: 0.5)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: bounds).setClip()
+            c.text.withAlphaComponent(st == .pressed ? 0.18 : st == .hover ? 0.13 : 0.08).setFill()
+            NSBezierPath(roundedRect: ext, xRadius: r.height / 2, yRadius: r.height / 2).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            if segment == .last { c.text.withAlphaComponent(0.14).setFill(); NSRect(x: 0, y: 5, width: 1, height: bounds.height - 10).fill() }
+            let a: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: c.text.withAlphaComponent(isEnabled ? 1 : 0.4)]
+            let sz = (title as NSString).size(withAttributes: a)
+            (title as NSString).draw(at: NSPoint(x: (bounds.midX - sz.width / 2).rounded(), y: (bounds.midY - sz.height / 2).rounded()), withAttributes: a)
+            return
+        }
+        if let sym = chipSymbol {
+            let a = c.accentOn
+            a.withAlphaComponent((chipOn ? 0.30 : 0.18) + (st == .hover ? 0.08 : 0) + (st == .pressed ? 0.14 : 0)).setFill()
+            path.fill()
+            ButtonStyle.symbol(sym, in: bounds, color: c.readable(c.accent, min: 4).withAlphaComponent(isEnabled ? 1 : 0.4), size: 12)
+            return
+        }
         switch role {
         case .primary:
             let a = c.accentOn
-            (st == .pressed ? a.blended(withFraction: 0.18, of: .black) ?? a
-             : st == .hover ? a.blended(withFraction: 0.12, of: .white) ?? a : a).setFill()
+            a.withAlphaComponent(rowStyle ? (st == .pressed ? 0.30 : st == .hover ? 0.22 : 0.13)
+                                          : (st == .pressed ? 0.34 : st == .hover ? 0.26 : 0.16)).setFill()
             path.fill()
-            fg = c.onAccent
+            if !rowStyle {
+                a.withAlphaComponent(0.55).setStroke()
+                path.lineWidth = 1
+                path.stroke()
+            }
+            fg = c.readable(c.accent, min: 4)
         // quiet look: only the primary is filled — the others are outlines
         // that take a faint fill under the pointer
         case .danger:
@@ -3494,6 +3555,18 @@ final class ThemedPushButton: NSButton, PopupThemeable {
         }
         let attrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: fg]
         let sz = (title as NSString).size(withAttributes: attrs)
+        if rowStyle {
+            (title as NSString).draw(at: NSPoint(x: 14, y: (bounds.midY - sz.height / 2).rounded()), withAttributes: attrs)
+            if let k = keycap {
+                let ka: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium), .foregroundColor: fg]
+                let ks = (k as NSString).size(withAttributes: ka)
+                let kr = NSRect(x: bounds.maxX - 14 - ks.width - 10, y: bounds.midY - 9, width: ks.width + 10, height: 18)
+                fg.withAlphaComponent(0.16).setFill()
+                NSBezierPath(roundedRect: kr, xRadius: 5, yRadius: 5).fill()
+                (k as NSString).draw(at: NSPoint(x: kr.minX + 5, y: kr.midY - ks.height / 2), withAttributes: ka)
+            }
+            return
+        }
         (title as NSString).draw(at: NSPoint(x: (bounds.midX - sz.width / 2).rounded(),
                                              y: (bounds.midY - sz.height / 2).rounded()),
                                  withAttributes: attrs)
@@ -4719,6 +4792,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         self.sortButton = ThemeButton(config: config, title: "", symbol: "line.3.horizontal.decrease")
         self.sortButton.chevron = true
         self.orderButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
+        self.starButton.segment = .first
+        self.sortButton.segment = .middle
+        self.orderButton.segment = .last
         self.listPane = FileListPane(config: config)
         self.previewList = FileListPane(config: config)
         super.init(frame: .zero)
@@ -4997,16 +5073,15 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         // pin button reserves its longer "Pinned" label so toggling it never
         // shifts the row
         let x0: CGFloat = 8 + left
-        starButton.frame = NSRect(x: x0, y: toolbarY,
+        // parent arrow alone, then ONE joined group: Pin | Sort ▾ | Asc
+        parentButton.frame = NSRect(x: x0, y: toolbarY, width: toolbarH + 4, height: toolbarH)
+        starButton.frame = NSRect(x: parentButton.frame.maxX + 10, y: toolbarY,
                                   width: max(starButton.fittingWidth(for: "Pin"),
                                              starButton.fittingWidth(for: "Pinned")),
                                   height: toolbarH)
-        parentButton.frame = NSRect(x: starButton.frame.maxX + 4, y: toolbarY,
-                                    width: toolbarH + 4, height: toolbarH)
         let sortW = SortKey.allCases.map { sortButton.fittingWidth(for: $0.short) }.max() ?? 80
-        sortButton.frame = NSRect(x: parentButton.frame.maxX + 10, y: toolbarY,
-                                  width: sortW, height: toolbarH)
-        orderButton.frame = NSRect(x: sortButton.frame.maxX + 4, y: toolbarY,
+        sortButton.frame = NSRect(x: starButton.frame.maxX, y: toolbarY, width: sortW, height: toolbarH)
+        orderButton.frame = NSRect(x: sortButton.frame.maxX, y: toolbarY,
                                    width: max(orderButton.fittingWidth(for: "Asc"),
                                               orderButton.fittingWidth(for: "Desc")),
                                    height: toolbarH)

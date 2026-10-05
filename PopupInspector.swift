@@ -24,7 +24,7 @@ public final class PopupInspectorView: NSView, PopupThemeable {
     public var emptyText = "Select an issue"
     private let scroll = NSScrollView()
     private let text = NSTextView()
-    private let button = ThemedPushButton(title: "Open full detail  ⏎", target: nil, action: nil)
+    private let button = ThemedPushButton(title: "Open full detail", target: nil, action: nil)
     private let hint = NSTextField(labelWithString: "⌘I hides this panel")
     private let zoom: () -> CGFloat
 
@@ -50,6 +50,8 @@ public final class PopupInspectorView: NSView, PopupThemeable {
         button.target = self
         button.action = #selector(openClicked)
         button.role = .primary
+        button.rowStyle = true
+        button.keycap = "⏎"
         button.controlSize = .regular
         button.toolTip = "Open the full issue (Return)"
         addSubview(button)
@@ -70,7 +72,7 @@ public final class PopupInspectorView: NSView, PopupThemeable {
         text.frame.size.width = scroll.contentSize.width
         button.sizeToFit()
         let bw = max(160, bounds.width - 36)
-        button.frame = NSRect(x: (bounds.width - bw) / 2, y: bounds.height - footer + 8, width: bw, height: 28)
+        button.frame = NSRect(x: (bounds.width - bw) / 2, y: bounds.height - footer + 8, width: bw, height: 32)
         hint.frame = NSRect(x: 8, y: bounds.height - footer + 42, width: bounds.width - 16, height: 16)
     }
 

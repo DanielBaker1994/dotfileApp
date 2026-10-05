@@ -35,7 +35,7 @@ enum JiraEditKeys {
         case 9: ed.paste(nil)                                     // Cmd+V / Ctrl+V
         case 8: ed.copy(nil)                                      // Cmd+C / Ctrl+C
         case 0 where cmd: ed.selectAll(nil)                       // Cmd+A
-        case 7 where cmd: ed.cut(nil)                             // Cmd+X
+        case 7: ed.cut(nil)                                       // Cmd+X / Ctrl+X (else Cocoa's Ctrl+X prefix eats it)
         case 6 where cmd:                                         // Cmd+Z / Cmd+Shift+Z
             if mods.contains(.shift) { ed.undoManager?.redo() } else { ed.undoManager?.undo() }
         default: return false

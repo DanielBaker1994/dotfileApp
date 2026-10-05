@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 
 // MARK: - Card windows (Confluence, AI, Jira Config)
 //
@@ -492,3 +493,17 @@ extension CardWindowController {
     }
 }
 
+
+
+// A preview's right-click menu keeps only what helps with the page (copy,
+// select all, links) — WebKit's Reload / Back / Inspect have no place in a
+// card, and a Ctrl+click or Ctrl+Return landing on one popped them up.
+final class QuietWebView: WKWebView {
+    private static let keep: Set<String> = ["WKMenuItemIdentifierCopy", "WKMenuItemIdentifierCopyLink",
+                                            "WKMenuItemIdentifierOpenLink", "WKMenuItemIdentifierCopyImage"]
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        menu.items.filter { !Self.keep.contains($0.identifier?.rawValue ?? "") }.forEach { menu.removeItem($0) }
+        if menu.items.isEmpty { menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "") }
+        super.willOpenMenu(menu, with: event)
+    }
+}
