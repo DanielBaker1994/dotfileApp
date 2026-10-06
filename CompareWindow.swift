@@ -247,8 +247,8 @@ final class CompareRecentList: NSView {
             goneAttrs[.foregroundColor] = colors.dim.withAlphaComponent(0.6)
             goneAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
             goneAttrs[.strikethroughColor] = colors.tone(.danger).withAlphaComponent(0.7)
-            let dl = pl ? "(clipboard)" : tilde((e.left as NSString).deletingLastPathComponent)
-            let dr = pr ? "(clipboard)" : tilde((e.right as NSString).deletingLastPathComponent)
+            let dl = pl ? "(pasted)" : tilde((e.left as NSString).deletingLastPathComponent)
+            let dr = pr ? "(pasted)" : tilde((e.right as NSString).deletingLastPathComponent)
             let dirs = NSMutableAttributedString()
             if dl == dr && gone.left == gone.right {
                 // both in one folder: say it once
@@ -349,12 +349,19 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     // sessions (pills); nil selection = the start page
     private(set) var sessions: [CompareSession] = []
     private var selected: Int?
+    // the Ctrl+B W view switcher's "where": the session shown, or Home
+    var whereText: String { session?.label ?? "Home" }
     var session: CompareSession? { selected.flatMap { sessions.indices.contains($0) ? sessions[$0] : nil } }
 
     // chrome
     private var root: ConfPane!
     private var pills: PopupTabsBar!
-    private var sidebarW: CGFloat = 0
+    private var sidebarWide: CGFloat = 0
+    // the icon rail (⌘\\) when collapsed
+    private var sidebarW: CGFloat {
+        get { pills?.width(expanded: sidebarWide) ?? sidebarWide }
+        set { sidebarWide = newValue }
+    }
     // start page
     private let start = ConfPane()
     private let leftBox = JiraInputBox(placeholder: "Left: a file or folder path (Tab completes)")
@@ -519,7 +526,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         root = r
         var pcfg = PopupConfig(name: "compare-sessions")
         pcfg.colors = colors
-        pcfg.tabsAddButton = !isSub
+        // sidebar mode has permanent Home + New rows instead of a "+"
+        pcfg.tabsAddButton = !isSub && (configSectionValue("compare", "sidebar-width").flatMap { Double($0) } ?? 210) <= 0
         pills = PopupTabsBar(config: pcfg)
         pills.closable = true
         pills.onSelect = { [weak self] i in self?.select(i) }
@@ -538,7 +546,19 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         sidebarW = isSub ? 0 : (configSectionValue("compare", "sidebar-width").flatMap { Double($0) }.map { CGFloat($0) } ?? 210)
         if sidebarW > 0 {
             pills.vertical = true
-            pills.sectionTitle = "Compares"
+            pills.sectionTitle = "Open"
+            pills.collapseKey = "compare"
+            // Home (the start page: recent pairs, open files / folders) and
+            // New (two empty sides) never move: the PINNED rows on top
+            pills.pinnedTitle = "Compare"
+            pills.pinned = ["home", "new"]
+            pills.maxPinnedShown = 2
+            pills.pinnedIconFor = { $0 == "home" ? "house" : "square.and.pencil" }
+            pills.pinnedLabel = { $0 == "home" ? "Home" : "New text compare" }
+            pills.pinnedTip = { $0 == "home" ? "Recent comparisons, open files or folders (⌘0)" : "Two empty sides — click one and paste (⌘N)" }
+            pills.onPinned = { [weak self] id in
+                if id == "home" { self?.showStartPage() } else { self?.startPasted() }
+            }
             pills.rowIcon = { [weak self] i in
                 guard let self, self.sessions.indices.contains(i) else { return nil }
                 return self.sessions[i].folder != nil ? "folder" : "arrow.left.arrow.right"
@@ -574,11 +594,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         start.addSubview(browseR)
         startActions = CapsuleButtons([
             .init(title: "Compare  ⏎", symbol: "arrow.left.arrow.right", primary: true) { [weak self] in self?.compareFromStart() },
-            .init(title: "Compare Pasted Text…", symbol: "doc.on.clipboard", primary: false) { [weak self] in self?.startPasted() },
+            .init(title: "New Text Compare", symbol: "square.and.pencil", primary: false) { [weak self] in self?.startPasted() },
         ])
         startActions.colors = colors
         startActions.toolTip = "Compare: files on both sides → Text Compare, folders → Folder Compare. "
-            + "Pasted Text: the clipboard goes in the left pane, paste the other side with ⌘V."
+            + "New Text Compare: two empty sides — click one and paste (⌘V)."
         start.addSubview(startActions)
         label(suggestTitle, size: 11, weight: .bold)
         start.addSubview(suggestTitle)
@@ -811,6 +831,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         pills.titles = sessions.map(\.label)
         pills.badges = sessions.map { $0.isDirty ? PopupTabBadge(tone: .warning, text: "", tip: "unsaved changes") : nil }
         pills.selected = selected ?? -1
+        if pills.vertical { pills.pinnedSelected = onStart ? "home" : nil }
         root?.needsLayout = true
         if onStart { reloadRecent() }
     }
@@ -1517,15 +1538,15 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         openPair(l.isEmpty ? nil : l, r.isEmpty ? nil : r)
     }
 
-    // "Compare Pasted Text…": a text session; the clipboard (when it is text) is the left side
-    private func startPasted() {
-        let pb = NSPasteboard.general
-        let text = pb.string(forType: .string) ?? ""
+    // "New Text Compare": two EMPTY sides. Nothing is read from the
+    // clipboard — click a side and ⌘V (or type); the diff runs as soon as
+    // both sides hold text
+    func startPasted() {
         guard let s = openPair(nil, nil) else { return }
-        if !text.isEmpty { setPasted(text, .left) }
-        s.focus = text.isEmpty ? .left : .right
-        s.status = cfg.label("paste-next", "paste the other text into the {} side (⌘V), or type in either pane", s.focus.rawValue)
+        s.focus = .left
+        s.status = cfg.label("paste-next", "click a side and paste (⌘V) or type — left first, then right")
         syncAll()
+        window.makeFirstResponder(pane)
     }
 
     private func expand(_ s: String) -> String {
@@ -1542,8 +1563,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         start.needsLayout = true
     }
 
-    // "READY": what the user was just doing, one click each. A path marked in
-    // the file browser, files copied in Finder, text on the clipboard.
+    // "READY": what the user was just doing, one click each: a path marked
+    // in the file browser.
     private func refreshSuggestions() {
         var items: [CapsuleButtons.Item] = []
         let fm = FileManager.default
@@ -1560,18 +1581,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
            expand(leftBox.field.stringValue) != pick, expand(rightBox.field.stringValue) != pick {
             items.append(.init(title: "Marked: " + (pick as NSString).lastPathComponent, symbol: "checkmark.circle", primary: false) { fill(pick) })
         }
-        let pb = NSPasteboard.general
-        let urls = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
-        if !urls.isEmpty {
-            let paths = Array(urls.prefix(2).map(\.path))
-            let title = paths.count == 2 ? "Clipboard: 2 files" : "Clipboard: " + (paths[0] as NSString).lastPathComponent
-            items.append(.init(title: title, symbol: "doc.on.clipboard", primary: false) { paths.forEach(fill) })
-        } else if let text = pb.string(forType: .string), !text.isEmpty {
-            let n = text.split(separator: "\n", omittingEmptySubsequences: false).count
-            items.append(.init(title: "Clipboard text · \(n) line\(n == 1 ? "" : "s")", symbol: "doc.on.clipboard", primary: false) { [weak self] in
-                self?.startPasted()
-            })
-        }
+        // (the clipboard is never guessed at: you paste into the side you pick)
         suggestActions?.items = items
         start.needsLayout = true
     }
@@ -2670,6 +2680,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if code == 53 { escape(); return true }                                   // Esc
         if cmd && code == 44 { showShortcuts(); return true }                     // Cmd+/
         if cmd && code == 40 { actionPicker(); return true }                      // Cmd+K
+        if cmd && !shift && code == 29, !isSub { showStartPage(); return true }   // Cmd+0: Home
+        if cmd && !shift && code == 45, !isSub, editor == nil { startPasted(); return true }   // Cmd+N: new text compare
         let inText = window.firstResponder is NSText
         let inEditor = editor != nil && window.firstResponder === editor
         // the start page: its fields + the Recent list

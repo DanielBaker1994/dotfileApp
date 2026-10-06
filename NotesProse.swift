@@ -98,7 +98,7 @@ enum ProseRender {
     }
 
     static func fragment(_ md: String) -> String {
-        if let html = RichText.pandocHTML(md), !html.isEmpty { return html }
+        if let html = RichText.pandocHTML(md, highlight: true), !html.isEmpty { return html }
         return basic(md)
     }
 
@@ -114,6 +114,25 @@ enum ProseRender {
                 + " div.\(name) > .title p { margin: 0 0 .3em; color: \(hex); font-weight: 600;"
                 + " font-family: -apple-system, system-ui; font-size: .85em; }"
         }.joined(separator: "\n")
+    }
+
+    // fenced code (pandoc `--syntax-highlighting` token spans) in palette tones
+    static func codeCSS(_ c: PopupColors) -> String {
+        let groups: [(String, String)] = [
+            ("kw, cf", css(c.accentOn)), ("dt", css(c.tone(.accent2))),
+            ("st, ch, ss, vs, sc", css(c.tone(.success))), ("dv, bn, fl, cn", css(c.tone(.warning))),
+            ("fu, at, va, bu", css(c.tone(.info))), ("pp, im, ex, er, al", css(c.tone(.danger))),
+            ("op, ot", css(c.text)),
+        ]
+        var out = groups.map { names, hex in
+            names.split(separator: ",").map { "code span.\($0.trimmingCharacters(in: .whitespaces))" }
+                .joined(separator: ", ") + " { color: \(hex); }"
+        }
+        out.append("code span.co, code span.do, code span.cv, code span.an, code span.in, code span.wa"
+                   + " { color: \(css(c.dim)); font-style: italic; }")
+        out.append("div.sourceCode { margin: 0 0 .9em; } div.sourceCode pre { margin: 0; }")
+        out.append("pre.sourceCode a { border: 0; color: inherit; }")
+        return out.joined(separator: "\n")
     }
 
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
@@ -154,6 +173,7 @@ enum ProseRender {
         pre code { background: none; padding: 0; color: \(css(c.tone(.accent2))); }
         blockquote { margin: 0 0 .9em; padding-left: 14px; border-left: 2px solid \(accent); color: \(dim); }
         \(alertCSS(c))
+        \(codeCSS(c))
         hr { border: 0; border-top: 1px solid \(rule); margin: 1.6em 0; }
         ul, ol { padding-left: 1.4em; margin: 0 0 .9em; }
         li { margin: .2em 0; }
@@ -190,8 +210,10 @@ final class ProseView: NSView, WKScriptMessageHandler {
               if (t && t.tagName === 'IMG') window.webkit.messageHandlers.wsImage.postMessage(t.src);
             });
             """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        web = WKWebView(frame: frame, configuration: cfg)
+        let w = ProseWebView(frame: frame, configuration: cfg)
+        web = w
         super.init(frame: frame)
+        w.onMenu = { [weak self] menu in self?.addMenuItems(menu) }
         cfg.userContentController.add(WeakScriptHandler(self), name: "wsImage")
         web.autoresizingMask = [.width, .height]
         web.frame = bounds
@@ -231,6 +253,56 @@ final class ProseView: NSView, WKScriptMessageHandler {
         onOpenImage(u.path)
     }
 
+    // right-click: the page's own items + Export PDF / Copy Note Path
+    private func addMenuItems(_ menu: NSMenu) {
+        guard !lastPath.isEmpty else { return }
+        menu.addItem(.separator())
+        let pdf = menuItem("Export PDF") { [weak self] in self?.exportPDF() }
+        pdf.keyEquivalent = "p"
+        pdf.keyEquivalentModifierMask = .command
+        menu.addItem(pdf)
+        let path = lastPath
+        menu.addItem(menuItem("Copy Note Path") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(path, forType: .string)
+        })
+    }
+
+    // ⌘P / right-click: the shown note → PDF (ProsePDF), its path on the
+    // clipboard + the toast. The pandoc + weasyprint run is off main.
+    private static var exporting = false
+    func exportPDF() {
+        let note = lastPath
+        guard !note.isEmpty, !Self.exporting else { return }
+        Self.exporting = true
+        let screen = window?.screen
+        var c = ProsePDF.Config()
+        c.pandoc = RichText.pandocBin
+        func notes(_ k: String) -> String? {
+            configSectionValue("notes", k).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        if let v = notes("pdf-engine-bin") { c.engine = v }
+        if let v = notes("pdf-css") { c.css = v }
+        if let v = notes("pdf-path") { c.outDir = v }
+        if let v = notes("pdf-highlight") { c.highlight = v }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = ProsePDF.export(note: note, c)
+            DispatchQueue.main.async {
+                Self.exporting = false
+                switch r {
+                case .success(let out):
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(out, forType: .string)
+                    let tilde = (out as NSString).abbreviatingWithTildeInPath
+                    let fmt = settings.copyToast.isEmpty ? "Copied {} to clipboard" : settings.copyToast
+                    ScreenToast.show(fmt.replacingOccurrences(of: "{}", with: tilde), on: screen, symbol: "doc.richtext")
+                case .failure(let e):
+                    ScreenToast.show(e.description, on: screen, symbol: "exclamationmark.triangle.fill")
+                }
+            }
+        }
+    }
+
     // render off the main thread (pandoc), keep the scroll spot on a reload
     // of the same note
     func show(_ src: ProseSource, colors: PopupColors, font: String, size: CGFloat, width: CGFloat) {
@@ -260,6 +332,15 @@ final class ProseView: NSView, WKScriptMessageHandler {
                 }
             }
         }
+    }
+}
+
+// the page's web view: lets ProseView add to its right-click menu
+final class ProseWebView: WKWebView {
+    var onMenu: ((NSMenu) -> Void)?
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        onMenu?(menu)
     }
 }
 
@@ -433,6 +514,7 @@ final class ProseWindow: NSPanel {
         guard e.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: e) }
         switch e.charactersIgnoringModifiers ?? "" {
         case "w": close(); return true
+        case "p": page.exportPDF(); return true
         case "=", "+": page.zoom(by: 1.1); page.saveZoom(); return true
         case "-": page.zoom(by: 1 / 1.1); page.saveZoom(); return true
         case "0": page.resetZoom(); page.saveZoom(); return true

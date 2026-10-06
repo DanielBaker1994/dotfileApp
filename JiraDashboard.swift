@@ -339,7 +339,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private static var live: JiraDashboardWindow?
 
     private enum Item: Equatable {
-        case group(String), job(String), addJob, setup, liveSearch, connection, definitions
+        case group(String), overview, job(String), addJob, setup, liveSearch, connection, definitions
     }
 
     private var timer: Timer?
@@ -549,11 +549,11 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     }
 
     private func sectionTitle(_ s: String) -> NSTextField {
-        // same voice as the sidebar's group headers: small caps in the accent
+        // same voice as the sidebar's group headers: quiet small caps
         let l = NSTextField(labelWithString: s)
         l.attributedStringValue = NSAttributedString(string: s.uppercased(), attributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .bold), .kern: 0.8,
-            .foregroundColor: JC.accent])
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .kern: 0.8,
+            .foregroundColor: JC.dim])
         return l
     }
 
@@ -776,7 +776,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         catalog = d["catalog"] as? [[String: Any]] ?? []
         let fetched = (d["directory"] as? [String: Any])?["fetchedAt"] as? String ?? ""
         if fetched != dir.fetchedAt { dir = JiraDirectory.load() }
-        var its: [Item] = [.group("POLL JOBS")]
+        var its: [Item] = [.group("STATUS"), .overview, .group("POLL JOBS")]
         its += eps.compactMap { ($0["name"] as? String).map(Item.job) }
         its += [.addJob, .group("SETTINGS"), .setup, .liveSearch, .connection, .definitions]
         items = its
@@ -784,8 +784,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         if !didInitialSelect {
             didInitialSelect = true
             // setup not finished (or no projects in scope): that page first
-            current = !setupDone ? .setup
-                : eps.first.flatMap { ($0["name"] as? String).map(Item.job) } ?? .connection
+            current = !setupDone ? .setup : .overview
             showItem(current)
         } else if !items.contains(current) {
             current = .connection
@@ -914,8 +913,11 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         case .group(let t):
             // section headers in the accent, small caps-style
             l.attributedStringValue = NSAttributedString(string: t.uppercased(), attributes: [
-                .font: NSFont.systemFont(ofSize: 10, weight: .bold), .kern: 0.8,
-                .foregroundColor: JC.accent])
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .kern: 0.8,
+                .foregroundColor: JC.dim])
+        case .overview:
+            dot = overviewTone.color
+            l.stringValue = "Overview"
         case .job(let n):
             let e = eps.first { $0["name"] as? String == n } ?? [:]
             var st = e["status"] as? String ?? ""
@@ -994,6 +996,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private func showItem(_ it: Item) {
         dirty = false
         switch it {
+        case .overview: overviewSig = overviewSignature(); showOverview()
         case .job(let n): showEditor(data: eps.first { $0["name"] as? String == n }, new: false)
         case .addJob: showEditor(data: nil, new: true)
         case .setup: showSetup()
@@ -1002,6 +1005,108 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         case .definitions: showDefinitions()
         case .group: break
         }
+    }
+
+    // MARK: overview — is it working? (the page the window opens on)
+
+    private var showRequest = false
+    private var overviewSig = ""
+    private func overviewSignature() -> String {
+        let jobs = eps.map { "\($0["name"] ?? "")|\($0["status"] ?? "")|\($0["lastRun"] ?? "")|\($0["enabled"] ?? "")" }
+        return [overviewTone.text, info["lastRun"] as? String ?? "", "\((info["issueCache"] as? [String: Any])?["items"] ?? "")",
+                scope.joined(separator: ","), "\(info["hasToken"] ?? "")"].joined(separator: "#") + jobs.joined(separator: ";")
+    }
+    private var requestToggleTarget: ClosureTarget?
+
+    private var overviewTone: (color: NSColor, text: String) {
+        let enabled = info["enabled"] as? Bool ?? jiraEnabledInConfig()
+        let failed = !(info["lastError"] as? String ?? "").isEmpty
+        let bad = eps.contains { ($0["status"] as? String) == "error" }
+        if !enabled { return (JC.faint, "Jira polling is off") }
+        if !setupDone { return (JC.warn, "Setup isn't finished") }
+        if failed || bad { return (JC.err, "The last poll had a problem") }
+        if lockHeld { return (JC.warn, "Polling now…") }
+        return (JC.ok, "Jira is syncing")
+    }
+
+    private func overviewRow(_ dot: NSColor?, _ name: String, _ value: String, tip: String? = nil) -> NSView {
+        // every row keeps the dot's slot so the names line up
+        let d = NSTextField(labelWithString: "●")
+        d.textColor = dot ?? .clear
+        d.font = .systemFont(ofSize: 9)
+        let views: [NSView] = [d]
+        let n = NSTextField(labelWithString: name)
+        n.textColor = JC.text
+        let v = NSTextField(labelWithString: value)
+        v.textColor = JC.dim
+        v.lineBreakMode = .byTruncatingMiddle
+        v.alignment = .right
+        v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow - 30, for: .horizontal)
+        let r = row(views + [n, spacer, v], spacing: 8)
+        r.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 12)
+        r.toolTip = tip
+        return r
+    }
+
+    // grouped rows in a quiet well (System Settings style)
+    private func overviewGroup(_ rows: [NSView]) -> NSView {
+        let box = NSStackView(views: rows)
+        box.orientation = .vertical
+        box.spacing = 0
+        box.alignment = .leading
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 8
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = ButtonStyle.inputStroke(JC.colors).cgColor
+        box.layer?.backgroundColor = JC.colors.mantle.withAlphaComponent(0.7).cgColor
+        for r in rows { r.translatesAutoresizingMaskIntoConstraints = false; r.widthAnchor.constraint(equalTo: box.widthAnchor).isActive = true }
+        return box
+    }
+
+    private func showOverview() {
+        let tone = overviewTone
+        let head = NSTextField(labelWithString: tone.text)
+        head.font = .systemFont(ofSize: 17, weight: .semibold)
+        head.textColor = JC.text
+        let dot = NSTextField(labelWithString: "●")
+        dot.textColor = tone.color
+        let lr = info["lastRun"] as? String ?? ""
+        let c = info["issueCache"] as? [String: Any] ?? [:]
+        let sub = NSTextField(labelWithString: [lr.isEmpty ? "Never polled" : "Last poll \(JiraPoll.short(lr))",
+                                                (c["items"] as? Int).map { "\($0.formatted()) issues cached" }]
+            .compactMap { $0 }.joined(separator: " · "))
+        sub.textColor = JC.dim
+        let conn = overviewGroup([
+            overviewRow(nil, "Site", info["site"] as? String ?? "—"),
+            overviewRow((info["hasToken"] as? Bool ?? false) ? JC.ok : JC.err, "Token",
+                        (info["hasToken"] as? Bool ?? false) ? "set · \(info["auth"] as? String ?? "")" : "missing — open Setup"),
+            overviewRow(scope.isEmpty ? JC.warn : nil, "Projects in scope", scope.isEmpty ? "none — open Setup" : scope.joined(separator: ", ")),
+        ])
+        let jobs = overviewGroup(eps.map { e in
+            let n = e["name"] as? String ?? ""
+            var st = e["status"] as? String ?? ""
+            if JiraPoll.running.contains(n) || JiraPoll.running.contains("*") { st = "running" }
+            let last = (e["lastRun"] as? String).map { JiraPoll.short($0) } ?? "not run yet"
+            let off = (e["enabled"] as? Bool ?? true) ? "" : "off · "
+            return overviewRow(statusColor(st), n, "\(off)every \(e["window"] as? String ?? "?") · \(last)",
+                               tip: e["lastError"] as? String)
+        })
+        let dirAt = (JiraPoll.readJSON(JiraPoll.directoryPath)?["fetchedAt"] as? String).map { JiraPoll.short($0) } ?? "not fetched"
+        let other = overviewGroup([overviewRow(nil, "Directory (users, statuses, releases)", dirAt)])
+        let buttons = row([
+            button(ThemedPushButton(title: "Open debug log", target: nil, action: nil), #selector(openDebugLog(_:))),
+            button(ThemedPushButton(title: "Open poll log", target: nil, action: nil), #selector(openPollLog(_:))),
+            button(ThemedPushButton(title: "Setup…", target: nil, action: nil), #selector(setup(_:))),
+        ])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow - 30, for: .vertical)
+        let page = vstack([row([dot, head], spacing: 8), sub, sectionTitle("Connection"), conn,
+                           sectionTitle("Poll jobs"), jobs, sectionTitle("Cache"), other, buttons, spacer], spacing: 8)
+        for v in [conn, jobs, other] { v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true }
+        page.setCustomSpacing(14, after: sub)
+        showPage(page)
     }
 
     private var editingName: String? {
@@ -1108,10 +1213,27 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             v.widthAnchor.constraint(greaterThanOrEqualToConstant: 380).isActive = true
         }
         colsTitle = sectionTitle("COLUMNS — this job's tab in the Jira window (and the fields it fetches)")
-        let reqTitle = sectionTitle("REQUEST — full JQL + curl (includes the token)")
+        // the full JQL + curl are for debugging: folded away until asked for
         let reqSV = monoTextView(requestText)
-        reqSV.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        reqSV.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         reqSV.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
+        reqSV.isHidden = !showRequest
+        let reqTitle = NSButton(title: "", target: nil, action: nil)
+        reqTitle.isBordered = false
+        func reqLabel() -> NSAttributedString {
+            NSAttributedString(string: (showRequest ? "▾ " : "▸ ") + "Show request (full JQL + curl, includes the token)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11.5, weight: .medium), .foregroundColor: JC.dim])
+        }
+        reqTitle.attributedTitle = reqLabel()
+        let t = ClosureTarget { [weak self, weak reqSV, weak reqTitle] in
+            guard let self else { return }
+            self.showRequest.toggle()
+            reqSV?.isHidden = !self.showRequest
+            reqTitle?.attributedTitle = reqLabel()
+        }
+        requestToggleTarget = t
+        reqTitle.target = t
+        reqTitle.action = #selector(ClosureTarget.run)
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow - 30, for: .horizontal)
         for b in [saveButton, revertButton, deleteButton, copyCurlButton, actionButton] { b.removeFromSuperview() }
@@ -1126,7 +1248,8 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         for v in [editorStatus, colEditor.view, reqSV, editorMsg, buttons] as [NSView] {
             v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
         }
-        colEditor.view.heightAnchor.constraint(equalTo: reqSV.heightAnchor, multiplier: 1.3).isActive = true
+        colEditor.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        colEditor.view.setContentHuggingPriority(.defaultLow - 10, for: .vertical)
         showPage(page)
         updateFormVisibility()
         updateLive()
@@ -1167,6 +1290,13 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         switch current {
         case .job, .addJob: break
         case .liveSearch, .group: return
+        case .overview:
+            // rebuilt only when what it shows changed (the 1 s status timer)
+            let sig = overviewSignature()
+            if sig != overviewSig { overviewSig = sig; showOverview() }
+            sidebar.reloadData()
+            if let i = items.firstIndex(of: current) { sidebar.selectRowIndexes(IndexSet(integer: i), byExtendingSelection: false) }
+            return
         case .setup: updateSetup(); return
         case .connection: updateConnection(); return
         case .definitions: reloadDefinitions(); return

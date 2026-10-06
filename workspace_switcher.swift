@@ -289,35 +289,38 @@ func jiraWindowColors() -> PopupColors {
 }
 var jiraHeaderColor: NSColor { hexColor(jiraConfigValue("header-color")) ?? headerBlueSilver }
 
-// Table cells wear the theme's status hues (resolved via the live palette,
-// so a Theme ▸ preset recolors them): issue keys = accent2, statuses by
-// workflow stage, priorities by urgency, issue types, dates dim.
-func jiraCellTone(_ field: String, _ text: String) -> PopupTone? {
+// Table cells, the "quiet" grid: color only where it means something (hues
+// from the live palette, so a Theme ▸ preset recolors them). Status = a
+// stage square + plain text (hollow = not started, half = moving, filled
+// green = done, filled red = stuck, amber outline = waiting); done rows
+// fade; only urgent priorities are tinted; keys, dates, project dim.
+func jiraCellStyle(_ field: String, _ text: String) -> PopupCellStyle? {
     let v = text.lowercased()
     switch field.lowercased() {
-    case "key": return .accent2
+    case "key", "updated", "created", "duedate", "releasedate", "project", "releaselabel", "release":
+        return PopupCellStyle(.dim)
     case "status", "statuscategory":
-        if v.isEmpty { return nil }
-        if ["done", "closed", "resolved", "released", "complete", "fixed", "shipped"].contains(where: v.contains) { return .success }
-        if ["block", "reject", "fail", "cancel", "won't", "wont"].contains(where: v.contains) { return .danger }
-        if ["progress", "review", "test", "qa", "develop", "doing", "verif"].contains(where: v.contains) { return .info }
-        if ["hold", "wait", "pending", "paused"].contains(where: v.contains) { return .warning }
-        return .dim
+        if ["cancel", "won't", "wont", "reject", "duplicate"].contains(where: v.contains) {
+            return PopupCellStyle(.dim, mark: .hollow, quietsRow: true)
+        }
+        if ["done", "closed", "resolved", "released", "complete", "fixed", "shipped"].contains(where: v.contains) {
+            return PopupCellStyle(.success, mark: .filled, quietsRow: true)
+        }
+        if ["block", "fail", "impediment"].contains(where: v.contains) { return PopupCellStyle(.danger, mark: .filled) }
+        if ["progress", "review", "test", "qa", "develop", "doing", "verif"].contains(where: v.contains) {
+            return PopupCellStyle(.info, mark: .half)
+        }
+        if ["hold", "wait", "pending", "paused"].contains(where: v.contains) { return PopupCellStyle(.warning, mark: .hollow) }
+        return PopupCellStyle(.dim, mark: .hollow)
     case "priority":
-        if ["highest", "blocker", "critical", "urgent", "p0", "p1"].contains(where: v.contains) { return .danger }
-        if ["high", "major", "p2"].contains(where: v.contains) { return .warning }
-        if ["low", "minor", "trivial", "p4", "p5"].contains(where: v.contains) { return .dim }
-        return v.isEmpty ? nil : .info
-    case "type", "issuetype":
-        if v.contains("bug") || v.contains("incident") { return .danger }
-        if v.contains("epic") { return .accent }
-        if v.contains("story") || v.contains("feature") { return .success }
-        return v.isEmpty ? nil : .info
+        if ["highest", "blocker", "critical", "urgent", "p0", "p1"].contains(where: v.contains) {
+            return PopupCellStyle(.danger, tinted: true, bold: true)
+        }
+        return PopupCellStyle(.dim)
     case "releasestatus":
-        if v.contains("unreleased") { return .warning }
-        if v.contains("released") { return .success }
+        if v.contains("unreleased") { return PopupCellStyle(.warning, mark: .hollow) }
+        if v.contains("released") { return PopupCellStyle(.success, mark: .filled) }
         return nil
-    case "updated", "created", "duedate", "releasedate", "project": return .dim
     default: return nil
     }
 }
@@ -1270,6 +1273,7 @@ struct ThemePreset {
     static let builtIn: [ThemePreset] = [
         ("Tokyo Night", "1A1B26, 16161E, 13141C, 111219, C0CAF5, 9AA5CE, 283457, 7AA2F7, BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"),
         ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 1A1D2B, C0CAF5, 9AA5CE, 2E3C64, 7AA2F7, BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"),
+        ("Ink & Brass", "1A1D24, 171A20, 13161C, 13161C, E7E2D7, 928C80, 2F3440, C9A45C, 7C9CB5, 8DB07A, D8A657, D0705F, 7FA3BF"),
         ("Catppuccin Mocha", "1E1E2E, 181825, 11111B, 11111B, CDD6F4, A6ADC8, 45475A, CBA6F7, 89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"),
         ("Catppuccin Macchiato", "24273A, 1E2030, 181926, 181926, CAD3F5, A5ADCB, 494D64, C6A0F6, 8AADF4, A6DA95, EED49F, ED8796, 8BD5CA"),
         ("Dracula", "282A36, 21222C, 191A21, 191A21, F8F8F2, A4AACC, 44475A, BD93F9, FF79C6, 50FA7B, F1FA8C, FF5555, 8BE9FD"),
@@ -2772,10 +2776,17 @@ final class SwitcherController: NSObject {
         // shrink/grow the window to fit the current row count while typing
         // (e.g. "/" with 3 commands gets a compact window, not a tall one)
         config.dynamicHeight = true
+        // the palette acts like a tool panel: it never activates the app.
+        // Activation raised the shared window wherever it was parked
+        // (another workspace) and AeroSpace followed it there, so a "/"
+        // tool opened "somewhere else" instead of where you are
+        config.toolPanel = true
         popup = PopupWindow(config: config)
         commandRunner = CommandRunner()
         super.init()
         commands = loadCommands()
+        // Ctrl+B prefix inside the shared window (SharedWindow.prefixKey)
+        PopupWindow.keyInterceptor = { [weak self] e, w in self?.slot.prefixKey(e, in: w) ?? false }
 
         popup.onFilter = { [weak self] query in
             self?.filter(query) ?? []
@@ -2868,6 +2879,8 @@ final class SwitcherController: NSObject {
     //     fires at once (it was a 0.25 s stat() poll) — for the focus
     //     changes that never make our window key on their own.
     private var bridgeMtime: (Int, Int)?
+    var viewSwitcher: ViewSwitcherPanel?
+    var terminalPanel: TerminalPanel?
     private var bridgeSource: DispatchSourceFileSystemObject?
     private func startFocusBridge() {
         // Record clicks in OTHER apps so the bridge never steals focus back
@@ -3385,6 +3398,23 @@ final class SwitcherController: NSObject {
         slot.aerospaceCacheCleared = prep.cacheCleared
     }
 
+    // a shared-window view opened from the palette: same prep as the
+    // hotkeys (our windows follow you to the focused workspace + its
+    // screen, AeroSpace's closed-windows cache cleared), then the show
+    func openSlotHere(_ show: @escaping (SwitcherController) -> Void) {
+        guard settings.sharedWindow else { show(self); return }
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let prep = Self.hotkeyPrep()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyHotkeyPrep(prep)
+                show(self)
+                self.slot.aerospaceCacheCleared = false
+                self.log("palette view: \(prep.log)")
+            }
+        }
+    }
+
     // `state` / `do:ACTION` over the socket (main thread): JSON the UI tests
     // poll instead of sleeping + AppleScript. Actions run the same code the
     // keys / header icons run; the answer is the state afterwards.
@@ -3399,6 +3429,9 @@ final class SwitcherController: NSObject {
             case "home": slot.home()
             case "toggle": slot.toggle()
             case "toggle-terminal": noteWindow?.toggleTerminalDrawer()
+            case "term": toggleTerminalPanel()
+            case "switcher": showViewSwitcher()
+            case "switcher-hide": viewSwitcher?.window.hide(restore: false)
             case "reset-size": noteWindow?.resetToDefaultSize()
             case _ where a.hasPrefix("open:"):
                 guard let v = SlotView(rawValue: String(a.dropFirst(5))) else {
@@ -3482,6 +3515,10 @@ final class SwitcherController: NSObject {
             }(),
             "pid": Int(getpid()),
             "paletteCommands": paletteCommands().map { $0.label ?? $0.name },
+            "terminalPanel": terminalPanel?.testState() ?? ["shown": false],
+            "viewSwitcher": ["shown": viewSwitcher?.window.isShown ?? false,
+                             "rows": viewSwitcher?.window.rows.compactMap { ($0 as? SwitchViewRow).map { "\($0.name)|\($0.location)" } } ?? [],
+                             "selection": viewSwitcher?.window.selection ?? 0],
             "paths": pathsWindow?.testState ?? ["shown": false,
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
@@ -3677,6 +3714,8 @@ final class SwitcherController: NSObject {
                             self?.toggleCommand(name)
                         } else if name == "notes" {
                             self?.showNotes()
+                        } else if name == "term" {
+                            self?.toggleTerminalPanel()
                         } else if name == "jira-dashboard" {
                             self?.showJiraDashboard()
                         } else if name == "setup" {
@@ -3859,8 +3898,8 @@ final class SwitcherController: NSObject {
                 // /confluence and /ai open the shared window's views
                 if cmd.name == "confluence" { showConfluence(); break }
                 if cmd.name == "ai" { showAI(); break }
-                if cmd.name == "compare" { showCompare(); break }
-                if cmd.name == "window" { toggleCommand("window"); break }
+                if cmd.name == "compare" { openSlotHere { $0.showCompare() }; break }
+                if cmd.name == "window" { openSlotHere { $0.toggleCommand("window") }; break }
                 commandRunner?.run(cmd.script ?? "") { out in
                     self.log("cmd '\(cmd.name)' -> \(out)")
                 }
@@ -4201,6 +4240,7 @@ final class SwitcherController: NSObject {
         if let existing = subWindows.first(where: { $0.config.name == settings.detailWindowName }) {
             existing.setEditorText(text)
             existing.chromeHeaderTitle = nil
+            showTicketPage(row, in: existing, cmd: cmd)
             if settings.sharedWindow {
                 slot.push(.detail)       // in place of the list; Esc = back
             } else {
@@ -4265,7 +4305,51 @@ final class SwitcherController: NSObject {
         } else {
             w.show()
         }
+        showTicketPage(row, in: w, cmd: cmd)
         log("detail window opened for \(key)")
+    }
+
+    // an issue (it has a status) reads as the ticket page (JiraTicket.swift):
+    // header card + workflow steps + tabs; anything else stays plain text.
+    // The page carries Copy key / Copy link / Open, so the header's go.
+    private var ticketView: JiraTicketView?
+    private func showTicketPage(_ row: FieldRow, in w: PopupWindow, cmd: CommandSpec) {
+        guard cmd.name == "jira" || cmd.name == jiraReleasesWindow, row.fields["status"] != nil,
+              !jiraIsReleaseRow(row) else {
+            w.setPageOverlay(nil)
+            w.copyPathButtonLabel = "copy key"
+            if !w.headerButtons.contains(where: { $0.1 == 10 }) { w.headerButtons = [("open in browser", 10)] + w.headerButtons }
+            return
+        }
+        let v = ticketView ?? JiraTicketView(frame: .zero)
+        ticketView = v
+        v.onAction = { [weak self] a in
+            guard let self, let r = self.detailRow else { return }
+            let k = r.fields["key"] ?? ""
+            switch a {
+            case "copy-key":
+                self.copy(k, "jira key: \(k)")
+                w.showToast("Copied \(k)", symbol: "doc.on.clipboard")
+            case "copy-link":
+                if let u = jiraBrowseURL(r) {
+                    let t = r.fields["title"] ?? ""
+                    self.copy(u.absoluteString + (t.isEmpty ? "" : " \(t)"), "jira link: \(k)")
+                    w.showToast("Copied link to \(k)", symbol: "link")
+                }
+            case "open":
+                if let u = jiraBrowseURL(r) { NSWorkspace.shared.open(u); self.log("detail: opened \(u.absoluteString)") }
+            case _ where a.hasPrefix("url:"):
+                if let u = URL(string: String(a.dropFirst(4))) { NSWorkspace.shared.open(u) }
+            default: break
+            }
+        }
+        w.copyPathButtonLabel = ""
+        // only the view's own button goes: the shared window's back / home stay
+        w.headerButtons = w.headerButtons.filter { $0.1 != 10 }
+        w.setPageOverlay(v)
+        v.show(JiraTicketPage.html(row, colors: w.config.colors, url: jiraBrowseURL(row)?.absoluteString,
+                                   labels: JiraPoll.fieldLabels()),
+               background: w.config.colors.base)
     }
 
     // headline fields in commands.toml order, then every remaining raw field
@@ -4325,7 +4409,7 @@ final class SwitcherController: NSObject {
     // popup raises itself on activation, so the shared window came along —
     // and they are never shared-window views.
     func isToolPanel(_ cmd: CommandSpec) -> Bool {
-        ["filefast", "paths", "prettyprint", "screenshot"].contains(cmd.name) || (cmd.kind == .output && cmd.panel)
+        ["filefast", "paths", "prettyprint", "screenshot", "terminal"].contains(cmd.name) || (cmd.kind == .output && cmd.panel)
     }
 
     // ONE way to open a tool panel (the palette, `do:tool:NAME`)
@@ -4335,8 +4419,57 @@ final class SwitcherController: NSObject {
         case "paths": showPaths(cmd)
         case "prettyprint": openPrettyPrintWindow(cmd)
         case "screenshot": showScreenshot()
+        case "terminal": toggleTerminalPanel()
         default: openOutputWindow(cmd)
         }
+    }
+
+    // Ctrl+B W inside the shared window (SharedWindow.prefixKey): the
+    // views the header icons click through, each with where it is
+    func showViewSwitcher() {
+        if viewSwitcher == nil {
+            let v = ViewSwitcherPanel(colors: windowColors())
+            v.onPick = { [weak self] id in self?.slot.navClicked(id) }
+            viewSwitcher = v
+        }
+        func tabName(_ w: PopupWindow?) -> String {
+            guard let w, w.tabTitles.indices.contains(w.selectedTab) else { return "" }
+            let t = w.tabTitles[w.selectedTab]
+            return t.hasSuffix(".json") ? String(t.dropLast(5)) : t
+        }
+        let filesWin = slotMember(.files) as? PopupWindow
+        let names: [Int: String] = [SharedWindow.navFiles: "Files", SharedWindow.navNotes: "Notes",
+                                    SharedWindow.navJira: "Jira", SharedWindow.navConfluence: "Confluence",
+                                    SharedWindow.navCompare: "Compare", SharedWindow.navAI: "AI"]
+        let views = SharedWindow.navIcons.map { icon -> (id: Int, name: String, icon: NSImage, location: String) in
+            let loc: String
+            switch icon.id {
+            case SharedWindow.navFiles: loc = filesWin?.fileBrowser?.whereText ?? ""
+            case SharedWindow.navNotes: loc = tabName(noteWindow)
+            case SharedWindow.navJira: loc = tabName(slotMember(.jira) as? PopupWindow)
+            case SharedWindow.navConfluence: loc = ConfluenceWindow.current?.whereText ?? ""
+            case SharedWindow.navCompare: loc = CompareWindow.current?.whereText ?? ""
+            case SharedWindow.navAI: loc = AIWindow.current?.whereText ?? ""
+            default: loc = ""
+            }
+            return (icon.id, names[icon.id] ?? icon.tip, icon.image, loc)
+        }
+        let cur = slot.current.flatMap { SharedWindow.navOn($0) }
+        viewSwitcher?.show(views, current: cur, preselect: slot.previousNav ?? cur,
+                           over: slot.current.flatMap { slotMember($0)?.slotWindow })
+    }
+
+    // Ctrl+B T / palette /terminal / `workspace-switcher term`: the
+    // dedicated terminal panel (TerminalPanel.swift), built once and kept
+    func toggleTerminalPanel() {
+        if terminalPanel == nil {
+            let t = TerminalPanel(colors: windowColors(commands.first { $0.name == "terminal" }),
+                                  shell: settings.shell, args: settings.shellArgs,
+                                  fontName: settings.terminalFont, fontSize: settings.terminalFontSize)
+            t.log = { [weak self] in self?.log($0) }
+            terminalPanel = t
+        }
+        terminalPanel?.toggle()
     }
 
     // /screenshot from the palette: capture once the palette has left the
@@ -5892,7 +6025,7 @@ final class SwitcherController: NSObject {
             cfg.tableColumns = columns.map { $0.popup }
             cfg.rowHeight = 26
         }
-        cfg.tableCellTone = jiraCellTone
+        cfg.tableCellStyle = jiraCellStyle
         return cfg
     }
 
@@ -8167,6 +8300,9 @@ extension SwitcherController {
         var sortKey: (field: String, ascending: Bool)?
         // jira favorites (config.json `favorites`): the ☆ of each issue row
         var favKeys: Set<String>
+        // starred releases (config.json `favoriteReleases`, newest first):
+        // the ☆ of release rows + the sidebar's FAVORITE RELEASES section
+        var favReleases: [String] = []
         // the searchable multi-select popover open on a header ▾ / bar pill
         var openPicker: JiraMultiPicker?
         // the pending save of a column drag (debounced)
@@ -8207,6 +8343,7 @@ extension SwitcherController {
             copyKeys = cmd.copyFields
             fieldLabels = isJira ? JiraPoll.fieldLabels() : [:]
             favKeys = isJira ? JiraPoll.favorites() : []
+            favReleases = isJira ? JiraPoll.favoriteReleases() : []
             tabMtimes = tabs.map { mtime(of: $0.path) }
             cacheStamp = mtime(of: JiraPoll.issueCachePath)
         }
@@ -8353,6 +8490,55 @@ extension SwitcherController {
             }
         }
 
+        // the jira window's sidebar: starred releases on top; a click lists
+        // every issue in that release (the release view)
+        func syncReleasePins() {
+            guard cmd.name == "jira" else { return }
+            w.setSidebarPinned(favReleases, title: "Favorite releases", icon: "star.fill",
+                               label: { k in
+                                   guard let d = k.firstIndex(of: "-") else { return k }
+                                   return k[..<d] + " " + k[k.index(after: d)...]
+                               },
+                               tip: { "Show every issue in \($0)" },
+                               menu: { [self] k in
+                                   let m = NSMenu()
+                                   m.addItem(menuItem("Show Issues") { [self] in showReleasePin(k) })
+                                   m.addItem(menuItem("Unfavorite Release") { [self] in setReleaseFavoriteKeys([k], on: false) })
+                                   return m
+                               },
+                               onClick: { [self] k in showReleasePin(k) })
+        }
+
+        func showReleasePin(_ key: String) {
+            host.showJiraReleaseView(FieldRow(title: key, content: nil, trailing: nil, detail: nil,
+                                              body: nil, searchText: "", fields: ["key": key]))
+        }
+
+        func setReleaseFavorite(_ rows: [FieldRow], on: Bool) {
+            setReleaseFavoriteKeys(rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }, on: on)
+        }
+
+        func setReleaseFavoriteKeys(_ keys: [String], on: Bool) {
+            guard !keys.isEmpty else { return }
+            let before = favReleases
+            favReleases = on ? keys.filter { !favReleases.contains($0) } + favReleases
+                             : favReleases.filter { !keys.contains($0) }
+            w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+            syncReleasePins()
+            let s = keys.count == 1 ? keys[0] : "\(keys.count) releases"
+            w.showToast(on ? "Starred \(s)" : "Unstarred \(s)", symbol: on ? "star.fill" : "star")
+            JiraPoll.run("jira_poll.py", ["--favorite-release", on ? "add" : "remove"] + keys) { [self] code, _, err in
+                host.log("jira: favorite release \(on ? "add" : "remove") \(keys.joined(separator: ",")) (exit \(code))"
+                         + (code == 0 ? "" : " " + err))
+                guard code != 0 else { return }
+                favReleases = before
+                w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
+                syncReleasePins()
+                w.showToast("Release star not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
+                            symbol: "exclamationmark.triangle")
+            }
+        }
+
         func setBlacklisted(_ rows: [FieldRow], on: Bool) {
             let keys = rows.compactMap { $0.fields["key"] }.filter { !$0.isEmpty }
             guard !keys.isEmpty else { return }
@@ -8452,8 +8638,8 @@ extension SwitcherController {
             // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
             var paged = shown.prefix(take).map { i -> FieldRow in
                 var r = items[i]
-                if isJira, !jiraIsReleaseRow(r), let k = r.fields["key"], !k.isEmpty {
-                    r.starred = favKeys.contains(k)
+                if isJira, let k = r.fields["key"], !k.isEmpty {
+                    r.starred = jiraIsReleaseRow(r) ? favReleases.contains(k) : favKeys.contains(k)
                 }
                 return r
             }
@@ -8554,8 +8740,9 @@ extension SwitcherController {
             w.onToggleStar = { [self] i in
                 guard w.rows.indices.contains(i), let row = w.rows[i] as? FieldRow,
                       let on = row.starred else { return }
-                setFavorite([row], on: !on)
+                if jiraIsReleaseRow(row) { setReleaseFavorite([row], on: !on) } else { setFavorite([row], on: !on) }
             }
+            syncReleasePins()
             w.onCommandK = { [self] in showActions() }
             // Cmd+F (jira): the live-search panel docked to this window
             if cmd.name == "jira" {
@@ -8803,8 +8990,7 @@ extension SwitcherController {
             let rows = w.actionRows.compactMap { $0 as? FieldRow }.filter { !$0.loadMore }
             guard !rows.isEmpty else { return }
             let n = rows.count, what = n == 1 ? (rows[0].fields["key"] ?? "1 row") : "\(n) rows"
-            var items: [(title: String, detail: String)] = [
-                ("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))")]
+            var items: [(title: String, detail: String)] = []
             let site = isJira ? jiraSite : ""
             let keyed = rows.filter { !($0.fields["key"] ?? "").isEmpty }
             let issues = keyed.filter { !jiraIsReleaseRow($0) }
@@ -8812,10 +8998,12 @@ extension SwitcherController {
             let urls = keyed.compactMap { r in jiraBrowseURL(r, site: site).map { (r, $0) } }
             let s = urls.count == 1 ? "" : "s"
             let noun = releases.isEmpty ? "issue" : issues.isEmpty ? "release" : "item"
+            // Open in browser FIRST: Cmd+K, Return opens what you're on
             if !site.isEmpty && !urls.isEmpty {
+                items.append(("Open in browser", "opens \(urls.count) \(noun)\(s) · the highlighted row + ticked rows"))
                 items.append(("Copy URL and title", "\(urls.count) \(noun)\(s) · one “URL Title” line each"))
-                items.append(("Open all in browser", "opens \(urls.count) \(noun)\(s) · copies KEY + URL"))
             }
+            items.append(("Copy to clipboard", "\(what) · \(copyKeys.joined(separator: ", "))"))
             let tabFile = tabs.indices.contains(currentTab)
                 ? (tabs[currentTab].path as NSString).lastPathComponent : ""
             if isJira && !issues.isEmpty {
@@ -8827,6 +9015,13 @@ extension SwitcherController {
             }
             if isJira && releases.count == 1 {
                 items.append(("Show release issues", "every issue in \(releases[0].title) · one tab per release"))
+            }
+            if isJira && !releases.isEmpty {
+                let starred = releases.allSatisfy { favReleases.contains($0.fields["key"] ?? "") }
+                let k = releases.count == 1 ? releases[0].title : "\(releases.count) releases"
+                items.append(starred
+                    ? ("Unfavorite release", "remove \(k) from the sidebar")
+                    : ("Favorite release", "pin \(k) in the sidebar · a click lists its issues"))
             }
             if isJira && !releases.isEmpty {
                 let k = releases.count == 1 ? releases[0].title : "\(releases.count) releases"
@@ -8848,7 +9043,7 @@ extension SwitcherController {
                     }
                     host.copy(lines.joined(separator: "\n"), "\(urls.count) jira URL(s) + titles")
                     w.showToast("Copied \(urls.count) URL\(s) + title\(s)", symbol: "link")
-                case "Open all in browser":
+                case "Open in browser":
                     let lines = urls.map { "\($0.0.fields["key"] ?? "")\t\($0.1.absoluteString)" }
                     for (_, u) in urls { NSWorkspace.shared.open(u) }
                     host.copy(lines.joined(separator: "\n"), "\(urls.count) jira key(s) + URLs")
@@ -8862,6 +9057,10 @@ extension SwitcherController {
                     setBlacklisted(releases, on: true)
                 case "Restore release":
                     setBlacklisted(releases, on: false)
+                case "Favorite release":
+                    setReleaseFavorite(releases, on: true)
+                case "Unfavorite release":
+                    setReleaseFavorite(releases, on: false)
                 case "Show release issues":
                     host.showJiraReleaseView(releases[0])
                 default:
@@ -8936,7 +9135,11 @@ extension SwitcherController {
                 host.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
             }
             // pins edited elsewhere (or by the poll) show on the ☆ too
-            if isJira { favKeys = JiraPoll.favorites() }
+            if isJira {
+                favKeys = JiraPoll.favorites()
+                favReleases = JiraPoll.favoriteReleases()
+                syncReleasePins()
+            }
             refreshBadges(force: true)
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
             refreshPathLabel()
@@ -8995,6 +9198,10 @@ enum JiraPoll {
     // config.json favorites: the issue keys pinned with the ☆
     static func favorites() -> Set<String> {
         Set(readJSON(configPath)?["favorites"] as? [String] ?? [])
+    }
+    // config.json favoriteReleases: starred release row keys, newest first
+    static func favoriteReleases() -> [String] {
+        readJSON(configPath)?["favoriteReleases"] as? [String] ?? []
     }
 
     // "10m" / "1h" / "1w" -> seconds (jira_config.parse_window)

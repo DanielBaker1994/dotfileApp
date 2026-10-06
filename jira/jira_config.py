@@ -103,6 +103,7 @@ DEFAULTS = {
     "setup": None,                   # {state: pending|done, steps: {name: {...}}} (jira_poll --setup)
     "favorites": [],                 # pinned issue keys, newest first (the favorites job re-queries them)
     "releaseBlacklist": [],          # release row keys (PROJECT-NAME) hidden from the releases tab
+    "favoriteReleases": [],          # starred release row keys, newest first (Jira sidebar)
 }
 
 LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)

@@ -165,12 +165,19 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private let spinner = NSProgressIndicator()
     private let splitter = PaneSplitter()
     private var split: CGFloat = 0.5
-    private var sidebarW: CGFloat = 0
+    private var sidebarWide: CGFloat = 0
+    // the icon rail (⌘\\) when collapsed
+    private var sidebarW: CGFloat {
+        get { pills?.width(expanded: sidebarWide) ?? sidebarWide }
+        set { sidebarWide = newValue }
+    }
     private var toast: NSView?
 
     // state
     private var rules: [AIRule] = []
     private var selected = 0
+    // the Ctrl+B W view switcher's "where": the rule shown
+    var whereText: String { rules.indices.contains(selected) ? rules[selected].name : "" }
     private var rule: AIRule? { rules.indices.contains(selected) ? rules[selected] : nil }
     private var answer = ""             // the clean output of the last run (Markdown)
     private var answerInput = ""        // the input it answered
@@ -325,6 +332,7 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         if sidebarW > 0 {
             pills.vertical = true
             pills.sectionTitle = "Rules"
+            pills.collapseKey = "ai"
             pills.rowIcon = { _ in "wand.and.stars" }
             pills.pathTip = { [weak self] i in
                 guard let self, self.rules.indices.contains(i) else { return nil }

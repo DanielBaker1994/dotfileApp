@@ -80,6 +80,7 @@ Usage:
   jira_poll.py --release-view [KEY...]   one tab file per release (its issues,
                                   from the cache) for the release view window
   jira_poll.py --blacklist-release add|remove KEY... hide / restore releases
+  jira_poll.py --favorite-release add|remove KEY... star releases (Jira sidebar)
                                   (both: config.json + the tabs rewritten
                                   from local data at once; no request, no lock)
   jira_poll.py --window 2h        explicit window override (implies now)
@@ -263,10 +264,11 @@ def parse_args(argv: list) -> dict:
             # blacklisted (the one double-clicked in blacklist_release.json)
             o["release_view"] = argv[i + 1:]
             return o
-        elif name in ("--favorite", "--blacklist-release"):
+        elif name in ("--favorite", "--blacklist-release", "--favorite-release"):
             # --favorite add|remove KEY...  (the rest of argv = the keys)
             op = val()
-            o["favorite" if name == "--favorite" else "blacklist"] = (op, argv[i + 1:])
+            o[{"--favorite": "favorite", "--blacklist-release": "blacklist",
+               "--favorite-release": "favorite_release"}[name]] = (op, argv[i + 1:])
             return o
         elif name in ("-h", "--help"):
             print(__doc__.strip())
@@ -1317,6 +1319,25 @@ def edit_pins(kind: str, op: str, keys: list) -> int:
     return result(True, keys=new, count=len(hidden), files=tabs + [bl_path])
 
 
+def edit_favorite_releases(op: str, keys: list) -> int:
+    """--favorite-release add|remove KEY...: the starred releases (config.json
+    favoriteReleases, newest first) the Jira window pins in its sidebar; a
+    click shows the release's issues (--release-view). Prints {ok, keys}."""
+    if op not in ("add", "remove") or not keys:
+        print(json.dumps({"ok": False, "problems": ["--favorite-release add|remove KEY..."]}))
+        return 1
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    cur = config_list(cfg, "favoriteReleases")
+    new = ([k for k in keys if k not in cur] + cur) if op == "add" else [k for k in cur if k not in keys]
+    jira_config.save({"favoriteReleases": new})
+    print(json.dumps({"ok": True, "keys": new}))
+    return 0
+
+
 def release_view_file(project: str, name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in f"{project}-{name}")
     return safe.strip() + ".json"
@@ -1388,6 +1409,8 @@ def main(argv: list) -> int:
         return edit_pins("favorites", *o["favorite"])
     if o["blacklist"]:
         return edit_pins("releases", *o["blacklist"])
+    if o.get("favorite_release"):
+        return edit_favorite_releases(*o["favorite_release"])
     if o["cancel"]:
         return cancel_running()
     if o["live"]:

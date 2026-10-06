@@ -137,8 +137,8 @@
 #                       each view the first time it is opened
 #   shared-window       true/false (default true): notes and jira live in ONE
 #                       window — Hyper+N shows it on the view you were last in, or
-#                       hides it when you are in it; the header icons and
-#                       Ctrl+Tab switch views. Jira's
+#                       hides it when you are in it; the header icons switch
+#                       views. Jira's
 #                       ticket details, release view and Jira Config open IN
 #                       it (home / back in the header). Esc: jira = back
 #                       (clears a search first); at the top of a view it
@@ -258,17 +258,23 @@ preview-border-width = 2
 #   two hex digits are the TRANSPARENCY (FF = opaque, 00 = fully see-through;
 #   same as the picker's alpha slider — drag it down to make it see-through).
 [theme]
-background = "24273A"
-highlight = "3F4A5A"
-text = "CAD3F5"
-dim = "939AB7"
-accent = "C6A0F6"
-header = 181926
-browser = "4F5A6E8C"
-terminal = "4F5A6EC7"
+# Nightfox (the Compare view's look, used by every view): deep blue, soft gray text, a blue accent
+background = "192330"
+highlight = "2B3B51"
+text = "CDCECF"
+dim = "AEAFB0"
+accent = "719CD6"
+header = "0F141C"
+browser = "131A24"
+terminal = "111720"
+accent2 = "9D79D6"
+success = "81B29A"
+warning = "DBC074"
+danger = "C94F6D"
+info = "63CDCF"
 
 # [themes] — extra Theme ▸ presets (a built-in with the same name is
-# replaced). Built-ins: Tokyo Night, Tokyo Night Storm, Catppuccin Mocha /
+# replaced). Built-ins: Ink & Brass, Tokyo Night, Tokyo Night Storm, Catppuccin Mocha /
 # Macchiato / Latte, Dracula, Nord, Gruvbox Dark, One Dark, Rosé Pine,
 # Solarized Dark / Light, Graphite, Tokyo Night Day, Paper.
 #   Name = background, browser, terminal, header, text, dim, highlight[, accent[,
@@ -484,12 +490,20 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #                       follows the note (Esc / ⌘W close, ⌘+ / ⌘− size)
 #   prose-font-size     reading view text size (default 19)
 #   prose-width         reading column width in points (default 900)
+#   pdf-css             ⌘P / right-click ▸ Export PDF in the reading view:
+#                       pandoc -s (gfm) → weasyprint. This file is a header
+#                       snippet (<style>…</style>) put in the page (default
+#                       "": a built-in light style). The PDF's path is copied
+#   pdf-path            folder the PDF goes to, as NOTE.pdf (default ~/Downloads)
+#   pdf-highlight       pandoc code highlight style (default tango)
+#   pdf-engine-bin      weasyprint (default /opt/homebrew/bin/weasyprint)
 [notes]
 terminal-background = "A6111720"
 enabled = true
 in-palette = false
 type = "note"
 name = "notes"
+pdf-css = "~/.dotfiles/markdown_generator/friendly_document_styling.css"
 title = ""
 voice = true
 # embedded shell drawer at the bottom of the notes window (header  toggles)
@@ -516,9 +530,9 @@ width = 768
 height = 585
 max-height = 730
 font = "Hack Nerd Font Mono"
-background-color = "A6192330"
-header-color = "A60F141C"
-browser-background = "A6131A24"
+background-color = "192330"
+header-color = "0F141C"
+browser-background = "A6171A20"
 text-color = "CDCECF"
 dim-color = "AEAFB0"
 highlight-color = "2B3B51"
@@ -527,7 +541,7 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 
 # Read-only file browser: type to fuzzy-filter the current directory, Enter
 # on a file opens it in its default app, Enter on a directory (or "..")
-# navigates. `root` is the starting directory (default ~). A view of the shared window (header icon, Ctrl+Tab, palette).
+# navigates. `root` is the starting directory (default ~). A view of the shared window (header icon, palette).
 # These browser keys also apply to the notes window's file drawer.
 # Filter bar:
 #   notes / *.md / .*        filter this folder (.* shows dotfiles)
@@ -581,14 +595,14 @@ start = "recent"
 # THE SWITCH: enabled = true shows the window, anything else hides it
 sort = "size"
 sort-order = "asc"
-background-color = "C71E1E2E"
-header-color = "11111B"
-browser-background = "991E1E2E"
-text-color = "CDD6F4"
-dim-color = "A6ADC8"
-highlight-color = "45475A"
-accent-color = "CBA6F7"
-palette = "89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"
+background-color = "192330"
+header-color = "0F141C"
+browser-background = "99171A20"
+text-color = "CDCECF"
+dim-color = "AEAFB0"
+highlight-color = "2B3B51"
+accent-color = "719CD6"
+palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 # (window, palette, menu entry). Every section must opt in explicitly.
 [jira]
 enabled = true
@@ -597,13 +611,13 @@ type = "list"
 name = "jira"
 title = ""
 # Tokyo Night (Theme ▸ presets rewrite these)
-header-color = "9911111B"
-background-color = "991E1E2E"
-text-color = "CDD6F4"
-dim-color = "A6ADC8"
-highlight-color = "45475A"
-accent-color = "CBA6F7"
-palette = "89B4FA, A6E3A1, F9E2AF, F38BA8, 94E2D5"
+header-color = "0F141C"
+background-color = "192330"
+text-color = "CDCECF"
+dim-color = "AEAFB0"
+highlight-color = "2B3B51"
+accent-color = "719CD6"
+palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 # a directory — every .json/.tsv file inside becomes a tab
 sources = "~/.cache/workspace-switcher/jira_json"
 # table mode: spreadsheet rows under a sticky header. columns = one line of
@@ -694,13 +708,13 @@ font-size = 14
 font = ""
 # toast after ⧉ Copy
 copy-toast = "Copied to clipboard"
-background-color = 303446
-header-color = 232634
-text-color = "C6D0F5"
-dim-color = "A5ADCE"
-highlight-color = "51576D"
-accent-color = "CA9EE6"
-palette = "8CAAEE, A6D189, E5C890, E78284, 81C8BE"
+background-color = "192330"
+header-color = "0F141C"
+text-color = "CDCECF"
+dim-color = "AEAFB0"
+highlight-color = "2B3B51"
+accent-color = "719CD6"
+palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 
 # [compare] — Beyond Compare-style Text + Folder Compare (CompareWindow.swift); a
 # shared-window view (header icon ⇆, Hyper+S /compare, file browser / /paths
@@ -772,7 +786,7 @@ keep-both-button-label = "Keep Both"
 skip-button-label = "Skip Existing"
 sync-info-label = "Replaced and removed items go to the Trash; ⌘Z undoes the whole run."
 sync-run-button-label = "Synchronize"
-background-color = 192330
+background-color = "192330"
 header-color = "0F141C"
 text-color = "CDCECF"
 dim-color = "AEAFB0"
@@ -805,7 +819,12 @@ workspace-switcher = "*:app"
 "all: Hyper+X" = "screenshot (Flameshot-style capture + annotate)"
 "all: Hyper+/" = "ws-settings: every shortcut + setting (search, edit)"
 "all: Cmd+W" = "hide the window"
-"all: Ctrl+Tab / Ctrl+Shift+Tab" = "toggle files ⇄ notes (from any other view: jump to files)"
+"all: Ctrl+B L" = "prefix (in this window only): back to the previous view"
+"all: Ctrl+B W" = "prefix: view switcher — each view and where it is; type to filter, Return opens, 1-9 jump"
+"all: Ctrl+B T" = "prefix: toggle the terminal popup"
+"all: Ctrl+B B" = "prefix: sidebar ⇄ icon rail (same as Cmd+\\)"
+"all: Ctrl+B Ctrl+B" = "a real Ctrl+B for the focused pane (vim page up, the shell)"
+"all: Cmd+\\" = "collapse the sidebar to an icon rail / show it again"
 "all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
 "all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
 "all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
@@ -818,6 +837,7 @@ workspace-switcher = "*:app"
 "notes: Cmd+S" = "save the note"
 "notes: Cmd+F" = "search the note"
 "notes: Cmd+O" = "open a file by path as a tab"
+"notes: Cmd+P" = "reading view: export the note as a PDF (its path is copied)"
 "notes: Cmd+C / Cmd+V / Ctrl+V" = "copy / paste (editor + terminal)"
 "files: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the list"
 "files: Return" = "open (folders: go in)"
@@ -854,6 +874,8 @@ workspace-switcher = "*:app"
 "ai: Cmd+L" = "focus your text"
 "ai: Esc" = "stop a running request; idle: hide (only when Esc Hides Window is on)"
 "ai: Cmd+/" = "this list"
+"compare: Cmd+0" = "Home: recent comparisons, open files or folders"
+"compare: Cmd+N" = "new text compare: two empty sides, click one and paste"
 "compare: Ctrl+N / Ctrl+P" = "next / previous difference"
 "compare: Ctrl+R / Ctrl+L" = "copy the section (or selected rows) to the right / left"
 "compare: Ctrl+Opt+R / Ctrl+Opt+L" = "copy the current line to the right / left"
@@ -941,6 +963,17 @@ title = ""
 icon = "notes"
 # where "save file" writes the formatted output (absolute or ~-prefixed)
 save-dir = "/tmp/"
+
+# /terminal — the dedicated terminal popup (TerminalPanel.swift): your
+# [app] shell in a floating, non-activating panel on the screen you're on.
+# Also Ctrl+B T (aerospace.toml mode.prefix) / `workspace-switcher term`.
+# The session survives hide / show. Cmd+C / V / A, Cmd+K clear, Cmd+= / -
+# font, Cmd+W hide; every other key (Esc, Ctrl+C …) goes to the shell.
+[terminal]
+enabled = true
+label = "Terminal"
+type = "shell"
+icon = "terminal"
 
 # read-only window showing the stack health check (Hyper+S -> /health-checks).
 [health-checks]

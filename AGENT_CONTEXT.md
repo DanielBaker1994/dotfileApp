@@ -121,6 +121,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   tool (see "/screenshot" below; model tested by `bin/run-tests.sh screenshot`)
 - `PaneShot.swift` + `AnsiRender.swift` — `pane-shot`, the herdr pane's
   full-height capture (see "/pane-shot" below; `bin/run-tests.sh ansi`)
+- `ProsePDF.swift` — prose Export PDF (pandoc -s → weasyprint; `bin/run-tests.sh prose`)
 - `CompareText.swift` + `ComparePane.swift` + `CompareWindow.swift` — the
   Compare view (Text Compare; see "Compare view" below; engine tested by
   `bin/run-tests.sh compare`)
@@ -350,6 +351,18 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `frontmostPid`; `do:tool-close:NAME`): open / re-run / click each with
   another app frontmost → `activations` unchanged, frontmost not us, the
   shared view not key and not moved, AeroSpace doesn't list it.
+
+- The Hyper+S palette itself is a tool panel (`config.toolPanel` on the
+  switcher): it used to activate the app, which raised the shared window
+  parked on workspace N and AeroSpace jumped there — "/" tools opened
+  "somewhere else". Palette views (Compare, Workspace Switcher) go through
+  `openSlotHere` = `hotkeyPrep` first (the window follows you).
+- /terminal (`[terminal]`, TerminalPanel.swift): the old notes drawer's
+  shell as its own borderless non-activating floating panel (SwiftTerm,
+  `[app] shell` / `terminal-font`), on the mouse's screen, frame remembered
+  (`terminalPanelFrame`), session kept across hide / show. Cmd+C/V/A, Cmd+K
+  clear, Cmd+=/- font, Cmd+W hide; right-click menu. Also Ctrl+B T, CLI
+  `workspace-switcher term`, `do:term`; state `terminalPanel`.
 
 ## /paths — recent-file shelf (Hyper+S → "file paths")
 
@@ -1132,8 +1145,9 @@ Line numbers drift; grep the symbol names (they're stable).
 
 ### handleKey order (first match wins)
 1. Esc streak reset on non-Esc key; Cmd+Opt+=/- font; Cmd+=/- resize.
-2. `cmd || ctrl`: sheet edit keys → Ctrl+J/K pane focus → **Ctrl+Tab / Ctrl+Shift+Tab
-   next/prev shared-window view (`onCycleView`), else tab cycle (wraps)** → Ctrl+Shift+HJKL resize → vim-pane shortcuts →
+0. `PopupWindow.keyInterceptor` (the Ctrl+B prefix) before anything.
+2. `cmd || ctrl`: sheet edit keys → Ctrl+J/K pane focus → Ctrl+Tab = tab cycle
+   (wraps) → Cmd+\\ sidebar rail → Ctrl+Shift+HJKL resize → vim-pane shortcuts →
    terminal (Cmd+C/V only) → Cmd+L → **file browser keys (Ctrl+N/P move,
    Cmd+K copy abs path, Cmd+A/C/V/X/Z)** → generic edit keys.
 3. `editMode`: terminal focused (Esc passes to shell; Nth rapid Esc closes),
@@ -1178,6 +1192,17 @@ Line numbers drift; grep the symbol names (they're stable).
   Recent header's Clear Missing (N) / Clear All. Recent rows: ✕ on hover
   (`CompareRecentList.onRemove`). Start page: the folder button sits LEFT
   of each path field.
+- Prose code: `ProseRender.fragment` = `RichText.pandocHTML(md, highlight:
+  true)` (`--syntax-highlighting=default` → `span.kw` …) + `codeCSS` (palette
+  tones); the AI view's pastes keep `none`. Export PDF (`ProsePDF.swift`,
+  Foundation, `bin/run-tests.sh prose`): Cmd+P in the reading view / pop-out
+  or its right-click menu (`ProseWebView.willOpenMenu`) → `pandoc -s -f gfm
+  -t html5 --syntax-highlighting=tango --include-in-header=[notes] pdf-css`
+  (the owner's = the dotfiles `friendly_document_styling.css`; dist / empty =
+  `ProsePDF.builtinCSS`) → `weasyprint` → `[notes] pdf-path`/NOTE.pdf
+  (default ~/Downloads, overwritten). The PDF's PATH goes on the clipboard +
+  `ScreenToast` (copy-toast text). Keys `pdf-engine-bin`, `pdf-highlight`;
+  preflight warns without weasyprint.
 - Prose: default 19 px / 900 pt column; ⤢ chip / ⌘⇧O = `ProseProcess.launch`
   → a SEPARATE process (`workspace-switcher prose --colors HEX,… FILE`, handled
   at the top of main.swift: no daemon, no lock; one per file) showing a
@@ -1197,7 +1222,7 @@ Line numbers drift; grep the symbol names (they're stable).
 - NO window hotkey (Hyper+N and the aerospace app rule were removed): the window opens from the Hyper+S palette's LAST entry "Workspace Switcher" (`window`) or by launching the app (one daemon: `acquireDaemonLock` forwards a second launch). `window`
   (`SharedWindow.toggle`: hidden → the view you were LAST on (`last`), in it →
   hide, elsewhere → focus). No per-view hotkeys (Hyper+F / J
-  removed): views switch via Ctrl+Tab, header icons, the Hyper+S palette.
+  removed): views switch via header icons, Ctrl+B W / L, the Hyper+S palette.
   The named modes (`notes|files|jira|confluence|ai|compare`) remain as CLI / socket
   messages. Hyper+X = `screenshot` (a tool panel, not a view: no
   `hotkeyPrep`, never in `hotkeyModes`; see "/screenshot").
@@ -1311,11 +1336,28 @@ worked example):
   (`esc-close` per section, default `[app] esc-close` = 0 = never; 1 =
   single, 2 = double-tap). Jira / output: Esc = back first. The switcher
   palette always closes on one Esc. Find bar: one Esc.
-- Ctrl+Tab / Ctrl+Shift+Tab: toggles files ⇄ notes only; from any
-  other view it jumps to files (`SharedWindow.cycle`; every member's
-  `onCycleView`; direction ignored). Other views: header icons / palette. Not
-  while a sheet / popover / Cmd+K picker / shortcuts card is up. Notes and
-  jira source tabs are click-only now.
+- Ctrl+Tab no longer switches views (removed 2026-10-05: `onCycleView` is
+  nil on every member; `SharedWindow.cycle` stays for `do:cycle`). In a
+  window with tabs it cycles the tabs.
+- Ctrl+B prefix, tmux-style, ONLY while a shared-window view is key (NOT
+  global — the owner rejected an AeroSpace binding): `SharedWindow.prefixKey`
+  via `PopupWindow.keyInterceptor` (asked first by every PopupWindow key
+  monitor and `CardWindowController.routeKey`). L = previous view
+  (`previousNav`, set in `present`), W = `ViewSwitcherPanel` (ViewSwitcher.swift:
+  a tool panel over the window listing the header's views, each with where it
+  is — files `whereText`, notes / jira tab, Confluence / Compare / AI
+  `whereText`; previous view pre-selected, 1-9, Return), T = the terminal
+  panel, B = sidebar ⇄ icon rail (`PopupTabsBar.toggleRail`, = Cmd+\\),
+  Ctrl+B twice = the pane gets a real Ctrl+B. Lapses after 1.5 s.
+  Auto-repeats of the key the prefix just used are swallowed
+  (`prefixHeldKey`): a held L used to type "l" into the new view.
+  Hooks `do:switcher | switcher-hide`, state `viewSwitcher`.
+- Cmd+\\ (or the ◧ at the sidebar's foot): sidebar ⇄ icon rail
+  (`PopupTabsBar.collapsed`, `railWidth` 50, `width(expanded:)`,
+  `toggleRail(in:)` finds the window's visible vertical bar; remembered per
+  `collapseKey` in UserDefaults `sidebarRail.<key>`). Hosts read their width
+  through it: PopupWindow `sidebarWNow`, browser / AI / Confluence / Compare
+  `sidebarW` (computed over `sidebarWide`).
 - File browser: Ctrl+N/P next/prev result, Cmd+K copy selected row's
   absolute path (+ toast), Cmd+L focus filter bar, Tab completes, Enter opens.
 - File browser drag & drop (Finder-style, `FileDrag` + `FileListPane` drag
@@ -1382,7 +1424,7 @@ worked example):
   `g:ws_accent…`, ONE `--cmd`: nvim allows max 10).
 - AppKit forms: `ThemedPushButton` (`role` .primary/.danger),
   `ThemedPopUpButton`, `PopupTableRowView`; initial colors from
-  `PopupThemeDefaults.colors`. Jira table cells: `jiraCellTone`.
+  `PopupThemeDefaults.colors`. Jira table cells: `jiraCellStyle` → `PopupCellStyle` (the "quiet" grid: stage square + plain status text, done rows fade, only urgent priority tinted, keys / dates dim).
 
 ## Config defaults worth knowing
 
@@ -1401,3 +1443,35 @@ worked example):
 S=$(ls -t ~/.cache/workspace-switcher/nvim-notes-*.sock | head -1)
 nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
 ```
+
+## 2026-10-05 changes (design picks: memory `design-picks-2026-10`)
+
+- Theme: Nightfox everywhere (the Compare view's look, owner's pick
+  2026-10-05; replaced Ink & Brass): `[theme]` = the built-in "Nightfox"
+  preset and every view section (notes / files / jira / ai / compare) has
+  the same opaque `*-color` keys + palette. Options page (old picks):
+  https://claude.ai/artifact/YarZrUPPfBkNkzRDNfcWvU
+- Card-window key monitor bug (fixed): `self?.routeKey(e) ?? e` turned every
+  swallowed key (nil) back into the event, so Compare / AI / Confluence /
+  Jira Config text fields also got keys the view had used.
+- Jira ticket page (JiraTicket.swift): issue rows open as HTML over the
+  detail window (`PopupWindow.setPageOverlay`, `showTicketPage`): header card
+  (key, Copy key / Copy link / Open ↗, summary, workflow step bar from
+  `[jira] workflow` or the directory's statuses in lifecycle order, pills),
+  tabs Details / Comments N / All fields. Release rows stay plain text.
+- Jira Cmd+K: "Open in browser" first; acts on the highlighted row + every
+  ticked row (`PopupWindow.actionRows`).
+- Favorite releases: ☆ on release rows / Cmd+K "Favorite release" →
+  `jira_poll.py --favorite-release add|remove KEY…` (config.json
+  `favoriteReleases`); the jira sidebar's FAVORITE RELEASES pinned rows
+  (`setSidebarPinned`) open `showJiraReleaseView`.
+- Jira Config: STATUS ▸ Overview first (health headline, Connection / Poll
+  jobs / Cache groups, `overviewSig` rebuild on change); quiet dim section
+  headers; job REQUEST behind "▸ Show request". Confluence Setup sheet opens
+  with a state line.
+- Compare: never reads the clipboard on its own (start-page clipboard
+  suggestions gone; New Text Compare = two empty sides). Sidebar has
+  permanent Home + New rows (PINNED, `pinnedIconFor`), Cmd+0 Home, Cmd+N new;
+  no "+" in sidebar mode. Pasted sides read "(pasted)".
+- File browser preview: click into it, Cmd+A selects all, Cmd+C copies the
+  selection (or everything) — `PopupFileBrowser.handleShortcut`.

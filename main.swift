@@ -198,6 +198,12 @@ if cliArgs.count > 1 {
             exit(1)
         }
         exit(0)
+    case "term":
+        // the terminal panel on the running daemon (palette /terminal,
+        // Ctrl+B T in the window) — no hotkeyPrep, nothing to cold-start into
+        if sendLaunchMessage(cliArgs[1]) { exit(0) }
+        FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+        exit(1)
     case let mode where SwitcherController.hotkeyModes.contains(mode):
         // THE hotkey path (aerospace runs this binary directly): a running
         // daemon gets a socket ping and does the rest (~20 ms). No daemon ->

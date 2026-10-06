@@ -81,10 +81,13 @@ enum RichText {
         t == .webex ? tablesAsText(md) : md
     }
 
-    // pandoc: gfm -> an HTML fragment (nil = no pandoc / it failed)
-    static func pandocHTML(_ md: String) -> String? {
+    // pandoc: gfm -> an HTML fragment (nil = no pandoc / it failed).
+    // highlight = token spans (`span.kw` …) for a page with its own CSS;
+    // pastes keep `none` (classes don't survive Outlook / Webex)
+    static func pandocHTML(_ md: String, highlight: Bool = false) -> String? {
         guard available,
-              let r = try? runProcess(pandocBin, ["-f", "gfm", "-t", "html", "--syntax-highlighting=none",
+              let r = try? runProcess(pandocBin, ["-f", "gfm", "-t", "html",
+                                                  "--syntax-highlighting=\(highlight ? "default" : "none")",
                                                   "--wrap=none"], stdin: md),
               r.code == 0 else { return nil }
         return r.out

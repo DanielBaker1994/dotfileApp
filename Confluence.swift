@@ -437,7 +437,12 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     // Search / Favorites as a left sidebar (`[confluence] sidebar-width`,
     // 0 = the old segmented control in the strip); its edge drags to resize
     private var sidebar: PopupTabsBar?
-    private var sidebarW: CGFloat = 0
+    private var sidebarWide: CGFloat = 0
+    // the icon rail (⌘\\) when collapsed
+    private var sidebarW: CGFloat {
+        get { sidebar?.width(expanded: sidebarWide) ?? sidebarWide }
+        set { sidebarWide = newValue }
+    }
     private var left: CGFloat { sidebar != nil ? sidebarW + 4 : 0 }
 
     // preview
@@ -588,6 +593,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             bar.vertical = true
             bar.closable = false
             bar.sectionTitle = "Confluence"
+            bar.collapseKey = "confluence"
             bar.titles = ["Search", "Favorites"]
             bar.rowIcon = { $0 == 0 ? "magnifyingglass" : "star" }
             bar.onSelect = { [weak self] i in self?.setScope(i == 0 ? .search : .favorites) }
@@ -828,8 +834,13 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             let oldKeys = ((j["spaces"] as? [[String: Any]]) ?? []).compactMap { $0["key"] as? String }
             let spacesF = NSTextField(string: oldKeys.joined(separator: ", "))
             spacesF.placeholderString = "space keys, e.g. ENG, OPS (empty = the whole site)"
+            // the state first (is it working?), then what the fields mean
+            let hasSite = !(j["site"] as? String ?? "").isEmpty, hasToken = j["hasToken"] as? Bool ?? false
+            let state = !hasSite ? "○ Not set up yet."
+                : !hasToken ? "● Site saved, token missing."
+                : "● Set up · \(oldKeys.isEmpty ? "whole site" : "\(oldKeys.count) space\(oldKeys.count == 1 ? "" : "s")") · Test & Save re-checks the sign-in."
             jiraFormSheet(on: self.window, title: "Confluence Setup",
-                          info: "Confluence has its own site and token (not Jira's). Spaces work like Jira "
+                          info: state + "\n\nConfluence has its own site and token (not Jira's). Spaces work like Jira "
                               + "projects: searches stay inside them. Saved to \(j["configPath"] as? String ?? "config.json").",
                           rows: [("Site", site), ("Email", email), ("Token", token), ("Spaces", spacesF)],
                           ok: "Test & Save", first: site) { ok in
@@ -1094,6 +1105,11 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     }
 
     private var showingFavorites = false
+    // the Ctrl+B W view switcher's "where": favorites, or the search typed
+    var whereText: String {
+        let q = textBox.field.stringValue.trimmingCharacters(in: .whitespaces)
+        return showingFavorites ? "Favorites" : q.isEmpty ? "Search" : "“\(q)”"
+    }
 
     // favorites filtered locally by the search box (title / space / path)
     private func showFavorites(keepSelection: Bool = false) {

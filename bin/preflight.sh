@@ -196,6 +196,14 @@ else
         "Notes fall back to the built-in editor. For the vim pane:  brew install neovim" brew:neovim
 fi
 
+PDF_BIN="$(conf_value notes pdf-engine-bin)"; PDF_BIN="${PDF_BIN:-/opt/homebrew/bin/weasyprint}"; PDF_BIN="${PDF_BIN/#\~/$HOME}"
+if [ -x "$PDF_BIN" ] || command -v "$PDF_BIN" >/dev/null 2>&1; then
+    add weasyprint features warn 1 "WeasyPrint (notes Export PDF)" "$PDF_BIN"
+else
+    add weasyprint features warn 0 "WeasyPrint (notes Export PDF)" "$PDF_BIN not found" \
+        "The reading view's Export PDF (Cmd+P) is off. To turn it on:  brew install weasyprint" brew:weasyprint
+fi
+
 # ---------------------------------------------------------------- stack
 # hotkeys + menu bar: optional for an app install, part of the repo install
 HAVE_BREW=0

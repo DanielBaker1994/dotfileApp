@@ -10,6 +10,7 @@
 #   ./bin/run-tests.sh paths     run only the /paths shelf tests (ignore rules vs git, shelf, clipboard)
 #   ./bin/run-tests.sh screenshot run only the /screenshot model tests (button ring, undo, pixelate, render)
 #   ./bin/run-tests.sh ansi      run only the /pane-shot tests (ANSI parser, Ghostty theme, render, herdr JSON)
+#   ./bin/run-tests.sh prose     run only the prose tests (highlighted fences, Export PDF via pandoc + weasyprint)
 #   ./bin/run-tests.sh compare   run only the Compare engine tests (git --histogram parity, round trips, copy + undo, timings)
 #   ./bin/run-tests.sh settings  run the ws-settings tests (python; WS_LIVE=1 adds the running-daemon check)
 #   ./bin/run-tests.sh ai-live   run the shipped rules through fm's on-device model (slow; not in "all")
@@ -66,6 +67,9 @@ case "${1:-all}" in
         ;;
     ansi)
         run_test "$TESTS/test_ansi_render.swift"
+        ;;
+    prose)
+        run_test "$TESTS/test_prose_pdf.swift"
         ;;
     compare)
         run_test "$TESTS/test_compare.swift"

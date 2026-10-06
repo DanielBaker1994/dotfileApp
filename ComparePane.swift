@@ -85,7 +85,7 @@ final class CompareSession {
         if let f = folder { return ((s == .left ? f.leftRoot : f.rightRoot) as NSString).lastPathComponent + "/" }
         if let t = title[s], !t.isEmpty { return (t as NSString).lastPathComponent }
         if let p = path[s] { return (p as NSString).lastPathComponent }
-        return model.side(s).lines.isEmpty ? "(empty)" : "(clipboard)"
+        return model.side(s).lines.isEmpty ? "(empty)" : "(pasted)"
     }
 
     // the pill: "a.txt ⇆ b.txt"

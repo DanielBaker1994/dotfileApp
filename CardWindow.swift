@@ -223,8 +223,11 @@ class CardWindowController: NSObject, NSWindowDelegate {
     // shared window's views; Cmd+W hides; then the window's own keys, then
     // the edit-key routing.
     private func installKeys() {
+        // NOT `self?.routeKey(e) ?? e`: that turned every "used" (nil)
+        // back into the event, so swallowed keys still reached the field
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            self?.routeKey(e) ?? e
+            guard let self else { return e }
+            return self.routeKey(e)
         }
     }
 
@@ -234,6 +237,8 @@ class CardWindowController: NSObject, NSWindowDelegate {
             if c.handleKey(e.keyCode, e.modifierFlags.intersection(.deviceIndependentFlagsMask)) { return nil }
             return editKey(e)                                             // its text field: typing + edit keys
         }
+        if window.isKeyWindow, window.attachedSheet == nil,                 // Ctrl+B prefix
+           let ic = PopupWindow.keyInterceptor, ic(e, window) { return nil }
         if keyBeforeSheet(e) { return nil }
         if let sheet = window.attachedSheet {
             return sheet.isKeyWindow ? editKey(e, in: sheet) : e
@@ -250,6 +255,8 @@ class CardWindowController: NSObject, NSWindowDelegate {
             return nil
         }
         if cmd && e.keyCode == 13 { closeOrHide(); return nil }          // Cmd+W
+        if cmd && !mods.contains(.shift) && e.keyCode == 42,
+           PopupTabsBar.toggleRail(in: window) { return nil }             // Cmd+\\: sidebar ⇄ icon rail
         if handleKey(e) { return nil }
         return editKey(e)
     }

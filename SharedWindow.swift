@@ -75,6 +75,10 @@ final class SharedWindow {
     private unowned let controller: SwitcherController
     private(set) var current: SlotView?     // the visible view (nil = hidden)
     private var last: SlotView = .files     // what Hyper+N re-opens
+    // the view group (nav id) shown before the current one: Ctrl+B L
+    private(set) var previousNav: Int?
+    private var prefixArmedAt: Date?
+    private var prefixHeldKey: UInt16?
     private var lastJira: SlotView = .jira  // where the jira icon comes back to
     private var stack: [SlotView] = []      // jira views under `current` (Back)
     private var returnWID: String?
@@ -319,6 +323,7 @@ final class SharedWindow {
     // make `v` (its window exists) the visible view, in the shared frame
     func present(_ v: SlotView) {
         guard let m = controller.slotMember(v) else { return }
+        if let cur = current, let a = Self.navOn(cur), let b = Self.navOn(v), a != b { previousNav = a }
         if !summoned {
             // summoned: remember where focus goes back to on hide
             summoned = true
@@ -435,6 +440,43 @@ final class SharedWindow {
         navClicked(next)
     }
 
+    // Ctrl+B, tmux-style, ONLY while one of the shared window's views has
+    // the keyboard: then L = the previous view, W = the view switcher
+    // (ViewSwitcherPanel), T = the terminal panel, B = sidebar ⇄ icon rail
+    // (Cmd+\), Esc = cancel; Ctrl+B
+    // twice = a real Ctrl+B for the pane (vim's page-up, the shell). The
+    // prefix lapses after 1.5 s. Every member's key monitor asks here first
+    // (PopupWindow.keyInterceptor). Returns true = the key was used.
+    func prefixKey(_ e: NSEvent, in w: NSWindow) -> Bool {
+        guard e.type == .keyDown else { return false }
+        // auto-repeats of the key the prefix just used: a held L switched
+        // the view, then its repeats typed "l" into the new view's field
+        if let k = prefixHeldKey {
+            if e.isARepeat && e.keyCode == k { return true }
+            prefixHeldKey = nil
+        }
+        guard let cur = current, controller.slotMember(cur)?.slotWindow === w else { return false }
+        let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
+        let armed = prefixArmedAt.map { Date().timeIntervalSince($0) < 1.5 } ?? false
+        if mods == .control && e.keyCode == 11 {                     // Ctrl+B
+            if armed { prefixArmedAt = nil; return false }            // twice: the pane gets it
+            prefixArmedAt = Date()
+            prefixHeldKey = e.keyCode
+            return true
+        }
+        guard armed else { return false }
+        prefixArmedAt = nil
+        prefixHeldKey = e.keyCode
+        switch e.charactersIgnoringModifiers?.lowercased() ?? "" {
+        case "l": navClicked(previousNav ?? (current == .files ? Self.navNotes : Self.navFiles))
+        case "w": controller.showViewSwitcher()
+        case "t": controller.toggleTerminalPanel()
+        case "b": _ = PopupTabsBar.toggleRail(in: w)
+        default: break                                               // unknown key: swallowed, like tmux
+        }
+        return true
+    }
+
     func navClicked(_ id: Int) {
         switch id {
         case Self.navNotes: current == .notes ? () : open(.notes)
@@ -497,13 +539,16 @@ final class SharedWindow {
             // the kitchen sink, whatever the view (its menu stays the view's)
             w.headerIcon = appIcon
             w.navOn = Self.navOn(v)
-            w.onCycleView = { [weak self] in self?.cycle($0) }
+            // no Ctrl+Tab view toggle (removed): Ctrl+Tab cycles the
+            // window's own tabs; views switch by header icon / palette /
+            // Ctrl+B W
+            w.onCycleView = nil
         } else if let c = m as? CardWindowController, let on = Self.navOn(v) {
             // Confluence, AI, Jira Config
             c.setSlotNav(Self.navButtons(for: v), icons: Self.navIcons, icon: appIcon, on: on) { [weak self] id in
                 self?.navClicked(id)
             }
-            c.onCycleView = { [weak self] in self?.cycle($0) }
+            c.onCycleView = nil
             c.onSlotHide = { [weak self] in self?.hide("✕ / Cmd+W (\(v.rawValue))") }
         }
     }
