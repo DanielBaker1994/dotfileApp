@@ -1515,6 +1515,9 @@ final class PopupTabsBar: NSView {
     // symbol, shown name and hover tip (nil = folder / ~-path / "Open …")
     var pinnedIcon = "folder"
     var pinnedIconFor: ((String) -> String)?     // per row (beats pinnedIcon)
+    // per row section title (jira: FAVORITE RELEASES, LABELS): a label is
+    // drawn wherever it changes; nil = one section titled pinnedTitle
+    var pinnedSection: ((String) -> String)?
     // ⌘\ / the ◧ button at the card's foot: collapse to an ICON RAIL
     // (railWidth wide: icons only, names as tooltips). Hosts lay the bar out
     // at `width(expanded:)` and re-lay out on onCollapse. Remembered per
@@ -1571,13 +1574,29 @@ final class PopupTabsBar: NSView {
         let c = vCard
         return NSRect(x: c.minX, y: c.minY + 6, width: c.width, height: 24 * zoom)
     }
-    private func vPinnedRows() -> [(rect: NSRect, path: String)] {
-        guard let h = vPinnedHeadRect else { return [] }
+    private func vPinnedLayout() -> (rows: [(rect: NSRect, path: String)], heads: [(rect: NSRect, title: String)]) {
+        guard let h = vPinnedHeadRect else { return ([], []) }
         let c = vCard
-        return pinned.prefix(maxPinnedShown).enumerated().map { i, p in
-            (NSRect(x: c.minX + 6, y: h.maxY + 2 + CGFloat(i) * (vPinRowH + 1), width: max(0, c.width - 12), height: vPinRowH), p)
+        var rows: [(rect: NSRect, path: String)] = []
+        var heads: [(rect: NSRect, title: String)] = []
+        var y = h.maxY + 2
+        var last: String?
+        for p in pinned.prefix(maxPinnedShown) {
+            let sec = pinnedSection?(p) ?? pinnedTitle
+            if last == nil {
+                heads.append((h, sec))
+            } else if sec != last {
+                y += 6
+                heads.append((NSRect(x: c.minX, y: y, width: c.width, height: h.height), sec))
+                y += h.height + 2
+            }
+            last = sec
+            rows.append((NSRect(x: c.minX + 6, y: y, width: max(0, c.width - 12), height: vPinRowH), p))
+            y += vPinRowH + 1
         }
+        return (rows, heads)
     }
+    private func vPinnedRows() -> [(rect: NSRect, path: String)] { vPinnedLayout().rows }
     private var vHeadRect: NSRect {
         let c = vCard
         let top = vPinnedRows().last.map { $0.rect.maxY + 10 } ?? c.minY + 6
@@ -1802,9 +1821,12 @@ final class PopupTabsBar: NSView {
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byTruncatingMiddle
         // PINNED folders
-        if let ph = vPinnedHeadRect {
-            if collapsed { vRailRule(in: ph) } else { vSectionLabel(pinnedTitle, in: ph) }
-            for (k, (r, path)) in vPinnedRows().enumerated() {
+        if vPinnedHeadRect != nil {
+            let layout = vPinnedLayout()
+            for (ph, title) in layout.heads {
+                if collapsed { vRailRule(in: ph) } else { vSectionLabel(title, in: ph) }
+            }
+            for (k, (r, path)) in layout.rows.enumerated() {
                 let sel = pinnedSelected == path
                 if sel || hoverIndex == -10 - k {
                     (sel ? c.surface1 : c.surface0).setFill()
@@ -8492,15 +8514,20 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                                  label: @escaping (String) -> String,
                                  tip: @escaping (String) -> String,
                                  menu: ((String) -> NSMenu?)? = nil,
+                                 section: ((String) -> String)? = nil,
+                                 iconFor: ((String) -> String)? = nil,
+                                 maxShown: Int = 8,
                                  onClick: @escaping (String) -> Void) {
         guard let bar = tabsBar, bar.vertical else { return }
         bar.pinnedTitle = title
+        bar.pinnedSection = section
+        bar.pinnedIconFor = iconFor
         bar.pinnedIcon = icon
         bar.pinnedLabel = label
         bar.pinnedTip = tip
         bar.pinnedMenu = menu
         bar.onPinned = onClick
-        bar.maxPinnedShown = 8
+        bar.maxPinnedShown = maxShown
         bar.pinned = ids
         bar.pinnedSelected = selected
     }

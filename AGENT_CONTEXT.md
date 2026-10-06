@@ -1540,9 +1540,26 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
   Jira Config text fields also got keys the view had used.
 - Jira ticket page (JiraTicket.swift): issue rows open as HTML over the
   detail window (`PopupWindow.setPageOverlay`, `showTicketPage`): header card
-  (key, Copy key / Copy link / Open ↗, summary, workflow step bar from
-  `[jira] workflow` or the directory's statuses in lifecycle order, pills),
-  tabs Details / Comments N / All fields. Release rows stay plain text.
+  (key, Copy key / Copy link / Open ↗, summary, status bar = To Do › In
+  Progress › Done with the real status in its segment — category from
+  directory.json `statusCategories`, else lifecycle words; `[jira] workflow`
+  = explicit steps instead — pills, labels capped at 6 + "+N"), tabs Details
+  / Comments N / All fields. Comments are cache-only (not in tabs):
+  `JiraTicketPage.cachedComments` indexes jiras.json per mtime off the main
+  thread, `JiraTicketView.setComments` fills the tab in place. Release rows
+  stay plain text. Roadmap: `PRD-jira-organize.md`.
+- `JiraMultiPicker` groups: `Option.group` / `.unused`, `groupOrder`,
+  `groupDetail` → header rows (`\0group:` ids; picks the whole group) +
+  "Show N unused" folds (`\0more:`); flat while searching. Status ▾ and the
+  live search's Status picker group by category; live search row "Status
+  category" → `statusCategory` in `CRITERIA_LISTS`.
+- Pinned labels: config.json `pinnedLabels` (`jira_poll.py --pin-label
+  add|remove NAME…`; table labels ▾ "Pin to Sidebar"). Jira sidebar pinned
+  list = favorite releases + `label:NAME` rows, titled per row
+  (`setSidebarPinned(section:iconFor:maxShown:)`). A label row →
+  `--label-view NAME` (cache → `jira_labels/`, stale files removed) →
+  `pinView`. Label pickers: by count, top 50 (`JiraMultiPicker.foldTail`),
+  `foldTitle` for the fold row; directory labels carry `count`.
 - Jira Cmd+K: "Open in browser" first; acts on the highlighted row + every
   ticked row (`PopupWindow.actionRows`).
 - Favorite releases: ☆ on release rows / Cmd+K "Favorite release" →

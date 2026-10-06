@@ -52,11 +52,12 @@ struct JiraDirectory {
     var projects: [(key: String, name: String)] = []
     var users: [User] = []
     var statuses: [String] = []
+    var statusCategories: [String: String] = [:]          // status -> new / indeterminate / done
     var issueTypes: [String] = []
     var priorities: [String] = []
     var fields: [Field] = []
     var versions: [Version] = []                          // unarchived releases per project
-    var labels: [(name: String, projects: [String])] = []  // labels seen per project
+    var labels: [(name: String, projects: [String], count: Int)] = []  // labels seen per project
     var fetchedAt = ""
     var isEmpty: Bool { fetchedAt.isEmpty }
 
@@ -74,6 +75,7 @@ struct JiraDirectory {
                         email: u["email"] as? String ?? "", projects: u["projects"] as? [String] ?? [])
         }
         d.statuses = o["statuses"] as? [String] ?? []
+        d.statusCategories = o["statusCategories"] as? [String: String] ?? [:]
         d.issueTypes = o["issueTypes"] as? [String] ?? []
         d.priorities = o["priorities"] as? [String] ?? []
         d.fields = (o["fields"] as? [[String: Any]] ?? []).compactMap { f in
@@ -88,7 +90,7 @@ struct JiraDirectory {
                            id: v["id"] as? String ?? "")
         }
         d.labels = (o["labels"] as? [[String: Any]] ?? []).compactMap { l in
-            (l["name"] as? String).map { ($0, l["projects"] as? [String] ?? []) }
+            (l["name"] as? String).map { ($0, l["projects"] as? [String] ?? [], l["count"] as? Int ?? 0) }
         }
         return d
     }
@@ -116,6 +118,14 @@ struct JiraDirectory {
         vals.map { .init(id: $0, title: $0, detail: "") }
     }
 
+    // statuses under their category headers (To Do / In Progress / Done)
+    func statusOptions() -> [JiraMultiPicker.Option] {
+        statuses.map { s in
+            .init(id: s, title: s, detail: "",
+                  group: JiraTicketPage.categoryNames[JiraTicketPage.category(of: s, in: statusCategories)])
+        }
+    }
+
     // `in`: the picked projects (nil = all) — only their labels / releases
     private static func matches(_ ps: [String], _ scope: [String]?) -> Bool {
         guard let scope, !scope.isEmpty else { return true }
@@ -123,8 +133,15 @@ struct JiraDirectory {
     }
 
     func labelOptions(in scope: [String]?) -> [JiraMultiPicker.Option] {
-        labels.filter { Self.matches($0.projects, scope) }
-            .map { .init(id: $0.name, title: $0.name, detail: $0.projects.joined(separator: ", ")) }
+        // most used first (directory counts over the sampled issues)
+        let opts: [JiraMultiPicker.Option] = labels.filter { Self.matches($0.projects, scope) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count
+                                           : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .map { l in
+                let n = l.count > 0 ? "\(l.count) issue\(l.count == 1 ? "" : "s") · " : ""
+                return .init(id: l.name, title: l.name, detail: n + l.projects.joined(separator: ", "))
+            }
+        return JiraMultiPicker.foldTail(opts)
     }
 
     // one option per release NAME (JQL matches fixVersion by name); the
@@ -309,8 +326,28 @@ final class JiraChoiceButton: NSView, PopupThemeable {
 
 final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
                              NSSearchFieldDelegate, NSPopoverDelegate, PopupThemeable {
-    struct Option { let id: String; let title: String; let detail: String }
+    // `group`: a section header the option sits under (statuses by
+    // category); `unused`: folded under "Show N unused" in its group
+    struct Option {
+        let id: String; let title: String; let detail: String
+        var group = ""; var unused = false
+    }
     private static let allID = "\u{0}all"
+    private static let groupPrefix = "\u{0}group:", morePrefix = "\u{0}more:"
+    // group order (headers in this order, unknown groups after)
+    var groupOrder: [String] = []
+    var groupDetail: [String: String] = [:]   // a header's right-hand text (else its value count)
+    // the fold row's text for N hidden options
+    var foldTitle: (Int) -> String = { "Show \($0) unused" }
+    // a long list (labels on a work site): the first topN shown, the rest folded
+    static let topN = 50
+    static func foldTail(_ opts: [Option]) -> [Option] {
+        guard opts.count > topN + 5 else { return opts }
+        return opts.enumerated().map { i, o in
+            Option(id: o.id, title: o.title, detail: o.detail, group: o.group, unused: i >= topN)
+        }
+    }
+    private var expanded: Set<String> = []
 
     var options: [Option] = [] { didSet { updateDisplay() } }
     private(set) var selected: [String] = []
@@ -502,8 +539,10 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
         }
         let w = max(extraButtons.isEmpty ? 340 : 440, bounds.width)
-        // list height fits the options (4 … 12 rows visible)
-        let listH = CGFloat(min(12, max(4, options.count + (allTitle == nil ? 0 : 1)))) * 24 + 4
+        expanded = []
+        refilter()
+        // list height fits the rows (4 … 14 visible)
+        let listH = CGFloat(min(14, max(4, shown.count))) * 24 + 4
         let h = listH + 80
         stack.frame = NSRect(x: 0, y: 0, width: w, height: h)
         sv.heightAnchor.constraint(equalToConstant: listH).isActive = true
@@ -573,14 +612,17 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func refilter() {
         let q = search.stringValue.lowercased().split(separator: " ").map(String.init)
         var list: [Option]
-        if q.isEmpty {
+        if q.isEmpty, options.contains(where: { !$0.group.isEmpty }) {
+            list = groupedRows()
+            if let a = allTitle { list.insert(Option(id: Self.allID, title: a, detail: ""), at: 0) }
+        } else if q.isEmpty {
             // picked first (in pick order), then the rest in list order
             let picked = selected.compactMap { id in options.first { $0.id == id } }
             list = picked + options.filter { !selected.contains($0.id) }
             if let a = allTitle { list.insert(Option(id: Self.allID, title: a, detail: ""), at: 0) }
         } else {
             list = options.filter { o in
-                let hay = "\(o.title) \(o.detail) \(o.id)".lowercased()
+                let hay = "\(o.title) \(o.detail) \(o.id) \(o.group)".lowercased()
                 return q.allSatisfy { hay.contains($0) }
             }
         }
@@ -590,16 +632,66 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         updateCount()
     }
 
-    private func updateCount() {
-        countLabel.stringValue = isAll ? (allTitle ?? "") :
-            "\(selected.count) selected · \(shown.count) shown" + (selected.count > 1 ? " (ORed)" : "")
+    // header per group (its options' ids picked as one), the used options,
+    // the picked unused ones, then "Show N unused" unless expanded
+    private func groupedRows() -> [Option] {
+        var order = groupOrder.filter { g in options.contains { $0.group == g } }
+        for o in options where !order.contains(o.group) { order.append(o.group) }
+        var out: [Option] = []
+        for g in order {
+            let mine = options.filter { $0.group == g }
+            if !g.isEmpty {
+                let used = mine.filter { !$0.unused }.count
+                out.append(Option(id: Self.groupPrefix + g, title: g, detail: groupDetail[g]
+                                  ?? (used == mine.count ? "\(mine.count)" : "\(used) of \(mine.count)")))
+            }
+            let open = expanded.contains(g)
+            out += mine.filter { open || !$0.unused || selected.contains($0.id) }
+            let hidden = mine.filter { $0.unused && !selected.contains($0.id) }
+            if !open, !hidden.isEmpty {
+                let names = hidden.prefix(3).map(\.title).joined(separator: ", ") + (hidden.count > 3 ? "…" : "")
+                out.append(Option(id: Self.morePrefix + g, title: foldTitle(hidden.count), detail: names))
+            }
+        }
+        return out
     }
 
-    private func isOn(_ o: Option) -> Bool { o.id == Self.allID ? isAll : selected.contains(o.id) }
+    private func groupIDs(_ g: String) -> [String] { options.filter { $0.group == g }.map(\.id) }
+
+    private func updateCount() {
+        countLabel.stringValue = isAll ? (allTitle ?? "") :
+            "\(selected.count) selected · \(shown.filter { !$0.id.hasPrefix("\u{0}") }.count) shown"
+                + (selected.count > 1 ? " (ORed)" : "")
+    }
+
+    private func isOn(_ o: Option) -> Bool {
+        if o.id.hasPrefix(Self.groupPrefix) {
+            let ids = groupIDs(String(o.id.dropFirst(Self.groupPrefix.count)))
+            return !ids.isEmpty && ids.allSatisfy(selected.contains)
+        }
+        return o.id == Self.allID ? isAll : selected.contains(o.id)
+    }
 
     private func toggle(_ row: Int) {
         guard shown.indices.contains(row) else { return }
         let o = shown[row]
+        if o.id.hasPrefix(Self.morePrefix) {
+            expanded.insert(String(o.id.dropFirst(Self.morePrefix.count)))
+            refilter()
+            table.selectRowIndexes(IndexSet(integer: min(row, shown.count - 1)), byExtendingSelection: false)
+            return
+        }
+        if o.id.hasPrefix(Self.groupPrefix) {
+            // the whole group: all on, or all off when it already was
+            let ids = groupIDs(String(o.id.dropFirst(Self.groupPrefix.count)))
+            if isOn(o) { selected.removeAll { ids.contains($0) } } else { selected += ids.filter { !selected.contains($0) } }
+            if !ids.isEmpty { isAll = false }
+            refilter()
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            updateDisplay()
+            onChange?()
+            return
+        }
         if o.id == Self.allID {
             isAll.toggle()
             if isAll { selected = [] }
@@ -631,6 +723,7 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard shown.indices.contains(row) else { return nil }
         let o = shown[row]
+        if o.id.hasPrefix(Self.morePrefix) || o.id.hasPrefix(Self.groupPrefix) { return sectionCell(o) }
         let img = NSImageView(image: NSImage(systemSymbolName: isOn(o) ? "checkmark.square.fill" : "square",
                                              accessibilityDescription: nil) ?? NSImage())
         img.contentTintColor = isOn(o) ? ButtonStyle.accent(colors) : colors.dim.withAlphaComponent(0.6)
@@ -652,6 +745,39 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
             s.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
             s.trailingAnchor.constraint(lessThanOrEqualTo: c.trailingAnchor, constant: -4),
             s.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+        ])
+        return c
+    }
+
+    // a group header (small caps label + count, its box picks the group) or
+    // the "Show N unused" fold (accent text)
+    private func sectionCell(_ o: Option) -> NSView {
+        let header = o.id.hasPrefix(Self.groupPrefix)
+        let t = NSTextField(labelWithString: header ? o.title.uppercased() : o.title)
+        t.font = header ? .systemFont(ofSize: 10.5, weight: .semibold) : .systemFont(ofSize: 12)
+        t.textColor = header ? colors.dim : ButtonStyle.accent(colors)
+        let d = NSTextField(labelWithString: o.detail)
+        d.textColor = colors.dim
+        d.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        d.lineBreakMode = .byTruncatingTail
+        d.setContentCompressionResistancePriority(.defaultLow - 10, for: .horizontal)
+        var views: [NSView] = [t, d]
+        if header {
+            let img = NSImageView(image: NSImage(systemSymbolName: isOn(o) ? "checkmark.square.fill" : "square",
+                                                 accessibilityDescription: nil) ?? NSImage())
+            img.contentTintColor = isOn(o) ? ButtonStyle.accent(colors) : colors.dim.withAlphaComponent(0.45)
+            img.toolTip = "Pick every \(o.title) value"
+            views.insert(img, at: 0)
+        }
+        let s = NSStackView(views: views)
+        s.spacing = 6
+        let c = NSTableCellView()
+        s.translatesAutoresizingMaskIntoConstraints = false
+        c.addSubview(s)
+        NSLayoutConstraint.activate([
+            s.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: header ? 4 : 26),
+            s.trailingAnchor.constraint(lessThanOrEqualTo: c.trailingAnchor, constant: -4),
+            s.centerYAnchor.constraint(equalTo: c.centerYAnchor, constant: header ? 2 : 0),
         ])
         return c
     }
@@ -1054,6 +1180,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
             Kind(key: "assignee", title: fieldLabel("assignee", "Assignee"), value: .users),
             Kind(key: "reporter", title: fieldLabel("reporter", "Reporter"), value: .users),
             Kind(key: "status", title: fieldLabel("status", "Status"), value: .list),
+            Kind(key: "statusCategory", title: "Status category", value: .list),
             Kind(key: "issuetype", title: "Issue type", value: .list),
             Kind(key: "priority", title: fieldLabel("priority", "Priority"), value: .list),
             Kind(key: "fixVersion", title: fieldLabel("release", "Release"), value: .list),
@@ -1165,10 +1292,13 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         let keep = p.selected
         switch r.kind.key {
         case "assignee", "reporter": p.options = dir.userOptions()
-        case "status": p.options = JiraDirectory.options(dir.statuses)
+        case "status": p.groupOrder = JiraTicketPage.categoryNames; p.options = dir.statusOptions()
+        case "statusCategory": p.options = JiraDirectory.options(JiraTicketPage.categoryNames)
         case "issuetype": p.options = JiraDirectory.options(dir.issueTypes)
         case "priority": p.options = JiraDirectory.options(dir.priorities)
-        case "labels": p.options = dir.labelOptions(in: projectScope)
+        case "labels":
+            p.foldTitle = { [weak p] n in "Show all \(p?.options.count ?? n) labels" }
+            p.options = dir.labelOptions(in: projectScope)
         case "fixVersion": p.options = dir.versionOptions(in: projectScope)
         default: break
         }

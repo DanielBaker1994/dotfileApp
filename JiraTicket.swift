@@ -3,8 +3,8 @@ import WebKit
 
 // The Jira ticket page (Return / double-click on an issue row): a header
 // card — key, Copy key / Copy link / Open in browser, the summary, the
-// workflow as a step bar (`[jira] workflow`, else a guessed order of the
-// directory's statuses), the meta pills — then tabs: Details (description
+// status as a To Do › In Progress › Done bar (`[jira] workflow` = an
+// explicit step list instead), the meta pills — then tabs: Details (description
 // + properties), Comments (N), All fields. Drawn as HTML in the window's
 // theme over the detail window's editor (PopupWindow.setPageOverlay).
 // Buttons post `ws` messages: copy-key, copy-link, open, url:<href>.
@@ -13,27 +13,75 @@ enum JiraTicketPage {
     static func esc(_ s: String) -> String { ProseRender.esc(s) }
     static func css(_ c: NSColor) -> String { ProseRender.css(c) }
 
-    // the workflow, in order: `[jira] workflow = "To Do, In Progress, …"`,
-    // else the directory's statuses sorted by the usual lifecycle words
-    static func workflow(current: String) -> [String] {
-        if let w = configSectionValue("jira", "workflow"), !w.isEmpty {
-            return w.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    // An explicit `[jira] workflow = "To Do, In Progress, …"` is drawn as
+    // given. Otherwise the bar is Jira's three status categories — To Do ›
+    // In Progress › Done — with the issue's own status named in its segment:
+    // a corporate site has dozens of statuses (Backlog, New, Open, Reopened,
+    // Re-opened, …) and listing them all reads as the whole graph.
+    static func explicitWorkflow() -> [String]? {
+        guard let w = configSectionValue("jira", "workflow"), !w.isEmpty else { return nil }
+        let steps = w.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return steps.isEmpty ? nil : steps
+    }
+
+    static let categoryNames = ["To Do", "In Progress", "Done"]
+
+    // 0 To Do / 1 In Progress / 2 Done: the directory's statusCategories
+    // (Jira's own new / indeterminate / done), else the usual lifecycle words
+    static func category(of status: String) -> Int {
+        category(of: status, in: JiraPoll.readJSON(JiraPoll.directoryPath)?["statusCategories"] as? [String: String] ?? [:])
+    }
+    static func category(of status: String, in cats: [String: String]) -> Int {
+        switch cats[status] {
+        case "new": return 0
+        case "indeterminate": return 1
+        case "done": return 2
+        default: break
         }
-        let dir = JiraPoll.readJSON(JiraPoll.directoryPath)?["statuses"] as? [String] ?? []
-        var all = dir
-        if !current.isEmpty, !all.contains(current) { all.append(current) }
-        func rank(_ s: String) -> Int {
-            let l = s.lowercased()
-            if ["backlog", "open", "to do", "todo", "new", "selected"].contains(where: l.contains) { return 0 }
-            if l.contains("progress") || l.contains("doing") || l.contains("develop") { return 1 }
-            if l.contains("review") { return 2 }
-            if l.contains("test") || l.contains("qa") || l.contains("verif") { return 3 }
-            if l.contains("block") || l.contains("hold") { return 4 }
-            if ["done", "closed", "resolved", "released", "complete"].contains(where: l.contains) { return 6 }
-            return 5
+        let l = status.lowercased()
+        if ["done", "closed", "resolved", "released", "complete", "cancel", "won't", "rejected"].contains(where: l.contains) { return 2 }
+        if ["backlog", "open", "to do", "todo", "new", "selected", "triage", "funnel"].contains(where: l.contains) { return 0 }
+        return 1
+    }
+
+    // comments are cache-only (jira_config.publish_keys keeps them out of the
+    // tabs): ~/.cache/jira/jiras.json, keyed by issue key. Work caches run to
+    // tens of MB, so it is parsed once per mtime, off the main thread.
+    typealias Comment = (author: String, body: String, created: String)
+    private static var commentIndex: [String: [Comment]] = [:]
+    private static var commentStamp: Date?
+    private static var commentLoading = false
+
+    private static func cacheStamp() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: JiraPoll.issueCachePath))?[.modificationDate] as? Date
+    }
+
+    // the key's comments when the index is current, else nil + a background
+    // (re)load that calls `ready` on the main thread when done
+    static func cachedComments(_ key: String, ready: @escaping () -> Void) -> [Comment]? {
+        let stamp = cacheStamp()
+        if stamp != nil, stamp == commentStamp { return commentIndex[key] ?? [] }
+        if stamp == nil { return [] }
+        if !commentLoading {
+            commentLoading = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                var idx: [String: [Comment]] = [:]
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: JiraPoll.issueCachePath)),
+                   let all = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    for (k, v) in all {
+                        guard let arr = (v as? [String: Any])?["comments"] as? [[String: Any]], !arr.isEmpty else { continue }
+                        idx[k] = arr.map { ($0["author"] as? String ?? "", $0["body"] as? String ?? "", $0["created"] as? String ?? "") }
+                    }
+                }
+                DispatchQueue.main.async {
+                    commentIndex = idx
+                    commentStamp = stamp
+                    commentLoading = false
+                    ready()
+                }
+            }
         }
-        // blocked / on hold are side states, not steps
-        return all.filter { rank($0) != 4 }.sorted { (rank($0), $0) < (rank($1), $1) }
+        return nil
     }
 
     static func date(_ s: String) -> String {
@@ -50,34 +98,55 @@ enum JiraTicketPage {
         return s
     }
 
-    static func comments(_ raw: String?) -> [(author: String, body: String, created: String)] {
-        guard let raw, let data = raw.data(using: .utf8),
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
-        return arr.map { ($0["author"] as? String ?? "", $0["body"] as? String ?? "", $0["created"] as? String ?? "") }
+    static func commentsHTML(_ cms: [Comment]?) -> String {
+        guard let cms else { return "<p class=\"empty\">Loading comments…</p>" }
+        if cms.isEmpty { return "<p class=\"empty\">No comments.</p>" }
+        return cms.reversed().map { cm in
+            let initials = cm.author.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
+            return """
+            <div class="cmt"><span class="av">\(esc(initials))</span><div class="cb">
+            <div class="ch"><b>\(esc(cm.author))</b> <span class="dim">· \(esc(date(cm.created)))</span></div>
+            <div class="ct">\(esc(cm.body).replacingOccurrences(of: "\n", with: "<br>"))</div></div></div>
+            """
+        }.joined()
     }
 
-    static func html(_ row: FieldRow, colors c: PopupColors, url: String?, labels: [String: String]) -> String {
+    // `comments`: nil = still loading (the page says so; rendered again when ready)
+    static func html(_ row: FieldRow, colors c: PopupColors, url: String?, labels: [String: String],
+                     comments cms: [Comment]?) -> String {
         let f = row.fields
         func v(_ k: String) -> String { (f[k] ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
         let key = v("key"), title = v("title").isEmpty ? (v("summary").isEmpty ? row.title : v("summary")) : v("title")
         let status = v("status")
-        let steps = workflow(current: status)
-        let cur = steps.firstIndex(of: status)
         var stepper = ""
-        if let cur {
+        if let steps = explicitWorkflow(), let cur = steps.firstIndex(of: status) {
             stepper = steps.enumerated().map { i, s in
                 let cls = i < cur ? "done" : i == cur ? "now" : ""
                 return "<span class=\"step \(cls)\">\(i < cur ? "✓ " : "")\(esc(s))</span>"
             }.joined(separator: "<span class=\"sep\">›</span>")
         } else if !status.isEmpty {
-            stepper = "<span class=\"step now\">\(esc(status))</span>"
+            // the current segment carries the real status when it differs
+            // from the category's own name ("In Progress · Code Review")
+            let cur = category(of: status)
+            stepper = categoryNames.enumerated().map { i, s in
+                let cls = i < cur ? "done" : i == cur ? "now" : ""
+                let name = i == cur && status.caseInsensitiveCompare(s) != .orderedSame
+                    ? "\(esc(s)) <span class=\"sub\">· \(esc(status))</span>" : esc(s)
+                return "<span class=\"step \(cls)\">\(i < cur ? "✓ " : "")\(name)</span>"
+            }.joined(separator: "<span class=\"sep\">›</span>")
         }
         var pills: [String] = []
         if !v("priority").isEmpty { pills.append("<span class=\"pill warn\">\(esc(v("priority")))</span>") }
         let rel = v("releaseLabel").isEmpty ? v("release") : v("releaseLabel")
         if !rel.isEmpty { pills.append("<span class=\"pill\">\(esc(rel))</span>") }
-        for l in v("labels").split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !l.isEmpty {
-            pills.append("<span class=\"pill dim\">\(esc(l))</span>")
+        // a corporate issue can carry dozens of labels: the first few, then +N
+        // (the rest in its tooltip; All fields has every one)
+        let labs = v("labels").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let maxLabels = 6
+        for l in labs.prefix(maxLabels) { pills.append("<span class=\"pill dim\">\(esc(l))</span>") }
+        if labs.count > maxLabels {
+            let rest = labs.dropFirst(maxLabels)
+            pills.append("<span class=\"pill dim\" title=\"\(esc(rest.joined(separator: ", ")))\">+\(rest.count)</span>")
         }
         let props: [(String, String)] = [
             ("Assignee", v("assignee").isEmpty ? "Unassigned" : v("assignee")), ("Reporter", v("reporter")),
@@ -88,15 +157,7 @@ enum JiraTicketPage {
         let desc = v("description")
         let descHTML = desc.isEmpty ? "<p class=\"empty\">No description.</p>"
             : desc.components(separatedBy: "\n\n").map { "<p>\(esc($0).replacingOccurrences(of: "\n", with: "<br>"))</p>" }.joined()
-        let cms = comments(f["comments"])
-        let cmHTML = cms.isEmpty ? "<p class=\"empty\">No comments.</p>" : cms.reversed().map { cm in
-            let initials = cm.author.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
-            return """
-            <div class="cmt"><span class="av">\(esc(initials))</span><div class="cb">
-            <div class="ch"><b>\(esc(cm.author))</b> <span class="dim">· \(esc(date(cm.created)))</span></div>
-            <div class="ct">\(esc(cm.body).replacingOccurrences(of: "\n", with: "<br>"))</div></div></div>
-            """
-        }.joined()
+        let cmHTML = commentsHTML(cms)
         let skip: Set<String> = ["comments", "description"]
         let all = f.sorted { $0.key < $1.key }.filter { !$0.key.hasPrefix("__") && !skip.contains($0.key) && !$0.value.isEmpty }
             .map { "<dt>\(esc(labels[$0.key] ?? $0.key))</dt><dd>\(esc($0.value))</dd>" }.joined()
@@ -122,6 +183,7 @@ enum JiraTicketPage {
         .step.done{color:var(--ok)}
         .step.now{background:var(--acc);color:var(--on);font-weight:600}
         .sep{color:var(--dim);opacity:.6}
+        .step .sub{font-weight:400;opacity:.85}
         .pills{display:flex;flex-wrap:wrap;gap:6px}
         .pill{font-size:11px;padding:2px 9px;border-radius:999px;background:var(--s0);color:var(--tx)}
         .pill.warn{color:var(--warn)} .pill.dim{color:var(--dim)}
@@ -149,7 +211,7 @@ enum JiraTicketPage {
           \(stepper.isEmpty ? "" : "<div class=\"steps\">\(stepper)</div>")
           \(pills.isEmpty ? "" : "<div class=\"pills\">\(pills.joined())</div>")
         </div>
-        <div class="tabs"><span class="tab on" data-t="d">Details</span><span class="tab" data-t="c">Comments \(cms.count)</span><span class="tab" data-t="f">All fields</span></div>
+        <div class="tabs"><span class="tab on" data-t="d">Details</span><span class="tab" data-t="c" id="ctab">Comments\(cms.map { " \($0.count)" } ?? "")</span><span class="tab" data-t="f">All fields</span></div>
         <div class="pane on" id="d"><div class="split"><div><p class="h">Description</p><div class="desc">\(descHTML)</div></div><dl>\(propsHTML)</dl></div></div>
         <div class="pane" id="c">\(cmHTML)</div>
         <div class="pane" id="f"><dl>\(all)</dl></div>
@@ -185,6 +247,22 @@ final class JiraTicketView: NSView, WKScriptMessageHandler {
     func show(_ html: String, background: NSColor) {
         layer?.backgroundColor = background.cgColor
         web.loadHTMLString(html, baseURL: nil)
+    }
+
+    // fills the Comments tab in place (the user may already be on it)
+    func setComments(_ cms: [JiraTicketPage.Comment]) {
+        if web.isLoading {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.setComments(cms) }
+            return
+        }
+        func js(_ s: String) -> String {
+            let d = (try? JSONSerialization.data(withJSONObject: [s])) ?? Data("[\"\"]".utf8)
+            return String(decoding: d, as: UTF8.self) + "[0]"
+        }
+        web.evaluateJavaScript("""
+            document.getElementById('c').innerHTML=\(js(JiraTicketPage.commentsHTML(cms)));
+            document.getElementById('ctab').textContent=\(js("Comments \(cms.count)"));
+            """)
     }
 
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {

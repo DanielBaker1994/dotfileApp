@@ -206,7 +206,10 @@ elif path.endswith("/user/assignable/search"):
     us = [{"name": f"{proj.lower()}u{i}", "displayName": f"{proj} User {i}"} for i in range(2)]
     us.append({"name": "bob", "displayName": "Bob", "emailAddress": "bob@x"})
     body = us[start:start + n]
-elif path.endswith("/status") or path.endswith("/priority") or path.endswith("/issuetype"):
+elif path.endswith("/status"):
+    body = [{"name": "B", "statusCategory": {"key": "done"}}, {"name": "a", "statusCategory": {"key": "new"}},
+            {"name": "B", "statusCategory": {"key": "done"}}]
+elif path.endswith("/priority") or path.endswith("/issuetype"):
     body = [{"name": "B"}, {"name": "a"}, {"name": "B"}]
 elif path.endswith("/versions"):
     body = [{"name": "1.0", "released": True, "releaseDate": "2026-01-01"},
@@ -471,6 +474,9 @@ class JobsAndLiveSearchTests(unittest.TestCase):
         # labels / releases come from the pickers as lists
         self.assertEqual(cj({"labels": ["a b", "c"], "fixVersion": ["1.0"]}, t),
                          S + 'labels in ("a b", "c") AND fixVersion = "1.0" ORDER BY updated DESC')
+        # the "Status category" row: To Do / In Progress / Done by name
+        self.assertEqual(cj({"statusCategory": ["To Do", "In Progress"]}, t),
+                         S + 'statusCategory in ("To Do", "In Progress") ORDER BY updated DESC')
         for bad in ({}, {"projects": []}, {"updated": "soon"}):
             with self.assertRaises(jira_config.ConfigError):
                 cj(bad, t)
@@ -572,6 +578,7 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             bob = [u for u in d["users"] if u["id"] == "bob"][0]
             self.assertEqual((bob["projects"], bob["email"]), (["P1", "P2"], "bob@x"))
             self.assertEqual(d["statuses"], ["a", "B"])    # de-duplicated, sorted
+            self.assertEqual(d["statusCategories"], {"a": "new", "B": "done"})   # the ticket page's bar
             self.assertEqual(d["fields"][0]["id"], "customfield_20214")   # custom first
             pages = [u for u in self.urls(env) if "assignable" in u]
             self.assertEqual(len(pages), 4)               # page size 2: 2 + 1, per project
@@ -586,9 +593,9 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             # releases: archived dropped, unreleased first; per project
             self.assertEqual([(v["name"], v["project"]) for v in d["versions"]],
                              [("2.0", "P1"), ("2.0", "P2"), ("1.0", "P1"), ("1.0", "P2")])
-            self.assertEqual(d["labels"], [{"name": "p1", "projects": ["P1"]},
-                                           {"name": "p2", "projects": ["P2"]},
-                                           {"name": "shared", "projects": ["P1", "P2"]}])
+            self.assertEqual(d["labels"], [{"name": "p1", "projects": ["P1"], "count": 1},
+                                           {"name": "p2", "projects": ["P2"], "count": 1},
+                                           {"name": "shared", "projects": ["P1", "P2"], "count": 2}])
 
     def test_upgrade_drops_searches_adds_directory_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1105,6 +1112,31 @@ class ResilientSyncTests(unittest.TestCase):
             run()                 # stale tab files go
             self.assertEqual(os.listdir(r["dir"]), ["P-1.0.json"])
 
+    def test_pinned_labels_and_label_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.assertEqual(self.poll(env, "--force", "--projects", "*").returncode, 0)
+            cache_p = os.path.join(tmp, "cache", "jiras.json")
+            with open(cache_p) as fh:
+                cache = json.load(fh)
+            keys = sorted(cache)
+            cache[keys[0]]["labels"] = "tech-debt, pci"
+            cache[keys[1]]["labels"] = "pci"
+            with open(cache_p, "w") as fh:
+                json.dump(cache, fh)
+            run = lambda *a: json.loads(subprocess.run(  # noqa: E731
+                [sys.executable, os.path.join(JIRA, "jira_poll.py"), *a],
+                env=env, capture_output=True, text=True, timeout=60).stdout)
+            self.assertEqual(run("--pin-label", "add", "pci", "tech-debt")["labels"], ["pci", "tech-debt"])
+            self.assertEqual(run("--pin-label", "add", "pci")["labels"], ["pci", "tech-debt"])   # no dupes
+            r = run("--label-view", "pci")
+            self.assertEqual(r["count"], 2)
+            with open(os.path.join(r["dir"], r["file"])) as fh:
+                self.assertEqual(sorted(x["key"] for x in json.load(fh)), keys[:2])
+            self.assertEqual(run("--pin-label", "remove", "pci")["labels"], ["tech-debt"])
+            r = run("--label-view", "tech-debt")       # the unpinned label's file goes
+            self.assertEqual((r["count"], os.listdir(r["dir"])), (1, [r["file"]]))
+
     def test_overlapping_jobs_share_one_sync(self):
         eps = [{"name": n, "window": "10m", "projects": pr, "type": "issues", "file": f"{n}.json"}
                for n, pr in (("all", "*"), ("KAN", ["KAN"]), ("SAM1", ["SAM1"]))]
@@ -1266,7 +1298,7 @@ class ResilientSyncTests(unittest.TestCase):
             with open(os.path.join(tmp, "cache", "directory.json")) as fh:
                 d = json.load(fh)
             self.assertEqual(len(d["users"]), 6)
-            self.assertEqual(d["labels"], [{"name": "lP1", "projects": ["P1"]}])
+            self.assertEqual([(x["name"], x["projects"]) for x in d["labels"]], [("lP1", ["P1"])])
             self.assertEqual(len(d["warnings"]), 1)
             self.assertIn("labels of P2", d["warnings"][0])
             self.assertIn("token worked earlier", d["warnings"][0])

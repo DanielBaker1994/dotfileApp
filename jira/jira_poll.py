@@ -81,6 +81,9 @@ Usage:
                                   from the cache) for the release view window
   jira_poll.py --blacklist-release add|remove KEY... hide / restore releases
   jira_poll.py --favorite-release add|remove KEY... star releases (Jira sidebar)
+  jira_poll.py --pin-label add|remove NAME...       pin labels (Jira sidebar LABELS)
+  jira_poll.py --label-view NAME  the label's issues (from the cache) as a tab
+                                  file for the sidebar's LABELS pin
                                   (both: config.json + the tabs rewritten
                                   from local data at once; no request, no lock)
   jira_poll.py --window 2h        explicit window override (implies now)
@@ -217,7 +220,7 @@ def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
          "force": False, "describe": False, "cancel": False, "live": False, "directory": False,
          "rebuild": False, "setup": False, "step": "", "favorite": None, "blacklist": None,
-         "release_view": None}
+         "release_view": None, "label_view": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -264,11 +267,13 @@ def parse_args(argv: list) -> dict:
             # blacklisted (the one double-clicked in blacklist_release.json)
             o["release_view"] = argv[i + 1:]
             return o
-        elif name in ("--favorite", "--blacklist-release", "--favorite-release"):
+        elif name == "--label-view":
+            o["label_view"] = val()
+        elif name in ("--favorite", "--blacklist-release", "--favorite-release", "--pin-label"):
             # --favorite add|remove KEY...  (the rest of argv = the keys)
             op = val()
             o[{"--favorite": "favorite", "--blacklist-release": "blacklist",
-               "--favorite-release": "favorite_release"}[name]] = (op, argv[i + 1:])
+               "--favorite-release": "favorite_release", "--pin-label": "pin_label"}[name]] = (op, argv[i + 1:])
             return o
         elif name in ("-h", "--help"):
             print(__doc__.strip())
@@ -1338,6 +1343,61 @@ def edit_favorite_releases(op: str, keys: list) -> int:
     return 0
 
 
+def edit_pinned_labels(op: str, names: list) -> int:
+    """--pin-label add|remove NAME...: the labels the Jira window pins in its
+    sidebar (config.json pinnedLabels, pin order); a click shows the label's
+    issues (--label-view). Prints {ok, labels}."""
+    names = [n.strip() for n in names if n.strip()]
+    if op not in ("add", "remove") or not names:
+        print(json.dumps({"ok": False, "problems": ["--pin-label add|remove NAME..."]}))
+        return 1
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    cur = config_list(cfg, "pinnedLabels")
+    new = (cur + [n for n in names if n not in cur]) if op == "add" else [n for n in cur if n not in names]
+    jira_config.save({"pinnedLabels": new})
+    print(json.dumps({"ok": True, "labels": new}))
+    return 0
+
+
+def label_view(name: str) -> int:
+    """--label-view NAME: the issues carrying the label, from the issue cache
+    (newest first, the main issue job's columns) -> LABEL_VIEW_DIR/<NAME>.json.
+    Local only (no request, no lock). Files of labels no longer pinned (and
+    not this one) are removed. Prints {ok, dir, file, count}."""
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
+    view_dir = os.path.join(os.path.dirname(out_dir.rstrip("/")), jira_config.LABEL_VIEW_DIR)
+    os.makedirs(view_dir, exist_ok=True)
+    main_ep = next((e for e in cfg.endpoints if plain_issue_job(e) and e.get("name") == "all"),
+                   next((e for e in cfg.endpoints if plain_issue_job(e)), {}))
+    _, pkeys = job_fields(main_ep, team)
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    cache = cache if isinstance(cache, dict) else {}
+    hits = [e for e in cache.values() if isinstance(e, dict)
+            and name in (x.strip() for x in str(e.get("labels") or "").split(","))]
+    items = shape(sort_updated_desc(hits), pkeys)
+    f = release_view_file("label", name)
+    jira_api.write_json(os.path.join(view_dir, f), items, mode=0o644)
+    keep = {release_view_file("label", n) for n in config_list(cfg, "pinnedLabels")} | {f}
+    for old in os.listdir(view_dir):
+        if old.endswith(".json") and old not in keep:
+            try:
+                os.unlink(os.path.join(view_dir, old))
+            except OSError:
+                pass
+    print(json.dumps({"ok": True, "dir": view_dir, "file": f, "count": len(items)}))
+    return 0
+
+
 def release_view_file(project: str, name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in f"{project}-{name}")
     return safe.strip() + ".json"
@@ -1405,6 +1465,10 @@ def main(argv: list) -> int:
     QUIET = o["quiet"]
     if o["release_view"] is not None:
         return release_view(o["release_view"])
+    if o["label_view"] is not None:
+        return label_view(o["label_view"])
+    if o.get("pin_label"):
+        return edit_pinned_labels(*o["pin_label"])
     if o["favorite"]:
         return edit_pins("favorites", *o["favorite"])
     if o["blacklist"]:

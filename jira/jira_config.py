@@ -104,6 +104,7 @@ DEFAULTS = {
     "favorites": [],                 # pinned issue keys, newest first (the favorites job re-queries them)
     "releaseBlacklist": [],          # release row keys (PROJECT-NAME) hidden from the releases tab
     "favoriteReleases": [],          # starred release row keys, newest first (Jira sidebar)
+    "pinnedLabels": [],              # labels pinned to the Jira sidebar (LABELS), in pin order
 }
 
 LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
@@ -111,6 +112,7 @@ LIVE_SEARCH_MAX = 100                # default max results of one live search
 FAVORITES_FILE = "favorites.json"    # the pinned issues' tab (the favorites job)
 BLACKLIST_RELEASE_FILE = "blacklist_release.json"   # releases hidden from the releases tab
 RELEASE_VIEW_DIR = "jira_releases"  # next to outDir: one <PROJECT>-<release>.json per release
+LABEL_VIEW_DIR = "jira_labels"      # next to outDir: one <label>.json per pinned label
 
 # the directory job: projects + assignable users + statuses / types /
 # priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).
@@ -624,7 +626,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 # criteria are ORed (`x in (...)`); criteria are ANDed together.
 CRITERIA_LISTS = {          # criteria key -> JQL field (values picked from lists)
     "projects": "project", "assignee": "assignee", "reporter": "reporter",
-    "status": "status", "issuetype": "issuetype", "priority": "priority",
+    "status": "status", "statusCategory": "statusCategory",   # To Do / In Progress / Done
+    "issuetype": "issuetype", "priority": "priority",
     "labels": "labels", "fixVersion": "fixVersion",
 }
 CRITERIA_DATES = ("updated", "created", "resolved", "duedate")
@@ -643,7 +646,7 @@ def _jql_value(v) -> str:
 
 def criteria_jql(crit: dict, team: dict, field_types: dict | None = None) -> str:
     """The live search's JQL. crit = {text, projects[], assignee[], reporter[],
-    status[], issuetype[], priority[], labels[], fixVersion[], updated|created|
+    status[], statusCategory[], issuetype[], priority[], labels[], fixVersion[], updated|created|
     resolved|duedate: "today"|"7d"|"2w"|"-30d", fields: {column: value}, jql}.
     `fields` keys are window columns / team custom_fields aliases / raw ids;
     custom fields use `~` when field_types says string (or unknown), else `=`.

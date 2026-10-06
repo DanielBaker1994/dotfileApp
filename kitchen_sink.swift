@@ -4748,8 +4748,13 @@ final class SwitcherController: NSObject {
         // only the view's own button goes: the shared window's back / home stay
         w.headerButtons = w.headerButtons.filter { $0.1 != 10 }
         w.setPageOverlay(v)
+        let key = row.fields["key"] ?? ""
+        let cms = JiraTicketPage.cachedComments(key) { [weak self, weak v] in
+            guard let self, let v, self.ticketView === v, self.detailRow?.fields["key"] == key else { return }
+            v.setComments(JiraTicketPage.cachedComments(key) {} ?? [])
+        }
         v.show(JiraTicketPage.html(row, colors: w.config.colors, url: jiraBrowseURL(row)?.absoluteString,
-                                   labels: JiraPoll.fieldLabels()),
+                                   labels: JiraPoll.fieldLabels(), comments: cms),
                background: w.config.colors.base)
     }
 
@@ -8704,6 +8709,10 @@ extension SwitcherController {
         // starred releases (config.json `favoriteReleases`, newest first):
         // the ☆ of release rows + the sidebar's FAVORITE RELEASES section
         var favReleases: [String] = []
+        // labels pinned to the sidebar (config.json `pinnedLabels`): a click
+        // shows the cache's issues with that label in place (like a release)
+        var pinnedLabels: [String] = []
+        static let labelPinPrefix = "label:"
         // a favorite release clicked in the sidebar: its issues fill the
         // table IN PLACE of the current tab (no tab highlighted; any tab
         // click or Esc returns). `path` = its release-view tab file.
@@ -8749,6 +8758,7 @@ extension SwitcherController {
             fieldLabels = isJira ? JiraPoll.fieldLabels() : [:]
             favKeys = isJira ? JiraPoll.favorites() : []
             favReleases = isJira ? JiraPoll.favoriteReleases() : []
+            pinnedLabels = isJira ? JiraPoll.pinnedLabels() : []
             tabMtimes = tabs.map { mtime(of: $0.path) }
             cacheStamp = mtime(of: JiraPoll.issueCachePath)
         }
@@ -8899,23 +8909,80 @@ extension SwitcherController {
 
         // the jira window's sidebar: starred releases on top; a click lists
         // every issue in that release (the release view)
+        // and pinned labels under LABELS (ids `label:NAME`)
         func syncReleasePins() {
             guard cmd.name == "jira" else { return }
-            if let k = pinView?.key, !favReleases.contains(k) { leavePinView() }
-            w.setSidebarPinned(favReleases, title: "Favorite releases", icon: "star.fill",
+            let pre = ListSession.labelPinPrefix
+            let ids = favReleases + pinnedLabels.map { pre + $0 }
+            if let k = pinView?.key, !ids.contains(k) { leavePinView() }
+            func labelName(_ k: String) -> String? { k.hasPrefix(pre) ? String(k.dropFirst(pre.count)) : nil }
+            w.setSidebarPinned(ids, title: "Favorite releases", icon: "star.fill",
                                selected: pinView?.key,
                                label: { k in
+                                   if let l = labelName(k) { return l }
                                    guard let d = k.firstIndex(of: "-") else { return k }
                                    return k[..<d] + " " + k[k.index(after: d)...]
                                },
-                               tip: { "Show every issue in \($0) here" },
+                               tip: { k in labelName(k).map { "Show every issue labelled \($0) here" }
+                                          ?? "Show every issue in \(k) here" },
                                menu: { [self] k in
                                    let m = NSMenu()
-                                   m.addItem(menuItem("Show Issues") { [self] in showReleasePin(k) })
-                                   m.addItem(menuItem("Unfavorite Release") { [self] in setReleaseFavoriteKeys([k], on: false) })
+                                   if let l = labelName(k) {
+                                       m.addItem(menuItem("Show Issues") { [self] in showLabelPin(l) })
+                                       m.addItem(menuItem("Unpin Label") { [self] in setPinnedLabels([l], on: false) })
+                                   } else {
+                                       m.addItem(menuItem("Show Issues") { [self] in showReleasePin(k) })
+                                       m.addItem(menuItem("Unfavorite Release") { [self] in setReleaseFavoriteKeys([k], on: false) })
+                                   }
                                    return m
                                },
-                               onClick: { [self] k in showReleasePin(k) })
+                               section: { labelName($0) == nil ? "Favorite releases" : "Labels" },
+                               iconFor: { labelName($0) == nil ? "star.fill" : "tag" },
+                               maxShown: 16,
+                               onClick: { [self] k in
+                                   if let l = labelName(k) { showLabelPin(l) } else { showReleasePin(k) }
+                               })
+        }
+
+        // a pinned label: its issues (from the issue cache, via --label-view)
+        // in the main table, the pin highlighted
+        func showLabelPin(_ name: String) {
+            let key = ListSession.labelPinPrefix + name
+            JiraPoll.run("jira_poll.py", ["--label-view", name]) { [weak self] code, out, err in
+                guard let self else { return }
+                guard code == 0, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any],
+                      let dir = d["dir"] as? String, let file = d["file"] as? String else {
+                    self.host.log("jira: label pin \(name) failed (exit \(code)) \(err)")
+                    self.w.showToast("No issues found for \(name)", symbol: "exclamationmark.triangle")
+                    return
+                }
+                let path = (dir as NSString).appendingPathComponent(file)
+                let cols = ListSession.tabColumns(self.cmd, path)
+                self.pinView = (key, path, self.host.loadListItems(path, cmd: self.cmd, columns: cols))
+                self.cacheStamp = mtime(of: JiraPoll.issueCachePath)
+                self.w.selectSidebarPin(key)
+                self.showRows(columns: cols)
+                self.host.log("list '\(self.cmd.name)': label pin -> \(name) (\(self.pinView?.items.count ?? 0) issues)")
+            }
+        }
+
+        func setPinnedLabels(_ names: [String], on: Bool) {
+            guard !names.isEmpty else { return }
+            let before = pinnedLabels
+            pinnedLabels = on ? pinnedLabels + names.filter { !pinnedLabels.contains($0) }
+                              : pinnedLabels.filter { !names.contains($0) }
+            syncReleasePins()
+            let s = names.count == 1 ? names[0] : "\(names.count) labels"
+            w.showToast(on ? "Pinned \(s) to the sidebar" : "Unpinned \(s)", symbol: on ? "tag.fill" : "tag")
+            JiraPoll.run("jira_poll.py", ["--pin-label", on ? "add" : "remove"] + names) { [self] code, _, err in
+                host.log("jira: pin label \(on ? "add" : "remove") \(names.joined(separator: ",")) (exit \(code))"
+                         + (code == 0 ? "" : " " + err))
+                guard code != 0 else { return }
+                pinnedLabels = before
+                syncReleasePins()
+                w.showToast("Label pin not saved: \(JiraPoll.errorLine(err, fallback: "error"))",
+                            symbol: "exclamationmark.triangle")
+            }
         }
 
         // a favorite release: its issues (from the issue cache, via
@@ -9131,9 +9198,39 @@ extension SwitcherController {
         // header ▾ or a filter-bar pill
         func showFilterPicker(_ field: String, anchor: NSView, rect: NSRect) {
             openPicker?.closePopover()
-            let opts = filterOptions(field)
+            var opts = filterOptions(field)
             let p = JiraMultiPicker(noun: label(field).lowercased())
             p.applyColors(w.config.colors)
+            if field == "status" {
+                // under To Do / In Progress / Done, each with its row count
+                let cats = JiraDirectory.load().statusCategories, names = JiraTicketPage.categoryNames
+                var rows: [String: Int] = [:]
+                opts = opts.map { o in
+                    let g = o.id == ListSession.emptyValue ? "" : names[JiraTicketPage.category(of: o.id, in: cats)]
+                    rows[g, default: 0] += Int(o.detail.split(separator: " ").first ?? "") ?? 0
+                    return .init(id: o.id, title: o.title, detail: o.detail, group: g)
+                }
+                p.groupOrder = names
+                p.groupDetail = rows.mapValues { "\($0) row\($0 == 1 ? "" : "s")" }
+            }
+            if field == "labels" {
+                // most used first (filterOptions' order): the top ones, the
+                // long tail of a work site behind "Show all N"; search covers all
+                opts = JiraMultiPicker.foldTail(opts)
+                p.foldTitle = { [weak p] n in "Show all \(p?.options.count ?? n) labels" }
+                if cmd.name == "jira" {
+                    p.extraButtons.append(("Pin to Sidebar", { [self, weak p] in
+                        guard let p else { return }
+                        let picked = p.selected.filter { $0 != ListSession.emptyValue }
+                        guard !picked.isEmpty else {
+                            w.showToast("Tick the labels to pin first", symbol: "tag")
+                            return
+                        }
+                        setPinnedLabels(picked, on: true)
+                        p.closePopover()
+                    }))
+                }
+            }
             p.options = opts
             p.set((colFilters[field] ?? []).filter { v in opts.contains { $0.id == v } }.sorted())
             p.anchor = (anchor, rect)
@@ -9569,7 +9666,10 @@ extension SwitcherController {
             }
             if let p = pinView, mtime(of: JiraPoll.issueCachePath) != cacheStamp {
                 cacheStamp = mtime(of: JiraPoll.issueCachePath)
-                JiraPoll.run("jira_poll.py", ["--release-view", p.key]) { [weak self] code, _, _ in
+                let pre = ListSession.labelPinPrefix
+                let args = p.key.hasPrefix(pre) ? ["--label-view", String(p.key.dropFirst(pre.count))]
+                                                : ["--release-view", p.key]
+                JiraPoll.run("jira_poll.py", args) { [weak self] code, _, _ in
                     guard let self, code == 0, self.pinView?.key == p.key else { return }
                     self.pinView?.items = self.host.loadListItems(p.path, cmd: self.cmd,
                                                                   columns: ListSession.tabColumns(self.cmd, p.path))
@@ -9594,6 +9694,7 @@ extension SwitcherController {
             if isJira {
                 favKeys = JiraPoll.favorites()
                 favReleases = JiraPoll.favoriteReleases()
+                pinnedLabels = JiraPoll.pinnedLabels()
                 syncReleasePins()
             }
             refreshBadges(force: true)
@@ -9658,6 +9759,10 @@ enum JiraPoll {
     // config.json favoriteReleases: starred release row keys, newest first
     static func favoriteReleases() -> [String] {
         readJSON(configPath)?["favoriteReleases"] as? [String] ?? []
+    }
+    // config.json pinnedLabels: the sidebar's LABELS, in pin order
+    static func pinnedLabels() -> [String] {
+        readJSON(configPath)?["pinnedLabels"] as? [String] ?? []
     }
 
     // "10m" / "1h" / "1w" -> seconds (jira_config.parse_window)

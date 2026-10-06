@@ -920,7 +920,7 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
                           None if quiet else print(f"jira-api: directory: {msg}", file=sys.stderr))
     ck_name = f"directory-{name}" if name and not c.dry else ""
     ck = load_checkpoint(ck_name)
-    fresh = {"projects": {}, "users": {}, "statuses": [], "issueTypes": [], "priorities": [],
+    fresh = {"projects": {}, "users": {}, "statuses": [], "statusCategories": {}, "issueTypes": [], "priorities": [],
              "fields": [], "versions": {}, "labels": {}, "warnings": {}, "done": {}}
     if ck and ck.get("forProjects") == keys and time.time() - float(ck.get("at") or 0) < resume_hours * 3600 \
             and isinstance(ck.get("state"), dict):
@@ -1057,6 +1057,15 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
             return len(st[key])
         return fetch
 
+    def statuses():
+        # names + each one's statusCategory key (new / indeterminate / done):
+        # the ticket page's To Do › In Progress › Done bar
+        vals = [v for v in (c.get(c.path("statuses")) or []) if isinstance(v, dict) and v.get("name")]
+        st["statuses"] = sorted({v["name"] for v in vals}, key=str.lower)
+        st["statusCategories"] = {v["name"]: (v.get("statusCategory") or {}).get("key") or ""
+                                  for v in vals}
+        return len(st["statuses"])
+
     def fields():
         flds = c.get(c.path("fields")) or []
         st["fields"] = sorted(({"id": f.get("id"), "name": f.get("name") or f.get("id"),
@@ -1079,23 +1088,24 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
 
     def labels(proj, i):
         jql = f"project = \"{jira_config.jql_quote(proj)}\" AND labels is not EMPTY ORDER BY updated DESC"
-        seen, n = set(), 0
+        seen: dict = {}      # label -> issues carrying it (among the sampled ones)
+        n = 0
         for got, total, _ in c.search_pages(jql, "labels", max_total=cap,
                                                page_size=min(cap, c.sd("max_results_search"))):
             n += len(got)
             for iss in got:
                 for lab in (iss.get("fields") or {}).get("labels") or []:
                     if isinstance(lab, str) and lab:
-                        seen.add(lab)
+                        seen[lab] = seen.get(lab, 0) + 1
             of = min(cap, total) if total else cap
             report("labels", f"labels {i}/{len(keys)} · {proj} {n:,}/{of:,} issues ({len(seen)} labels)",
                    i - 1, len(keys))
-        st["labels"][proj] = sorted(seen)
+        st["labels"][proj] = dict(sorted(seen.items()))
         return len(seen)
 
     per_project("projects", "project", project)
     per_project("users", "users", users)
-    once("statuses", "statuses", lists("statuses", "statuses"))
+    once("statuses", "statuses", statuses)
     once("issueTypes", "issue types", lists("issueTypes", "issue_types"))
     once("priorities", "priorities", lists("priorities", "priorities"))
     once("fields", "fields", fields)
@@ -1123,15 +1133,20 @@ def directory_result(st: dict, keys: list) -> dict:
     done = sorted((v for v in vers if v["released"]),
                   key=lambda v: (v["releaseDate"], v["name"].lower()), reverse=True)
     labs: dict = {}
+    counts: dict = {}
     for p in keys:
-        for lab in st["labels"].get(p, []):
+        got = st["labels"].get(p) or {}
+        # {label: issues} (a checkpoint from before counts: a plain list)
+        for lab, cnt in (got.items() if isinstance(got, dict) else ((x, 0) for x in got)):
             labs.setdefault(lab, []).append(p)
+            counts[lab] = counts.get(lab, 0) + int(cnt or 0)
     return {"projects": [{"key": k, "name": st["projects"].get(k) or k} for k in keys],
             "users": sorted(st["users"].values(), key=lambda u: u["name"].lower()),
-            "statuses": st["statuses"], "issueTypes": st["issueTypes"], "priorities": st["priorities"],
+            "statuses": st["statuses"], "statusCategories": st.get("statusCategories") or {},
+            "issueTypes": st["issueTypes"], "priorities": st["priorities"],
             "fields": st["fields"], "versions": todo + done,
-            "labels": [{"name": k, "projects": sorted(v)} for k, v in sorted(labs.items(),
-                                                                             key=lambda kv: kv[0].lower())],
+            "labels": [{"name": k, "projects": sorted(v), "count": counts.get(k, 0)}
+                       for k, v in sorted(labs.items(), key=lambda kv: kv[0].lower())],
             "warnings": list(st["warnings"].values()),
             "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "forProjects": keys}
