@@ -1560,6 +1560,21 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
   `--label-view NAME` (cache → `jira_labels/`, stale files removed) →
   `pinView`. Label pickers: by count, top 50 (`JiraMultiPicker.foldTail`),
   `foldTitle` for the fold row; directory labels carry `count`.
+- Jira sidebar pinned list (`ListSession.syncReleasePins`, `Pin` enum): MY
+  WORK (`mywork:ID`, `[jira] my-work`; `--my-work`), BOARDS (`board:ID`;
+  config.json `pinnedBoards`, `--pin-board`, jobs `board-ID` publish into
+  `jira_boards/`, columns in `~/.cache/jira/boards.json`), LABELS, FAVORITE
+  RELEASES. All open in place via `showPinFile` (`pinView`); side folders
+  next to outDir are never tabs (`JiraPoll.sideDir`). Icon menu: Group By ▸,
+  Pin Boards…, Import Favourite Filters (`--import-filters` → `filter-ID` jobs).
+- Group-by: `ListSession.groupedRows` (after filter + sort, no paging),
+  header rows `__group` (`FieldRow.synthetic` = loadMore || groupHeader —
+  every row handler skips them), `PopupWindow.onTableHeaderMenu`.
+- `jira_config.GROUP_FIELDS` (components, epic) ride every sync whatever the
+  columns; new sync fields are back-filled once (`jira_poll.backfill_fields`,
+  status `syncedFields`). Board quick filters = filter-bar pill `__quick`
+  (`showQuickFilterPicker` → `--board-quickfilter` keys → `quickKeys`). MY
+  WORK ▸ Watching = job `mywork-watching` (`sideDir` jira_mywork).
 - Jira Cmd+K: "Open in browser" first; acts on the highlighted row + every
   ticked row (`PopupWindow.actionRows`).
 - Favorite releases: ☆ on release rows / Cmd+K "Favorite release" →

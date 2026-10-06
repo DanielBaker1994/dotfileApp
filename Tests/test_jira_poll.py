@@ -9,6 +9,7 @@ old bash scripts ran (jira-api.sh sync / jira-poll.sh publish), so the window
 json stays byte-for-byte compatible for every existing consumer.
 """
 import json
+import time
 import urllib.parse
 import os
 import re
@@ -101,7 +102,17 @@ class ParityTests(unittest.TestCase):
             want = jq(LEGACY_ENTRY_JQ, raw, "--argjson", "v", json.dumps(VERS),
                       "--argjson", "c", json.dumps(COMMENTS))
             got = jira_api.cache_entry(raw, VERS, COMMENTS, fields)
+            # + the group-by fields (GROUP_FIELDS), which the legacy shape never had
+            self.assertEqual((got.pop("components"), got.pop("epic")), ("", ""))
             self.assertEqual(got, want, raw["key"])
+
+    def test_components_and_epic(self):
+        raw = {"key": "P-1", "fields": {"components": [{"name": "API"}, {"name": "Web"}],
+                                        "parent": {"key": "P-9", "fields": {"summary": "Login epic"}}}}
+        e = jira_api.cache_entry(raw, {}, None, ["components", "parent"])
+        self.assertEqual((e["components"], e["epic"]), ("API, Web", "P-9 Login epic"))
+        self.assertIn("parent", jira_config.api_fields({}))           # whatever the columns
+        self.assertIn("epic", jira_config.publish_keys({}))
 
     def test_per_project_publish_matches_legacy(self):
         import jira_poll
@@ -154,7 +165,7 @@ class ConfigTests(unittest.TestCase):
         sec = {"columns": "key:Key:6:left:filter, title:Title:40, created:Created:10:right:sort, "
                           "releaseLabel:Release:14"}
         self.assertEqual(jira_config.api_fields(sec),
-                         ["summary", "created", "fixVersions", "updated", "project"])
+                         ["summary", "created", "fixVersions", "components", "parent", "updated", "project"])
         cols = jira_config.parse_columns(sec["columns"])
         self.assertEqual([c["field"] for c in cols], ["key", "title", "created", "releaseLabel"])
         self.assertTrue(cols[0]["filterable"] and not cols[0]["sortable"])
@@ -207,8 +218,23 @@ elif path.endswith("/user/assignable/search"):
     us.append({"name": "bob", "displayName": "Bob", "emailAddress": "bob@x"})
     body = us[start:start + n]
 elif path.endswith("/status"):
-    body = [{"name": "B", "statusCategory": {"key": "done"}}, {"name": "a", "statusCategory": {"key": "new"}},
-            {"name": "B", "statusCategory": {"key": "done"}}]
+    body = [{"id": "2", "name": "B", "statusCategory": {"key": "done"}},
+            {"id": "1", "name": "a", "statusCategory": {"key": "new"}},
+            {"id": "2", "name": "B", "statusCategory": {"key": "done"}}]
+elif path.endswith("/agile/1.0/board"):
+    proj = q["projectKeyOrId"][0]
+    body = {"isLast": True, "values": [{"id": 7, "name": "Shared board", "type": "scrum"}]
+            + ([{"id": 8, "name": "P1 kanban", "type": "kanban"}] if proj == "P1" else [])}
+elif path.endswith("/board/7/configuration"):
+    body = {"name": "Shared board", "type": "scrum", "filter": {"id": "100"},
+            "columnConfig": {"columns": [{"name": "Todo", "statuses": [{"id": "1"}]},
+                                         {"name": "Shipped", "statuses": [{"id": "2"}]}]}}
+elif path.endswith("/board/7/quickfilter"):
+    body = {"values": [{"id": 3, "name": "Mine", "jql": "assignee = currentUser()"}]}
+elif path.endswith("/filter/100"):
+    body = {"id": "100", "jql": "project = P1 ORDER BY Rank"}
+elif path.endswith("/filter/favourite"):
+    body = [{"id": "55", "name": "My bugs!", "jql": "type = Bug ORDER BY created"}]
 elif path.endswith("/priority") or path.endswith("/issuetype"):
     body = [{"name": "B"}, {"name": "a"}, {"name": "B"}]
 elif path.endswith("/versions"):
@@ -562,6 +588,76 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             d = json.loads(self.run_py(env, "jira_poll.py", "--describe").stdout)
             self.assertEqual({c["field"]: c["label"] for c in d["catalog"]}["status"], "Workflow")
 
+    def test_pin_board_adds_a_job_and_unpin_removes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.fake_curl(tmp, env)
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["P1", "P2"]}, fh)
+            self.assertEqual(self.run_py(env, "jira_poll.py", "--directory").returncode, 0)
+            r = json.loads(self.run_py(env, "jira_poll.py", "--pin-board", "add", "7").stdout)
+            self.assertEqual((r["ok"], r["boards"]), (True, ["7"]))
+            ep = next(e for e in self.cfgjson(env)["endpoints"] if e["name"] == "board-7")
+            # the filter's JQL, ORDER BY dropped; scrum = open sprints only
+            self.assertEqual((ep["boardJql"], ep["jql"], ep["boardId"], ep["file"]),
+                             ("project = P1", "(project = P1) AND sprint in openSprints()", "7", "board-7.json"))
+            with open(os.path.join(tmp, "cache", "boards.json")) as fh:
+                b = json.load(fh)["7"]
+            self.assertEqual(b["columns"], [{"name": "Todo", "statuses": ["a"]},
+                                            {"name": "Shipped", "statuses": ["B"]}])
+            self.assertEqual(b["quickFilters"][0]["name"], "Mine")
+            r = json.loads(self.run_py(env, "jira_poll.py", "--board-quickfilter", "7", "3").stdout)
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["jql"], '((project = P1) AND sprint in openSprints()) AND '
+                                       '(assignee = currentUser()) AND project in ("P1", "P2")')
+            self.assertEqual(r["keys"][:2], ["P-0", "P-1"])
+            r = json.loads(self.run_py(env, "jira_poll.py", "--board-sprint", "7", "off").stdout)
+            self.assertFalse(r["sprintOnly"])
+            ep = next(e for e in self.cfgjson(env)["endpoints"] if e["name"] == "board-7")
+            self.assertEqual(ep["jql"], "project = P1")
+            # the job publishes next to outDir (no tab of its own)
+            p = self.run_py(env, "jira_poll.py", "--force", "--projects", "board-7")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "jira_boards", "board-7.json")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "out", "board-7.json")))
+            r = json.loads(self.run_py(env, "jira_poll.py", "--pin-board", "remove", "7").stdout)
+            self.assertEqual(r["boards"], [])
+            self.assertFalse(any(e["name"] == "board-7" for e in self.cfgjson(env)["endpoints"]))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "jira_boards", "board-7.json")))
+
+    def test_import_filters_makes_one_job_per_favourite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.fake_curl(tmp, env)
+            r = json.loads(self.run_py(env, "jira_poll.py", "--import-filters").stdout)
+            self.assertEqual((r["added"], r["filters"][0]["job"]), (1, "filter-55"))
+            ep = next(e for e in self.cfgjson(env)["endpoints"] if e["name"] == "filter-55")
+            self.assertEqual((ep["jql"], ep["file"]), ("type = Bug", "My bugs.json"))
+            r = json.loads(self.run_py(env, "jira_poll.py", "--import-filters").stdout)
+            self.assertEqual((r["added"], r["updated"]), (0, 0))      # idempotent
+
+    def test_my_work_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.fake_curl(tmp, env)
+            os.makedirs(os.path.join(tmp, "cache"), exist_ok=True)
+            today = time.strftime("%Y-%m-%dT10:00:00.000+0000")
+            with open(os.path.join(tmp, "cache", "jiras.json"), "w") as fh:
+                json.dump({"P-1": {"key": "P-1", "assignee": "fake", "reporter": "x", "updated": today},
+                           "P-2": {"key": "P-2", "assignee": "y", "reporter": "Fake User",
+                                   "updated": "2020-01-01T00:00:00.000+0000"}}, fh)
+            r = json.loads(self.run_py(env, "jira_poll.py", "--my-work").stdout)
+            self.assertEqual({v["id"]: v["count"] for v in r["views"]},
+                             {"mine": 1, "reported": 1, "today": 1, "watching": None})
+            ep = next(e for e in self.cfgjson(env)["endpoints"] if e["name"] == "mywork-watching")
+            self.assertEqual((ep["jql"], ep["sideDir"]), ("watcher = currentUser()", "jira_mywork"))
+            p = self.run_py(env, "jira_poll.py", "--force", "--projects", "mywork-watching")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "jira_mywork", "watching.json")))
+            calls = len(self.urls(env))
+            self.run_py(env, "jira_poll.py", "--my-work")
+            self.assertEqual(len(self.urls(env)), calls)               # /myself only once
+
     def test_directory_job_caches_users(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.env(tmp)
@@ -579,6 +675,10 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             self.assertEqual((bob["projects"], bob["email"]), (["P1", "P2"], "bob@x"))
             self.assertEqual(d["statuses"], ["a", "B"])    # de-duplicated, sorted
             self.assertEqual(d["statusCategories"], {"a": "new", "B": "done"})   # the ticket page's bar
+            self.assertEqual(d["statusIds"], {"1": "a", "2": "B"})
+            # boards: one row per id, every scoped project that lists it
+            self.assertEqual([(b["id"], b["projects"]) for b in d["boards"]],
+                             [("8", ["P1"]), ("7", ["P1", "P2"])])
             self.assertEqual(d["fields"][0]["id"], "customfield_20214")   # custom first
             pages = [u for u in self.urls(env) if "assignable" in u]
             self.assertEqual(len(pages), 4)               # page size 2: 2 + 1, per project
@@ -1357,8 +1457,10 @@ class ResilientSyncTests(unittest.TestCase):
             p = self.poll(env, "--directory")
             self.assertEqual(p.returncode, 0, p.stderr)
             calls = self.calls(tmp)
-            self.assertEqual(len(calls), 3)                   # labels of P1..P3 only
-            self.assertTrue(all("labels" in u for u in calls))
+            # labels of P1..P3 (what failed), then the boards stage that came after
+            self.assertEqual(len(calls), 6)
+            self.assertTrue(all("labels" in u for u in calls[:3]))
+            self.assertTrue(all("/agile/1.0/board" in u for u in calls[3:]))
             with open(os.path.join(tmp, "cache", "directory.json")) as fh:
                 self.assertEqual(len(json.load(fh)["users"]), 9)
 

@@ -58,6 +58,7 @@ struct JiraDirectory {
     var fields: [Field] = []
     var versions: [Version] = []                          // unarchived releases per project
     var labels: [(name: String, projects: [String], count: Int)] = []  // labels seen per project
+    var boards: [(id: String, name: String, type: String, projects: [String])] = []  // per scoped project
     var fetchedAt = ""
     var isEmpty: Bool { fetchedAt.isEmpty }
 
@@ -88,6 +89,9 @@ struct JiraDirectory {
             return Version(name: n, project: v["project"] as? String ?? "",
                            releaseDate: v["releaseDate"] as? String ?? "", released: v["released"] as? Bool ?? false,
                            id: v["id"] as? String ?? "")
+        }
+        d.boards = (o["boards"] as? [[String: Any]] ?? []).compactMap { b in
+            (b["id"] as? String).map { ($0, b["name"] as? String ?? $0, b["type"] as? String ?? "", b["projects"] as? [String] ?? []) }
         }
         d.labels = (o["labels"] as? [[String: Any]] ?? []).compactMap { l in
             (l["name"] as? String).map { ($0, l["projects"] as? [String] ?? [], l["count"] as? Int ?? 0) }

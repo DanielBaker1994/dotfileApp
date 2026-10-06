@@ -590,8 +590,8 @@ favorites = "~/notes, ~/Desktop, /tmp"
 start = "recent"
 
 # THE SWITCH: enabled = true shows the window, anything else hides it
-sort = "size"
-sort-order = "asc"
+sort = "created"
+sort-order = "desc"
 background-color = "192330"
 header-color = "0F141C"
 browser-background = "99171A20"
@@ -617,6 +617,9 @@ accent-color = "719CD6"
 palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 # a directory — every .json/.tsv file inside becomes a tab
 sources = "~/.cache/kitchen-sink/jira_json"
+# sidebar MY WORK rows (assigned to me / reported by me / updated today),
+# filtered from the synced issues; false hides them
+my-work = true
 # table mode: spreadsheet rows under a sticky header. columns = one line of
 #   field:Title:width:align:flags, …  (jira: the header is the field's ONE
 #   label — Jira Config ▸ Definitions ▸ Fields — so Title may stay empty)

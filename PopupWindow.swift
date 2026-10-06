@@ -825,6 +825,9 @@ public protocol PopupRow {
     var body: String? { get }      // with wrapContent: wrapped multi-line text
                                    // under line 2 (capped at 2 lines)
     var loadMore: Bool { get }     // synthetic "load next page" row
+    var groupHeader: Bool { get }  // synthetic group header (table group-by):
+                                   // title = group, trailing = count, content
+                                   // "1" = collapsed; no checkbox / star
     var starred: Bool? { get }     // config.rowStars: filled ☆ / empty ☆ / nil = none
     // table mode: the text of one cell (config.tableColumns field)
     func cellText(_ field: String) -> String?
@@ -837,6 +840,7 @@ public extension PopupRow {
     var detail: String? { nil }
     var body: String? { nil }
     var loadMore: Bool { false }
+    var groupHeader: Bool { false }
     var starred: Bool? { nil }
     func cellText(_ field: String) -> String? { nil }
 }
@@ -2767,7 +2771,7 @@ final class PopupRowView: NSView {
         // selecting/accepting the row
         if config.selectableRows {
             let i = rowIndex(at: p)
-            if i >= 0, checkBoxRect(in: band(for: i)).contains(p) {
+            if i >= 0, rows.indices.contains(i), !rows[i].groupHeader, checkBoxRect(in: band(for: i)).contains(p) {
                 onToggleSelect?(i)
                 downIndex = -1
                 return
@@ -2775,7 +2779,7 @@ final class PopupRowView: NSView {
         }
         if config.rowStars {
             let i = rowIndex(at: p)
-            if i >= 0, rows.indices.contains(i), !rows[i].loadMore, rows[i].starred != nil,
+            if i >= 0, rows.indices.contains(i), !rows[i].loadMore, !rows[i].groupHeader, rows[i].starred != nil,
                starRect(in: band(for: i)).insetBy(dx: -3, dy: -3).contains(p) {
                 onToggleStar?(i)
                 downIndex = -1
@@ -2888,10 +2892,10 @@ final class PopupRowView: NSView {
             NSRect(x: pill.minX, y: pill.minY, width: 3, height: pill.height).fill()
             NSGraphicsContext.current?.restoreGraphicsState()
         }
-        if config.selectableRows, !row.loadMore || config.tableColumns.isEmpty {
+        if config.selectableRows, !row.groupHeader, !row.loadMore || config.tableColumns.isEmpty {
             drawCheckBox(checkBoxRect(in: band), on: selected.contains(index))
         }
-        if config.rowStars, !row.loadMore, let on = row.starred {
+        if config.rowStars, !row.loadMore, !row.groupHeader, let on = row.starred {
             drawStar(starRect(in: band), on: on)
         }
         if !config.tableColumns.isEmpty {
@@ -3009,6 +3013,21 @@ final class PopupRowView: NSView {
                                            height: lineH),
                      font: font, baseColor: config.colors.tone(.accent2), accent: config.colors.accentOn,
                      wrap: false, highlight: false)
+            return
+        }
+        if row.groupHeader {
+            // a group band: ▾/▸ · NAME · count, from the gutter to the edge
+            let r = NSRect(x: 4, y: band.minY + 1, width: band.width - 8, height: band.height - 2)
+            config.colors.surface0.withAlphaComponent(0.7).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+            let s = NSMutableAttributedString(string: (row.content == "1" ? "▸  " : "▾  "),
+                                              attributes: [.font: font, .foregroundColor: config.colors.dim])
+            s.append(NSAttributedString(string: row.title, attributes: [.font: bold, .foregroundColor: config.colors.text]))
+            s.append(NSAttributedString(string: "   " + (row.trailing ?? ""),
+                                        attributes: [.font: font, .foregroundColor: config.colors.dim]))
+            s.draw(with: NSRect(x: 14, y: y, width: band.width - 28, height: lineH),
+                   options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
             return
         }
         let frames = PopupRowView.tableFrames(config, width: band.width)
@@ -3174,6 +3193,8 @@ final class PopupTableHeaderView: NSView {
     // "fit columns": an icon in the corner cell (the gutter over the rows'
     // checkbox / star column) + right-click ▸ Fit Columns to Content
     var onFit: (() -> Void)? { didSet { needsDisplay = true } }
+    // more items for the right-click menu (e.g. Group By ▸)
+    var extraMenu: (() -> [NSMenuItem])?
     private var hoverFit = false
     private var reorder: (from: Int, x: CGFloat, target: Int)?
     private var pressCol: Int?
@@ -3275,9 +3296,12 @@ final class PopupTableHeaderView: NSView {
             onFilter?(i, fr)
             return
         }
-        if let fit = onFit {
+        let extra = extraMenu?() ?? []
+        if onFit != nil || !extra.isEmpty {
             let menu = NSMenu()
-            menu.addItem(menuItem("Fit Columns to Content", fit))
+            if let fit = onFit { menu.addItem(menuItem("Fit Columns to Content", fit)) }
+            if onFit != nil, !extra.isEmpty { menu.addItem(.separator()) }
+            extra.forEach(menu.addItem)
             NSMenu.popUpContextMenu(menu, with: event, for: self)
             return
         }
@@ -8373,6 +8397,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             if let h = tableHeader { h.window?.invalidateCursorRects(for: h) }
         }
     }
+    // extra items for the table header's right-click menu (jira: Group By ▸)
+    public var onTableHeaderMenu: (() -> [NSMenuItem])? {
+        didSet { tableHeader?.extraMenu = { [weak self] in self?.onTableHeaderMenu?() ?? [] } }
+    }
     // a filterable column's ▾ was clicked: (column, header view, the ▾'s
     // rect in it) — the host anchors its filter popover there
     public var onTableFilter: ((Int, NSView, NSRect) -> Void)?
@@ -8542,6 +8570,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         tabsBar?.pinnedSelected = id
     }
     public func clearSidebarPin() { tabsBar?.pinnedSelected = nil }
+    // somewhere to hang a popover off the sidebar (its top edge)
+    public var sidebarAnchor: (view: NSView, rect: NSRect)? {
+        guard let bar = tabsBar, bar.vertical, !bar.isHidden else { return nil }
+        return (bar, NSRect(x: bar.bounds.maxX - 4, y: 30, width: 1, height: 1))
+    }
     // hover tip per tab (the host returns the tab's full file path)
     public var tabPathTip: ((Int) -> String?)? {
         didSet { tabsBar?.pathTip = tabPathTip }
@@ -9348,6 +9381,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // sort clicks, ▾ filters, column drags + divider drags -> host hooks
     private func wireTableHeader(_ header: PopupTableHeaderView) {
         header.onSort = { [weak self] i in self?.onTableSort?(i) }
+        header.extraMenu = { [weak self] in self?.onTableHeaderMenu?() ?? [] }
         header.onFilter = { [weak self] i, r in
             guard let self, let h = self.tableHeader else { return }
             self.onTableFilter?(i, h, r)
@@ -11291,7 +11325,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
         let hfont = NSFontManager.shared.convert(config.rowFont(config.rowFontSize * zoom * 0.86),
                                                  toHaveTrait: .boldFontMask)
-        let rowsToMeasure = rows.filter { !$0.loadMore }.prefix(sample)
+        let rowsToMeasure = rows.filter { !$0.loadMore && !$0.groupHeader }.prefix(sample)
         var need: [CGFloat] = cols.enumerated().map { i, col in
             // header: small caps + kerning + sort arrow + the ▾ slot
             var w = (col.title.uppercased() + " ↑" as NSString)

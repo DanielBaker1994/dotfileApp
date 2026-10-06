@@ -689,9 +689,20 @@ def cache_entry(issue: dict, vers_map: dict, comments, api_fields: list,
         e["reporter"] = person(f.get("reporter"))
     if "project" in fetched:
         e["project"] = proj
+    if "components" in fetched:
+        e["components"] = ", ".join(x.get("name", "") for x in (f.get("components") or [])
+                                    if isinstance(x, dict) and x.get("name"))
+    links = [x for x in jira_config.epic_link_ids() if x in fetched]
+    if "parent" in fetched or links:
+        # the epic (Cloud: parent, "KEY summary") else the Server Epic Link key
+        par = f.get("parent") if isinstance(f.get("parent"), dict) else None
+        if par:
+            e["epic"] = f"{par.get('key', '')} {alt((par.get('fields') or {}).get('summary'), '')}".strip()
+        else:
+            e["epic"] = next((str(f[x]) for x in links if isinstance(f.get(x), str) and f.get(x)), "")
     if comments is not None:
         e["comments"] = comments
-    known = {s for srcs in jira_config.FIELD_SOURCES.values() for s in srcs}
+    known = {s for srcs in jira_config.FIELD_SOURCES.values() for s in srcs} | set(jira_config.epic_link_ids())
     known.add("comment")     # comes back as `comments` (issue_comments), never raw
     for fld in api_fields:
         if fld not in known:
@@ -920,8 +931,9 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
                           None if quiet else print(f"jira-api: directory: {msg}", file=sys.stderr))
     ck_name = f"directory-{name}" if name and not c.dry else ""
     ck = load_checkpoint(ck_name)
-    fresh = {"projects": {}, "users": {}, "statuses": [], "statusCategories": {}, "issueTypes": [], "priorities": [],
-             "fields": [], "versions": {}, "labels": {}, "warnings": {}, "done": {}}
+    fresh = {"projects": {}, "users": {}, "statuses": [], "statusCategories": {}, "statusIds": {},
+             "issueTypes": [], "priorities": [],
+             "fields": [], "versions": {}, "labels": {}, "boards": {}, "warnings": {}, "done": {}}
     if ck and ck.get("forProjects") == keys and time.time() - float(ck.get("at") or 0) < resume_hours * 3600 \
             and isinstance(ck.get("state"), dict):
         st = {**fresh, **ck["state"]}
@@ -1064,6 +1076,8 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
         st["statuses"] = sorted({v["name"] for v in vals}, key=str.lower)
         st["statusCategories"] = {v["name"]: (v.get("statusCategory") or {}).get("key") or ""
                                   for v in vals}
+        # id -> name: a board's columns name their statuses by id
+        st["statusIds"] = {str(v["id"]): v["name"] for v in vals if v.get("id") is not None}
         return len(st["statuses"])
 
     def fields():
@@ -1103,6 +1117,21 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
         st["labels"][proj] = dict(sorted(seen.items()))
         return len(seen)
 
+    def boards(proj, i):
+        # the agile boards located in this project (never a site-wide listing)
+        out, start = [], 0
+        page = max(1, c.sd("page_size"))
+        while True:
+            got = c.get(c.path("boards"), f"projectKeyOrId={qenc(proj)}&startAt={start}&maxResults={page}") or {}
+            vals = [b for b in (got.get("values") or []) if isinstance(b, dict) and b.get("id") is not None]
+            out += [{"id": str(b["id"]), "name": b.get("name") or str(b["id"]), "type": b.get("type") or "",
+                     "project": proj} for b in vals]
+            start += len(vals)
+            if got.get("isLast", True) or not vals or len(out) >= 2000:
+                break
+        st["boards"][proj] = out
+        return len(out)
+
     per_project("projects", "project", project)
     per_project("users", "users", users)
     once("statuses", "statuses", statuses)
@@ -1112,10 +1141,11 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
     per_project("versions", "releases", versions)
     if cap:
         per_project("labels", "labels", labels)
+    per_project("boards", "boards", boards)
 
     out = directory_result(st, keys)
     complete = not any(k.split(":")[0] in ("projects", "users", "statuses", "issueTypes", "priorities",
-                                           "fields", "versions", "labels") for k in st["warnings"])
+                                           "fields", "versions", "labels", "boards") for k in st["warnings"])
     if ck_name:
         if complete:
             clear_checkpoints(ck_name)
@@ -1123,6 +1153,19 @@ def directory(c: Client, projects: list | None = None, quiet: bool = True, progr
             LOG.info("directory finished with skipped parts - checkpoint kept: a rerun within %sh "
                      "retries only those", resume_hours)
     return out
+
+
+def board_list(by_project: dict, keys: list) -> list:
+    """Boards per project -> one row per board id (a board can sit in more
+    than one listing): {id, name, type, projects}, by project then name."""
+    out: dict = {}
+    for p in keys:
+        for b in by_project.get(p) or []:
+            row = out.setdefault(b["id"], {"id": b["id"], "name": b["name"], "type": b["type"], "projects": []})
+            if p not in row["projects"]:
+                row["projects"].append(p)
+    return sorted(out.values(), key=lambda b: (keys.index(b["projects"][0]) if b["projects"][0] in keys else 0,
+                                               b["name"].lower()))
 
 
 def directory_result(st: dict, keys: list) -> dict:
@@ -1143,6 +1186,8 @@ def directory_result(st: dict, keys: list) -> dict:
     return {"projects": [{"key": k, "name": st["projects"].get(k) or k} for k in keys],
             "users": sorted(st["users"].values(), key=lambda u: u["name"].lower()),
             "statuses": st["statuses"], "statusCategories": st.get("statusCategories") or {},
+            "statusIds": st.get("statusIds") or {},
+            "boards": board_list(st.get("boards") or {}, keys),
             "issueTypes": st["issueTypes"], "priorities": st["priorities"],
             "fields": st["fields"], "versions": todo + done,
             "labels": [{"name": k, "projects": sorted(v), "count": counts.get(k, 0)}

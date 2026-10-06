@@ -105,6 +105,7 @@ DEFAULTS = {
     "releaseBlacklist": [],          # release row keys (PROJECT-NAME) hidden from the releases tab
     "favoriteReleases": [],          # starred release row keys, newest first (Jira sidebar)
     "pinnedLabels": [],              # labels pinned to the Jira sidebar (LABELS), in pin order
+    "pinnedBoards": [],              # board ids pinned to the Jira sidebar (BOARDS); each = a board-ID job
 }
 
 LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
@@ -113,6 +114,9 @@ FAVORITES_FILE = "favorites.json"    # the pinned issues' tab (the favorites job
 BLACKLIST_RELEASE_FILE = "blacklist_release.json"   # releases hidden from the releases tab
 RELEASE_VIEW_DIR = "jira_releases"  # next to outDir: one <PROJECT>-<release>.json per release
 LABEL_VIEW_DIR = "jira_labels"      # next to outDir: one <label>.json per pinned label
+BOARD_DIR = "jira_boards"           # next to outDir: pinned boards' job files (no tab each)
+MY_WORK_DIR = "jira_mywork"         # next to outDir: the sidebar's MY WORK views
+BOARDS_FILE = "boards.json"         # in the jira cache: pinned boards' columns + quick filters
 
 # the directory job: projects + assignable users + statuses / types /
 # priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).
@@ -158,7 +162,11 @@ FIELD_SOURCES = {
     "reporter": ["reporter"],
     "project": ["project"],
     "comments": [],   # the `comment` field of the search itself (fetchComments)
+    "components": ["components"],
+    "epic": ["parent"],   # + Server/DC "Epic Link" (epic_link_ids); see jira_api.cache_entry
 }
+# synced for every issue whatever the columns: the Jira window groups by them
+GROUP_FIELDS = ["components", "epic"]
 # always requested: updated drives sort + windows, project drives the
 # per-project files and the versions (release date) lookup
 ALWAYS_API_FIELDS = ["updated", "project"]
@@ -176,6 +184,7 @@ BASE_FIELD_LABELS = {
     "description": "Description", "project": "Project", "updated": "Updated",
     "release": "Fix versions", "releaseLabel": "Release", "releaseDate": "Release date",
     "releaseStatus": "Released", "comments": "Comments",
+    "components": "Components", "epic": "Epic / parent",
 }
 # [jira] keys whose field names feed the API request
 FIELD_KEYS = ("primary", "content", "detail", "trailing", "body", "filter",
@@ -201,6 +210,11 @@ DEFAULT_API_ENDPOINTS = {
     "priorities": "/priority",
     "issue_types": "/issuetype",
     "board_issues": "/board/{board_id}/issue",
+    "boards": "/board",                                   # ?projectKeyOrId=KEY (per scoped project)
+    "board_configuration": "/board/{board_id}/configuration",
+    "board_quickfilters": "/board/{board_id}/quickfilter",
+    "filter": "/filter/{filter_id}",
+    "favourite_filters": "/filter/favourite",
 }
 API_BASE = "/rest/api/2"
 AGILE_BASE = "/rest/agile/1.0"
@@ -570,19 +584,39 @@ def api_fields(section: dict | None = None, team: dict | None = None,
     A team.json custom_fields alias (e.g. package_info) maps to its id."""
     aliases = custom_field_aliases(team or {})
     out: list = []
-    for f in window_fields(section, columns) + ALWAYS_API_FIELDS:
+    for f in window_fields(section, columns) + GROUP_FIELDS + ALWAYS_API_FIELDS:
         srcs = FIELD_SOURCES.get(f) if f in FIELD_SOURCES else [aliases[f]["id"] if f in aliases else f]
+        if f == "epic":
+            srcs = srcs + epic_link_ids()
         for src in srcs:
             if src not in out:
                 out.append(src)
     return out
 
 
+_EPIC_LINKS: list | None = None
+
+
+def epic_link_ids() -> list:
+    """Server/DC's "Epic Link" custom field id(s), from the directory's field
+    list (Cloud has none: `parent` is the epic). Read once per process."""
+    global _EPIC_LINKS
+    if _EPIC_LINKS is None:
+        try:
+            with open(os.path.join(CACHE_DIR, "directory.json"), encoding="utf-8") as fh:
+                flds = json.load(fh).get("fields") or []
+        except (OSError, ValueError, AttributeError):
+            flds = []
+        _EPIC_LINKS = [f["id"] for f in flds if isinstance(f, dict) and f.get("custom")
+                       and str(f.get("name") or "").lower() == "epic link" and f.get("id")]
+    return _EPIC_LINKS
+
+
 def publish_keys(section: dict | None = None, columns: str | None = None) -> list:
     """Keys written to each window json: the legacy base shape plus any
     extra referenced field (comments stay cache-only - not a string)."""
     keys = list(BASE_WINDOW_KEYS)
-    for f in window_fields(section, columns):
+    for f in window_fields(section, columns) + GROUP_FIELDS:
         if f not in keys and f != "comments":
             keys.append(f)
     return keys

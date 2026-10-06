@@ -1,6 +1,6 @@
 # PRD — Jira: search, organize, group (boards, labels, group-by)
 
-Status: phases 0–2 built (2026-10-06), phases 3–5 open · Written: 2026-10-06 · Target: kitchen-sink Jira window (Swift/AppKit) + `jira/*.py`
+Status: phases 0–5 built, follow-ups done (2026-10-06) · Written: 2026-10-06 · Target: kitchen-sink Jira window (Swift/AppKit) + `jira/*.py`
 
 > **For the implementing agent.** Read `AGENT_CONTEXT.md` (= `CLAUDE.md`) and
 > `rule.md` first; they are binding. Especially the Jira poller rules: SCOPE =
@@ -104,7 +104,7 @@ Sidebar: one pinned list, sections per row (`PopupTabsBar.pinnedSection`):
 FAVORITE RELEASES then LABELS (`label:NAME` ids, tag icon, right-click
 Unpin Label). A label click = `--label-view NAME` → `jira_labels/label-NAME.json`
 from the cache, shown in place (`pinView`), refreshed when the cache changes.
-Not done: a Cmd+K "Pin label" action.
+Cmd+K on issue rows: "Pin labels to sidebar" (their labels not pinned yet).
 
 Original spec:
 
@@ -117,7 +117,22 @@ Original spec:
   shows the cache's issues with that label in place (`ListSession.pinView`,
   local filter, no request).
 
-## 7. Phase 3 — boards
+## 7. Phase 3 — boards (built 2026-10-06)
+
+As built: directory stage `boards` (per scoped project, `/rest/agile/1.0/board?projectKeyOrId=`)
+→ directory.json `boards` [{id, name, type, projects}] + `statusIds`.
+`jira_poll.py --pin-board add|remove ID…`: `/board/ID/configuration` +
+`/filter/FID` + `/board/ID/quickfilter` once → `~/.cache/jira/boards.json`
+(columns as status names, quick filters) + a `board-ID` custom-jql job
+(`boardJql`, scrum → `sprint in openSprints()`, 15m) publishing into
+`jira_boards/` (no tab). `--board-sprint ID on|off`. Jira window: icon menu
+▸ Pin Boards… (picker grouped by project), sidebar BOARDS (right-click: Poll
+Board Now, Open Sprints Only, Unpin), a board opens grouped by its columns.
+Quick filters: a **Quick filters** pill in the filter bar on a board (picker,
+ANDed like Jira) → `--board-quickfilter ID QF…` = one key-only search
+(board JQL AND the picked filters' JQL, scope) → the rows narrow to those keys.
+
+Original spec:
 
 - Directory stage `boards` (per project): `GET /rest/agile/1.0/board?projectKeyOrId=KEY`
   (paginated) → `{id, name, type, project}`; merged with team.json `boards`.
@@ -131,7 +146,17 @@ Original spec:
   boards add a "Current sprint" toggle (`sprint in openSprints()`).
 - Quick filters (`/board/{id}/quickfilter`) appear as chips over the table.
 
-## 8. Phase 4 — saved filters + my work
+## 8. Phase 4 — saved filters + my work (built 2026-10-06)
+
+As built: icon menu ▸ Import Favourite Filters → `--import-filters`
+(`filter-ID` jobs, file = the filter's name, scope ANDed in by the sync;
+idempotent, a changed JQL restarts the job). Sidebar MY WORK (`[jira]
+my-work`, default true): `--my-work` → `jira_mywork/{mine,reported,today}.json`
+from the cache; "me" = /myself once → `~/.cache/jira/me.json`. Watching =
+a custom-jql job `mywork-watching` (`watcher = currentUser()`, 15m,
+`sideDir: jira_mywork`), added by the first `--my-work`, fetched on first open.
+
+Original spec:
 
 - `jira_poll.py --import-filters`: `/filter/favourite` → one custom-JQL job
   per filter (scope ANDed in), the same flow as Confluence's
@@ -140,7 +165,21 @@ Original spec:
   filters over the cache (`/myself` id). Watching = a JQL job
   (`watcher = currentUser()`).
 
-## 9. Phase 5 — group by
+## 9. Phase 5 — group by (built 2026-10-06)
+
+As built: icon menu / table header right-click (outside a filterable title)
+▸ Group By: Status category, Status, Assignee, Priority, Release, Labels,
+Project, other filterable columns, Board column (on a board). Group header
+rows = `FieldRow` with `__group` (`PopupRow.groupHeader`: no checkbox / star,
+drawn as a band ▾/▸ NAME count); click / Return toggles, Collapse / Expand
+All. Remembered per window (UserDefaults `listGroupBy.jira`); boards default
+to their columns. Paging is off while grouped. Epic / parent and Components:
+`GROUP_FIELDS` are synced for every issue (`parent`, Server "Epic Link" via
+`epic_link_ids`); an existing cache gets them once by `backfill_fields`
+(only the new fields, key order; status `syncedFields` records what the
+cache holds).
+
+Original spec:
 
 - Table header right-click ▸ Group by: Status category, Status, Assignee,
   Label, Release, Priority, Epic/parent, Component, Board column. Groups are

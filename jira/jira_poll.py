@@ -82,6 +82,17 @@ Usage:
   jira_poll.py --blacklist-release add|remove KEY... hide / restore releases
   jira_poll.py --favorite-release add|remove KEY... star releases (Jira sidebar)
   jira_poll.py --pin-label add|remove NAME...       pin labels (Jira sidebar LABELS)
+  jira_poll.py --pin-board add|remove ID...         pin agile boards (Jira sidebar
+                                  BOARDS): reads the board's columns, filter
+                                  JQL + quick filters, adds a board-ID job
+  jira_poll.py --board-sprint ID on|off   scrum board job: only open sprints
+  jira_poll.py --board-quickfilter ID QF...   the keys of the board's issues that
+                                  match its quick filters (ANDed, like Jira);
+                                  one key-only search; prints {ok, keys}
+  jira_poll.py --import-filters   your favourite Jira filters -> one job each
+                                  (filter-ID, scope ANDed in); prints them
+  jira_poll.py --my-work          the sidebar's MY WORK views from the cache
+                                  (assigned to me / reported by me / updated today)
   jira_poll.py --label-view NAME  the label's issues (from the cache) as a tab
                                   file for the sidebar's LABELS pin
                                   (both: config.json + the tabs rewritten
@@ -114,6 +125,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import select
 import signal
 import sys
@@ -220,7 +232,8 @@ def parse_args(argv: list) -> dict:
     o = {"init": False, "window": "", "projects": "", "dry": False, "quiet": False,
          "force": False, "describe": False, "cancel": False, "live": False, "directory": False,
          "rebuild": False, "setup": False, "step": "", "favorite": None, "blacklist": None,
-         "release_view": None, "label_view": None}
+         "release_view": None, "label_view": None, "board_sprint": None,
+         "import_filters": False, "my_work": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -269,11 +282,22 @@ def parse_args(argv: list) -> dict:
             return o
         elif name == "--label-view":
             o["label_view"] = val()
-        elif name in ("--favorite", "--blacklist-release", "--favorite-release", "--pin-label"):
+        elif name == "--board-sprint":
+            o["board_sprint"] = argv[i + 1:i + 3]
+            return o
+        elif name == "--board-quickfilter":
+            o["board_quick"] = argv[i + 1:]
+            return o
+        elif name == "--import-filters":
+            o["import_filters"] = True
+        elif name == "--my-work":
+            o["my_work"] = True
+        elif name in ("--favorite", "--blacklist-release", "--favorite-release", "--pin-label", "--pin-board"):
             # --favorite add|remove KEY...  (the rest of argv = the keys)
             op = val()
             o[{"--favorite": "favorite", "--blacklist-release": "blacklist",
-               "--favorite-release": "favorite_release", "--pin-label": "pin_label"}[name]] = (op, argv[i + 1:])
+               "--favorite-release": "favorite_release", "--pin-label": "pin_label",
+               "--pin-board": "pin_board"}[name]] = (op, argv[i + 1:])
             return o
         elif name in ("-h", "--help"):
             print(__doc__.strip())
@@ -584,6 +608,23 @@ def job_fields(ep: dict, team: dict) -> tuple:
             jira_config.publish_keys(columns=spec))
 
 
+def side_dir(out_dir: str, name: str) -> str:
+    """A folder next to outDir (its files are not tabs)."""
+    d = os.path.join(os.path.dirname(os.path.expanduser(out_dir).rstrip("/")), name)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def job_path(out_dir: str, ep: dict) -> str:
+    """Where a job publishes: outDir (a tab), except a pinned board's job
+    (BOARD_DIR: the sidebar's BOARDS row shows it, no tab of its own)."""
+    if ep.get("boardId"):
+        return os.path.join(side_dir(out_dir, jira_config.BOARD_DIR), ep["file"])
+    if ep.get("sideDir") in (jira_config.MY_WORK_DIR,):
+        return os.path.join(side_dir(out_dir, ep["sideDir"]), ep["file"])
+    return os.path.join(out_dir, ep["file"])
+
+
 def plain_issue_job(ep: dict) -> bool:
     """An issue job without its own query: a view over the shared sync."""
     return ep.get("type", "issues") == "issues" and not ep.get("jql")
@@ -638,6 +679,50 @@ def synced_projects() -> list | None:
     return v if isinstance(v, list) else None
 
 
+def synced_fields() -> list | None:
+    v = jira_status.endpoint_entry(jira_status.read(), SYNC).get("syncedFields")
+    return v if isinstance(v, list) else None
+
+
+def backfill_fields(ctx: "Ctx", projects: list) -> list:
+    """Fields the shared sync asks for that the cache was never filled with
+    (a column / group field added later): fetch ONLY those (+ key) for every
+    scoped issue, once, and merge them into the cache - far lighter than a
+    full re-sync. Before syncedFields was tracked: the GROUP_FIELDS sources.
+    Returns the fields now in the cache."""
+    c = ctx.c
+    want = ctx.sync_fields()
+    have = synced_fields()
+    if have is None:
+        group = {s for f in jira_config.GROUP_FIELDS for s in jira_config.FIELD_SOURCES[f]}
+        group |= set(jira_config.epic_link_ids())
+        have = [f for f in want if f not in group]
+    missing = [f for f in want if f not in have]
+    if not missing:
+        return want
+    rep = Reporter(SYNC + "-fields", "New fields")
+    c.on_wait = rep.wait
+    c.on_note = rep.note
+    rep.start(f"filling {', '.join(missing)} for the cached issues of {', '.join(projects)}")
+    jql = "project in (" + ", ".join(f'"{jira_config.jql_quote(p)}"' for p in projects) + ") ORDER BY key ASC"
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    cache = cache if isinstance(cache, dict) else {}
+    vers = jira_api.read_json(jira_api.VERSIONS_FILE, {})
+    n = 0
+    for got, total, _ in c.search_pages(jql, ",".join(missing)):
+        for i in got:
+            k = i.get("key")
+            if k in cache:
+                e = jira_api.cache_entry(i, vers if isinstance(vers, dict) else {}, None, missing)
+                e.pop("key", None)
+                cache[k].update(e)
+        n += len(got)
+        rep.page(n, total, time.time(), len(got))
+    jira_api.write_json(jira_api.CACHE_FILE, cache, mode=0o600)
+    say(f"filled {', '.join(missing)} on {n:,} issue(s)", SYNC)
+    return want
+
+
 def run_shared_sync(ctx: Ctx, window: str) -> dict:
     """ONE streamed sync for every plain issue job, then publish them all.
     A project added to the scope since the last sync is fully synced first
@@ -647,6 +732,10 @@ def run_shared_sync(ctx: Ctx, window: str) -> dict:
     if not projects:
         raise jira_config.ConfigError(jira_config.NO_SCOPE)
     page, cap = ctx.sync_limits()
+    if window != "full" and synced_projects() is not None:
+        ctx.filled = backfill_fields(ctx, projects)
+    else:
+        ctx.filled = ctx.sync_fields()
     have = synced_projects()
     added = [p for p in projects if have is not None and p not in have] if window != "full" else []
     if added:
@@ -732,7 +821,7 @@ def run_job(ctx: Ctx, ep: dict, window: str) -> int:
             + (f", {len(d['warnings'])} warning(s): {'; '.join(d['warnings'])}" if d["warnings"] else ""),
             ep["name"])
         return len(d["users"])
-    path = os.path.join(ctx.out_dir, ep["file"])
+    path = job_path(ctx.out_dir, ep)
     if typ == "releases":
         rep.start(f"versions of {', '.join(plist)}")
         items, hidden = split_blacklist(release_rows(jira_api.releases(c, projects=plist)),
@@ -1177,7 +1266,7 @@ def run_setup_step(ctx: Ctx, name: str) -> tuple:
         res = run_shared_sync(ctx, "full")
         counts = publish_plain(ctx)
         record(SYNC, started, "full", "", "", res["total"], ctx.sync_wsec(),
-               extra={"syncedProjects": ctx.sync_projects()})
+               extra={"syncedProjects": ctx.sync_projects(), "syncedFields": ctx.sync_fields()})
         for e in ctx.plain:
             record(e["name"], started, "full", "", "", counts.get(e["name"]),
                    jira_config.parse_window(e.get("window", "10m")))
@@ -1398,6 +1487,291 @@ def label_view(name: str) -> int:
     return 0
 
 
+def strip_order(jql: str) -> str:
+    return re.sub(r"\s+ORDER\s+BY\s+.*$", "", jql or "", flags=re.I | re.S).strip()
+
+
+def board_job(bid: str, jql: str, sprint: bool, columns: str) -> dict:
+    q = f"({jql}) AND sprint in openSprints()" if sprint else jql
+    return {"name": f"board-{bid}", "type": "issues", "jql": q, "boardJql": jql, "boardId": bid,
+            "sprintOnly": bool(sprint), "file": f"board-{bid}.json", "window": "15m",
+            "projects": "*", "enabled": True, "columns": columns}
+
+
+def reset_job(name: str) -> None:
+    """A job whose JQL changed starts over (its key set + checkpoint)."""
+    for f in (keys_file(name), jira_api.checkpoint_path(name)):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+
+
+def board_info(c, bid: str, status_ids: dict) -> dict:
+    """GET the board's configuration (columns -> status names, its filter),
+    the filter's JQL and the quick filters."""
+    conf = c.get(c.path("board_configuration", board_id=bid)) or {}
+    fid = str((conf.get("filter") or {}).get("id") or "")
+    jql = strip_order((c.get(c.path("filter", filter_id=fid)) or {}).get("jql") or "") if fid else ""
+    cols = []
+    for col in ((conf.get("columnConfig") or {}).get("columns") or []):
+        names = [status_ids.get(str(st.get("id")), "") for st in col.get("statuses") or []]
+        cols.append({"name": col.get("name") or "", "statuses": [n for n in names if n]})
+    try:
+        qf = c.get(c.path("board_quickfilters", board_id=bid), "maxResults=50") or {}
+        quick = [{"id": str(q.get("id")), "name": q.get("name") or "", "jql": q.get("jql") or ""}
+                 for q in qf.get("values") or [] if isinstance(q, dict)]
+    except jira_api.ApiError:
+        quick = []
+    return {"id": bid, "name": conf.get("name") or bid, "type": conf.get("type") or "",
+            "filterId": fid, "jql": jql, "columns": cols, "quickFilters": quick}
+
+
+def boards_cache_path() -> str:
+    return os.path.join(jira_api.CACHE_DIR, jira_config.BOARDS_FILE)
+
+
+def main_columns(cfg) -> str:
+    ep = next((e for e in cfg.endpoints if plain_issue_job(e) and e.get("name") == "all"),
+              next((e for e in cfg.endpoints if plain_issue_job(e)), {}))
+    return ep.get("columns") or ""
+
+
+def edit_pinned_boards(op: str, ids: list) -> int:
+    """--pin-board add|remove ID...: config.json pinnedBoards + one custom-jql
+    job per board (board-ID: the board's filter JQL, scope ANDed in by the
+    sync; scrum boards start at open sprints only) publishing into
+    BOARD_DIR, + the board's columns / quick filters in boards.json. Add =
+    3 requests per board, once. Prints {ok, boards, jobs}."""
+    ids = [str(x).strip() for x in ids if str(x).strip()]
+    if op not in ("add", "remove") or not ids:
+        print(json.dumps({"ok": False, "problems": ["--pin-board add|remove ID..."]}))
+        return 1
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    cache = jira_api.read_json(boards_cache_path(), {})
+    cache = cache if isinstance(cache, dict) else {}
+    eps = [dict(e) for e in cfg.endpoints]
+    cur = config_list(cfg, "pinnedBoards")
+    problems = []
+    if op == "add":
+        d = jira_api.read_json(jira_api.DIRECTORY_FILE, {})
+        status_ids = (d or {}).get("statusIds") or {}
+        if not status_ids:
+            problems.append("directory has no status ids yet - run the directory job (columns stay empty)")
+        c = jira_api.Client.from_config(cfg)
+        for bid in ids:
+            try:
+                info = board_info(c, bid, status_ids)
+            except jira_api.ApiError as err:
+                problems.append(f"board {bid}: {err}")
+                continue
+            if not info["jql"]:
+                problems.append(f"board {bid}: no filter JQL readable")
+                continue
+            cache[bid] = info
+            old = next((e for e in eps if e.get("name") == f"board-{bid}"), None)
+            # re-pinning keeps the job's own schedule, columns and sprint switch
+            sprint = old.get("sprintOnly", False) if old else info["type"] == "scrum"
+            job = board_job(bid, info["jql"], sprint, (old or {}).get("columns") or main_columns(cfg))
+            if old is None:
+                eps.append(job)
+            else:
+                if old.get("jql") != job["jql"]:
+                    reset_job(job["name"])
+                eps[eps.index(old)] = {**old, **job, "window": old.get("window", job["window"]),
+                                       "enabled": old.get("enabled", True)}
+            if bid not in cur:
+                cur.append(bid)
+    else:
+        cur = [b for b in cur if b not in ids]
+        names = {f"board-{b}" for b in ids}
+        for e in [e for e in eps if e.get("name") in names]:
+            try:
+                os.unlink(job_path(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT, e))
+            except OSError:
+                pass
+            reset_job(e["name"])
+        eps = [e for e in eps if e.get("name") not in names]
+        for b in ids:
+            cache.pop(b, None)
+    jira_config.save({"pinnedBoards": cur, "endpoints": eps})
+    jira_api.write_json(boards_cache_path(), cache, mode=0o644)
+    ok = op == "remove" or all(b in cur for b in ids)
+    print(json.dumps({"ok": ok, "boards": cur, "jobs": [f"board-{b}" for b in cur], "problems": problems}))
+    return 0 if ok else 1
+
+
+def board_sprint(args: list) -> int:
+    """--board-sprint ID on|off: a board job's open-sprints-only switch."""
+    if len(args) != 2 or args[1] not in ("on", "off"):
+        print(json.dumps({"ok": False, "problems": ["--board-sprint ID on|off"]}))
+        return 1
+    cfg = jira_config.load()
+    eps = [dict(e) for e in cfg.endpoints]
+    ep = next((e for e in eps if e.get("name") == f"board-{args[0]}"), None)
+    if not ep or not ep.get("boardJql"):
+        print(json.dumps({"ok": False, "problems": [f"board {args[0]} is not pinned"]}))
+        return 1
+    on = args[1] == "on"
+    ep.update(jql=board_job(args[0], ep["boardJql"], on, "")["jql"], sprintOnly=on)
+    reset_job(ep["name"])
+    jira_config.save({"endpoints": eps})
+    print(json.dumps({"ok": True, "board": args[0], "sprintOnly": on}))
+    return 0
+
+
+def board_quickfilter(args: list) -> int:
+    """--board-quickfilter ID QF...: the board job's JQL AND each picked quick
+    filter's JQL (boards.json), inside the scope, fields=key -> {ok, keys}.
+    The window narrows the board's rows to them (quick filters are JQL: the
+    app can't evaluate them itself)."""
+    if len(args) < 2:
+        print(json.dumps({"ok": False, "problems": ["--board-quickfilter ID QF..."]}))
+        return 1
+    bid, qids = args[0], args[1:]
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    ep = next((e for e in cfg.endpoints if e.get("name") == f"board-{bid}"), None)
+    info = (jira_api.read_json(boards_cache_path(), {}) or {}).get(bid) or {}
+    qfs = {q.get("id"): q for q in info.get("quickFilters") or []}
+    scope = jira_config.scope_projects(team)
+    if not ep or not scope:
+        print(json.dumps({"ok": False, "problems": [f"board {bid} is not pinned" if not ep else jira_config.NO_SCOPE]}))
+        return 1
+    clauses = [f"({ep['jql']})"] + [f"({strip_order(qfs[q]['jql'])})" for q in qids if q in qfs and qfs[q].get("jql")]
+    clauses.append("project in (" + ", ".join(f'"{jira_config.jql_quote(p)}"' for p in scope) + ")")
+    jql = " AND ".join(clauses)
+    c = jira_api.Client.from_config(cfg)
+    keys = []
+    try:
+        for got, _, _ in c.search_pages(jql, "key", max_total=int(ep.get("maxTotal") or 10000)):
+            keys += [i.get("key") for i in got if i.get("key")]
+    except jira_api.ApiError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)], "jql": jql}))
+        return 1
+    print(json.dumps({"ok": True, "keys": keys, "jql": jql}))
+    return 0
+
+
+def import_filters() -> int:
+    """--import-filters: GET /filter/favourite -> a custom-jql job per filter
+    (filter-ID, ORDER BY dropped; the sync ANDs the scope in). Existing
+    filter jobs keep their schedule / columns; a changed JQL starts over.
+    Prints {ok, added, updated, filters: [{id, name, job}]}."""
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    c = jira_api.Client.from_config(cfg)
+    try:
+        got = c.get(c.path("favourite_filters")) or []
+    except jira_api.ApiError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    eps = [dict(e) for e in cfg.endpoints]
+    added, updated, out = 0, 0, []
+    for f in got if isinstance(got, list) else []:
+        fid, jql = str(f.get("id") or ""), strip_order(f.get("jql") or "")
+        if not fid or not jql:
+            continue
+        name = f"filter-{fid}"
+        title = re.sub(r"[^A-Za-z0-9 ._-]+", "", f.get("name") or name).strip() or name
+        old = next((e for e in eps if e.get("name") == name), None)
+        if old is None:
+            eps.append({"name": name, "type": "issues", "jql": jql, "file": f"{title}.json",
+                        "filterId": fid, "window": "30m", "projects": "*", "enabled": True,
+                        "columns": main_columns(cfg)})
+            added += 1
+        elif old.get("jql") != jql:
+            old["jql"] = jql
+            reset_job(name)
+            updated += 1
+        out.append({"id": fid, "name": f.get("name") or "", "job": name})
+    files = [e.get("file") for e in eps if e.get("file")]
+    for e in eps:   # two filters with one title: the id keeps the files apart
+        if e.get("filterId") and files.count(e.get("file")) > 1:
+            e["file"] = f"{e['file'][:-5]} {e['filterId']}.json"
+    jira_config.save({"endpoints": eps})
+    print(json.dumps({"ok": True, "added": added, "updated": updated, "filters": out}))
+    return 0
+
+
+ME_FILE = "me.json"
+
+
+def me(cfg) -> set:
+    """The Jira user's names as the cache writes them (person(): Server
+    username / Cloud display name), from /myself once, then cached."""
+    path = os.path.join(jira_api.CACHE_DIR, ME_FILE)
+    got = jira_api.read_json(path, {})
+    if not got:
+        got = jira_api.Client.from_config(cfg).get("/rest/api/2/myself") or {}
+        got = {k: got.get(k) for k in ("name", "displayName", "accountId", "emailAddress")}
+        jira_api.write_json(path, got, mode=0o644)
+    return {v for v in (got.get("name"), got.get("displayName")) if v}
+
+
+MY_WORK = [("mine", "Assigned to me"), ("reported", "Reported by me"), ("today", "Updated today")]
+WATCHING_JOB = "mywork-watching"
+
+
+def ensure_watching_job(cfg) -> bool:
+    """MY WORK ▸ Watching needs Jira (watcher = currentUser()): a custom-jql
+    job writing MY_WORK_DIR/watching.json, added once. True = just added."""
+    if any(e.get("name") == WATCHING_JOB for e in cfg.endpoints):
+        return False
+    eps = [dict(e) for e in cfg.endpoints] + [{
+        "name": WATCHING_JOB, "type": "issues", "jql": "watcher = currentUser()", "file": "watching.json",
+        "sideDir": jira_config.MY_WORK_DIR, "window": "15m", "projects": "*", "enabled": True,
+        "columns": main_columns(cfg)}]
+    jira_config.save({"endpoints": eps})
+    return True
+
+
+def my_work() -> int:
+    """--my-work: the sidebar's MY WORK views, local filters over the issue
+    cache (no request but /myself once) -> MY_WORK_DIR/<view>.json.
+    Prints {ok, dir, views: [{id, title, file, count}]}."""
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+        names = me(cfg)
+    except (jira_config.ConfigError, jira_api.ApiError) as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    d = side_dir(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT, jira_config.MY_WORK_DIR)
+    main_ep = next((e for e in cfg.endpoints if plain_issue_job(e) and e.get("name") == "all"),
+                   next((e for e in cfg.endpoints if plain_issue_job(e)), {}))
+    _, pkeys = job_fields(main_ep, team)
+    cache = jira_api.read_json(jira_api.CACHE_FILE, {})
+    items = [e for e in (cache.values() if isinstance(cache, dict) else []) if isinstance(e, dict)]
+    today = time.strftime("%Y-%m-%d")
+    tests = {"mine": lambda e: e.get("assignee") in names,
+             "reported": lambda e: e.get("reporter") in names,
+             "today": lambda e: str(e.get("updated") or "").startswith(today)}
+    views = []
+    for vid, title in MY_WORK:
+        rows = shape(sort_updated_desc([e for e in items if tests[vid](e)]), pkeys)
+        jira_api.write_json(os.path.join(d, f"{vid}.json"), rows, mode=0o644)
+        views.append({"id": vid, "title": title, "file": f"{vid}.json", "count": len(rows)})
+    # Watching: its own job's file (polled; None = not fetched yet)
+    added = ensure_watching_job(cfg)
+    got = jira_api.read_json(os.path.join(d, "watching.json"), None)
+    views.append({"id": "watching", "title": "Watching", "file": "watching.json", "job": WATCHING_JOB,
+                  "count": len(got) if isinstance(got, list) else None, "jobAdded": added})
+    print(json.dumps({"ok": True, "dir": d, "views": views}))
+    return 0
+
+
 def release_view_file(project: str, name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in f"{project}-{name}")
     return safe.strip() + ".json"
@@ -1469,6 +1843,16 @@ def main(argv: list) -> int:
         return label_view(o["label_view"])
     if o.get("pin_label"):
         return edit_pinned_labels(*o["pin_label"])
+    if o.get("pin_board"):
+        return edit_pinned_boards(*o["pin_board"])
+    if o.get("board_quick") is not None:
+        return board_quickfilter(o["board_quick"])
+    if o.get("board_sprint") is not None:
+        return board_sprint(o["board_sprint"])
+    if o.get("import_filters"):
+        return import_filters()
+    if o.get("my_work"):
+        return my_work()
     if o["favorite"]:
         return edit_pins("favorites", *o["favorite"])
     if o["blacklist"]:
@@ -1714,7 +2098,8 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
             say(f"failed: {err} - progress kept; the next run resumes", SYNC)
         counts = publish_plain(ctx)     # partial data is still better than none
         record(SYNC, started, window, err, curl, (res or {}).get("total"), ctx.sync_wsec(),
-               extra=None if err else {"syncedProjects": ctx.sync_projects()})
+               extra=None if err else {"syncedProjects": ctx.sync_projects(),
+                                       "syncedFields": getattr(ctx, "filled", None) or ctx.sync_fields()})
         for ep in ctx.plain:
             record(ep["name"], started, window, err, curl, counts.get(ep["name"]),
                    jira_config.parse_window(ep.get("window", "10m")))
