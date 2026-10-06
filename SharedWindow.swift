@@ -501,6 +501,7 @@ final class SharedWindow {
         current = v
         last = v
         if v.isJira { lastJira = v }
+        PaneNav.shared.track(m.slotWindow)
         controller.log("shared window: \(v.rawValue)" + (stack.isEmpty ? "" : " (back: \(stack.map(\.rawValue).joined(separator: " > ")))"))
     }
 
@@ -594,7 +595,8 @@ final class SharedWindow {
     // the keyboard: then L = the previous view, W = the view switcher
     // (ViewSwitcherPanel), T = the terminal panel, B = sidebar ⇄ icon rail
     // (Cmd+\), Esc = cancel; Ctrl+B
-    // twice = a real Ctrl+B for the pane (vim's page-up, the shell). The
+    // twice = a real Ctrl+B for the pane (vim's page-up, the shell), Ctrl+B
+    // then Ctrl+H/J/K/L = the real key (plain Ctrl+H/J/K/L moves panes). The
     // prefix lapses after 1.5 s. Every member's key monitor asks here first
     // (PopupWindow.keyInterceptor). Returns true = the key was used.
     func prefixKey(_ e: NSEvent, in w: NSWindow) -> Bool {
@@ -614,7 +616,16 @@ final class SharedWindow {
             prefixHeldKey = e.keyCode
             return true
         }
-        guard armed else { return false }
+        // Ctrl+H / J / K / L: the pane on that side (PaneNav); after the
+        // prefix the pane gets the real key instead (shell Ctrl+L, a text
+        // field's Ctrl+H)
+        if mods == .control, let dir = PaneDir(keyCode: e.keyCode) {
+            if armed { prefixArmedAt = nil; return false }
+            return PaneNav.shared.move(dir, in: w)
+        }
+        // a sidebar with the keyboard takes its keys before the view's own
+        // handlers (jira's list, Confluence / Compare Ctrl+N/P)
+        guard armed else { return (w.firstResponder as? PopupTabsBar)?.handleNavKey(e) ?? false }
         prefixArmedAt = nil
         prefixHeldKey = e.keyCode
         switch e.charactersIgnoringModifiers?.lowercased() ?? "" {

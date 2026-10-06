@@ -1216,8 +1216,8 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         func lines(_ v: String) -> [String] {
             shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
         }
-        let own = lines("ai"), all = lines("all")
-        let text = (own.isEmpty ? [] : own) + (all.isEmpty ? [] : ["", "Everywhere:"] + all)
+        let own = lines("ai")
+        let text = own + sharedShortcutGroups().flatMap { g in ["", g.0 + ":"] + g.1.map { "\($0.keys) — \($0.what)" } }
         let a = NSAlert()
         a.messageText = "AI Shortcuts"
         a.informativeText = text.isEmpty ? "Add \"ai: keys\" = \"what\" lines to [shortcuts] in commands.toml."
@@ -1241,4 +1241,27 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     Describe what the model should do with the text it is given.
     Return ONLY the result — no commentary, no preamble.
     """
+}
+
+// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): rules, your text, the answer
+extension AIWindow: PaneProvider {
+    var navPanes: [NavPane] {
+        var out: [NavPane] = []
+        if let bar = pills, bar.vertical {
+            out.append(NavPane("sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
+        }
+        out.append(NavPane("input", inScroll, focus: { [weak self] in
+            guard let self else { return }
+            self.window.makeFirstResponder(self.input)
+        }))
+        if let web, !web.isHidden {
+            out.append(NavPane("answer", web))
+        } else {
+            out.append(NavPane("answer", outScroll, focus: { [weak self] in
+                guard let self else { return }
+                self.window.makeFirstResponder(self.output)
+            }))
+        }
+        return out
+    }
 }

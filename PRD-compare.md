@@ -166,8 +166,8 @@ reached like the other views:
    lined up, scrolled to the first difference.
 2. Ctrl+N / Ctrl+P jump between differences. The thumbnail on the left
    shows where they all are.
-3. Ctrl+R / Ctrl+L (or the gutter arrows) copy the current section to the
-   right / left. Or type in either pane.
+3. Opt+→ / Opt+← (or the gutter arrows; Ctrl+R = right too) copy the current
+   section to the right / left. Or type in either pane.
 4. Cmd+S saves the focused side. A dot on the session pill marks unsaved edits.
 5. Hide the window (Cmd+W, ✕, Hyper+N, focus loss). Nothing is lost. Hyper+N
    brings it back exactly as it was.
@@ -181,7 +181,7 @@ reached like the other views:
 3. Return on a file pair opens Text Compare **inside the view** (a back
    step). Esc or the header "back" returns to the folder, with the cursor
    on the same row.
-4. Copy files or folders to the other side (Ctrl+R / Ctrl+L, right-click, or
+4. Copy files or folders to the other side (Opt+→ / Opt+←, right-click, or
    drag across). Cmd+Z undoes.
 
 #### Wireframe A: start page (empty session)
@@ -304,7 +304,7 @@ against BC's own menus (§10).
 | Syntax highlighting | ⏭ | later; not needed to spot differences |
 | Over-under layout, webpages, hex / alignment details | ❌ | |
 | **Text Compare: edit** | | |
-| Copy to Right / Left (section or selected lines) | ✅ | Ctrl+R / Ctrl+L + gutter arrows |
+| Copy to Right / Left (section or selected lines) | ✅ | Opt+→ / Opt+← (Ctrl+R) + gutter arrows |
 | Copy Line to Right / Left | ✅ | Ctrl+Opt+R / Ctrl+Opt+L |
 | Edit either side, Undo / Redo | ✅ | rule 1 edit keys; one undo stack per side |
 | Save / Save As (per side), Save both | ✅ | keeps encoding, BOM, line endings, permissions |
@@ -325,7 +325,7 @@ against BC's own menus (§10).
 | Two trees side by side, aligned by name | ✅ | case per volume (APFS default: insensitive) |
 | Status colors + center glyph (= ≠ ≈ < > orphan) | ✅ | legend in Cmd+/ card |
 | Show All / Differences / Same / Orphans / Left newer / Right newer | ✅ | Cmd+1…6 |
-| Expand / Collapse, Expand All / Collapse All | ✅ | → / ←, Opt+→ recursive |
+| Expand / Collapse, Expand All / Collapse All | ✅ | → / ←, Shift+→ recursive |
 | Ignore Folder Structure (flatten) | ✅ | |
 | Name filter (include / exclude globs) + gitignore rules | ✅ | reuses `IgnoreRules`; `[compare] ignore-file`, `use-gitignore` |
 | Hidden files toggle | ✅ | Cmd+Shift+. (file browser key) |
@@ -358,7 +358,7 @@ against BC's own menus (§10).
 - **Important vs unimportant.** A line pair that's equal after normalizing
   but differs raw = unimportant (blue). Any other change = important (red).
 - **Sections.** A run of adjacent changed rows = one section: the unit for
-  Ctrl+N / P, the gutter arrows and Ctrl+R / L.
+  Ctrl+N / P, the gutter arrows and Opt+→ / Opt+←.
 - **Live.** Edits re-diff only the touched window (the section ± 50
   unchanged lines). A full re-diff runs off main. A generation counter drops
   stale results (the `runGen` pattern from the AI view).
@@ -405,7 +405,8 @@ default.
 | Ctrl+N / Ctrl+P | next / previous difference section | next / previous differing row |
 | ↑ ↓ / PgUp PgDn / Home End | move the cursor | move the cursor |
 | Tab | focus the other side | focus the other side |
-| Ctrl+R / Ctrl+L | copy section / selection to right / left | copy selected to right / left |
+| Opt+→ / Opt+← (Ctrl+R = right) | copy section / selection to right / left | copy selected to right / left (Ctrl+Opt+→ / ← = move) |
+| Ctrl+H / Ctrl+L | the left / right side as a pane (every view's pane keys) | same |
 | Ctrl+Opt+R / Ctrl+Opt+L | copy the current line | move selected to right / left |
 | Cmd+Z / Cmd+Shift+Z | undo / redo (edits, copies) | undo the last copy / move / trash / rename |
 | Cmd+S / Cmd+Opt+S | save the focused side / both | — |
@@ -598,7 +599,7 @@ the session closed or the window hidden. Temp-file sessions are marked
 | A3 | Patience / histogram anchoring + Myers gets ≥ 95 % parity with git histogram. | KR4 corpus. |
 | A4 | Hiding the window is an acceptable "done" for `git difftool --wait`. | Owner tries a `--dir-diff`. |
 | A5 | Shared-window view (not a tool panel) is the right home: it should be hidden with the other views, not float on its own. | Owner confirms (this PRD's §7.1 dismissal table). |
-| A6 | Ctrl+R / Ctrl+L / Ctrl+N / Ctrl+P don't clash with anything the owner relies on inside the view. | `ws-settings` clash report (`conflicts.py`) after adding the `[shortcuts]` rows. |
+| A6 | Ctrl+R / Ctrl+N / Ctrl+P / Opt+→ / Opt+← don't clash with anything the owner relies on inside the view (Ctrl+L became the pane key, 2026-10-06: PRD-keyboard.md). | `ws-settings` clash report (`conflicts.py`) after adding the `[shortcuts]` rows. |
 | A7 | A 2 s timestamp tolerance + content `auto` gives no false "same" in practice. | Folder tests with same-size, same-second edits (content check covers it when times differ; equal times + equal size = "same" without content, as in BC's quick test). |
 
 ## 8. Release

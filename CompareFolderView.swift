@@ -410,8 +410,8 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         buttons = [
             button("chevron.up", "Previous difference (⌃P)") { [weak self] in self?.jumpDiff(-1) },
             button("chevron.down", "Next difference (⌃N)") { [weak self] in self?.jumpDiff(1) },
-            button("arrow.right.to.line", "Copy the selection to the right (⌃R)") { [weak self] in self?.copy(from: .left) },
-            button("arrow.left.to.line", "Copy the selection to the left (⌃L)") { [weak self] in self?.copy(from: .right) },
+            button("arrow.right.to.line", "Copy the selection to the right (⌥→)") { [weak self] in self?.copy(from: .left) },
+            button("arrow.left.to.line", "Copy the selection to the left (⌥←)") { [weak self] in self?.copy(from: .right) },
             flatten,
             button("arrow.up.and.down.text.horizontal", "Expand / collapse all (⌥→ / ⌥←)") { [weak self] in self?.toggleAll() },
             button("chevron.backward", "Back (⌘[)") { [weak self] in self?.goBack() },
@@ -911,8 +911,12 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         switch code {
         case 45 where ctrl && !cmd: jumpDiff(1)                                  // Ctrl+N
         case 35 where ctrl && !cmd: jumpDiff(-1)                                 // Ctrl+P
+        // copy across: Opt+→ / Opt+← (Ctrl+Opt = move), Ctrl+R too; plain
+        // Ctrl+L is the pane move now (SharedWindow)
         case 15 where ctrl && !cmd: opt ? transfer(from: .left, move: true) : copy(from: .left)     // Ctrl+R / Ctrl+Opt+R
-        case 37 where ctrl && !cmd: opt ? transfer(from: .right, move: true) : copy(from: .right)   // Ctrl+L / Ctrl+Opt+L
+        case 37 where ctrl && opt && !cmd: transfer(from: .right, move: true)                       // Ctrl+Opt+L
+        case 124 where opt && !cmd: ctrl ? transfer(from: .left, move: true) : copy(from: .left)    // Opt+→ / Ctrl+Opt+→
+        case 123 where opt && !cmd: ctrl ? transfer(from: .right, move: true) : copy(from: .right)  // Opt+← / Ctrl+Opt+←
         case 6 where cmd && !shift: undo()                                       // Cmd+Z (this session's own ops)
         case 51 where cmd: trash()                                               // Cmd+Delete
         case 18 where cmd, 19 where cmd, 20 where cmd, 21 where cmd, 23 where cmd, 22 where cmd:   // Cmd+1…6
@@ -945,13 +949,13 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         case 119: move(to: s.rows.count - 1, extend: shift)                      // End
         case 116: move(to: s.cursor - page, extend: shift)
         case 121: move(to: s.cursor + page, extend: shift)
-        case 124 where !cmd && !ctrl:                                            // →: expand (Opt = all below)
-            if let n = node(at: s.cursor), n.isDir, !n.expanded { toggleExpand(s.cursor, recursive: opt, to: true) }
-            else if opt { t_expandAll(true) }
+        case 124 where !cmd && !ctrl:                                            // →: expand (Shift = all below)
+            if let n = node(at: s.cursor), n.isDir, !n.expanded { toggleExpand(s.cursor, recursive: shift, to: true) }
+            else if shift { t_expandAll(true) }
             else { move(to: s.cursor + 1) }
         case 123 where !cmd && !ctrl:                                            // ←: collapse, else up to the parent
-            if let n = node(at: s.cursor), n.isDir, n.expanded { toggleExpand(s.cursor, recursive: opt, to: false) }
-            else if opt { t_expandAll(false) }
+            if let n = node(at: s.cursor), n.isDir, n.expanded { toggleExpand(s.cursor, recursive: shift, to: false) }
+            else if shift { t_expandAll(false) }
             else if let p = node(at: s.cursor)?.parent, let i = s.rows.firstIndex(where: { $0.node === p }) { move(to: i) }
         case 36, 76: activate(s.cursor)                                          // Return
         case 49 where !cmd && !ctrl && !opt: toggleQuickLook()                   // Space: Quick Look
@@ -1137,8 +1141,8 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
             m.addItem(menuItem(n.left != nil && n.right != nil ? "Open (Compare)" : "Open in Text Compare") { [weak self] in self?.activate(row) })
         }
         m.addItem(.separator())
-        m.addItem(menuItem("Copy to Right  ⌃R", enabled: n.left != nil) { [weak self] in self?.copy(from: .left) })
-        m.addItem(menuItem("Copy to Left  ⌃L", enabled: n.right != nil) { [weak self] in self?.copy(from: .right) })
+        m.addItem(menuItem("Copy to Right  ⌥→", enabled: n.left != nil) { [weak self] in self?.copy(from: .left) })
+        m.addItem(menuItem("Copy to Left  ⌥←", enabled: n.right != nil) { [weak self] in self?.copy(from: .right) })
         m.addItem(menuItem("Move to Right  ⌃⌥R", enabled: n.left != nil) { [weak self] in self?.transfer(from: .left, move: true) })
         m.addItem(menuItem("Move to Left  ⌃⌥L", enabled: n.right != nil) { [weak self] in self?.transfer(from: .right, move: true) })
         m.addItem(.separator())
@@ -1469,5 +1473,31 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         default: return "unknown folder action \(a)"
         }
         return nil
+    }
+}
+
+// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): the tree's two sides, the
+// name filter when shown
+extension FolderPage {
+    var navPanes: [NavPane] {
+        var out: [NavPane] = []
+        if !nameBox.isHidden { out.append(.area("names", nameBox)) }
+        for side in [CompareSide.left, .right] {
+            out.append(NavPane(side.rawValue, scroll, part: { [weak self] in
+                guard let self else { return .zero }
+                let v = self.scroll.documentVisibleRect
+                let r = NSRect(x: self.tree.sideX(side), y: v.minY, width: self.tree.paneW, height: v.height)
+                return self.scroll.convert(r, from: self.tree)
+            }, focus: { [weak self] in
+                guard let self, let s = self.session else { return }
+                s.focus = side
+                self.focusTree()
+                self.sync()
+            }, owns: { [weak self] r in
+                guard let self else { return false }
+                return NavPane.inside(r, self.scroll) && self.session?.focus == side
+            }))
+        }
+        return out
     }
 }

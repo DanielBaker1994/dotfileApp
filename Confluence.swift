@@ -1720,8 +1720,8 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         func lines(_ v: String) -> [String] {
             shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
         }
-        let own = lines("confluence"), all = lines("all")
-        let text = own + (all.isEmpty ? [] : ["", "Everywhere:"] + all)
+        let own = lines("confluence")
+        let text = own + sharedShortcutGroups().flatMap { g in ["", g.0 + ":"] + g.1.map { "\($0.keys) — \($0.what)" } }
         alert("Confluence Shortcuts", text.isEmpty
               ? "Add \"confluence: keys\" = \"what\" lines to [shortcuts] in commands.toml."
               : text.joined(separator: "\n"), buttons: ["OK"]) { _ in }
@@ -1734,5 +1734,23 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     init(_ t: WKScriptMessageHandler) { target = t }
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
         target?.userContentController(uc, didReceive: message)
+    }
+}
+
+// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): sidebar, search box,
+// results, page preview
+extension ConfluenceWindow: PaneProvider {
+    var navPanes: [NavPane] {
+        var out: [NavPane] = []
+        if let bar = sidebar, bar.vertical {
+            out.append(NavPane("sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
+        }
+        out.append(.area("search", textBox))
+        out.append(NavPane("results", tableScroll, focus: { [weak self] in
+            guard let self else { return }
+            self.window.makeFirstResponder(self.table)
+        }))
+        if let web { out.append(NavPane("preview", web)) }
+        return out
     }
 }

@@ -160,7 +160,7 @@ def app_label(text: str) -> tuple:
 
     "Cmd+Plus / Cmd+Minus", "Ctrl+Shift+H / J / K / L" (bare alternatives
     inherit the previous modifiers), "P D A S R C M T B I" (several keys),
-    "Esc Esc" (a sequence), "1-9" (a range), "↑ ↓ / Ctrl+N".
+    "Esc Esc" / "Ctrl+B L" (sequences), "1-9" (a range), "↑ ↓ / Ctrl+N".
     """
     chords, gestures = [], []
     prev_mods = None
@@ -178,6 +178,11 @@ def app_label(text: str) -> tuple:
             else:
                 gestures.append(alt)
             continue
+        if len(toks) == 2:                              # "Ctrl+B L": a prefix, then a key
+            first, then = _label_stroke(toks[0]), _label_stroke(toks[1])
+            if first and then and first.mods:
+                chords.append(Chord((first, then)))
+                continue
         got_any = False
         for tok in toks:
             m = re.fullmatch(r"(\d)-(\d)", tok)

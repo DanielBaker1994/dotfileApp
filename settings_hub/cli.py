@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from . import apply, catalog, chords, conflicts, doctor, export, favorites, paths, schema, search
+from . import apply, catalog, chords, conflicts, doctor, export, favorites, parity, paths, schema, search
 from . import rebind, undo, writer
 
 
@@ -234,6 +234,30 @@ def cmd_conflicts(a) -> int:
     return 0
 
 
+def cmd_parity(a) -> int:
+    cat = catalog.build(with_settings=False, only=["app"])
+    try:
+        found = parity.check(cat.keys, view=a.view)
+    except (OSError, ValueError) as e:
+        return err(f"parity data: {e}")
+    if a.view and not found:
+        return err(f"no view {a.view!r} in parity.toml", 2)
+    shown = found if a.all else [c for c in found if c.status == "missing"]
+    if a.json:
+        print(json.dumps([parity.as_json(c) for c in shown], indent=2, ensure_ascii=False))
+        return 0
+    if not shown:
+        print(f"nothing missing ({len(found)} expectations checked)")
+        return 0
+    _table([(c.status, c.view, c.kind, c.concept,
+             (", ".join(c.missing) if c.status != "have" else ", ".join(c.keys))
+             + (f"  — VS Code: {c.vscode}" if c.vscode else "") + (f"  — {c.reason}" if c.reason else ""))
+            for c in shown], [7, 15, 8, 34, 0])
+    gaps = sum(c.status == "missing" for c in found)
+    print(f"\n{gaps} missing of {len(found)} expectations (--all shows the met + waived ones too)")
+    return 0
+
+
 def cmd_export(a) -> int:
     cat = catalog.build()
     text = export.to_json(cat) if a.format == "json" else export.to_markdown(cat, not a.keys_only)
@@ -443,6 +467,11 @@ def main(argv=None) -> int:
     e.add_argument("--out")
     e.add_argument("--keys-only", action="store_true")
     e.set_defaults(fn=cmd_export)
+    pa = sub.add_parser("parity", help="VS Code parity: standard keys a view's panes are missing")
+    pa.add_argument("--view", help="one view (notes, files, jira, confluence, compare, compare-folders, ai)")
+    pa.add_argument("--all", action="store_true", help="also the expectations that are met or waived")
+    pa.add_argument("--json", action="store_true")
+    pa.set_defaults(fn=cmd_parity)
     d = sub.add_parser("doctor", help="sources, parse warnings, dead bindings")
     d.add_argument("--json", action="store_true")
     d.add_argument("--verbose", action="store_true")

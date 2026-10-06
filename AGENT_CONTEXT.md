@@ -143,6 +143,8 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `ensure` (4.5:1 against the real composited background)
 - `ConfigText.swift` — commands.toml's one-line TOML codec (`configEntry`,
   `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
+- `PaneGeometry.swift` + `PaneNav.swift` — Ctrl+H/J/K/L pane navigation + the
+  focus ring (see "Pane navigation"; `bin/run-tests.sh panes`)
 - `ProcessRun.swift` — `runProcess`: run a program to completion, stdin fed,
   stdout + stderr drained concurrently (Foundation only — the tested files use it)
 - Closure actions: `menuItem(title) { … }` (a `ClosureMenuItem` owns its
@@ -606,7 +608,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   line or -1 filler, kind same/changed/leftOnly/rightOnly + `important`;
   sections = runs of `isDiff` rows; `replace` → `TextSide.replace` →
   `rediff` = only ± `rediffContext` (50) same rows around the edit;
-  `copyRows` / `copySection` = Ctrl+R / L; per-side undo stacks), `CharDiff`
+  `copyRows` / `copySection` = Opt+→ / Opt+← (Ctrl+R); per-side undo stacks), `CharDiff`
   (the old AI `WordDiff`, moved here: `diff` / `changes` for the AI view,
   `marks` = changed spans for drawing), `BinaryCompare`.
   `ComparePane.swift`: `CompareSession` (one pair + view state: filter →
@@ -1155,14 +1157,15 @@ Line numbers drift; grep the symbol names (they're stable).
 | `showToast(_:symbol:)` | Raycast-style bottom-center pill (fade/rise, 1.4 s); used by Cmd+K copy; explicit frames, icon+text centered |
 | `PopupPlainWindow._cornerRadius` | makes the system window frame use `config.cornerRadius` (else macOS 26's 16pt frame peeks out around the card) |
 | `PopupChrome.closeButtonRect` | ✕ glyph far-left of the drag header (`PopupConfig.headerCloseButton`, default on; titled windows only); icon sits right of it (`leftInset`) |
-| `PopupFileBrowser.updatePartFocus` | which part has focus: filter bar (bright 2px outline) / list / preview (`partRing`); KVO on `firstResponder` |
+| `PopupFileBrowser.updatePartFocus` | the filter bar's 2px input outline while it has focus (the pane ring is PaneNav's); KVO on `firstResponder` |
 | `focusedVim()`, `vimRemote`, `vimEval`, `vimCommand` | nvim pane + RPC (`vimClient` → `NvimRPC`: ONE persistent msgpack-RPC socket, ~0.03 ms a call; it used to spawn `nvim --server` per call on the main thread) |
 | `browserHasFocus`, `browserActive` | file browser focus checks |
 
 ### handleKey order (first match wins)
 1. Esc streak reset on non-Esc key; Cmd+Opt+=/- font; Cmd+=/- resize.
-0. `PopupWindow.keyInterceptor` (the Ctrl+B prefix) before anything.
-2. `cmd || ctrl`: sheet edit keys → Ctrl+J/K pane focus → Ctrl+Tab = tab cycle
+0. `PopupWindow.keyInterceptor` (the Ctrl+B prefix, Ctrl+H/J/K/L panes, a
+   focused sidebar's keys: `SharedWindow.prefixKey`) before anything.
+2. `cmd || ctrl`: sheet edit keys → Ctrl+Tab = tab cycle
    (wraps) → Cmd+\\ sidebar rail → Ctrl+Shift+HJKL resize → vim-pane shortcuts →
    terminal (Cmd+C/V only) → Cmd+L → **file browser keys (Ctrl+N/P move,
    Cmd+K copy abs path, Cmd+A/C/V/X/Z)** → generic edit keys.
@@ -1191,7 +1194,8 @@ Line numbers drift; grep the symbol names (they're stable).
   (`listLeft` / `layoutListSidebar` shift field, filters, rows), AI rules,
   Files (`PopupFileBrowser.useSidebar`: pinned + Places = Recent, Arrived,
   Home, Desktop, Documents, Downloads), Confluence (Search / Favorites),
-  Compare sessions. No editor focus ring in notes. Buttons: only
+  Compare sessions. The pane with the keys (editor too) gets PaneNav's
+  silver ring. Buttons: only
   `.primary` is filled; normal / danger = outlines (`ThemedPushButton`).
   Jira detail: no header title, the page's first line = KEY — summary.
 - Prose mode (NotesProse.swift): ⌘⇧P / the Prose | nvim switch (bottom
@@ -1349,6 +1353,55 @@ worked example):
 7. Tool-panel hotkeys (Hyper+X) are NOT in `hotkeyModes` (no `hotkeyPrep`).
 8. After the edit: `./build.sh --build-only`, then reload aerospace.
 
+## Pane navigation (Ctrl+H/J/K/L) + the focus ring
+
+- Spec: `PRD-keyboard.md`. Owner's scheme (fixed): plain Ctrl+H/J/K/L moves
+  the keyboard between pane-like areas of every shared-window view; the
+  Ctrl+B prefix keys stay (L = previous view, W = view switcher, B = rail,
+  T = terminal). Ctrl+B then Ctrl+H/J/K/L = the pane gets the real key.
+- Entry: `SharedWindow.prefixKey` (the `keyInterceptor` both key paths ask
+  first) → `PaneNav.shared.move(dir, in: w)`. Providers: each slot member is
+  a `PaneProvider` (`navPanes`: `NavPane(id, view, part:, focus:, owns:,
+  intercept:)`, extensions at the end of PopupWindow.swift (notes / files /
+  jira; `PopupFileBrowser` adds its parts), CompareWindow.swift (+
+  `FolderPage`), Confluence.swift, AIWindow.swift, JiraDashboard.swift).
+  Panes are BIG areas (sidebar, editor, list, preview, terminal, a Compare
+  side); a pane's `view` is its outer view (the scroll view), `part` a
+  sub-rect (Compare's two sides share one document view).
+- Geometry (`PaneGeometry.next`, Foundation + CG, tested): candidates past
+  the center that OVERLAP on the other axis (diagonal = not a neighbour),
+  smallest gap (within 16 pt = a tie: the full-width notes terminal goes up
+  to the editor, not the 4 pt closer sidebar), then the larger overlap; the
+  way back retraces (`came`); nothing that way = key used, nothing happens.
+- nvim pane: `intercept` = `winnr('h') != winnr()` → `wincmd h` (vim's own
+  splits first, vim-tmux-navigator style). Notes' old Ctrl+J/K cycle
+  (`paneFocusKey`) is gone; `paneFocusMoved` keeps `focusedPane` (Cmd+C/V
+  routing) in step.
+- Ring: `PaneFocusRing`, one hairline overlay in the window's content view
+  (`track(w)` from `SharedWindow.present`: KVO firstResponder, key / resign,
+  resize, after every keyDown / mouse-up), shown only while the window is
+  key and the view has 2+ visible panes. `[app] pane-focus-color` (AARRGGBB,
+  default `8cc8ced8`) / `pane-focus-width` (1). The old 3pt accent drawer
+  borders stay hidden.
+- Sidebars (`PopupTabsBar`, vertical): focusable only through
+  `takeKeyboardFocus` (clicks never take the keys); `cursor` over the shown
+  pinned rows + tabs, drawn as a silver outline; `handleNavKey` (called from
+  `prefixKey`, before every view's own handlers): ↑ ↓ Ctrl+N/P Home End
+  PgUp PgDn, a letter = type-to-select, Return = `activate(row:)` then back
+  to the content, Space = activate + stay, Esc = back, Delete = close tab;
+  Cmd / Ctrl / Opt keys and Tab pass on.
+- Compare: copy across moved to Opt+→ / Opt+← (Ctrl+R stays; Ctrl+Opt+L/R =
+  line copy / folder move); folder expand-all-below = Shift+→ / ←.
+- Shortcut sheets: `sharedShortcutGroups()` = `[shortcuts]` "sidebar: …",
+  "preview: …", then "all: …" rows in every view's Cmd+/.
+- Hooks: `do:pane:h|j|k|l`, `do:pane:focus:ID`, `do:key:SPEC` (a real key
+  event into the current view, `CompareWindow.keyEvent` names; needs the
+  window key); state `pane` {focused, panes[{id, rect}], ring {pane, rect}}.
+- VS Code parity: `ws-settings parity [--view V] [--all] [--json]`
+  (`settings_hub/parity.py`, data `settings_hub/data/parity.toml`: pane
+  kinds per view, `[[expect]]` per kind, `[[waive]]`); matches chords from
+  the view's / "all" / the kind's [shortcuts] rows (keys, not meaning).
+
 ## Keyboard shortcuts (user-facing)
 
 - Esc: hides a view only where its kitchen sink "Esc Hides Window" is on
@@ -1367,7 +1420,8 @@ worked example):
   is — files `whereText`, notes / jira tab, Confluence / Compare / AI
   `whereText`; previous view pre-selected, 1-9, Return), T = the terminal
   panel, B = sidebar ⇄ icon rail (`PopupTabsBar.toggleRail`, = Cmd+\\),
-  Ctrl+B twice = the pane gets a real Ctrl+B. Lapses after 1.5 s.
+  Ctrl+B twice = the pane gets a real Ctrl+B; Ctrl+B then Ctrl+H/J/K/L = the
+  pane gets that real key. Lapses after 1.5 s.
   Auto-repeats of the key the prefix just used are swallowed
   (`prefixHeldKey`): a held L used to type "l" into the new view.
   Hooks `do:switcher | switcher-hide`, state `viewSwitcher`.
@@ -1407,7 +1461,8 @@ worked example):
 - File browser multi-select (`FileListPane.marked` + cursor `selection`,
   `selectedRows`): Shift-click / Shift+Up/Down range, Cmd-click toggle; a
   drag or right-click inside it acts on all of it; setting `rows` clears it.
-- Ctrl+J/K: move focus between editor / browser / terminal panes.
+- Ctrl+H/J/K/L: the pane on that side, every shared-window view (see "Pane
+  navigation").
 
 ## Theme system (keep every window on it)
 

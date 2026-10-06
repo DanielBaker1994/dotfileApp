@@ -143,6 +143,8 @@ enum CompareRecent {
 
 // the start page's Recent list, drawn (cursor pill + accent edge like every list)
 final class CompareRecentList: NSView {
+    // a pane (Ctrl+H/J/K/L): the window's keys drive it while it has focus
+    override var acceptsFirstResponder: Bool { true }
     var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
     var rows: [CompareRecentEntry] = [] {
         didSet { selection = min(selection, max(0, rows.count - 1)); needsDisplay = true; refreshMissing() }
@@ -1878,7 +1880,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // the rows Ctrl+R / Ctrl+L act on: a row selection, else the cursor's section
+    // the rows Opt+→ / Opt+← (Ctrl+R) act on: a row selection, else the cursor's section
     private func targetRows(_ s: CompareSession) -> Range<Int>? {
         if let a = s.anchor {
             let lo = s.modelRow(min(a, s.cursor)), hi = s.modelRow(max(a, s.cursor))
@@ -1889,7 +1891,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return nil
     }
 
-    // Ctrl+R (from: left) / Ctrl+L (from: right)
+    // Opt+→ / Ctrl+R (from: left) / Opt+← (from: right)
     func copyAcross(from: CompareSide) {
         guard let s = session else { return }
         commitEditor()
@@ -2508,8 +2510,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
                 ("Next Difference  ⌃N", { f.jumpDiff(1) }),
                 ("Previous Difference  ⌃P", { f.jumpDiff(-1) }),
                 ("Open Pair (Text Compare)  ⏎", { if let s = f.session { f.activate(s.cursor) } }),
-                ("Copy to Right  ⌃R", { f.copy(from: .left) }),
-                ("Copy to Left  ⌃L", { f.copy(from: .right) }),
+                ("Copy to Right  ⌥→", { f.copy(from: .left) }),
+                ("Copy to Left  ⌥←", { f.copy(from: .right) }),
                 ("Move to Right  ⌃⌥R", { f.transfer(from: .left, move: true) }),
                 ("Move to Left  ⌃⌥L", { f.transfer(from: .right, move: true) }),
                 ("Rename…  F2", { f.beginRename() }),
@@ -2539,8 +2541,8 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         a += [
             ("Next Difference  ⌃N", { [weak self] in self?.jumpSection(1) }),
             ("Previous Difference  ⌃P", { [weak self] in self?.jumpSection(-1) }),
-            ("Copy to Right  ⌃R", { [weak self] in self?.copyAcross(from: .left) }),
-            ("Copy to Left  ⌃L", { [weak self] in self?.copyAcross(from: .right) }),
+            ("Copy to Right  ⌥→", { [weak self] in self?.copyAcross(from: .left) }),
+            ("Copy to Left  ⌥←", { [weak self] in self?.copyAcross(from: .right) }),
             ("Copy Line to Right  ⌃⌥R", { [weak self] in self?.copyLine(from: .left) }),
             ("Copy Line to Left  ⌃⌥L", { [weak self] in self?.copyLine(from: .right) }),
             ("Edit Section  ⏎", { [weak self] in self?.beginEdit() }),
@@ -2643,7 +2645,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         let text: ShortcutsOverlay.Group = ("Text Compare", items("compare"))
         let folder: ShortcutsOverlay.Group = ("Folder Compare", items("compare-folders"))
         let modes = session?.folder != nil ? [folder, text] : [text, folder]
-        var groups = modes + [("Everywhere", items("all"))]
+        var groups = modes + sharedShortcutGroups()
         if !groups.contains(where: { !$0.items.isEmpty }) {
             groups = [("Compare", [("Cmd+/", "add \"compare: keys\" = \"what\" lines to [shortcuts] in commands.toml")])]
         }
@@ -2712,8 +2714,12 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         switch code {
         case 45 where ctrl && !cmd: jumpSection(1)                                // Ctrl+N
         case 35 where ctrl && !cmd: jumpSection(-1)                               // Ctrl+P
+        // copy across: Opt+→ / Opt+← (WinMerge), Ctrl+R too; plain Ctrl+L is
+        // the pane move now (SharedWindow), Ctrl+Opt+L/R copy one line
         case 15 where ctrl && !cmd: opt ? copyLine(from: .left) : copyAcross(from: .left)     // Ctrl+R / Ctrl+Opt+R
-        case 37 where ctrl && !cmd: opt ? copyLine(from: .right) : copyAcross(from: .right)   // Ctrl+L / Ctrl+Opt+L
+        case 37 where ctrl && opt && !cmd: copyLine(from: .right)                             // Ctrl+Opt+L
+        case 124 where opt && !cmd && !ctrl: copyAcross(from: .left)                          // Opt+→: to the right
+        case 123 where opt && !cmd && !ctrl: copyAcross(from: .right)                         // Opt+←: to the left
         case 5 where ctrl && !cmd: openFind(.goTo)                                // Ctrl+G
         case 6 where cmd: undo(redo: shift)                                       // Cmd+Z / Cmd+Shift+Z
         case 1 where cmd: opt ? saveAll(s) { _ in } : save(s.focus)              // Cmd+S / Cmd+Opt+S
@@ -2933,4 +2939,47 @@ func copyText(_ s: String) {
     let pb = NSPasteboard.general
     pb.clearContents()
     pb.setString(s, forType: .string)
+}
+
+// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift)
+//
+// sessions sidebar; start page: the two path boxes, Recent's filter and
+// list; text compare: the two sides of the one pane view (focus = the
+// side, like Tab / ← →); folder compare: FolderPage's own.
+extension CompareWindow: PaneProvider {
+    var navPanes: [NavPane] {
+        var out: [NavPane] = []
+        if let bar = pills, bar.vertical {
+            out.append(NavPane("sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
+        }
+        if session == nil {
+            out += [NavPane.area("left-path", leftBox), NavPane.area("right-path", rightBox),
+                    NavPane.area("recent-filter", recentFilter)]
+            out.append(NavPane("recent", recentScroll, focus: { [weak self] in
+                guard let self else { return }
+                self.window.makeFirstResponder(self.recentList)
+            }))
+        } else if session?.folder != nil {
+            out += folderPage.navPanes
+        } else {
+            for side in [CompareSide.left, .right] {
+                out.append(NavPane(side.rawValue, scroll, part: { [weak self] in
+                    guard let self else { return .zero }
+                    let v = self.scroll.documentVisibleRect
+                    let r = NSRect(x: self.pane.paneX(side), y: v.minY, width: self.pane.paneW, height: v.height)
+                    return self.scroll.convert(r, from: self.pane)
+                }, focus: { [weak self] in
+                    guard let self, let s = self.session else { return }
+                    _ = self.commitEditor()
+                    s.focus = side
+                    self.window.makeFirstResponder(self.pane)
+                    self.syncAll()
+                }, owns: { [weak self] r in
+                    guard let self else { return false }
+                    return NavPane.inside(r, self.scroll) && self.session?.focus == side
+                }))
+            }
+        }
+        return out
+    }
 }

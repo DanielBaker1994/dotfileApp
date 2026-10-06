@@ -72,6 +72,9 @@ font-size = 16
 "screenshot: P D A" = "pencil, line, arrow"
 "screenshot: Mouse drag" = "select an area"
 "jira: 1-3" = "in the Cmd+K menu: run that action"
+"all: Ctrl+B L" = "previous view"
+"all: Ctrl+B W" = "view switcher"
+"sidebar: ↑ ↓" = "move through the rows"
 
 [settings-hub]
 layers = "app, aerospace, herdr, ghostty, vim"
@@ -289,6 +292,85 @@ class Catalog(Env):
         self.assertEqual(keys["1-3"]["chords"], ["1", "2", "3"])
         self.assertEqual(keys["Shift+click / Cmd+click / Cmd+A"]["chords"], ["Cmd+A"])
         self.assertEqual(keys["Mouse drag"]["kind"], "gesture")
+        # a prefix, then a key: ONE two-stroke chord (no bare Ctrl+B row)
+        self.assertEqual(keys["Ctrl+B L"]["chords"], ["Ctrl+B, L"])
+
+    def test_prefix_keys_are_no_clash(self):
+        rc, out, err = self.run_cli("conflicts", "--no-system")
+        self.assertNotIn("previous view", out + err)
+
+
+# ---------------------------------------------------------------- parity
+PARITY = r'''
+[views]
+files = ["window", "sidebar", "list"]
+jira = ["window", "list"]
+
+[[expect]]
+kind = "window"
+concept = "hide"
+vscode = "Cmd+W"
+keys = ["Cmd+W"]
+
+[[expect]]
+kind = "window"
+concept = "views"
+keys = ["Ctrl+B W"]
+
+[[expect]]
+kind = "sidebar"
+concept = "rows"
+keys = ["Up", "Down"]
+
+[[expect]]
+kind = "list"
+concept = "copy path"
+keys = ["Cmd+K | Cmd+C"]
+
+[[expect]]
+kind = "list"
+concept = "jump"
+keys = ["Home", "End"]
+
+[[waive]]
+view = "jira"
+concept = "jump"
+reason = "not yet"
+'''
+
+
+class Parity(Env):
+    def setUp(self):
+        super().setUp()
+        self.parity = os.path.join(self.fx, "parity.toml")
+        with open(self.parity, "w") as fh:
+            fh.write(PARITY)
+        self.env["WS_PARITY"] = self.parity
+
+    def test_have_missing_waived(self):
+        got = {(c["view"], c["concept"]): c for c in self.json_cli("parity", "--all")}
+        # "all:" rows count everywhere, the prefix sequence too
+        self.assertEqual(got[("files", "hide")]["status"], "have")
+        self.assertEqual(got[("jira", "views")]["status"], "have")
+        # "sidebar:" rows count for every view's sidebar
+        self.assertEqual(got[("files", "rows")]["status"], "have")
+        # either alternative: files lists Cmd+K, jira lists neither
+        self.assertEqual(got[("files", "copy path")]["status"], "have")
+        self.assertEqual(got[("jira", "copy path")]["status"], "missing")
+        self.assertEqual(got[("jira", "copy path")]["missing"], ["Cmd+K | Cmd+C"])
+        self.assertEqual(got[("files", "jump")]["status"], "missing")
+        self.assertEqual(got[("jira", "jump")]["status"], "waived")
+        self.assertEqual(got[("jira", "jump")]["reason"], "not yet")
+
+    def test_default_shows_only_gaps(self):
+        rows = self.json_cli("parity")
+        self.assertEqual({(c["view"], c["concept"]) for c in rows},
+                         {("jira", "copy path"), ("files", "jump")})
+        rc, out, _ = self.run_cli("parity", "--view", "files")
+        self.assertEqual(rc, 0)
+        self.assertIn("1 missing of 5", out)
+        rc, _, err = self.run_cli("parity", "--view", "nope")
+        self.assertEqual(rc, 2)
 
 
 # ---------------------------------------------------------------- §9.2

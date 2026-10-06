@@ -831,6 +831,16 @@ struct ShortcutEntry {
 }
 var shortcutEntries: [ShortcutEntry] = []
 
+// the [shortcuts] groups every view's Cmd+/ sheet ends with: the pane
+// kinds every view shares ("sidebar: …", "preview: …"), then "all: …"
+func sharedShortcutGroups() -> [ShortcutRows] {
+    func items(_ v: String) -> [(keys: String, what: String)] {
+        shortcutEntries.filter { $0.view == v }.map { ($0.keys, $0.what) }
+    }
+    return [("Sidebars", items("sidebar")), ("Previews & Pages", items("preview")), ("Everywhere", items("all"))]
+        .filter { !$0.1.isEmpty }
+}
+
 func loadCommands() -> [CommandSpec] {
     // app-level settings first — [app] may sit anywhere in the file
     applyAppConfigFromDisk()
@@ -1148,6 +1158,9 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("terminal-app") { settings.terminalApp = v }
     FilePopup.borderColor = hexColor(str("preview-border")) ?? FilePopup.defaultBorder
     FilePopup.borderWidth = str("preview-border-width").flatMap { Double($0) }.map { CGFloat(max(0, min($0, 8))) } ?? 2
+    // the focused pane's ring (PaneNav): Ctrl+H/J/K/L and clicks move it
+    PaneNav.ringColor = hexColor(str("pane-focus-color")) ?? PaneNav.defaultRingColor
+    PaneNav.ringWidth = str("pane-focus-width").flatMap { Double($0) }.map { CGFloat(max(0, min($0, 4))) } ?? 1
 }
 
 // MARK: - Theme presets (header icon menu ▸ Theme)
@@ -1415,7 +1428,7 @@ private let configBoolKeys: Set<String> = [
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
-    "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "preview-border-width": 0...8,
+    "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "preview-border-width": 0...8, "pane-focus-width": 0...4,
     "terminal-height": 40...4000, "sidebar-width": 0...600, "inspector-width": 0...800, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
@@ -1445,7 +1458,7 @@ private let configEnumKeys: [String: Set<String>] = [
 // Empty values are always allowed (they mean "use the default").
 private func configValueProblem(section: String, key: String, value: String) -> String? {
     guard !value.isEmpty else { return nil }
-    if section == "theme" {
+    if section == "theme" || (section == "app" && (key == "pane-focus-color" || key == "preview-border")) {
         return hexColor(value) == nil ? "'\(value)' is not a hex color (RRGGBB / AARRGGBB)" : nil
     }
     if section == "themes" {
@@ -2789,6 +2802,12 @@ final class SwitcherController: NSObject {
         commands = loadCommands()
         // Ctrl+B prefix inside the shared window (SharedWindow.prefixKey)
         PopupWindow.keyInterceptor = { [weak self] e, w in self?.slot.prefixKey(e, in: w) ?? false }
+        // Ctrl+H/J/K/L panes + the focus ring: the shared window's current view
+        PaneNav.shared.provider = { [weak self] w in
+            guard let self, let cur = self.slot.current, let m = self.slotMember(cur),
+                  m.slotWindow === w else { return nil }
+            return m as? PaneProvider
+        }
 
         popup.onFilter = { [weak self] query in
             self?.filter(query) ?? []
@@ -3490,6 +3509,29 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"esc-hides:VIEW:on|off\"}"
                 }
                 setEscHides(v, parts[2] == "on")
+            case _ where a.hasPrefix("pane:"):
+                // pane:h|j|k|l = Ctrl+H/J/K/L in the current view; pane:focus:ID
+                guard let cur = slot.current, let w = slotMember(cur)?.slotWindow else {
+                    return "{\"error\":\"no view shown\"}"
+                }
+                let arg = String(a.dropFirst(5))
+                if arg.hasPrefix("focus:") {
+                    guard PaneNav.shared.focus(String(arg.dropFirst(6)), in: w) else {
+                        return "{\"error\":\"no such pane\"}"
+                    }
+                } else if let d = PaneDir(rawValue: arg) {
+                    _ = PaneNav.shared.move(d, in: w)
+                } else {
+                    return "{\"error\":\"pane:h|j|k|l|focus:ID\"}"
+                }
+            case _ where a.hasPrefix("key:"):
+                // key:SPEC (ctrl+h, down, return, cmd+shift+z …): a real key
+                // event into the current view, through its key monitors
+                guard let cur = slot.current, let w = slotMember(cur)?.slotWindow,
+                      let e = CompareWindow.keyEvent(String(a.dropFirst(4)), window: w) else {
+                    return "{\"error\":\"no view shown / bad key\"}"
+                }
+                NSApp.postEvent(e, atStart: false)
             case _ where a.hasPrefix("header-style:"):
                 // live only (not written to commands.toml)
                 guard let st = HeaderStyle(rawValue: String(a.dropFirst(13))) else {
@@ -3531,6 +3573,8 @@ final class SwitcherController: NSObject {
             "paths": pathsWindow?.testState ?? ["shown": false,
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
+            // Ctrl+H/J/K/L: the current view's panes, the focused one, the ring
+            "pane": slot.current.flatMap { slotMember($0)?.slotWindow }.map { PaneNav.shared.testState($0) } ?? [:],
             "screenshot": screenshot.testState,
             "compare": { () -> [String: Any] in
                 var st = CompareWindow.current?.testState ?? ["shown": false, "sessions": [Any]()]
@@ -5650,7 +5694,7 @@ final class SwitcherController: NSObject {
         }
         var groups: [PopupWindow.ShortcutGroup] = []
         if let t = titles[view], !items(view).isEmpty { groups.append((t, items(view))) }
-        if !items("all").isEmpty { groups.append(("Everywhere", items("all"))) }
+        groups += sharedShortcutGroups()
         guard !groups.isEmpty else {
             w.showToast("No shortcuts listed — add a [shortcuts] section to commands.toml",
                         symbol: "keyboard")

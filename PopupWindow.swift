@@ -1627,6 +1627,118 @@ final class PopupTabsBar: NSView {
         clampScroll()
         needsDisplay = true
     }
+    // MARK: keyboard (the sidebar as a pane: Ctrl+H from the content)
+    //
+    // Clicks never give the bar the keyboard (a note click still lands in
+    // the editor); `takeKeyboardFocus` does (PaneNav). A cursor walks the
+    // shown pinned rows, then the tabs: ↑ ↓ / Ctrl+N / Ctrl+P, Home / End /
+    // PgUp / PgDn, a letter = the next row starting with it; Return opens
+    // the row and goes back to the content, Space opens it and stays, Esc
+    // goes back without opening.
+    private var keyFocusAllowed = false
+    private(set) var keyFocused = false
+    private(set) var cursor = 0
+    override var acceptsFirstResponder: Bool { vertical && keyFocusAllowed }
+    override func becomeFirstResponder() -> Bool {
+        keyFocused = true
+        cursor = currentRow()
+        revealCursor()
+        needsDisplay = true
+        return true
+    }
+    override func resignFirstResponder() -> Bool {
+        keyFocused = false
+        keyFocusAllowed = false
+        needsDisplay = true
+        return true
+    }
+    func takeKeyboardFocus() {
+        guard vertical, let w = window else { return }
+        keyFocusAllowed = true
+        if !w.makeFirstResponder(self) { keyFocusAllowed = false }
+    }
+    private var pinnedShown: Int { min(pinned.count, maxPinnedShown) }
+    private var rowCount: Int { pinnedShown + titles.count }
+    // the open row: the selected tab, else the open pinned folder
+    private func currentRow() -> Int {
+        if titles.indices.contains(selected) { return pinnedShown + selected }
+        if let p = pinnedSelected, let k = pinned.prefix(maxPinnedShown).firstIndex(of: p) { return k }
+        return min(cursor, max(0, rowCount - 1))
+    }
+    private func rowTitle(_ row: Int) -> String {
+        if row < pinnedShown {
+            let p = pinned[row]
+            return pinnedLabel?(p) ?? (p as NSString).lastPathComponent
+        }
+        let i = row - pinnedShown
+        return titles.indices.contains(i) ? titles[i] : ""
+    }
+    private func revealCursor() {
+        guard cursor >= pinnedShown else { needsDisplay = true; return }
+        let i = cursor - pinnedShown, l = vListRect
+        let top = CGFloat(i) * (vRowH + 1)
+        if top < vScroll { vScroll = top }
+        else if top + vRowH > vScroll + l.height { vScroll = top + vRowH - l.height }
+        clampScroll()
+        needsDisplay = true
+    }
+    private func moveCursor(to row: Int) {
+        guard rowCount > 0 else { return }
+        cursor = max(0, min(row, rowCount - 1))
+        revealCursor()
+    }
+    // a row as if clicked
+    func activate(row: Int) {
+        if row < pinnedShown {
+            onPinned?(pinned[row])
+            return
+        }
+        let i = row - pinnedShown
+        guard titles.indices.contains(i) else { return }
+        onClick?(i)
+        if i != selected {
+            selected = i
+            onSelect?(i)
+        }
+    }
+    // the bar's keys while it has the keyboard; true = used
+    func handleNavKey(_ e: NSEvent) -> Bool {
+        guard keyFocused, e.type == .keyDown else { return false }
+        let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
+        let page = max(1, Int(vListRect.height / (vRowH + 1)) - 1)
+        switch (e.keyCode, mods) {
+        case (125, []), (45, .control): moveCursor(to: cursor + 1)          // ↓ / Ctrl+N
+        case (126, []), (35, .control): moveCursor(to: cursor - 1)          // ↑ / Ctrl+P
+        case (115, []), (126, .command): moveCursor(to: 0)                  // Home / Cmd+↑
+        case (119, []), (125, .command): moveCursor(to: rowCount - 1)       // End / Cmd+↓
+        case (116, []): moveCursor(to: cursor - page)                        // PgUp
+        case (121, []): moveCursor(to: cursor + page)                        // PgDn
+        case (36, []), (76, []):                                             // Return: open + back to the content
+            let w = window
+            activate(row: cursor)
+            if let w, w.firstResponder === self { _ = PaneNav.shared.move(.right, in: w) }
+        case (49, []): activate(row: cursor)                                 // Space: open, stay here
+        case (53, []):                                                       // Esc: back to the content
+            if let w = window { _ = PaneNav.shared.move(.right, in: w) }
+        case (51, []), (117, []), (51, .command):                            // Delete: close the tab
+            let i = cursor - pinnedShown
+            guard closable, let close = onCloseTab, titles.indices.contains(i) else { return true }
+            close(i)
+            moveCursor(to: cursor)
+        default:
+            // type-to-select: the next row whose name starts with the letter
+            // shortcuts (Cmd+W, Cmd+\\, Cmd+/ …) and Tab go on to the window
+            guard mods.isDisjoint(with: [.command, .control, .option]), e.keyCode != 48 else { return false }
+            guard let ch = e.charactersIgnoringModifiers?.lowercased().first, ch.isLetter || ch.isNumber,
+                  rowCount > 0 else { return true }   // other plain keys: nothing to type into
+            for step in 1...rowCount {
+                let r = (cursor + step) % rowCount
+                if rowTitle(r).lowercased().first == ch { moveCursor(to: r); break }
+            }
+        }
+        return true
+    }
+
     override func scrollWheel(with event: NSEvent) {
         guard vertical else { return super.scrollWheel(with: event) }
         let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 10
@@ -1672,6 +1784,14 @@ final class PopupTabsBar: NSView {
         let lsz = lab.size(withAttributes: labAttrs)
         lab.draw(at: NSPoint(x: head.minX + 14, y: head.midY - lsz.height / 2), withAttributes: labAttrs)
     }
+    // the keyboard cursor: a hairline in the pane ring's silver
+    private func drawCursor(_ r: NSRect, radius: CGFloat) {
+        let path = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
+        path.lineWidth = 1
+        PaneNav.ringColor.withAlphaComponent(min(1, PaneNav.ringColor.alphaComponent + 0.25)).setStroke()
+        path.stroke()
+    }
+
     private func drawVertical() {
         let c = config.colors
         let card = vCard
@@ -1690,6 +1810,7 @@ final class PopupTabsBar: NSView {
                     (sel ? c.surface1 : c.surface0).setFill()
                     NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
                 }
+                if keyFocused && cursor == k { drawCursor(r, radius: radius) }
                 let iconX = collapsed ? r.midX - 8 * zoom : r.minX + 8 * zoom
                 ButtonStyle.symbol(pinnedIconFor?(path) ?? pinnedIcon, in: NSRect(x: iconX, y: r.minY, width: 16 * zoom, height: r.height),
                                    color: sel ? c.accentOn : c.dim, size: (collapsed ? 13 : 11) * zoom)
@@ -1721,6 +1842,7 @@ final class PopupTabsBar: NSView {
                 (sel ? c.surface1 : c.surface0).setFill()
                 NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
             }
+            if keyFocused && cursor == pinnedShown + i { drawCursor(r, radius: radius) }
             if collapsed {
                 ButtonStyle.symbol(vIcon(i), in: NSRect(x: r.midX - 8 * zoom, y: r.minY, width: 16 * zoom, height: r.height),
                                    color: sel ? c.accentOn : c.dim, size: 13 * zoom)
@@ -4550,6 +4672,9 @@ enum FileDrag {
 // The image / PDF preview: dragging it drags the FILE (like Finder's Quick
 // Look), with a thumbnail of the picture as the drag image.
 final class FileDragImageView: NSImageView, NSDraggingSource {
+    // a pane (Ctrl+H/J/K/L): it can hold the keys; PaneNav's ring shows it
+    override var acceptsFirstResponder: Bool { image != nil }
+    override var focusRingType: NSFocusRingType { get { .none } set {} }
     var path: String?
     private var downAt: NSPoint?
 
@@ -4649,6 +4774,19 @@ final class DocxTextExtractor: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, didEndElement elementName: String,
                 namespaceURI: String?, qualifiedName qName: String?) {
         if elementName == "w:t" { inText = false }
+    }
+}
+
+// the file preview's text: read-only, so Space / Shift+Space page like a
+// browser (arrows, Page Up / Down already scroll an NSTextView)
+final class PreviewTextView: NSTextView {
+    override func keyDown(with e: NSEvent) {
+        let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
+        if !isEditable, e.keyCode == 49, mods.isSubset(of: .shift) {
+            mods.contains(.shift) ? scrollPageUp(nil) : scrollPageDown(nil)
+            return
+        }
+        super.keyDown(with: e)
     }
 }
 
@@ -4772,7 +4910,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     // list-pane share of the browser width (0.2-0.8); the splitter drags it
     private var splitFraction: CGFloat = 0.56
     private let previewScroll = NSScrollView()
-    private let previewText = NSTextView()
+    private let previewText = PreviewTextView()
     private let previewImage = FileDragImageView(frame: .zero)
     private let previewHint = NSTextField(labelWithString: "")
     // folder preview: selecting a directory shows its contents as a REAL file
@@ -5175,7 +5313,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         updatePartFocus()
     }
 
-    // follow first-responder changes (Tab, clicks, Cmd+L, Ctrl+J/K) and key
+    // follow first-responder changes (Tab, clicks, Cmd+L, Ctrl+H/J/K/L) and key
     // status so the ring always marks the part that receives typing
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -8126,9 +8264,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     private var fileBrowserDrawerMode = false
 
     // Pane focus tracking + visual indicators: when the user cycles between
-    // editor / file-browser / terminal with Ctrl+J/K (or clicks into one),
-    // the active pane gets a bright colored border so it is immediately
-    // obvious which surface owns the keyboard.
+    // editor / file-browser / terminal with Ctrl+H/J/K/L (or clicks into one),
+    // `focusedPane` routes Cmd+C/V; the ring that shows it is PaneNav's.
     enum FocusedPane { case editor, browser, terminal }
     private var focusedPane: FocusedPane?
     private var editorFocusBorder: NSView?
@@ -10130,7 +10267,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     // Re-evaluate which pane currently has first responder and update the
     // bright focus border accordingly. Called on key-window activation and
-    // after Ctrl+J/K cycles.
+    // after Ctrl+H/J/K/L moves.
     private func updateFocusedPane() {
         let fr = panel.firstResponder
         // Evaluate every pane independently — the browser branch must not
@@ -10231,7 +10368,6 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // Ctrl+C must reach the shell as SIGINT, Ctrl+A/Z/X stay readline/suspend.
     private func modifiedKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
         if panel.attachedSheet != nil { return sheetEditKey(code, mods) }
-        if let r = paneFocusKey(code, mods) { return r }
         if let r = viewCycleKey(code, mods) { return r }
         // Cmd+\\: the sidebar ⇄ its icon rail (before vim / the shell take keys)
         if code == 42, mods.contains(.command), !mods.contains(.control), !mods.contains(.shift),
@@ -10329,61 +10465,6 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             }
         }
         return false
-    }
-
-    private func paneFocusKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
-        let ctrl = mods.contains(.control)
-        // Ctrl+J / Ctrl+K: move keyboard focus up/down across the panes
-        // (notes editor -> file browser drawer -> terminal drawer), only
-        // over the ones that are open. J = down, K = up. Handled BEFORE
-        // the terminal branch so it works from any pane.
-        // Ctrl+Shift+J/K is reserved for pane resize — don't intercept it.
-        if ctrl && !mods.contains(.shift) && (code == 38 || code == 40), config.editMode {
-            var panes: [NSResponder] = []
-            var paneTypes: [FocusedPane] = []
-            if let ed = primaryEditor { panes.append(ed); paneTypes.append(.editor) }
-            if fileBrowserShown, let fb = fileBrowser { panes.append(fb.listView); paneTypes.append(.browser) }
-            if terminalShown, let term = terminalDrawer { panes.append(term); paneTypes.append(.terminal) }
-            if panes.count > 1 {
-                let current = panel.firstResponder
-                var curIdx = panes.firstIndex { p in
-                    if let current, current === p { return true }
-                    if let v = current as? NSView, let pv = p as? NSView {
-                        return v.isDescendant(of: pv)
-                    }
-                    return false
-                }
-                // the filter bar (its field editor), pills and preview
-                // sit OUTSIDE the list view but are still the browser
-                // pane — without this, Ctrl+J/K from the filter bar saw
-                // "no pane focused" and jumped to the first/last pane
-                // instead of the neighbour, needing extra presses
-                var inFilterBar = false
-                if curIdx == nil, fileBrowserShown, let fb = fileBrowser,
-                   browserHasFocus(fb), let bi = paneTypes.firstIndex(of: .browser) {
-                    curIdx = bi
-                    inFilterBar = fb.searchView.currentEditor() != nil
-                }
-                if let curIdx {
-                    let target = code == 38
-                        ? min(curIdx + 1, panes.count - 1)
-                        : max(curIdx - 1, 0)
-                    // at the edge from the filter bar: drop into the list
-                    // (the browser is still the pane, focus still moves)
-                    if target != curIdx || inFilterBar { panel.makeFirstResponder(panes[target]) }
-                    focusedPane = paneTypes[target]
-                } else {
-                    let target = code == 38 ? panes[0] : panes[panes.count - 1]
-                    panel.makeFirstResponder(target)
-                    focusedPane = code == 38 ? paneTypes[0] : paneTypes[panes.count - 1]
-                }
-                updateFocusIndicator()
-                return true
-            }
-            // single pane (editor only) — fall through so the emacs
-            // bindings (Ctrl+J newline, Ctrl+K kill-line) reach the text view
-        }
-        return nil
     }
 
     private func viewCycleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool? {
@@ -10744,6 +10825,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             case (45, true): moveSelection(1); return true                        // C-n
             case (35, true): moveSelection(-1); return true                       // C-p
             case (36, _), (38, true): acceptSelection(); return true              // Return / C-j
+            case (115, false), (119, false), (116, false), (121, false):          // Home / End / PgUp / PgDn
+                guard !rows.isEmpty else { return true }
+                let page = max(1, Int((rowScroll?.contentSize.height ?? 300) / max(1, config.rowHeight * zoom)) - 1)
+                let to = code == 115 ? 0 : code == 119 ? rows.count - 1
+                    : selection + (code == 116 ? -page : page)
+                selection = min(max(0, to), rows.count - 1)   // clamp, never wrap
+                return true
             default: break
             }
         }
@@ -12190,31 +12278,15 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         fb.layoutSubtreeIfNeeded()
     }
 
-    // Update the bright focus border so it highlights whichever pane (editor /
-    // browser / terminal) currently owns first responder.
+    // The pane that has the keyboard is shown by PaneNav's thin silver ring
+    // (every view of the shared window); the old 3pt accent borders stay
+    // hidden. Kept as the one hook the pane bookkeeping calls.
     private func updateFocusIndicator() {
         fileBrowser?.updatePartFocus()
         editorFocusBorder?.isHidden = true
         browserFocusBorder?.isHidden = true
         terminalFocusBorder?.isHidden = true
-        switch focusedPane {
-        case .editor:
-            // no ring around the editor: it is the page, not a pane among
-            // others (the drawers still light up when they take the keys)
-            break
-        case .browser:
-            if let fb = fileBrowser, let bb = browserFocusBorder, fileBrowserShown {
-                bb.frame = fb.frame
-                bb.isHidden = false
-            }
-        case .terminal:
-            if let term = terminalDrawer, let tb = terminalFocusBorder, terminalShown {
-                tb.frame = term.frame
-                tb.isHidden = false
-            }
-        case nil:
-            break
-        }
+        PaneNav.shared.refreshSoon(panel)
     }
 
     // does the embedded terminal hold keyboard focus? (keyboard routing: let
@@ -12897,5 +12969,98 @@ private final class ShortcutsListView: NSView {
                 y += rowH
             }
         }
+    }
+}
+
+// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift)
+//
+// notes: sidebar, the editor (vim / text / the reading view), the files
+// drawer (filter, list, preview), the shell drawer. Files: the browser's
+// own parts. Jira list: sidebar, the live-search strip, the list (its
+// filter box drives it, so they are one pane), the issue panel. Jira
+// detail: the ticket page.
+extension PopupWindow: PaneProvider {
+    var navPanes: [NavPane] {
+        var out: [NavPane] = []
+        if let bar = tabsBar, bar.vertical {
+            out.append(NavPane("sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
+        }
+        if let acc = topAccessory { out.append(.area("search", acc)) }
+        if let page = pageOverlay {
+            // the jira ticket page covers the editor
+            out.append(.area("page", page))
+        } else if proseShown, let pv = proseView {
+            out.append(NavPane("editor", pv, focus: { [weak self, weak pv] in
+                if let pv { self?.panel.makeFirstResponder(pv.web) }
+            }))
+        } else if config.editMode, let ed = primaryEditor {
+            let area = ed === vimView ? ed : (ed.enclosingScrollView ?? ed)
+            out.append(NavPane("editor", area, focus: { [weak self, weak ed] in
+                if let ed { self?.panel.makeFirstResponder(ed) }
+            }, intercept: { [weak self] dir in self?.vimSplitMove(dir) ?? false }))
+        }
+        if let fb = fileBrowser, fb.superview != nil, !fb.isHidden, !config.editMode || fileBrowserShown {
+            out += fb.navPanes
+        }
+        if config.editMode, terminalShown, let term = terminalDrawer {
+            out.append(NavPane("terminal", term))
+        }
+        if !config.editMode, fileBrowser == nil {
+            // list windows: the filter box drives the rows, so one pane
+            let area: NSView = rowScroll ?? rowView
+            out.append(NavPane("list", area, focus: { [weak self] in
+                guard let self else { return }
+                self.panel.makeFirstResponder(self.field)
+            }, owns: { [weak self] r in
+                guard let self else { return false }
+                return NavPane.inside(r, self.field) || NavPane.inside(r, area)
+            }))
+            if let iv = inspectorView, inspectorShown { out.append(.area("issue", iv)) }
+        }
+        return out
+    }
+
+    func paneFocusMoved() { updateFocusedPane() }
+
+    // the vim pane with a split that way: vim's own window move first
+    // (vim-tmux-navigator), true = done
+    private func vimSplitMove(_ dir: PaneDir) -> Bool {
+        guard focusedVim() != nil else { return false }
+        let k = dir.rawValue
+        guard let r = vimEval("winnr('\(k)') != winnr()"), r.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        else { return false }
+        vimCommand("wincmd \(k)")
+        return true
+    }
+}
+
+extension PopupFileBrowser: PaneProvider {
+    var navPanes: [NavPane] {
+        var out: [NavPane] = []
+        if let bar = sidebar {
+            out.append(NavPane("files-sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
+        }
+        out.append(NavPane("files-filter", searchField, focus: { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self.searchField)
+        }))
+        out.append(NavPane("files-list", listScroll, focus: { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self.listPane)
+        }))
+        if !previewListScroll.isHidden {
+            out.append(NavPane("files-preview", previewListScroll, focus: { [weak self] in
+                guard let self else { return }
+                self.window?.makeFirstResponder(self.previewList)
+            }))
+        } else if !previewScroll.isHidden {
+            out.append(NavPane("files-preview", previewScroll, focus: { [weak self] in
+                guard let self else { return }
+                self.window?.makeFirstResponder(self.previewText)
+            }))
+        } else if !previewImage.isHidden, previewImage.image != nil {
+            out.append(NavPane("files-preview", previewImage))   // pictures, PDFs
+        }
+        return out
     }
 }

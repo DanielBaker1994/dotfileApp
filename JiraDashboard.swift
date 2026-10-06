@@ -2555,3 +2555,14 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 }
+
+// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): the sidebar list, the page
+extension JiraDashboardWindow: PaneProvider {
+    var navPanes: [NavPane] {
+        [NavPane("sidebar", sidebar.enclosingScrollView ?? sidebar, focus: { [weak self] in
+            guard let self else { return }
+            self.window.makeFirstResponder(self.sidebar)
+         }),
+         .area("page", detailHost)]
+    }
+}

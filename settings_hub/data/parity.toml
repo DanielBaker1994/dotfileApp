@@ -1,0 +1,260 @@
+# VS Code parity: what every pane of the app's views is expected to offer,
+# with VS Code's default keymap as the reference. `ws-settings parity`
+# checks each expectation against commands.toml [shortcuts] (the view's
+# rows + the "all:" rows) and lists what is missing.
+#
+# When a view or a key lands: add its [shortcuts] row; when a view gains a
+# kind of pane, add the kind below. A gap that is fine on purpose gets a
+# [[waive]] with the reason.
+#
+#   [views]     VIEW = [pane kinds]   (VIEW = the [shortcuts] "view:" prefix)
+#   [[expect]]  kind, concept, vscode (VS Code's key, for reference),
+#               keys = every entry must be listed; "A | B" = either one
+#   [[waive]]   view, concept, reason
+
+[views]
+notes = ["window", "sidebar", "editor", "terminal"]
+files = ["window", "sidebar", "input", "list", "filelist", "preview"]
+jira = ["window", "sidebar", "input", "list", "preview"]
+confluence = ["window", "sidebar", "input", "list", "preview"]
+compare = ["window", "sidebar", "diff", "editor"]
+compare-folders = ["window", "diff", "list", "filelist"]
+ai = ["window", "sidebar", "editor", "preview"]
+
+# ---------------------------------------------------------------- window
+[[expect]]
+kind = "window"
+concept = "move to the pane on that side"
+vscode = "Cmd+K Cmd+← / → (editor groups); vim: Ctrl+W H J K L"
+keys = ["Ctrl+H", "Ctrl+J", "Ctrl+K", "Ctrl+L"]
+
+[[expect]]
+kind = "window"
+concept = "close / hide the window"
+vscode = "Cmd+W"
+keys = ["Cmd+W"]
+
+[[expect]]
+kind = "window"
+concept = "show / hide the sidebar"
+vscode = "Cmd+B"
+keys = ["Cmd+\\ | Cmd+B"]
+
+[[expect]]
+kind = "window"
+concept = "keyboard shortcuts list"
+vscode = "Cmd+K Cmd+S"
+keys = ["Cmd+/"]
+
+[[expect]]
+kind = "window"
+concept = "every action by name (command palette)"
+vscode = "Cmd+Shift+P"
+keys = ["Cmd+K | Cmd+Shift+P"]
+
+[[expect]]
+kind = "window"
+concept = "go to another view"
+vscode = "Cmd+1 … 9 (editor groups), Ctrl+Tab"
+keys = ["Ctrl+B W"]
+
+[[expect]]
+kind = "window"
+concept = "back to the previous view"
+vscode = "Ctrl+- (go back)"
+keys = ["Ctrl+B L"]
+
+[[expect]]
+kind = "window"
+concept = "quick open (a file / item by name)"
+vscode = "Cmd+P"
+keys = ["Cmd+P"]
+
+# --------------------------------------------------------------- sidebar
+[[expect]]
+kind = "sidebar"
+concept = "move through the rows"
+vscode = "↑ ↓ in the Explorer"
+keys = ["Up", "Down", "Ctrl+N", "Ctrl+P"]
+
+[[expect]]
+kind = "sidebar"
+concept = "open the row"
+vscode = "Return / Space in the Explorer"
+keys = ["Return", "Space"]
+
+[[expect]]
+kind = "sidebar"
+concept = "first / last row"
+vscode = "Home / End"
+keys = ["Home", "End"]
+
+# ---------------------------------------------------------------- list
+[[expect]]
+kind = "list"
+concept = "move through the rows"
+vscode = "↑ ↓ (Ctrl+N / Ctrl+P on macOS)"
+keys = ["Up", "Down", "Ctrl+N", "Ctrl+P"]
+
+[[expect]]
+kind = "list"
+concept = "jump a page / to the ends"
+vscode = "PgUp / PgDn / Home / End"
+keys = ["PgUp", "PgDn", "Home", "End"]
+
+[[expect]]
+kind = "list"
+concept = "open the row"
+vscode = "Return"
+keys = ["Return"]
+
+[[expect]]
+kind = "list"
+concept = "copy the row"
+vscode = "Cmd+C (Copy Path: Cmd+Opt+C)"
+keys = ["Cmd+C | Cmd+K"]
+
+[[expect]]
+kind = "filelist"
+concept = "rename"
+vscode = "Return (macOS) / F2"
+keys = ["F2"]
+
+[[expect]]
+kind = "filelist"
+concept = "delete to the Trash"
+vscode = "Cmd+Delete"
+keys = ["Cmd+Delete"]
+
+[[expect]]
+kind = "filelist"
+concept = "new folder"
+vscode = "(Explorer: New Folder…)"
+keys = ["Cmd+Shift+N"]
+
+[[expect]]
+kind = "filelist"
+concept = "undo the last file operation"
+vscode = "Cmd+Z in the Explorer"
+keys = ["Cmd+Z"]
+
+[[expect]]
+kind = "filelist"
+concept = "preview the file"
+vscode = "Space (open preview)"
+keys = ["Space"]
+
+# ---------------------------------------------------------------- input
+[[expect]]
+kind = "input"
+concept = "focus the search / filter box"
+vscode = "Cmd+F / Cmd+Shift+F"
+keys = ["Cmd+F | Cmd+L"]
+
+# ---------------------------------------------------------------- editor
+[[expect]]
+kind = "editor"
+concept = "find"
+vscode = "Cmd+F"
+keys = ["Cmd+F"]
+
+[[expect]]
+kind = "editor"
+concept = "next / previous match"
+vscode = "Cmd+G / Cmd+Shift+G"
+keys = ["Cmd+G", "Cmd+Shift+G"]
+
+[[expect]]
+kind = "editor"
+concept = "undo / redo"
+vscode = "Cmd+Z / Cmd+Shift+Z"
+keys = ["Cmd+Z", "Cmd+Shift+Z"]
+
+[[expect]]
+kind = "editor"
+concept = "save"
+vscode = "Cmd+S"
+keys = ["Cmd+S"]
+
+[[expect]]
+kind = "editor"
+concept = "go to line"
+vscode = "Ctrl+G"
+keys = ["Ctrl+G"]
+
+# -------------------------------------------------------------- terminal
+[[expect]]
+kind = "terminal"
+concept = "show / hide the terminal"
+vscode = "Ctrl+` / Cmd+J"
+keys = ["Ctrl+B T | Cmd+J"]
+
+[[expect]]
+kind = "terminal"
+concept = "copy / paste"
+vscode = "Cmd+C / Cmd+V"
+keys = ["Cmd+C", "Cmd+V"]
+
+# --------------------------------------------------------------- preview
+[[expect]]
+kind = "preview"
+concept = "scroll the page"
+vscode = "↑ ↓ / PgUp PgDn / Space in a preview"
+keys = ["Up", "Down", "PgUp", "PgDn", "Space"]
+
+[[expect]]
+kind = "preview"
+concept = "select all / copy"
+vscode = "Cmd+A / Cmd+C"
+keys = ["Cmd+A", "Cmd+C"]
+
+[[expect]]
+kind = "preview"
+concept = "find in the page"
+vscode = "Cmd+F (in a webview)"
+keys = ["Cmd+F | Cmd+G"]
+
+# ------------------------------------------------------------------ diff
+[[expect]]
+kind = "diff"
+concept = "next / previous difference"
+vscode = "F7 / Shift+F7 (Opt+F5 in the diff editor)"
+keys = ["Ctrl+N", "Ctrl+P"]
+
+[[expect]]
+kind = "diff"
+concept = "copy the change to the other side"
+vscode = "(merge editor: Accept Current / Incoming)"
+keys = ["Opt+Right", "Opt+Left"]
+
+[[expect]]
+kind = "diff"
+concept = "the other side"
+vscode = "Cmd+K Cmd+← / →"
+keys = ["Tab | Ctrl+H | Ctrl+L"]
+
+# ------------------------------------------------------------------ waivers
+[[waive]]
+view = "notes"
+concept = "go to line"
+reason = "the editor is nvim: :N or NG"
+
+[[waive]]
+view = "notes"
+concept = "next / previous match"
+reason = "the editor is nvim: n / N after Cmd+F (/)"
+
+[[waive]]
+view = "notes"
+concept = "undo / redo"
+reason = "the editor is nvim: u / Ctrl+R (Cmd+Z is routed to vim)"
+
+[[waive]]
+view = "ai"
+concept = "save"
+reason = "nothing to save: the rule runs on text you paste"
+
+[[waive]]
+view = "ai"
+concept = "go to line"
+reason = "short text, no line numbers"
