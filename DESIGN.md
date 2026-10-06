@@ -1,5 +1,5 @@
 ---
-name: workspace-switcher
+name: kitchen-sink
 description: A keyboard-summoned card dressed in your terminal theme — one window, many tools, layered like a tmux status bar.
 colors:
   base: "#24273A"
@@ -114,13 +114,13 @@ components:
     rounded: "{rounded.pill}"
 ---
 
-# Design System: workspace-switcher
+# Design System: kitchen-sink
 
 ## Overview
 
 **Creative North Star: "The Terminal Card"**
 
-workspace-switcher is a floating card that wears your terminal theme.
+kitchen-sink is a floating card that wears your terminal theme.
 Surfaces are stacked like a tmux or Catppuccin port, deepest first: the
 header strip is the darkest band (crust), toolbars, tab strips and input
 wells sit one step in (mantle), the card is the base, and raised controls

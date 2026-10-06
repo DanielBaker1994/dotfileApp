@@ -5,16 +5,16 @@ set -uo pipefail
 # borders) into THE config copies, + the stable home link.
 #
 # Where the copies live ($LINK_ROOT/config/<name>):
-#   repo install  the repo itself (ROOT); ~/.config/workspace-switcher is
+#   repo install  the repo itself (ROOT); ~/.config/kitchen-sink is
 #                 then the repo, or a link to it
-#   app install   WS_LINK_ROOT = ~/.config/workspace-switcher, a real
+#   app install   WS_LINK_ROOT = ~/.config/kitchen-sink, a real
 #                 directory holding the user's own copies (bin/setup-home.sh
 #                 seeds them from the bundle) — never a link into the app
 _sl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="${ROOT:-$_sl_self}"
 [ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"   # CONFIG_DIRS
 LINK_ROOT="${WS_LINK_ROOT:-$ROOT}"
-WS_HOME_DEFAULT="${WS_HOME_DEFAULT:-$HOME/.config/workspace-switcher}"
+WS_HOME_DEFAULT="${WS_HOME_DEFAULT:-$HOME/.config/kitchen-sink}"
 
 command -v ok   >/dev/null 2>&1 || ok()   { printf '\033[32m  \342\234\224 %s\033[0m\n' "$*"; }
 command -v fail >/dev/null 2>&1 || fail() { printf '\033[31m  \342\234\230 %s\033[0m\n' "$*"; }
@@ -105,7 +105,7 @@ _sl_repair() {
 validate_sym_links() {
     local mode="${1:-prompt}"
     _ws_build_manifest
-    step "symlinks (workspace-switcher)"
+    step "symlinks (kitchen-sink)"
     info "configs = $LINK_ROOT/config"
     local i t s st bad=0 total=0
     local -a bad_idx=()

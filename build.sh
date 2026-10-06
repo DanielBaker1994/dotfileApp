@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — build (and relaunch) the workspace switcher.
+# build.sh — build (and relaunch) the kitchen sink.
 #   ./build.sh           build + relaunch on the first view, files (only if sources changed)
 #   ./build.sh --force   force rebuild even if nothing changed
 #   ./build.sh --build-only   build + re-grant TCC, but DON'T launch
@@ -16,4 +16,4 @@ fi
 if [ "${1:-}" = "--build-only" ]; then
     export WS_BUILD_ONLY=1
 fi
-exec "$DIR/bin/workspace_switcher.sh" window
+exec "$DIR/bin/kitchen_sink.sh" window

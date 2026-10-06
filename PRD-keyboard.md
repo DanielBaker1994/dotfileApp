@@ -1,6 +1,6 @@
 # PRD: keyboard parity — pane navigation, focus ring, sidebars, VS Code gaps
 
-Status: phase 1 built (2026-10-06), phase 2 = the owner's picks from §7.4 · Written: 2026-10-06 · Target: workspace-switcher (every shared-window view) + `ws-settings`
+Status: phase 1 built (2026-10-06), phase 2 = the owner's picks from §7.4 · Written: 2026-10-06 · Target: kitchen-sink (every shared-window view) + `ws-settings`
 
 > **For the implementing agent.** Read `AGENT_CONTEXT.md` (= `CLAUDE.md`, section
 > "Pane navigation") and `rule.md` first. They are binding. §7.1–7.3 describe

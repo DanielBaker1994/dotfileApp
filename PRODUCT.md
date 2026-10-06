@@ -26,7 +26,7 @@ Interface Guidelines for macOS), never web or mobile.
 
 ## Product Purpose
 
-workspace-switcher puts the tools a keyboard-driven developer reaches for
+kitchen-sink puts the tools a keyboard-driven developer reaches for
 all day into one hotkey-summoned window. It sits beside a tiling window
 manager and does not fight it. Success: the owner reaches for it before any
 separate app (browser Jira or Confluence, Beyond Compare, Flameshot,

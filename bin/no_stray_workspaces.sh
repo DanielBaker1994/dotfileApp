@@ -8,7 +8,7 @@
 # moved to a real workspace and the monitor is switched to an allowed one.
 # An emptied, invisible stray is garbage-collected by AeroSpace.
 #
-# Triggered by: the workspace-switcher daemon on display changes and wake
+# Triggered by: the kitchen-sink daemon on display changes and wake
 # (SENDER=display_change / system_woke) and aerospace exec-on-workspace-change.
 # Fast path = one aerospace call.
 

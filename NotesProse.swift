@@ -389,7 +389,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
             let html = ProseRender.page(src, colors: colors, font: font, size: size, width: width)
             DispatchQueue.main.async {
                 guard let self, g == self.gen else { return }
-                let dir = NSHomeDirectory() + "/.cache/workspace-switcher/prose"
+                let dir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
                 try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
                 let file = URL(fileURLWithPath: dir + "/page.html")
                 guard (try? Data(html.utf8).write(to: file)) != nil else { return }
@@ -500,7 +500,7 @@ final class ProseModeSwitch: NSView {
 // panel like the tool panels: opening it never drags the shared window up.
 final class ProseWindow: NSPanel {
     private static var open: [ProseWindow] = []
-    // true in the `workspace-switcher prose` process: closing the last window ends it
+    // true in the `kitchen-sink prose` process: closing the last window ends it
     static var standalone = false
     private let page = ProseView(frame: .zero)
     private let path: String
@@ -653,7 +653,7 @@ final class ProseCloseButton: NSView {
     }
 }
 
-// Pop-out as its OWN PROCESS (`workspace-switcher prose …`): the page has no
+// Pop-out as its OWN PROCESS (`kitchen-sink prose …`): the page has no
 // tie to the app that opened it — move it, keep it when the daemon restarts.
 // Colors travel as hex on the command line; one process per file.
 enum ProseProcess {
@@ -708,7 +708,7 @@ enum ProseProcess {
             i += 1
         }
         guard FileManager.default.fileExists(atPath: path) else {
-            FileHandle.standardError.write(Data("usage: workspace-switcher prose [--colors …] [--font F] [--size N] [--width N] FILE.md\n".utf8))
+            FileHandle.standardError.write(Data("usage: kitchen-sink prose [--colors …] [--font F] [--size N] [--width N] FILE.md\n".utf8))
             exit(2)
         }
         let app = NSApplication.shared

@@ -27,7 +27,7 @@ if CommandLine.arguments.count > 1 {
     }
 }
 
-// An app install (DMG): make sure ~/.config/workspace-switcher exists and
+// An app install (DMG): make sure ~/.config/kitchen-sink exists and
 // points at THIS app before anything reads commands.toml from it (a marker
 // check when nothing changed — a hotkey ping pays two file reads).
 AppInstall.ensureHome()
@@ -38,7 +38,7 @@ applyAppConfigFromDisk()
 
 let cliArgs = CommandLine.arguments
 
-// probe-only ping (workspace_switcher.sh sets this): ask the RUNNING daemon
+// probe-only ping (kitchen_sink.sh sets this): ask the RUNNING daemon
 // to open ANY command window (notes/jira/voice/health-checks/...). Exit 0
 // when the message was delivered, 1 when no daemon is listening — NEVER fall
 // through to app.run(), or the "ping" becomes a foreground daemon and the
@@ -58,23 +58,23 @@ if cliArgs.count > 1 {
         // or open the Jira Config window: dashboard
         let action = cliArgs.count > 2 ? cliArgs[2] : "toggle"
         guard ["on", "off", "toggle", "setup", "dashboard"].contains(action) else {
-            FileHandle.standardError.write(Data("usage: workspace-switcher jira-poll on|off|toggle|setup|dashboard\n".utf8))
+            FileHandle.standardError.write(Data("usage: kitchen-sink jira-poll on|off|toggle|setup|dashboard\n".utf8))
             exit(2)
         }
         let msg = action == "setup" ? "jira-setup" : action == "dashboard" ? "jira-dashboard" : "jira-poll-" + action
         if sendLaunchMessage(msg) { exit(0) }
-        FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+        FileHandle.standardError.write(Data("kitchen-sink is not running\n".utf8))
         exit(1)
     case "reload", "restart":
         // re-read commands.toml / relaunch the daemon (ws-settings' apply
         // step). Never STARTS a daemon: nothing running = nothing to apply.
         guard let data = sendRequest(cliArgs[1], timeout: 15) else {
-            FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink is not running\n".utf8))
             exit(1)
         }
         let reply = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         if reply.isEmpty {
-            FileHandle.standardError.write(Data("the running workspace-switcher is too old for '\(cliArgs[1])': restart it once\n".utf8))
+            FileHandle.standardError.write(Data("the running kitchen-sink is too old for '\(cliArgs[1])': restart it once\n".utf8))
             exit(1)
         }
         print(reply)
@@ -91,14 +91,14 @@ if cliArgs.count > 1 {
         switch ShotArgs.parse(words) {
         case .success(let a): parsed = a
         case .failure(let p):
-            FileHandle.standardError.write(Data("workspace-switcher screenshot: \(p.message)\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink screenshot: \(p.message)\n".utf8))
             exit(2)
         }
         let msg = (["screenshot"] + words).joined(separator: "\t")
         if parsed.wantsReply {
             // -r (PNG on stdout) / -g ("W H X Y"): wait for the user to finish
             guard let data = sendRequest(msg, timeout: 3600) else {
-                FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+                FileHandle.standardError.write(Data("kitchen-sink is not running\n".utf8))
                 exit(1)
             }
             if data.isEmpty { exit(1) }   // aborted
@@ -108,7 +108,7 @@ if cliArgs.count > 1 {
         if sendLaunchMessage(msg) { exit(0) }
         // no daemon: start it (as the hotkey modes do); it opens the capture
         if getppid() != 1 {
-            let script = assetDir + "/bin/workspace_switcher.sh"
+            let script = assetDir + "/bin/kitchen_sink.sh"
             if FileManager.default.isExecutableFile(atPath: script) {
                 let argv: [UnsafeMutablePointer<CChar>?] = [strdup(script), strdup("screenshot"), nil]
                 execv(script, argv)
@@ -129,11 +129,11 @@ if cliArgs.count > 1 {
                 words[i] = tmp
             }
         case .failure(let p):
-            FileHandle.standardError.write(Data("workspace-switcher pane-shot: \(p.message)\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink pane-shot: \(p.message)\n".utf8))
             exit(2)
         }
         guard let data = sendRequest((["pane-shot"] + words).joined(separator: "\t"), timeout: 60) else {
-            FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink is not running\n".utf8))
             exit(1)
         }
         let line = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -141,7 +141,7 @@ if cliArgs.count > 1 {
             try? FileManager.default.removeItem(atPath: tmp)
         }
         if line.isEmpty || line.hasPrefix("error: ") {
-            FileHandle.standardError.write(Data("workspace-switcher pane-shot: \(line.isEmpty ? "no answer" : String(line.dropFirst(7)))\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink pane-shot: \(line.isEmpty ? "no answer" : String(line.dropFirst(7)))\n".utf8))
             exit(1)
         }
         print(line)
@@ -160,7 +160,7 @@ if cliArgs.count > 1 {
                 words += [w, cliArgs[i + 1].replacingOccurrences(of: "\t", with: " ")]
                 i += 1
             } else if w.hasPrefix("-") && w.count > 1 {
-                FileHandle.standardError.write(Data("usage: workspace-switcher compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]\n".utf8))
+                FileHandle.standardError.write(Data("usage: kitchen-sink compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]\n".utf8))
                 exit(2)
             } else {
                 let abs = w.hasPrefix("/") ? w : FileManager.default.currentDirectoryPath + "/" + w
@@ -170,7 +170,7 @@ if cliArgs.count > 1 {
             i += 1
         }
         guard (1...2).contains(paths) else {
-            FileHandle.standardError.write(Data("usage: workspace-switcher compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]\n".utf8))
+            FileHandle.standardError.write(Data("usage: kitchen-sink compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]\n".utf8))
             exit(2)
         }
         let msg = (["compare"] + (wait ? ["--wait"] : []) + words).joined(separator: "\t")
@@ -194,7 +194,7 @@ if cliArgs.count > 1 {
             }
         }
         guard reply != nil else {
-            FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink is not running\n".utf8))
             exit(1)
         }
         exit(0)
@@ -202,7 +202,7 @@ if cliArgs.count > 1 {
         // the terminal panel on the running daemon (palette /terminal,
         // Ctrl+B T in the window) — no hotkeyPrep, nothing to cold-start into
         if sendLaunchMessage(cliArgs[1]) { exit(0) }
-        FileHandle.standardError.write(Data("workspace-switcher is not running\n".utf8))
+        FileHandle.standardError.write(Data("kitchen-sink is not running\n".utf8))
         exit(1)
     case let mode where SwitcherController.hotkeyModes.contains(mode):
         // THE hotkey path (aerospace runs this binary directly): a running
@@ -216,7 +216,7 @@ if cliArgs.count > 1 {
         // — has launchd as parent: that IS the daemon starting, never re-exec)
         if getppid() != 1 {
             // repo build: <root>/bin/…; app install: Contents/Resources/bin/…
-            let script = assetDir + "/bin/workspace_switcher.sh"
+            let script = assetDir + "/bin/kitchen_sink.sh"
             if FileManager.default.isExecutableFile(atPath: script) {
                 let argv: [UnsafeMutablePointer<CChar>?] = [strdup(script), strdup(cliArgs[1]), nil]
                 execv(script, argv)
@@ -243,7 +243,7 @@ if !acquireDaemonLock(waitUpTo: 0) {
         if delivered { exit(0) }
         if acquireDaemonLock(waitUpTo: 0.25) { break }
         if Date() >= deadline {
-            FileHandle.standardError.write(Data("workspace-switcher: another daemon holds the lock but does not answer — not starting a second one\n".utf8))
+            FileHandle.standardError.write(Data("kitchen-sink: another daemon holds the lock but does not answer — not starting a second one\n".utf8))
             exit(1)
         }
     }

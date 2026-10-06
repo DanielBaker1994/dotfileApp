@@ -1,4 +1,4 @@
-"""Validation through the APP (`workspace-switcher config-check`), so no
+"""Validation through the APP (`kitchen-sink config-check`), so no
 range / enum is copied into python. Offline fallback: the cached
 `config-schema`, then the row's inferred type. Allowed values read from doc
 comments are only a warning (--force writes anyway)."""

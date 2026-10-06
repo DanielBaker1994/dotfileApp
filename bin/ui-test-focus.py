@@ -2,7 +2,7 @@
 """ui-test-focus.py — show / hide / focus / follow-the-workspace, measured.
 
 Drives the REAL paths against the running daemon: the hotkey binary exactly
-as AeroSpace runs it (`workspace-switcher window`), `aerospace workspace` /
+as AeroSpace runs it (`kitchen-sink window`), `aerospace workspace` /
 `aerospace focus`, a real Esc keypress (System Events). State comes from the
 daemon socket (`state` / `do:ACTION`, polled every ~5 ms — no sleeps, no
 AppleScript), window placement from AeroSpace itself.
@@ -38,8 +38,8 @@ It moves your workspaces / focus while it runs (~15 s) and puts them back
 import json, os, shutil, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-APP = os.path.join(ROOT, "workspace-switcher.app")
-BIN = os.path.join(APP, "Contents/MacOS/workspace-switcher")
+APP = os.path.join(ROOT, "kitchen-sink.app")
+BIN = os.path.join(APP, "Contents/MacOS/kitchen-sink")
 SOCK = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ws-notes.sock")
 CONF = os.path.join(ROOT, "commands.toml")
 VERBOSE = "--verbose" in sys.argv
@@ -235,12 +235,12 @@ try:
     # ------------------------------------------------------------ single
     if want("single"):
         def daemons():
-            r = subprocess.run(["pgrep", "-f", "workspace-switcher.app/Contents/MacOS/workspace-switcher"],
+            r = subprocess.run(["pgrep", "-f", "kitchen-sink.app/Contents/MacOS/kitchen-sink"],
                                capture_output=True, text=True)
             pids = []
             for p in r.stdout.split():
                 ps = subprocess.run(["ps", "-o", "command=", "-p", p], capture_output=True, text=True).stdout
-                if "workspace-switcher.app/Contents/MacOS/workspace-switcher" in ps and "nvim" not in ps:
+                if "kitchen-sink.app/Contents/MacOS/kitchen-sink" in ps and "nvim" not in ps:
                     pids.append(p)
             return pids
         before = daemons()

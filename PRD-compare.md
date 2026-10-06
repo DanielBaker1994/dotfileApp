@@ -1,6 +1,6 @@
-# PRD — Compare: Beyond Compare-style text + folder compare inside workspace-switcher
+# PRD — Compare: Beyond Compare-style text + folder compare inside kitchen-sink
 
-Status: phases 0–2 built (Text + Folder Compare), phase 3 open · Written: 2026-10-03 · Reviewed: 2026-10-03 · Target: workspace-switcher (Swift/AppKit, macOS ≥ 26.7, arm64)
+Status: phases 0–2 built (Text + Folder Compare), phase 3 open · Written: 2026-10-03 · Reviewed: 2026-10-03 · Target: kitchen-sink (Swift/AppKit, macOS ≥ 26.7, arm64)
 
 > **For the implementing agent.** Read `AGENT_CONTEXT.md` (= `CLAUDE.md`) and
 > `rule.md` first. They are binding. This PRD says *what* to build and which
@@ -14,7 +14,7 @@ Status: phases 0–2 built (Text + Folder Compare), phase 3 open · Written: 202
 > page has a **Compare Pasted Text…** button (clipboard = left side, focus the
 > right); ⌘V works in any pane (an empty side takes it, a side with text is
 > replaced by an undoable edit); a pair with pasted text becomes a Recent row
-> ("pasted text ⇆ …", snapshots in `~/.cache/workspace-switcher/compare-pasted/`);
+> ("pasted text ⇆ …", snapshots in `~/.cache/kitchen-sink/compare-pasted/`);
 > Folder Compare (phase 2) is built — see "Phase 2 as built" in §8. Still open:
 > the phase 3 list, plus the gaps named there.
 
@@ -41,7 +41,7 @@ are out of scope.
 
 ## 3. Background
 
-**What this is.** workspace-switcher is the owner's menu-bar app. One shared
+**What this is.** kitchen-sink is the owner's menu-bar app. One shared
 window holds the files, notes, AI, Jira and Confluence views. You switch views
 with the header icons or Ctrl+Tab and show or hide the window with Hyper+N.
 Every view hides the same way (✕, Cmd+W, Hyper+N, focus loss, and Esc where
@@ -156,7 +156,7 @@ reached like the other views:
 | Palette (Hyper+S) | `/compare` | start page (Return on a recent pair opens it) |
 | File browser + `/paths` | right-click "Select for Compare" on one row, then "Compare to 'NAME'" on another; with exactly 2 rows marked, "Compare" | Text or Folder Compare (by row type) |
 | Drag & drop | drop a file / folder on the left or right path field or pane | that side |
-| CLI | `workspace-switcher compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]` | Text or Folder Compare |
+| CLI | `kitchen-sink compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]` | Text or Folder Compare |
 | git | `git difftool` / `git difftool --dir-diff` (config snippet in §7.4) | same, with `--wait` |
 | Clipboard | an empty pane takes Cmd+V / Ctrl+V; right-click "Paste Clipboard Here" | Text Compare of pasted text |
 
@@ -454,7 +454,7 @@ through `handleKey` / `JiraEditKeys.route`.
 | `CompareFolder.swift` (new) | `FolderScan`, `FolderPair`, `PairStatus`, `ContentCheck`, `SyncPlan` (phase 3) | Foundation + `IgnoreRules`, `FileOps` |
 | `CompareWindow.swift` (new) | `CompareWindow` (`CardWindowController`, `SlotMember`, views `.compare` / `.compareText`), `ComparePaneView` (drawn rows), `CompareThumbnail`, `FolderTreeView`, start page | AppKit |
 | `SharedWindow.swift` | `SlotView.compare`, `.compareText` (`isSub`), nav id **67** (`navCompare`, appended after confluence in `navIcons`), `navOn`, `escViews`, `navClicked` | — |
-| `workspace_switcher.swift` | `[compare]` parsing (`makeCommand` / `configNumberKeys` / `configValueProblem`), `ensureSlotMember(.compare)`, prewarm, socket `compare` + `do:compare:*`, palette entry | — |
+| `kitchen_sink.swift` | `[compare]` parsing (`makeCommand` / `configNumberKeys` / `configValueProblem`), `ensureSlotMember(.compare)`, prewarm, socket `compare` + `do:compare:*`, palette entry | — |
 | `main.swift` | CLI `compare` (`--wait` = `sendRequest`, reply on close, like `screenshot -r`) | — |
 | `PopupWindow.swift` | `FileListPane.Action` + menu items "Select for Compare" / "Compare to…" | — |
 
@@ -515,7 +515,7 @@ content = auto
 time-tolerance = 2
 exclude = .git, node_modules, .DS_Store, .build
 use-gitignore = true
-ignore-file = ~/.config/workspace-switcher/config/compare.ignore
+ignore-file = ~/.config/kitchen-sink/config/compare.ignore
 gutter-arrows = hover
 max-lines = 200000
 recent = 30
@@ -530,12 +530,12 @@ config. "Save as Default" in the ⚙ popover writes it.
 
 #### 7.3.4 State on disk
 
-- `~/.cache/workspace-switcher/compare-recent.json`: recent pairs (paths,
+- `~/.cache/kitchen-sink/compare-recent.json`: recent pairs (paths,
   kind, last used).
-- `~/.cache/workspace-switcher/compare-sessions.json`: open sessions (pair,
+- `~/.cache/kitchen-sink/compare-sessions.json`: open sessions (pair,
   filter, importance overrides, scroll row, cursor) for restore after a
   restart.
-- `~/.cache/workspace-switcher/compare-recovery/`: unsaved text of a dirty
+- `~/.cache/kitchen-sink/compare-recovery/`: unsaved text of a dirty
   side, written 2 s after the last edit. Restored as "unsaved (recovered)"
   and deleted on save or discard.
 
@@ -570,9 +570,9 @@ color. Pills, segmented filter (`ConfSegmented`), path fields
 ### 7.4 CLI and git
 
 ```
-workspace-switcher compare LEFT [RIGHT]          # files → text, folders → folder
-workspace-switcher compare --wait LEFT RIGHT     # block until that session closes or the window hides
-workspace-switcher compare --title1 "ours" --title2 "theirs" A B
+kitchen-sink compare LEFT [RIGHT]          # files → text, folders → folder
+kitchen-sink compare --wait LEFT RIGHT     # block until that session closes or the window hides
+kitchen-sink compare --title1 "ours" --title2 "theirs" A B
 ```
 
 `--wait` uses `sendRequest` (the reply comes when the session is done, as
@@ -582,7 +582,7 @@ tool returns:
 ```ini
 [diff]      tool = ws
 [difftool "ws"]
-    cmd = ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher compare --wait --title1 \"$BASE\" \"$LOCAL\" \"$REMOTE\"
+    cmd = ~/.config/kitchen-sink/kitchen-sink.app/Contents/MacOS/kitchen-sink compare --wait --title1 \"$BASE\" \"$LOCAL\" \"$REMOTE\"
 [difftool]  prompt = false
 ```
 

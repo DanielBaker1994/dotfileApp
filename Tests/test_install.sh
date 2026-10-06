@@ -24,7 +24,7 @@ unset WS_HOME WS_LINK_ROOT
 mkdir -p "$HOME/.config" "$T/Applications"
 APP="$T/Applications/$APP_NAME.app"
 cp -Rp "$DIST" "$APP"
-WSH="$HOME/.config/workspace-switcher"
+WSH="$HOME/.config/kitchen-sink"
 SETUP="$APP/Contents/Resources/bin/setup-home.sh"
 
 PASS=0; FAIL=0
@@ -94,7 +94,7 @@ OUT="$(bash "$SETUP" stack 2>&1)"
 t "stack succeeds" grep -q 'result=ok' <<<"$OUT"
 t "aerospace.toml links to the home's copy" is_link_to "$HOME/.config/aerospace/aerospace.toml" "$WSH/config/aerospace/aerospace.toml"
 t "bordersrc linked" is_link_to "$HOME/.config/borders/bordersrc" "$WSH/config/borders/bordersrc"
-t "helpers precompiled into the cache" test -x "$HOME/.cache/workspace-switcher/helpers/dock_badges"
+t "helpers precompiled into the cache" test -x "$HOME/.cache/kitchen-sink/helpers/dock_badges"
 t "symlinks --check passes" env WS_LINK_ROOT="$WSH" bash "$RES/symlinks.sh" --check
 
 echo "preflight"

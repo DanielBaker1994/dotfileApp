@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# utils.sh — shared bash utilities for the workspace switcher (and the shell).
+# utils.sh — shared bash utilities for the kitchen sink (and the shell).
 # Source this file (e.g. from ~/.bashrc) to make `prettyprint` available in
 # the embedded terminal drawer and any interactive bash.
 

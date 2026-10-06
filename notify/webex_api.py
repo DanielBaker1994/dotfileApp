@@ -37,7 +37,7 @@ API = "https://webexapis.com/v1"
 SCOPES = "spark:rooms_read spark:messages_read spark:memberships_read spark:people_read"
 DEFAULT_PORT = 8765
 MAX_RETRY_WAIT = 30          # seconds; a longer Retry-After fails this poll
-LOGIN_HINT = "sign in: python3 ~/.config/workspace-switcher/notify/webex_api.py --login"
+LOGIN_HINT = "sign in: python3 ~/.config/kitchen-sink/notify/webex_api.py --login"
 
 # swapped by tests
 SLEEP = time.sleep

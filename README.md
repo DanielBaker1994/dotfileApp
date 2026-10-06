@@ -1,4 +1,4 @@
-# workspace-switcher
+# kitchen-sink
 
 A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
 with a borders focused-window outline. Native AppKit (Swift), no runtime
@@ -8,19 +8,19 @@ dependencies beyond what the installer brings.
 
 ### The app (disk image)
 
-Open `workspace-switcher-<version>.dmg`, drag the app to **Applications**,
+Open `kitchen-sink-<version>.dmg`, drag the app to **Applications**,
 open it. The first run shows **Setup & Health Check**: what this Mac has and
 what is missing (no Apple on-device model → the AI view is off, everything
 else works). Notes, files, Jira, Confluence and AI work straight away; the
 Hyper hotkeys and window borders (AeroSpace, borders — Homebrew) are one optional button in that window. Your settings live in
-`~/.config/workspace-switcher` (`commands.toml`, `rules/`, `config/`);
+`~/.config/kitchen-sink` (`commands.toml`, `rules/`, `config/`);
 updating = dragging the new app over the old one.
 
 Build the image: `bin/make-dmg.sh` (→ `.build/dist/`). With `DEVELOPER_ID` +
 `NOTARY_PROFILE` set in `install.conf` it is signed and notarized; without
 them it is self-signed and other Macs need System Settings ▸ Privacy &
 Security ▸ Open Anyway. Uninstall:
-`/Applications/workspace-switcher.app/Contents/Resources/UNINSTALL.sh`.
+`/Applications/kitchen-sink.app/Contents/Resources/UNINSTALL.sh`.
 
 ### From source
 
@@ -39,7 +39,7 @@ Not sure what to run? `./INSTALL.sh` — that's it.
 
 Download just the script (or `curl -fsSL …/INSTALL.sh | bash`). If it is not
 running from a git checkout it asks where to put the app (default
-`~/workspace-switcher`), clones the repo, and continues the install from the
+`~/kitchen-sink`), clones the repo, and continues the install from the
 clone:
 
 ```bash
@@ -71,18 +71,18 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 ```bash
 ./INSTALL.sh help       # the one command (install / uninstall)
-./build.sh              # dev: compile workspace-switcher.app + TCC re-grant
+./build.sh              # dev: compile kitchen-sink.app + TCC re-grant
 ./build.sh --build-only # dev: compile + grant, do NOT launch
 ```
 
 - `PopupWindow.swift` — reusable AppKit popup framework (windows, chrome,
   rows, filters, editor, embedded terminal, record meter)
-- `workspace_switcher.swift` — host app: commands.toml parsing, aerospace IPC,
+- `kitchen_sink.swift` — host app: commands.toml parsing, aerospace IPC,
   icons, voice recorder (AVAudioEngine → SFSpeechRecognizer)
 - `main.swift` — entry point
 - `commands.toml` — every user-facing string + window definition (the app is
   config-driven; new windows need no code)
-- `bin/workspace_switcher.sh` — hotkey launcher (pings the daemon, launches via
+- `bin/kitchen_sink.sh` — hotkey launcher (pings the daemon, launches via
   LaunchServices so mic/speech TCC grants attach to the app bundle)
 - `bin/grant-permissions.sh` — writes the mic + speech TCC grants
 - `jira/` — python poller (stdlib only): `jira_api.py` (API client, JQL
@@ -96,12 +96,12 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 | What | Where |
 | --- | --- |
-| On/off switch | `commands.toml [jira] enabled` (menu **Enable Jira** / **Disable Jira**; `poll-when-disabled = true` keeps the poller running while disabled; or `bin/workspace_switcher.sh jira-poll on\|off\|toggle\|setup`) |
+| On/off switch | `commands.toml [jira] enabled` (menu **Enable Jira** / **Disable Jira**; `poll-when-disabled = true` keeps the poller running while disabled; or `bin/kitchen_sink.sh jira-poll on\|off\|toggle\|setup`) |
 | Credentials + **poll jobs** (schedules) | `~/.config/jira/config.json` → `endpoints` (chmod 600; edited by the **Jira Config** window) |
 | Team schema (custom fields, JQL templates, …) | `~/.config/jira/team.json` (optional; example `jira/team.example.json`) |
 | Live state (last/next run, errors, lock) | `~/.cache/jira/status.json` · `jira/jira_status.py` · `jira-doctor.sh` |
 | Every HTTP request, copy-pasteable | `~/.cache/jira/curl.log` (chmod 600 — contains the basic-auth token) |
-| Window data | `~/.cache/workspace-switcher/jira_json/<endpoint file>.json` |
+| Window data | `~/.cache/kitchen-sink/jira_json/<endpoint file>.json` |
 
 ### Where the poll jobs (and their JSON files) come from
 
@@ -111,7 +111,7 @@ every poll job is one entry of `endpoints` in `~/.config/jira/config.json`:
 ```jsonc
 {
   "site": "https://you.atlassian.net", "email": "…", "token": "…",
-  "outDir": "~/.cache/workspace-switcher/jira_json",
+  "outDir": "~/.cache/kitchen-sink/jira_json",
   "endpoints": [
     {"name": "all",      "type": "issues",   "projects": "*",     "window": "10m", "file": "all.json"},
     {"name": "KAN",      "type": "issues",   "projects": ["KAN"], "window": "30m", "file": "KAN.json"},

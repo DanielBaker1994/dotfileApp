@@ -1,6 +1,6 @@
-# PRD — `/screenshot`: a Flameshot-style capture tool inside workspace-switcher
+# PRD — `/screenshot`: a Flameshot-style capture tool inside kitchen-sink
 
-Status: ready to implement · Written: 2026-10-02 · Target: workspace-switcher (Swift/AppKit, macOS ≥ 26.7, arm64)
+Status: ready to implement · Written: 2026-10-02 · Target: kitchen-sink (Swift/AppKit, macOS ≥ 26.7, arm64)
 
 > **For the implementing agent.** Read `AGENT_CONTEXT.md` (= `CLAUDE.md`) and
 > `rule.md` first. They are binding. This PRD says *what* to build and which
@@ -12,7 +12,7 @@ Status: ready to implement · Written: 2026-10-02 · Target: workspace-switcher 
 
 ## 1. Summary
 
-Add a screenshot tool to workspace-switcher that looks and behaves almost
+Add a screenshot tool to kitchen-sink that looks and behaves almost
 exactly like **Flameshot**: press a hotkey, the screen freezes and goes dim,
 you drag a box around what you want, a ring of round purple buttons appears
 around the box, you draw arrows, boxes, text, numbers and blur on it, then copy,
@@ -30,7 +30,7 @@ never needs Flameshot itself.
 
 ## 3. Background
 
-**What this is.** workspace-switcher is the owner's macOS menu-bar app. It
+**What this is.** kitchen-sink is the owner's macOS menu-bar app. It
 holds notes, files, Jira, Confluence and AI views in one shared window, plus a
 few "tool panels" (`/filefast`, `/paths`, `/prettyprint`, `/health-checks`)
 that behave like small standalone apps. The owner takes screenshots with
@@ -105,7 +105,7 @@ There is one user, the owner, but the job is a common one:
 | Hide secrets | Pixelate/blur that can't be reversed (default "secure" mode) | Leaking tokens in a Jira ticket | Same algorithm as Flameshot. |
 | Share it | Copy (Cmd+C / Return) lands as PNG; Save also files it in `/paths` | Hunting for "Screenshot 2026-…png" on the Desktop | **Better:** `/paths` shelf + Quick Look integration. |
 | Keep a reference visible | Pin the capture as a floating, always-on-top image | Alt-tabbing to a saved file | Same as Flameshot. AeroSpace ignores it, so it never tiles. |
-| Stay in one setup | Theme, config, hotkey and permissions all in workspace-switcher | A second unsigned app, tray icon and config file | **Better:** one app, `commands.toml`, the Setup window. |
+| Stay in one setup | Theme, config, hotkey and permissions all in kitchen-sink | A second unsigned app, tray icon and config file | **Better:** one app, `commands.toml`, the Setup window. |
 
 **Value curve, in short:** match Flameshot on capture and annotation, beat it
 on integration (config, `/paths`, focus behavior, signing). Skip what the
@@ -306,7 +306,7 @@ luminance < 0.5 is dark).
 Common rules (all drawing tools):
 
 - **Thickness** = "tool size", one value per tool, remembered in
-  `~/.cache/workspace-switcher/screenshot-state.json`. Defaults: draw
+  `~/.cache/kitchen-sink/screenshot-state.json`. Defaults: draw
   thickness 3, font size 8, marker 5, pixelate 2, circle counter 1, rectangle
   corner radius 1 (Flameshot `drawThickness`, `drawFontSize`,
   `drawMarkerSize`, `drawPixelateSize`, `drawCircleCounterSize`,
@@ -410,9 +410,9 @@ Common rules (all drawing tools):
 | Overlay drawing + input | `ScreenshotOverlay.swift` (`ScreenshotOverlayView`, one per display) | One `NSView` with layer-backed drawing. No SwiftUI. |
 | Annotation model | `ScreenshotAnnotations.swift` | **AppKit-light, unit-testable**: tool objects, hit-testing, undo stack, counter renumbering, button-ring layout math, pixelate algorithm, filename pattern. |
 | Pinned image | `ScreenshotPin.swift` (`PinPanel`) | |
-| Config | `commands.toml` `[screenshot]` + `makeCommand` / `configNumberKeys` / `validateConfig` in `workspace_switcher.swift` | Every value through `configEntry` / `configLine`. |
-| Hook into tools | `isToolPanel` / `openTool` in `workspace_switcher.swift` | Add `"screenshot"` to the tool-panel name list and a `case "screenshot": showScreenshot(cmd)`. |
-| Hotkey | `config/aerospace/aerospace.toml` | `alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher screenshot'`. **Hyper+X** mirrors Flameshot's macOS default `Ctrl+Shift+X`. Hyper+S/N/T are taken. Hyper+X is free (checked). Comment it like the Hyper+N/T lines. |
+| Config | `commands.toml` `[screenshot]` + `makeCommand` / `configNumberKeys` / `validateConfig` in `kitchen_sink.swift` | Every value through `configEntry` / `configLine`. |
+| Hook into tools | `isToolPanel` / `openTool` in `kitchen_sink.swift` | Add `"screenshot"` to the tool-panel name list and a `case "screenshot": showScreenshot(cmd)`. |
+| Hotkey | `config/aerospace/aerospace.toml` | `alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/kitchen-sink/kitchen-sink.app/Contents/MacOS/kitchen-sink screenshot'`. **Hyper+X** mirrors Flameshot's macOS default `Ctrl+Shift+X`. Hyper+S/N/T are taken. Hyper+X is free (checked). Comment it like the Hyper+N/T lines. |
 | CLI / socket | `main.swift` forwards `screenshot …` to the daemon. Socket messages: `screenshot` (= gui), `screenshot:gui|full|screen|pin…` with flags (§7.4), test hooks `do:screenshot:*`, state `screenshot` | Like `window` / `terminal`. Do **not** add it to `hotkeyModes`: that runs `hotkeyPrep` (AeroSpace queries) the tool doesn't need, and costs 20–60 ms. |
 | Shortcuts list | `[shortcuts]` in `commands.toml` | Add `"all: Hyper+X" = "screenshot (Flameshot-style)"` and a `"screenshot: …"` block for the capture keys. |
 | Setup / health | `bin/preflight.sh` + `SetupWindow.swift` | New warning row "Screen Recording permission" with Fix = open System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording (`url:x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`). |
@@ -567,11 +567,11 @@ Add numeric keys to `configNumberKeys` with ranges (`contrast-opacity`
 ### 7.4 CLI (mirrors `flameshot` so scripts carry over)
 
 ```
-workspace-switcher screenshot [gui] [-p PATH] [-c] [-d MS] [--region WxH+X+Y|screen0]
+kitchen-sink screenshot [gui] [-p PATH] [-c] [-d MS] [--region WxH+X+Y|screen0]
                                [--last-region] [-s|--accept-on-select] [--pin]
                                [-r|--raw] [-g|--print-geometry]
-workspace-switcher screenshot full   [-p PATH] [-c] [-d MS] [-r]      # all displays, stitched, no UI
-workspace-switcher screenshot screen [-n N] [-p PATH] [-c] [-d MS] [-r] [--pin]   # one display (default: under the mouse)
+kitchen-sink screenshot full   [-p PATH] [-c] [-d MS] [-r]      # all displays, stitched, no UI
+kitchen-sink screenshot screen [-n N] [-p PATH] [-c] [-d MS] [-r] [--pin]   # one display (default: under the mouse)
 ```
 
 - `-p` saves to PATH (a directory → pattern name), `-c` copies. With neither,

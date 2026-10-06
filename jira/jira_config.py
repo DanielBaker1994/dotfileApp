@@ -75,7 +75,7 @@ LEGACY_CONFIG = os.environ.get("JIRA_CONFIG_FILE") or os.path.join(HOME, ".confi
 COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "commands.toml")
 
 CACHE_DIR = os.environ.get("JIRA_CACHE_DIR") or os.path.join(HOME, ".cache/jira")
-OUT_DIR_DEFAULT = os.path.join(HOME, ".cache/workspace-switcher/jira_json")
+OUT_DIR_DEFAULT = os.path.join(HOME, ".cache/kitchen-sink/jira_json")
 
 DEFAULTS = {
     "site": "",
@@ -167,7 +167,7 @@ BASE_WINDOW_KEYS = ["key", "title", "status", "assignee", "release", "releaseLab
                     "description", "reporter", "project"]
 # a field's display name (column header, search filter title) unless team.json
 # field_labels renames it - ONE label per field (Jira Config ▸ Definitions ▸
-# Fields). Mirrored in the app: JiraPoll.baseFieldLabels (workspace_switcher.swift).
+# Fields). Mirrored in the app: JiraPoll.baseFieldLabels (kitchen_sink.swift).
 BASE_FIELD_LABELS = {
     "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
     "reporter": "Reporter", "priority": "Priority", "labels": "Labels",

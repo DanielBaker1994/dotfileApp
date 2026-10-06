@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# build-app.sh — THE one build of workspace-switcher.app. INSTALL.sh and
-# bin/workspace_switcher.sh (build.sh) both call this, so the compiled file
+# build-app.sh — THE one build of kitchen-sink.app. INSTALL.sh and
+# bin/kitchen_sink.sh (build.sh) both call this, so the compiled file
 # list can never drift between them (install once missed the Jira files).
 #
 #   bin/build-app.sh            build if stale
@@ -145,7 +145,7 @@ build_icon() {
 
 # --dist: everything the app needs at runtime goes INSIDE the bundle (lists in
 # install.conf). An installed app reads its code from Contents/Resources and
-# the user's files from ~/.config/workspace-switcher (bin/setup-home.sh).
+# the user's files from ~/.config/kitchen-sink (bin/setup-home.sh).
 bundle_resources() {
     local res="$APP/Contents/Resources" d f src
     for d in $RESOURCE_LINK_DIRS $RESOURCE_SEED_DIRS; do
@@ -166,7 +166,7 @@ bundle_resources() {
     awk '
         /^\[/ { sec = $0 }
         sec == "[notes]" && /^paths[ \t]*=/ {
-            print "paths = \"~/notes, ~/.config/workspace-switcher/commands.toml\""; next }
+            print "paths = \"~/notes, ~/.config/kitchen-sink/commands.toml\""; next }
         sec == "[notes]" && /^pdf-css[ \t]*=/ { print "pdf-css = \"\""; next }   # the dotfiles style
         /^config[ \t]*=.*fake\.json/ { next }   # bin/fake-confluence.sh start
         /^vim-bin[ \t]*=/ { print "vim-bin = \"nvim\""; next }

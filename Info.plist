@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleExecutable</key>
-	<string>workspace-switcher</string>
+	<string>kitchen-sink</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.danielbaker.workspace-switcher</string>
+	<string>dev.danielbaker.kitchen-sink</string>
 	<key>CFBundleName</key>
-	<string>workspace-switcher</string>
+	<string>kitchen-sink</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>NSAppTransportSecurity</key>

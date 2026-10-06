@@ -890,7 +890,7 @@ extension Array where Element == PopupTableColumn {
 
 // Borderless windows can't become key by default; without this the popup
 // never gets focus (no caret, no keyboard input). Two window flavors:
-//   - PopupPanel (NSPanel): borderless popups like the workspace switcher.
+//   - PopupPanel (NSPanel): borderless popups like the kitchen sink.
 //     NSPanel is REQUIRED here — a plain NSWindow can't become key while
 //     another app is frontmost, and the switcher is toggled from other apps.
 //   - PopupPlainWindow (NSWindow): titled note/list windows. NSWindow is
@@ -989,7 +989,7 @@ public class PopupBaseWindow: NSWindow, EscapableWindow, HeaderClickWindow {
     }
 }
 
-// Borderless variant (workspace switcher, tool panels).
+// Borderless variant (kitchen sink, tool panels).
 public final class PopupPanel: NSPanel, EscapableWindow, HeaderClickWindow {
     public var onEscape: (() -> Void)?
 
@@ -5075,7 +5075,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         self.cwd = (startDir as NSString).standardizingPath
         self.staticFavorites = staticFavorites
         let home = NSHomeDirectory()
-        self.favURL = favoritesURL ?? URL(fileURLWithPath: home + "/.cache/workspace-switcher/files-favorites.json")
+        self.favURL = favoritesURL ?? URL(fileURLWithPath: home + "/.cache/kitchen-sink/files-favorites.json")
         self.parentButton = ThemeButton(config: config, title: "", symbol: "arrow.up")
         self.starButton = ThemeButton(config: config, title: "Pin", symbol: "star")
         self.sortKey = SortKey(rawValue: config.browserSort.lowercased()) ?? .name

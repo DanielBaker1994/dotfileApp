@@ -14,7 +14,7 @@ import AppKit
 //              an existing path (ClipboardPaths; password managers skipped)
 //   explicit   filefast saves, the Files view's Copy Path / drag-out
 // Clipboard + explicit paths skip the ignore rules (you asked for that
-// file). Stored in ~/.cache/workspace-switcher/paths.json.
+// file). Stored in ~/.cache/kitchen-sink/paths.json.
 final class PathShelf {
     static let shared = PathShelf()
     static let changed = Notification.Name("PathShelfChanged")
@@ -57,7 +57,7 @@ final class PathShelf {
     var immediate = false
 
     // store / rules are parameters for Tests/test_path_shelf.swift
-    init(store: String = NSHomeDirectory() + "/.cache/workspace-switcher/paths.json",
+    init(store: String = NSHomeDirectory() + "/.cache/kitchen-sink/paths.json",
          rules: IgnoreRules = IgnoreRules()) {
         self.store = store
         self.rules = rules

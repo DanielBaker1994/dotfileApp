@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ui-test.sh — end-to-end UI tests for workspace-switcher
+# ui-test.sh — end-to-end UI tests for kitchen-sink
 #
 # Uses cliclick (brew install cliclick) to simulate clicks and keystrokes,
 # plus osascript (AppleScript) to inspect window state via Accessibility API.
@@ -37,14 +37,14 @@ wait_for() {
     return 0
 }
 
-# Count workspace-switcher windows visible
+# Count kitchen-sink windows visible
 window_count() {
-    osascript -e 'tell application "System Events" to count (windows of (processes where name is "workspace-switcher"))' 2>/dev/null || echo 0
+    osascript -e 'tell application "System Events" to count (windows of (processes where name is "kitchen-sink"))' 2>/dev/null || echo 0
 }
 
 # Get the app pid
 app_pid() {
-    pgrep -f "workspace-switcher.app/Contents/MacOS" | head -1
+    pgrep -f "kitchen-sink.app/Contents/MacOS" | head -1
 }
 
 # Get window count for a specific name/title pattern
@@ -52,19 +52,19 @@ windows_named() {
     local pattern="$1"
     osascript -e "
         tell application \"System Events\"
-            tell process \"workspace-switcher\"
+            tell process \"kitchen-sink\"
                 count (windows whose name contains \"$pattern\")
             end tell
         end tell
     " 2>/dev/null || echo 0
 }
 
-# Get the window frame (x,y,w,h) of a workspace-switcher window
+# Get the window frame (x,y,w,h) of a kitchen-sink window
 window_frame() {
     local idx="${1:-1}"
     osascript -e "
         tell application \"System Events\"
-            tell process \"workspace-switcher\"
+            tell process \"kitchen-sink\"
                 set f to position of window $idx
                 set s to size of window $idx
                 return (item 1 of f as text) & \",\" & (item 2 of f as text) & \",\" & (item 1 of s as text) & \",\" & (item 2 of s as text)
@@ -78,7 +78,7 @@ window_exists() {
     local title="$1"
     osascript -e "
         tell application \"System Events\"
-            tell process \"workspace-switcher\"
+            tell process \"kitchen-sink\"
                 return (count (windows whose title contains \"$title\")) > 0
             end tell
         end tell
@@ -87,11 +87,11 @@ window_exists() {
 
 # Get status item count in the menu bar
 status_item_count() {
-    # Count processes with status items (workspace-switcher is accessory,
+    # Count processes with status items (kitchen-sink is accessory,
     # so it should only have 1 status item total)
     osascript -e '
         tell application "System Events"
-            tell process "workspace-switcher"
+            tell process "kitchen-sink"
                 count (menu bars of menu bar 1)
             end tell
         end tell
@@ -141,9 +141,9 @@ send_shortcut() {
 # --- setup ------------------------------------------------------------------
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="$ROOT/../workspace-switcher.app/Contents/MacOS/workspace-switcher"
+BIN="$ROOT/../kitchen-sink.app/Contents/MacOS/kitchen-sink"
 
-echo "== workspace-switcher UI tests =="
+echo "== kitchen-sink UI tests =="
 echo "  cliclick:  $CLICLICK"
 echo "  binary:    $BIN"
 echo "  date:      $(date)"
@@ -161,7 +161,7 @@ cp "$CONF_FILE" "$CONF_SNAPSHOT"
 restore_config() {
     if ! cmp -s "$CONF_SNAPSHOT" "$CONF_FILE"; then
         cp "$CONF_SNAPSHOT" "$CONF_FILE"
-        pkill -x workspace-switcher 2>/dev/null || true
+        pkill -x kitchen-sink 2>/dev/null || true
     fi
     rm -f "$CONF_SNAPSHOT"
 }
@@ -173,7 +173,7 @@ if grep -Eq '^vim-mode *= *true' "$CONF_FILE"; then
 fi
 
 # Kill any existing daemon
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # ============================================================================
@@ -391,7 +391,7 @@ fi
 echo "== 11. Drag shake regression: position stability on open =="
 
 # Kill and restart fresh for a clean test
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -483,14 +483,14 @@ fi
 echo "== 13. Edge resize (non-key window regression) =="
 
 # Kill all and start fresh
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # Helper: get window 1 size as "W,H"
 window_size() {
     osascript -e '
         tell application "System Events"
-            tell process "workspace-switcher"
+            tell process "kitchen-sink"
                 set s to size of window 1
                 return (item 1 of s as text) & "," & (item 2 of s as text)
             end tell
@@ -511,7 +511,7 @@ fi
 INIT_SIZE="$(window_size)"
 
 # --- Test 13c: Rapid open/close stress — no state corruption ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 RAPID_PASS=true
@@ -536,7 +536,7 @@ else
 fi
 
 # --- Test 13d: Window position stable after open (no jitter) ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -544,7 +544,7 @@ sleep 0.8
 
 STABLE_POS="$(osascript -e '
     tell application "System Events"
-        tell process "workspace-switcher"
+        tell process "kitchen-sink"
             set p to position of window 1
             return (item 1 of p as text) & "," & (item 2 of p as text)
         end tell
@@ -558,7 +558,7 @@ if [[ -n "$STABLE_POS" ]]; then
         sleep 0.1
         CP="$(osascript -e '
             tell application "System Events"
-                tell process "workspace-switcher"
+                tell process "kitchen-sink"
                     set p to position of window 1
                     return (item 1 of p as text) & "," & (item 2 of p as text)
                 end tell
@@ -584,7 +584,7 @@ else
 fi
 
 # --- Test 13e: Full drawer toggle cycle with resize checks ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -621,7 +621,7 @@ fi
 
 # --- Test 13f: Manual edge-resize test (cliclick cannot synthesize AppKit tracking-area drags) ---
 echo ""
-echo "  MANUAL: Kill app → ./workspace-switcher notes → DO NOT click anything"
+echo "  MANUAL: Kill app → ./kitchen-sink notes → DO NOT click anything"
 echo "  → hover LEFT edge (cursor=←→) → drag → should resize, not move window"
 echo ""
 
@@ -631,7 +631,7 @@ echo ""
 
 echo "== 14. Keyboard navigation =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 14a: Popup row navigation (Up/Down/Return) ---
@@ -771,7 +771,7 @@ else
 fi
 
 # --- Test 14g: Output window (health checks) ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" health >/dev/null 2>&1 &
@@ -798,7 +798,7 @@ else
 fi
 
 # --- Test 14h: Cmd+=/Cmd=- UI zoom ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -837,7 +837,7 @@ fi
 
 echo "== 15. Auto-save & tab management =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 15a: Auto-save on window close (Esc) ---
@@ -869,7 +869,7 @@ else
 fi
 
 # --- Test 15c: Tab add/close/switch cycle ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -907,7 +907,7 @@ fi
 
 echo "== 16. File browser =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 16a: File browser window opens ---
@@ -927,7 +927,7 @@ else
 fi
 
 # --- Test 16e: File browser drawer in notes window ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -957,7 +957,7 @@ fi
 
 echo "== 17. List window features =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 17a: List window opens (Jira) ---
@@ -984,7 +984,7 @@ fi
 
 echo "== 18. Config & resilience =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 18a: App survives missing config file ---
@@ -997,7 +997,7 @@ if window_count | grep -q '^[0-9]'; then
 else
     fail "App crashed or hung with minimal config"
 fi
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.3
 
 # ============================================================================
@@ -1069,7 +1069,7 @@ fi
 
 echo "== 20. File browser E2E (fixture directory /tmp/ws-test) =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # Verify fixture directory exists
@@ -1162,7 +1162,7 @@ pass "Restored original commands.toml"
 
 echo "== 21. Real UI interactions =="
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # Helper: get window frame as "x,y,w,h" for window matching $1 title
@@ -1170,7 +1170,7 @@ win_frame() {
     local title="$1"
     osascript -e "
         tell application \"System Events\"
-            tell process \"workspace-switcher\"
+            tell process \"kitchen-sink\"
                 repeat with w in windows
                     if title of w contains \"$title\" then
                         set f to position of w
@@ -1185,7 +1185,7 @@ win_frame() {
 
 # Helper: get window count
 win_count() {
-    osascript -e 'tell application "System Events" to count windows of (processes where name is "workspace-switcher")' 2>/dev/null || echo 0
+    osascript -e 'tell application "System Events" to count windows of (processes where name is "kitchen-sink")' 2>/dev/null || echo 0
 }
 
 # --- Test 21a: Tab close via X button click ---
@@ -1251,7 +1251,7 @@ mkdir -p "$HOME/notes"
 echo "# E2E Save Test" > "$TEST_NOTE"
 
 # Close existing notes and reopen fresh
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 # Create test file BEFORE app starts so it becomes a tab
@@ -1262,7 +1262,7 @@ NOTE_FRAME="$(win_frame "notes")"
 if [[ -n "$NOTE_FRAME" ]]; then
     osascript -e '
         tell application "System Events"
-            tell process "workspace-switcher"
+            tell process "kitchen-sink"
                 set frontmost to true
                 perform action "AXRaise" of window 1
             end tell
@@ -1297,7 +1297,7 @@ else
 fi
 
 # Source guard: verify the auto-save chain exists
-AUTO_SAVE_CHAIN=$(grep -c 'onEditorClose.*commitSave\|onHide.*onEditorClose\|w\.onEditorClose = commitSave\|saveNote.*to.*currentPath\|saveNote.*to.*fallback' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
+AUTO_SAVE_CHAIN=$(grep -c 'onEditorClose.*commitSave\|onHide.*onEditorClose\|w\.onEditorClose = commitSave\|saveNote.*to.*currentPath\|saveNote.*to.*fallback' "$ROOT/../kitchen_sink.swift" 2>/dev/null || true)
 if [[ "$AUTO_SAVE_CHAIN" -ge 3 ]]; then
     pass "Auto-save chain verified in source (onEditorClose→commitSave→saveNote, count=$AUTO_SAVE_CHAIN)"
 else
@@ -1307,7 +1307,7 @@ fi
 rm -f "$TEST_NOTE"
 
 # --- Test 21c: File browser filter by typing ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 FB_FRAME="$(win_frame "files")"
@@ -1344,8 +1344,8 @@ else
     fi
 fi
 
-# --- Test 21d: Workspace switcher popup → type to filter → accept ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+# --- Test 21d: Kitchen sink popup → type to filter → accept ---
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" show >/dev/null 2>&1 &
@@ -1377,7 +1377,7 @@ fi
 # We can't easily verify the external app opened, but we can verify the
 # code path exists and the file browser doesn't crash on Enter
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 OPEN_CODE=$(grep -c 'func openIndex\|NSWorkspace.*open\|onOpen.*path' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
@@ -1393,7 +1393,7 @@ fi
 # The other paths each become a tab
 # So there should be multiple tabs total
 
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -1408,7 +1408,7 @@ else
 fi
 
 # Verify the note paths config parsing
-PATHS_CODE=$(grep -c 'cmd\.paths\|\.paths\[' "$ROOT/../workspace_switcher.swift" 2>/dev/null || true)
+PATHS_CODE=$(grep -c 'cmd\.paths\|\.paths\[' "$ROOT/../kitchen_sink.swift" 2>/dev/null || true)
 if [[ "$PATHS_CODE" -ge 1 ]]; then
     pass "Note paths config parsing present (count=$PATHS_CODE)"
 else
@@ -1454,7 +1454,7 @@ fi
 rm -f "$SURVIVE_NOTE"
 
 # --- Test 21h: Popup command mode (/ prefix) ---
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" show >/dev/null 2>&1 &
@@ -1505,7 +1505,7 @@ echo ""
 
 echo
 echo "== cleanup =="
-pkill -f "workspace-switcher.app" 2>/dev/null || true
+pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
 
 echo

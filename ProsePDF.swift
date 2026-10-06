@@ -13,7 +13,7 @@ enum ProsePDF {
         var css = ""                                   // [notes] pdf-css: a <style> header snippet; "" = built in
         var outDir = "~/Downloads"                     // [notes] pdf-path
         var highlight = "tango"                        // [notes] pdf-highlight
-        var cacheDir = NSHomeDirectory() + "/.cache/workspace-switcher/prose"
+        var cacheDir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
     }
 
     static func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }

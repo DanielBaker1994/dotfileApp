@@ -19,7 +19,7 @@ def expand(p: str) -> str:
 
 
 def home() -> str:
-    return expand(os.environ.get("WS_HOME") or "~/.config/workspace-switcher")
+    return expand(os.environ.get("WS_HOME") or "~/.config/kitchen-sink")
 
 
 def commands_conf() -> str:
@@ -108,10 +108,10 @@ def app_binary() -> str:
     if env:
         return expand(env)
     for base in (ROOT, home()):
-        p = os.path.join(base, "workspace-switcher.app", "Contents", "MacOS", "workspace-switcher")
+        p = os.path.join(base, "kitchen-sink.app", "Contents", "MacOS", "kitchen-sink")
         if os.path.exists(p):
             return p
-    return os.path.join(home(), "workspace-switcher.app", "Contents", "MacOS", "workspace-switcher")
+    return os.path.join(home(), "kitchen-sink.app", "Contents", "MacOS", "kitchen-sink")
 
 
 def socket_path() -> str:
@@ -121,7 +121,7 @@ def socket_path() -> str:
 
 
 def cache_dir() -> str:
-    d = expand(os.environ.get("WS_SETTINGS_CACHE") or "~/.cache/workspace-switcher")
+    d = expand(os.environ.get("WS_SETTINGS_CACHE") or "~/.cache/kitchen-sink")
     os.makedirs(d, exist_ok=True)
     return d
 

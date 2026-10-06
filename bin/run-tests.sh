@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-tests.sh — compile and run the workspace-switcher tests
+# run-tests.sh — compile and run the kitchen-sink tests
 #   ./bin/run-tests.sh           run all tests
 #   ./bin/run-tests.sh config    run only config tests
 #   ./bin/run-tests.sh recent    run only the file browser's Recent list tests

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # grant-permissions.sh — pre-grant EVERY privacy permission the app uses, so
-# macOS never interrupts you with "workspace-switcher.app would like to…":
+# macOS never interrupts you with "kitchen-sink.app would like to…":
 #   Microphone + Speech Recognition   voice notes
 #   Downloads / Desktop / Documents   the file browsers + their Recent view
 #

@@ -11,9 +11,9 @@ is the CLT 3.9 without `tomllib`).
 | # | Question | Decision |
 |---|---|---|
 | 1 | Home of the shared python codec | NEW top-level `pylib/config_text.py` (jira / confluence / notify import it; `jira_config` re-exports `config_entry` / `config_line`) |
-| 2 | Favorites file | `~/.config/workspace-switcher/settings-hub.json`, gitignored |
+| 2 | Favorites file | `~/.config/kitchen-sink/settings-hub.json`, gitignored |
 | 3 | Setting a commented-out key | un-comment it IN PLACE (keeps it beside its doc) |
-| 4 | `[theme]` / launch-only `[app]` changes | add a `workspace-switcher restart` verb |
+| 4 | `[theme]` / launch-only `[app]` changes | add a `kitchen-sink restart` verb |
 | 5 | Confluence's hard-coded shortcuts alert | switch to the shared `[shortcuts]` card |
 | 6 | Dead `config = "~/.config/confluence/fake.json"` at the end of `[ai]` | delete it |
 | 7 | herdr default bindings | NOT shown (only what the config sets) |
@@ -32,7 +32,7 @@ is the CLT 3.9 without `tomllib`).
    rule goes BEFORE the Ghostty → workspace 1 rule.
 5. Apply: `[theme]` + launch-only `[app]` keys need a restart; `[confluence]` /
    `[ai]` / `[setup]` apply on open; `jira.enabled` goes through
-   `workspace-switcher jira-poll on|off`; herdr reloads with `herdr server reload-config`
+   `kitchen-sink jira-poll on|off`; herdr reloads with `herdr server reload-config`
    after `herdr config check`; aerospace `reload-config --dry-run --no-gui` first.
 6. Validation = a `config-check` CLI verb wrapping Swift `configValueProblem`
    (section rules too), plus `config-schema` JSON for offline hints.
@@ -63,7 +63,7 @@ install.conf: `pylib settings_hub` → `RESOURCE_LINK_DIRS`, `ws-settings` → `
 - Writes: realpath → one-line edit → assert exactly one line differs → (v1.1)
   `config-check --file` → re-read, retry once on sha change → mkstemp in the
   target dir + fsync + chmod + `os.replace` (the link is never replaced).
-- Undo: `~/.cache/workspace-switcher/settings-undo.json`, last 20, byte-identical.
+- Undo: `~/.cache/kitchen-sink/settings-undo.json`, last 20, byte-identical.
 - Swift (v1.1): socket `reload` (reply JSON), CLI `reload` / `restart` /
   `config-schema` / `config-check` with explicit `main.swift` cases (an unknown
   verb would start a daemon); `"settings-hub"` in `loadCommands`' skip list.

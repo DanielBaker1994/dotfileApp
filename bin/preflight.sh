@@ -4,7 +4,7 @@
 # `--json`. One script so the two can never disagree.
 #
 #   bin/preflight.sh                  repo install, coloured text
-#   bin/preflight.sh --mode app --app /Applications/workspace-switcher.app
+#   bin/preflight.sh --mode app --app /Applications/kitchen-sink.app
 #   bin/preflight.sh --json           one JSON object on stdout
 #
 # Exit 1 only when a REQUIRED check fails. Everything else is a warning: the
@@ -181,7 +181,7 @@ if [ "$SHOT_ON" != false ]; then
     case "$SHOT_PERM" in
         granted) add screen-recording features warn 1 "Screen Recording permission" "granted (/screenshot)" ;;
         denied)  add screen-recording features warn 0 "Screen Recording permission" "not granted" \
-                     "/screenshot (Hyper+X) needs it: System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording ▸ turn on workspace-switcher." \
+                     "/screenshot (Hyper+X) needs it: System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording ▸ turn on kitchen-sink." \
                      "$SHOT_PANE" ;;
         *)       add screen-recording features warn 0 "Screen Recording permission" "unknown (the app is not running)" \
                      "Start the app, then check again. /screenshot (Hyper+X) needs Screen Recording." "$SHOT_PANE" ;;

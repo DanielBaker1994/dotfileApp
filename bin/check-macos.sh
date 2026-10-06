@@ -34,6 +34,6 @@ ver_ge() {
 if ver_ge "$HOST" "$MIN"; then
     exit 0
 fi
-echo "workspace-switcher targets macOS $MIN, but this Mac runs ${HOST:-an unknown macOS}." >&2
+echo "kitchen-sink targets macOS $MIN, but this Mac runs ${HOST:-an unknown macOS}." >&2
 echo "Lower MACOS_MIN in install.conf to build for this machine." >&2
 exit 1

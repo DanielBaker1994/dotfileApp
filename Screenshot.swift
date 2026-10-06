@@ -202,11 +202,11 @@ enum ScreenToast {
 // MARK: - Recent screenshots (history + panel)
 
 // Every capture that leaves the overlay (copy, save, pin) is also kept as a
-// PNG in ~/.cache/workspace-switcher/screenshots — the newest `[screenshot]
+// PNG in ~/.cache/kitchen-sink/screenshots — the newest `[screenshot]
 // history` (default 20; 0 = off) — so the clock button / ⌘R can reopen it
 // even when it only ever went to the clipboard.
 enum ShotHistory {
-    static var dir: String { NSHomeDirectory() + "/.cache/workspace-switcher/screenshots" }
+    static var dir: String { NSHomeDirectory() + "/.cache/kitchen-sink/screenshots" }
     private static let queue = DispatchQueue(label: "ws.shot-history", qos: .utility)
 
     static func record(_ img: CGImage, limit: Int) {
@@ -436,7 +436,7 @@ final class ScreenshotController {
     // /pane-shot's last result (state `paneShot`)
     private(set) var paneShotLast: [String: Any] = [:]
     private var recentPanel: ShotRecentPanel?
-    let statePath = NSHomeDirectory() + "/.cache/workspace-switcher/screenshot-state.json"
+    let statePath = NSHomeDirectory() + "/.cache/kitchen-sink/screenshot-state.json"
 
     init() {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,

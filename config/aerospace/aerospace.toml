@@ -11,11 +11,11 @@
 # M Y W 1-9 gets its windows moved back. The switcher daemon also runs it on
 # display changes and wake.
 exec-on-workspace-change = [
-  '/opt/homebrew/bin/bash', '-c', '~/.config/workspace-switcher/bin/no_stray_workspaces.sh &'
+  '/opt/homebrew/bin/bash', '-c', '~/.config/kitchen-sink/bin/no_stray_workspaces.sh &'
 ]
 
 
-# The workspace-switcher focus bridge: it records the
+# The kitchen-sink focus bridge: it records the
 # newly focused window id for the daemon (macOS won't activate an accessory
 # app from another process, so the daemon self-activates when aerospace
 # focuses it; it watches the file, no polling). Inline on purpose: ONE
@@ -97,9 +97,9 @@ key-mapping.preset = 'qwerty'
 # properly; the dialog heuristic floats those now.
 # Raycast's launcher is auto-ignored by aerospace (since 0.18.3) so it needs no rule.
 on-window-detected = [
-  # workspace-switcher: a regular TILED window on workspace N (first rule,
+  # kitchen-sink: a regular TILED window on workspace N (first rule,
   # so nothing below can float it; the dialog heuristic is overridden too)
-  { if = 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher', run = ['layout tiling', 'move-node-to-workspace N --focus-follows-window'] },
+  { if = 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink', run = ['layout tiling', 'move-node-to-workspace N --focus-follows-window'] },
   # VS Code is Microsoft too, but an editor: it tiles on 2 (stops here,
   # before the Microsoft float rule below)
   { if = 'test %{app-bundle-id} = com.microsoft.VSCode', run = ['move-node-to-workspace 2'] },
@@ -183,19 +183,19 @@ N = ['main']
 # Fallback value (if you omit the key): mode.main.binding = {}
 [mode.main.binding]
 
-    # Workspace switcher popup: Hyper+S (Hyper = all four modifiers;
+    # Kitchen sink popup: Hyper+S (Hyper = all four modifiers;
     # AeroSpace has no `hyper` keyword, so it's spelled out as
     # alt-cmd-ctrl-shift). The window itself has no hotkey: open it from the
     # palette (Hyper+S, last entry) or launch the app.
-    alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/workspace-switcher/bin/workspace_switcher.sh'
+    alt-cmd-ctrl-shift-s = 'exec-and-forget ~/.config/kitchen-sink/bin/kitchen_sink.sh'
     # Screenshot: Hyper+X (Flameshot's macOS default is Ctrl+Shift+X) —
     # freeze + dim every display, drag a box, annotate, Cmd+C / Cmd+S / pin.
     # Runs the app BINARY directly (a ~20ms socket ping); the overlay never activates the app.
-    alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/workspace-switcher/workspace-switcher.app/Contents/MacOS/workspace-switcher screenshot'
+    alt-cmd-ctrl-shift-x = 'exec-and-forget ~/.config/kitchen-sink/kitchen-sink.app/Contents/MacOS/kitchen-sink screenshot'
     # ws-settings: Hyper+/ — every shortcut + setting in one searchable list
     # (bin/ws-settings open: focuses the picker if it's up, else opens it in
     # a floating Ghostty window titled "ws-settings"; see the float rule)
-    alt-cmd-ctrl-shift-slash = 'exec-and-forget ~/.config/workspace-switcher/bin/ws-settings open'
+    alt-cmd-ctrl-shift-slash = 'exec-and-forget ~/.config/kitchen-sink/bin/ws-settings open'
     # Tiles layout; again = flip horizontal / vertical
     alt-slash = 'layout tiles horizontal vertical'
     # Vertical counterpart of alt-slash: stack all windows vertically in the
@@ -271,7 +271,7 @@ N = ['main']
     f = ['layout floating tiling', 'mode main'] # Toggle between floating and tiling layout
     backspace = ['close-all-windows-but-current', 'mode main']
     # flip which monitor owns 1-8 + letters vs 9 (bin/aerospace-monitors.sh)
-    #m = ['exec-and-forget ~/.config/workspace-switcher/bin/aerospace-monitors.sh toggle', 'mode main']
+    #m = ['exec-and-forget ~/.config/kitchen-sink/bin/aerospace-monitors.sh toggle', 'mode main']
 
     # sticky is not yet supported https://github.com/nikitabobko/AeroSpace/issues/2
     #s = ['layout sticky tiling', 'mode main']

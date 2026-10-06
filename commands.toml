@@ -1,4 +1,4 @@
-# Workspace switcher command palette (loaded ONCE at daemon start).
+# Kitchen sink command palette (loaded ONCE at daemon start).
 #
 # Plain lines:   name = "shell command"      (run in persistent bash, output logged)
 # Sections:      [name] + key = value lines  (typed commands with behavior)
@@ -155,7 +155,7 @@
 #   esc-close           rapid Esc presses that hide a window (default 0 =
 #                       never; 1 = single Esc, 2 = double-tap). A view's own
 #                       `esc-close` overrides it — kitchen sink ▸ "Esc Hides
-#                       Window", per view. The workspace switcher palette
+#                       Window", per view. The kitchen sink palette
 #                       always closes on one Esc.
 #   copy-toast          pill shown when Cmd+K copies a path in the file
 #                       browser; "{}" = the path (default "Copied {} to
@@ -215,9 +215,9 @@ notes-icon = "notes_icon.png"
 files-icon = ""
 # machine-owned socket / focus-filename / window identities
 notes-socket = "ws-notes.sock"
-focus-file = "workspace-switcher-focus"
+focus-file = "kitchen-sink-focus"
 focus-bridge = "ws-aerospace-focus"
-switcher-name = "workspace-switcher"
+switcher-name = "kitchen-sink"
 detail-name = "jira-detail"
 # aerospace-socket: AeroSpace's IPC socket. Default = its own per-user path
 # (/tmp/bobko.aerospace-<user>.sock); "$USER" expands. Never hard-code a user
@@ -318,7 +318,7 @@ script = "mkdir -p \"$FF_DIR\" && cat > \"$FF_DIR/$FF_NAME\" && printf %s \"$FF_
 # .ignore / .rgignore, the global git excludes, and `ignore-file` — plus
 # paths you copy (a file in Finder, or text that is 1-5 existing paths;
 # password-manager copies skipped), filefast saves and the Files view's Copy
-# Path / drag-out. Stored in ~/.cache/workspace-switcher/paths.json.
+# Path / drag-out. Stored in ~/.cache/kitchen-sink/paths.json.
 #   limit        rows kept (1-25, default 25)
 #   return       what Return does: file (default) | path | open
 #   clipboard    true/false (default true): add paths you copy
@@ -347,7 +347,7 @@ ignore-file = "config/paths.ignore"
 # is recognized on device (Apple Vision) and copied; ⇧⌘C / the copy-text
 # button does the same for a screenshot selection. A tool panel: it never activates the app. Needs Screen Recording
 # (System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording).
-# CLI: workspace-switcher screenshot [gui|text|full|screen] [-p PATH] [-c] [-d MS]
+# CLI: kitchen-sink screenshot [gui|text|full|screen] [-p PATH] [-c] [-d MS]
 #      [--region WxH+X+Y|screenN] [--last-region] [-s] [--pin] [-r] [-g] [-n N]
 # Defaults are Flameshot's; this file carries the owner's flameshot.ini
 # (contrast-opacity 188, draw-color #288000, save-path /private/tmp).
@@ -431,7 +431,7 @@ help-text-mode = "Back to screenshot mode"
 # ONE tall image, drawn off screen in Ghostty's font + colors (ghostty
 # +show-config), then copied + saved like a /screenshot capture (→ /paths).
 # Not a palette command. herdr keeps ≤ 1000 rows per read (its cap).
-# CLI: workspace-switcher pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
+# CLI: kitchen-sink pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
 #      [--no-save] [--no-copy]   (prints the saved path)
 #   lines               history rows above the screen (0 = the screen only)
 #   save / copy         what a capture does (flags override)
@@ -528,7 +528,7 @@ sidebar-width = 234
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
-paths = "~/notes, ~/.config/workspace-switcher/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/workspace-switcher/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt"
+paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt"
 # window 20% wider (640 -> 768) and the notepad ~30% taller; max-height lets
 # the taller window actually apply (the 60%-of-screen cap would clamp it)
 width = 768
@@ -616,7 +616,7 @@ highlight-color = "2B3B51"
 accent-color = "719CD6"
 palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 # a directory — every .json/.tsv file inside becomes a tab
-sources = "~/.cache/workspace-switcher/jira_json"
+sources = "~/.cache/kitchen-sink/jira_json"
 # table mode: spreadsheet rows under a sticky header. columns = one line of
 #   field:Title:width:align:flags, …  (jira: the header is the field's ONE
 #   label — Jira Config ▸ Definitions ▸ Fields — so Title may stay empty)
@@ -667,7 +667,7 @@ inspector-width = 340
 # search-max-choices = 25, 50, 100, 250, 500
 
 # [confluence] — Confluence search: a view of the shared window (Hyper+S
-# /confluence, menu bar ▸ Confluence Search, `workspace-switcher confluence`). Search with
+# /confluence, menu bar ▸ Confluence Search, `kitchen-sink confluence`). Search with
 # All words / Phrase / Any word, Title only, prefix*; filter by space, type,
 # modified, mine; the page previews live with every match highlighted; ☆
 # favorites. Its own site + token (NOT Jira's) live in
@@ -698,7 +698,7 @@ fm-bin = "/usr/bin/fm"
 pandoc-bin = "/opt/homebrew/bin/pandoc"
 # fm's window: instructions + your text + the answer; longer text runs in parts
 context-tokens = 4096
-rules-dir = "~/.config/workspace-switcher/rules"
+rules-dir = "~/.config/kitchen-sink/rules"
 # input share of the width (drag the divider to change it)
 split = 0.5
 # text size of both panes; font = "" is the system font
@@ -716,7 +716,7 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 
 # [compare] — Beyond Compare-style Text + Folder Compare (CompareWindow.swift); a
 # shared-window view (header icon ⇆, Hyper+S /compare, file browser / /paths
-# right-click "Select for Compare" → "Compare to …", `workspace-switcher
+# right-click "Select for Compare" → "Compare to …", `kitchen-sink
 # compare [--wait] A B`, git difftool). Keys:
 #   enabled          true | false: the view, its nav icon, palette entry
 #   esc-close        0 | 1 | 2: "Esc Hides Window" (0 = never; default [app] esc-close)
@@ -735,7 +735,7 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 #   ignore-file      extra gitignore-syntax file
 #   *-label          the view's words ({} = the variable part; recovered-label = the status after a restart
 #                    brought back unsaved edits)
-#   Open sessions + unsaved text survive a restart: ~/.cache/workspace-switcher/compare-sessions.json
+#   Open sessions + unsaved text survive a restart: ~/.cache/kitchen-sink/compare-sessions.json
 #   + compare-recovery/ (git difftool sessions are never kept)
 [compare]
 enabled = true
@@ -757,7 +757,7 @@ content = auto
 time-tolerance = 2
 exclude = ".git, node_modules, .DS_Store, .build"
 use-gitignore = true
-ignore-file = "~/.config/workspace-switcher/config/compare.ignore"
+ignore-file = "~/.config/kitchen-sink/config/compare.ignore"
 same-label = "Identical"
 same-text-label = "Same text — files differ in {}"
 binary-label = "Binary files {}"
@@ -793,18 +793,18 @@ accent-color = "719CD6"
 palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 sidebar-width = 245
 
-# [icons] — app icons for the workspace switcher rows. Normal apps keep their
+# [icons] — app icons for the kitchen sink rows. Normal apps keep their
 # real macOS icons; ONLY apps listed here get overrides, matched by app name
 # plus window-title substrings. Line format:
 #   app-name = title-match:icon, other-title:icon, *:default-icon
 #   icon = app | jira | notes | <png filename or absolute path>
 # "*" is the fallback icon when the window title matches nothing (and the
 # whole override is skipped when no fallback is given and nothing matched).
-# The workspace-switcher app shows notes / files / jira in ONE shared window
+# The kitchen-sink app shows notes / files / jira in ONE shared window
 # whose title follows the view, so its row always wears the app's own icon
 # (the kitchen sink) — not whichever view happens to be active.
 [icons]
-workspace-switcher = "*:app"
+kitchen-sink = "*:app"
 
 # [shortcuts] — the kitchen sink menu's "Keyboard Shortcuts…" list (also
 # Cmd+/ in any view). One line per shortcut, shown in file order:
@@ -985,7 +985,7 @@ save-dir = "/tmp/"
 
 # /terminal — the dedicated terminal popup (TerminalPanel.swift): your
 # [app] shell in a floating, non-activating panel on the screen you're on.
-# Also Ctrl+B T (aerospace.toml mode.prefix) / `workspace-switcher term`.
+# Also Ctrl+B T (aerospace.toml mode.prefix) / `kitchen-sink term`.
 # The session survives hide / show. Cmd+C / V / A, Cmd+K clear, Cmd+= / -
 # font, Cmd+W hide; every other key (Esc, Ctrl+C …) goes to the shell.
 [terminal]
@@ -1002,7 +1002,7 @@ type = "output"
 panel = true
 title = ""
 icon = "heart"
-script = "~/.config/workspace-switcher/jira/jira-doctor.sh"
+script = "~/.config/kitchen-sink/jira/jira-doctor.sh"
 width = 800
 height = 640
 font = "SF Mono"
@@ -1057,12 +1057,12 @@ imessage-app = "com.apple.MobileSMS"
 imessage-tag = "MESSAGES"
 
 # The Setup & Health Check window (menu bar ▸ Setup & Health Check…, or
-# `workspace-switcher setup`): what this Mac needs + the optional hotkeys /
+# `kitchen-sink setup`): what this Mac needs + the optional hotkeys /
 # menu-bar set-up. An installed app (DMG) opens it on first run.
 #   title / intro   the window title and the line under it ("" = built-in)
 #   width / height  window size in points
 [setup]
-title = "workspace-switcher — Setup & Health Check"
+title = "kitchen-sink — Setup & Health Check"
 intro = ""
 width = 640
 height = 620

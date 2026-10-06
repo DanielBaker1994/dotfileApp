@@ -3,7 +3,7 @@
 # (reproduces a work-sized list: typing lag in the filter box).
 #
 #   start [N]  write N Faker issues (default 20000, jira/fake_jira_tab.py) to
-#              ~/.cache/workspace-switcher/jira_fake/bench-N.json and point
+#              ~/.cache/kitchen-sink/jira_fake/bench-N.json and point
 #              `[jira] sources` in commands.toml at that folder (the old value
 #              is kept in jira_fake/sources.orig). The real tabs, the poller
 #              and config.json are never touched.
@@ -12,7 +12,7 @@
 # Filter timings: /tmp/ws-debug.log, lines "jira filter: …".
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FAKE_DIR="$HOME/.cache/workspace-switcher/jira_fake"
+FAKE_DIR="$HOME/.cache/kitchen-sink/jira_fake"
 ORIG="$FAKE_DIR/sources.orig"
 
 conf() {  # conf get | conf set VALUE|"" -> [jira] sources
@@ -33,10 +33,10 @@ start)
     mkdir -p "$FAKE_DIR"
     cur="$(conf get)"
     # remember the real value once (a second start keeps the first one)
-    [[ -f $ORIG || $cur == "~/.cache/workspace-switcher/jira_fake" ]] || printf '%s' "$cur" >"$ORIG"
+    [[ -f $ORIG || $cur == "~/.cache/kitchen-sink/jira_fake" ]] || printf '%s' "$cur" >"$ORIG"
     rm -f "$FAKE_DIR"/bench-*.json
     python3 "$ROOT/jira/fake_jira_tab.py" "$FAKE_DIR/bench-$n.json" --count "$n"
-    conf set "~/.cache/workspace-switcher/jira_fake"
+    conf set "~/.cache/kitchen-sink/jira_fake"
     echo "Jira window now reads $FAKE_DIR; 'bin/fake-jira-tab.sh stop' switches back"
     ;;
 stop)

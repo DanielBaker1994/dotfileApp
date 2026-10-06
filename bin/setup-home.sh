@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-home.sh — set up ~/.config/workspace-switcher ("the home"), the ONE
+# setup-home.sh — set up ~/.config/kitchen-sink ("the home"), the ONE
 # path every external config points at (aerospace.toml hotkeys, the jira
 # launchd agent, commands.toml). What sits behind it depends on how
 # the app was installed:
@@ -7,8 +7,8 @@
 #   repo install   the home IS the git checkout (or a link to it)
 #   app install    a real directory: the user's own commands.toml, rules/ and
 #                  config/ (seeded from the bundle), links for the code
-#                  (bin jira … -> workspace-switcher.app/Contents/Resources/…)
-#                  and ONE absolute link, workspace-switcher.app -> the app
+#                  (bin jira … -> kitchen-sink.app/Contents/Resources/…)
+#                  and ONE absolute link, kitchen-sink.app -> the app
 #
 #   setup-home.sh app APP [--switch]   the app runs this on every launch
 #                                      (fast no-op when nothing changed; a
@@ -205,10 +205,10 @@ cmd_stack() {
         # precompiled unread-count helpers (no swiftc on an end user's Mac);
         # touched so they count as newer than their sources
         if [ -d "$res/helpers-bin" ]; then
-            mkdir -p "$HOME/.cache/workspace-switcher/helpers"
+            mkdir -p "$HOME/.cache/kitchen-sink/helpers"
             for f in "$res/helpers-bin/"*; do
-                cp -p "$f" "$HOME/.cache/workspace-switcher/helpers/" \
-                    && touch "$HOME/.cache/workspace-switcher/helpers/$(basename "$f")"
+                cp -p "$f" "$HOME/.cache/kitchen-sink/helpers/" \
+                    && touch "$HOME/.cache/kitchen-sink/helpers/$(basename "$f")"
             done
         fi
         ;;

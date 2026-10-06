@@ -130,7 +130,7 @@ def link_mirrors(rows: list) -> None:
     for r in rows:
         if r.layer != "aerospace" or not r.chords:
             continue
-        if "workspace-switcher" in r.action or "workspace_switcher" in r.action or "ws-settings" in r.action:
+        if "kitchen-sink" in r.action or "kitchen_sink" in r.action or "ws-settings" in r.action:
             hit = app.get(r.chords[0].text)
             if hit:
                 r.mirror_of = hit.id

@@ -1108,7 +1108,7 @@ enum ShotFiles {
 
 // MARK: - CLI
 
-// `workspace-switcher screenshot [gui|full|screen] [flags]` (Flameshot's)
+// `kitchen-sink screenshot [gui|full|screen] [flags]` (Flameshot's)
 struct ShotArgs: Equatable {
     enum Mode: String { case gui, text, full, screen }   // text = gui in Copy Text mode
     var mode = Mode.gui
@@ -1189,7 +1189,7 @@ struct ShotArgs: Equatable {
 
 // MARK: - Persistent state
 
-// ~/.cache/workspace-switcher/screenshot-state.json: per-tool sizes, the
+// ~/.cache/kitchen-sink/screenshot-state.json: per-tool sizes, the
 // draw color, text style, the last accepted region (save-last-region)
 struct ShotState: Codable {
     struct Region: Codable, Equatable {

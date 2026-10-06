@@ -11,7 +11,7 @@
 
 import Foundation
 
-// `workspace-switcher pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
+// `kitchen-sink pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
 // [--no-save] [--no-copy]`
 struct PaneShotArgs: Equatable {
     var pane: String?
@@ -52,8 +52,8 @@ struct PaneShotArgs: Equatable {
             case "--no-save": a.save = false
             case "--copy": a.copy = true
             case "--no-copy": a.copy = false
-            case "-h", "--help": return .failure(Problem(message: "usage: workspace-switcher " + usage))
-            default: return .failure(Problem(message: "unknown argument \(w)\nusage: workspace-switcher " + usage))
+            case "-h", "--help": return .failure(Problem(message: "usage: kitchen-sink " + usage))
+            default: return .failure(Problem(message: "unknown argument \(w)\nusage: kitchen-sink " + usage))
             }
             i += 1
         }

@@ -3,7 +3,7 @@ import AppKit
 // MARK: - Jira Config window (the one place for everything jira-poll)
 //
 // Menu bar "Open Jira Config Window" (also the Jira window's icon menu, and
-// `workspace-switcher jira-poll dashboard`). Master–detail:
+// `kitchen-sink jira-poll dashboard`). Master–detail:
 //
 //   sidebar          POLL JOBS  (each endpoint in config.json, + Add Poll Job)
 //                    SETTINGS   (Setup, Live Search, Connection, Definitions)

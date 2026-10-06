@@ -1,7 +1,7 @@
 import AppKit
 import SwiftTerm
 
-// The dedicated terminal (Ctrl+B T, palette /terminal, `workspace-switcher
+// The dedicated terminal (Ctrl+B T, palette /terminal, `kitchen-sink
 // term`): the old notes drawer's shell as its own popup. A tool panel —
 // borderless, non-activating, floating, ignored by AeroSpace — so it opens
 // on the screen you're on and never brings the shared window along. The

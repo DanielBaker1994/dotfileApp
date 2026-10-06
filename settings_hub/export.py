@@ -5,7 +5,7 @@ import json
 
 from .model import Catalog
 
-LAYER_TITLE = {"aerospace": "Global hotkeys (AeroSpace)", "app": "workspace-switcher",
+LAYER_TITLE = {"aerospace": "Global hotkeys (AeroSpace)", "app": "kitchen-sink",
                "herdr": "herdr (terminal)", "ghostty": "Ghostty", "vim": "Notes vim pane"}
 
 

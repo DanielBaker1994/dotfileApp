@@ -1,6 +1,6 @@
 # PRD: `ws-settings`, one place to see and change every shortcut and setting
 
-Status: approved, building (decisions + corrections: `PLAN-settings-hub.md`) · Written: 2026-10-03 · Target: a standalone Python tool beside workspace-switcher (macOS, arm64, python3 ≥ 3.11)
+Status: approved, building (decisions + corrections: `PLAN-settings-hub.md`) · Written: 2026-10-03 · Target: a standalone Python tool beside kitchen-sink (macOS, arm64, python3 ≥ 3.11)
 
 > **For the implementing agent.** Read `AGENT_CONTEXT.md` (= `CLAUDE.md`) and
 > `rule.md` first. They are binding. This PRD says *what* to build and which
@@ -12,7 +12,7 @@ Status: approved, building (decisions + corrections: `PLAN-settings-hub.md`) · 
 ## 1. Summary
 
 Build `ws-settings`, a small standalone Python tool. It shows **every keyboard
-shortcut and every setting** of the workspace-switcher setup in one place,
+shortcut and every setting** of the kitchen-sink setup in one place,
 and lets you **change them** from that same place. It has a CLI for scripts and
 quick lookups, and a fast keyboard-driven picker that opens on a hotkey, like
 [KeyMinder](https://keyminder.app/) does for menu shortcuts. It works even
@@ -100,7 +100,7 @@ config files."*
 - Must follow `commands.toml`'s rules: one-line entries, read and written only
   through `config_entry` / `config_line`. Never split on `=` by hand.
 - Must work in both install modes (repo and DMG): find files through "the
-  home" `~/.config/workspace-switcher` and `$WS_COMMANDS_CONF`.
+  home" `~/.config/kitchen-sink` and `$WS_COMMANDS_CONF`.
 
 ## 6. Value proposition
 
@@ -121,7 +121,7 @@ includes settings.
 
 ### 7.1 UX
 
-**A. CLI** (`bin/ws-settings`, also installed as `workspace-switcher settings` later)
+**A. CLI** (`bin/ws-settings`, also installed as `kitchen-sink settings` later)
 
 ```
 ws-settings keys [QUERY] [--layer aerospace|app|herdr|vim] [--view files] [--mods cmd,shift] [--json]
@@ -189,7 +189,7 @@ closes.
 
 | Reader | Source | Notes |
 |---|---|---|
-| `aerospace` | `config/aerospace/aerospace.toml` (`tomllib`) `[mode.main.binding]`, `[mode.service.binding]` | `alt-cmd-ctrl-shift-x` → **Hyper+X**. `exec-and-forget …workspace-switcher window` → action text from a small map (`window` → "show / hide the window"), the rest shown raw. Service-mode keys get view `service`. |
+| `aerospace` | `config/aerospace/aerospace.toml` (`tomllib`) `[mode.main.binding]`, `[mode.service.binding]` | `alt-cmd-ctrl-shift-x` → **Hyper+X**. `exec-and-forget …kitchen-sink window` → action text from a small map (`window` → "show / hide the window"), the rest shown raw. Service-mode keys get view `service`. |
 | `app` | `commands.toml` `[shortcuts]` via `config_entry` | `"view: keys" = "what"`, in file order. Read-only binding (it's a label); the **text** is editable. |
 | `herdr` | `~/.dotfiles/herdr/config.toml` `[keys]` + `[[keys.command]]` | lists (`["prefix+h","ctrl+h"]`) → one row per chord. `prefix` shown as herdr's prefix key. Path from `[settings-hub] herdr-config` (default `~/.config/herdr/config.toml`). Only configured keys, not herdr's defaults. |
 | `vim` | `vim/init.lua` `*map` lines | best effort, read-only, view `notes (vim)`. |
@@ -209,7 +209,7 @@ with `config_entry`. For each key:
 - commented-out keys (`# key = value`) listed as "default, not set".
 
 **F3. Search, filter, favorites.** Fuzzy match as in §7.1; `--mods` and the
-⌃⌥⇧⌘ toggles; favorites in `~/.config/workspace-switcher/settings-hub.json`
+⌃⌥⇧⌘ toggles; favorites in `~/.config/kitchen-sink/settings-hub.json`
 (user data, never in the repo or the app bundle).
 
 **F4. Safe setting edits.** `set` / picker edits:
@@ -220,7 +220,7 @@ with `config_entry`. For each key:
 4. Write atomically (temp file in the same folder + `rename`). The real
    `commands.toml` may be a symlink: write through to its target, never
    replace the link.
-5. Record the old line in `~/.cache/workspace-switcher/settings-undo.json`;
+5. Record the old line in `~/.cache/kitchen-sink/settings-undo.json`;
    `ws-settings undo` puts it back (last 20 edits).
 
 **F5. Rebinding (editable layers only).**
@@ -235,13 +235,13 @@ with `config_entry`. For each key:
   there would make the card lie. Show them read-only with that reason.
 
 **F6. Schema from the app (optional, one source of truth).** Add a CLI verb
-`workspace-switcher config-schema` that prints JSON: `configNumberKeys` ranges,
+`kitchen-sink config-schema` that prints JSON: `configNumberKeys` ranges,
 known enum keys, and which sections apply live vs on reload. Plus
-`workspace-switcher config-check SECTION KEY VALUE` (and `--file PATH`), which
+`kitchen-sink config-check SECTION KEY VALUE` (and `--file PATH`), which
 runs the app's own `configValueProblem` / `validateConfig`, so section rules are
 exact too. Allowed values read from doc comments are only a warning (`--force`
 writes anyway). The tool caches
-it in `~/.cache/workspace-switcher/config-schema.json` and falls back to
+it in `~/.cache/kitchen-sink/config-schema.json` and falls back to
 inference (F2) when the binary is missing. No ranges are copied into Python.
 
 **F7. Apply after a change.**
@@ -249,9 +249,9 @@ inference (F2) when the binary is missing. No ranges are copied into Python.
 | What changed | Apply |
 |---|---|
 | `[screenshot]`, `[pane-shot]` | nothing (read on every trigger) |
-| `[theme]`, launch-only `[app]` keys | new verb `workspace-switcher restart` |
+| `[theme]`, launch-only `[app]` keys | new verb `kitchen-sink restart` |
 | `[confluence]`, `[ai]`, `[setup]` | nothing (read when the view opens) |
-| `[jira] enabled` | `workspace-switcher jira-poll on\|off` (never a raw write) |
+| `[jira] enabled` | `kitchen-sink jira-poll on\|off` (never a raw write) |
 | other `commands.toml` sections | new socket message `reload` → `SwitcherController.reloadConfig()` (today only the notes icon menu's "Reload Config" calls it). No daemon → "applies on next start". |
 | `[notifications]`, sketchybar | `sketchybar --reload` |
 | aerospace.toml | `aerospace reload-config --dry-run --no-gui`, then `aerospace reload-config` (failure → auto undo) |

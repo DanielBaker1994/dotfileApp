@@ -31,13 +31,13 @@ def _app(verb: str) -> dict:
             got = json.loads(out.splitlines()[-1])
             bad = [i["message"] for i in got.get("issues", []) if i.get("fatal")]
             if bad:
-                return {"ok": False, "ran": f"workspace-switcher {verb}", "note": "; ".join(bad)}
+                return {"ok": False, "ran": f"kitchen-sink {verb}", "note": "; ".join(bad)}
         except (ValueError, IndexError):
             pass
-        return {"ok": True, "ran": f"workspace-switcher {verb}", "note": note}
+        return {"ok": True, "ran": f"kitchen-sink {verb}", "note": note}
     if "not running" in out:
-        return {"ok": True, "ran": f"workspace-switcher {verb}", "note": "the app isn't running; applies on next start"}
-    return {"ok": False, "ran": f"workspace-switcher {verb}", "note": out or f"exit {rc}"}
+        return {"ok": True, "ran": f"kitchen-sink {verb}", "note": "the app isn't running; applies on next start"}
+    return {"ok": False, "ran": f"kitchen-sink {verb}", "note": out or f"exit {rc}"}
 
 
 def setting(mode: str) -> dict:

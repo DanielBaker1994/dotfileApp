@@ -408,7 +408,7 @@ func testParity() {
     }
     // 2. consecutive versions from this repo's history (read-only git)
     let (_, log) = run(["/usr/bin/git", "log", "--format=%H", "-n", "40", "--", "PopupWindow.swift",
-                        "workspace_switcher.swift", "SharedWindow.swift", "Confluence.swift", "AIWindow.swift"], cwd: root)
+                        "kitchen_sink.swift", "SharedWindow.swift", "Confluence.swift", "AIWindow.swift"], cwd: root)
     let commits = log.split(separator: "\n").map(String.init)
     var history = 0
     outer: for name in ["SharedWindow.swift", "AIWindow.swift", "Confluence.swift", "CardWindow.swift", "PathShelf.swift"] {

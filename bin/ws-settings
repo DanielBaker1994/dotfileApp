@@ -1,5 +1,5 @@
 #!/bin/bash
-# ws-settings — every shortcut and setting of the workspace-switcher setup
+# ws-settings — every shortcut and setting of the kitchen-sink setup
 # (settings_hub/, PRD-settings-hub.md). `ws-settings --help`; Hyper+/ runs
 # `ws-settings open` (the picker in a floating Ghostty window).
 #

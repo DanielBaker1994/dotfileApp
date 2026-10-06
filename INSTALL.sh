@@ -75,7 +75,7 @@ esac
 if [ ! -d "$ROOT/.git" ]; then
     printf "\n${CYAN}This looks like a standalone copy — the full app is in a git repo.${RESET}\n"
     printf "${CYAN}I'll clone it and continue the install from the fresh copy.${RESET}\n\n"
-    DEFAULT="$HOME/workspace-switcher"
+    DEFAULT="$HOME/kitchen-sink"
     read -r -p "Where should I install the app? [$DEFAULT]: " DEST
     DEST="${DEST:-$DEFAULT}"
     if [ -d "$DEST" ]; then
@@ -103,7 +103,7 @@ set -e
 
 printf "${CYAN}
 ┌──────────────────────────────────────────────────────────────┐
-│            workspace-switcher — one-command install          │
+│            kitchen-sink — one-command install          │
 └──────────────────────────────────────────────────────────────┘
 ${RESET}"
 printf "${DIM}This script installs a macOS app that gives you a notes window, a\nvoice-to-text window (dictate → text), a Jira issue browser, and a\nswitcher popup — plus AeroSpace and window borders.${RESET}\n"
@@ -125,9 +125,9 @@ fi
 "$ROOT/bin/preflight.sh" --mode repo || die "this Mac cannot run the app (see the ✘ lines above)"
 ok "this Mac can build and run the app (! lines = optional features that are off)"
 
-# the stable home (~/.config/workspace-switcher) must not belong to an
+# the stable home (~/.config/kitchen-sink) must not belong to an
 # installed app (DMG) — setup-home.sh stops if it does, nothing is moved
-"$ROOT/bin/setup-home.sh" repo >/dev/null || die "could not prepare ~/.config/workspace-switcher"
+"$ROOT/bin/setup-home.sh" repo >/dev/null || die "could not prepare ~/.config/kitchen-sink"
 # a second copy with the same bundle id confuses LaunchServices and the
 # privacy grants — this install runs the one built in the checkout
 for other in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; do
@@ -190,7 +190,7 @@ ok "configs linked to the repo ($CONFIG_DIRS)"
 
 # ------------------------------------------------------------- 4. build
 STEP="building the app"
-step "4/6 building workspace-switcher.app (compiling the Swift sources)"
+step "4/6 building kitchen-sink.app (compiling the Swift sources)"
 # the same build script ./build.sh uses (bin/build-app.sh): every top-level
 # *.swift is compiled, SwiftTerm is precompiled once, then sign + the privacy
 # grants (mic, speech, Downloads / Desktop / Documents: bin/grant-permissions.sh)
@@ -229,7 +229,7 @@ printf "       aerospace reload-config\n"
 printf "  3. Jira (optional): menu bar wrench → Enable Jira (asks for site +\n"
 printf "     token), then Open Jira Config Window. Poll jobs = the \"endpoints\"\n"
 printf "     list in ~/.config/jira/config.json (one job → one JSON file → one\n"
-printf "     Jira window tab, written to ~/.cache/workspace-switcher/jira_json/).\n"
+printf "     Jira window tab, written to ~/.cache/kitchen-sink/jira_json/).\n"
 printf "  4. Use it:\n"
 printf "       Hyper+S            switcher popup (search '/' for commands)\n"
 printf "       menu bar wrench    notes / jira / voice / health checks\n"

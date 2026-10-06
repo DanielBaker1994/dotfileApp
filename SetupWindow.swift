@@ -5,10 +5,10 @@ import Foundation
 // Install modes + the Setup & Health Check window.
 //
 // Two kinds of install (paths: `assetDir` / `userDir` / `homeDir` in
-// workspace_switcher.swift):
+// kitchen_sink.swift):
 //   repo build   ./INSTALL.sh — everything lives in the git checkout
 //   app install  the DMG — code in Contents/Resources, the user's files in
-//                ~/.config/workspace-switcher, set up by bin/setup-home.sh
+//                ~/.config/kitchen-sink, set up by bin/setup-home.sh
 //
 // `AppInstall.ensureHome()` runs first thing in main.swift (app installs
 // only; a marker check, no process, when nothing changed). The window shows
@@ -30,7 +30,7 @@ enum AppInstall {
         case failed(String)
     }
     static var state: State = .repo
-    // `workspace-switcher setup` with no daemon running: open it at launch
+    // `kitchen-sink setup` with no daemon running: open it at launch
     static var requested = false
     static let keepCheckoutKey = "setupKeepCheckout"
 
@@ -76,7 +76,7 @@ enum AppInstall {
         let m = marker()
         if !switchFromCheckout, m["mode"] == "app", m["app"] == bundle, m["version"] == version,
            fm.fileExists(atPath: homeDir + "/commands.toml"),
-           (try? fm.destinationOfSymbolicLink(atPath: homeDir + "/workspace-switcher.app")) == bundle {
+           (try? fm.destinationOfSymbolicLink(atPath: homeDir + "/kitchen-sink.app")) == bundle {
             state = .ready(fresh: false)
             return
         }
@@ -161,7 +161,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                           backing: .buffered, defer: false)
         super.init()
         let c = colors
-        window.title = Self.setting("title", "workspace-switcher — Setup & Health Check")
+        window.title = Self.setting("title", "kitchen-sink — Setup & Health Check")
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.backgroundColor = c.base
@@ -251,9 +251,9 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         case .notInstalled:
             fallback = "The app is running from the disk image. Move it to the Applications folder first — nothing can be saved from here."
         case .checkout:
-            fallback = "~/.config/workspace-switcher is a developer checkout. The app uses its settings as they are; nothing was changed."
+            fallback = "~/.config/kitchen-sink is a developer checkout. The app uses its settings as they are; nothing was changed."
         case .failed(let why):
-            fallback = "Setting up ~/.config/workspace-switcher failed: \(why)"
+            fallback = "Setting up ~/.config/kitchen-sink failed: \(why)"
         default:
             fallback = "What this Mac needs. Notes, files, Jira, Confluence and AI work on their own; the Hyper hotkeys and window borders are an optional extra step."
         }
@@ -563,9 +563,9 @@ final class SetupWindow: NSObject, NSWindowDelegate {
 
     // the home is a git checkout: keep it (nothing changes) or hand over
     private func chooseHome() {
-        ask(title: "~/.config/workspace-switcher is a developer checkout",
+        ask(title: "~/.config/kitchen-sink is a developer checkout",
             text: "Keep Using the Checkout: nothing changes — the app reads the checkout's commands.toml.\n\n"
-                + "Switch to the Installed App: the checkout is kept (renamed to workspace-switcher.repo-<date>, or just unlinked), "
+                + "Switch to the Installed App: the checkout is kept (renamed to kitchen-sink.repo-<date>, or just unlinked), "
                 + "your commands.toml, rules and configs are carried over, and the hotkeys point at this app.",
             buttons: ["Keep Using the Checkout", "Switch to the Installed App", "Cancel"]) { [weak self] pick in
             guard let self else { return }

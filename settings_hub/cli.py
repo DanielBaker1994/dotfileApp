@@ -128,9 +128,9 @@ def do_set(sec: str, key: str, value: str, force: bool = False, no_apply: bool =
         rc = subprocess.run([b, "jira-poll", "on" if value == "true" else "off"],
                             capture_output=True, text=True).returncode if os.access(b, os.X_OK) else 127
         if rc == 0:
-            return 0, ["ran: workspace-switcher jira-poll " + ("on" if value == "true" else "off"),
+            return 0, ["ran: kitchen-sink jira-poll " + ("on" if value == "true" else "off"),
                        "  (the app's own switch: it checks the setup and starts / stops the poller)"]
-        return 1, ["[jira] enabled goes through the running app (workspace-switcher jira-poll on|off),",
+        return 1, ["[jira] enabled goes through the running app (kitchen-sink jira-poll on|off),",
                    "which isn't running; start the app first"]
     row = _find_setting(sec, key)
     errors, warnings = schema.validate(sec, key, value, row)
@@ -420,7 +420,7 @@ def _center(aq) -> tuple:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="ws-settings",
-                                description="every shortcut and setting of the workspace-switcher setup")
+                                description="every shortcut and setting of the kitchen-sink setup")
     sub = p.add_subparsers(dest="verb")
     k = sub.add_parser("keys", help="list / search keyboard shortcuts")
     k.add_argument("query", nargs="*")

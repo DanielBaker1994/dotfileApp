@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# UNINSTALL.sh — remove the whole workspace-switcher stack.
+# UNINSTALL.sh — remove the whole kitchen-sink stack.
 #
 #   ./UNINSTALL.sh
 #
@@ -9,7 +9,7 @@ set -uo pipefail
 
 # Works for both installs: run from the checkout (repo install), or the copy
 # inside the app (app install):
-#   /Applications/workspace-switcher.app/Contents/Resources/UNINSTALL.sh
+#   /Applications/kitchen-sink.app/Contents/Resources/UNINSTALL.sh
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 UID_="$(id -u)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -30,7 +30,7 @@ ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$*"; }
 warn() { printf "${RED}  ✘ %s${RESET}\n" "$*"; }
 step() { printf "\n${CYAN}== %s ==${RESET}\n" "$*"; }
 
-printf "${CYAN}== Uninstalling the workspace switcher ==${RESET}\n"
+printf "${CYAN}== Uninstalling the kitchen sink ==${RESET}\n"
 
 step "stopping brew services ($BREW_SERVICES)"
 for svc in $BREW_SERVICES; do

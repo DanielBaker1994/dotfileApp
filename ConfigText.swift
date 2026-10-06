@@ -3,7 +3,7 @@
 // Foundation only (no app state, no file IO), so Tests/test_config.swift
 // compiles it on its own. Reading / validating / writing the file itself
 // (readConfigText, writeConfigText, validateConfig) stays in
-// workspace_switcher.swift.
+// kitchen_sink.swift.
 
 import Foundation
 

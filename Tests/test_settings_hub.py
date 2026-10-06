@@ -89,7 +89,7 @@ colors = "terminal"
 AEROSPACE = r'''# fixture aerospace.toml
 [mode.main.binding]
     # Screenshot: Hyper+X
-    alt-cmd-ctrl-shift-x = 'exec-and-forget /bin/echo workspace-switcher screenshot'
+    alt-cmd-ctrl-shift-x = 'exec-and-forget /bin/echo kitchen-sink screenshot'
     alt-h = 'focus left'
     cmd-k = 'focus up'   # clashes with files: Cmd+K
     alt-shift-slash = ['layout v_tiles', 'balance-sizes']
@@ -161,7 +161,7 @@ elif a[:1] == ["config-check"]:
         print(json.dumps({"ok": prob is None, **({"problem": prob} if prob else {})}))
 elif a[:1] in (["reload"], ["restart"]):
     if os.environ.get("STUB_DAEMON") == "down":
-        print("workspace-switcher is not running", file=sys.stderr)
+        print("kitchen-sink is not running", file=sys.stderr)
         sys.exit(1)
     print('{"commands":3,"issues":[],"ok":true,"usingBackup":false}')
 elif a[:1] == ["jira-poll"]:
@@ -210,7 +210,7 @@ class Env(unittest.TestCase):
         os.symlink(self.real, self.conf)
         stubs = os.path.join(d, "stubs")
         os.makedirs(stubs)
-        self.app = os.path.join(stubs, "workspace-switcher")
+        self.app = os.path.join(stubs, "kitchen-sink")
         with open(self.app, "w") as fh:
             fh.write(STUB_APP.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
         os.chmod(self.app, 0o755)
@@ -785,7 +785,7 @@ class PickerMouse(PtyEnv):
 
 
 # ---------------------------------------------------------------- live (opt-in)
-REAL_BIN = os.path.join(ROOT, "workspace-switcher.app", "Contents", "MacOS", "workspace-switcher")
+REAL_BIN = os.path.join(ROOT, "kitchen-sink.app", "Contents", "MacOS", "kitchen-sink")
 
 
 @unittest.skipUnless(os.access(REAL_BIN, os.X_OK), "app not built")
@@ -810,7 +810,7 @@ class LiveDaemon(unittest.TestCase):
         self.conf = os.path.realpath(os.path.join(ROOT, "commands.toml"))
         with open(self.conf, "rb") as fh:
             self.snapshot = fh.read()
-        self.undo_log = os.path.expanduser("~/.cache/workspace-switcher/settings-undo.json")
+        self.undo_log = os.path.expanduser("~/.cache/kitchen-sink/settings-undo.json")
         try:
             with open(self.undo_log, "rb") as fh:
                 self.undo_snapshot = fh.read()

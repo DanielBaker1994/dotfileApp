@@ -13,7 +13,7 @@ import Quartz
 // Compare (phase 2) opens file pairs there; `do:compare:open-sub` today.
 // Config: commands.toml [compare]. Opened from the Hyper+S palette
 // (/compare), the header icon, the file browser / /paths right-click
-// ("Select for Compare", "Compare to …"), the CLI (`workspace-switcher
+// ("Select for Compare", "Compare to …"), the CLI (`kitchen-sink
 // compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]`, git difftool).
 
 func compareEnabled() -> Bool {
@@ -79,7 +79,7 @@ let compareNavIcon: NSImage = {
         ?? glyphIcon("arrow.left.arrow.right", fallback: "⇆", tint: compareTint, size: 32, tile: false)
 }()
 
-// MARK: - Recent pairs (~/.cache/workspace-switcher/compare-recent.json)
+// MARK: - Recent pairs (~/.cache/kitchen-sink/compare-recent.json)
 
 struct CompareRecentEntry: Equatable {
     var left: String
@@ -88,9 +88,9 @@ struct CompareRecentEntry: Equatable {
 }
 
 enum CompareRecent {
-    static var path: String { NSHomeDirectory() + "/.cache/workspace-switcher/compare-recent.json" }
+    static var path: String { NSHomeDirectory() + "/.cache/kitchen-sink/compare-recent.json" }
     // snapshots of pasted sides (a Recent row opens them like files)
-    static var pastedDir: String { NSHomeDirectory() + "/.cache/workspace-switcher/compare-pasted" }
+    static var pastedDir: String { NSHomeDirectory() + "/.cache/kitchen-sink/compare-pasted" }
     static func isPasted(_ p: String) -> Bool { p.hasPrefix(pastedDir + "/") }
 
     static func load() -> [CompareRecentEntry] {
@@ -1149,7 +1149,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     // "unsaved (recovered)"; a save / discard drops the copy. git sessions
     // (temp files) are never kept.
 
-    static var stateDir: String { NSHomeDirectory() + "/.cache/workspace-switcher" }
+    static var stateDir: String { NSHomeDirectory() + "/.cache/kitchen-sink" }
     static var sessionsPath: String { stateDir + "/compare-sessions.json" }
     static var recoveryDir: String { stateDir + "/compare-recovery" }
     private var persistWork: DispatchWorkItem?

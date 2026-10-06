@@ -1,13 +1,13 @@
 ---
 name: ui-check
-description: Verify a workspace-switcher UI change in seconds by querying the running daemon's state over its socket (views, frames, drawers, focus, tabs) instead of running the slow bin/ui-test.sh suite. Use after ./build.sh when a change affects the shared window, views, drawers, or focus.
+description: Verify a kitchen-sink UI change in seconds by querying the running daemon's state over its socket (views, frames, drawers, focus, tabs) instead of running the slow bin/ui-test.sh suite. Use after ./build.sh when a change affects the shared window, views, drawers, or focus.
 ---
 
 # ui-check — verify UI behavior through the daemon socket
 
 The daemon answers two test messages on `$TMPDIR/ws-notes.sock`
 (`[app] notes-socket`), implemented in `SwitcherController.testQuery`
-(workspace_switcher.swift) + `PopupWindow.testState` (PopupWindow.swift):
+(kitchen_sink.swift) + `PopupWindow.testState` (PopupWindow.swift):
 
 - `state` → one JSON line:
   `view` (visible shared-window view, "" = hidden), `visible`, `active`,

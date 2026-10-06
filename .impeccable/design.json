@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-10-04T13:56:31.777607+00:00",
-  "title": "Design System: workspace-switcher",
+  "title": "Design System: kitchen-sink",
   "extensions": {
     "colorMeta": {
       "base": {
@@ -414,7 +414,7 @@
   ],
   "narrative": {
     "northStar": "The Terminal Card",
-    "overview": "workspace-switcher is a floating card that wears your terminal theme.\nSurfaces are stacked like a tmux or Catppuccin port, deepest first: the\nheader strip is the darkest band (crust), toolbars, tab strips and input\nwells sit one step in (mantle), the card is the base, and raised controls\nfloat just above it (surface). Nothing uses a system colour. Every pixel\ncomes from the active theme preset, so switching from Macchiato to Tokyo\nNight or Paper recolours every view, the embedded shell's ANSI palette and\nthe nvim pane together.\n\nThe look is dense and quiet. Text is small (10.5–13 pt), rows are 30 pt,\nand chrome is thin hairlines rather than boxes. Colour carries meaning, not\ndecoration. The one accent marks what is *selected or active*: the active\ntab, the cursor row's edge, an \"on\" toggle, a focus ring. The five palette\nhues (accent2, success, warning, danger, info) mark *state*: links and fuzzy\nmatches, Jira statuses, poll health, the ✕ hover. The card floats over a\nblurred desktop, so the system is translucent at the edges and solid where\nyou read.",
+    "overview": "kitchen-sink is a floating card that wears your terminal theme.\nSurfaces are stacked like a tmux or Catppuccin port, deepest first: the\nheader strip is the darkest band (crust), toolbars, tab strips and input\nwells sit one step in (mantle), the card is the base, and raised controls\nfloat just above it (surface). Nothing uses a system colour. Every pixel\ncomes from the active theme preset, so switching from Macchiato to Tokyo\nNight or Paper recolours every view, the embedded shell's ANSI palette and\nthe nvim pane together.\n\nThe look is dense and quiet. Text is small (10.5–13 pt), rows are 30 pt,\nand chrome is thin hairlines rather than boxes. Colour carries meaning, not\ndecoration. The one accent marks what is *selected or active*: the active\ntab, the cursor row's edge, an \"on\" toggle, a focus ring. The five palette\nhues (accent2, success, warning, danger, info) mark *state*: links and fuzzy\nmatches, Jira statuses, poll health, the ✕ hover. The card floats over a\nblurred desktop, so the system is translucent at the edges and solid where\nyou read.",
     "keyCharacteristics": [
       "Depth by tone, not shadow: crust < mantle < base < surface.",
       "One accent marks selection; palette hues mark status.",

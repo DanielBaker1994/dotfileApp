@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# jira-doctor.sh — ONE command that heartbeats the whole workspace-switcher
+# jira-doctor.sh — ONE command that heartbeats the whole kitchen-sink
 # stack: borders, aerospace, the
-# workspace-switcher daemon, permissions (mic/speech/dictation) — and, ONLY
+# kitchen-sink daemon, permissions (mic/speech/dictation) — and, ONLY
 # if jira is enabled in commands.toml, the jira section (config, API, poll
 # agent, schedule, window json). Disabling jira must never disable the
 # heartbeat: every non-jira check runs regardless.
@@ -23,8 +23,8 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$WS_ROOT/install.conf"
 # SwiftTerm checkout lives outside the repo (install.conf SWIFTTERM_DIR)
 SWIFTTERM_SRC="$WS_ROOT/$SWIFTTERM_DIR"
-WS_APP="$WS_ROOT/workspace-switcher.app"
-WS_BIN="$WS_APP/Contents/MacOS/workspace-switcher"
+WS_APP="$WS_ROOT/kitchen-sink.app"
+WS_BIN="$WS_APP/Contents/MacOS/kitchen-sink"
 CONF_JSON="$HOME/.config/jira/config.json"
 CACHE="$HOME/.cache/jira"
 STATUS="$CACHE/status.json"
@@ -87,10 +87,10 @@ if [ -f "$TOML" ]; then
 else
     bad "aerospace config missing: $TOML"
 fi
-if grep -q 'test %{app-bundle-id} = dev.danielbaker.workspace-switcher' "$TOML" 2>/dev/null; then
-    ok "aerospace.toml: workspace-switcher windows float"
+if grep -q 'test %{app-bundle-id} = dev.danielbaker.kitchen-sink' "$TOML" 2>/dev/null; then
+    ok "aerospace.toml: kitchen-sink windows float"
 else
-    bad "aerospace.toml: no floating rule for dev.danielbaker.workspace-switcher"
+    bad "aerospace.toml: no floating rule for dev.danielbaker.kitchen-sink"
 fi
 if grep -q 'ws-aerospace-focus' "$TOML" 2>/dev/null; then
     ok "aerospace.toml: on-focus-changed writes the focus bridge (daemon self-activate)"
@@ -99,16 +99,16 @@ else
 fi
 
 # ---------------------------------------------------------------- daemon
-head_ "== workspace-switcher daemon =="
+head_ "== kitchen-sink daemon =="
 if [ -x "$WS_BIN" ]; then
     STALE=0
-    for src in "$WS_ROOT/main.swift" "$WS_ROOT/workspace_switcher.swift" "$WS_ROOT/PopupWindow.swift"; do
+    for src in "$WS_ROOT/main.swift" "$WS_ROOT/kitchen_sink.swift" "$WS_ROOT/PopupWindow.swift"; do
         [ "$src" -nt "$WS_BIN" ] && STALE=1
     done
     if [ "$STALE" = 1 ]; then
         if [ "$FIX" = 1 ]; then
             # SwiftTerm is fetched at build time (bin/ensure-swiftterm.sh) and
-            # precompiled once (like bin/workspace_switcher.sh does) — build it
+            # precompiled once (like bin/kitchen_sink.sh does) — build it
             # here too if a repair is the first build on this machine.
             "$WS_ROOT/bin/ensure-swiftterm.sh" >/dev/null 2>&1 || true
             if [ ! -f "$WS_ROOT/.build/SwiftTerm/libSwiftTerm.a" ]; then
@@ -125,11 +125,11 @@ if [ -x "$WS_BIN" ]; then
             fi
             if (mkdir -p "$WS_APP/Contents/MacOS" && cd "$WS_ROOT" && swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
                 -I .build/SwiftTerm -Xlinker .build/SwiftTerm/libSwiftTerm.a \
-                PopupWindow.swift workspace_switcher.swift main.swift -o "$WS_BIN" >/dev/null 2>&1); then
+                PopupWindow.swift kitchen_sink.swift main.swift -o "$WS_BIN" >/dev/null 2>&1); then
                 # keep the bundle Info.plist (NSServices -> Finder right-click)
                 # in sync with the rebuilt binary
                 cp "$WS_ROOT/Info.plist" "$WS_APP/Contents/Info.plist"
-                codesign --force --sign - --identifier dev.danielbaker.workspace-switcher "$WS_APP" >/dev/null 2>&1
+                codesign --force --sign - --identifier dev.danielbaker.kitchen-sink "$WS_APP" >/dev/null 2>&1
                 ok "binary rebuilt (--fix): $WS_BIN"
                 # a rebuilt daemon loses its TCC grants — re-grant mic + speech
                 # (bundle-id grants persist across rebuilds)
@@ -150,8 +150,8 @@ if [ -x "$WS_BIN" ]; then
 else
     bad "binary missing: $WS_BIN (jira-doctor --fix builds it)"
 fi
-if pgrep -f "workspace-switcher.app" >/dev/null 2>&1; then
-    ok "daemon running (pid $(pgrep -f 'workspace-switcher.app' | head -1))"
+if pgrep -f "kitchen-sink.app" >/dev/null 2>&1; then
+    ok "daemon running (pid $(pgrep -f 'kitchen-sink.app' | head -1))"
 else
     warn "daemon not running — the next Hyper+S/J/N keypress starts it"
 fi
@@ -173,20 +173,20 @@ if [ -f "$WS_ROOT/commands.toml" ]; then
 else
     bad "commands.toml missing: $WS_ROOT/commands.toml"
 fi
-for s in workspace_switcher.sh grant-permissions.sh aerospace-monitors.sh; do
+for s in kitchen_sink.sh grant-permissions.sh aerospace-monitors.sh; do
     if [ -x "$WS_ROOT/bin/$s" ]; then ok "bin/$s present"; else bad "bin/$s missing or not executable"; fi
 done
-if grep -q 'workspace_switcher.sh' "$TOML" 2>/dev/null; then
-    ok "aerospace: Hyper+S bound to workspace_switcher.sh"
+if grep -q 'kitchen_sink.sh' "$TOML" 2>/dev/null; then
+    ok "aerospace: Hyper+S bound to kitchen_sink.sh"
 else
-    warn "aerospace: no workspace_switcher.sh keybinding found"
+    warn "aerospace: no kitchen_sink.sh keybinding found"
 fi
 
 # ---------------------------------------------------------------- permissions
 head_ "== permissions (mic + speech) =="
 if [ -r "$TCC_DB" ]; then
     for svc in Microphone SpeechRecognition; do
-        N="$(sqlite3 "$TCC_DB" "select count(*) from access where service='kTCCService$svc' and client like '%workspace-switcher%' and auth_value=2" 2>/dev/null)"
+        N="$(sqlite3 "$TCC_DB" "select count(*) from access where service='kTCCService$svc' and client like '%kitchen-sink%' and auth_value=2" 2>/dev/null)"
         if [ "${N:-0}" -ge 1 ]; then
             ok "TCC $svc: granted"
         else
@@ -251,7 +251,7 @@ if [ "$JIRA_ENABLED" = "true" ]; then
     else
         bad "cache missing: $CACHE/jiras.json (run: jira_poll.py --init --force)"
     fi
-    PLIST_WANT="$(sed "s|__WS_CONFIG__|$HOME/.config/workspace-switcher|g" "$PLIST_SRC")"
+    PLIST_WANT="$(sed "s|__WS_CONFIG__|$HOME/.config/kitchen-sink|g" "$PLIST_SRC")"
     if [ -f "$PLIST_DST" ]; then
         ok "plist installed: $PLIST_DST"
         if [ "$PLIST_WANT" != "$(cat "$PLIST_DST")" ]; then

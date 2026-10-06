@@ -22,7 +22,7 @@ import CoreServices
 // (Photos / Music — touching them triggers privacy prompts), build and
 // dependency trees, in-progress downloads, swap files, our own writes
 // (IgnoreSelf), plus [files] recent-exclude. Stored in
-// ~/.cache/workspace-switcher/recent.json.
+// ~/.cache/kitchen-sink/recent.json.
 final class RecentFiles {
     static let shared = RecentFiles()
     static let changed = Notification.Name("RecentFilesChanged")
@@ -63,7 +63,7 @@ final class RecentFiles {
 
     // home / store are parameters for Tests/test_recent_files.swift
     init(home: String = NSHomeDirectory(),
-         store: String = NSHomeDirectory() + "/.cache/workspace-switcher/recent.json") {
+         store: String = NSHomeDirectory() + "/.cache/kitchen-sink/recent.json") {
         self.home = home
         self.store = store
     }
@@ -427,7 +427,7 @@ final class RecentFiles {
         if p.hasPrefix("/private/tmp/"), !p.hasPrefix(home + "/") {
             let top = comps.count > 3 ? comps[3] : ""
             if top.hasPrefix("com.apple") || top.hasPrefix("claude") || top.hasPrefix("tmp")
-                || top.hasPrefix("ws-") || top.hasPrefix("workspace-switcher")
+                || top.hasPrefix("ws-") || top.hasPrefix("kitchen-sink")
                 || top.hasPrefix("jira-poll") { return false }   // our own agents' logs
         }
         for g in excludes where !g.isEmpty {

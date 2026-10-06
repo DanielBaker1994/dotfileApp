@@ -1,4 +1,4 @@
-# workspace-switcher
+# kitchen-sink
 
 Swift/AppKit macOS menu-bar app. `CLAUDE.md` is a symlink to this file
 (`AGENT_CONTEXT.md`) — edit it once. Don't read the big Swift files whole:
@@ -28,7 +28,7 @@ bin/make-dmg.sh       # the distributable .dmg (.build/dist) — see Install mod
 ```
 
 ONE build: `bin/build-app.sh` (compiles every top-level `*.swift`, SwiftTerm
-lib, sign, TCC) — used by build.sh, `bin/workspace_switcher.sh` and
+lib, sign, TCC) — used by build.sh, `bin/kitchen_sink.sh` and
 INSTALL.sh. Install/uninstall/build names + paths (bundle id, brew deps,
 launchd agent, caches) live in `install.conf`. Configs (`CONFIG_DIRS`:
 aerospace, borders) are per-file SYMLINKS from `~/.config/<name>`
@@ -37,15 +37,15 @@ files in the way, UNINSTALL.sh removes only links into the repo.
 
 ## Install modes (repo + DMG)
 
-- `~/.config/workspace-switcher` ("the home") is THE path every external
+- `~/.config/kitchen-sink` ("the home") is THE path every external
   config points at (aerospace.toml hotkeys, the jira launchd agent). Repo install: the home is the checkout (or a link
   to it). App install (DMG): a real directory — the user's `commands.toml`,
   `rules/`, `config/` (copies seeded from the bundle, never links into the
   signed app) + links `bin jira confluence notify vim pylib settings_hub install.conf` →
-  `workspace-switcher.app/Contents/Resources/…` (relative) and ONE absolute
-  link `workspace-switcher.app` → the app. `.install` = marker (`mode`,
+  `kitchen-sink.app/Contents/Resources/…` (relative) and ONE absolute
+  link `kitchen-sink.app` → the app. `.install` = marker (`mode`,
   `app`, `version`, `seed <sha> <file>`).
-- Swift paths (`workspace_switcher.swift` top): `isRepoBuild` (commands.toml
+- Swift paths (`kitchen_sink.swift` top): `isRepoBuild` (commands.toml
   + bin/build-app.sh beside the bundle), `assetDir` (repo / Contents/Resources:
   jira, confluence, vim, bin, icons), `userDir` (commands.toml, rules: repo /
   the home), `homeDir` (`$WS_HOME` overrides — tests). `main.swift` sets
@@ -58,7 +58,7 @@ files in the way, UNINSTALL.sh removes only links into the repo.
   real file / dir in the way (a checkout above all) → error, untouched
   (`--switch` only unlinks a home that is a link; `repo` refuses an app
   home). Home owned by a checkout → exit 3, nothing touched. `stack` = `symlinks.sh` (`WS_LINK_ROOT` = the home in
-  app mode) + precompiled unread helpers (→ ~/.cache/workspace-switcher/helpers)
+  app mode) + precompiled unread helpers (→ ~/.cache/kitchen-sink/helpers)
   + brew services. Never git.
 - `bin/preflight.sh [--json] [--mode repo|app] [--app PATH]`: ONE check list
   for INSTALL.sh (step 0) and the Setup window. Required: macOS ≥
@@ -74,7 +74,7 @@ files in the way, UNINSTALL.sh removes only links into the repo.
   `SetupWindow` (rows from preflight JSON, Fix per row: `move-app`,
   `setup-home`, `brew:` / `cask:`, `stack`, `url:`, `term:`; opt-in "Set Up
   Hotkeys & Menu Bar…"; output log). Opens on first run / new version / not
-  in Applications; menu bar ▸ Setup & Health Check…, `workspace-switcher
+  in Applications; menu bar ▸ Setup & Health Check…, `kitchen-sink
   setup`. `[setup]` in commands.toml (not a palette command).
 - `bin/build-app.sh --dist` → `.build/dist/<app>` (Resources per
   `install.conf` `RESOURCE_*`, `commands.default.toml` = the repo's minus
@@ -127,7 +127,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `bin/run-tests.sh compare`)
 - `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
   (see "/paths" below; `bin/run-tests.sh paths`)
-- `workspace_switcher.swift` — app logic (~9200 lines)
+- `kitchen_sink.swift` — app logic (~9200 lines)
 - `PopupWindow.swift` — popup window framework (~11700 lines; all keys in `handleKey`;
   `init` = `makePanel` / `makeBackdrop` + the `build…` steps, each wiring its own hooks)
 - `CardWindow.swift` — `CardNSWindow` + `CardWindowController`, the base of the
@@ -191,7 +191,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   within 1s of a view swap it was stolen (aerospace focusing the next
   window) → the view is re-shown instead.
   The shared window is a regular TILED window: aerospace.toml's FIRST
-  on-window-detected rule (`dev.danielbaker.workspace-switcher` → `layout
+  on-window-detected rule (`dev.danielbaker.kitchen-sink` → `layout
   tiling`) puts every window of the bundle id in the tiling tree (verified:
   same tile across view swaps); members sit at `.normal` level (`present`
   normalizes Jira Config's popUpMenu+1). No `[app] float`, no layout /
@@ -280,12 +280,12 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   app's `config-check --file` on the result, re-read + retry once on a
   concurrent change, mkstemp + fsync + chmod + os.replace; un-comments a
   `# key = …` in place, else after the section's last entry. Undo:
-  `~/.cache/workspace-switcher/settings-undo.json` (hunks, byte-identical).
-  Validation (`schema.py`) = the APP: `workspace-switcher config-check
+  `~/.cache/kitchen-sink/settings-undo.json` (hunks, byte-identical).
+  Validation (`schema.py`) = the APP: `kitchen-sink config-check
   SECTION KEY VALUE` (Swift `configValueProblem`, section rules included)
   + `config-schema` (cached by binary mtime) offline; a doc-comment enum
   miss is only a warning (`--force`). `[jira] enabled` goes through
-  `workspace-switcher jira-poll on|off`.
+  `kitchen-sink jira-poll on|off`.
 - Apply (`apply.py`, per `settings.apply_mode`): socket / CLI `reload`
   (`reloadConfig()`, replies `{ok, commands, usingBackup, issues}`; never
   starts a daemon), `restart` (`restartDaemon()`: [theme] + launch-only
@@ -393,20 +393,20 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 - The Hyper+S palette itself is a tool panel (`config.toolPanel` on the
   switcher): it used to activate the app, which raised the shared window
   parked on workspace N and AeroSpace jumped there — "/" tools opened
-  "somewhere else". Palette views (Compare, Workspace Switcher) go through
+  "somewhere else". Palette views (Compare, Kitchen Sink) go through
   `openSlotHere` = `hotkeyPrep` first (the window follows you).
 - /terminal (`[terminal]`, TerminalPanel.swift): the old notes drawer's
   shell as its own borderless non-activating floating panel (SwiftTerm,
   `[app] shell` / `terminal-font`), on the mouse's screen, frame remembered
   (`terminalPanelFrame`), session kept across hide / show. Cmd+C/V/A, Cmd+K
   clear, Cmd+=/- font, Cmd+W hide; right-click menu. Also Ctrl+B T, CLI
-  `workspace-switcher term`, `do:term`; state `terminalPanel`.
+  `kitchen-sink term`, `do:term`; state `terminalPanel`.
 
 ## /paths — recent-file shelf (Hyper+S → "file paths")
 
 - `PathShelf.swift` (AppKit-light, tested: `bin/run-tests.sh paths`):
   `PathShelf.shared` = ≤25 rows (`[paths] limit`, hard cap 25), newest
-  first, `~/.cache/workspace-switcher/paths.json`; rows are CANONICAL
+  first, `~/.cache/kitchen-sink/paths.json`; rows are CANONICAL
   (`realpath`: a symlinked folder is one row, /tmp = /private/tmp).
   Feeds: `RecentFiles.onKept` / `onRenamed` (the ONE FSEvents stream; needs
   `[files] recent` on) → regular files only → `IgnoreRules`; `ClipboardPaths`
@@ -448,7 +448,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   colors, soft-wrapped at the pane width, ~15 ms). Server cap: 1000 rows
   (`Herdr.maxLines`; `--lines 6000` over the raw socket still gets 1000).
   Alternate-screen apps (nvim, htop) have no scrollback → the screen only.
-- `workspace-switcher pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
+- `kitchen-sink pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
   [--no-save] [--no-copy]` (main.swift → socket `pane-shot<TAB>args`, the
   CLI waits for ONE reply line: saved path / `copied` / `error: …`). No
   `--pane` = `herdr pane current` = herdr's focused pane (works from any
@@ -476,11 +476,11 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 ## /screenshot — Flameshot-style capture (Hyper+X)
 
 - Spec: `PRD-screenshot.md`. Hyper+X (aerospace.toml) runs the binary
-  `workspace-switcher screenshot`; main.swift sends `screenshot<TAB>args…`
+  `kitchen-sink screenshot`; main.swift sends `screenshot<TAB>args…`
   (tab-separated: paths may hold spaces); `-r` / `-g` use `sendRequest`
   (the reply comes on the same connection when the user finishes; the
   socket thread hands the fd to the session, never blocks the accept
-  loop); no daemon → `bin/workspace_switcher.sh screenshot` cold start.
+  loop); no daemon → `bin/kitchen_sink.sh screenshot` cold start.
   Palette `/screenshot` = `openTool` → `showScreenshot` (0.15 s so the
   palette isn't in the frozen image). `[screenshot]` in commands.toml
   (read on every trigger via `ScreenshotConfig.load`; dist default =
@@ -498,7 +498,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `ShotRenderer` (ONE drawing path for the overlay and the output;
   top-left point space; `render` = crop × backing scale), `ShotFiles`
   (strftime pattern, " 2" clash suffix, `-p` dir/file), `ShotArgs`
-  (Flameshot's CLI), `ShotState` (`~/.cache/workspace-switcher/
+  (Flameshot's CLI), `ShotState` (`~/.cache/kitchen-sink/
   screenshot-state.json`: per-tool sizes, color, text style, grid, last
   region).
 - `Screenshot.swift`: `ScreenshotController` (`SwitcherController.screenshot`,
@@ -641,7 +641,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   one side's section; text = lines each + "\n"; commits on click away,
   Ctrl+N/P, Esc, Cmd+S, park). `CompareWindow.swift`: `CompareConfig`
   (`[compare]` read once per open/show; `*-label` strings), `CompareRecent`
-  (`~/.cache/workspace-switcher/compare-recent.json`; git + pasted sessions
+  (`~/.cache/kitchen-sink/compare-recent.json`; git + pasted sessions
   never stored), `CompareWindow` (a `CardWindowController`; `current` =
   `.compare` with session pills + "+" start page, `sub` = `.compareText`).
 - Shared window: `SlotView.compare` (nav id 67 `navCompare`, after
@@ -659,11 +659,11 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   browser + /paths right-click: "Select for Compare", "Compare to “NAME”",
   "Compare" with two marked; two files or two folders), drops on a
   pane, clipboard (an empty side takes Cmd+V; right-click "Paste Clipboard
-  Here"), CLI `workspace-switcher compare [--wait] [--title1 T] [--title2 T]
+  Here"), CLI `kitchen-sink compare [--wait] [--title1 T] [--title2 T]
   LEFT [RIGHT]` (main.swift makes paths absolute, socket `compare<TAB>…`;
   `--wait` = `sendRequest`, the daemon writes `done` when the session closes
   or the window hides; no daemon → `open -g` the app + retry). git:
-  `difftool.ws.cmd = …/workspace-switcher compare --wait --title1 "$BASE"
+  `difftool.ws.cmd = …/kitchen-sink compare --wait --title1 "$BASE"
   "$LOCAL" "$REMOTE"`. `compare` alone = a hotkey mode (`hotkeyModes`).
 - Keys: `CompareWindow.handleKey` (§7.2.4 of the PRD; `[shortcuts]
   "compare: …"` rows, Cmd+/ sheet). Cmd+K = an NSMenu of every action
@@ -700,7 +700,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   empty side takes it, a side with text is REPLACED by an undoable
   `model.replace`; a copied file opens instead). A pair with a pasted side
   becomes a Recent row when its session closes (`rememberPasted`: both sides
-  written to `~/.cache/workspace-switcher/compare-pasted/`, pruned by
+  written to `~/.cache/kitchen-sink/compare-pasted/`, pruned by
   `CompareRecent.save`; the row reads "pasted text ⇆ …"). Hook
   `do:compare:start-paste`.
 - Folder Compare: `CompareFolder.swift` (Foundation only: `FolderScan.run` =
@@ -807,7 +807,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   AX tree (`notify/helpers/webex_unread.swift`); other sources = the badge the
   DOCK draws (`notify/helpers/dock_badges.swift` via AX `AXURL` +
   `AXStatusLabel`). Helpers build on demand into
-  ~/.cache/workspace-switcher/helpers (precompiled into the bundle for app
+  ~/.cache/kitchen-sink/helpers (precompiled into the bundle for app
   installs) and need ACCESSIBILITY for the app (they run as its children;
   `requestUnreadAccess` asks once at launch; without it poll.log says "no
   Accessibility permission" and the chips stay empty). `lsappinfo
@@ -946,7 +946,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   → `setJiraEnabled(true)`), "Toggle Jira Window", and ONE "Open Jira Config
   Window" (`showJiraDashboard`). No other jira menu items — everything else
   lives in that window. Socket messages `jira-poll-on/off/toggle`,
-  `jira-setup`, `jira-dashboard` (CLI: `workspace-switcher jira-poll on|off|toggle|setup|dashboard`).
+  `jira-setup`, `jira-dashboard` (CLI: `kitchen-sink jira-poll on|off|toggle|setup|dashboard`).
 - Jira Config window look: a `CardWindowController` (CardWindow.swift:
   `CardNSWindow` = titled + hidden titlebar, `_cornerRadius` override, header
   clicks caught in `sendEvent`; `themedRoot` = blur, card tint, border, a real
@@ -1122,20 +1122,20 @@ Line numbers drift; grep the symbol names (they're stable).
 
 ## Repo facts
 
-- Real repo: `/Users/danielbaker/.config/workspace-switcher` (rule.md still
+- Real repo: `/Users/danielbaker/.config/kitchen-sink` (rule.md still
   says `dotfileApp` — that's the old name; same rule: no git in backups).
 - Backdrop (`panel.contentView`) is FLIPPED — y=0 is the top when placing overlays.
 - Signing: `bin/build-app.sh` signs with the self-signed login-keychain
   cert "workspace-switcher codesign" (stable TCC grants across rebuilds);
   falls back to ad-hoc (`-`) if the cert is missing.
 - `./build.sh` builds AND relaunches the app (exit 0 + no output = OK). The
-  running process is `workspace-switcher.app/Contents/MacOS/workspace-switcher`.
+  running process is `kitchen-sink.app/Contents/MacOS/kitchen-sink`.
 - Python jira tests: `python3 Tests/test_jira_poll.py`. UI suites
   (`bin/ui-test*.sh`) are slow/flaky — run once at most, don't loop them.
 
 ## Where things live
 
-### workspace_switcher.swift (host / app logic)
+### kitchen_sink.swift (host / app logic)
 | Symbol | What |
 |---|---|
 | `struct AppSettings` / `settings` | `[app]` values (esc-close, hide-on-focus-loss, shell, …) |
@@ -1237,12 +1237,12 @@ Line numbers drift; grep the symbol names (they're stable).
   `ScreenToast` (copy-toast text). Keys `pdf-engine-bin`, `pdf-highlight`;
   preflight warns without weasyprint.
 - Prose: default 19 px / 900 pt column; ⤢ chip / ⌘⇧O = `ProseProcess.launch`
-  → a SEPARATE process (`workspace-switcher prose --colors HEX,… FILE`, handled
+  → a SEPARATE process (`kitchen-sink prose --colors HEX,… FILE`, handled
   at the top of main.swift: no daemon, no lock; one per file) showing a
   `ProseWindow` (floating panel, follows the file's mtime every 1 s, Esc / ⌘W /
   the themed ✕ top-left close it, ⌘= ⌘- ⌘0 + trackpad pinch zoom (`ProseView.zoom` = WKWebView pageZoom, kept as `proseZoom`; two-finger double-tap = 100%); closing the last one ends the process).
 - /screenshot recents: `ShotHistory` keeps every copied / saved / pinned
-  capture (`[screenshot] history`, 20) in ~/.cache/workspace-switcher/
+  capture (`[screenshot] history`, 20) in ~/.cache/kitchen-sink/
   screenshots; clock button / ⌘R → `ShotRecentPanel` thumbnail grid
   (click = reopen as a pin; right-click Copy / Open / Reveal / Delete).
   The clock button was invisible (untinted template symbol) and dropped
@@ -1252,7 +1252,7 @@ Line numbers drift; grep the symbol names (they're stable).
 
 ## Hotkey fast path (no window hotkey)
 
-- NO window hotkey (Hyper+N and the aerospace app rule were removed): the window opens from the Hyper+S palette's LAST entry "Workspace Switcher" (`window`) or by launching the app (one daemon: `acquireDaemonLock` forwards a second launch). `window`
+- NO window hotkey (Hyper+N and the aerospace app rule were removed): the window opens from the Hyper+S palette's LAST entry "Kitchen Sink" (`window`) or by launching the app (one daemon: `acquireDaemonLock` forwards a second launch). `window`
   (`SharedWindow.toggle`: hidden → the view you were LAST on (`last`), in it →
   hide, elsewhere → focus). No per-view hotkeys (Hyper+F / J
   removed): views switch via header icons, Ctrl+B W / L, the Hyper+S palette.
@@ -1260,9 +1260,9 @@ Line numbers drift; grep the symbol names (they're stable).
   messages. Hyper+X = `screenshot` (a tool panel, not a view: no
   `hotkeyPrep`, never in `hotkeyModes`; see "/screenshot").
 
-- aerospace runs the app BINARY (`workspace-switcher window|terminal`),
+- aerospace runs the app BINARY (`kitchen-sink window|terminal`),
   not the script: `main.swift` pings the socket (~20 ms) and exits. No
-  daemon (ppid != 1) → it execs `bin/workspace_switcher.sh MODE` (cold start:
+  daemon (ppid != 1) → it execs `bin/kitchen_sink.sh MODE` (cold start:
   build-if-stale + LaunchServices `open -n -g`; a launchd-parented process
   never re-execs).
 - The daemon's socket thread runs `SwitcherController.hotkeyPrep()` before the
@@ -1324,7 +1324,7 @@ Line numbers drift; grep the symbol names (they're stable).
   (notes drawers). With 2+ tiles it belongs to the
   tile under its center, not the one that looks "behind" it.
 - Our windows are TILED by the aerospace.toml rule `test %{app-bundle-id} =
-  dev.danielbaker.workspace-switcher → layout tiling` (first rule). Finder,
+  dev.danielbaker.kitchen-sink → layout tiling` (first rule). Finder,
   Preview, Webex and every `com.microsoft.*` but VS Code tile into
   v_accordion. The tool panels are NSPanels: AeroSpace never sees them.
 - Monitors: `bin/aerospace-monitors.sh main|inverse|toggle|status` rewrites
@@ -1342,15 +1342,15 @@ these places — grep the key / mode name in all of them (Hyper+T removal is the
 worked example):
 
 1. `config/aerospace/aerospace.toml` — the `alt-cmd-ctrl-shift-KEY =
-   'exec-and-forget …/workspace-switcher MODE'` binding (+ its comment). The
+   'exec-and-forget …/kitchen-sink MODE'` binding (+ its comment). The
    repo copy; `~/.config/aerospace` is a symlink. Check with
    `aerospace reload-config --dry-run --no-gui`, apply with `--no-gui`.
-2. `workspace_switcher.swift` — `SwitcherController.hotkeyModes` (message
+2. `kitchen_sink.swift` — `SwitcherController.hotkeyModes` (message
    names that run `hotkeyPrep`; `main.swift` pings the socket for these),
    `toggleCommand(name)` (per-mode handler), the socket dispatch that calls
    it (`hotkeyModes.contains(name)`), and any helper (e.g. `slotToggle…`).
 3. `main.swift` — cold-start `openCommand` mapping (`window` → files);
-   `bin/workspace_switcher.sh` — usage header + its cold-start `MODE` remap.
+   `bin/kitchen_sink.sh` — usage header + its cold-start `MODE` remap.
 4. `commands.toml` `[shortcuts]` — the `"all: Hyper+KEY" = "…"` row (feeds
    Keyboard Shortcuts… and the ws-settings hub, which reads aerospace.toml
    itself, so no hub change).
@@ -1524,7 +1524,7 @@ worked example):
 ## Verifying vim-pane changes without UI tests
 
 ```bash
-S=$(ls -t ~/.cache/workspace-switcher/nvim-notes-*.sock | head -1)
+S=$(ls -t ~/.cache/kitchen-sink/nvim-notes-*.sock | head -1)
 nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
 ```
 

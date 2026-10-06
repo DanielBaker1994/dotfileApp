@@ -1,4 +1,4 @@
-"""ws-settings: every shortcut and setting of the workspace-switcher setup
+"""ws-settings: every shortcut and setting of the kitchen-sink setup
 in one place (PRD-settings-hub.md, PLAN-settings-hub.md)."""
 import sys
 

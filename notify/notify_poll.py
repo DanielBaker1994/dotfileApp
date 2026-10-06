@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unread counts for the Hyper+S status row (workspace-switcher).
+"""Unread counts for the Hyper+S status row (kitchen-sink).
 
   notify_poll.py --json        badges + cached API state → one JSON object
                                (starts a background --poll when stale)
@@ -93,11 +93,11 @@ def parse_badge(out: str):
 
 
 HELPERS = os.path.join(HERE, "helpers")
-HELPER_BIN = os.path.expanduser("~/.cache/workspace-switcher/helpers")
+HELPER_BIN = os.path.expanduser("~/.cache/kitchen-sink/helpers")
 
 
 def helper(name: str, *argv: str):
-    """stdout of helpers/NAME.swift (built into ~/.cache/workspace-switcher/helpers, rebuilt
+    """stdout of helpers/NAME.swift (built into ~/.cache/kitchen-sink/helpers, rebuilt
     when the source changes); None when it can't run or fails (no
     Accessibility permission, no swiftc, app not running)."""
     src, exe = os.path.join(HELPERS, name + ".swift"), os.path.join(HELPER_BIN, name)

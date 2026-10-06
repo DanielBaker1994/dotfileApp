@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# fzf-free workspace switcher: native AppKit popup (Swift), themed from
+# fzf-free kitchen sink: native AppKit popup (Swift), themed from
 # commands.toml [theme]. If the daemon is running (Unix-socket ping succeeds), send a
 # toggle message; otherwise build-if-stale and launch it in the background.
 #
 # Usage:
-#   workspace_switcher.sh            toggle the main popup
-#   workspace_switcher.sh window     show the shared window on its last view / hide it
-#   workspace_switcher.sh notes      open ONLY the notes window (no popup)
-#   workspace_switcher.sh jira       open ONLY the jira window (no popup)
-#   workspace_switcher.sh voice      open ONLY the voice-to-text window
-#   workspace_switcher.sh jira-poll [on|off|toggle|setup]
+#   kitchen_sink.sh            toggle the main popup
+#   kitchen_sink.sh window     show the shared window on its last view / hide it
+#   kitchen_sink.sh notes      open ONLY the notes window (no popup)
+#   kitchen_sink.sh jira       open ONLY the jira window (no popup)
+#   kitchen_sink.sh voice      open ONLY the voice-to-text window
+#   kitchen_sink.sh jira-poll [on|off|toggle|setup]
 #                                    THE jira switch ([jira] enabled + the
 #                                    launchd poll agent) — NOT the window
 #                                    toggle above; needs a running daemon
 # (physical paths: an app install reaches this script through the link
-# ~/.config/workspace-switcher/bin -> <App>/Contents/Resources/bin)
+# ~/.config/kitchen-sink/bin -> <App>/Contents/Resources/bin)
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$DIR/.." && pwd -P)"
 . "$ROOT/install.conf"
@@ -24,7 +24,7 @@ BUNDLED=0
 case "$ROOT" in *.app/Contents/Resources) BUNDLED=1; APP="${ROOT%/Contents/Resources}" ;; esac
 BIN="$APP/Contents/MacOS/$APP_NAME"
 TMP="${TMPDIR:-/tmp}"
-FOCUS_FILE="$TMP/workspace-switcher-focus"
+FOCUS_FILE="$TMP/kitchen-sink-focus"
 MODE="${1:-}"
 
 # jira-poll: flip the poll feature through the running daemon (same code
@@ -42,7 +42,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 # running) exit immediately — only one script drives the flow at a time, so
 # two daemons / double toggles can never race. (macOS has no flock; mkdir is
 # atomic. A stale lock from a crashed run older than 60s is cleared.)
-LOCK="$TMP/workspace-switcher.lockdir"
+LOCK="$TMP/kitchen-sink.lockdir"
 if ! mkdir "$LOCK" 2>/dev/null; then
     if [ -d "$LOCK" ] && [ "$(find "$LOCK" -mmin +1 2>/dev/null)" = "$LOCK" ]; then
         rm -rf "$LOCK"
@@ -112,7 +112,7 @@ case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
     # hotkey path does this itself; see hotkeyPrep.)
     if [ -n "$CUR" ]; then
         aerospace list-windows --all --format '%{window-id}|%{app-name}|%{window-title}|%{workspace}' 2>/dev/null \
-            | awk -F'|' -v c="$CUR" '$2=="workspace-switcher" && $3!="workspace-switcher" && $4!=c {print $1}' \
+            | awk -F'|' -v c="$CUR" '$2=="kitchen-sink" && $3!="kitchen-sink" && $4!=c {print $1}' \
             | while read -r W; do
                 LOG "move $W -> $CUR"
                 aerospace move-node-to-workspace --window-id "$W" "$CUR" >/dev/null 2>&1

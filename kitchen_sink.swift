@@ -34,7 +34,7 @@ final class ClosureTarget: NSObject {
 }
 
 // ============================================================================
-// Workspace switcher — host app built on the PopupWindow framework.
+// Kitchen sink — host app built on the PopupWindow framework.
 // This file only contains app-specific logic: workspace/command data, the
 // aerospace socket IPC, app icons, the persistent shell, and behavior hooks.
 // ============================================================================
@@ -47,7 +47,7 @@ final class ClosureTarget: NSObject {
 // Two kinds of install (see AGENT_CONTEXT.md "Install modes"):
 //   repo build  the bundle sits in the git checkout, its assets NEXT TO it
 //   app install (DMG, /Applications): assets inside Contents/Resources, the
-//               user's files in ~/.config/workspace-switcher
+//               user's files in ~/.config/kitchen-sink
 private let bundleParentDir: String = {
     let u = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL.resolvingSymlinksInPath()
     let p = u.path
@@ -61,7 +61,7 @@ private let bundleParentDir: String = {
     }
     return u.deletingLastPathComponent().path
 }()
-// the bundle itself (…/workspace-switcher.app); nil when run as a bare binary
+// the bundle itself (…/kitchen-sink.app); nil when run as a bare binary
 let appBundlePath: String? = {
     let p = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL.resolvingSymlinksInPath().path
     guard let r = p.range(of: "/Contents/MacOS/") else { return nil }
@@ -79,7 +79,7 @@ let isRepoBuild: Bool = {
 // it (tests).
 let homeDir: String = {
     if let h = ProcessInfo.processInfo.environment["WS_HOME"], !h.isEmpty { return h }
-    return NSHomeDirectory() + "/.config/workspace-switcher"
+    return NSHomeDirectory() + "/.config/kitchen-sink"
 }()
 // read-only code + resources: jira/, confluence/, vim/, bin/, icons
 let assetDir: String = {
@@ -153,9 +153,9 @@ struct AppSettings {
     var notesIconName = "notes_icon.png"
     var filesIconName = ""
     var notesSocketName = "ws-notes.sock"
-    var focusFileName = "workspace-switcher-focus"
+    var focusFileName = "kitchen-sink-focus"
     var focusBridgeName = "ws-aerospace-focus"
-    var switcherWindowName = "workspace-switcher"
+    var switcherWindowName = "kitchen-sink"
     var detailWindowName = "jira-detail"
     var aerospaceSocketPath = "/tmp/bobko.aerospace-\(NSUserName()).sock"
     var crashLogPath = NSString(string: "~/.cache/ws-crash.log").expandingTildeInPath
@@ -836,7 +836,7 @@ func loadCommands() -> [CommandSpec] {
         guard let s = section else { return }
         switch s.name {
         case "icons":
-            // icon overrides for the workspace-switcher rows ([icons] section)
+            // icon overrides for the kitchen-sink rows ([icons] section)
             iconRules = parseIconRules(s.vars)
         case "shortcuts",       // collected line by line below (order matters)
              "app",             // already applied by applyAppConfigFromDisk()
@@ -1652,7 +1652,7 @@ func configCheckCLI(_ args: [String]) -> Int32 {
         return 0
     }
     guard args.count == 3 else {
-        FileHandle.standardError.write(Data("usage: workspace-switcher config-check SECTION KEY VALUE | --file PATH\n".utf8))
+        FileHandle.standardError.write(Data("usage: kitchen-sink config-check SECTION KEY VALUE | --file PATH\n".utf8))
         return 2
     }
     if let problem = configValueProblem(section: args[0], key: args[1], value: args[2]) {
@@ -1920,7 +1920,7 @@ func presentPathSheet(on panel: NSWindow,
 // closed note keeps getting resynced back as a tab. Explicitly re-opening a
 // note (via + / Finder "Open in Notes") removes it from the map again.
 enum DismissedNotes {
-    private static let store = NSHomeDirectory() + "/.cache/workspace-switcher/dismissed-notes.json"
+    private static let store = NSHomeDirectory() + "/.cache/kitchen-sink/dismissed-notes.json"
     private static var map: Set<String> = {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: store)),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [String] else {
@@ -2043,7 +2043,7 @@ final class CommandRunner {
 // Config-driven app-icon overrides, parsed from the [icons] section of
 // commands.toml. Each rule: app name -> title-substring matches + optional
 // "*" default. iconForApp consults these before falling back to the real
-// macOS app icon — the workspace-switcher app hosts several windows (notes,
+// macOS app icon — the kitchen-sink app hosts several windows (notes,
 // jira) in ONE process, so its rows need title-based glyphs.
 struct IconRule {
     let app: String
@@ -2054,7 +2054,7 @@ var iconRules: [IconRule] = []
 
 let appIconSize: CGFloat = 22
 
-// Row rendering constants — these are the workspace switcher's own look; the
+// Row rendering constants — these are the kitchen sink's own look; the
 // framework knows nothing about them (rows are drawn via popup.onDrawRow).
 let rowPillH: CGFloat = 24
 let rowPillBorder: CGFloat = 2
@@ -2083,7 +2083,7 @@ let missingIcon: NSImage = {
     return img
 }()
 
-// Our own windows (notes / jira) live in the icon-less workspace-switcher
+// Our own windows (notes / jira) live in the icon-less kitchen-sink
 // app. One factory builds every glyph: app-picker rows get a tinted rounded
 // tile, menu-bar status items get a template silhouette. Each app has its own
 // symbol AND accent tint, so the two are never confusable in the picker.
@@ -3387,7 +3387,7 @@ final class SwitcherController: NSObject {
 
     // Bring a sub-window (note/jira) to the front and make it key. Bringing the
     // window onto the CURRENT workspace is handled by the invoking script
-    // (workspace_switcher.sh notes|jira) via aerospace BEFORE pinging us — so
+    // (kitchen_sink.sh notes|jira) via aerospace BEFORE pinging us — so
     // the daemon never blocks its main thread on aerospace IPC while focusing.
     private func focusSubWindow(_ w: PopupWindow) {
         if !w.isShown {
@@ -3719,7 +3719,7 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query.hasPrefix("compare\t") {
-                    // `workspace-switcher compare [--wait] [--title1 T] [--title2 T] A [B]`:
+                    // `kitchen-sink compare [--wait] [--title1 T] [--title2 T] A [B]`:
                     // --wait keeps the connection until the session closes or the window hides
                     let words = query.split(separator: "\t", omittingEmptySubsequences: false).dropFirst().map(String.init)
                     let wait = words.contains("--wait")
@@ -3739,7 +3739,7 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query == "pane-shot" || query.hasPrefix("pane-shot\t") {
-                    // `workspace-switcher pane-shot [flags]` (PaneShot.swift):
+                    // `kitchen-sink pane-shot [flags]` (PaneShot.swift):
                     // the CLI waits for ONE reply line (path / copied / error)
                     let words = query.split(separator: "\t").dropFirst().map(String.init)
                     DispatchQueue.main.async { [weak self] in
@@ -3754,7 +3754,7 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query == "reload" || query == "restart" {
-                    // ws-settings / `workspace-switcher reload|restart`: re-read
+                    // ws-settings / `kitchen-sink reload|restart`: re-read
                     // commands.toml (reload answers with the config's health);
                     // restart = a fresh daemon for launch-only keys ([theme]…)
                     var reply = "{\"ok\":false,\"error\":\"timeout\"}"
@@ -3866,7 +3866,7 @@ final class SwitcherController: NSObject {
 
     // MARK: Hooks
 
-    // Row rendering — the workspace switcher's own look. Workspace rows: key
+    // Row rendering — the kitchen sink's own look. Workspace rows: key
     // chip (accent = the focused workspace) + app icons + what the query hit
     // (or "+N") + an unread badge; grid rows: one cell per command; the
     // status row: unread chips left, CPU · RAM · battery · clock right. The
@@ -4109,7 +4109,7 @@ final class SwitcherController: NSObject {
         }
         // always last: show the shared window on the view you were last on
         if settings.sharedWindow {
-            all.append(Self.slotCommand("window", label: "Workspace Switcher"))
+            all.append(Self.slotCommand("window", label: "Kitchen Sink"))
         }
         return all
     }
@@ -4860,7 +4860,7 @@ final class SwitcherController: NSObject {
                            over: slot.current.flatMap { slotMember($0)?.slotWindow })
     }
 
-    // Ctrl+B T / palette /terminal / `workspace-switcher term`: the
+    // Ctrl+B T / palette /terminal / `kitchen-sink term`: the
     // dedicated terminal panel (TerminalPanel.swift), built once and kept
     func toggleTerminalPanel() {
         if terminalPanel == nil {
@@ -5349,7 +5349,7 @@ final class SwitcherController: NSObject {
         // drawers and chrome stay). One long-lived editor; tab switches go
         // over its --listen socket, so nothing quits or relaunches.
         let vimSocket = NSHomeDirectory()
-            + "/.cache/workspace-switcher/nvim-\(cmd.name)-\(getpid()).sock"
+            + "/.cache/kitchen-sink/nvim-\(cmd.name)-\(getpid()).sock"
         let cfg = noteWindowConfig(cmd, firstNote: paths[0], vimSocket: vimSocket)
         let w = PopupWindow(config: cfg)
         // the tab list, the note on screen and every window hook; the hooks
@@ -6933,7 +6933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installStatusMenus(_ c: SwitcherController) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = utilityMenuGlyph
-        item.button?.toolTip = "workspace-switcher"
+        item.button?.toolTip = "kitchen-sink"
         let menu = NSMenu()
         menu.delegate = MenuTarget.shared  // for checkmark updates
         menu.autoenablesItems = false      // the tiled-greyed focus-loss item
@@ -7041,10 +7041,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // hides the menu bar until the app icon is clicked.
     private func installMainMenu() {
         let mainMenu = NSMenu()
-        // App menu (appears under "workspace-switcher" when clicked)
+        // App menu (appears under "kitchen-sink" when clicked)
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About workspace-switcher", action: nil, keyEquivalent: "")
+        appMenu.addItem(withTitle: "About kitchen-sink", action: nil, keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Hide", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -9967,7 +9967,7 @@ extension SwitcherController {
     }
 
     // the Confluence search view (Hyper+S /confluence, the menu,
-    // `workspace-switcher confluence`); setup = open its Setup sheet too
+    // `kitchen-sink confluence`); setup = open its Setup sheet too
     func showConfluence(setup: Bool = false) {
         guard confluenceEnabled() else { return }
         if settings.sharedWindow {
@@ -9981,7 +9981,7 @@ extension SwitcherController {
     }
 
     // the Compare view (Hyper+S /compare, the header icon, the menu, the
-    // file browser's "Compare to …", `workspace-switcher compare A B`).
+    // file browser's "Compare to …", `kitchen-sink compare A B`).
     // `paths` empty = just the view; files open a Text Compare session.
     func showCompare(_ paths: [String] = [], titles: [CompareSide: String] = [:], git: Bool = false,
                      waiter: (() -> Void)? = nil) {
@@ -10044,7 +10044,7 @@ extension SwitcherController {
         }
     }
 
-    // the AI view (Hyper+S /ai, the menu, `workspace-switcher ai`)
+    // the AI view (Hyper+S /ai, the menu, `kitchen-sink ai`)
     func showAI() {
         guard aiEnabled() else { return }
         if settings.sharedWindow {

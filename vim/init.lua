@@ -34,7 +34,7 @@ o.autoread = true
 o.autowriteall = true
 o.updatetime = 400
 o.undofile = true
-local undodir = vim.fn.expand('~/.cache/workspace-switcher/nvim-undo')
+local undodir = vim.fn.expand('~/.cache/kitchen-sink/nvim-undo')
 vim.fn.mkdir(undodir, 'p')
 o.undodir = undodir
 o.swapfile = false
@@ -204,7 +204,7 @@ if vim.uv.fs_stat(lazypath) then
       end,
     },
   }, {
-    lockfile = vim.fn.expand('~/.cache/workspace-switcher/nvim-lazy-lock.json'),
+    lockfile = vim.fn.expand('~/.cache/kitchen-sink/nvim-lazy-lock.json'),
     change_detection = { enabled = false, notify = false },
     checker = { enabled = false },
     performance = { rtp = { reset = false } },

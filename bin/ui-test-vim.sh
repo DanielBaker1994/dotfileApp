@@ -7,7 +7,7 @@
 # Works on scratch notes under /tmp/ws-vim-test; commands.toml and the
 # dismissed-notes list are backed up first and restored on exit.
 #
-# Every keystroke is guarded: it is only sent while workspace-switcher is the
+# Every keystroke is guarded: it is only sent while kitchen-sink is the
 # frontmost app, so keys can never leak into another window.
 #
 # Usage: bin/ui-test-vim.sh [--keep]   (--keep: leave scratch notes + app up)
@@ -17,7 +17,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/commands.toml"
-DISMISSED="$HOME/.cache/workspace-switcher/dismissed-notes.json"
+DISMISSED="$HOME/.cache/kitchen-sink/dismissed-notes.json"
 T=/tmp/ws-vim-test
 BK="$(mktemp -d /tmp/ws-vim-bk.XXXXXX)"
 KEEP=0; [[ "${1:-}" == "--keep" ]] && KEEP=1
@@ -34,13 +34,13 @@ check() { # check "desc" "actual" "expected"
 
 # --- helpers ------------------------------------------------------------------
 
-WSPID() { pgrep -x workspace-switcher | head -1; }
-SOCK() { echo "$HOME/.cache/workspace-switcher/nvim-notes-$(WSPID).sock"; }
+WSPID() { pgrep -x kitchen-sink | head -1; }
+SOCK() { echo "$HOME/.cache/kitchen-sink/nvim-notes-$(WSPID).sock"; }
 NOTESOCK="${TMPDIR%/}/ws-notes.sock"
 ws_send() { printf '%s' "$1" | nc -U -w 1 "$NOTESOCK"; }
 vx() { timeout 4 nvim --headless --clean --server "$(SOCK)" --remote-expr "$1" 2>/dev/null; }
 front() { lsappinfo info -only name "$(lsappinfo front)" | sed -E 's/.*="(.*)"/\1/'; }
-guard() { [[ "$(front)" == "workspace-switcher" ]] || { echo "ABORT: frontmost is '$(front)'" >&2; return 1; }; }
+guard() { [[ "$(front)" == "kitchen-sink" ]] || { echo "ABORT: frontmost is '$(front)'" >&2; return 1; }; }
 # all keys go through System Events: cliclick's kp:/t: events can carry stale
 # fn/numpad flags (the terminal then drops them) and drop characters
 typ() {
@@ -57,7 +57,7 @@ ESC() { sk 53; }
 RET() { sk 36; }
 CMD() { guard && osascript -e "tell application \"System Events\" to keystroke \"$1\" using {command down}"; }
 CTRL() { guard && osascript -e "tell application \"System Events\" to keystroke \"$1\" using {control down}"; }
-wframe() { osascript -e 'tell application "System Events" to tell process "workspace-switcher"
+wframe() { osascript -e 'tell application "System Events" to tell process "kitchen-sink"
   repeat with w in windows
     set s to size of w
     if item 2 of s > 200 then
@@ -66,7 +66,7 @@ wframe() { osascript -e 'tell application "System Events" to tell process "works
     end if
   end repeat
 end tell' 2>/dev/null | tr -d ' '; }
-wcount() { osascript -e 'tell application "System Events" to count (windows of process "workspace-switcher")' 2>/dev/null; }
+wcount() { osascript -e 'tell application "System Events" to count (windows of process "kitchen-sink")' 2>/dev/null; }
 vim_pid() { pgrep -f "nvim --embed.*--listen $(SOCK)" | head -1; }
 disk() { tr '\n' '|' < "$1"; }
 buf() { vx "join(getline(1,'\$'),'|')"; }
@@ -98,7 +98,7 @@ printf 'first line\n' > "$T/zz-a.md"
 printf 'b note\n' > "$T/zz-b.md"
 
 if [[ -z "$(WSPID)" ]]; then
-    ("$ROOT/bin/workspace_switcher.sh" notes >/dev/null 2>&1 &)
+    ("$ROOT/bin/kitchen_sink.sh" notes >/dev/null 2>&1 &)
 fi
 for _ in $(seq 1 60); do [[ -S "$(SOCK)" ]] && break; sleep 1; done
 [[ -S "$(SOCK)" ]] || { echo "vim socket never appeared"; exit 1; }
@@ -224,7 +224,7 @@ if [[ -n "$IMG_SRC" ]]; then
     check "image follows edits above it" "$(img_row)" "4"
     typ "u"; typ "u"; sleep 0.6
     check "image follows undo" "$(img_row)" "2"
-    screencapture -x -R "$(osascript -e 'tell application "System Events" to tell process "workspace-switcher" to get {position, size} of (first window whose size is not {0,0})' | tr -d ' ')" /tmp/ws-vim-image.png
+    screencapture -x -R "$(osascript -e 'tell application "System Events" to tell process "kitchen-sink" to get {position, size} of (first window whose size is not {0,0})' | tr -d ' ')" /tmp/ws-vim-image.png
     # paste an image from the clipboard (Cmd+V) -> saved to assets + linked
     osascript -e "set the clipboard to (read (POSIX file \"$T/assets/pic.png\") as «class PNGf»)"
     BEFORE=$(ls "$T/assets" | wc -l | tr -d ' ')
