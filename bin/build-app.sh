@@ -257,7 +257,7 @@ SIGINFO="$(codesign -dvv "$APP" 2>&1)"
 # installed app gets the normal macOS permission prompts)
 [ "$DIST" = 1 ] && exit 0
 if [[ "$SIGINFO" != *"Authority=$SIGN_ID"* ]]; then
-    echo "build-app: WARNING not signed with '$SIGN_ID' (ad-hoc) — privacy grants won't survive rebuilds" >&2
+    echo "build-app: WARNING not signed with '$SIGN_ID' (ad-hoc) — privacy grants won't survive rebuilds — run bin/fix-permissions.sh" >&2
 fi
 
 # fresh signature — (re)grant every privacy permission the app uses (mic,
