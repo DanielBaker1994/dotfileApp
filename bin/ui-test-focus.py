@@ -706,6 +706,8 @@ try:
                 st = unmoved(f"/{n} opened", a0)
                 wid = tool(st, n).get("wid")
                 (bad if wid in our_windows() else ok)(f"/{n}: AeroSpace doesn't list it")
+                lvl = tool(st, n).get("level")
+                (ok if lvl and lvl > 0 else bad)(f"/{n}: floats above other apps (level {lvl})")
                 do("tool:" + n)  # re-run, as from Hyper+S again
                 unmoved(f"/{n} re-run", a0)
                 if sh:

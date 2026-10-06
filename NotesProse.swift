@@ -1,16 +1,17 @@
 import AppKit
 import WebKit
 
-// Notes prose mode (Figma direction B, "Quiet Page"): the current note set
-// as a READING page — Markdown rendered in a serif face (`[notes]
-// prose-font`, default Literata → the system serif, New York) in a centred
-// column of `prose-width` points, with a dim meta line (path · edited ·
-// words) under the first heading. The switch at the editor's bottom right
-// (Prose | Edit), ⌘⇧P or Esc goes back to the editor (nvim / native).
+// Notes prose mode: the current note as a READING page that renders the
+// SAME document the PDF export produces — pandoc `-s -f gfm -t html5` with
+// `[notes] pdf-css` (else the built-in light style) as its header, so what
+// you read is what you export — in a centred column of `prose-width`
+// points, with a dim meta line (path · edited · words) under the first
+// heading. The switch at the editor's bottom right (Prose | Edit), ⌘⇧P or
+// Esc goes back to the editor (nvim / native).
 //
-// Markdown → HTML: pandoc (`[ai] pandoc-bin`, the AI view's) when present,
-// else `ProseRender.basic` — headings, lists + task boxes, fences, quotes,
-// rules, paragraphs, inline code / bold / italic / links / images.
+// pandoc missing → `ProseRender.basic` (headings, lists + task boxes,
+// fences, quotes, rules, paragraphs, inline code / bold / italic / links /
+// images) inside the same header style.
 
 public struct ProseSource {
     public var markdown: String
@@ -107,111 +108,80 @@ enum ProseRender {
         return out.joined(separator: "\n")
     }
 
-    static func fragment(_ md: String, colors c: PopupColors? = nil) -> String {
-        var html = RichText.pandocHTML(md, highlight: true) ?? ""
-        if html.isEmpty { html = basic(md) }
-        return c.map { langLabels(html, $0) } ?? html
-    }
-
-    // A fenced block's language over it (the PDF style's badge): a Nerd Font
-    // glyph in the language's color, name as its tooltip (`[notes]
-    // prose-icon-font`, default Hack Nerd Font; "" / not installed / an
-    // unknown language = the name instead).
-    // (fence names, label, glyph, brand color)
-    static let languages: [([String], String, UInt32, String)] = [
-        (["cpp", "c++", "cxx", "hpp"], "C++", 0xf0672, "#00599C"), (["c", "h"], "C", 0xf0671, "#A8B9CC"),
-        (["cs", "csharp"], "C#", 0xf031b, "#9B4F96"), (["python", "py"], "Python", 0xe73c, "#FFD43B"),
-        (["java"], "Java", 0xf0b37, "#B07219"), (["lua"], "Lua", 0xe826, "#4C6EF5"),
-        (["bash", "sh", "zsh"], "Bash", 0xe760, "#4EAA25"), (["shell", "console", "shellsession"], "Shell", 0xf120, "#4EAA25"),
-        (["swift"], "Swift", 0xe755, "#F05138"), (["javascript", "js", "jsx"], "JavaScript", 0xf031e, "#F7DF1E"),
-        (["typescript", "ts", "tsx"], "TypeScript", 0xf06e6, "#3178C6"), (["go", "golang"], "Go", 0xf07d3, "#00ADD8"),
-        (["rust", "rs"], "Rust", 0xe7a8, "#DEA584"), (["json", "jsonc"], "JSON", 0xe60b, "#CBCB41"),
-        (["yaml", "yml"], "YAML", 0xf013, "#CB171E"), (["toml", "ini"], "TOML", 0xf013, "#9C4221"),
-        (["html"], "HTML", 0xf031d, "#E34F26"), (["css", "scss"], "CSS", 0xf031c, "#663399"),
-        (["markdown", "md"], "Markdown", 0xf0354, "#519ABA"), (["sql"], "SQL", 0xf01bc, "#E38C00"),
-        (["ruby", "rb"], "Ruby", 0xf0d2d, "#CC342D"), (["php"], "PHP", 0xf031f, "#777BB4"),
-        (["kotlin", "kt"], "Kotlin", 0xf1219, "#7F52FF"), (["r"], "R", 0xf07d4, "#276DC3"),
-        (["vim", "viml"], "Vim", 0xe7c5, "#019733"), (["diff", "patch"], "Diff", 0xf440, "#41B883"),
-        (["dockerfile", "docker"], "Dockerfile", 0xf0868, "#2496ED"), (["xml"], "XML", 0xf05c0, "#E37933"),
-        (["log"], "Log", 0xf1085, ""), (["text", "txt", "plain", "file"], "Text", 0xf0f6, ""),
-    ]
-
-    // the icon font, when [notes] prose-icon-font names an installed family
-    static let iconFont: String? = {
-        let f = (configSectionValue("notes", "prose-icon-font") ?? "Hack Nerd Font").trimmingCharacters(in: .whitespaces)
-        return !f.isEmpty && NSFontManager.shared.availableFontFamilies.contains(f) ? f : nil
-    }()
-
-    static func langLabel(_ lang: String, _ c: PopupColors) -> String {
-        let key = lang.lowercased()
-        let hit = languages.first { $0.0.contains(key) }
-        let name = esc(hit?.1 ?? lang)
-        guard let hit, iconFont != nil, let glyph = UnicodeScalar(hit.2) else {
-            return "<div class=\"lang\">\(name)</div>"
+    // The dark theme layer over the PDF style: its layout, recolored to the
+    // active theme (the original Prose look) instead of the light print
+    // palette. Applied to BOTH the reading view and the PDF export.
+    static func themeCSS(_ c: PopupColors) -> String {
+        func rgba(_ x: NSColor, _ a: CGFloat) -> String {
+            let s = ButtonStyle.opaque(x)
+            return String(format: "rgba(%d,%d,%d,%.3f)",
+                          Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255), a)
         }
-        let tint = hit.3.isEmpty ? c.dim : (hexColor(hit.3) ?? c.dim)
-        let color = css(c.ensure(tint, on: c.mantle, 3))
-        // icon only (minimal); the name is its tooltip
-        return "<div class=\"lang\" title=\"\(name)\"><span class=\"glyph\" style=\"color: \(color)\">\(String(glyph))</span></div>"
+        let bg = css(c.base), text = css(c.text), dim = css(c.dim)
+        let accent = css(c.accentOn), accent2 = css(c.tone(.accent2))
+        let well = css(c.mantle), surface0 = css(c.surface0), surface1 = css(c.surface1)
+        let rule = css(ButtonStyle.opaque(c.dim).blended(withFraction: 0.6, of: ButtonStyle.opaque(c.base)) ?? c.dim)
+        let onAccent = css(c.onAccent)
+        func tint(_ x: NSColor) -> String { rgba(x, 0.12) }
+        return """
+        <style>
+        :root { --md-accent_pretty: \(accent); --md-accent_pretty-2: \(accent2); --md-muted: \(dim); }
+        html { color: \(text); background-color: \(bg); }
+        body { color: \(text); }
+        a, a:visited { color: \(accent); border-bottom-color: \(accent); }
+        :not(pre) > code, code { background: \(well); color: \(accent2); }
+        pre, pre.sourceCode, .sourceCode > pre { background-color: \(well); border-color: \(rule); }
+        div.sourceCode { background-color: transparent; }   /* pandoc paints this near-white */
+        pre.sourceCode::before { color: \(dim) !important; }
+        blockquote { border-left-color: \(accent); color: \(dim); }
+        hr { border-top-color: \(rule); }
+        img { border-color: \(rule); }
+        thead tr { background: linear-gradient(180deg, \(accent2), \(accent)) !important; color: \(onAccent); }
+        thead th { background-color: transparent !important; }
+        th, td { border-color: \(rule); }
+        th + th, td + td { border-left-color: \(rule); }
+        tbody tr + tr td { border-top-color: \(rule); }
+        tbody tr:nth-of-type(odd) { background-color: \(surface0); }
+        tbody tr:nth-of-type(even) { background-color: \(surface1); }
+        tbody tr:last-of-type td { border-bottom-color: \(accent); }
+        tbody td:first-child { background-color: transparent; }
+        div.note { --a: \(css(c.tone(.info))); --bg: \(tint(c.tone(.info))); --t: \(text); }
+        div.tip { --a: \(css(c.tone(.success))); --bg: \(tint(c.tone(.success))); --t: \(text); }
+        div.important { --a: \(accent2); --bg: \(tint(c.tone(.accent2))); --t: \(text); }
+        div.warning { --a: \(css(c.tone(.warning))); --bg: \(tint(c.tone(.warning))); --t: \(text); }
+        div.caution { --a: \(css(c.tone(.danger))); --bg: \(tint(c.tone(.danger))); --t: \(text); }
+        ::selection { background: \(rgba(c.accentOn, 0.28)); }
+        </style>
+        """
     }
 
-    // pandoc: <pre class="sourceCode cpp"> (known) / <pre class="mermaid">
-    // (unknown); basic(): <pre class="cpp">
-    static func langLabels(_ html: String, _ c: PopupColors) -> String {
-        guard let re = try? NSRegularExpression(pattern: #"<pre\s+class="(?:sourceCode )?([A-Za-z0-9_+#.-]+)""#) else { return html }
-        var out = html
-        for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)).reversed() {
-            guard let whole = Range(m.range, in: html), let r = Range(m.range(at: 1), in: html) else { continue }
-            let lang = String(html[r])
-            if lang == "sourceCode" { continue }
-            out.insert(contentsOf: langLabel(lang, c), at: whole.lowerBound)
-        }
-        return out
-    }
-
-    // GitHub alerts (> [!NOTE] …): pandoc gfm's `alerts` emits
-    // <div class="note"><div class="title"><p>Note</p></div>…</div>
-    static func alertCSS(_ c: PopupColors) -> String {
-        let tones: [(String, PopupTone)] = [("note", .info), ("tip", .success), ("important", .accent2),
-                                            ("warning", .warning), ("caution", .danger)]
-        return tones.map { name, t in
-            let hex = css(c.tone(t))
-            return "div.\(name) { margin: 0 0 .9em; padding: .55em 1em .1em; border-left: 3px solid \(hex);"
-                + " background: \(hex)14; border-radius: 6px; }"
-                + " div.\(name) > .title p { margin: 0 0 .3em; color: \(hex); font-weight: 600;"
-                + " font-family: -apple-system, system-ui; font-size: .85em; }"
-        }.joined(separator: "\n")
-    }
-
-    // fenced code (pandoc `--syntax-highlighting` token spans) in palette tones
-    static func codeCSS(_ c: PopupColors) -> String {
-        func on(_ x: NSColor) -> String { css(c.ensure(x, on: c.mantle)) }   // 4.5:1 on the code well
-        let groups: [(String, String)] = [
-            ("kw, cf", on(c.accentOn)), ("dt", on(c.tone(.accent2))),
-            ("st, ch, ss, vs, sc", on(c.tone(.success))), ("dv, bn, fl, cn", on(c.tone(.warning))),
-            ("fu, at, va, bu", on(c.tone(.info))), ("pp, im, ex, er, al", on(c.tone(.danger))),
-            ("op, ot", on(c.text)),
-        ]
-        var out = groups.map { names, hex in
-            names.split(separator: ",").map { "code span.\($0.trimmingCharacters(in: .whitespaces))" }
-                .joined(separator: ", ") + " { color: \(hex); }"
-        }
-        out.append("code span.co, code span.do, code span.cv, code span.an, code span.in, code span.wa"
-                   + " { color: \(css(c.dim)); font-style: italic; }")
-        out.append("div.sourceCode { margin: 0 0 .9em; } div.sourceCode pre { margin: 0; }")
-        out.append("pre.sourceCode a { border: 0; color: inherit; }")
-        let icon = iconFont.map { "\"\($0)\", " } ?? ""
-        out.append("div.lang { font-family: -apple-system, system-ui; font-size: 11.5px; font-weight: 500; color: \(css(c.dim));"
-                   + " background: \(css(c.mantle)); border-radius: 8px 8px 0 0; padding: 8px 14px 2px; -webkit-user-select: none;"
-                   + " line-height: 1.4; } div.lang + pre { margin-top: 0; border-radius: 0 0 8px 8px; padding-top: 6px; }"
-                   + " div.lang .glyph { font-family: \(icon)monospace; font-size: 15px; display: inline-block; min-width: 1.5em;"
-                   + " margin-right: 4px; vertical-align: -1px; }")
-        return out.joined(separator: "\n")
-    }
-
+    // The reading page: the SAME document the PDF export produces — pandoc
+    // `-s -f gfm -t html5` with `[notes] pdf-css` (else the built-in style)
+    // as its header — so what you read is what you export. The dark theme
+    // layer (themeCSS) recolors it; the screen adds only a <base> for
+    // relative images, the `prose-width` column and the (screen-only) meta
+    // line under the first heading.
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
-        var body = fragment(src.markdown, colors: c)
-        // the meta line: under the first heading when the note starts with one
+        var cfg = ProsePDF.Config()
+        cfg.pandoc = RichText.pandocBin
+        func notes(_ k: String) -> String? {
+            configSectionValue("notes", k).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        if let v = notes("pdf-css") { cfg.css = v }
+        if let v = notes("pdf-highlight") { cfg.highlight = v }
+        cfg.themeCSS = themeCSS(c)
+        var html = ProsePDF.screenHTML(note: src.path, cfg) ?? shell(src, cfg)
+        // <base> so relative images resolve + the screen-only column width
+        let base = URL(fileURLWithPath: (src.path as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
+        let override = "<base href=\"\(esc(base))\">\n<style>\n"
+            + "body { max-width: \(Int(width))px !important; }\n"
+            + ".meta { font-family: -apple-system, system-ui; font-size: .82em; color: \(css(c.dim)); margin: -.2em 0 1.6em; }\n"
+            + "</style>"
+        if let head = html.range(of: "</head>", options: .caseInsensitive) {
+            html.insert(contentsOf: override, at: head.lowerBound)
+        }
+        // the meta line (screen-only): under the first heading when there is
+        // one, else at the top of the body
         let words = src.markdown.split { $0.isWhitespace || $0.isNewline }.count
         var edited = ""
         if let d = (try? FileManager.default.attributesOfItem(atPath: src.path))?[.modificationDate] as? Date {
@@ -220,49 +190,21 @@ enum ProseRender {
             edited = " · edited " + f.string(from: d)
         }
         let meta = "<div class=\"meta\">\(esc((src.path as NSString).abbreviatingWithTildeInPath))\(edited) · \(words) words</div>"
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("<h1"), let end = body.range(of: "</h1>") {
-            body.insert(contentsOf: meta, at: end.upperBound)
-        } else {
-            body = meta + body
+        if let end = html.range(of: "</h1>", options: .caseInsensitive) {
+            html.insert(contentsOf: meta, at: end.upperBound)
+        } else if let body = html.range(of: "<body", options: .caseInsensitive),
+                  let gt = html[body.upperBound...].firstIndex(of: ">") {
+            html.insert(contentsOf: meta, at: html.index(after: gt))
         }
-        let base = URL(fileURLWithPath: (src.path as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
-        let accent = css(c.accentOn), text = css(c.text), dim = css(c.dim), bg = css(c.base)
-        let well = css(c.mantle), rule = css(ButtonStyle.opaque(c.dim).blended(withFraction: 0.6, of: ButtonStyle.opaque(c.base)) ?? c.dim)
-        return """
-        <!doctype html><html><head><meta charset="utf-8"><base href="\(base)">
-        <style>
-        html { background: \(bg); }
-        body { margin: 0; padding: 36px 32px 72px; color: \(text); font-family: \(font); font-size: \(Int(size))px;
-               line-height: 1.66; -webkit-font-smoothing: antialiased; }
-        main { max-width: \(Int(width))px; margin: 0 auto; }
-        h1, h2, h3, h4 { font-family: \(font); font-weight: 600; line-height: 1.25; margin: 1.4em 0 .5em; }
-        h1 { font-size: 1.6em; margin-top: 0; } h2 { font-size: 1.2em; } h3 { font-size: 1.05em; }
-        .meta { font-family: -apple-system, system-ui; font-size: 11px; color: \(dim); margin: -.2em 0 1.6em; }
-        p { margin: 0 0 .9em; }
-        a { color: \(accent); text-decoration: none; border-bottom: 1px solid \(accent)55; }
-        code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .84em; background: \(well);
-               padding: .1em .35em; border-radius: 4px; }
-        pre { background: \(well); padding: 12px 14px; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
-        pre code { background: none; padding: 0; color: \(css(c.tone(.accent2))); }
-        blockquote { margin: 0 0 .9em; padding-left: 14px; border-left: 2px solid \(accent); color: \(dim); }
-        \(alertCSS(c))
-        \(codeCSS(c))
-        hr { border: 0; border-top: 1px solid \(rule); margin: 1.6em 0; }
-        ul, ol { padding-left: 1.4em; margin: 0 0 .9em; }
-        li { margin: .2em 0; }
-        li.task, li:has(> input[type=checkbox]) { list-style: none; margin-left: -1.4em; }
-        input[type=checkbox] { appearance: none; width: 15px; height: 15px; border: 1.5px solid \(dim); border-radius: 4px;
-               vertical-align: -2px; margin: 0 8px 0 0; position: relative; }
-        input[type=checkbox]:checked { background: \(accent); border-color: \(accent); }
-        input[type=checkbox]:checked::after { content: "✓"; position: absolute; left: 2px; top: -3px; font-size: 12px;
-               color: \(css(c.onAccent)); font-family: system-ui; }
-        li:has(> input:checked) { color: \(dim); text-decoration: line-through; }
-        img { max-width: 100%; border-radius: 6px; }
-        table { border-collapse: collapse; margin: 0 0 1em; font-size: .92em; }
-        td, th { border: 1px solid \(rule); padding: 4px 10px; }
-        ::selection { background: \(accent)44; }
-        </style></head><body><main>\(body)</main></body></html>
+        return html
+    }
+
+    // pandoc missing: the built-in renderer inside the same header style
+    private static func shell(_ src: ProseSource, _ c: ProsePDF.Config) -> String {
+        """
+        <!doctype html><html><head><meta charset="utf-8">
+        \(ProsePDF.cssContent(c))
+        </head><body>\(basic(src.markdown))</body></html>
         """
     }
 }
@@ -274,6 +216,14 @@ final class ProseView: NSView, WKScriptMessageHandler {
     var onOpenImage: ((String) -> Void) = { FilePopup.show(path: $0, over: nil) }
     private var lastPath = ""
     private var gen = 0
+    private var themeColors = PopupColors()   // the PDF export's theme layer
+    private var lastKey = ""                   // path+content+size+theme: skip no-op renders
+    private var loadedPath: String?            // the note the web view currently holds
+    private var loadedHeadKey = ""             // path+width+theme: the head CSS the page holds
+    // one scratch file per view: the in-editor view and pop-out windows (and
+    // other processes) must never write each other's page
+    private let pageFile = URL(fileURLWithPath: NSHomeDirectory()
+        + "/.cache/kitchen-sink/prose/page-\(UUID().uuidString).html")
 
     override init(frame: NSRect) {
         let cfg = WKWebViewConfiguration()
@@ -359,6 +309,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         if let v = notes("pdf-css") { c.css = v }
         if let v = notes("pdf-path") { c.outDir = v }
         if let v = notes("pdf-highlight") { c.highlight = v }
+        c.themeCSS = ProseRender.themeCSS(themeColors)
         DispatchQueue.global(qos: .userInitiated).async {
             let r = ProsePDF.export(note: note, c)
             DispatchQueue.main.async {
@@ -377,23 +328,39 @@ final class ProseView: NSView, WKScriptMessageHandler {
         }
     }
 
-    // render off the main thread (pandoc), keep the scroll spot on a reload
-    // of the same note
+    // Render off the main thread (pandoc). An unchanged render is dropped; a
+    // same-note update patches the document body IN PLACE (no reload, no
+    // flash, scroll kept); a full reload only for a new note or the first paint.
     func show(_ src: ProseSource, colors: PopupColors, font: String, size: CGFloat, width: CGFloat) {
+        themeColors = colors
         layer?.backgroundColor = colors.base.cgColor
+        let sig = ProseRender.css(colors.base) + ProseRender.css(colors.text) + ProseRender.css(colors.accentOn)
+        let key = "\(src.path)\u{1}\(Int(size))\u{1}\(font)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(src.markdown)"
+        guard key != lastKey else { return }   // nothing changed: keep what is on screen
+        // The <head> (themeCSS, <base>, the column width) is what colors the
+        // page; only patch the body in place when the head is unchanged too.
+        let headKey = "\(src.path)\u{1}\(Int(width))\u{1}\(sig)"
+        let same = src.path == loadedPath
+        let sameHead = same && headKey == loadedHeadKey
+        lastKey = key
+        lastPath = src.path
         gen += 1
         let g = gen
-        let same = src.path == lastPath
-        lastPath = src.path
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let html = ProseRender.page(src, colors: colors, font: font, size: size, width: width)
             DispatchQueue.main.async {
                 guard let self, g == self.gen else { return }
+                if sameHead, let body = Self.bodyInner(html) {
+                    self.web.evaluateJavaScript(Self.patchJS(body))
+                    return
+                }
                 let dir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
                 try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-                let file = URL(fileURLWithPath: dir + "/page.html")
+                let file = self.pageFile
                 guard (try? Data(html.utf8).write(to: file)) != nil else { return }
-                if same {
+                self.loadedPath = src.path
+                self.loadedHeadKey = headKey
+                if same {   // re-loading the same note: keep the scroll spot
                     self.web.evaluateJavaScript("window.scrollY") { y, _ in
                         let y = (y as? Double) ?? 0
                         self.web.loadFileURL(file, allowingReadAccessTo: URL(fileURLWithPath: "/"))
@@ -406,6 +373,23 @@ final class ProseView: NSView, WKScriptMessageHandler {
                 }
             }
         }
+    }
+
+    // the document's <body> content (nil when absent) — for an in-place update
+    private static func bodyInner(_ html: String) -> String? {
+        guard let b = html.range(of: "<body", options: .caseInsensitive),
+              let gt = html[b.upperBound...].firstIndex(of: ">"),
+              let e = html.range(of: "</body>", options: .caseInsensitive) else { return nil }
+        let start = html.index(after: gt)
+        guard start <= e.lowerBound else { return nil }
+        return String(html[start..<e.lowerBound])
+    }
+
+    // replace the body in place, keeping the scroll position (no reload)
+    private static func patchJS(_ body: String) -> String {
+        let lit = (try? JSONSerialization.data(withJSONObject: body, options: .fragmentsAllowed))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+        return "var __y=window.scrollY;document.body.innerHTML=\(lit);window.scrollTo(0,__y);"
     }
 }
 
@@ -496,7 +480,8 @@ final class ProseModeSwitch: NSView {
 
 // The reading page on its own: a lean floating window (Figma B's "present"
 // idea) — no chrome but a thin draggable title strip, follows the note as
-// it is saved (1 s check), ⌘+ / ⌘− size, Esc / ⌘W close. A non-activating
+// it is saved (debounced mtime check; the body is patched in place, no
+// reload), ⌘+ / ⌘− size, Esc / ⌘W close. A non-activating
 // panel like the tool panels: opening it never drags the shared window up.
 final class ProseWindow: NSPanel {
     private static var open: [ProseWindow] = []
@@ -510,6 +495,7 @@ final class ProseWindow: NSPanel {
     private let width: CGFloat
     private var stamp: Date?
     private var timer: Timer?
+    private var pending: Timer?
 
     static func show(path: String, colors: PopupColors, font: String, size: CGFloat, width: CGFloat) {
         if let w = open.first(where: { $0.path == path }) { w.orderFrontRegardless(); w.makeKey(); return }
@@ -551,19 +537,30 @@ final class ProseWindow: NSPanel {
         x.autoresizingMask = [.minYMargin]
         contentView?.addSubview(x)
         render()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshIfChanged() }
+        // follow the note: poll its mtime, but coalesce a burst of autosaves
+        // into ONE render a beat after the writes stop (no reload per keystroke)
+        timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in self?.poll() }
     }
 
     private func mtime() -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
+    private func poll() {
+        guard mtime() != stamp else { return }
+        pending?.invalidate()
+        pending = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in self?.render() }
+    }
     private func render() {
         stamp = mtime()
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
-        page.show(ProseSource(markdown: text, path: path), colors: colors, font: font, size: size, width: width)
-    }
-    private func refreshIfChanged() {
-        if mtime() != stamp { render() }
+        let p = path
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let text = try? String(contentsOfFile: p, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.page.show(ProseSource(markdown: text, path: p), colors: self.colors,
+                               font: self.font, size: self.size, width: self.width)
+            }
+        }
     }
     override var canBecomeKey: Bool { true }
     // double-click the top strip = fill the screen / back (the Apple title bar
@@ -603,6 +600,8 @@ final class ProseWindow: NSPanel {
     override func close() {
         timer?.invalidate()
         timer = nil
+        pending?.invalidate()
+        pending = nil
         Self.open.removeAll { $0 === self }
         super.close()
         if Self.standalone, Self.open.isEmpty { NSApp.terminate(nil) }

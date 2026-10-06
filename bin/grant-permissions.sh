@@ -6,7 +6,7 @@
 #
 # Rows go straight into the user TCC database (the same way macOS stores an
 # "Allow" click), for the app's bundle id. When the app is signed with the
-# stable "workspace-switcher codesign" certificate, the rows carry its code
+# stable "kitchen-sink codesign" certificate, the rows carry its code
 # requirement (bundle id + that certificate) — valid across every rebuild.
 # An ad-hoc build gets NULL (any signature) so it still works, with a warning.
 # Mic + speech also get a row for the binary PATH (the speech recognizer

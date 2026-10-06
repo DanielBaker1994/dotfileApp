@@ -1,6 +1,6 @@
 ---
 name: ui-check
-description: Verify a kitchen-sink UI change in seconds by querying the running daemon's state over its socket (views, frames, drawers, focus, tabs) instead of running the slow bin/ui-test.sh suite. Use after ./build.sh when a change affects the shared window, views, drawers, or focus.
+description: Verify a kitchen-sink UI change in seconds by querying the running daemon's state over its socket (views, frames, drawers, focus, tabs) instead of running the slow UI suite. Use after ./ws build when a change affects the shared window, views, drawers, or focus.
 ---
 
 # ui-check — verify UI behavior through the daemon socket
@@ -28,7 +28,7 @@ The daemon answers two test messages on `$TMPDIR/ws-notes.sock`
 
 ## Steps
 
-1. `./build.sh` (builds + relaunches; exit 0 + no output = OK).
+1. `./ws build` (builds + relaunches; exit 0 + no output = OK).
 2. Query:
    ```bash
    S="$TMPDIR/ws-notes.sock"

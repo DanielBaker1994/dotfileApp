@@ -141,6 +141,15 @@ for other in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; d
         esac
     fi
 done
+# the app used to be "workspace-switcher" (bundle id
+# dev.danielbaker.workspace-switcher): macOS keeps its Privacy grants after
+# the rename, so on an upgraded machine they linger in System Settings and
+# look like the app asking for the same permissions again — clear them
+if "$ROOT/bin/clean-stale-permissions.sh" >/dev/null 2>&1; then
+    ok "no stale workspace-switcher privacy grants"
+else
+    warn "could not clear stale workspace-switcher privacy grants — harmless, check System Settings ▸ Privacy if they linger"
+fi
 
 # ------------------------------------------------------------- 1. homebrew
 STEP="installing Homebrew"

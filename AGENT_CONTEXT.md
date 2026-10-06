@@ -20,15 +20,23 @@ Read and honor `rule.md` before touching any code. Key points:
 
 ## Build
 
+`./ws` is THE human entry point (no args = interactive menu; `./ws help`).
+The old names below still work as thin shims around the functions in
+`bin/lib.sh`; the app / aerospace / install.conf keep calling their fixed-path
+scripts directly.
+
 ```bash
-./build.sh            # Build + relaunch
-./build.sh --force    # Force rebuild
-./build.sh --build-only
-bin/make-dmg.sh       # the distributable .dmg (.build/dist) — see Install modes
+./ws build            # Build + relaunch (was ./build.sh)
+./ws build --force    # Force rebuild
+./ws build --build-only
+./ws dmg              # the distributable .dmg (.build/dist) — see Install modes
+./ws test [SUITE|ui|vim|focus|install]   # tests (was run-tests.sh + ui-test*.sh)
+./ws doctor [--fix]   # health check of the whole stack (was jira-doctor.sh)
+./ws check [--json]   # preflight (bin/preflight.sh)
 ```
 
 ONE build: `bin/build-app.sh` (compiles every top-level `*.swift`, SwiftTerm
-lib, sign, TCC) — used by build.sh, `bin/kitchen_sink.sh` and
+lib, sign, TCC) — used by `ws build`, `bin/kitchen_sink.sh` and
 INSTALL.sh. Install/uninstall/build names + paths (bundle id, brew deps,
 launchd agent, caches) live in `install.conf`. Configs (`CONFIG_DIRS`:
 aerospace, borders) are per-file SYMLINKS from `~/.config/<name>`
@@ -88,12 +96,18 @@ files in the way, UNINSTALL.sh removes only links into the repo.
 ## Tests
 
 ```bash
-bin/ui-test.sh              # Full UI test suite (cliclick + osascript)
-bin/ui-test.sh --verbose
-bin/ui-test-focus.py        # show / hide / focus / follow-the-workspace, timed (~20 s)
-bin/run-tests.sh nvim       # the vim pane's RPC client against a real nvim
-bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, render
+./ws test ui                # Full UI test suite (cliclick + osascript; was bin/ui-test.sh)
+./ws test ui --verbose
+./ws test focus             # show / hide / focus / follow-the-workspace, timed (~20 s)
+./ws test vim               # the notes pane's nvim RPC UI suite
+./ws test install           # the two install kinds (needs the dist bundle)
+./ws test nvim              # the vim pane's RPC client against a real nvim
+./ws test screenshot        # /screenshot's model: button ring, undo, pixelate, render
 ```
+
+The underlying scripts (`bin/ui-test.sh`, `bin/ui-test-vim.sh`,
+`bin/ui-test-focus.py`, `bin/run-tests.sh`, `Tests/test_install.sh`) are
+unchanged and can still be called directly.
 
 - `bin/ui-test-focus.py [single show hide follow stranded swap focus esc]`:
   drives the REAL paths — the hotkey binary as aerospace runs it,
@@ -1126,9 +1140,9 @@ Line numbers drift; grep the symbol names (they're stable).
   says `dotfileApp` — that's the old name; same rule: no git in backups).
 - Backdrop (`panel.contentView`) is FLIPPED — y=0 is the top when placing overlays.
 - Signing: `bin/build-app.sh` signs with the self-signed login-keychain
-  cert "workspace-switcher codesign" (stable TCC grants across rebuilds);
+  cert "kitchen-sink codesign" (stable TCC grants across rebuilds);
   falls back to ad-hoc (`-`) if the cert is missing.
-- `./build.sh` builds AND relaunches the app (exit 0 + no output = OK). The
+- `./ws build` builds AND relaunches the app (exit 0 + no output = OK). The
   running process is `kitchen-sink.app/Contents/MacOS/kitchen-sink`.
 - Python jira tests: `python3 Tests/test_jira_poll.py`. UI suites
   (`bin/ui-test*.sh`) are slow/flaky — run once at most, don't loop them.
@@ -1209,11 +1223,16 @@ Line numbers drift; grep the symbol names (they're stable).
   `.primary` is filled; normal / danger = outlines (`ThemedPushButton`).
   Jira detail: no header title, the page's first line = KEY — summary.
 - Prose mode (NotesProse.swift): ⌘⇧P / the Prose | nvim switch (bottom
-  right) / Esc back; `ProseRender` = pandoc (`RichText.pandocHTML`) else
-  `basic`; `[notes] prose-font / prose-font-size / prose-width`.
+  right) / Esc back; the reading view renders the SAME document as Export
+  PDF — `ProsePDF.screenHTML` = pandoc `-s -f gfm -t html5` with
+  `[notes] pdf-css` (else `builtinCSS`) as its header — so what you read is
+  what you export; `ProseRender.page` adds only a `<base>`, the
+  `prose-width` column and the screen-only meta line. `prose-font`,
+  `prose-font-size`, `prose-icon-font` no longer apply; pandoc missing →
+  `ProseRender.basic` in the same style.
   Alerts: ONLY GitHub's five (`> [!NOTE|TIP|IMPORTANT|WARNING|CAUTION]`) —
-  pandoc gfm's built-in `alerts` → `div.note` …; `ProseRender.alertCSS`
-  (palette tones), `RichText.styled` inlines them for Outlook / Webex. Same
+  pandoc gfm's built-in `alerts` → `div.note` … styled by the PDF CSS
+  (`RichText.styled` inlines them for Outlook / Webex). Same
   syntax as the dotfiles PDF builder (`-f gfm`, no Lua filter) + nvim.
 - Capsule look everywhere (`CapsuleStyle` track + raised chip, PopupWindow.swift):
   view switcher, `ConfSegmented` / `ConfToggle` (compare + folder filters,
@@ -1222,12 +1241,12 @@ Line numbers drift; grep the symbol names (they're stable).
   Recent header's Clear Missing (N) / Clear All. Recent rows: ✕ on hover
   (`CompareRecentList.onRemove`). Start page: the folder button sits LEFT
   of each path field.
-- Prose code: `ProseRender.fragment` = `RichText.pandocHTML(md, highlight:
-  true)` (`--syntax-highlighting=default` → `span.kw` …) + `codeCSS` (palette
-  tones, pushed to 4.5:1 on the well); the AI view's pastes keep `none`.
-  Each fence gets a `div.lang` header (`langLabels`: Nerd Font glyph in the
-  language's color from `ProseRender.languages`, name = tooltip; unknown
-  = the name instead; `[notes] prose-icon-font`, default Hack Nerd Font). Export PDF (`ProsePDF.swift`,
+- Prose code: the reading view uses the PDF's own style — pandoc
+  `-s --syntax-highlighting=[notes] pdf-highlight` (default tango) with the
+  `pdf-css` header, so fenced code keeps pandoc's highlight theme, the
+  CSS's Nerd Font language icons (`pre.sourceCode.LANG::before`) and its
+  GitHub-alert blocks; the AI view's pastes keep `--syntax-highlighting=none`.
+  Export PDF (`ProsePDF.swift`,
   Foundation, `bin/run-tests.sh prose`): Cmd+P in the reading view / pop-out
   or its right-click menu (`ProseWebView.willOpenMenu`) → `pandoc -s -f gfm
   -t html5 --syntax-highlighting=tango --include-in-header=[notes] pdf-css`
@@ -1239,7 +1258,13 @@ Line numbers drift; grep the symbol names (they're stable).
 - Prose: default 19 px / 900 pt column; ⤢ chip / ⌘⇧O = `ProseProcess.launch`
   → a SEPARATE process (`kitchen-sink prose --colors HEX,… FILE`, handled
   at the top of main.swift: no daemon, no lock; one per file) showing a
-  `ProseWindow` (floating panel, follows the file's mtime every 1 s, Esc / ⌘W /
+  `ProseWindow` (floating panel; follows the file's mtime with a 0.4 s poll
+  COALESCED into one render 0.35 s after the writes stop — a vim autosave burst
+  is one update, not one per keystroke; `ProseView.show` drops a render whose
+  path/content/size/theme is unchanged and PATCHES the body in place
+  (`document.body.innerHTML`, scroll kept) for a same-note update instead of
+  reloading, so live editing doesn't flash/stutter; a full `loadFileURL` only
+  for a new note or the first paint. Esc / ⌘W /
   the themed ✕ top-left close it, ⌘= ⌘- ⌘0 + trackpad pinch zoom (`ProseView.zoom` = WKWebView pageZoom, kept as `proseZoom`; two-finger double-tap = 100%); closing the last one ends the process).
 - /screenshot recents: `ShotHistory` keeps every copied / saved / pinned
   capture (`[screenshot] history`, 20) in ~/.cache/kitchen-sink/
@@ -1289,7 +1314,7 @@ Line numbers drift; grep the symbol names (they're stable).
   `on-focus-changed` writes `$TMPDIR/ws-aerospace-focus` inline (one bash,
   no script) and the daemon watches it (DispatchSource vnode, no poll).
 - The script builds only when no daemon answers / `WS_BUILD_ONLY`;
-  `./build.sh` runs `build-app.sh` itself. `WS_DEBUG=1` → `$TMPDIR/ws-launch.log`.
+  `./ws build` runs `build-app.sh` itself. `WS_DEBUG=1` → `$TMPDIR/ws-launch.log`.
 - Hyper+T was removed (no binding, no `terminal` mode). The notes terminal
   drawer: Cmd+Opt+T / menu / `do:toggle-terminal`. `PopupWindow.setTerminalDrawer(_:)`.
 - Drawer bookkeeping: `drawerInsetNow` counts only what the window really
@@ -1361,7 +1386,7 @@ worked example):
    repo; only Hyper+S/J/N-style bindings live there — caps_lock → Hyper is
    generic, no per-key entry).
 7. Tool-panel hotkeys (Hyper+X) are NOT in `hotkeyModes` (no `hotkeyPrep`).
-8. After the edit: `./build.sh --build-only`, then reload aerospace.
+8. After the edit: `./ws build --build-only`, then reload aerospace.
 
 ## Pane navigation (Ctrl+H/J/K/L) + the focus ring
 

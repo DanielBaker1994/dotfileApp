@@ -299,7 +299,7 @@ info = "63CDCF"
 [filefast]
 enabled = true
 sticky = true
-float = false
+float = true
 type = "shell"
 label = "Create File"
 icon = "notes"
@@ -331,7 +331,7 @@ type = "shell"
   label = "Find Recent Files"
 icon = "folder"
 sticky = true
-float = false
+float = true
 limit = 25
 return = "file"
 clipboard = true
@@ -487,15 +487,14 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #                       many points wide (default 210; "+" beside the NOTES
 #                       label adds one, hover a row for its ✕, right-click
 #                       for Copy Path / Reveal / Close). 0 = the old tab strip
-#   prose-font          the reading view's font (CSS stack; default "Literata,
-#                       ui-serif, New York, Georgia, serif"). ⌘⇧P or the
-#                       Prose | nvim switch at the bottom right; Esc goes back.
-#                       ⤢ / ⌘⇧O opens the page in a floating window that
-#                       follows the note (Esc / ⌘W close, ⌘+ / ⌘− size)
-#   prose-font-size     reading view text size (default 19)
-#   prose-width         reading column width in points (default 900)
-#   prose-icon-font     font for the language icon over fenced code (default
-#                       "Hack Nerd Font"; "" or not installed = the name instead)
+#   prose-width         reading column width in points (default 900). The
+#                       reading view renders the SAME document as Export PDF
+#                       (pandoc -s + pdf-css below), so its font, size and
+#                       language icons come from that style — prose-font,
+#                       prose-font-size and prose-icon-font no longer apply.
+#                       ⌘⇧P / the Prose | nvim switch at the bottom right;
+#                       Esc goes back; ⤢ / ⌘⇧O opens it in a floating window
+#                       that follows the note (Esc / ⌘W close, ⌘+ / ⌘− size)
 #   pdf-css             ⌘P / right-click ▸ Export PDF in the reading view:
 #                       pandoc -s (gfm) → weasyprint. This file is a header
 #                       snippet (<style>…</style>) put in the page (default

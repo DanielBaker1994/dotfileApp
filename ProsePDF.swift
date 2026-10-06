@@ -13,10 +13,25 @@ enum ProsePDF {
         var css = ""                                   // [notes] pdf-css: a <style> header snippet; "" = built in
         var outDir = "~/Downloads"                     // [notes] pdf-path
         var highlight = "tango"                        // [notes] pdf-highlight
+        var themeCSS = ""                              // dark theme layer (ProseRender.themeCSS)
         var cacheDir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
     }
 
     static func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }
+
+    // A unique scratch file under cacheDir: concurrent renders (the in-editor
+    // view + floating windows, in one process or across processes) must never
+    // share one path, or they swap each other's HTML.
+    private static func scratchFile(_ c: Config, _ prefix: String) -> String {
+        (c.cacheDir as NSString).appendingPathComponent("\(prefix)-\(UUID().uuidString).html")
+    }
+
+    // Remove a scratch file — but never the path the user configured:
+    // headerFile returns `[notes] pdf-css` itself when there is no theme layer.
+    private static func removeScratch(_ path: String, _ c: Config) {
+        guard path.hasPrefix(c.cacheDir) else { return }
+        try? FileManager.default.removeItem(atPath: path)
+    }
 
     static func outputPath(note: String, _ c: Config) -> String {
         let stem = ((note as NSString).lastPathComponent as NSString).deletingPathExtension
@@ -36,13 +51,44 @@ enum ProsePDF {
         return ["-u", base, html, out]
     }
 
-    // the header CSS file: the configured one, else the built-in style
+    // the header CSS file: the configured one, else the built-in style, with
+    // the dark theme layer appended when set
     static func headerFile(_ c: Config) throws -> String {
         let own = expand(c.css)
-        if !c.css.isEmpty, FileManager.default.fileExists(atPath: own) { return own }
-        let f = (c.cacheDir as NSString).appendingPathComponent("pdf-header.html")
-        try Data(builtinCSS.utf8).write(to: URL(fileURLWithPath: f))
+        let ownExists = !c.css.isEmpty && FileManager.default.fileExists(atPath: own)
+        if ownExists && c.themeCSS.isEmpty { return own }
+        var text = (ownExists ? (try? String(contentsOfFile: own, encoding: .utf8)) : nil) ?? builtinCSS
+        if !c.themeCSS.isEmpty { text += "\n" + c.themeCSS }
+        let f = scratchFile(c, "header")
+        try Data(text.utf8).write(to: URL(fileURLWithPath: f))
         return f
+    }
+
+    // the header CSS text: the configured file, else the built-in style, with
+    // the dark theme layer appended when set
+    static func cssContent(_ c: Config) -> String {
+        let own = expand(c.css)
+        var text = (!c.css.isEmpty ? (try? String(contentsOfFile: own, encoding: .utf8)) : nil) ?? builtinCSS
+        if !c.themeCSS.isEmpty { text += "\n" + c.themeCSS }
+        return text
+    }
+
+    // The SAME pandoc → HTML5 document the PDF export feeds to weasyprint,
+    // returned for the reading view so what you read is what you export.
+    // nil = pandoc missing / failed (the caller falls back to the built-in
+    // renderer).
+    static func screenHTML(note: String, _ c: Config) -> String? {
+        let fm = FileManager.default
+        guard fm.isExecutableFile(atPath: expand(c.pandoc)), fm.fileExists(atPath: note) else { return nil }
+        do {
+            try fm.createDirectory(atPath: c.cacheDir, withIntermediateDirectories: true)
+            let css = try headerFile(c)
+            let html = scratchFile(c, "prose")
+            defer { removeScratch(css, c); removeScratch(html, c) }
+            let p = try runProcess(expand(c.pandoc), pandocArgs(note: note, css: css, html: html, c))
+            guard p.code == 0 else { return nil }
+            return try? String(contentsOfFile: html, encoding: .utf8)
+        } catch { return nil }
     }
 
     // runs synchronously (call it off main): the PDF's path, or why not
@@ -60,7 +106,8 @@ enum ProsePDF {
             try fm.createDirectory(atPath: c.cacheDir, withIntermediateDirectories: true)
             try fm.createDirectory(atPath: (out as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
             let css = try headerFile(c)
-            let html = (c.cacheDir as NSString).appendingPathComponent("pdf.html")
+            let html = scratchFile(c, "pdf")
+            defer { removeScratch(css, c); removeScratch(html, c) }
             let p = try runProcess(expand(c.pandoc), pandocArgs(note: note, css: css, html: html, c))
             guard p.code == 0 else { return .failure(ExportError("pandoc failed: " + firstLine(p.err))) }
             let w = try runProcess(expand(c.engine), engineArgs(note: note, html: html, out: out))

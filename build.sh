@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-# build.sh — build (and relaunch) the kitchen sink.
-#   ./build.sh           build + relaunch on the first view, files (only if sources changed)
-#   ./build.sh --force   force rebuild even if nothing changed
-#   ./build.sh --build-only   build + re-grant TCC, but DON'T launch
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# the launcher only builds on a cold start (hotkeys never pay for the
-# stale check), so build here: build-app.sh kills the old daemon after a
-# new binary, and the launcher below starts the fresh one
-if [ "${1:-}" = "--force" ]; then
-    "$DIR/bin/build-app.sh" --force || exit 1
-    shift
-elif [ "${1:-}" != "--build-only" ]; then
-    "$DIR/bin/build-app.sh" || exit 1
-fi
-if [ "${1:-}" = "--build-only" ]; then
-    export WS_BUILD_ONLY=1
-fi
-exec "$DIR/bin/kitchen_sink.sh" window
+# build.sh — deprecated shim for `./ws build` (kept for old docs / scripts).
+#   ./build.sh            build + relaunch
+#   ./build.sh --force    force rebuild
+#   ./build.sh --build-only   build + re-grant TCC, do NOT launch
+set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/bin/lib.sh"
+ws_cmd_build "$@"

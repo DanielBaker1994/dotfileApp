@@ -10184,7 +10184,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     private func takeFocus() {
         guard isShown else { return }
-        panel.makeKeyAndOrderFront(nil)
+        if config.toolPanel {
+            // a tool panel never activates the app (config.toolPanel), so
+            // makeKeyAndOrderFront would NOT order it above the frontmost
+            // app's window (it landed behind, key but hidden): order it front
+            // regardless of activation, then take the keyboard without
+            // activating (activation would raise our other windows too)
+            panel.orderFrontRegardless()
+            panel.makeKey()
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
         // a tool panel never activates the app (config.toolPanel): it can be
         // key while inactive, and activation raises our other windows
         if !panel.isKeyWindow, !NSApp.isActive, !config.toolPanel {

@@ -4905,7 +4905,8 @@ final class SwitcherController: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak w] in
             guard let w, w.isShown, !w.nativeWindow.isKeyWindow,
                   let k = NSApp.keyWindow, k !== w.nativeWindow else { return }
-            w.nativeWindow.makeKeyAndOrderFront(nil)
+            w.nativeWindow.orderFrontRegardless()
+            w.nativeWindow.makeKey()
             focus?()
         }
     }

@@ -16,7 +16,7 @@ Hyper hotkeys and window borders (AeroSpace, borders — Homebrew) are one optio
 `~/.config/kitchen-sink` (`commands.toml`, `rules/`, `config/`);
 updating = dragging the new app over the old one.
 
-Build the image: `bin/make-dmg.sh` (→ `.build/dist/`). With `DEVELOPER_ID` +
+Build the image: `./ws dmg` (→ `.build/dist/`). With `DEVELOPER_ID` +
 `NOTARY_PROFILE` set in `install.conf` it is signed and notarized; without
 them it is self-signed and other Macs need System Settings ▸ Privacy &
 Security ▸ Open Anyway. Uninstall:
@@ -69,11 +69,21 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 ## Development
 
+`./ws` is the one entry point — run it with no arguments for an interactive
+menu, or pass a command. `./ws help` lists everything.
+
 ```bash
-./INSTALL.sh help       # the one command (install / uninstall)
-./build.sh              # dev: compile kitchen-sink.app + TCC re-grant
-./build.sh --build-only # dev: compile + grant, do NOT launch
+./ws                     # interactive menu
+./ws build               # compile kitchen-sink.app + TCC re-grant + relaunch
+./ws build --build-only  # compile + grant, do NOT launch
+./ws test config         # unit tests (any suite: compare, recent, …)
+./ws test ui             # the UI suite
+./ws doctor              # health check of the whole stack
+./ws dmg                 # the distributable disk image
 ```
+
+The old names (`build.sh`, `bin/make-dmg.sh`, `bin/fix-permissions.sh`,
+`bin/fake-*.sh`) still work as thin shims around the same functions.
 
 - `PopupWindow.swift` — reusable AppKit popup framework (windows, chrome,
   rows, filters, editor, embedded terminal, record meter)
@@ -153,7 +163,7 @@ automatically before the SwiftTerm compile in `bin/build-app.sh`, so a normal
 build just works:
 
 ```bash
-./build.sh            # first run fetches + precompiles SwiftTerm, then builds
+./ws build            # first run fetches + precompiles SwiftTerm, then builds
 bin/ensure-swiftterm.sh   # fetch/refresh it alone (no-op when already pinned)
 ```
 
