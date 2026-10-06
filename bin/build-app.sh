@@ -179,7 +179,7 @@ bundle_resources() {
         sec == "[screenshot]" && /^save-path[ \t]*=/ { print "save-path = \"~/Desktop\""; next }
         { print }' "$ROOT/commands.toml" > "$res/commands.default.toml"
     printf '%s\n' "$APP_VERSION" > "$res/VERSION"
-    # sketchybar helpers, precompiled: an end user has no swiftc
+    # unread-count helpers (notify/helpers), precompiled: an end user has no swiftc
     mkdir -p "$res/helpers-bin"
     for src in $HELPER_SOURCES; do
         swiftc -O -target "$(uname -m)-apple-macosx$MACOS_MIN" "$ROOT/$src" \

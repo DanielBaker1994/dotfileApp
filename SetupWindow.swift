@@ -14,7 +14,7 @@ import Foundation
 // only; a marker check, no process, when nothing changed). The window shows
 // what bin/preflight.sh --json reports — the SAME checks INSTALL.sh prints —
 // with a Fix button per row, "Move to Applications", and the opt-in
-// "Hotkeys & Menu Bar" step (Homebrew packages + config links).
+// "Hotkeys & Borders" step (Homebrew packages + config links).
 //
 // Config: commands.toml [setup] (title, intro, width, height).
 // Open: first run / new version / a required check fails, menu bar ▸
@@ -123,7 +123,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     private let logView = NSTextView()
     private let status = NSTextField(labelWithString: "")
     private let recheck = ThemedPushButton(title: "Check Again", target: nil, action: nil)
-    private let stack = ThemedPushButton(title: "Set Up Hotkeys & Menu Bar…", target: nil, action: nil)
+    private let stack = ThemedPushButton(title: "Set Up Hotkeys & Borders…", target: nil, action: nil)
     private let done = ThemedPushButton(title: "Done", target: nil, action: nil)
     private var monitor: Any?
     private weak var controller: SwitcherController?
@@ -255,7 +255,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         case .failed(let why):
             fallback = "Setting up ~/.config/workspace-switcher failed: \(why)"
         default:
-            fallback = "What this Mac needs. Notes, files, Jira, Confluence and AI work on their own; the Hyper hotkeys and the menu bar are an optional extra step."
+            fallback = "What this Mac needs. Notes, files, Jira, Confluence and AI work on their own; the Hyper hotkeys and window borders are an optional extra step."
         }
         let custom = Self.setting("intro", "")
         if case .ready = AppInstall.state, !custom.isEmpty { intro.stringValue = custom } else { intro.stringValue = fallback }
@@ -330,7 +330,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         } else if !warned.isEmpty {
             say("Ready. \(warned.count) optional feature\(warned.count == 1 ? " is" : "s are") off — see the list.", tone: .warning)
         } else if !stackMissing.isEmpty {
-            say("Ready. Hotkeys and the menu bar are not set up (optional).", tone: .dim)
+            say("Ready. Hotkeys and window borders are not set up (optional).", tone: .dim)
         } else {
             say("Everything is in place.", tone: .success)
         }
@@ -346,7 +346,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     }
 
     private static let groupTitles = ["core": "THIS MAC", "features": "FEATURES (OPTIONAL)",
-                                      "stack": "HOTKEYS + MENU BAR (OPTIONAL)", "dev": "BUILDING FROM SOURCE"]
+                                      "stack": "HOTKEYS + BORDERS (OPTIONAL)", "dev": "BUILDING FROM SOURCE"]
 
     private func rebuildRows() {
         rows.subviews.forEach { $0.removeFromSuperview() }
@@ -469,7 +469,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     private func noBrew() {
         let cmd = "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
         ask(title: "Homebrew is not installed",
-            text: "The hotkeys and the menu bar are built on AeroSpace, sketchybar and borders, which come from Homebrew. "
+            text: "The hotkeys and window borders are built on AeroSpace and borders, which come from Homebrew. "
                 + "Its installer needs your password, so it has to run in Terminal:\n\n\(cmd)\n\nRun it, then press Check Again.",
             buttons: ["Copy Command & Open Terminal", "Cancel"]) { [weak self] pick in
             guard pick == 0 else { return }
@@ -488,9 +488,9 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             .map { String($0.action.dropFirst(5)) }
         let casks = checks.filter { !$0.ok && $0.action.hasPrefix("cask:") }.map { String($0.action.dropFirst(5)) }
         let installs = (formulae + casks).joined(separator: ", ")
-        ask(title: "Set up the hotkeys and the menu bar?",
+        ask(title: "Set up the hotkeys and window borders?",
             text: (installs.isEmpty ? "" : "Installs with Homebrew: \(installs).\n\n")
-                + "Links this app's AeroSpace, sketchybar and borders configs into ~/.config. "
+                + "Links this app's AeroSpace and borders configs into ~/.config. "
                 + "Real files already there are left alone and reported — nothing is moved or deleted.\n\n"
                 + "Afterwards macOS asks once for Accessibility access for AeroSpace (System Settings ▸ Privacy & Security).",
             buttons: ["Set Up", "Cancel"]) { [weak self] pick in
@@ -523,7 +523,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         env["NONINTERACTIVE"] = "1"
         // brew's tap trust list lives under $XDG_CONFIG_HOME when the user's
         // shell sets it; launched from Finder we don't inherit that, and brew
-        // then refuses the sketchybar / borders / aerospace taps
+        // then refuses the borders / aerospace taps
         let home = NSHomeDirectory(), fm = FileManager.default
         if env["XDG_CONFIG_HOME"] == nil, fm.fileExists(atPath: home + "/.config/homebrew/trust.json"),
            !fm.fileExists(atPath: home + "/.homebrew/trust.json") {

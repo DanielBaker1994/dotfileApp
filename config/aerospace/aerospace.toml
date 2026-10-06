@@ -4,36 +4,24 @@
 #   aerospace layout h_accordion
 #   aerospace layout v_tiles
 #   aerospace layout h_tiles
-#   aerospace reload-config && sketchybar --reload
+#   aerospace reload-config
 # re-apply rules to open windows (generic, no restart)
 #   aerospace run-callback --for-every-window on-window-detected  
-after-startup-command = [
-# sketchybar is also managed by brew services; sketchybar has built-in
-# detection of an already-running process, so this is a no-op if brew already
-# started it (and only actually launches it if brew hasn't).
-'exec-and-forget sketchybar'
-]
-
-# Notify Sketchybar about workspace change.
-# The KEY=VALUE payload arrives in the subscribed item's script as ENVIRONMENT
-# variables (sketchybar does not pass them positionally), and
-# sketchybar/plugins/aerospacer.sh reads $FOCUSED_WORKSPACE to move the highlight.
+# Stray-workspace guard (bin/no_stray_workspaces.sh): any workspace outside
+# M Y W 1-9 gets its windows moved back. The switcher daemon also runs it on
+# display changes and wake.
 exec-on-workspace-change = [
-  '/opt/homebrew/bin/bash', '-c', 'sketchybar --trigger aerospace_workspace_change FOCUSED_WORKSPACE=$AEROSPACE_FOCUSED_WORKSPACE PREV_WORKSPACE=$AEROSPACE_PREV_WORKSPACE; ~/.config/workspace-switcher/bin/no_stray_workspaces.sh &'
+  '/opt/homebrew/bin/bash', '-c', '~/.config/workspace-switcher/bin/no_stray_workspaces.sh &'
 ]
 
 
-# Notify Sketchybar about focus change (window opened/closed/moved).
-# Debounced in aerospacer.sh to 1/sec so it doesn't block aerospace's
-# main thread (aerospace #230).
-# The second line is the workspace-switcher focus bridge: it records the
+# The workspace-switcher focus bridge: it records the
 # newly focused window id for the daemon (macOS won't activate an accessory
 # app from another process, so the daemon self-activates when aerospace
 # focuses it; it watches the file, no polling). Inline on purpose: ONE
 # process (exec-and-forget's /bin/bash, printf is a builtin) instead of a
 # script + env + bash — every exec is scanned on a managed Mac.
 on-focus-changed = [
-  'exec-and-forget sketchybar --trigger aerospace_focus_change',
   'exec-and-forget [ -n "$AEROSPACE_WINDOW_ID" ] && printf %s "$AEROSPACE_WINDOW_ID" >"${TMPDIR:-/tmp}/ws-aerospace-focus"'
 ]
 
@@ -156,7 +144,7 @@ inner.vertical =   [{ monitor.main = 5 }, 10]
 outer.left =       [{ monitor.main = 10 }, 10]
 outer.right =      [{ monitor.main = 10 }, 10]
 outer.bottom =     [{ monitor.main = 10 }, 10]
-outer.top =        [{ monitor."built-in" = 15 }, 48]  # notch screen: visibleFrame already starts 33.5pt down
+outer.top =        [{ monitor.main = 10 }, 10]
 
 # Pin workspaces to monitors. 9 ALWAYS has a screen of its own: when a
 # monitor connects, AeroSpace shows an invisible workspace already assigned

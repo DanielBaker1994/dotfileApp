@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Webex REST source for the sketchybar notifications pill.
+"""Webex REST source for the Hyper+S unread counts (notify_poll.py).
 
   webex_api.py --login          one-time OAuth sign-in (Webex Integration)
   webex_api.py --poll [--print] one poll → JSON (unread spaces, @mentions)

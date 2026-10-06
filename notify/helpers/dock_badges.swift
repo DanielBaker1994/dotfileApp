@@ -2,8 +2,8 @@
 // Dock item: "<bundle id>\t<badge>" (badge empty = none). Read through the
 // Dock's accessibility tree (AXStatusLabel), i.e. exactly what you see — this
 // covers badges `lsappinfo` misses (UserNotifications badges, e.g. Messages).
-// Needs Accessibility for the process that runs it (sketchybar).
-// Built on demand by notify/notify_poll.py into ~/.cache/sketchybar/.
+// Needs Accessibility for the process that runs it (the workspace-switcher app).
+// Built on demand by notify/notify_poll.py into ~/.cache/workspace-switcher/helpers/.
 import AppKit
 import ApplicationServices
 

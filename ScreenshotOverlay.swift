@@ -39,7 +39,7 @@ final class ShotOverlayPanel: NSPanel {
     }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-    // covers the menu bar + the sketchybar strip: never pushed below them
+    // covers the menu bar: never pushed below it
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     // Esc runs through the session's key monitor (the Esc chain)
     override func cancelOperation(_ sender: Any?) {}

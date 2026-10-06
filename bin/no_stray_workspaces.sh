@@ -8,8 +8,9 @@
 # moved to a real workspace and the monitor is switched to an allowed one.
 # An emptied, invisible stray is garbage-collected by AeroSpace.
 #
-# Triggered by: sketchybar display_change/system_woke (monitor plug/unplug,
-# wake) and aerospace exec-on-workspace-change. Fast path = one aerospace call.
+# Triggered by: the workspace-switcher daemon on display changes and wake
+# (SENDER=display_change / system_woke) and aerospace exec-on-workspace-change.
+# Fast path = one aerospace call.
 
 ALLOWED=(G M Y W N 1 2 3 4 5 6 7 8 9)
 is_allowed() { case " ${ALLOWED[*]} " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -73,5 +74,4 @@ done
 
 # Restore the user's focus if it was on an allowed workspace.
 is_allowed "$focused_ws" && aerospace workspace "$focused_ws"
-sketchybar --trigger aerospace_workspace_change 2>/dev/null
 exit 0

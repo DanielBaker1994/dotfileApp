@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the sketchybar notifications pill backend (notify/*.py).
+"""Tests for the Hyper+S unread-count backend (notify/*.py).
 
   python3 Tests/test_notifications.py      (stdlib unittest; no network)
 """
@@ -157,59 +157,26 @@ class TickTests(unittest.TestCase):
         self.assertEqual(notify_poll.badge("com.apple.finder"), 0)
 
     def chip(self, count, api):
-        args, on = notify_poll.chip_args(self.CFG, "webex", count, api)
-        return " ".join(args), on
+        return notify_poll.chip("webex", self.CFG, count, api)
 
     def test_chip_count_and_mentions(self):
-        s, on = self.chip(3, {"ok": True, "mentions": 2, "unread": 1})
-        self.assertTrue(on)
-        self.assertIn("notif.webex label.drawing=on label=3 icon.width=11", s)
-        self.assertIn("label=@2", s)
+        c = self.chip(3, {"ok": True, "mentions": 2, "unread": 1})
+        self.assertEqual((c["count"], c["mentions"], c["warn"], c["shown"]), (3, 2, False, True))
+        self.assertEqual(c["app"], "Cisco-Systems.Spark")
 
-    def test_chip_badge_thousands_and_off(self):
-        self.assertIn("label=2,090", self.chip(2090, None)[0])
-        self.assertIn("notif.webex label.drawing=off label= icon.width=22", self.chip(0, None)[0])
+    def test_chip_zero_is_hidden(self):
+        self.assertFalse(self.chip(0, None)["shown"])
 
     def test_badge_zero_clears_mentions(self):
-        s, on = self.chip(0, {"ok": True, "mentions": 2})
-        self.assertFalse(on)
-        self.assertIn("notif.webex.at drawing=off", s)
+        c = self.chip(0, {"ok": True, "mentions": 2})
+        self.assertEqual((c["mentions"], c["shown"]), (0, False))
 
     def test_app_not_running_falls_back_to_api(self):
-        s, _ = self.chip(None, {"ok": True, "mentions": 0, "unread": 4})
-        self.assertIn("label=4", s)
+        self.assertEqual(self.chip(None, {"ok": True, "mentions": 0, "unread": 4})["count"], 4)
 
     def test_api_error_warns(self):
-        s, on = self.chip(None, {"ok": False, "error": "x"})
-        self.assertTrue(on)
-        self.assertIn("notif.webex.at drawing=on label=●", s)
-
-    def rows(self, count, api, on=True):
-        return notify_poll.popup_rows(self.CFG, "webex", count, api, on)
-
-    def test_popup_signed_out(self):
-        rows = self.rows(0, {"ok": False, "auth": True, "error": "x"})
-        self.assertEqual(rows[1]["right"], "Sign in ›")
-        self.assertIn("webex_api.py --login", rows[1]["click"])
-        self.assertIn("open -na Ghostty", rows[1]["click"])
-
-    def test_popup_mentions_then_spaces(self):
-        api = {"ok": True, "mentions": 1, "unread": 2,
-               "items": [{"space": "Team", "link": "webexteams://im?space=u1",
-                          "text": "hi", "at": None}],
-               "spaces": [{"title": "Team", "link": "webexteams://im?space=u1", "mentions": 1},
-                          {"title": "Bob", "link": "webexteams://im?space=u2", "mentions": 0}]}
-        texts = [r["text"] for r in self.rows(2, api)]
-        self.assertEqual(texts, ["Webex — 2 unread · @1", "@ Team: hi", "Bob", "Open Webex", "Refresh"])
-        self.assertIn("space=u2", self.rows(2, api)[2]["click"])
-
-    def test_popup_api_off(self):
-        texts = [r["text"] for r in self.rows(3, None, on=False)]
-        self.assertEqual(texts, ["Webex — 3 unread", "Open Webex"])
-
-    def test_popup_api_off_lists_window_spaces(self):
-        rows = notify_poll.popup_rows(notify_poll.DEFAULTS, "webex", 2, None, False, ["Team", "Bob"])
-        self.assertEqual([r["text"] for r in rows], ["Webex — 2 unread", "Team", "Bob", "Open Webex"])
+        c = self.chip(None, {"ok": False, "error": "x"})
+        self.assertTrue(c["warn"] and c["shown"])
 
     def test_parse_window(self):
         self.assertEqual(notify_poll.parse_window("count\t2\nspace\tTeam\nspace\tBob\n"),

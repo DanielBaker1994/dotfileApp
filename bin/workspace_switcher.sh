@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fzf-free workspace switcher: native AppKit popup (Swift), themed like
-# sketchybar. If the daemon is running (Unix-socket ping succeeds), send a
+# fzf-free workspace switcher: native AppKit popup (Swift), themed from
+# commands.toml [theme]. If the daemon is running (Unix-socket ping succeeds), send a
 # toggle message; otherwise build-if-stale and launch it in the background.
 #
 # Usage:

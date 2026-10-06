@@ -1,7 +1,7 @@
 # workspace-switcher
 
 A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
-with sketchybar + borders menu-bar stack. Native AppKit (Swift), no runtime
+with a borders focused-window outline. Native AppKit (Swift), no runtime
 dependencies beyond what the installer brings.
 
 ## Install (end user — pick one)
@@ -12,7 +12,7 @@ Open `workspace-switcher-<version>.dmg`, drag the app to **Applications**,
 open it. The first run shows **Setup & Health Check**: what this Mac has and
 what is missing (no Apple on-device model → the AI view is off, everything
 else works). Notes, files, Jira, Confluence and AI work straight away; the
-Hyper hotkeys and the menu bar (AeroSpace, sketchybar, borders — Homebrew) are one optional button in that window. Your settings live in
+Hyper hotkeys and window borders (AeroSpace, borders — Homebrew) are one optional button in that window. Your settings live in
 `~/.config/workspace-switcher` (`commands.toml`, `rules/`, `config/`);
 updating = dragging the new app over the old one.
 
@@ -48,7 +48,7 @@ bash INSTALL.sh
 
 `INSTALL.sh` prints every step as it runs (checks your Mac, installs
 Homebrew/deps, installs configs, compiles the app, grants mic + speech
-permissions, starts sketchybar + borders, loads the jira poll agent, opens
+permissions, starts borders, loads the jira poll agent, opens
 the app). Re-running it is safe. Uninstall: `./UNINSTALL.sh`.
 
 Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
@@ -57,11 +57,11 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 
 | Thing | Where |
 | --- | --- |
-| Switcher popup | Hyper+S |
+| Switcher popup | Hyper+S — workspaces (app icons per workspace), a command grid, and a status row (unread · CPU · RAM · battery · clock); type to narrow all of it |
 | Every shortcut + setting (search, edit, rebind, clash report) | Hyper+/ — `bin/ws-settings` (`--help`: keys, settings, set, undo, bind, conflicts, export md, doctor) |
 | Notes / Jira / Voice / Health windows | menu-bar **wrench** icon |
 | Voice notes | red record button → dictation → text, pause/resume, live draft |
-| Menu-bar stack | sketchybar + borders (brew services) |
+| Window borders | borders (brew service) |
 | Jira window | Hyper+J (aerospace) — spreadsheet table, columns from `commands.toml [jira] columns` |
 | AI view | Hyper+S → /ai — Apple's on-device model (`fm`) driven by rule files in `rules/*.md` (Grammar Check: grammar + Markdown formatting for Outlook/Webex); right pane = Diff / Markdown / Outlook / Webex preview, ⧉ Copy = rich text (HTML + RTF + Markdown via pandoc), Ctrl+Enter runs |
 | Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window** / **Open Jira Config Window** (poll jobs, schedules, columns, Force Poll, Setup…) |

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # jira-doctor.sh — ONE command that heartbeats the whole workspace-switcher
-# stack: menu bar (sketchybar + borders), aerospace, the
+# stack: borders, aerospace, the
 # workspace-switcher daemon, permissions (mic/speech/dictation) — and, ONLY
 # if jira is enabled in commands.toml, the jira section (config, API, poll
 # agent, schedule, window json). Disabling jira must never disable the
@@ -32,7 +32,6 @@ PLIST_SRC="$WS_ROOT/jira/com.jira.poll.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
 LABEL="com.jira.poll"
 TOML="$HOME/.config/aerospace/aerospace.toml"
-SKETCH_DIR="$HOME/.config/sketchybar"
 WS_SOCKET="${TMPDIR:-/tmp}"
 WS_SOCKET="${WS_SOCKET%/}/ws-notes.sock"
 TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
@@ -51,20 +50,8 @@ for b in curl jq python3 aerospace swiftc brew; do
     if command -v "$b" >/dev/null 2>&1; then ok "$b ($(command -v "$b"))"; else bad "$b missing"; fi
 done
 
-# ---------------------------------------------------------------- menu bar
-head_ "== menu bar (sketchybar + borders) =="
-if running sketchybar; then
-    ok "sketchybar running (pid $(pgrep -x sketchybar | head -1))"
-else
-    if [ "$FIX" = 1 ] && brew services start sketchybar >/dev/null 2>&1; then
-        ok "sketchybar started (--fix)"
-    else
-        bad "sketchybar NOT running (jira-doctor --fix starts it)"
-    fi
-fi
-for f in colors.sh plugins/aerospacer.sh; do
-    if [ -f "$SKETCH_DIR/$f" ]; then ok "sketchybar config: $f"; else bad "sketchybar config missing: $SKETCH_DIR/$f"; fi
-done
+# ---------------------------------------------------------------- borders
+head_ "== borders =="
 if running borders; then
     ok "borders running (pid $(pgrep -x borders | head -1))"
 else
@@ -74,7 +61,7 @@ else
         bad "borders NOT running (jira-doctor --fix starts it)"
     fi
 fi
-for s in sketchybar borders; do
+for s in borders; do
     if brew services list 2>/dev/null | grep -q "^${s}[[:space:]]*started"; then
         ok "brew service $s: started"
     else

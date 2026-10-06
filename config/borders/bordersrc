@@ -2,7 +2,7 @@
 
 # JankyBorders (FelixKratz/formulae/borders) — window border highlighter.
 # Borders the focused window so you can see what's active under AeroSpace.
-# Colors match the sketchybar palette (colors.sh): white active / muted grey inactive.
+# Colors: white active / muted grey inactive (Catppuccin Macchiato).
 
 options=(
   style=round

@@ -205,7 +205,7 @@ else
 fi
 
 # ---------------------------------------------------------------- stack
-# hotkeys + menu bar: optional for an app install, part of the repo install
+# hotkeys + borders: optional for an app install, part of the repo install
 HAVE_BREW=0
 if command -v brew >/dev/null 2>&1; then
     HAVE_BREW=1
@@ -214,7 +214,7 @@ if command -v brew >/dev/null 2>&1; then
     CASKS=" $(brew list --cask -1 2>/dev/null | tr '\n' ' ') "
 else
     add brew stack warn 0 "Homebrew" "not installed" \
-        "Needed for the hotkeys and the menu bar (AeroSpace, sketchybar, borders). Install it from https://brew.sh — it asks for your password once." "url:https://brew.sh"
+        "Needed for the hotkeys and window borders (AeroSpace, borders). Install it from https://brew.sh — it asks for your password once." "url:https://brew.sh"
     FORMULAE=" "; CASKS=" "
 fi
 for f in $BREW_FORMULAE; do
@@ -244,7 +244,7 @@ if [ -f "$ROOT/symlinks.sh" ]; then
     else
         BAD="$(printf '%s\n' "$LINKS" | grep -c -e '✘' -e '·' || true)"
         add links stack warn 0 "Config links" "$BAD link(s) missing or pointing elsewhere" \
-            "Link the aerospace / sketchybar / borders configs (a real file in the way is left alone and reported)." stack
+            "Link the aerospace / borders configs (a real file in the way is left alone and reported)." stack
     fi
 fi
 
@@ -287,7 +287,7 @@ group_title() {
     case "$1" in
         core) echo "this Mac" ;;
         features) echo "features (optional)" ;;
-        stack) echo "hotkeys + menu bar" ;;
+        stack) echo "hotkeys + borders" ;;
         dev) echo "building from source" ;;
     esac
 }

@@ -15,7 +15,7 @@ Interface Guidelines for macOS), never web or mobile.
 ## Users
 
 - **Primary: the owner.** A developer who works all day in a tiling-window
-  setup (AeroSpace, sketchybar, borders, Ghostty, herdr, nvim) and wants
+  setup (AeroSpace, borders, Ghostty, herdr, nvim) and wants
   notes, files, Jira, Confluence, an AI writing helper, diffing and
   screenshots a hotkey away. They choose what gets built, based on what they
   use every day.
@@ -45,8 +45,8 @@ All three of these together; no single one leads:
    milliseconds. Esc, edit shortcuts and focus hand-back behave the same way
    in every view.
 3. **Native to a tiling workflow.** Built around AeroSpace's model (focus
-   files, closed-windows cache, workspace placement) and sketchybar, with
-   workspace awareness and a notifications pill.
+   files, closed-windows cache, workspace placement), with workspace
+   awareness and unread counts in the Hyper+S switcher.
 
 ## Operating Context
 

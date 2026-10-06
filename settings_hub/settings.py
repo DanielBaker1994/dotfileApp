@@ -74,7 +74,7 @@ APPLY = {
     "screenshot": "trigger", "pane-shot": "trigger", "setup": "open",
     "confluence": "open", "ai": "open", "jira-config": "open",
     "theme": "restart", "themes": "restart",
-    "notifications": "sketchybar", "settings-hub": "none",
+    "notifications": "open", "settings-hub": "none",
 }
 APP_LAUNCH_ONLY = {"notes-socket", "focus-file", "focus-bridge", "switcher-name", "detail-name",
                    "crash-log", "shell", "shell-args", "aerospace-socket"}

@@ -83,7 +83,7 @@ class SettingRow:
     range: tuple | None = None
     source_file: str = ""
     line: int = 0
-    apply: str = ""            # reload | trigger | open | restart | sketchybar | jira-switch
+    apply: str = ""            # reload | trigger | open | restart | jira-switch
     id: str = ""
 
     def __post_init__(self):

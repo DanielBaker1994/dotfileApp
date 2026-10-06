@@ -89,12 +89,12 @@
 #              only hides at the top. `vim-esc-close` = alias.
 #   tabs-opaque any window: the tab / open-file pills strip stays solid when
 #              the window is made transparent (true/false, default true)
-#   label      any command: text the Hyper+S "/" palette shows (default =
+#   label      any command: text the Hyper+S command grid shows (default =
 #              the section name)
-#   in-palette any section: false = not listed in the Hyper+S "/" palette
+#   in-palette any section: false = not listed in the Hyper+S command grid
 #              (default true). Its window still opens from the hotkeys,
 #              header icons and menu bar — notes / files / jira / confluence
-#              / ai / Jira Config are reached that way.
+#              / ai / compare / Jira Config are reached that way.
 #   float      popup-only "/" windows (filefast, paths, output,
 #              prettyprint): stay above other apps' windows (true/false;
 #              tool panels default true, other output windows false).
@@ -182,8 +182,8 @@
 #                       Default: org.flameshot, pl.maketheweb.cleanshotx,
 #                       cc.ffitch.shottr, com.skitch.skitch
 [app]
-margin-top = 48
-margin-top-builtin = 15
+margin-top = 10
+margin-top-builtin = 10
 margin-bottom = 10
 header-style = "quiet"
 # shell used to run palette commands (persistent runner + output windows)
@@ -200,8 +200,6 @@ terminal-font-size = 24
 font-install-casks = "JetBrains Mono Nerd Font|font-jetbrains-mono-nerd-font|nerd, Fira Code Nerd Font|font-fira-code-nerd-font|nerd, Iosevka Term Nerd Font|font-iosevka-term-nerd-font|nerd, IBM Plex Mono|font-ibm-plex-mono|mono, Cascadia Code|font-cascadia-code|mono, Inter|font-inter|sans, Source Serif 4|font-source-serif-4|serif"
 # aerospace CLI search paths (used when the per-user socket is unavailable)
 aerospace-cli = "/opt/homebrew/bin/aerospace, /usr/local/bin/aerospace, aerospace"
-# sketchybar scripts the window colors are parsed from (searched in order)
-color-sources = "~/.config/sketchybar/colors.sh, ~/.config/sketchybar/plugins/aerospacer.sh"
 # directories searched for an app's .app bundle when its bundle id is unknown
 app-dirs = "/Applications, /Applications/Utilities, /System/Applications, /System/Applications/Utilities, /System/Library/CoreServices, ~/Applications"
 # icon assets (filenames resolved against the binary dir). app-icon = the
@@ -243,7 +241,7 @@ pane-focus-color = "8cc8ced8"
 pane-focus-width = 1
 
 # [theme] — app-wide window colors as hex RRGGBB (every key optional; the
-# sketchybar `color-sources` + the built-in defaults fill any gaps). Edit
+# built-in Catppuccin Macchiato defaults fill any gaps). Edit
 # these by hand. The paint-brush header button instead edits PER-WINDOW
 # overrides in each section ([notes] / [files] below) so the notes and files
 # windows never affect each other.
@@ -741,7 +739,7 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 #   + compare-recovery/ (git difftool sessions are never kept)
 [compare]
 enabled = true
-in-palette = true
+in-palette = false
 label = "Compare"
 esc-close = 0
 context-lines = 3
@@ -1022,42 +1020,25 @@ label = "Jira Config Window"
 # startup, parked hidden. This entry shows it stacked ABOVE the notes window
 # (it follows notes as you drag it); the same entry again parks it. NEVER closed.
 
-# Sketchybar notifications pill, left of the CPU/RAM/clock group
-# (config/sketchybar/plugins/notifications.sh → notify/notify_poll.py).
-# One chip per source: app icon + unread count (the app's Dock badge, red
-# pill); "@N" = @mentions from the source's API; amber dot = the API needs
-# attention (~/.cache/notifications/poll.log). Click = popup: unread spaces +
-# mentions (click one to open it), sign in, open app, refresh.
-# Apply changes: `sketchybar --reload`.
+# Unread counts in the Hyper+S status row (notify/notify_poll.py --json, read
+# each time the switcher opens). One chip per source: app icon + unread count
+# (the app's Dock badge, or the Webex window's own badge); "@N" = @mentions
+# from the source's API; amber dot = the API needs attention
+# (~/.cache/notifications/poll.log).
 # Webex API sign-in (once): python3 notify/webex_api.py --login
 [notifications]
 enabled = true
-# chip order, left to right; each needs NAME-enabled = true
+# chip order in the status row; each needs NAME-enabled = true
 sources = "webex, outlook, imessage"
-# seconds between API polls (the Dock badge is read every tick)
+# seconds between API polls (the Dock badge is read on every open)
 poll-seconds = 60
-tick-seconds = 5
-# hide the whole pill while nothing is unread / mentioned / broken
+# list only the sources with something unread / mentioned / broken
 hide-when-zero = true
-unread-color = "0xffff3b30"
-unread-text-color = "0xffffffff"
-mention-color = "0xffed8796"
-warn-color = "0xffeed49f"
-tag-color = "0xff939ab7"
-# size of the app icon on the chip
-icon-scale = 0.62
-# click popup: rows of mentions / unread spaces, width in pt
-popup-rows = 6
-popup-width = 340
-# how "Sign in" runs the login ({} = the command)
-login-command = "open -na Ghostty --args -e {}"
 # mentions older than this are ignored (also the window when Webex gives no read status)
 mention-max-age-hours = 24
 webex-enabled = true
 webex-app = "Cisco-Systems.Spark"
 webex-tag = "WEBEX"
-# "app" = the app's own icon, anything else = that text
-webex-icon = "app"
 # where the unread count comes from: "window" = the Webex window's own
 # Messaging badge (Webex draws no Dock badge), "dock" = the Dock badge
 webex-count = "window"
@@ -1070,12 +1051,10 @@ webex-rooms = 30
 outlook-enabled = true
 outlook-app = "com.microsoft.Outlook"
 outlook-tag = "MAIL"
-outlook-icon = "app"
 # iMessage / SMS: the Messages app's Dock badge (keep Messages in the Dock)
 imessage-enabled = true
 imessage-app = "com.apple.MobileSMS"
 imessage-tag = "MESSAGES"
-imessage-icon = "app"
 
 # The Setup & Health Check window (menu bar ▸ Setup & Health Check…, or
 # `workspace-switcher setup`): what this Mac needs + the optional hotkeys /

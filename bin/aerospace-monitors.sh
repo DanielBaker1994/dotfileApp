@@ -82,5 +82,4 @@ if [ "$(aerospace list-monitors --count 2>/dev/null)" -ge 2 ] 2>/dev/null; then
     aerospace workspace 9 && aerospace workspace "$other"
     [ -n "$orig" ] && aerospace workspace "$orig"
 fi
-sketchybar --trigger aerospace_workspace_change >/dev/null 2>&1 || true
 echo "$mode: $desc"

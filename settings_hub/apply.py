@@ -49,11 +49,6 @@ def setting(mode: str) -> dict:
         return {"ok": True, "ran": "", "note": "read on the next use (no reload needed)"}
     if mode == "open":
         return {"ok": True, "ran": "", "note": "applies the next time that view / window opens"}
-    if mode == "sketchybar":
-        if not shutil.which("sketchybar"):
-            return {"ok": True, "ran": "", "note": "sketchybar not installed"}
-        rc, out = _run(["sketchybar", "--reload"])
-        return {"ok": rc == 0, "ran": "sketchybar --reload", "note": out or ("done" if rc == 0 else f"exit {rc}")}
     return {"ok": True, "ran": "", "note": ""}
 
 

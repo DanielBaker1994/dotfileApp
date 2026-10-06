@@ -3,8 +3,8 @@
 //   "count\t<N>"      the badge on the Messaging tab (WTMessagingHubButton)
 //   "space\t<title>"  one per space / person with new messages (spaces_list)
 // Exit 2 = no Accessibility permission, 3 = Webex not running / no window.
-// Needs Accessibility for the process that runs it (sketchybar).
-// Built on demand by notify/notify_poll.py into ~/.cache/sketchybar/.
+// Needs Accessibility for the process that runs it (the workspace-switcher app).
+// Built on demand by notify/notify_poll.py into ~/.cache/workspace-switcher/helpers/.
 import AppKit
 import ApplicationServices
 

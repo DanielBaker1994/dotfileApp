@@ -31,15 +31,14 @@ ONE build: `bin/build-app.sh` (compiles every top-level `*.swift`, SwiftTerm
 lib, sign, TCC) — used by build.sh, `bin/workspace_switcher.sh` and
 INSTALL.sh. Install/uninstall/build names + paths (bundle id, brew deps,
 launchd agent, caches) live in `install.conf`. Configs (`CONFIG_DIRS`:
-aerospace, sketchybar, borders) are per-file SYMLINKS from `~/.config/<name>`
+aerospace, borders) are per-file SYMLINKS from `~/.config/<name>`
 into the repo's `config/<name>` — edit the repo copy; INSTALL.sh backs up real
 files in the way, UNINSTALL.sh removes only links into the repo.
 
 ## Install modes (repo + DMG)
 
 - `~/.config/workspace-switcher` ("the home") is THE path every external
-  config points at (aerospace.toml hotkeys, sketchybarrc, notifications.sh,
-  the jira launchd agent). Repo install: the home is the checkout (or a link
+  config points at (aerospace.toml hotkeys, the jira launchd agent). Repo install: the home is the checkout (or a link
   to it). App install (DMG): a real directory — the user's `commands.toml`,
   `rules/`, `config/` (copies seeded from the bundle, never links into the
   signed app) + links `bin jira confluence notify vim pylib settings_hub install.conf` →
@@ -59,7 +58,8 @@ files in the way, UNINSTALL.sh removes only links into the repo.
   real file / dir in the way (a checkout above all) → error, untouched
   (`--switch` only unlinks a home that is a link; `repo` refuses an app
   home). Home owned by a checkout → exit 3, nothing touched. `stack` = `symlinks.sh` (`WS_LINK_ROOT` = the home in
-  app mode) + precompiled sketchybar helpers + brew services. Never git.
+  app mode) + precompiled unread helpers (→ ~/.cache/workspace-switcher/helpers)
+  + brew services. Never git.
 - `bin/preflight.sh [--json] [--mode repo|app] [--app PATH]`: ONE check list
   for INSTALL.sh (step 0) and the Setup window. Required: macOS ≥
   `MACOS_MIN`, arm64 + not on the disk image (app), swiftc + git (repo).
@@ -145,6 +145,8 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
 - `PaneGeometry.swift` + `PaneNav.swift` — Ctrl+H/J/K/L pane navigation + the
   focus ring (see "Pane navigation"; `bin/run-tests.sh panes`)
+- `SwitcherStatus.swift` — the Hyper+S status row's data (unread via
+  `notify/notify_poll.py --json`, CPU, RAM, battery); `gather()` blocks
 - `ProcessRun.swift` — `runProcess`: run a program to completion, stdin fed,
   stdout + stderr drained concurrently (Foundation only — the tested files use it)
 - Closure actions: `menuItem(title) { … }` (a `ClosureMenuItem` owns its
@@ -288,7 +290,7 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   (`reloadConfig()`, replies `{ok, commands, usingBackup, issues}`; never
   starts a daemon), `restart` (`restartDaemon()`: [theme] + launch-only
   [app] keys), trigger sections ([screenshot], [pane-shot]) nothing, views
-  read on open ([confluence], [ai], [setup]), `sketchybar --reload`.
+  read on open ([confluence], [ai], [setup], [notifications]).
   `config-schema` / `config-check` run at the very top of main.swift (no
   AppInstall, no lock).
 - Rebind (`rebind.py`, AeroSpace + herdr only — app keys are Swift):
@@ -370,6 +372,24 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   another app frontmost → `activations` unchanged, frontmost not us, the
   shared view not key and not moved, AeroSpace doesn't list it.
 
+- Hyper+S is ONE view (SketchyBar was removed 2026-10-06; this replaces its
+  workspace map + status group): `filter()` returns `WorkspaceRow`s (occupied
+  or focused workspaces only — the ONLY place apps are listed; a query hit on
+  an app / window title sets `match`, drawn in the row, never a second row;
+  a query equal to a key puts that row first, empty ones included), then the
+  palette commands as `CommandGridRow`s (`[app] switcher-columns`, default 3;
+  `in-palette = false` keeps Jira / Confluence / Notes / AI / Compare / Files
+  out), then one `StatusRow` (unread chips · CPU · RAM · battery · clock,
+  `SwitcherStatus.swift`, gathered on every open off main). Leading "/" =
+  commands only. Keys are the host's (`onKeyPreview` → `switcherKey`):
+  Up/Down/C-n/p skip the status row, Left/Right walk the grid (`gridColumn`,
+  wraps into the next / previous grid row), Tab jumps workspaces ⇄ commands;
+  Esc clears a query, then hides. `config.clickToSelect`: a click runs the
+  row (`clickRow`, grid cell from the pointer x via `gridCells`). Width =
+  `[app] switcher-width` (380). Workspace rows carry the summed unread count
+  of their apps (bundle id match). The daemon also runs
+  `bin/no_stray_workspaces.sh` on screen-parameter changes + wake
+  (`startStrayGuard`, SENDER=display_change / system_woke).
 - The Hyper+S palette itself is a tool panel (`config.toolPanel` on the
   switcher): it used to activate the app, which raised the shared window
   parked on workspace N and AeroSpace jumped there — "/" tools opened
@@ -495,8 +515,8 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `PopupWindow.showToast`) on its own non-activating panel.
 - `ScreenshotOverlay.swift`: `ShotOverlayPanel` (borderless
   `.nonactivatingPanel`, `.screenSaver` level — set AFTER
-  `isFloatingPanel`, which resets it to .floating — covers the menu bar /
-  sketchybar, `constrainFrameRect` passthrough); the frozen image is the
+  `isFloatingPanel`, which resets it to .floating — covers the menu bar,
+  `constrainFrameRect` passthrough); the frozen image is the
   unflipped backdrop layer's `contents`, `ShotOverlayView` (flipped)
   draws veil + selection + objects in dirty rects. `ShotSession` = the
   brain: per-display selection (a drag on another display moves it there,
@@ -775,34 +795,24 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   `folder.canUndo / sharedCanUndo / back / forward`.
 - Not built: word wrap, syntax highlighting (phase 3 "if wanted"), Isolate.
 
-## Notifications pill (sketchybar)
+## Unread counts (Hyper+S status row)
 
-- `config/sketchybar/plugins/notifications.sh` (sourced AFTER status.sh →
-  its chips are the LEFT END of the status group: no own group, it re-runs
-  status.sh's `status_bracket`, which spans `status.*` + `notif.*`) only builds items;
-  every tick / `notifications_update` event runs `notify/notify_poll.py
-  --tick` (config, badges, cached state → ONE `sketchybar --set` batch).
-  `[notifications]` in commands.toml (skipped by `loadCommands`, not a
-  palette command); `enabled = false` → no items. `updates=on` on
-  `notif.tail` so a hidden pill (`hide-when-zero`) keeps ticking.
-- Per source (`sources`, `NAME-enabled/app/tag/icon/api`): items
-  `notif.NAME` (icon = `app.<bundle-id>` image, `NAME-icon = "app"`, else the
-  text), label = the count: an iOS-style red badge ON TOP of the icon's corner (`chip_args`: narrowed `icon.width` makes the label overlap; no separate `.n` item), `.at` ("@N", or an amber dot = API error).
-  Webex count (`webex-count = "window"`) = the Messaging-tab badge in the
-  Webex WINDOW's AX tree (`helpers/webex_unread.swift`: `WTMessagingHubButton`
-  value indicator + unread rows of `spaces_list` → popup rows; Webex draws NO
-  Dock badge; `notify_poll.unread` falls back to the Dock when unreadable).
-  `webex-api = false` by default (count only, no OAuth, no amber dot).
-  Other sources: count = the badge the DOCK draws (`helpers/dock_badges.swift` via AX
-  `AXURL` + `AXStatusLabel`, built into ~/.cache/sketchybar on demand; needs
-  Accessibility for sketchybar, else poll.log says so). `lsappinfo
-  StatusLabel` misses UserNotifications badges (Messages) — only the
-  fallback for apps not in the Dock. Mentions are zeroed when the badge is 0.
-- Click (`--event`, `$SENDER` mouse.clicked / mouse.exited.global on both
-  items) → `popup_rows` rebuilt as `notif.pop.*` in `popup.notif.NAME`
-  (text = icon slot, right text = label): header, sign-in (`login-command`),
-  mentions + unread spaces (`webexteams://im?space=UUID` via `space_link`),
-  Open, Refresh.
+- `notify/notify_poll.py --json` → `{"sources": [{name, app, tag, count,
+  mentions, warn, shown}]}` (only `shown` sources unless `hide-when-zero =
+  false`); run by `SwitcherStatus.gather` on every Hyper+S open (~150 ms
+  warm). `[notifications]` in commands.toml (skipped by `loadCommands`, not a
+  palette command); `enabled = false` → `{"sources": []}`.
+- Per source (`sources`, `NAME-enabled/app/tag/api`): Webex count
+  (`webex-count = "window"`) = the Messaging-tab badge in the Webex WINDOW's
+  AX tree (`notify/helpers/webex_unread.swift`); other sources = the badge the
+  DOCK draws (`notify/helpers/dock_badges.swift` via AX `AXURL` +
+  `AXStatusLabel`). Helpers build on demand into
+  ~/.cache/workspace-switcher/helpers (precompiled into the bundle for app
+  installs) and need ACCESSIBILITY for the app (they run as its children;
+  `requestUnreadAccess` asks once at launch; without it poll.log says "no
+  Accessibility permission" and the chips stay empty). `lsappinfo
+  StatusLabel` = fallback for apps not in the Dock. Mentions are zeroed when
+  the badge is 0.
 - Webex API (`notify/webex_api.py`, stdlib urllib): Integration OAuth
   (`--login`, local redirect server on 127.0.0.1:8765), creds + refresh token
   in `~/.config/notifications/webex.json` (0600, never commands.toml);

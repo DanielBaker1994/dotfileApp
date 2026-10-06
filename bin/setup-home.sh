@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup-home.sh — set up ~/.config/workspace-switcher ("the home"), the ONE
-# path every external config points at (aerospace.toml hotkeys, sketchybarrc,
-# the jira launchd agent, commands.toml). What sits behind it depends on how
+# path every external config points at (aerospace.toml hotkeys, the jira
+# launchd agent, commands.toml). What sits behind it depends on how
 # the app was installed:
 #
 #   repo install   the home IS the git checkout (or a link to it)
@@ -18,8 +18,8 @@
 #   setup-home.sh repo                 INSTALL.sh: mark the home as the
 #                                      checkout's (refuses while an app
 #                                      install owns it)
-#   setup-home.sh stack                link the aerospace / sketchybar /
-#                                      borders configs + start the services
+#   setup-home.sh stack                link the aerospace / borders
+#                                      configs + start the services
 #   setup-home.sh status               who owns the home: repo | app | none
 #
 # Never runs git, never moves or deletes a real file / directory (a git
@@ -33,7 +33,7 @@ ROOT="$(cd "$DIR/.." && pwd -P)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 # brew keeps its tap trust list (`brew trust`) under $XDG_CONFIG_HOME when the
 # shell sets it; an app launched from Finder has no XDG_CONFIG_HOME, so brew
-# would look in ~/.homebrew and refuse the sketchybar / borders / aerospace taps
+# would look in ~/.homebrew and refuse the borders / aerospace taps
 if [ -z "${XDG_CONFIG_HOME:-}" ] && [ -f "$HOME/.config/homebrew/trust.json" ] \
     && [ ! -f "$HOME/.homebrew/trust.json" ]; then
     export XDG_CONFIG_HOME="$HOME/.config"
@@ -126,7 +126,7 @@ cmd_app() {
         [ -L "$WS_HOME" ] || die "$WS_HOME is a git checkout — left alone (move it out of the way yourself, then re-run)"
         # hand over: the link is removed (the checkout it points at is
         # untouched) and the user's settings are carried over
-        # (rules + the aerospace / sketchybar / borders configs included:
+        # (rules + the aerospace / borders configs included:
         # the per-file links in ~/.config keep resolving to the same content)
         local keep old
         keep="$(mktemp -d)"
@@ -202,12 +202,13 @@ cmd_stack() {
     case "$ROOT" in *.app/Contents/Resources)
         export WS_LINK_ROOT="$WS_HOME"
         res="$ROOT"
-        # precompiled sketchybar helpers (no swiftc on an end user's Mac);
+        # precompiled unread-count helpers (no swiftc on an end user's Mac);
         # touched so they count as newer than their sources
         if [ -d "$res/helpers-bin" ]; then
-            mkdir -p "$HOME/.cache/sketchybar"
+            mkdir -p "$HOME/.cache/workspace-switcher/helpers"
             for f in "$res/helpers-bin/"*; do
-                cp -p "$f" "$HOME/.cache/sketchybar/" && touch "$HOME/.cache/sketchybar/$(basename "$f")"
+                cp -p "$f" "$HOME/.cache/workspace-switcher/helpers/" \
+                    && touch "$HOME/.cache/workspace-switcher/helpers/$(basename "$f")"
             done
         fi
         ;;
@@ -223,7 +224,6 @@ cmd_stack() {
         done
     fi
     command -v aerospace >/dev/null 2>&1 && aerospace reload-config
-    command -v sketchybar >/dev/null 2>&1 && sketchybar --reload
     [ "$rc" = 0 ] || return "$rc"
     say "result=ok"
 }

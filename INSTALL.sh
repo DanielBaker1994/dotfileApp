@@ -106,7 +106,7 @@ printf "${CYAN}
 │            workspace-switcher — one-command install          │
 └──────────────────────────────────────────────────────────────┘
 ${RESET}"
-printf "${DIM}This script installs a macOS app that gives you a notes window, a\nvoice-to-text window (dictate → text), a Jira issue browser, and a\nswitcher popup — plus the sketchybar menu bar and AeroSpace.${RESET}\n"
+printf "${DIM}This script installs a macOS app that gives you a notes window, a\nvoice-to-text window (dictate → text), a Jira issue browser, and a\nswitcher popup — plus AeroSpace and window borders.${RESET}\n"
 
 # ---------------------------------------------------------------- 0. sanity
 STEP="checking your Mac"
@@ -199,8 +199,8 @@ info "compiling (first run also precompiles SwiftTerm — a few minutes)…"
 ok "compiled + code-signed + permissions granted"
 
 # ------------------------------------------------------------- 5. services
-STEP="starting menu-bar services"
-step "5/6 starting sketchybar + borders (menu-bar stack)"
+STEP="starting services"
+step "5/6 starting borders (focused-window border)"
 for svc in $BREW_SERVICES; do
     brew services start "$svc" >/dev/null 2>&1 || true
 done

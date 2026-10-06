@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Notifications pill backend (sketchybar `plugins/notifications.sh`).
+"""Unread counts for the Hyper+S status row (workspace-switcher).
 
-  notify_poll.py --config-sh   [notifications] as shell assignments (build)
-  notify_poll.py --tick        badges + cached API state → sketchybar --set …
+  notify_poll.py --json        badges + cached API state → one JSON object
                                (starts a background --poll when stale)
   notify_poll.py --poll        run the API sources now → state.json
 
@@ -13,6 +12,8 @@ window via helpers/NAME_unread.swift — Webex draws no Dock badge), NAME-tag,
 NAME-api. @mentions = the API
 source (webex only for now), shown until the badge drops to 0 or the API says
 the space was read. State: ~/.cache/notifications/state.json, log poll.log.
+--json prints {"sources": [{name, app, tag, count, mentions, warn}]}: only the
+sources with something to show unless hide-when-zero = false.
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ import fcntl
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -36,40 +36,26 @@ CACHE = os.environ.get("NOTIFY_CACHE_DIR") or os.path.expanduser("~/.cache/notif
 STATE = os.path.join(CACHE, "state.json")
 LOCK = os.path.join(CACHE, "poll.lock")
 LOG = os.path.join(CACHE, "poll.log")
-EVENT = "notifications_update"
 
 DEFAULTS = {
     "enabled": "false",
     "sources": "webex, outlook, imessage",
     "poll-seconds": "60",
-    "tick-seconds": "5",
     "hide-when-zero": "true",
-    "unread-color": "0xffff3b30",
-    "unread-text-color": "0xffffffff",
-    "mention-color": "0xffed8796",
-    "warn-color": "0xffeed49f",
-    "tag-color": "0xff939ab7",
-    "icon-scale": "0.62",
-    "popup-rows": "6",
-    "popup-width": "340",
-    "login-command": "open -na Ghostty --args -e {}",
     "mention-max-age-hours": "24",
     "webex-enabled": "true",
     "webex-app": "Cisco-Systems.Spark",
     "webex-tag": "WEBEX",
-    "webex-icon": "app",
     "webex-api": "true",
     "webex-count": "window",
     "webex-rooms": "30",
     "outlook-enabled": "false",
     "outlook-app": "com.microsoft.Outlook",
     "outlook-tag": "MAIL",
-    "outlook-icon": "app",
     "outlook-api": "false",
     "imessage-enabled": "false",
     "imessage-app": "com.apple.MobileSMS",
     "imessage-tag": "MESSAGES",
-    "imessage-icon": "app",
     "imessage-api": "false",
 }
 API_SOURCES = {"webex"}
@@ -106,12 +92,12 @@ def parse_badge(out: str):
     return int(label) if label.isdigit() else "•"
 
 
-HELPERS = os.path.join(os.path.dirname(HERE), "config", "sketchybar", "helpers")
-HELPER_BIN = os.path.expanduser("~/.cache/sketchybar")
+HELPERS = os.path.join(HERE, "helpers")
+HELPER_BIN = os.path.expanduser("~/.cache/workspace-switcher/helpers")
 
 
 def helper(name: str, *argv: str):
-    """stdout of helpers/NAME.swift (built into ~/.cache/sketchybar, rebuilt
+    """stdout of helpers/NAME.swift (built into ~/.cache/workspace-switcher/helpers, rebuilt
     when the source changes); None when it can't run or fails (no
     Accessibility permission, no swiftc, app not running)."""
     src, exe = os.path.join(HELPERS, name + ".swift"), os.path.join(HELPER_BIN, name)
@@ -227,18 +213,13 @@ def run_poll(cfg: dict) -> dict:
             st[s] = res
         st["at"] = time.time()
         save_state(st)
-    subprocess.run(["sketchybar", "--trigger", EVENT], capture_output=True, check=False)
     return st
 
 
-# -- tick → sketchybar ---------------------------------------------------------
-# Per source NAME: notif.NAME (app icon or tag; label = the red count badge),
-# notif.NAME.at ("@N" red, or an amber dot when the API needs attention).
-ICON_SLOT, ICON_SLOT_BADGED = 22, 11   # icon.width: alone / under a badge
-
-
-def chip_args(cfg: dict, name: str, count, api: dict | None) -> tuple[list[str], bool]:
-    """sketchybar --set args for one source's items; True = worth showing."""
+# -- snapshot → the switcher's status row --------------------------------------
+def chip(name: str, cfg: dict, count, api: dict | None) -> dict:
+    """One source's status: count (int, "•", 0, or None = not running),
+    @mentions and warn (the API needs attention); `shown` = worth a chip."""
     mentions = 0
     warn = bool(api and not api.get("ok"))
     if api and api.get("ok"):
@@ -247,25 +228,9 @@ def chip_args(cfg: dict, name: str, count, api: dict | None) -> tuple[list[str],
         mentions = 0                     # the app says everything is read
     if count is None and api and api.get("ok"):
         count = api.get("unread", 0)     # app not running: fall back to the API
-    shown = str(count) if count not in (None, 0) else ""
-    if isinstance(count, int) and count:
-        shown = f"{count:,}"
-    # the count = the icon item's own label: an iOS-style badge drawn ON TOP of
-    # the icon's top-right corner (a narrowed icon slot makes the label overlap)
-    args = ["--set", f"notif.{name}", f"label.drawing={'on' if shown else 'off'}", f"label={shown}"]
-    if cfg.get(f"{name}-icon", "app") == "app":
-        args.append(f"icon.width={ICON_SLOT_BADGED if shown else ICON_SLOT}")
-    if mentions:
-        args += ["--set", f"notif.{name}.at", "drawing=on", f"label=@{mentions}",
-                 f"label.color={cfg['mention-color']}", "label.font=SF Pro:Heavy:12.0",
-                 "label.y_offset=0"]
-    elif warn:
-        args += ["--set", f"notif.{name}.at", "drawing=on", "label=●",
-                 f"label.color={cfg['warn-color']}", "label.font=SF Pro:Bold:8.0",
-                 "label.y_offset=6"]
-    else:
-        args += ["--set", f"notif.{name}.at", "drawing=off"]
-    return args, bool(shown or mentions or warn)
+    return {"name": name, "app": cfg[f"{name}-app"], "tag": cfg.get(f"{name}-tag", name.upper()),
+            "count": count, "mentions": mentions, "warn": warn,
+            "shown": bool(count not in (None, 0) or mentions or warn)}
 
 
 def api_sources(cfg: dict) -> set[str]:
@@ -279,162 +244,34 @@ def spawn_poll() -> None:
                      start_new_session=True)
 
 
-def tick(cfg: dict) -> list[str]:
+def snapshot(cfg: dict) -> dict:
     st = load_state()
     api_on = api_sources(cfg)
     if api_on and time.time() - st.get("at", 0) >= float(cfg["poll-seconds"]):
         spawn_poll()
-    args: list[str] = []
-    any_on = False
     hide = jira_config.truthy(cfg["hide-when-zero"])
     dock = dock_badges()
+    out = []
     for s in sources(cfg):
-        a, on = chip_args(cfg, s, unread(cfg, s, dock)[0], st.get(s) if s in api_on else None)
-        # each chip hides on its own: only apps with something unread show
-        args += a + ["--set", f"notif.{s}", f"drawing={'on' if on or not hide else 'off'}"]
-        any_on |= on
-    vis = "on" if any_on or not hide else "off"
-    args += ["--set", "notif.lead", f"drawing={vis}"]   # the chips' left inset
-    if vis == "off":
-        for s in sources(cfg):
-            args += ["--set", f"notif.{s}.at", "drawing=off",
-                     "--set", f"notif.{s}", "popup.drawing=off"]
-    return args
-
-
-# -- popup (click) -------------------------------------------------------------
-def ago(iso: str | None) -> str:
-    if not iso:
-        return ""
-    try:
-        import datetime as dt
-        t = dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return ""
-    m = max(0, int((time.time() - t) // 60))
-    return "now" if m < 1 else f"{m}m" if m < 60 else f"{m // 60}h" if m < 1440 else f"{m // 1440}d"
-
-
-def popup_rows(cfg: dict, name: str, count, api: dict | None, api_enabled: bool,
-               local: list[str] = ()) -> list[dict]:
-    """Rows for notif.NAME's popup: {text, right, color, font, click}."""
-    app = cfg[f"{name}-app"]
-    title = cfg.get(f"{name}-tag", name).title()
-    close = f"sketchybar --set notif.{name} popup.drawing=off"
-    me = shlex.quote(os.path.abspath(__file__))
-    rows: list[dict] = []
-    head = [f"{count} unread" if isinstance(count, int) and count else
-            "not running" if count is None else "all read" if count == 0 else "unread"]
-    if api and api.get("ok") and api.get("mentions") and count != 0:
-        head.append(f"@{api['mentions']}")
-    rows.append({"text": f"{title} — {' · '.join(head)}", "font": "SF Pro:Bold:13.0",
-                 "click": f"open -b {shlex.quote(app)}; {close}"})
-    if api_enabled and api and not api.get("ok"):
-        cmd = cfg["login-command"].replace(
-            "{}", f"python3 {shlex.quote(os.path.join(HERE, name + '_api.py'))} --login")
-        rows.append({"text": "Sign in to see @mentions" if api.get("auth") else api.get("error", "API error")[:60],
-                     "right": "Sign in ›" if api.get("auth") else "Retry ›",
-                     "color": cfg["warn-color"],
-                     "click": (f"{cmd}; {close}" if api.get("auth") else
-                               f"python3 {me} --poll; {close}")})
-    elif api_enabled and api and api.get("ok"):
-        limit = int(cfg["popup-rows"])
-        shown = 0
-        for it in api.get("items", [])[:limit]:
-            rows.append({"text": f"@ {it['space']}: {it['text']}"[:70], "right": ago(it.get("at")),
-                         "color": cfg["mention-color"],
-                         "click": f"open {shlex.quote(it['link'] or '')} || open -b {shlex.quote(app)}; {close}"})
-            shown += 1
-        for sp in api.get("spaces", []):
-            if shown >= limit:
-                break
-            if sp.get("mentions"):
-                continue
-            rows.append({"text": sp["title"][:60], "right": ago(sp.get("at")),
-                         "click": f"open {shlex.quote(sp['link'] or '')} || open -b {shlex.quote(app)}; {close}"})
-            shown += 1
-        if not shown and count != 0:
-            rows.append({"text": "No @mentions", "color": cfg["tag-color"]})
-    if not (api_enabled and api and api.get("ok")):
-        # no API: the unread spaces the app's window lists (no deep links)
-        for t in list(local)[:int(cfg["popup-rows"])]:
-            rows.append({"text": t[:60], "right": "new", "color": cfg["mention-color"],
-                         "click": f"open -b {shlex.quote(app)}; {close}"})
-    rows.append({"text": f"Open {title}", "right": "›", "click": f"open -b {shlex.quote(app)}; {close}"})
-    if api_enabled:
-        rows.append({"text": "Refresh", "right": "↻", "color": cfg["tag-color"],
-                     "click": f"python3 {me} --poll; {close}"})
-    return rows
-
-
-def popup_args(cfg: dict, name: str) -> list[str]:
-    st = load_state()
-    on = name in api_sources(cfg)
-    count, local = unread(cfg, name, dock_badges())
-    rows = popup_rows(cfg, name, count, st.get(name) if on else None, on, local)
-    anchor = f"notif.{name}"
-    args = ["--remove", "/^notif\\.pop\\./"]
-    w = int(cfg["popup-width"])
-    for i, r in enumerate(rows):
-        item = f"notif.pop.{name}.{i}"
-        # text on the left = the icon slot (fixed width), `right` = the label
-        args += ["--add", "item", item, f"popup.{anchor}",
-                 "--set", item, "background.drawing=off", "icon.max_chars=46",
-                 f"icon={r['text']}", f"icon.color={r.get('color', '0xffcad3f5')}",
-                 f"icon.font={r.get('font', 'SF Pro:Semibold:12.0')}",
-                 f"icon.width={w - 60}", "icon.padding_left=12", "icon.padding_right=0",
-                 f"label={r.get('right', '')}", f"label.color={cfg['tag-color']}",
-                 "label.font=SF Pro:Semibold:11.0", "label.width=48", "label.align=right",
-                 "label.padding_left=0", "label.padding_right=12",
-                 f"click_script={r.get('click', '')}"]
-    return args
-
-
-def event(cfg: dict) -> list[str]:
-    """Item script entry: $NAME / $SENDER from sketchybar."""
-    name, sender = os.environ.get("NAME", ""), os.environ.get("SENDER", "")
-    parts = name.split(".")
-    src = parts[1] if len(parts) > 1 and parts[0] == "notif" else ""
-    if sender == "mouse.clicked" and src in sources(cfg):
-        return popup_args(cfg, src) + ["--set", f"notif.{src}", "popup.drawing=toggle"]
-    if sender == "mouse.exited.global" and src in sources(cfg):
-        return ["--set", f"notif.{src}", "popup.drawing=off"]
-    return tick(cfg)
-
-
-def config_sh(cfg: dict) -> str:
-    keys = {"ENABLED": "on" if jira_config.truthy(cfg["enabled"]) else "off",
-            "SOURCES": " ".join(sources(cfg)),
-            "TICK": cfg["tick-seconds"],
-            "UNREAD_COLOR": cfg["unread-color"],
-            "UNREAD_TEXT_COLOR": cfg["unread-text-color"],
-            "TAG_COLOR": cfg["tag-color"],
-            "ICON_SCALE": cfg["icon-scale"]}
-    for s in sources(cfg):
-        keys[f"TAG_{s}"] = cfg.get(f"{s}-tag", s.upper())
-        keys[f"APP_{s}"] = cfg[f"{s}-app"]
-        keys[f"ICON_{s}"] = cfg.get(f"{s}-icon", "app")
-    return "\n".join(f"NOTIF_{k}={shlex.quote(str(v))}" for k, v in keys.items())
+        c = chip(s, cfg, unread(cfg, s, dock)[0], st.get(s) if s in api_on else None)
+        if c["shown"] or not hide:
+            out.append(c)
+    return {"sources": out}
 
 
 def main(argv: list[str]) -> int:
     cfg = config()
-    if "--config-sh" in argv:
-        print(config_sh(cfg))
-        return 0
     if not jira_config.truthy(cfg["enabled"]):
+        if "--json" in argv:
+            print(json.dumps({"sources": []}))
         return 0
     if "--poll" in argv:
         st = run_poll(cfg)
         if "--print" in argv:
             print(json.dumps(st, indent=2))
         return 0
-    if "--tick" in argv or "--event" in argv:
-        args = tick(cfg) if "--tick" in argv else event(cfg)
-        if "--dry-run" in argv:
-            print(shlex.join(["sketchybar", *args]))
-        else:
-            subprocess.run(["sketchybar", *args], check=False)
+    if "--json" in argv:
+        print(json.dumps(snapshot(cfg)))
         return 0
     print(__doc__)
     return 2

@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # symlinks.sh — the per-file links from ~/.config/<name> (aerospace,
-# sketchybar, borders) into THE config copies, + the stable home link.
+# borders) into THE config copies, + the stable home link.
 #
 # Where the copies live ($LINK_ROOT/config/<name>):
 #   repo install  the repo itself (ROOT); ~/.config/workspace-switcher is

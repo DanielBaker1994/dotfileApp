@@ -4,7 +4,7 @@
 Everything runs against throwaway copies: a temp commands.toml whose
 [settings-hub] points at fixture aerospace / herdr / ghostty / vim files, a
 stub app binary (config-schema / config-check / reload), and stub
-aerospace / herdr / sketchybar / pbcopy / pbpaste first on PATH. The live
+aerospace / herdr / pbcopy / pbpaste first on PATH. The live
 classes are opt-in: WS_LIVE=1 (the running daemon) and REAL_BINARY (the
 built app's own validation, skipped when it isn't built).
 
@@ -214,7 +214,7 @@ class Env(unittest.TestCase):
         with open(self.app, "w") as fh:
             fh.write(STUB_APP.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
         os.chmod(self.app, 0o755)
-        for tool in ("aerospace", "herdr", "sketchybar", "pbcopy", "pbpaste"):
+        for tool in ("aerospace", "herdr", "pbcopy", "pbpaste"):
             p = os.path.join(stubs, tool)
             with open(p, "w") as fh:
                 fh.write(STUB_TOOL)

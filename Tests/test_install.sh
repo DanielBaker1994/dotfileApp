@@ -93,8 +93,8 @@ rm "$HOME/.config/aerospace/aerospace.toml"
 OUT="$(bash "$SETUP" stack 2>&1)"
 t "stack succeeds" grep -q 'result=ok' <<<"$OUT"
 t "aerospace.toml links to the home's copy" is_link_to "$HOME/.config/aerospace/aerospace.toml" "$WSH/config/aerospace/aerospace.toml"
-t "sketchybarrc linked" is_link_to "$HOME/.config/sketchybar/sketchybarrc" "$WSH/config/sketchybar/sketchybarrc"
-t "helpers precompiled into the cache" test -x "$HOME/.cache/sketchybar/menubar_watch"
+t "bordersrc linked" is_link_to "$HOME/.config/borders/bordersrc" "$WSH/config/borders/bordersrc"
+t "helpers precompiled into the cache" test -x "$HOME/.cache/workspace-switcher/helpers/dock_badges"
 t "symlinks --check passes" env WS_LINK_ROOT="$WSH" bash "$RES/symlinks.sh" --check
 
 echo "preflight"
