@@ -3440,6 +3440,13 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"unknown view\"}"
                 }
                 slot.open(v)
+            case _ where a.hasPrefix("rebuild-card:"):
+                // what a Theme ▸ preset hover does: drop + rebuild a card view
+                guard let v = SlotView(rawValue: String(a.dropFirst(13))),
+                      [.confluence, .ai, .compare, .compareText].contains(v) else {
+                    return "{\"error\":\"not a card view\"}"
+                }
+                rebuildCard(v)
             case _ where a.hasPrefix("paths:"):
                 // paths:show | hide | return | select:N — the /paths popup
                 let arg = String(a.dropFirst(6))
@@ -5570,8 +5577,8 @@ final class SwitcherController: NSObject {
         default: w = CompareWindow.current
         }
         (w as? CompareWindow)?.persistNow()
-        if view == .compareText, let sub = CompareWindow.sub { sub.window.orderOut(nil) }
-        w?.window.orderOut(nil)
+        if view == .compareText, let sub = CompareWindow.sub { sub.leaveWindow() }
+        w?.leaveWindow()
         switch v {
         case .confluence: ConfluenceWindow.discard()
         case .ai: AIWindow.discard()
@@ -6472,6 +6479,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // app can't — revealing the auto-hidden menu bar activated the last
         // regular app and AeroSpace followed it to its workspace)
         NSApp.setActivationPolicy(.regular)
+        // shared-window views are shown by the shared window (in its host),
+        // never by their own show()
+        PopupWindow.builtForHost = { [weak self] w in self?.controller?.slotView(of: w) != nil }
         installMainMenu()
         installCrashHandler()
         // diag: log the TCC state the process actually sees + how it was

@@ -459,7 +459,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         guard let back = onSlotBack else { close(); return }
         guard window.attachedSheet == nil else { return }
         confirmDiscard { [weak self] in
-            self?.window.orderOut(nil)
+            self?.leaveWindow()
             self?.teardown()
             back()
         }
@@ -2515,14 +2515,18 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private func close() {
         guard window.attachedSheet == nil else { return }
         confirmDiscard { [weak self] in
-            self?.window.orderOut(nil)
+            self?.leaveWindow()
             self?.teardown()
         }
     }
 
     override func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard dirty else { return true }
-        confirmDiscard { [weak self] in self?.window.close() }
+        confirmDiscard { [weak self] in
+            guard let self else { return }
+            // in the shared window's host: leave it (the host never closes)
+            if self.window !== self.homeWindow { self.leaveWindow(); self.teardown() } else { self.window.close() }
+        }
         return false
     }
 

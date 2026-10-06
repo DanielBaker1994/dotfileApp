@@ -34,7 +34,10 @@ final class CardNSWindow: NSWindow {
 // build their content into `themedRoot` and override the hooks below.
 class CardWindowController: NSObject, NSWindowDelegate {
     weak var controller: SwitcherController?
-    let window: CardNSWindow
+    // the window holding the content: `homeWindow`, or the shared window's
+    // host while this view is shown in it (slotAttach / slotDetach)
+    private(set) var window: NSWindow
+    let homeWindow: CardNSWindow
     var chrome: PopupChrome?
     var monitor: Any?
     // the shared window's hooks (nil = a standalone window): ✕ / Cmd+W hide
@@ -49,9 +52,10 @@ class CardWindowController: NSObject, NSWindowDelegate {
 
     init(controller: SwitcherController, frame: NSRect, title: String, minSize: NSSize) {
         self.controller = controller
-        window = CardNSWindow(contentRect: frame,
-                              styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        homeWindow = CardNSWindow(contentRect: frame,
+                                  styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+        window = homeWindow
         super.init()
         window.title = title
         window.isReleasedWhenClosed = false
@@ -75,7 +79,14 @@ class CardWindowController: NSObject, NSWindowDelegate {
     // ✕ / Cmd+W: hide the shared window (this view stays as is);
     // standalone: just this window
     func closeOrHide() {
-        if let hide = onSlotHide { hide() } else { window.orderOut(nil) }
+        if let hide = onSlotHide { hide() } else { leaveWindow() }
+    }
+
+    // this view's window goes away: out of the shared window's host (which
+    // hides itself once nothing is in it) or its own window ordered out
+    func leaveWindow() {
+        slotDetach()
+        window.orderOut(nil)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -97,6 +108,7 @@ class CardWindowController: NSObject, NSWindowDelegate {
         cfg.titlePill = false
         cfg.headerColor = headerColor
         let radius = cfg.cornerRadius + 1
+        let window = homeWindow     // the chrome's truth; a host re-takes it below
         window.cornerRadius = radius
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -164,6 +176,7 @@ class CardWindowController: NSObject, NSWindowDelegate {
         walk(content)
         window.headerBand = cfg.headerHeight
         window.onHeaderClick = { [weak self] p in self?.headerClicked(at: p) }
+        if let host = self.window as? SlotHostWindow { host.take(self, chromeOf: homeWindow) }
         return root
     }
 
@@ -290,7 +303,22 @@ class CardWindowController: NSObject, NSWindowDelegate {
     var slotWindow: NSWindow { window }
     var slotShown: Bool { window.isVisible }
     var slotBaseFrame: NSRect { window.frame }
-    func slotPark(stopVoice: Bool) { window.orderOut(nil) }
+    func slotPark(stopVoice: Bool) { leaveWindow() }
+    func slotAttach(to host: SlotHostWindow) {
+        guard window === homeWindow else { return }
+        host.take(self, chromeOf: homeWindow)
+        host.delegate = self
+        SlotHostWindow.moveContent(from: homeWindow, to: host)
+        window = host
+    }
+    func slotDetach() {
+        guard window !== homeWindow, let host = window as? SlotHostWindow else { return }
+        homeWindow.setFrame(host.frame, display: false)
+        SlotHostWindow.moveContent(from: host, to: homeWindow)
+        if host.delegate === self { host.delegate = nil }
+        window = homeWindow
+        host.guestLeft(self)
+    }
     func slotShow(frame: NSRect?) {
         if let f = frame { window.setFrame(f, display: false) }
         NSApp.activate(ignoringOtherApps: true)

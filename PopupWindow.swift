@@ -978,9 +978,11 @@ public class PopupBaseWindow: NSWindow, EscapableWindow, HeaderClickWindow {
         onEscape?()  // Esc even when the input field isn't first responder
     }
 
+    // the shared window's host turns this off while a card view is in it
+    var clickFocusesField = true
     public override func mouseDown(with event: NSEvent) {
         // clicking anywhere on the popup focuses the search field
-        if let field = contentView?.subviews.compactMap({ $0 as? NSTextField }).first {
+        if clickFocusesField, let field = contentView?.subviews.compactMap({ $0 as? NSTextField }).first {
             makeFirstResponder(field)
         }
         super.mouseDown(with: event)
@@ -1035,7 +1037,7 @@ public final class PopupPanel: NSPanel, EscapableWindow, HeaderClickWindow {
 // purely so the Accessibility API reports an AX close button — AeroSpace's
 // isWindowHeuristic excludes accessory apps whose windows have no close
 // button, which would make the popups invisible to focus navigation.
-public final class PopupPlainWindow: PopupBaseWindow {
+public class PopupPlainWindow: PopupBaseWindow {
     // titled windows carry the system's own rounded frame (16pt on macOS 26):
     // its rim + fill peeked out around our smaller rounded card. The window
     // server asks the window for its radius — answer with the card's.
@@ -8092,7 +8094,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // prompt — sheets always appear above their parent window)
     public var nativeWindow: NSWindow { panel }
 
-    private let panel: NSWindow
+    // the window holding the content: `homeWindow`, or the shared window's
+    // host while this view is shown in it (slotAttach / slotDetach)
+    private var panel: NSWindow
+    private let homeWindow: NSWindow
     private let field: NSTextField
     private let rowView: PopupRowView
     private var editorView: NSTextView?
@@ -8557,6 +8562,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         self.config = config
         let height = config.padding * 2 + config.headerHeight * zoom + config.rowHeight * zoom
         panel = Self.makePanel(config, height: height)
+        homeWindow = panel
         rowView = PopupRowView(config: config)
         field = Self.makeSearchField(config, zoom: zoom)
         super.init()
@@ -9293,8 +9299,14 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
 
     public func show() {
+        // a shared-window view is only built here: the shared window shows
+        // it, inside its host (its own window on screen would be a second
+        // window for AeroSpace to tile)
+        if !quietShow, Self.builtForHost?(self) == true { quietShow = true }
         presentList()
     }
+    // true = `show()` builds this window hidden (the host app's say)
+    public static var builtForHost: ((PopupWindow) -> Bool)?
 
     // first show at this exact frame instead of centered at the config
     // size (the shared window opens a new view where the last one was)
@@ -9329,7 +9341,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public var onPark: (() -> Void)?
     public var onUnpark: (() -> Void)?
     public func park(stopVoice: Bool = false) {
-        guard isShown else { return }
+        guard isShown else { slotDetach(); return }
         isShown = false
         removeMonitors()
         if config.editMode, editorView != nil {
@@ -9337,7 +9349,28 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         }
         if stopVoice { onHideVoiceStop?() }
         onPark?()
+        // out of the shared window's host (which stays up for the next
+        // view); the home window is off screen already
+        slotDetach()
         panel.orderOut(nil)
+    }
+
+    // the shared window's host takes this view's content (SharedWindow.swift)
+    func slotAttach(to host: SlotHostWindow) {
+        guard panel === homeWindow else { return }
+        host.take(self, chromeOf: homeWindow)
+        host.delegate = self
+        SlotHostWindow.moveContent(from: homeWindow, to: host)
+        panel = host
+    }
+    func slotDetach() {
+        guard panel !== homeWindow, let host = panel as? SlotHostWindow else { return }
+        host.give(chromeTo: homeWindow)
+        homeWindow.setFrame(host.frame, display: false)
+        SlotHostWindow.moveContent(from: host, to: homeWindow)
+        if host.delegate === self { host.delegate = nil }
+        panel = homeWindow
+        host.guestLeft(self)
     }
     public func unpark(frame: NSRect?) {
         if let f = frame { setBaseFrame(f) }
@@ -9454,6 +9487,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             .joined(separator: " < ")
         appendToFile(debugLogPath, "ws: hide '\(config.name)' restore=\(restore) front=\(front) via \(caller)\n")
         removeMonitors()
+        // never order the shared window's host out from here: leave it (it
+        // hides itself once it has nothing to show)
+        slotDetach()
         panel.orderOut(nil)
         if config.editMode, editorView != nil {
             onEditorClose?(currentEditorText)
@@ -9966,6 +10002,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             if let ed = primaryEditor {
                 panel.makeFirstResponder(ed)
                 focusedPane = .editor
+            } else if let fb = fileBrowser, !fileBrowserDrawerMode {
+                // the files view: the browser IS the window (its hidden
+                // search field must not take the keys)
+                panel.makeFirstResponder(fb.listView)
             } else {
                 panel.makeFirstResponder(field)
             }
@@ -11284,7 +11324,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if let ed = editorView, !(editorScroll?.isHidden ?? true),
            v === ed || v.isDescendant(of: ed) { return true }
         if let term = terminalDrawer, terminalShown, v === term || v.isDescendant(of: term) { return true }
-        if let fb = fileBrowser, fileBrowserShown, v.isDescendant(of: fb) { return true }
+        if let fb = fileBrowser, browserActive(), v.isDescendant(of: fb) { return true }
         if let ff = findField, !ff.isHidden, v === ff || ff.currentEditor() === v { return true }
         return false
     }

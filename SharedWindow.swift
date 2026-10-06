@@ -4,10 +4,11 @@ import AppKit
 //
 // Notes, the file browser, the jira list and everything jira opens (a
 // ticket's details, the release view, Jira Config) — plus command output
-// windows (/health-checks) — share ONE on-screen window: exactly one of them
-// is visible, in one frame, and switching swaps them in place. The windows
-// themselves stay separate objects — a hidden view is PARKED (ordered out
-// but alive), so the vim session, the jira tab / filters / scroll and an
+// windows (/health-checks) — share ONE on-screen window, the host
+// (SlotHostWindow): exactly one view's content is in it, and switching swaps
+// the content in place — the host never leaves the screen. Each view keeps
+// its own (off-screen) home window; a hidden view is PARKED (its content back
+// home, alive), so the vim session, the jira tab / filters / scroll and an
 // in-progress Jira Config edit all survive a switch.
 //
 //   Hyper+N             hidden -> show the view you were last on;
@@ -50,12 +51,18 @@ enum SlotView: String {
 
 // a window that can live in the shared window
 protocol SlotMember: AnyObject {
+    // the window the view is in right now: the host while shown in the
+    // shared window, else its own (never shown again) home window
     var slotWindow: NSWindow { get }
     var slotShown: Bool { get }
     // the frame the other views share: notes leaves its drawer growth out
     var slotBaseFrame: NSRect { get }
+    // parked = its content back in its home window (the host is untouched)
     func slotPark(stopVoice: Bool)
     func slotShow(frame: NSRect?)
+    // move the view's content into the host / back home (SlotHostWindow)
+    func slotAttach(to host: SlotHostWindow)
+    func slotDetach()
 }
 
 extension PopupWindow: SlotMember {
@@ -64,6 +71,123 @@ extension PopupWindow: SlotMember {
     var slotBaseFrame: NSRect { baseFrame }
     func slotPark(stopVoice: Bool) { park(stopVoice: stopVoice) }
     func slotShow(frame: NSRect?) { unpark(frame: frame) }
+}
+
+// MARK: - The host: ONE window for every view
+//
+// Every view used to be its own window, swapped by ordering one in and the
+// other out. AeroSpace can't follow that: it drops a window only once
+// _AXUIElementGetWindow fails for it, which for an ordered-out window takes
+// 60 ms to over a second — meanwhile it tiles the outgoing ghost beside the
+// incoming view (half width, desktop showing in the other half). So the
+// shared window is ONE NSWindow, AeroSpace's one tile, that never leaves
+// the screen on a switch: a view's content root moves in (`slotAttach`)
+// and back to its own home window (`slotDetach`), and the view's window
+// reference (`panel` / `window`) follows it, so everything a view does to
+// "its window" lands on whichever window holds its content. A switch is a
+// content swap inside one runloop turn: one redraw, nothing for AeroSpace
+// to see.
+final class SlotHostWindow: PopupPlainWindow {
+    // the view whose content is in here (nil between a detach and the next
+    // attach; still nil a turn later = the view went away: `onEmpty`)
+    private(set) weak var guest: AnyObject?
+    var onEmpty: (() -> Void)?
+    // Cmd+W / the Close menu item / a stray close(): hide the shared window,
+    // never close the host
+    var onCloseRequest: (() -> Void)?
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                   styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                   backing: .buffered, defer: false)
+        titlebarAppearsTransparent = true
+        titleVisibility = .hidden
+        for b: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            standardWindowButton(b)?.isHidden = true
+        }
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        isReleasedWhenClosed = false
+        animationBehavior = .none
+        acceptsMouseMovedEvents = true
+        contentView = NSView()
+    }
+
+    override func performClose(_ sender: Any?) { onCloseRequest?() }
+    override func close() { onCloseRequest?() }
+
+    // a guest's window-level look + hooks: the host behaves like its window
+    func take(_ g: AnyObject, chromeOf w: NSWindow) {
+        guest = g
+        if let c = w as? CardNSWindow {
+            cornerRadius = c.cornerRadius
+            headerClickBand = c.headerBand
+            // card windows take header clicks top-down
+            onHeaderClick = { [weak self, weak c] p in
+                c?.onHeaderClick?(NSPoint(x: p.x, y: (self?.frame.height ?? 0) - p.y))
+            }
+            onEscape = nil
+            selectionAttributes = nil
+            clickFocusesField = false
+        } else if let b = w as? PopupBaseWindow {
+            headerClickBand = b.headerClickBand
+            onHeaderClick = b.onHeaderClick
+            onEscape = b.onEscape
+            selectionAttributes = b.selectionAttributes
+            clickFocusesField = true
+            if let pw = b as? PopupPlainWindow { cornerRadius = pw.cornerRadius }
+        }
+        title = w.title
+        minSize = w.minSize
+        appearance = w.appearance
+        hasShadow = w.hasShadow
+        collectionBehavior = w.collectionBehavior
+        // a visible close button (notes' vim mode) keeps its action
+        let mine = standardWindowButton(.closeButton), theirs = w.standardWindowButton(.closeButton)
+        mine?.isHidden = theirs?.isHidden ?? true
+        mine?.target = theirs?.target
+        mine?.action = theirs?.action
+        invalidateShadow()
+    }
+
+    // what a popup guest changed on the host while in here (zoom moved the
+    // header band, a retheme) goes back to its home window
+    func give(chromeTo w: NSWindow) {
+        if let b = w as? PopupBaseWindow, !(w is CardNSWindow) {
+            b.headerClickBand = headerClickBand
+            b.selectionAttributes = selectionAttributes
+            (b as? PopupPlainWindow)?.cornerRadius = cornerRadius
+        }
+        w.appearance = appearance
+    }
+
+    func guestLeft(_ g: AnyObject) {
+        guard guest === g else { return }
+        guest = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.guest == nil, self.isVisible else { return }
+            self.onEmpty?()
+        }
+    }
+
+    // move `from`'s content view into `to`, keeping what had the keyboard
+    // (a text field being edited keeps its caret)
+    static func moveContent(from: NSWindow, to: NSWindow) {
+        guard let root = from.contentView else { return }
+        var target: NSResponder? = from.firstResponder
+        var caret: NSRange?
+        if let tv = target as? NSTextView, tv.isFieldEditor, let field = tv.delegate as? NSTextField {
+            caret = tv.selectedRange
+            target = field
+        }
+        from.contentView = NSView()
+        to.contentView = root
+        if let v = target as? NSView, v.isDescendant(of: root), to.makeFirstResponder(v),
+           let caret, let ed = (v as? NSTextField)?.currentEditor() {
+            ed.selectedRange = caret
+        }
+    }
 }
 
 final class SharedWindow {
@@ -93,6 +217,15 @@ final class SharedWindow {
     // hotkeyPrep already cleared AeroSpace's closed-windows cache for the
     // show this hotkey triggers (only for that hotkey: reset after it)
     var aerospaceCacheCleared = false
+
+    // the ONE window every view shows in (SlotHostWindow): AeroSpace's tile
+    private(set) lazy var host: SlotHostWindow = {
+        let h = SlotHostWindow()
+        // its view went away on its own (closed, rebuilt): nothing to show
+        h.onEmpty = { [weak self] in self?.hide("its view went away", restoreFocus: false) }
+        h.onCloseRequest = { [weak self] in self?.hide("close") }
+        return h
+    }()
 
     init(controller: SwitcherController) {
         self.controller = controller
@@ -331,15 +464,23 @@ final class SharedWindow {
             returnPID = controller.savedPID
         }
         var f = currentFrame()
-        // the old view is parked only AFTER the new one is up: parked first,
-        // aerospace sees its focused window vanish and focuses the next
-        // window on the workspace (a terminal raised over the slower jira
-        // window looked like the switch had closed it)
         var outgoing: SlotMember?
         if let old = shownMember, old !== m {
             frame = old.slotBaseFrame
             outgoing = old
         }
+        // the switch: the old view's content goes home, the new one's comes
+        // in — the host itself never leaves the screen, so AeroSpace sees no
+        // window come or go (the old ordered-out window lingered in its tree
+        // and the new one tiled beside it at half width). One runloop turn,
+        // one redraw.
+        let hostUp = host.isVisible
+        if let sheet = host.attachedSheet, outgoing != nil || host.guest !== m {
+            host.endSheet(sheet, returnCode: .cancel)   // it was the old view's
+        }
+        outgoing?.slotPark(stopVoice: false)
+        if let g = host.guest as? SlotMember, g !== m { g.slotPark(stopVoice: false) }
+        m.slotAttach(to: host)
         // normal level, whatever the window was built with (Jira Config is
         // made for a standalone life above the popups)
         if let p = m as? PopupWindow { p.setFloating(false) } else { m.slotWindow.level = .normal }
@@ -349,13 +490,13 @@ final class SharedWindow {
         if f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
         frame = f
         decorate(m, v)
-        // a hidden view coming back is, to AeroSpace, a closed window
-        // reappearing: clear its closed-windows cache first (the hotkey's
-        // prep already did, in parallel with its queries)
-        if !m.slotShown && !aerospaceCacheCleared { Self.clearAerospaceCache() }
+        // the window coming back from hidden is, to AeroSpace, a closed
+        // window reappearing: clear its closed-windows cache first (the
+        // hotkey's prep already did, in parallel with its queries). A switch
+        // needs none: the host stayed up.
+        if !hostUp && !aerospaceCacheCleared { Self.clearAerospaceCache() }
         aerospaceCacheCleared = false
         m.slotShow(frame: f)
-        outgoing?.slotPark(stopVoice: false)
         if outgoing != nil { swappedAt = Date() }
         current = v
         last = v
@@ -395,12 +536,21 @@ final class SharedWindow {
         swappedAt = nil
         targetScreen = nil
         aerospaceCacheCleared = false
-        guard let cur = current else { return }
+        guard let cur = current else {
+            // the view already went away (memberGone): just the empty host
+            if host.isVisible {
+                host.orderOut(nil)
+                controller.log("shared window: hidden" + (reason.isEmpty ? "" : " — \(reason)"))
+            }
+            return
+        }
         current = nil
         if let m = controller.slotMember(cur) {
             if m.slotShown { frame = m.slotBaseFrame }
             m.slotPark(stopVoice: true)
         }
+        if let g = host.guest as? SlotMember { g.slotPark(stopVoice: true) }
+        host.orderOut(nil)
         if restoreFocus { controller.restoreFocus(wid: returnWID, pid: returnPID) }
         returnWID = nil
         returnPID = nil

@@ -150,8 +150,22 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
 - `JiraDashboard.swift` — the Jira Config window (`JiraDashboardWindow`, `JiraColumnEditor`)
 - `JiraSearch.swift` — Cmd+F live search (`JiraSearchPanel`), `JiraMultiPicker`, `JiraDirectory`
 - `SharedWindow.swift` — ONE window for notes + jira (`SharedWindow`, `SlotView`,
-  `SlotMember`): members are the existing windows, swapped in place
-  (`PopupWindow.park()` / `unpark(frame:)`); jira back stack (detail /
+  `SlotMember`): ONE real NSWindow, the host (`SlotHostWindow`, AeroSpace's
+  one tile, never ordered out on a switch). A switch moves the view's content
+  root in (`slotAttach(to:)`) and the old one's back to its own off-screen
+  home window (`slotDetach`, in `park`); the member's `panel` / `window` ref
+  follows the content, so code touching "its window" hits whichever holds it.
+  The host takes the guest's chrome (`take(_:chromeOf:)`: radius, header
+  band + click, onEscape, close button, min size; popups `give` it back).
+  Why: separate windows swapped by order in / out made AeroSpace tile the
+  ordered-out ghost beside the new view (half width + desktop for 60 ms-1 s:
+  it drops a window only when `_AXUIElementGetWindow` fails, and AppKit keeps
+  answering for an ordered-out window). In shared mode a slot view's own
+  `show()` only BUILDS it (`PopupWindow.builtForHost` → quietShow); `present`
+  / `push` show it. Leaving: `PopupWindow.hide` / `CardWindowController.
+  leaveWindow()` detach first (never order the host out); an emptied host
+  hides itself a turn later (`onEmpty`). Host Cmd+W / close() = hide.
+  Hook `do:rebuild-card:VIEW` (Theme hover's rebuild). Jira back stack (detail /
   releases / config) with back + home in the RIGHT header bar (ids 63/62,
   after the view's own buttons). Header, every view: ✕ · kitchen sink (the
   app's icon menu, `appIcon`, `[app] app-icon`) · view switcher ICONS
@@ -184,8 +198,10 @@ bin/run-tests.sh screenshot # /screenshot's model: button ring, undo, pixelate, 
   snapshots the WHOLE world; the same window id reappearing RESTORES it
   (monitor flips back to the workspace you hid on, tiles snap to old
   sizes). `workspace N` doesn't clear it; `aerospace eval true` does. So
-  every hidden view is shown after `SharedWindow.clearAerospaceCache()`
-  (hotkeyPrep does it in parallel; `present` otherwise, ≤0.25 s).
+  the host coming back from hidden is shown after
+  `SharedWindow.clearAerospaceCache()` (hotkeyPrep does it in parallel;
+  `present` otherwise, ≤0.25 s — it blocks main, AeroSpace's AX queries wait
+  on it). A view switch needs none (the host stayed up): ~30 ms.
   Frame: `frame` refuses off-screen rects (AeroSpace's hidden corner),
   tracks drags / resizes, and lands on `targetScreen` (the focused
   workspace's monitor from hotkeyPrep, `place(_:from:to:)`).
