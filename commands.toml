@@ -490,6 +490,8 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #                       follows the note (Esc / ⌘W close, ⌘+ / ⌘− size)
 #   prose-font-size     reading view text size (default 19)
 #   prose-width         reading column width in points (default 900)
+#   prose-icon-font     font for the language icon over fenced code (default
+#                       "Hack Nerd Font"; "" or not installed = the name instead)
 #   pdf-css             ⌘P / right-click ▸ Export PDF in the reading view:
 #                       pandoc -s (gfm) → weasyprint. This file is a header
 #                       snippet (<style>…</style>) put in the page (default
@@ -648,6 +650,7 @@ checkbox = true
 resize = true
 search-width = 0.9
 max-row-stretch = 26
+row-height = 32
 width = 1100
 height = 560
 font = "SF Mono"

@@ -55,6 +55,11 @@ enum ProseRender {
         var para: [String] = []
         var list: String?          // "ul" / "ol" while inside a list
         var fence: [String]?
+        var fenceLang = ""
+        func pre(_ lines: [String]) -> String {
+            let cls = fenceLang.isEmpty ? "" : " class=\"\(esc(fenceLang))\""
+            return "<pre\(cls)><code>" + esc(lines.joined(separator: "\n")) + "</code></pre>"
+        }
         func flushPara() {
             if !para.isEmpty { out.append("<p>" + para.map(inline).joined(separator: " ") + "</p>"); para = [] }
         }
@@ -62,11 +67,16 @@ enum ProseRender {
         for line in md.components(separatedBy: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces)
             if var f = fence {
-                if t.hasPrefix("```") { out.append("<pre><code>" + esc(f.joined(separator: "\n")) + "</code></pre>"); fence = nil }
+                if t.hasPrefix("```") { out.append(pre(f)); fence = nil }
                 else { f.append(line); fence = f }
                 continue
             }
-            if t.hasPrefix("```") { flushPara(); closeList(); fence = []; continue }
+            if t.hasPrefix("```") {
+                flushPara(); closeList(); fence = []
+                fenceLang = String(t.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                    .split(separator: " ").first.map(String.init) ?? ""
+                continue
+            }
             if t.isEmpty { flushPara(); closeList(); continue }
             if let m = t.range(of: "^#{1,6} ", options: .regularExpression) {
                 flushPara(); closeList()
@@ -92,14 +102,71 @@ enum ProseRender {
             closeList()
             para.append(t)
         }
-        if let f = fence { out.append("<pre><code>" + esc(f.joined(separator: "\n")) + "</code></pre>") }
+        if let f = fence { out.append(pre(f)) }
         flushPara(); closeList()
         return out.joined(separator: "\n")
     }
 
-    static func fragment(_ md: String) -> String {
-        if let html = RichText.pandocHTML(md, highlight: true), !html.isEmpty { return html }
-        return basic(md)
+    static func fragment(_ md: String, colors c: PopupColors? = nil) -> String {
+        var html = RichText.pandocHTML(md, highlight: true) ?? ""
+        if html.isEmpty { html = basic(md) }
+        return c.map { langLabels(html, $0) } ?? html
+    }
+
+    // A fenced block's language over it (the PDF style's badge): a Nerd Font
+    // glyph in the language's color, name as its tooltip (`[notes]
+    // prose-icon-font`, default Hack Nerd Font; "" / not installed / an
+    // unknown language = the name instead).
+    // (fence names, label, glyph, brand color)
+    static let languages: [([String], String, UInt32, String)] = [
+        (["cpp", "c++", "cxx", "hpp"], "C++", 0xf0672, "#00599C"), (["c", "h"], "C", 0xf0671, "#A8B9CC"),
+        (["cs", "csharp"], "C#", 0xf031b, "#9B4F96"), (["python", "py"], "Python", 0xe73c, "#FFD43B"),
+        (["java"], "Java", 0xf0b37, "#B07219"), (["lua"], "Lua", 0xe826, "#4C6EF5"),
+        (["bash", "sh", "zsh"], "Bash", 0xe760, "#4EAA25"), (["shell", "console", "shellsession"], "Shell", 0xf120, "#4EAA25"),
+        (["swift"], "Swift", 0xe755, "#F05138"), (["javascript", "js", "jsx"], "JavaScript", 0xf031e, "#F7DF1E"),
+        (["typescript", "ts", "tsx"], "TypeScript", 0xf06e6, "#3178C6"), (["go", "golang"], "Go", 0xf07d3, "#00ADD8"),
+        (["rust", "rs"], "Rust", 0xe7a8, "#DEA584"), (["json", "jsonc"], "JSON", 0xe60b, "#CBCB41"),
+        (["yaml", "yml"], "YAML", 0xf013, "#CB171E"), (["toml", "ini"], "TOML", 0xf013, "#9C4221"),
+        (["html"], "HTML", 0xf031d, "#E34F26"), (["css", "scss"], "CSS", 0xf031c, "#663399"),
+        (["markdown", "md"], "Markdown", 0xf0354, "#519ABA"), (["sql"], "SQL", 0xf01bc, "#E38C00"),
+        (["ruby", "rb"], "Ruby", 0xf0d2d, "#CC342D"), (["php"], "PHP", 0xf031f, "#777BB4"),
+        (["kotlin", "kt"], "Kotlin", 0xf1219, "#7F52FF"), (["r"], "R", 0xf07d4, "#276DC3"),
+        (["vim", "viml"], "Vim", 0xe7c5, "#019733"), (["diff", "patch"], "Diff", 0xf440, "#41B883"),
+        (["dockerfile", "docker"], "Dockerfile", 0xf0868, "#2496ED"), (["xml"], "XML", 0xf05c0, "#E37933"),
+        (["log"], "Log", 0xf1085, ""), (["text", "txt", "plain", "file"], "Text", 0xf0f6, ""),
+    ]
+
+    // the icon font, when [notes] prose-icon-font names an installed family
+    static let iconFont: String? = {
+        let f = (configSectionValue("notes", "prose-icon-font") ?? "Hack Nerd Font").trimmingCharacters(in: .whitespaces)
+        return !f.isEmpty && NSFontManager.shared.availableFontFamilies.contains(f) ? f : nil
+    }()
+
+    static func langLabel(_ lang: String, _ c: PopupColors) -> String {
+        let key = lang.lowercased()
+        let hit = languages.first { $0.0.contains(key) }
+        let name = esc(hit?.1 ?? lang)
+        guard let hit, iconFont != nil, let glyph = UnicodeScalar(hit.2) else {
+            return "<div class=\"lang\">\(name)</div>"
+        }
+        let tint = hit.3.isEmpty ? c.dim : (hexColor(hit.3) ?? c.dim)
+        let color = css(c.ensure(tint, on: c.mantle, 3))
+        // icon only (minimal); the name is its tooltip
+        return "<div class=\"lang\" title=\"\(name)\"><span class=\"glyph\" style=\"color: \(color)\">\(String(glyph))</span></div>"
+    }
+
+    // pandoc: <pre class="sourceCode cpp"> (known) / <pre class="mermaid">
+    // (unknown); basic(): <pre class="cpp">
+    static func langLabels(_ html: String, _ c: PopupColors) -> String {
+        guard let re = try? NSRegularExpression(pattern: #"<pre\s+class="(?:sourceCode )?([A-Za-z0-9_+#.-]+)""#) else { return html }
+        var out = html
+        for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)).reversed() {
+            guard let whole = Range(m.range, in: html), let r = Range(m.range(at: 1), in: html) else { continue }
+            let lang = String(html[r])
+            if lang == "sourceCode" { continue }
+            out.insert(contentsOf: langLabel(lang, c), at: whole.lowerBound)
+        }
+        return out
     }
 
     // GitHub alerts (> [!NOTE] …): pandoc gfm's `alerts` emits
@@ -118,11 +185,12 @@ enum ProseRender {
 
     // fenced code (pandoc `--syntax-highlighting` token spans) in palette tones
     static func codeCSS(_ c: PopupColors) -> String {
+        func on(_ x: NSColor) -> String { css(c.ensure(x, on: c.mantle)) }   // 4.5:1 on the code well
         let groups: [(String, String)] = [
-            ("kw, cf", css(c.accentOn)), ("dt", css(c.tone(.accent2))),
-            ("st, ch, ss, vs, sc", css(c.tone(.success))), ("dv, bn, fl, cn", css(c.tone(.warning))),
-            ("fu, at, va, bu", css(c.tone(.info))), ("pp, im, ex, er, al", css(c.tone(.danger))),
-            ("op, ot", css(c.text)),
+            ("kw, cf", on(c.accentOn)), ("dt", on(c.tone(.accent2))),
+            ("st, ch, ss, vs, sc", on(c.tone(.success))), ("dv, bn, fl, cn", on(c.tone(.warning))),
+            ("fu, at, va, bu", on(c.tone(.info))), ("pp, im, ex, er, al", on(c.tone(.danger))),
+            ("op, ot", on(c.text)),
         ]
         var out = groups.map { names, hex in
             names.split(separator: ",").map { "code span.\($0.trimmingCharacters(in: .whitespaces))" }
@@ -132,11 +200,17 @@ enum ProseRender {
                    + " { color: \(css(c.dim)); font-style: italic; }")
         out.append("div.sourceCode { margin: 0 0 .9em; } div.sourceCode pre { margin: 0; }")
         out.append("pre.sourceCode a { border: 0; color: inherit; }")
+        let icon = iconFont.map { "\"\($0)\", " } ?? ""
+        out.append("div.lang { font-family: -apple-system, system-ui; font-size: 11.5px; font-weight: 500; color: \(css(c.dim));"
+                   + " background: \(css(c.mantle)); border-radius: 8px 8px 0 0; padding: 8px 14px 2px; -webkit-user-select: none;"
+                   + " line-height: 1.4; } div.lang + pre { margin-top: 0; border-radius: 0 0 8px 8px; padding-top: 6px; }"
+                   + " div.lang .glyph { font-family: \(icon)monospace; font-size: 15px; display: inline-block; min-width: 1.5em;"
+                   + " margin-right: 4px; vertical-align: -1px; }")
         return out.joined(separator: "\n")
     }
 
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
-        var body = fragment(src.markdown)
+        var body = fragment(src.markdown, colors: c)
         // the meta line: under the first heading when the note starts with one
         let words = src.markdown.split { $0.isWhitespace || $0.isNewline }.count
         var edited = ""

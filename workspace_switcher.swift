@@ -772,6 +772,7 @@ struct CommandSpec {
     var terminalWords: [String]?
     var searchWidth: CGFloat = 0  // list: search bar as a fraction of window width
     var maxStretch: CGFloat = 0   // list: cap on per-row stretch when resized big
+    var tableRowHeight: CGFloat = 0   // list table mode: row height (0 = default 32)
     var height: CGFloat = 0       // window height in points
     var maxHeight: CGFloat = 0    // cap on the window height (0 = 60% of screen)
     var font: String?             // font family for this window's text
@@ -994,6 +995,7 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.checkbox = tri(vars["checkbox"])
     s.searchWidth = num(vars["search-width"])
     s.maxStretch = num(vars["max-row-stretch"])
+    s.tableRowHeight = num(vars["row-height"])
     s.table = tri(vars["table"]) ?? false
     s.columns = ListColumn.parse(vars["columns"])
     s.tableSort = vars["table-sort"]
@@ -1417,7 +1419,7 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "terminal-height": 40...4000, "sidebar-width": 0...600, "inspector-width": 0...800, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
-    "tint-alpha": 0...1, "max-row-stretch": 0...1000, "image-rows": 1...200,
+    "tint-alpha": 0...1, "max-row-stretch": 0...1000, "row-height": 18...80, "image-rows": 1...200,
     "vim-esc-close": 0...20, "esc-close": 0...20, "search-limit": 1...1_000_000,
     "dashboard-width": 600...8000, "dashboard-height": 400...8000, "dashboard-refresh": 2...3600,
     "split": 0.2...0.8, "context-tokens": 512...1_000_000, "focus-loss-delay": 0...5,
@@ -6023,7 +6025,7 @@ final class SwitcherController: NSObject {
         if cmd.maxStretch > 0 { cfg.maxRowStretch = cmd.maxStretch }
         if !columns.isEmpty {
             cfg.tableColumns = columns.map { $0.popup }
-            cfg.rowHeight = 26
+            cfg.rowHeight = cmd.tableRowHeight > 0 ? cmd.tableRowHeight : 32
         }
         cfg.tableCellStyle = jiraCellStyle
         return cfg
@@ -8303,6 +8305,10 @@ extension SwitcherController {
         // starred releases (config.json `favoriteReleases`, newest first):
         // the ☆ of release rows + the sidebar's FAVORITE RELEASES section
         var favReleases: [String] = []
+        // a favorite release clicked in the sidebar: its issues fill the
+        // table IN PLACE of the current tab (no tab highlighted; any tab
+        // click or Esc returns). `path` = its release-view tab file.
+        var pinView: (key: String, path: String, items: [FieldRow])?
         // the searchable multi-select popover open on a header ▾ / bar pill
         var openPicker: JiraMultiPicker?
         // the pending save of a column drag (debounced)
@@ -8348,7 +8354,9 @@ extension SwitcherController {
             cacheStamp = mtime(of: JiraPoll.issueCachePath)
         }
 
-        func currentItems() -> [FieldRow] { tabs[currentTab].items }
+        func currentItems() -> [FieldRow] { pinView?.items ?? tabs[currentTab].items }
+        // the file behind the rows on screen (columns, owner, sort)
+        var currentPath: String { pinView?.path ?? tabs[currentTab].path }
 
         func cellValues(_ field: String, _ row: FieldRow) -> [String] {
             let v = (row.fields[field] ?? "").trimmingCharacters(in: .whitespaces)
@@ -8494,12 +8502,14 @@ extension SwitcherController {
         // every issue in that release (the release view)
         func syncReleasePins() {
             guard cmd.name == "jira" else { return }
+            if let k = pinView?.key, !favReleases.contains(k) { leavePinView() }
             w.setSidebarPinned(favReleases, title: "Favorite releases", icon: "star.fill",
+                               selected: pinView?.key,
                                label: { k in
                                    guard let d = k.firstIndex(of: "-") else { return k }
                                    return k[..<d] + " " + k[k.index(after: d)...]
                                },
-                               tip: { "Show every issue in \($0)" },
+                               tip: { "Show every issue in \($0) here" },
                                menu: { [self] k in
                                    let m = NSMenu()
                                    m.addItem(menuItem("Show Issues") { [self] in showReleasePin(k) })
@@ -8509,9 +8519,57 @@ extension SwitcherController {
                                onClick: { [self] k in showReleasePin(k) })
         }
 
+        // a favorite release: its issues (from the issue cache, via
+        // --release-view) in the main table, the pin highlighted
         func showReleasePin(_ key: String) {
-            host.showJiraReleaseView(FieldRow(title: key, content: nil, trailing: nil, detail: nil,
-                                              body: nil, searchText: "", fields: ["key": key]))
+            JiraPoll.run("jira_poll.py", ["--release-view", key]) { [weak self] code, out, err in
+                guard let self else { return }
+                guard code == 0, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any],
+                      let dir = d["dir"] as? String,
+                      let file = (d["releases"] as? [[String: Any]])?
+                          .first(where: { ($0["key"] as? String) == key })?["file"] as? String else {
+                    self.host.log("jira: release pin \(key) failed (exit \(code)) \(err)")
+                    self.w.showToast("No issues found for \(key)", symbol: "exclamationmark.triangle")
+                    return
+                }
+                let path = (dir as NSString).appendingPathComponent(file)
+                let cols = ListSession.tabColumns(self.cmd, path)
+                self.pinView = (key, path, self.host.loadListItems(path, cmd: self.cmd, columns: cols))
+                self.cacheStamp = mtime(of: JiraPoll.issueCachePath)
+                self.w.selectSidebarPin(key)
+                self.showRows(columns: cols)
+                self.host.log("list '\(self.cmd.name)': release pin -> \(key) (\(self.pinView?.items.count ?? 0) issues)")
+            }
+        }
+
+        // back from a release pin to the tab it replaced
+        func leavePinView() {
+            guard pinView != nil else { return }
+            pinView = nil
+            w.clearSidebarPin()
+            w.selectedTab = currentTab
+            showRows(columns: ListSession.tabColumns(cmd, tabs[currentTab].path))
+        }
+
+        // fresh rows on screen: columns (when they differ), sort, filters reset
+        func showRows(columns cols: [ListColumn]) {
+            invalidateFilter()
+            visibleOffset = 0
+            if cmd.table {
+                if cols.map(\.field) != columns.map(\.field) || cols.map(\.width) != columns.map(\.width)
+                    || cols.map(\.title) != columns.map(\.title) {
+                    columns = cols
+                    w.setTableColumns(cols.map { $0.popup })
+                }
+                if let k = sortKey, !columns.contains(where: { $0.field == k.field }) { sortKey = nil }
+                syncSortArrow()
+            }
+            w.clearInput()
+            openPicker?.closePopover()
+            colFilters = [:]
+            applyFilterData()
+            w.setRows(filteredRows(query: ""))
+            w.tabFooterText = ""
         }
 
         func setReleaseFavorite(_ rows: [FieldRow], on: Bool) {
@@ -8861,6 +8919,7 @@ extension SwitcherController {
                     w.setRows(filteredRows(query: ""))
                     return
                 }
+                if pinView != nil { leavePinView(); return }
                 host.slot.back(esc: true)
             }
             if cmd.name == "jira" && inSlot {
@@ -8935,25 +8994,13 @@ extension SwitcherController {
         }
 
         private func selectTab(_ index: Int) {
-            guard index < tabs.count, index != currentTab else { return }
-            currentTab = index
-            visibleOffset = 0
-            if cmd.table {
-                let cols = ListSession.tabColumns(cmd, tabs[index].path)
-                if cols.map(\.field) != columns.map(\.field) || cols.map(\.width) != columns.map(\.width)
-                    || cols.map(\.title) != columns.map(\.title) {
-                    columns = cols
-                    w.setTableColumns(cols.map { $0.popup })
-                }
-                if let k = sortKey, !columns.contains(where: { $0.field == k.field }) { sortKey = nil }
-                syncSortArrow()
+            guard tabs.indices.contains(index), index != currentTab || pinView != nil else { return }
+            if pinView != nil {
+                pinView = nil
+                w.clearSidebarPin()
             }
-            w.clearInput()
-            openPicker?.closePopover()
-            colFilters = [:]
-            applyFilterData()
-            w.setRows(filteredRows(query: ""))
-            w.tabFooterText = ""
+            currentTab = index
+            showRows(columns: ListSession.tabColumns(cmd, tabs[index].path))
             refreshPathLabel()
             host.log("list '\(cmd.name)': tab -> \(tabs[index].path)")
         }
@@ -8967,7 +9014,7 @@ extension SwitcherController {
                 let spec = ListColumn.serialize(columns, titles: !isJira)
                 // a jira tab owned by a poll job / search saves into THAT job
                 if isJira, tabs.indices.contains(currentTab),
-                   let own = JiraPoll.owner(ofTab: tabs[currentTab].path) {
+                   let own = JiraPoll.owner(ofTab: currentPath) {
                     JiraPoll.run("jira_config.py", ["--set-columns", own.kind, own.name, spec]) { [host] code, _, err in
                         host.log("jira: \(own.kind) \(own.name) columns -> \(spec) (exit \(code))"
                                  + (code == 0 ? "" : " " + err))
@@ -9121,6 +9168,16 @@ extension SwitcherController {
                 cacheStamp = mtime(of: JiraPoll.issueCachePath)
                 JiraPoll.run("jira_poll.py", ["--release-view"])
             }
+            if let p = pinView, mtime(of: JiraPoll.issueCachePath) != cacheStamp {
+                cacheStamp = mtime(of: JiraPoll.issueCachePath)
+                JiraPoll.run("jira_poll.py", ["--release-view", p.key]) { [weak self] code, _, _ in
+                    guard let self, code == 0, self.pinView?.key == p.key else { return }
+                    self.pinView?.items = self.host.loadListItems(p.path, cmd: self.cmd,
+                                                                  columns: ListSession.tabColumns(self.cmd, p.path))
+                    self.invalidateFilter()
+                    self.w.setRows(self.filteredRows(query: self.w.currentQuery), resetScroll: false)
+                }
+            }
             var changed: [Int] = []
             for (i, t) in tabs.enumerated() {
                 let mt = mtime(of: t.path)
@@ -9144,7 +9201,7 @@ extension SwitcherController {
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
             refreshPathLabel()
             // only re-filter when the tab on screen is one that changed
-            guard changed.contains(currentTab) else { return }
+            guard pinView == nil, changed.contains(currentTab) else { return }
             applyFilterData()
             visibleOffset = 0
             // keep the scroll position: a background json refresh must not

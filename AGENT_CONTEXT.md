@@ -1194,7 +1194,10 @@ Line numbers drift; grep the symbol names (they're stable).
   of each path field.
 - Prose code: `ProseRender.fragment` = `RichText.pandocHTML(md, highlight:
   true)` (`--syntax-highlighting=default` → `span.kw` …) + `codeCSS` (palette
-  tones); the AI view's pastes keep `none`. Export PDF (`ProsePDF.swift`,
+  tones, pushed to 4.5:1 on the well); the AI view's pastes keep `none`.
+  Each fence gets a `div.lang` header (`langLabels`: Nerd Font glyph in the
+  language's color from `ProseRender.languages`, name = tooltip; unknown
+  = the name instead; `[notes] prose-icon-font`, default Hack Nerd Font). Export PDF (`ProsePDF.swift`,
   Foundation, `bin/run-tests.sh prose`): Cmd+P in the reading view / pop-out
   or its right-click menu (`ProseWebView.willOpenMenu`) → `pandoc -s -f gfm
   -t html5 --syntax-highlighting=tango --include-in-header=[notes] pdf-css`
@@ -1464,7 +1467,7 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
 - Favorite releases: ☆ on release rows / Cmd+K "Favorite release" →
   `jira_poll.py --favorite-release add|remove KEY…` (config.json
   `favoriteReleases`); the jira sidebar's FAVORITE RELEASES pinned rows
-  (`setSidebarPinned`) open `showJiraReleaseView`.
+  (`setSidebarPinned`) show that release's issues IN PLACE in the main table (`ListSession.pinView` via `--release-view KEY`; `selectSidebarPin` = pin highlighted, no tab; any tab click or Esc returns). Return on a release ROW / Cmd+K "Show release issues" still open `showJiraReleaseView`.
 - Jira Config: STATUS ▸ Overview first (health headline, Connection / Poll
   jobs / Cache groups, `overviewSig` rebuild on change); quiet dim section
   headers; job REQUEST behind "▸ Show request". Confluence Setup sheet opens

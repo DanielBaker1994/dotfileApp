@@ -2710,7 +2710,19 @@ final class PopupRowView: NSView {
         let bandH = min(rect.height, natural)
         let top = rect.minY + (rect.height - bandH) / 2
         let band = NSRect(x: rect.minX, y: top, width: rect.width, height: bandH)
-        if isSel {
+        if isSel, !config.tableColumns.isEmpty {
+            // table cursor: a soft band over the WHOLE row (2pt off the
+            // hairlines), no outline; the accent edge is the cursor mark
+            let pill = NSRect(x: 6, y: top + 2, width: rect.width - 12, height: bandH - 4)
+            let p = NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6)
+            config.colors.highlight.setFill()
+            p.fill()
+            NSGraphicsContext.current?.saveGraphicsState()
+            p.addClip()
+            config.colors.accentOn.setFill()
+            NSRect(x: pill.minX, y: pill.minY, width: 3, height: pill.height).fill()
+            NSGraphicsContext.current?.restoreGraphicsState()
+        } else if isSel {
             // generous, even margins: the pill breathes inside the row band
             // and the stroke is a hairline, not a 2pt outline
             let pill = NSRect(x: 8, y: top + 5,
@@ -8350,6 +8362,17 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         bar.pinned = ids
         bar.pinnedSelected = selected
     }
+    // a pinned row is what's on screen (nil = back to the tabs): no tab is
+    // highlighted meanwhile, so a click on ANY tab — the one the pin replaced
+    // too — fires onTabChange. The host restores `selectedTab` itself.
+    public func selectSidebarPin(_ id: String) {
+        let cb = onTabChange
+        onTabChange = nil
+        selectedTab = -1
+        onTabChange = cb
+        tabsBar?.pinnedSelected = id
+    }
+    public func clearSidebarPin() { tabsBar?.pinnedSelected = nil }
     // hover tip per tab (the host returns the tab's full file path)
     public var tabPathTip: ((Int) -> String?)? {
         didSet { tabsBar?.pathTip = tabPathTip }
