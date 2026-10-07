@@ -120,7 +120,7 @@ enum ProseRender {
     static func themeCSS(_ c: PopupColors) -> String {
         let bg = css(c.base), text = css(c.text), dim = css(c.dim)
         let accent = css(c.accentOn), accent2 = css(c.tone(.accent2))
-        let well = css(c.mantle)
+        let well = css(c.mantle), s0 = css(c.surface0), s1 = css(c.surface1)
         let rule = css(ButtonStyle.opaque(c.dim).blended(withFraction: 0.6, of: ButtonStyle.opaque(c.base)) ?? c.dim)
         func tint(_ x: NSColor) -> String { rgba(x, 0.12) }
         return """
@@ -133,16 +133,31 @@ enum ProseRender {
         @page { background-color: \(bg); }
         a, a:visited { color: \(accent); border-bottom-color: \(accent); }
         :not(pre) > code, code { background: \(well); color: \(accent2); }
-        pre, pre.sourceCode, .sourceCode > pre { background-color: \(well); border-color: \(rule); }
+        pre, pre.sourceCode, .sourceCode > pre { background-color: \(well); border: 1px solid \(rule); }
         div.sourceCode { background-color: transparent; }   /* pandoc paints this near-white */
         pre.sourceCode::before { color: \(dim) !important; }
         blockquote { border-left-color: \(accent); color: \(dim); }
         hr { border-top-color: \(rule); }
         img { border-color: \(rule); }
-        /* Tables keep the print style's blue (blue header + light-blue row
-           stripes); the theme layer leaves them alone, only flipping the ink
-           dark so the text reads on the light rows. */
-        tbody { color: #1a1a1a; }
+        /* Tables: the print style's blue gradient header + light-blue stripes
+           and separators glare on the dark page, so repaint the whole table in
+           the theme's own surfaces: a recessed header well (same as code), the
+           body raised to surface0/surface1 with hairline rules between, and a
+           thin accent under the header. The base table already collapses cell
+           borders, so only the separator colors need flipping. */
+        table { border: 1px solid \(rule); background-color: \(s0); }
+        thead tr { background: \(well); color: \(text); }
+        thead th { border-bottom: 1px solid \(accent); }
+        th, td { color: \(text); }
+        th + th, td + td { border-left-color: \(rule); }
+        tbody tr + tr td { border-top-color: \(rule); }
+        tbody tr:nth-of-type(odd) { background-color: \(s0); }
+        tbody tr:nth-of-type(even) { background-color: \(s1); }
+        tbody tr:hover { background-color: \(tint(c.accentOn)); }
+        tbody td:first-child { background-color: transparent; }
+        tbody tr:last-of-type td { border-bottom: none; }
+        tbody a, tbody a:visited { color: \(accent); }
+        tbody code { background: \(well); color: \(accent2); }
         div.note { --a: \(css(c.tone(.info))); --bg: \(tint(c.tone(.info))); --t: \(text); }
         div.tip { --a: \(css(c.tone(.success))); --bg: \(tint(c.tone(.success))); --t: \(text); }
         div.important { --a: \(accent2); --bg: \(tint(c.tone(.accent2))); --t: \(text); }
