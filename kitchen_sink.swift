@@ -6903,6 +6903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let showOnLaunch: Bool
     let openCommand: String?
     private var servicesHandler: ServicesHandler?
+    private var textKeyMonitor: Any?
 
     init(showOnLaunch: Bool, openCommand: String? = nil) {
         self.showOnLaunch = showOnLaunch
@@ -6918,6 +6919,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // never by their own show()
         PopupWindow.builtForHost = { [weak self] w in self?.controller?.slotView(of: w) != nil }
         installMainMenu()
+        installTextKeys()
         installCrashHandler()
         // diag: log the TCC state the process actually sees + how it was
         // launched (touch ~/.cache/ws-auth-debug to enable)
@@ -7080,6 +7082,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         wsLog("app terminating (front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"))")
+    }
+
+    // Ctrl+W (delete the previous word) in every text field: one app-wide
+    // monitor; TextEditKeys holds the routing and the vim / terminal exclusions
+    private func installTextKeys() {
+        textKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            TextEditKeys.route(e) ? nil : e
+        }
     }
 
     // Build a real macOS app menu (top-left click) so the user has obvious

@@ -11,6 +11,7 @@
 # Triggered by: the kitchen-sink daemon on display changes and wake
 # (SENDER=display_change / system_woke) and aerospace exec-on-workspace-change.
 # Fast path = one aerospace call.
+set -uo pipefail
 
 ALLOWED=(G M Y W N 1 2 3 4 5 6 7 8 9)
 is_allowed() { case " ${ALLOWED[*]} " in *" $1 "*) return 0 ;; esac; return 1; }

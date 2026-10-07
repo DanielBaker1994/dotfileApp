@@ -34,6 +34,8 @@ if [ -e "$TMP" ]; then
     echo "clean-stale-permissions: $TMP already exists — not touching it" >&2
     exit 0
 fi
+# an interrupt between here and the final rm must not leave the throwaway behind
+trap 'rm -rf "$TMP"' EXIT
 APP="$TMP/workspace-switcher.app"
 mkdir -p "$APP/Contents/MacOS"
 cat > "$APP/Contents/Info.plist" <<EOF

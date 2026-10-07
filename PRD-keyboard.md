@@ -36,7 +36,8 @@ of being found one at a time.
   - **Ctrl+B L** = previous view (window).
   - **Ctrl+B W** = the view switcher (window search).
   - **Ctrl+B B** = sidebar ⇄ icon rail.
-  - **Ctrl+B T** = the terminal panel.
+  - **Ctrl+B T** = the terminal panel (in the notes window: the editor ⇄
+    prose reading page).
 - What they replace: Ctrl+H (backspace) and Ctrl+K (kill line) in text
   fields, Ctrl+L in a shell, notes' Ctrl+J/K cycle, and Compare's Ctrl+L
   "copy to left". The nvim pane keeps its own splits (§7.1).

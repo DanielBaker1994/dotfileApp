@@ -22,11 +22,22 @@ o.mouse = 'a'
 if vim.fn.executable('pbcopy') == 1 and vim.fn.executable('pbpaste') == 1 then
   o.clipboard = 'unnamedplus'
 end
--- yank/copy -> system clipboard (unnamedplus above); every form of delete /
--- change goes to the black-hole register so it never clobbers the clipboard
--- (mirrors ~/.config/nvim/init.lua). Visual p replaces without yanking.
+-- yank/copy -> system clipboard (unnamedplus above). Normal-mode delete /
+-- change goes to the black-hole register so it never clobbers the clipboard;
+-- a visual-mode cut (d / x) DOES go to the system clipboard, so the selection
+-- can be pasted in another app. Visual p replaces without yanking.
 for _, k in ipairs({ 'd', 'D', 'c', 'C', 'x', 'X', 's', 'S' }) do
-  vim.keymap.set({ 'n', 'x' }, k, '"_' .. k)
+  vim.keymap.set('n', k, '"_' .. k)
+end
+for _, k in ipairs({ 'c', 'C', 's', 'S' }) do
+  vim.keymap.set('x', k, '"_' .. k)
+end
+-- visual cut -> "+ (the system clipboard); only with a reachable provider, so
+-- a cut can never raise a blocking "Press ENTER" clipboard error
+if vim.fn.executable('pbcopy') == 1 and vim.fn.executable('pbpaste') == 1 then
+  for _, k in ipairs({ 'd', 'D', 'x', 'X' }) do
+    vim.keymap.set('x', k, '"+' .. k)
+  end
 end
 vim.keymap.set('x', 'p', 'P')
 -- Space s f = find among the open notes, Space s g = ripgrep their contents:

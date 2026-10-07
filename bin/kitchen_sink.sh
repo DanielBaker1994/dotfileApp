@@ -15,6 +15,7 @@
 #                                    toggle above; needs a running daemon
 # (physical paths: an app install reaches this script through the link
 # ~/.config/kitchen-sink/bin -> <App>/Contents/Resources/bin)
+set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$DIR/.." && pwd -P)"
 . "$ROOT/install.conf"

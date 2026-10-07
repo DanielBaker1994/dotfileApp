@@ -74,8 +74,13 @@ ok "permissions removed"
 
 step "removing caches and runtime files"
 # space-separated lists from install.conf: split on purpose
-# shellcheck disable=SC2086
-rm -rf $CACHE_DIRS
+# sanity: never let a corrupt/empty entry turn into `rm -rf /` or `rm -rf $HOME`
+for d in $CACHE_DIRS; do
+    case "$d" in
+        ""|/|"$HOME") warn "refusing to remove '$d' (suspicious cache path)" ;;
+        *) rm -rf "$d" ;;
+    esac
+done
 # shellcheck disable=SC2086
 rm -f $RUNTIME_FILES
 ok "caches removed"

@@ -12594,6 +12594,18 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         layoutEditorScroll()
     }
 
+    // Ctrl+B T (SharedWindow.prefixKey), notes only: the editor ⇄ the prose
+    // reading page — the same as ⌘⇧P / the Prose | nvim switch. Returns false
+    // when this window has no reading page (no editor, e.g. a PDF / image
+    // preview), so the caller falls back to the terminal panel.
+    @discardableResult
+    public func toggleProseFromPrefix() -> Bool {
+        guard config.editMode, proseProvider != nil else { return false }
+        guard proseShown || vimPaneActive else { return false }
+        setProse(!proseShown)
+        return true
+    }
+
     // ⌘⇧P / the switch: the note as a reading page, or back to editing
     public func setProse(_ on: Bool) {
         guard config.editMode, let backdrop = panel.contentView else { return }

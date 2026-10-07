@@ -325,7 +325,7 @@ PY
         else
             nohup python3 "$ROOT/confluence/fake_confluence.py" serve --port "$PORT" --context /wiki \
                 >"$LOG_FILE" 2>&1 &
-            echo $! >"$PID_FILE"
+            echo "$!" >"$PID_FILE"
             for _ in $(seq 1 30); do
                 curl -s -o /dev/null "http://127.0.0.1:$PORT/wiki/" && break
                 sleep 0.1

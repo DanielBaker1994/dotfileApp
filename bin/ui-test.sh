@@ -102,6 +102,7 @@ status_item_count() {
 # `state` answers one JSON line (SwitcherController.testQuery); `do:ACTION`
 # runs cycle | cycle-back | hide | back | home | toggle | toggle-terminal |
 # reset-size | open:VIEW and answers the state afterwards.
+TMPDIR="${TMPDIR:-/tmp}"
 WS_SOCK="${TMPDIR%/}/$(sed -nE 's/^notes-socket *= *"?([^"]*)"?.*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../commands.toml" | head -1)"
 [[ "$WS_SOCK" == */ ]] && WS_SOCK="${TMPDIR%/}/ws-notes.sock"
 ws_query() { echo "$1" | nc -U -w 3 "$WS_SOCK" 2>/dev/null; }
@@ -120,22 +121,39 @@ wait_state() {
     return 1
 }
 
-# Send a keyboard shortcut
+# Send a keyboard shortcut, e.g. "cmd+0", "cmd+alt+t", "ctrl+shift+l", "esc",
+# "down", "tab". Modifiers are held with kd:/ku:; NAMED keys must use kp:
+# (cliclick's t: TYPES TEXT, so "t:esc" would type the word "esc" into the
+# focused app); printable keys keep t: so a modifier makes them a shortcut.
 send_shortcut() {
-    local keys="$1"  # e.g. "cmd+0", "cmd+alt+t"
-    local modifier="" key=""
-    if [[ "$keys" == *"cmd"* ]]; then modifier+="kd:cmd,"; fi
-    if [[ "$keys" == *"alt"* ]] || [[ "$keys" == *"opt"* ]]; then modifier+="kd:alt,"; fi
+    local keys="$1" key; local -a args=()
+    [[ "$keys" == *cmd*   ]] && args+=(kd:cmd)
+    [[ "$keys" == *alt* || "$keys" == *opt* ]] && args+=(kd:alt)
+    [[ "$keys" == *ctrl*  ]] && args+=(kd:ctrl)
+    [[ "$keys" == *shift* ]] && args+=(kd:shift)
     key="${keys//cmd/}"
     key="${key//alt/}"
     key="${key//opt/}"
-    key="${key#+}"
-
-    if [[ -n "$modifier" ]]; then
-        "$CLICLICK" "${modifier}t:$key,ku:cmd,ku:alt" 2>/dev/null
-    else
-        "$CLICLICK" "t:$key" 2>/dev/null
-    fi
+    key="${key//ctrl/}"
+    key="${key//shift/}"
+    key="${key//+/}"
+    case "$key" in
+        esc|escape)       args+=(kp:esc) ;;
+        down)             args+=(kp:arrow-down) ;;
+        up)               args+=(kp:arrow-up) ;;
+        left)             args+=(kp:arrow-left) ;;
+        right)            args+=(kp:arrow-right) ;;
+        tab)              args+=(kp:tab) ;;
+        enter|return)     args+=(kp:return) ;;
+        space)            args+=(kp:space) ;;
+        delete|backspace) args+=(kp:delete) ;;
+        *)                args+=("t:$key") ;;
+    esac
+    [[ "$keys" == *cmd*   ]] && args+=(ku:cmd)
+    [[ "$keys" == *alt* || "$keys" == *opt* ]] && args+=(ku:alt)
+    [[ "$keys" == *ctrl*  ]] && args+=(ku:ctrl)
+    [[ "$keys" == *shift* ]] && args+=(ku:shift)
+    "$CLICLICK" "${args[@]}" 2>/dev/null
 }
 
 # --- setup ------------------------------------------------------------------
@@ -156,14 +174,18 @@ echo
 CONF_FILE="$ROOT/../commands.toml"
 # Snapshot the WHOLE file and put it back byte-for-byte on any exit (Ctrl+C
 # included) — the suite's menu actions (color reset…) write it too.
-CONF_SNAPSHOT="$(mktemp)"
-cp "$CONF_FILE" "$CONF_SNAPSHOT"
+CONF_SNAPSHOT="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
+cp "$CONF_FILE" "$CONF_SNAPSHOT" || { echo "cannot snapshot $CONF_FILE" >&2; exit 1; }
 restore_config() {
-    if ! cmp -s "$CONF_SNAPSHOT" "$CONF_FILE"; then
+    # only ever restore a real (non-empty) snapshot — never clobber the config
+    # with the empty file a failed cp would have left behind
+    if [ -s "$CONF_SNAPSHOT" ] && ! cmp -s "$CONF_SNAPSHOT" "$CONF_FILE"; then
         cp "$CONF_SNAPSHOT" "$CONF_FILE"
         pkill -x kitchen-sink 2>/dev/null || true
     fi
     rm -f "$CONF_SNAPSHOT"
+    [ -n "${CONF_BAK:-}" ] && rm -f "$CONF_BAK"
+    rm -f "$HOME/notes/__e2e_test_save__.md" /tmp/ws-test-survive.md
 }
 trap restore_config EXIT
 trap 'exit 130' INT TERM
@@ -305,7 +327,7 @@ FRONT_BEFORE="$(osascript -e '
 sleep 1
 
 # Close with Escape
-"$CLICLICK" "t:esc" 2>/dev/null
+"$CLICLICK" "kp:esc" 2>/dev/null
 sleep 0.5
 
 # Notes window should be hidden
@@ -466,7 +488,7 @@ sleep 0.5
 "$CLICLICK" "t:/" 2>/dev/null
 sleep 0.3
 # Escape should drop back to workspace mode, not dismiss
-"$CLICLICK" "t:esc" 2>/dev/null
+"$CLICLICK" "kp:esc" 2>/dev/null
 sleep 0.3
 
 WC_CMD="$(window_count)"
@@ -1082,8 +1104,8 @@ fi
 
 # --- Test 20a: File browser opens with fixture directory as root ---
 # Add a temporary [files] section to commands.toml pointing at /tmp/ws-test
-CONF_BAK=$(mktemp)
-cp "$ROOT/../commands.toml" "$CONF_BAK" 2>/dev/null
+CONF_BAK="$(mktemp)" || CONF_BAK=""
+[ -n "$CONF_BAK" ] && cp "$ROOT/../commands.toml" "$CONF_BAK" 2>/dev/null
 
 # Check if a [files] section already exists with /tmp/ws-test
 HAS_FIXTURE=$(grep -c '/tmp/ws-test' "$ROOT/../commands.toml" 2>/dev/null || true)
@@ -1152,9 +1174,12 @@ else
 fi
 
 # Restore original commands.toml
-cp "$CONF_BAK" "$ROOT/../commands.toml" 2>/dev/null
+if [ -n "$CONF_BAK" ] && cp "$CONF_BAK" "$ROOT/../commands.toml" 2>/dev/null; then
+    pass "Restored original commands.toml"
+else
+    fail "could not restore commands.toml"
+fi
 rm -f "$CONF_BAK"
-pass "Restored original commands.toml"
 
 # ============================================================================
 # REAL UI INTERACTION TESTS (cliclick clicks + type + verify)
@@ -1247,8 +1272,8 @@ fi
 # and doesn't update on re-show, so we verify the buffer + source code here.
 # The external-write→reload path is tested in 21g.
 TEST_NOTE="$HOME/notes/__e2e_test_save__.md"
-mkdir -p "$HOME/notes"
-echo "# E2E Save Test" > "$TEST_NOTE"
+mkdir -p "$HOME/notes" || fail "cannot create $HOME/notes"
+echo "# E2E Save Test" > "$TEST_NOTE" 2>/dev/null || fail "cannot write $TEST_NOTE"
 
 # Close existing notes and reopen fresh
 pkill -f "kitchen-sink.app" 2>/dev/null || true

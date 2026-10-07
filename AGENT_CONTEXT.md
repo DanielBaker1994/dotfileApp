@@ -153,7 +153,12 @@ unchanged and can still be called directly.
   (`ConfirmOverlay`), Cmd+/ card: `showShortcutsCard` (`ShortcutsOverlay`).
   Edit keys: `editKey` — Cmd+A/X/C/V pass through to the Edit menu (it
   fires BEFORE local monitors: routing them too pasted twice), Cmd+Z and
-  Ctrl+C/V are routed (`JiraEditKeys`). Text on a tint: `PopupColors.over` +
+  Ctrl+C/V are routed (`JiraEditKeys`). Ctrl+W (delete the previous word) is
+  app-wide: `TextEditKeys.route` from one local monitor installed in
+  `AppDelegate` (`installTextKeys`) covers every editable field (popups,
+  search bars, sheets, inline renames); the vim pane / terminal are excluded
+  (their first responder is not an `NSTextView`), so they keep their own
+  Ctrl+W. Text on a tint: `PopupColors.over` +
   `ensure` (4.5:1 against the real composited background)
 - `ConfigText.swift` — commands.toml's one-line TOML codec (`configEntry`,
   `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
@@ -1454,7 +1459,9 @@ worked example):
   a tool panel over the window listing the header's views, each with where it
   is — files `whereText`, notes / jira tab, Confluence / Compare / AI
   `whereText`; previous view pre-selected, 1-9, Return), T = the terminal
-  panel, B = sidebar ⇄ icon rail (`PopupTabsBar.toggleRail`, = Cmd+\\),
+  panel (in the notes window: the editor ⇄ prose reading page,
+  `PopupWindow.toggleProseFromPrefix`), B = sidebar ⇄ icon rail
+  (`PopupTabsBar.toggleRail`, = Cmd+\\),
   Ctrl+B twice = the pane gets a real Ctrl+B; Ctrl+B then Ctrl+H/J/K/L = the
   pane gets that real key. Lapses after 1.5 s.
   Auto-repeats of the key the prefix just used are swallowed

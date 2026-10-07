@@ -29,12 +29,13 @@ run_test() {
     local sources
     sources="$(sed -n 's|^// sources: *||p' "$file" | head -1)"
     if [ -n "$sources" ]; then
-        local bin src=()
-        bin="$(mktemp -d)/$name"
+        local bin src=() dir
+        dir="$(mktemp -d)" || { echo "mktemp failed" >&2; return 1; }
+        bin="$dir/$name"
         for s in $sources; do src+=("$ROOT/$s"); done
-        swiftc -O -o "$bin" "${src[@]}" "$file"
+        swiftc -O -o "$bin" "${src[@]}" "$file" || { rm -rf "$dir"; return 1; }
         "$bin"
-        rm -rf "$(dirname "$bin")"
+        rm -rf "$dir"
     else
         swift "$file"
     fi

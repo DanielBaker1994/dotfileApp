@@ -124,7 +124,8 @@ LOG="$BUILD_TMP.log"
 # (version, minimum macOS) + the icon; the same file is embedded in the
 # binary and written into the bundle.
 PLIST="$BUILD_TMP.plist"
-cp "$ROOT/Info.plist" "$PLIST"
+trap 'rm -f "$BUILD_TMP" "$PLIST" "$LOG"' EXIT
+cp "$ROOT/Info.plist" "$PLIST" || { echo "build-app: cannot read $ROOT/Info.plist" >&2; exit 1; }
 pl_set() {   # key type value
     /usr/libexec/PlistBuddy -c "Add :$1 $2 $3" "$PLIST" >/dev/null 2>&1 \
         || /usr/libexec/PlistBuddy -c "Set :$1 $3" "$PLIST" >/dev/null 2>&1

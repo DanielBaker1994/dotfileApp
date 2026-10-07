@@ -158,7 +158,9 @@ if command -v brew >/dev/null 2>&1; then
     ok "Homebrew already installed ($(brew --version | head -1))"
 else
     info "Homebrew not found — installing it (this needs your password once)"
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    brew_installer="$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+        || die "could not download the Homebrew installer — check your network and re-run"
+    /bin/bash -c "$brew_installer" || die "the Homebrew installer failed"
     eval "$(/opt/homebrew/bin/brew shellenv)"
     ok "Homebrew installed"
 fi

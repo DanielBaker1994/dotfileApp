@@ -593,8 +593,9 @@ final class SharedWindow {
 
     // Ctrl+B, tmux-style, ONLY while one of the shared window's views has
     // the keyboard: then L = the previous view, W = the view switcher
-    // (ViewSwitcherPanel), T = the terminal panel, B = sidebar ⇄ icon rail
-    // (Cmd+\), Esc = cancel; Ctrl+B
+    // (ViewSwitcherPanel), T = the terminal panel (in the notes window: the
+    // editor ⇄ prose reading page), B = sidebar ⇄ icon rail (Cmd+\), Esc =
+    // cancel; Ctrl+B
     // twice = a real Ctrl+B for the pane (vim's page-up, the shell), Ctrl+B
     // then Ctrl+H/J/K/L = the real key (plain Ctrl+H/J/K/L moves panes). The
     // prefix lapses after 1.5 s. Every member's key monitor asks here first
@@ -631,7 +632,9 @@ final class SharedWindow {
         switch e.charactersIgnoringModifiers?.lowercased() ?? "" {
         case "l": navClicked(previousNav ?? (current == .files ? Self.navNotes : Self.navFiles))
         case "w": controller.showViewSwitcher()
-        case "t": controller.toggleTerminalPanel()
+        case "t":
+            if let note = controller.slotMember(cur) as? PopupWindow, note.toggleProseFromPrefix() { break }
+            controller.toggleTerminalPanel()
         case "b": _ = PopupTabsBar.toggleRail(in: w)
         default: break                                               // unknown key: swallowed, like tmux
         }

@@ -19,11 +19,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/commands.toml"
 DISMISSED="$HOME/.cache/kitchen-sink/dismissed-notes.json"
 T=/tmp/ws-vim-test
-BK="$(mktemp -d /tmp/ws-vim-bk.XXXXXX)"
 KEEP=0; [[ "${1:-}" == "--keep" ]] && KEEP=1
 
 command -v cliclick >/dev/null || { echo "cliclick not found — brew install cliclick"; exit 1; }
 command -v nvim >/dev/null || { echo "nvim not found"; exit 1; }
+# backup dir AFTER the early exits, so a missing tool never leaves it behind
+BK="$(mktemp -d /tmp/ws-vim-bk.XXXXXX)" || { echo "mktemp failed"; exit 1; }
 
 PASS=0 FAIL=0
 pass() { printf 'PASS: %s\n' "$*"; PASS=$((PASS + 1)); }
@@ -72,8 +73,10 @@ disk() { tr '\n' '|' < "$1"; }
 buf() { vx "join(getline(1,'\$'),'|')"; }
 # click inside the vim pane (upper third of the window)
 click_pane() {
-    local f; f="$(wframe)"; IFS=, read -r x y w h <<<"$f"
-    cliclick c:$((x + w / 2)),$((y + 120))
+    local f; f="$(wframe)"
+    [[ -n "$f" ]] || { fail "click_pane: no kitchen-sink window frame"; return 1; }
+    IFS=, read -r x y w h <<<"$f"
+    cliclick "c:$((x + w / 2)),$((y + 120))"
 }
 
 cleanup() {

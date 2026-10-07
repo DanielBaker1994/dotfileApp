@@ -20,9 +20,10 @@ FIX=0
 
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../install.conf
-. "$WS_ROOT/install.conf"
+. "$WS_ROOT/install.conf" 2>/dev/null \
+    || { printf 'jira-doctor: cannot read %s/install.conf\n' "$WS_ROOT" >&2; exit 1; }
 # SwiftTerm checkout lives outside the repo (install.conf SWIFTTERM_DIR)
-SWIFTTERM_SRC="$WS_ROOT/$SWIFTTERM_DIR"
+SWIFTTERM_SRC="$WS_ROOT/${SWIFTTERM_DIR:-../SwiftTerm}"
 WS_APP="$WS_ROOT/kitchen-sink.app"
 WS_BIN="$WS_APP/Contents/MacOS/kitchen-sink"
 CONF_JSON="$HOME/.config/jira/config.json"
@@ -237,9 +238,9 @@ if [ "$JIRA_ENABLED" = "true" ]; then
     if [ "$(jf "$CHECK" '.ok')" = "true" ]; then
         ok "config valid ($(jf "$CHECK" '.site'), $(jf "$CHECK" '.endpoints | length') endpoint(s))"
     else
-        jf "$CHECK" '.problems[]?' | while IFS= read -r p; do bad "config: $p"; done
+        while IFS= read -r p; do bad "config: $p"; done < <(jf "$CHECK" '.problems[]?')
     fi
-    jf "$CHECK" '.notes[]?' | while IFS= read -r n; do warn "config note: $n"; done
+    while IFS= read -r n; do warn "config note: $n"; done < <(jf "$CHECK" '.notes[]?')
     ME="$("$PY" "$WS_ROOT/jira/jira_api.py" --myself 2>/dev/null | jq -r '.displayName // empty' 2>/dev/null)"
     if [ -n "$ME" ]; then
         ok "login OK ($ME) — $(jf "$CHECK" '.site')"
@@ -313,9 +314,10 @@ if [ "$JIRA_ENABLED" = "true" ]; then
                 *) bad "endpoint $line status=$st — $err" ;;
             esac
         done < <(jf "$S" '.endpoints[]? | [.name, .type, .window, (.enabled|tostring), (.lastRun // "never"), (.nextRun // "-"), (.status // "?"), ((.items // "-")|tostring), (.lastError // "")] | @tsv')
-        for f in $(jf "$S" '.endpoints[]? | select(.enabled != false) | .path // empty'); do
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
             if [ -f "$f" ]; then ok "window json: $f"; else bad "window json missing: $f"; fi
-        done
+        done < <(jf "$S" '.endpoints[]? | select(.enabled != false) | .path // empty')
     else
         bad "status missing: $STATUS (the poller has never run: jira_poll.py --force)"
     fi
