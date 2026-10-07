@@ -668,6 +668,13 @@ final class ProseWindow: NSWindow {
             }
             return
         }
+        // j / k scroll the page (the web view would swallow them as plain keys)
+        if e.type == .keyDown, e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+           let c = e.charactersIgnoringModifiers, c == "j" || c == "k" {
+            let dy = c == "j" ? 60 : -60
+            page.web.evaluateJavaScript("window.scrollBy(0, \(dy))")
+            return
+        }
         // the pinch never reaches the page's own view reliably: take it here
         if e.type == .magnify { page.magnify(with: e); return }
         if e.type == .smartMagnify { page.smartMagnify(with: e); return }
