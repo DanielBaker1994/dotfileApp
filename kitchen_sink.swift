@@ -2735,6 +2735,7 @@ final class SwitcherController: NSObject {
     var pathsWindow: PathsWindow?
     var noteFindWindow: NoteFindWindow?
     var noteGrepWindow: NoteFindWindow?
+    var sidebarJumpWindow: SidebarJumpWindow?
     var clipboardPaths: ClipboardPaths?
     var pathsSeedObserver: NSObjectProtocol?
     // /screenshot (Hyper+X): capture + annotate, a tool panel (Screenshot.swift)
@@ -3535,6 +3536,8 @@ final class SwitcherController: NSObject {
             case "term": toggleTerminalPanel()
             case "notes-find": showNoteFind()
             case "notes-grep": showNoteFind(grep: true)
+            case "jira-jump":
+                if let w = slotMember(.jira) as? PopupWindow { showSidebarJump(w) }
             case "switcher": showViewSwitcher()
             case "switcher-hide": viewSwitcher?.window.hide(restore: false)
             case "reset-size": noteWindow?.resetToDefaultSize()
@@ -6579,6 +6582,21 @@ final class SwitcherController: NSObject {
         }()
         f.openPaths = { notes.openNotePaths?() ?? [] }
         f.show()
+        reclaimToolKey(f.window) { [weak f] in f?.window.focusSearchField() }
+    }
+
+    // Jira Space s f (socket `jira-jump`): jump to a sidebar row. Built once,
+    // kept; Space s f again closes it.
+    func showSidebarJump(_ w: PopupWindow) {
+        if sidebarJumpWindow?.isShown == true { sidebarJumpWindow?.hide(); return }
+        let f = sidebarJumpWindow ?? {
+            let n = SidebarJumpWindow(commands.first(where: { $0.name == "jira" }))
+            sidebarJumpWindow = n
+            subWindows.append(n.window)
+            return n
+        }()
+        f.onJump = { [weak w] row in w?.sidebarJump(row) }
+        f.show(items: w.sidebarJumpItems())
         reclaimToolKey(f.window) { [weak f] in f?.window.focusSearchField() }
     }
 
@@ -9737,6 +9755,7 @@ extension SwitcherController {
             }
             syncReleasePins()
             w.onCommandK = { [self] in showActions() }
+            if cmd.name == "jira" { w.onSidebarJump = { [weak host, weak w] in if let w { host?.showSidebarJump(w) } } }
             if isJira { w.onTableHeaderMenu = { [self] in groupMenuItems() } }
             // Cmd+F (jira): the live-search panel docked to this window
             if cmd.name == "jira" {

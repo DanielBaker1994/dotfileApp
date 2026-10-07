@@ -1695,6 +1695,22 @@ final class PopupTabsBar: NSView {
         if let p = pinnedSelected, let k = pinned.prefix(maxPinnedShown).firstIndex(of: p) { return k }
         return min(cursor, max(0, rowCount - 1))
     }
+    // every row of the bar for the jump popup (Cmd+P): its section, name and
+    // symbol; `row` goes back into activate(row:)
+    func jumpItems() -> [PopupWindow.SidebarJumpItem] {
+        var out: [PopupWindow.SidebarJumpItem] = []
+        for row in 0..<rowCount {
+            if row < pinnedShown {
+                let p = pinned[row]
+                out.append(.init(section: pinnedSection?(p) ?? pinnedTitle, title: rowTitle(row),
+                                 icon: pinnedIconFor?(p) ?? pinnedIcon, row: row))
+            } else {
+                out.append(.init(section: sectionTitle, title: rowTitle(row),
+                                 icon: rowIcon?(row - pinnedShown), row: row))
+            }
+        }
+        return out
+    }
     private func rowTitle(_ row: Int) -> String {
         if row < pinnedShown {
             let p = pinned[row]
@@ -8669,6 +8685,14 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         tabsBar?.pinnedSelected = id
     }
     public func clearSidebarPin() { tabsBar?.pinnedSelected = nil }
+    // Space s f: jump to a row of the sidebar (the host shows the popup)
+    public struct SidebarJumpItem { public let section: String, title: String, icon: String?, row: Int }
+    public var onSidebarJump: (() -> Void)?
+    public func sidebarJumpItems() -> [SidebarJumpItem] {
+        guard let bar = tabsBar, bar.vertical else { return [] }
+        return bar.jumpItems()
+    }
+    public func sidebarJump(_ row: Int) { tabsBar?.activate(row: row) }
     // somewhere to hang a popover off the sidebar (its top edge)
     public var sidebarAnchor: (view: NSView, rect: NSRect)? {
         guard let bar = tabsBar, bar.vertical, !bar.isHidden else { return nil }
@@ -10537,7 +10561,32 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             pv.scrollBy(code == 38 ? 60 : -60)
             return true
         }
+        if !config.editMode, jumpLeaderKey(code, mods) { return true }
         return config.editMode ? editorKey(code, mods) : listKey(code, mods)
+    }
+
+    // Space s f = the sidebar jump (the notes pad's leader chord) in a list
+    // view with a sidebar hook (Jira). Only while nothing is being typed: the
+    // list has the keys, or the filter box is empty. A chord left half done
+    // lapses after 1.2 s.
+    private var jumpLeader = 0
+    private var jumpLeaderAt = Date.distantPast
+    private func jumpLeaderKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        guard let hook = onSidebarJump, panel.attachedSheet == nil, actionPicker == nil,
+              shortcutsSheet == nil, !topAccessoryHasFocus,
+              mods.intersection([.command, .control, .option, .shift]).isEmpty else { jumpLeader = 0; return false }
+        if jumpLeader > 0, Date().timeIntervalSince(jumpLeaderAt) > 1.2 { jumpLeader = 0 }
+        let typing = !((panel.firstResponder as? NSText)?.string.isEmpty ?? true)
+        switch (jumpLeader, code) {
+        case (0, 49) where !typing:       // Space
+            jumpLeader = 1; jumpLeaderAt = Date(); return true
+        case (1, 1):                      // s
+            jumpLeader = 2; return true
+        case (2, 3):                      // f
+            jumpLeader = 0; hook(); return true
+        default:
+            jumpLeader = 0; return false
+        }
     }
 
     // Cmd / Ctrl chords, pane by pane. Editing shortcuts (select-all / copy /
