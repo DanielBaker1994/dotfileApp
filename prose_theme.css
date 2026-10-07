@@ -9,7 +9,16 @@ body { color: var(--p-text); }
 @page { background-color: var(--p-bg); }
 a, a:visited { color: var(--p-accent); border-bottom-color: var(--p-accent); }
 :not(pre) > code, code { background: var(--p-well); color: var(--p-accent2); }
-pre, pre.sourceCode, .sourceCode > pre { background-color: var(--p-well); border: 1px solid var(--p-rule); }
+/* the print style paints fenced blocks light grey via pre[class*="log"] etc.
+   (higher specificity than plain pre), which left ```log and ```file white */
+pre, pre.sourceCode, .sourceCode > pre,
+pre[class*="bash"], pre[class*="cpp"], pre[class*="lua"], pre[class*="python"], pre[class*="vim"],
+pre[class*="shell"], pre[class*="java"], pre[class*="log"], pre[class*="file"] {
+  background-color: var(--p-well); border: 1px solid var(--p-rule); color: var(--p-text); }
+pre[class*="log"] code, pre[class*="file"] code { color: var(--p-text); }
+/* language icons are hardcoded black/navy in the print style: invisible on dark */
+pre[class*="bash"]::before, pre[class*="vim"]::before { color: var(--p-text) !important; }
+pre[class*="log"]::before { color: var(--p-warning) !important; }
 div.sourceCode { background-color: transparent; }   /* pandoc paints this near-white */
 pre.sourceCode::before { color: var(--p-dim) !important; }
 blockquote { border-left-color: var(--p-accent); color: var(--p-dim); }
@@ -20,7 +29,7 @@ img { border-color: var(--p-rule); }
    hairline grid, and a dim dot in empty cells so blank tables read as
    intentional. Separate borders so the rounded frame stays intact. */
 table { display: table; width: auto !important; max-width: 100%; border-collapse: separate;
-        border-spacing: 0; border: 1px solid var(--p-rule); border-radius: 4px; background-color: var(--p-s0);
+        border-spacing: 0; min-width: 0 !important; margin: .8em 0; border: 1px solid var(--p-rule); border-radius: 4px; background-color: var(--p-s0);
         page-break-inside: avoid; }
 col { width: auto !important; }
 thead tr { background: var(--p-accent); }

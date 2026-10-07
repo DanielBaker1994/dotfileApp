@@ -156,6 +156,9 @@ enum ProseRender {
         """
         .codeblock { display: flex; align-items: stretch; }
         .codeblock pre { flex: 1 1 auto; min-width: 0; }
+        .codeblock table { flex: 0 1 auto; min-width: 0; margin: .8em 0; }
+        .codeblock:has(> table) { align-items: flex-start; }
+        .codeblock:has(> table) .copy-btn { align-self: flex-start; height: 34px; margin-top: .8em; }
         .copy-btn { flex: 0 0 auto; align-self: stretch; width: 34px; margin: .8em 8px .8em 0;
           display: flex; align-items: center; justify-content: center; padding: 0;
           border: none; border-radius: 8px; background: \(css(c.surface0)); color: \(css(c.dim));
@@ -244,7 +247,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         + "/.cache/kitchen-sink/prose/page-\(UUID().uuidString).html")
 
     // Copy-to-clipboard for code blocks (ported from the dotfiles'
-    // markdown_generator/copy_button.js): wrap each <pre> in a flex
+    // markdown_generator/copy_button.js): wrap each <pre> (and table) in a flex
     // .codeblock and put a .copy-btn to its left. Screen-only — the PDF path
     // never loads this (weasyprint runs no JS). The page opts in by emitting
     // <style id="ws-copy"> ([notes] copy-buttons); the function is re-run after
@@ -255,16 +258,22 @@ final class ProseView: NSView, WKScriptMessageHandler {
           var CHECK = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
           function addCopyButtons() {
             if (!document.getElementById('ws-copy')) return;
-            document.querySelectorAll('pre').forEach(function (pre) {
+            document.querySelectorAll('pre, table').forEach(function (pre) {
               if (pre.parentElement && pre.parentElement.classList.contains('codeblock')) return;
+              var isTable = pre.tagName === 'TABLE';
               var code = pre.querySelector('code') || pre;
               var btn = document.createElement('button');
               btn.className = 'copy-btn';
               btn.type = 'button';
               btn.innerHTML = COPY;
-              btn.setAttribute('aria-label', 'Copy code to clipboard');
+              btn.setAttribute('aria-label', isTable ? 'Copy table to clipboard' : 'Copy code to clipboard');
               btn.addEventListener('click', function () {
-                var text = code.innerText;
+                // a table copies as tab-separated rows, so it pastes into a spreadsheet
+                var text = isTable
+                  ? Array.prototype.map.call(pre.rows, function (r) {
+                      return Array.prototype.map.call(r.cells, function (c) { return c.innerText.trim(); }).join('\\t');
+                    }).join('\\n')
+                  : code.innerText;
                 function done(ok) {
                   btn.classList.toggle('copied', ok);
                   btn.innerHTML = ok ? CHECK : COPY;
