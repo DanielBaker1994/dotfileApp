@@ -8624,6 +8624,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // host hook to open a specific file in this window (e.g. the Finder
     // "Open in Notes" service): the host adds it as a tab / makes it active
     public var onOpenExternalPath: ((String) -> Void)?
+    // the notes' open tabs, in tab order (the Space s f popup lists these)
+    public var openNotePaths: (() -> [String])?
     // host prompt for the editor's "Open file at path…" context-menu item
     public var onOpenPathPrompt: (() -> Void)?
     // editor right-click "Copy File Path": copies the open note's absolute

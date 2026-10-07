@@ -843,6 +843,7 @@ func loadCommands() -> [CommandSpec] {
              "confluence", "ai", "compare", // their views read it directly (configSectionValue)
              "notifications",   // Hyper+S unread counts (notify/notify_poll.py)
              "pane-shot",       // the herdr pane capture (PaneShot.swift)
+             "notes-find",      // the notes pad's Space s f popup (NoteFindWindow.swift)
              "setup",           // the Setup & Health Check window (SetupWindow.swift)
              "settings-hub":    // ws-settings (settings_hub/, python)
             break               // never palette commands
@@ -2737,6 +2738,7 @@ final class SwitcherController: NSObject {
     var savedPID: pid_t?
     // /paths: the shelf popup + the clipboard watcher feeding it
     var pathsWindow: PathsWindow?
+    var noteFindWindow: NoteFindWindow?
     var clipboardPaths: ClipboardPaths?
     var pathsSeedObserver: NSObjectProtocol?
     // /screenshot (Hyper+X): capture + annotate, a tool panel (Screenshot.swift)
@@ -3519,6 +3521,7 @@ final class SwitcherController: NSObject {
             case "toggle": slot.toggle()
             case "toggle-terminal": noteWindow?.toggleTerminalDrawer()
             case "term": toggleTerminalPanel()
+            case "notes-find": showNoteFind()
             case "switcher": showViewSwitcher()
             case "switcher-hide": viewSwitcher?.window.hide(restore: false)
             case "reset-size": noteWindow?.resetToDefaultSize()
@@ -3837,6 +3840,8 @@ final class SwitcherController: NSObject {
                             self?.showNotes()
                         } else if name == "term" {
                             self?.toggleTerminalPanel()
+                        } else if name == "notes-find" {
+                            self?.showNoteFind()
                         } else if name == "jira-dashboard" {
                             self?.showJiraDashboard()
                         } else if name == "setup" {
@@ -4519,7 +4524,8 @@ final class SwitcherController: NSObject {
                           Int(round(cc.blueComponent * 255)))
         }
         let imgFile = (socket as NSString).deletingPathExtension + ".images.json"
-        a += ["--cmd", "let g:ws_img_file='\(imgFile)'",
+        a += ["--cmd", "let g:ws_sock='\(popupTmpDir() + settings.notesSocketName)'",
+              "--cmd", "let g:ws_img_file='\(imgFile)'",
               "--cmd", "let g:ws_img_rows=\(max(1, cmd.imageRows))"]
         // cursor-line band (iTerm2-style cursor guide): the selection color
         // pulled halfway toward the card so it reads fainter than Visual
@@ -6593,6 +6599,26 @@ final class SwitcherController: NSObject {
         }
     }
 
+    // notes pad Space s f (socket `notes-find`): built once, kept
+    func showNoteFind() {
+        // only from the notes view (Space s f lives in its vim pane); the
+        // same key again closes it
+        if noteFindWindow?.isShown == true { noteFindWindow?.hide(); return }
+        guard let notes = noteWindow, slot.current == .notes else { return }
+        if noteFindWindow == nil {
+            let f = NoteFindWindow(commands.first(where: { $0.kind == .note }))
+            f.onOpen = { [weak self] path in self?.openNoteFile(path) }
+            f.log = { [weak self] in self?.log($0) }
+            noteFindWindow = f
+            subWindows.append(f.window)
+        }
+        noteFindWindow?.openPaths = { notes.openNotePaths?() ?? [] }
+        noteFindWindow?.show()
+        if let w = noteFindWindow?.window {
+            reclaimToolKey(w) { [weak w] in w?.focusSearchField() }
+        }
+    }
+
     // Hyper+S → /paths: built once, kept; a reopen orders it back in
     func showPaths(_ cmd: CommandSpec) {
         let ret = (configSectionValue("paths", "return") ?? "file").trimmingCharacters(in: .whitespaces).lowercased()
@@ -7926,6 +7952,7 @@ extension SwitcherController {
                 host.copy(currentPath, "note path: \(currentPath)")
             }
             w.onOpenExternalPath = { [self] path in openExternal(path) }
+            w.openNotePaths = { [self] in paths }
             w.onOpenPathPrompt = { [self] in promptOpenPath() }
             // terminal drawer right-click "Open in Notes": the selected text is a
             // path — open it as a note tab (openNoteFile checks it exists)

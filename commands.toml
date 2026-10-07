@@ -337,6 +337,16 @@ return = "file"
 clipboard = true
 ignore-file = "config/paths.ignore"
 
+# Notes pad "Space s f" (search files): a popup over the notes pad listing the
+# notes OPEN as tabs, filtered as you type (the letters in order; a match in
+# the file name beats one in the folders). Return switches to that tab, Cmd+C
+# copies the path, Esc or Space s f again closes. Only from the notes view.
+# NoteFindWindow.swift; the key is in vim/init.lua.
+#   rows   rows shown (default 12)       width   popup width (640)
+[notes-find]
+rows = 12
+width = 640
+
 # /screenshot (Hyper+X): Flameshot-style capture + annotate (Screenshot.swift,
 # ScreenshotOverlay.swift, ScreenshotPin.swift). The screen freezes + dims,
 # drag a box, then the ring of round buttons: P pencil, D line, A arrow,
@@ -855,6 +865,7 @@ kitchen-sink = "*:app"
 "notes: Cmd+S" = "save the note"
 "notes: Cmd+F" = "search the note"
 "notes: Cmd+O" = "open a file by path as a tab"
+"notes: Space s f" = "vim pane: find among the open notes (popup), Return switches to it"
 "notes: Cmd+P" = "reading view: export the note as a PDF (its path is copied)"
 "notes: Cmd+C / Cmd+V / Ctrl+V" = "copy / paste (editor + terminal)"
 "files: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the list"
