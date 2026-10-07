@@ -1,0 +1,44 @@
+/* Prose dark theme layer: applied to the reading view AND the PDF export.
+   Colors come from --p-* variables that ProseRender.themeCSS() generates from the
+   active theme (see NotesProse.swift); edit the rules here, no rebuild needed. */
+:root { --md-accent_pretty: var(--p-accent); --md-accent_pretty-2: var(--p-accent2); --md-muted: var(--p-dim); }
+html { color: var(--p-text); background-color: var(--p-bg); }
+body { color: var(--p-text); }
+/* the page box itself (the @page margins included) — without this
+   weasyprint leaves the PDF margins white around the dark page */
+@page { background-color: var(--p-bg); }
+a, a:visited { color: var(--p-accent); border-bottom-color: var(--p-accent); }
+:not(pre) > code, code { background: var(--p-well); color: var(--p-accent2); }
+pre, pre.sourceCode, .sourceCode > pre { background-color: var(--p-well); border: 1px solid var(--p-rule); }
+div.sourceCode { background-color: transparent; }   /* pandoc paints this near-white */
+pre.sourceCode::before { color: var(--p-dim) !important; }
+blockquote { border-left-color: var(--p-accent); color: var(--p-dim); }
+hr { border-top-color: var(--p-rule); }
+img { border-color: var(--p-rule); }
+/* Tables ("spreadsheet"): the frame hugs the table (never the full page
+   width), a solid accent header, a raised first column as row labels,
+   hairline grid, and a dim dot in empty cells so blank tables read as
+   intentional. Separate borders so the rounded frame stays intact. */
+table { display: table; width: auto !important; max-width: 100%; border-collapse: separate;
+        border-spacing: 0; border: 1px solid var(--p-rule); border-radius: 4px; background-color: var(--p-s0);
+        page-break-inside: avoid; }
+col { width: auto !important; }
+thead tr { background: var(--p-accent); }
+thead th { background: var(--p-accent); color: var(--p-bg); font-weight: 600; border: none; }
+thead th:first-child { border-top-left-radius: 3px; }
+thead th:last-child { border-top-right-radius: 3px; }
+th, td { color: var(--p-text); border: none; }
+thead th + th { border-left: 1px solid var(--p-bg); }
+tbody td { background-color: var(--p-s0); border-top: 1px solid var(--p-rule); }
+tbody td + td { border-left: 1px solid var(--p-rule); }
+tbody td:first-child { background-color: var(--p-s1); font-weight: 600; }
+tbody td:empty::after { content: "\00B7"; color: var(--p-rule); }
+tbody tr:hover { background-color: transparent; }
+tbody a, tbody a:visited { color: var(--p-accent); }
+tbody code { background: var(--p-well); color: var(--p-accent2); }
+div.note { --a: var(--p-info); --bg: var(--p-info-tint); --t: var(--p-text); }
+div.tip { --a: var(--p-success); --bg: var(--p-success-tint); --t: var(--p-text); }
+div.important { --a: var(--p-accent2); --bg: var(--p-accent2-tint); --t: var(--p-text); }
+div.warning { --a: var(--p-warning); --bg: var(--p-warning-tint); --t: var(--p-text); }
+div.caution { --a: var(--p-danger); --bg: var(--p-danger-tint); --t: var(--p-text); }
+::selection { background: var(--p-selection); }
