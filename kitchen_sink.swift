@@ -116,9 +116,10 @@ struct AppSettings {
     var marginTop: CGFloat = 0
     var marginTopBuiltin: CGFloat = 0
     var marginBottom: CGFloat = 0
-    // the Hyper+S card: its width and the command grid's column count
-    var switcherWidth: CGFloat = 380
-    var switcherColumns = 3
+    // the Hyper+S card: its width, and the commands listed first (by
+    // section name) in its left pane
+    var switcherWidth: CGFloat = 760
+    var paletteFirst: [String] = ["filefast", "paths", "prettyprint"]
     var shell = "/opt/homebrew/bin/bash"
     // args for the embedded terminal's shell: --login -i sources the profile
     // AND rc files so aliases/functions (zoxide, etc.) work there
@@ -1131,7 +1132,9 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("shared-height"), let n = Double(v), n >= 300 { settings.sharedHeight = CGFloat(n) }
     if let v = str("margin-top"), let n = Double(v) { settings.marginTop = CGFloat(max(0, n)) }
     if let v = str("switcher-width"), let n = Double(v) { settings.switcherWidth = CGFloat(min(1200, max(240, n))) }
-    if let v = str("switcher-columns"), let n = Int(v) { settings.switcherColumns = min(6, max(1, n)) }
+    if let v = str("palette-first") {
+        settings.paletteFirst = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+    }
     if let v = str("margin-top-builtin"), let n = Double(v) { settings.marginTopBuiltin = CGFloat(max(0, n)) }
     if let v = str("margin-bottom"), let n = Double(v) { settings.marginBottom = CGFloat(max(0, n)) }
     if let v = str("esc-close"), let n = Int(v) { settings.escClose = max(0, n) }
@@ -1409,7 +1412,7 @@ private let configBoolKeys: Set<String> = [
 private let configNumberKeys: [String: ClosedRange<Double>] = [
     "limit": 1...25,   // [paths]: the shelf's hard cap
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
-    "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "switcher-width": 240...1200, "switcher-columns": 1...6, "preview-border-width": 0...8, "pane-focus-width": 0...4,
+    "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "switcher-width": 240...1200, "preview-border-width": 0...8, "pane-focus-width": 0...4,
     "terminal-height": 40...4000, "sidebar-width": 0...600, "inspector-width": 0...800, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
     "max-rows": 0...10_000, "page-size": 0...100_000, "content-cap": 0...100_000,
     "body-lines": 0...100, "search-width": 0...1, "recent-days": 1...365, "recent-limit": 20...5000,
@@ -2346,23 +2349,13 @@ struct CommandRow: PopupRow {
     init(_ c: CommandSpec) { title = "> \(c.label ?? c.name)"; command = c }
 }
 
-// One line of the Hyper+S command grid (settings.switcherColumns cells);
-// the switcher tracks which cell the cursor is on (gridColumn).
-struct CommandGridRow: PopupRow {
-    let title: String
-    let commands: [CommandSpec]
-    let first: Bool   // draws the hairline that separates it from the workspaces
-    init(_ cmds: [CommandSpec], first: Bool) {
-        commands = cmds
-        self.first = first
-        title = cmds.map { $0.label ?? $0.name }.joined(separator: " · ")
-    }
-}
-
-// The bottom line of Hyper+S: unread chips · CPU · RAM · battery · clock.
-// Never selectable (the switcher's own key handling skips it).
-struct StatusRow: PopupRow {
-    let title = ""
+// One line of the Hyper+S two-pane view: a command on the left, a workspace
+// on the right (either may be missing when the panes differ in length). The
+// switcher tracks which pane the cursor is in (splitPane).
+struct SplitRow: PopupRow {
+    let command: CommandSpec?
+    let workspace: WorkspaceRow?
+    var title: String { command.map { $0.label ?? $0.name } ?? workspace?.title ?? "" }
 }
 
 // Generic row for list commands (jira etc.): primary field as title with the
@@ -2728,11 +2721,13 @@ final class SwitcherController: NSObject {
     let commandRunner: CommandRunner?
     var workspaces: [WorkspaceInfo] = []
     var commands: [CommandSpec] = []
-    // Hyper+S: the command-grid cell the cursor is on (clamped per row), the
-    // query the grid column belongs to, and the status row's last reading
-    // (refreshed on every open; the last one draws at once)
-    var gridColumn = 0
-    private var gridQuery = ""
+    // Hyper+S: the pane the cursor is in (0 commands, 1 workspaces), the
+    // query it belongs to, and the last unread reading (refreshed on every
+    // open; the last one draws at once)
+    var splitPane = 0
+    var stripSig = ""
+    private var stripTimer: Timer?
+    private var splitQuery = ""
     var status = SwitcherStatus()
     var savedWID: String?
     var savedPID: pid_t?
@@ -2836,11 +2831,11 @@ final class SwitcherController: NSObject {
         }
         popup.onShow = { [weak self] in
             guard let self else { return }
-            // one view: workspaces, the command grid and the status row ("/"
-            // still narrows it to commands)
+            // one view: commands + workspaces ("/" still narrows it to
+            // commands)
             self.popup.initialQuery = ""
             self.popup.selection = 0
-            self.gridColumn = 0
+            self.splitPane = 0
             // the toggle path goes through popup.show(), not controller
             // show() — refresh the keypress-time focus target HERE
             (self.savedWID, self.savedPID) = readFocusFile()
@@ -3008,6 +3003,21 @@ final class SwitcherController: NSObject {
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.appActivations += 1 }
         watchFocusBridge()
+        // the header's workspace strip: windows opening / closing raise no
+        // focus event, and the unread counts age
+        var tick = 0
+        stripTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
+            guard let self, self.slot.isVisible else { return }
+            tick += 1
+            if tick % 5 == 0 {
+                let notify = assetDir + "/notify/notify_poll.py"
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    let st = SwitcherStatus.gather(notifyScript: notify)
+                    DispatchQueue.main.async { self?.status = st }
+                }
+            }
+            self.refreshWorkspaceStrip()
+        }
     }
 
     private func watchFocusBridge() {
@@ -3042,6 +3052,7 @@ final class SwitcherController: NSObject {
     }
 
     private func focusBridgeChanged(_ path: String) {
+        if slot.isVisible { refreshWorkspaceStrip() }
         // consume EVERY bridge write, even while we're already active: a
         // write left unconsumed (notes focused while active) used to fire
         // later — switching workspaces 4 -> 1 deactivated us, the stale
@@ -3879,13 +3890,11 @@ final class SwitcherController: NSObject {
 
     // Row rendering — the kitchen sink's own look. Workspace rows: key
     // chip (accent = the focused workspace) + app icons + what the query hit
-    // (or "+N") + an unread badge; grid rows: one cell per command; the
-    // status row: unread chips left, CPU · RAM · battery · clock right. The
-    // framework only hands us the row rect; rows stretch vertically when the
+    // (or "+N") + an unread badge; split rows: a command left, a workspace
+    // right. The framework only hands us the row rect; rows stretch vertically when the
     // window is resized, so center on rect.midY.
     private func drawRow(_ rect: NSRect, _ row: PopupRow, _ selected: Bool) {
-        if let g = row as? CommandGridRow { drawGridRow(rect, g, selected); return }
-        if row is StatusRow { drawStatusRow(rect); return }
+        if let r = row as? SplitRow { drawSplitRow(rect, r, selected); return }
         // scale the row's look with the window (Ctrl/Cmd+± drives config.zoom)
         let z = popup.config.zoom
         let c = popup.config.colors
@@ -3973,123 +3982,41 @@ final class SwitcherController: NSObject {
         return r.minX
     }
 
-    // the grid's cell frames for a row rect (drawing and clicks agree)
-    private func gridCells(_ rect: NSRect) -> [NSRect] {
-        let z = popup.config.zoom
-        let cols = CGFloat(settings.switcherColumns)
-        let inset = 8 * z, gap = 4 * z
-        let w = (rect.width - 2 * inset - gap * (cols - 1)) / cols
-        return (0..<settings.switcherColumns).map { i in
-            NSRect(x: inset + CGFloat(i) * (w + gap), y: rect.midY - 12 * z, width: w, height: 24 * z)
-        }
-    }
+    // x where the right (workspaces) pane starts
+    private func splitMid(_ width: CGFloat) -> CGFloat { (width * 0.46).rounded() }
 
-    private func drawGridRow(_ rect: NSRect, _ g: CommandGridRow, _ selected: Bool) {
+    private func drawSplitRow(_ rect: NSRect, _ r: SplitRow, _ selected: Bool) {
         let z = popup.config.zoom
-        let c = popup.config.colors
-        if g.first {
-            TEXT.withAlphaComponent(0.1).setFill()
-            NSRect(x: 12 * z, y: rect.minY, width: rect.width - 24 * z, height: 1).fill()
-        }
-        let col = min(gridColumn, g.commands.count - 1)
-        let para = NSMutableParagraphStyle()
-        para.lineBreakMode = .byTruncatingTail
-        for (i, cell) in gridCells(rect).enumerated() where i < g.commands.count {
-            let on = selected && i == col
-            if on {
-                drawCursor(cell)
-            } else {
-                c.surface0.setFill()
-                NSBezierPath(roundedRect: cell, xRadius: popup.config.buttonRadius * z,
-                             yRadius: popup.config.buttonRadius * z).fill()
-            }
+        let mid = splitMid(rect.width)
+        // the pane divider
+        TEXT.withAlphaComponent(0.1).setFill()
+        NSRect(x: mid, y: rect.minY + 4 * z, width: 1, height: rect.height - 8 * z).fill()
+        if let cmd = r.command {
+            let on = selected && splitPane == 0
+            let cell = NSRect(x: 8 * z, y: rect.midY - rowPillH * z / 2, width: mid - 16 * z, height: rowPillH * z)
+            if on { drawCursor(cell) }
+            let para = NSMutableParagraphStyle()
+            para.lineBreakMode = .byTruncatingTail
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11 * z, weight: on ? .semibold : .regular),
-                .foregroundColor: on ? TEXT : TEXT.withAlphaComponent(0.85),
+                .font: NSFont.systemFont(ofSize: 13 * z, weight: on ? .semibold : .regular),
+                .foregroundColor: on ? TEXT : TEXT.withAlphaComponent(0.88),
                 .paragraphStyle: para,
             ]
-            let label = (g.commands[i].label ?? g.commands[i].name) as NSString
+            let label = (cmd.label ?? cmd.name) as NSString
             let h = label.size(withAttributes: attrs).height
-            label.draw(with: NSRect(x: cell.minX + 10 * z, y: cell.midY - h / 2,
-                                    width: cell.width - 16 * z, height: h),
+            label.draw(with: NSRect(x: cell.minX + 14 * z, y: cell.midY - h / 2,
+                                    width: cell.width - 22 * z, height: h),
                        options: [.usesLineFragmentOrigin], attributes: attrs)
         }
-    }
-
-    private static let clockFormat: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM  HH:mm"
-        return f
-    }()
-
-    private func drawStatusRow(_ rect: NSRect) {
-        let z = popup.config.zoom
-        let c = popup.config.colors
-        let band = NSRect(x: 8 * z, y: rect.midY - 12 * z, width: rect.width - 16 * z, height: 24 * z)
-        c.crust.withAlphaComponent(0.7).setFill()
-        NSBezierPath(roundedRect: band, xRadius: popup.config.buttonRadius * z,
-                     yRadius: popup.config.buttonRadius * z).fill()
-        let cy = band.midY
-        // left: one chip per unread source (app icon + count badge)
-        var x = band.minX + 8 * z
-        for chip in status.chips {
-            let icon = iconForApp(AppInfo(name: chip.app, bundleID: chip.app, windowTitle: nil))
-            let s = 16 * z
-            popupDrawImage(icon, in: NSRect(x: x, y: cy - s / 2, width: s, height: s))
-            x += s + 2 * z
-            if !chip.count.isEmpty {
-                let left = x
-                x = left + (drawBadgeWidth(chip.count, z: z))
-                drawBadge(chip.count, rightEdge: x, cy: cy, z: z)
-            }
-            if chip.mentions > 0 || chip.warn {
-                let t = (chip.mentions > 0 ? "@\(chip.mentions)" : "●") as NSString
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 10 * z, weight: .bold),
-                    .foregroundColor: c.tone(.warning),
-                ]
-                let ts = t.size(withAttributes: attrs)
-                t.draw(at: NSPoint(x: x + 3 * z, y: cy - ts.height / 2), withAttributes: attrs)
-                x += ts.width + 3 * z
-            }
-            x += 10 * z
+        if let ws = r.workspace {
+            NSGraphicsContext.current?.saveGraphicsState()
+            let t = NSAffineTransform()
+            t.translateX(by: mid + 1, yBy: 0)
+            t.concat()
+            drawRow(NSRect(x: 0, y: rect.minY, width: rect.width - mid - 1, height: rect.height),
+                    ws, selected && splitPane == 1)
+            NSGraphicsContext.current?.restoreGraphicsState()
         }
-        // right: CPU · RAM · battery · clock
-        var parts: [(tag: String, value: String, tone: NSColor?)] = []
-        if let v = status.cpu { parts.append(("CPU", "\(v)%", nil)) }
-        if let v = status.ram { parts.append(("RAM", "\(v)%", nil)) }
-        if let b = status.battery {
-            parts.append((b.charging ? "⚡︎" : "BAT", "\(b.pct)%",
-                          b.charging ? c.tone(.success) : b.pct <= 20 ? c.tone(.danger) : nil))
-        }
-        parts.append(("", Self.clockFormat.string(from: Date()), TEXT))
-        var rx = band.maxX - 10 * z
-        let tagAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9 * z, weight: .bold), .foregroundColor: DIM.withAlphaComponent(0.8),
-        ]
-        for part in parts.reversed() {
-            let valAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5 * z, weight: .regular),
-                .foregroundColor: part.tone ?? DIM,
-            ]
-            let v = part.value as NSString
-            let vs = v.size(withAttributes: valAttrs)
-            rx -= vs.width
-            guard rx > x else { break }   // narrow window: drop from the left
-            v.draw(at: NSPoint(x: rx, y: cy - vs.height / 2), withAttributes: valAttrs)
-            if !part.tag.isEmpty {
-                let t = part.tag as NSString
-                let ts = t.size(withAttributes: tagAttrs)
-                rx -= ts.width + 3 * z
-                t.draw(at: NSPoint(x: rx, y: cy - ts.height / 2), withAttributes: tagAttrs)
-            }
-            rx -= 12 * z
-        }
-    }
-
-    private func drawBadgeWidth(_ text: String, z: CGFloat) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9.5 * z, weight: .semibold)]
-        return max(15 * z, (text as NSString).size(withAttributes: attrs).width + 9 * z)
     }
 
     // a palette row for a shared-window view that is not a [section] command
@@ -4122,28 +4049,32 @@ final class SwitcherController: NSObject {
         if settings.sharedWindow {
             all.append(Self.slotCommand("window", label: "Kitchen Sink"))
         }
-        return all
+        // [app] palette-first: those commands lead, in that order
+        let first = settings.paletteFirst.compactMap { n in all.first { $0.name.lowercased() == n } }
+        return first + all.filter { c in !first.contains { $0.name == c.name } }
     }
 
-    // Hyper+S is ONE view: a row per workspace (its apps as icons — the only
-    // place apps are listed), then every palette command in a grid, then the
-    // status row. A query narrows both: a workspace key ("w", "3") puts that
+    // Hyper+S is ONE view in two panes: palette commands on the left (the
+    // `palette-first` ones on top), a row per workspace on the right (its apps
+    // as icons — the only place apps are listed). One
+    // query narrows both; commands match their label AND section name
+    // ("filefast", "paths", "prettyprint"). A query narrows both: a workspace key ("w", "3") puts that
     // row first, an app / window title hit names itself inside its row, and
     // commands match fuzzily. A leading "/" shows commands only.
     private func filter(_ query: String) -> [PopupRow] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if q != gridQuery {
+        if q != splitQuery {
             // a new query: the cursor goes back to the best match
-            gridQuery = q
-            gridColumn = 0
+            splitQuery = q
+            splitPane = 0
             popup.selection = 0
         }
         let slash = q.hasPrefix("/")
         let t = slash ? String(q.dropFirst()).trimmingCharacters(in: .whitespaces) : q
-        var out: [PopupRow] = []
+        var wsRows: [WorkspaceRow] = []
         if !slash {
             let unread = status.unreadByApp
-            var exact: [PopupRow] = [], hits: [PopupRow] = []
+            var exact: [WorkspaceRow] = [], hits: [WorkspaceRow] = []
             for ws in workspaces {
                 var row = WorkspaceRow(ws: ws, iconCache: &iconCache)
                 row.unread = rowUnread(ws, unread)
@@ -4168,17 +4099,53 @@ final class SwitcherController: NSObject {
                     hits.append(row)
                 }
             }
-            out = exact + hits
+            wsRows = exact + hits
         }
         let cmds = t.isEmpty ? paletteCommands() : PopupFuzzy.filter(paletteCommands(), query: t) { c in
             c.label.map { "\($0) \(c.name)" } ?? c.name
         }
-        let cols = max(1, settings.switcherColumns)
-        for i in stride(from: 0, to: cmds.count, by: cols) {
-            out.append(CommandGridRow(Array(cmds[i..<min(cmds.count, i + cols)]), first: i == 0))
+        var out: [PopupRow] = []
+        for i in 0..<max(cmds.count, wsRows.count) {
+            out.append(SplitRow(command: i < cmds.count ? cmds[i] : nil,
+                                workspace: i < wsRows.count ? wsRows[i] : nil))
         }
-        out.append(StatusRow())
+        // the cursor starts in the pane that has something
+        if cmds.isEmpty && !wsRows.isEmpty { splitPane = 1 }
         return out
+    }
+
+    // The shared window's header strip: Hyper+S's workspace rows, sideways
+    // (occupied workspaces + the focused one). Refreshed when the window is
+    // shown, when AeroSpace reports a focus change and every few seconds while
+    // it is up; the unread counts ride on the last status reading.
+    func refreshWorkspaceStrip() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let fresh = gatherWorkspaces()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !fresh.isEmpty else { return }
+                self.workspaces = fresh
+                let unread = self.status.unreadByApp
+                let cells = fresh.filter { !$0.apps.isEmpty || $0.focused }.map { ws -> PopupChrome.WorkspaceCell in
+                    let row = WorkspaceRow(ws: ws, iconCache: &self.iconCache)
+                    return PopupChrome.WorkspaceCell(key: ws.id, icons: Array(row.icons.prefix(3)),
+                                                     extra: ws.apps.count > 3 ? "+\(ws.apps.count - 3)" : nil,
+                                                     unread: self.rowUnread(ws, unread), focused: ws.focused)
+                }
+                let sig = cells.map { "\($0.key)|\($0.icons.count)|\($0.extra ?? "")|\($0.unread)|\($0.focused)" }.joined(separator: ";")
+                guard sig != self.stripSig else { return }
+                self.stripSig = sig
+                PopupChrome.workspaceCells = cells
+                PopupChrome.redrawAll()
+            }
+        }
+    }
+
+    func switchWorkspace(cell: Int) {
+        guard PopupChrome.workspaceCells.indices.contains(cell) else { return }
+        let key = PopupChrome.workspaceCells[cell].key
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = aerospaceCall(["workspace", key])
+        }
     }
 
     // a workspace row's badge: the unread counts of its apps, summed
@@ -4199,15 +4166,12 @@ final class SwitcherController: NSObject {
         popup.selection = min(sel, max(0, popup.rows.count - 1))
     }
 
-    // Up/Down/Ctrl+N/P walk every row but the status row (into and out of the
-    // grid, keeping the column); Left/Right move across the grid, running on
-    // into the next / previous grid row; Tab jumps between the workspaces and
-    // the commands. Everything else falls through to the popup.
+    // Up/Down/Ctrl+N/P walk the lines of the pane the cursor is in; Tab (and
+    // Left/Right while the query is empty) crosses to the other pane.
+    // Everything else falls through to the popup.
     private func switcherKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         guard popup.isShown, mods.intersection([.command, .option]).isEmpty else { return false }
-        let rows = popup.rows
         let ctrl = mods.contains(.control)
-        let sel = popup.selection
         switch (code, ctrl) {
         case (125, false), (45, true):
             moveCursor(1)
@@ -4216,29 +4180,34 @@ final class SwitcherController: NSObject {
             moveCursor(-1)
             return true
         case (48, false):
-            jumpSection(back: mods.contains(.shift))
+            switchPane(splitPane == 0 ? 1 : 0)
             return true
         case (123, false), (124, false):
-            guard rows.indices.contains(sel), let g = rows[sel] as? CommandGridRow else { return false }
-            let col = min(gridColumn, g.commands.count - 1) + (code == 124 ? 1 : -1)
-            if col >= g.commands.count, rows.indices.contains(sel + 1), rows[sel + 1] is CommandGridRow {
-                gridColumn = 0
-                popup.selection = sel + 1
-            } else if col < 0, sel > 0, let prev = rows[sel - 1] as? CommandGridRow {
-                gridColumn = prev.commands.count - 1
-                popup.selection = sel - 1
-            } else {
-                gridColumn = max(0, min(g.commands.count - 1, col))
-                popup.selection = sel   // redraw the cell cursor
-            }
+            guard popup.currentQuery.isEmpty else { return false }
+            switchPane(code == 124 ? 1 : 0)
             return true
         default:
             return false
         }
     }
 
+    // does line `i` have a cell in `pane`?
+    private func hasCell(_ i: Int, _ pane: Int) -> Bool {
+        guard popup.rows.indices.contains(i), let r = popup.rows[i] as? SplitRow else { return false }
+        return pane == 0 ? r.command != nil : r.workspace != nil
+    }
+
+    // move the cursor into `pane`, onto the same line when it has a cell there
+    private func switchPane(_ pane: Int) {
+        let lines = popup.rows.indices.filter { hasCell($0, pane) }
+        guard let last = lines.last else { return }
+        splitPane = pane
+        popup.selection = lines.contains(popup.selection) ? popup.selection
+            : (lines.first { $0 >= popup.selection } ?? last)
+    }
+
     private func moveCursor(_ d: Int) {
-        let idx = popup.rows.indices.filter { !(popup.rows[$0] is StatusRow) }
+        let idx = popup.rows.indices.filter { hasCell($0, splitPane) }
         guard !idx.isEmpty else { return }
         if let i = idx.firstIndex(of: popup.selection) {
             popup.selection = idx[(i + d + idx.count) % idx.count]
@@ -4247,42 +4216,26 @@ final class SwitcherController: NSObject {
         }
     }
 
-    private func jumpSection(back: Bool) {
-        let rows = popup.rows
-        let onGrid = rows.indices.contains(popup.selection) && rows[popup.selection] is CommandGridRow
-        let target = onGrid
-            ? rows.firstIndex { $0 is WorkspaceRow }
-            : rows.firstIndex { $0 is CommandGridRow }
-        guard let target else { moveCursor(back ? -1 : 1); return }
-        if !onGrid { gridColumn = 0 }
-        popup.selection = target
-    }
-
     // clickToSelect already moved the selection: run the row (a grid row
-    // runs the cell under the pointer; the status row does nothing)
+    // runs the cell under the pointer)
     private func clickRow(_ index: Int) {
         let rows = popup.rows
         guard rows.indices.contains(index) else { return }
         let row = rows[index]
-        if row is StatusRow {
-            moveCursor(0)
-            return
-        }
-        if row is CommandGridRow {
+        if row is SplitRow {
             let x = popup.nativeWindow.mouseLocationOutsideOfEventStream.x
             let width = popup.nativeWindow.contentView?.bounds.width ?? settings.switcherWidth
-            let cells = gridCells(NSRect(x: 0, y: 0, width: width, height: 30))
-            guard let col = cells.firstIndex(where: { x >= $0.minX && x <= $0.maxX }) else { return }
-            gridColumn = col
+            let pane = x < splitMid(width) ? 0 : 1
+            guard hasCell(index, pane) else { return }
+            splitPane = pane
         }
         accept(row)
     }
 
     private func accept(_ row: PopupRow) {
-        if row is StatusRow { return }
-        if let g = row as? CommandGridRow {
-            guard !g.commands.isEmpty else { return }
-            accept(CommandRow(g.commands[min(gridColumn, g.commands.count - 1)]))
+        if let r = row as? SplitRow {
+            if splitPane == 0, let c = r.command { accept(CommandRow(c)) }
+            else if let w = r.workspace { accept(w) }
             return
         }
         if let cr = row as? CommandRow {

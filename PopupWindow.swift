@@ -7214,6 +7214,90 @@ final class PopupChrome: NSView {
         didSet { needsDisplay = true }
     }
     var navOn: Int? { didSet { if navOn != oldValue { needsDisplay = true } } }
+    // the workspace strip right of the view icons (shared window): one cell
+    // per occupied workspace (Hyper+S's workspace rows, sideways). Process
+    // wide — the host refreshes it and redraws every chrome. Cell i is the
+    // header button id workspaceBase + i.
+    struct WorkspaceCell {
+        let key: String
+        let icons: [NSImage]
+        let extra: String?
+        let unread: String
+        let focused: Bool
+    }
+    static let workspaceBase = 1000
+    static var workspaceCells: [WorkspaceCell] = []
+    private let wsCellH: CGFloat = 24
+    // where the strip ends (set by draw: just before the right-hand buttons)
+    private var wsRight: CGFloat = 0
+    // right-aligned: one capsule track like the view switcher's; when it does
+    // not fit, the leftmost workspaces drop off
+    private func wsCellRects() -> [NSRect] {
+        guard !navIcons.isEmpty, dragHeaderHeight > 0, wsRight > 0 else { return [] }
+        let widths = Self.workspaceCells.map { c -> CGFloat in
+            var w: CGFloat = 10 + 9 + 6 + CGFloat(c.icons.count) * 19 + 4
+            if c.extra != nil { w += 18 }
+            if !c.unread.isEmpty { w += 22 }
+            return w
+        }
+        let minX = navRect(navIcons.count - 1).maxX + 24
+        var first = 0
+        func total(_ f: Int) -> CGFloat { widths[f...].reduce(0, +) + CGFloat(max(0, widths.count - f - 1)) * 2 }
+        while first < widths.count, wsRight - 3 - total(first) < minX { first += 1 }
+        guard first < widths.count else { return [] }
+        var x = wsRight - 3 - total(first)
+        let y = (dragHeaderHeight - wsCellH) / 2
+        var out = [NSRect](repeating: .zero, count: first)
+        for w in widths[first...] {
+            out.append(NSRect(x: x, y: y, width: w, height: wsCellH))
+            x += w + 2
+        }
+        return out
+    }
+    private func drawWorkspaceCells() {
+        let c = config.colors
+        let rects = wsCellRects()
+        guard let firstShown = rects.firstIndex(where: { $0 != .zero }), let last = rects.last else { return }
+        let first = rects[firstShown]
+        CapsuleStyle.track(NSRect(x: first.minX - 3, y: first.minY - 3,
+                                  width: last.maxX - first.minX + 6, height: first.height + 6), c)
+        for (i, cell) in Self.workspaceCells.enumerated() where i >= firstShown && i < rects.count {
+            let r = rects[i]
+            let id = Self.workspaceBase + i
+            CapsuleStyle.chip(r, c, on: cell.focused, hover: hoveredSegment == id)
+            let ka: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                .foregroundColor: cell.focused ? c.text : c.dim,
+            ]
+            let ks = (cell.key as NSString).size(withAttributes: ka)
+            (cell.key as NSString).draw(at: NSPoint(x: r.minX + 10, y: r.midY - ks.height / 2), withAttributes: ka)
+            var x = r.minX + 10 + 9 + 6
+            for img in cell.icons {
+                popupDrawImage(img, in: NSRect(x: x, y: r.midY - 8, width: 16, height: 16),
+                               fraction: cell.focused || hoveredSegment == id ? 1 : 0.8)
+                x += 19
+            }
+            if let extra = cell.extra {
+                let ea: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: c.dim]
+                let es = (extra as NSString).size(withAttributes: ea)
+                (extra as NSString).draw(at: NSPoint(x: x, y: r.midY - es.height / 2), withAttributes: ea)
+                x += 18
+            }
+            if !cell.unread.isEmpty {
+                let ba: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 9.5, weight: .semibold), .foregroundColor: NSColor.white,
+                ]
+                let bs = (cell.unread as NSString).size(withAttributes: ba)
+                let bw = max(15, bs.width + 9)
+                let br = NSRect(x: x, y: r.midY - 7.5, width: bw, height: 15)
+                c.tone(.danger).setFill()
+                NSBezierPath(roundedRect: br, xRadius: 7.5, yRadius: 7.5).fill()
+                (cell.unread as NSString).draw(at: NSPoint(x: br.midX - bs.width / 2, y: br.midY - bs.height / 2),
+                                               withAttributes: ba)
+            }
+            extraButtonRects[id] = r
+        }
+    }
     private let navSize: CGFloat = 24   // segment height
     private let navW: CGFloat = 32      // segment width (capsule)
     private var navTipRects: [NSRect] = []
@@ -7326,6 +7410,9 @@ final class PopupChrome: NSView {
             }
             for (i, n) in navIcons.enumerated() where navRect(i).contains(p) {
                 hovered = n.id
+            }
+            for (i, r) in wsCellRects().enumerated() where r != .zero && r.contains(p) {
+                hovered = Self.workspaceBase + i
             }
         }
         iconHovered = headerIcon != nil && dragHeaderHeight > 0 && iconButtonRect.contains(p)
@@ -7598,6 +7685,10 @@ final class PopupChrome: NSView {
         // must not keep catching clicks at its old spot
         extraButtonRects = [:]
         if !navIcons.isEmpty { drawNavIcons() }
+        if !navIcons.isEmpty {
+            wsRight = stretch ? bounds.width - 10 : bounds.width - buttonsWidth - 10
+            drawWorkspaceCells()
+        }
         // header buttons (right side): "copy config" (copy the config file
         // path) and "copy path" (copy the open file path); each flips to
         // "✓ …" for a moment after a copy. The row-copy button (host-enabled
@@ -7666,7 +7757,8 @@ final class PopupChrome: NSView {
         // header buttons (measured above for the stretched-bar layout)
         if !meta.isEmpty {
             let x0: CGFloat = leftInset
-            let maxW = max(60, bounds.width - buttonsWidth - x0 - 10)
+            let strip = wsCellRects().first(where: { $0 != .zero }).map { wsRight - $0.minX + 3 + 8 } ?? 0
+            let maxW = max(60, bounds.width - buttonsWidth - x0 - 10 - strip)
             var text = meta
             if (text as NSString).size(withAttributes: metaAttrs).width > maxW {
                 while (text as NSString).size(withAttributes: metaAttrs).width > maxW {

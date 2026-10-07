@@ -490,6 +490,7 @@ final class SharedWindow {
         if f.height < min.height { f.origin.y -= min.height - f.height; f.size.height = min.height }
         frame = f
         decorate(m, v)
+        controller.refreshWorkspaceStrip()
         // the window coming back from hidden is, to AeroSpace, a closed
         // window reappearing: clear its closed-windows cache first (the
         // hotkey's prep already did, in parallel with its queries). A switch
@@ -651,6 +652,7 @@ final class SharedWindow {
         case Self.navCompare: current == .compare ? () : open(.compare)
         case Self.navHome: home()
         case Self.navBack: back()
+        case PopupChrome.workspaceBase...: controller.switchWorkspace(cell: id - PopupChrome.workspaceBase)
         default: break
         }
     }
@@ -669,6 +671,8 @@ final class SharedWindow {
     // the view's own nav words (right-hand bar, never beside the switcher):
     // jira sub-views get home + back, output views + compareText back
     static func navButtons(for v: SlotView) -> [(String, Int)] {
+        // Jira Config has none: Esc / the view icons already leave it
+        v == .config ? [] :
         (v.isSub ? [("back", navBack)] : [])
             + (v.isJira && v.isSub ? [("home", navHome)] : [])
     }
@@ -694,7 +698,7 @@ final class SharedWindow {
                 if let order = w.headerOrder { w.headerOrder = order + nav.map(\.1) }
                 let prev = w.onHeaderButton
                 w.onHeaderButton = { [weak self] id in
-                    if Self.navIDs.contains(id) { self?.navClicked(id) } else { prev?(id) }
+                    if Self.navIDs.contains(id) || id >= PopupChrome.workspaceBase { self?.navClicked(id) } else { prev?(id) }
                 }
                 w.onCloseWindow = { [weak self] in self?.hide("✕ / Cmd+W") }
             }

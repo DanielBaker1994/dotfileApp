@@ -218,6 +218,10 @@ notes-socket = "ws-notes.sock"
 focus-file = "kitchen-sink-focus"
 focus-bridge = "ws-aerospace-focus"
 switcher-name = "kitchen-sink"
+# Hyper+S palette: these commands (section names) lead the left pane, in this
+# order. switcher-width = the card's width (two panes)
+palette-first = "filefast, paths, prettyprint"
+switcher-width = 760
 detail-name = "jira-detail"
 # aerospace-socket: AeroSpace's IPC socket. Default = its own per-user path
 # (/tmp/bobko.aerospace-<user>.sock); "$USER" expands. Never hard-code a user
