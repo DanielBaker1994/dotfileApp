@@ -508,6 +508,12 @@ in-palette = false
 type = "note"
 name = "notes"
 pdf-css = "~/.dotfiles/markdown_generator/friendly_document_styling.css"
+# copy-to-clipboard button beside every code block in the reading view
+# (default true; screen only — the PDF export never includes it)
+copy-buttons = true
+# pandoc --syntax-highlighting theme for the reading view + PDF; unset =
+# picked from the active theme (breezedark on dark pages, tango on light)
+# pdf-highlight = "breezedark"
 title = ""
 voice = true
 # embedded shell drawer at the bottom of the notes window (header  toggles)

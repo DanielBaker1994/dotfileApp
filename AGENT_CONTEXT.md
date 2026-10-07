@@ -26,7 +26,7 @@ The old names below still work as thin shims around the functions in
 scripts directly.
 
 ```bash
-./ws build            # Build + relaunch (was ./build.sh)
+./ws build            # Build + relaunch
 ./ws build --force    # Force rebuild
 ./ws build --build-only
 ./ws dmg              # the distributable .dmg (.build/dist) — see Install modes

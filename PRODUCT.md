@@ -58,7 +58,7 @@ All three of these together; no single one leads:
   corporate Jira and Confluence (Server/DC or Cloud).
 - Configured through `commands.toml` (hand-edited or through the ws-settings
   TUI). Themes, presets and header styles switch live.
-- Installed two ways: from the repo checkout (`./build.sh`, the owner) or
+- Installed two ways: from the repo checkout (`./ws build`) or
   from the DMG (everyone else).
 
 ## Capabilities and Constraints

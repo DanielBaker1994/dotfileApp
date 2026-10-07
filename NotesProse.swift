@@ -111,23 +111,26 @@ enum ProseRender {
     // The dark theme layer over the PDF style: its layout, recolored to the
     // active theme (the original Prose look) instead of the light print
     // palette. Applied to BOTH the reading view and the PDF export.
+    static func rgba(_ x: NSColor, _ a: CGFloat) -> String {
+        let s = ButtonStyle.opaque(x)
+        return String(format: "rgba(%d,%d,%d,%.3f)",
+                      Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255), a)
+    }
+
     static func themeCSS(_ c: PopupColors) -> String {
-        func rgba(_ x: NSColor, _ a: CGFloat) -> String {
-            let s = ButtonStyle.opaque(x)
-            return String(format: "rgba(%d,%d,%d,%.3f)",
-                          Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255), a)
-        }
         let bg = css(c.base), text = css(c.text), dim = css(c.dim)
         let accent = css(c.accentOn), accent2 = css(c.tone(.accent2))
-        let well = css(c.mantle), surface0 = css(c.surface0), surface1 = css(c.surface1)
+        let well = css(c.mantle)
         let rule = css(ButtonStyle.opaque(c.dim).blended(withFraction: 0.6, of: ButtonStyle.opaque(c.base)) ?? c.dim)
-        let onAccent = css(c.onAccent)
         func tint(_ x: NSColor) -> String { rgba(x, 0.12) }
         return """
         <style>
         :root { --md-accent_pretty: \(accent); --md-accent_pretty-2: \(accent2); --md-muted: \(dim); }
         html { color: \(text); background-color: \(bg); }
         body { color: \(text); }
+        /* the page box itself (the @page margins included) — without this
+           weasyprint leaves the PDF margins white around the dark page */
+        @page { background-color: \(bg); }
         a, a:visited { color: \(accent); border-bottom-color: \(accent); }
         :not(pre) > code, code { background: \(well); color: \(accent2); }
         pre, pre.sourceCode, .sourceCode > pre { background-color: \(well); border-color: \(rule); }
@@ -136,15 +139,10 @@ enum ProseRender {
         blockquote { border-left-color: \(accent); color: \(dim); }
         hr { border-top-color: \(rule); }
         img { border-color: \(rule); }
-        thead tr { background: linear-gradient(180deg, \(accent2), \(accent)) !important; color: \(onAccent); }
-        thead th { background-color: transparent !important; }
-        th, td { border-color: \(rule); }
-        th + th, td + td { border-left-color: \(rule); }
-        tbody tr + tr td { border-top-color: \(rule); }
-        tbody tr:nth-of-type(odd) { background-color: \(surface0); }
-        tbody tr:nth-of-type(even) { background-color: \(surface1); }
-        tbody tr:last-of-type td { border-bottom-color: \(accent); }
-        tbody td:first-child { background-color: transparent; }
+        /* Tables keep the print style's blue (blue header + light-blue row
+           stripes); the theme layer leaves them alone, only flipping the ink
+           dark so the text reads on the light rows. */
+        tbody { color: #1a1a1a; }
         div.note { --a: \(css(c.tone(.info))); --bg: \(tint(c.tone(.info))); --t: \(text); }
         div.tip { --a: \(css(c.tone(.success))); --bg: \(tint(c.tone(.success))); --t: \(text); }
         div.important { --a: \(accent2); --bg: \(tint(c.tone(.accent2))); --t: \(text); }
@@ -152,6 +150,35 @@ enum ProseRender {
         div.caution { --a: \(css(c.tone(.danger))); --bg: \(tint(c.tone(.danger))); --t: \(text); }
         ::selection { background: \(rgba(c.accentOn, 0.28)); }
         </style>
+        """
+    }
+
+    // pandoc's built-in `tango` is a LIGHT theme: its keywords/types are dark
+    // ink (#204a87 ≈ 2:1) and its variables are black (#000 ≈ 1.2:1) on the
+    // dark page the theme layer paints, so every language reads as the same
+    // smudge. Pick a highlight theme that reads on the active page — dark
+    // pages get a dark theme (distinct bright tokens), light pages keep tango.
+    // `[notes] pdf-highlight` still wins when the user names a theme.
+    static func highlightTheme(_ c: PopupColors) -> String {
+        c.isLight ? "tango" : "breezedark"
+    }
+
+    // Screen-only copy-to-clipboard buttons: the reading view's JS wraps each
+    // <pre> in .codeblock and adds a .copy-btn to its left; this is the flex
+    // layout + hover/copied states. Never reaches the PDF (export() skips the
+    // reading page entirely, and weasyprint runs no JS anyway).
+    static func copyButtonCSS(_ c: PopupColors) -> String {
+        """
+        .codeblock { display: flex; align-items: stretch; }
+        .codeblock pre { flex: 1 1 auto; min-width: 0; }
+        .copy-btn { flex: 0 0 auto; align-self: stretch; width: 34px; margin: .8em 8px .8em 0;
+          display: flex; align-items: center; justify-content: center; padding: 0;
+          border: none; border-radius: 8px; background: \(css(c.surface0)); color: \(css(c.dim));
+          cursor: pointer; transition: background .15s, color .15s; }
+        .copy-btn:hover { background: \(css(c.surface1)); color: \(css(c.text)); }
+        .copy-btn:active { background: \(css(c.surface1)); }
+        .copy-btn.copied { background: \(rgba(c.tone(.success), 0.20)); color: \(css(c.tone(.success))); }
+        .copy-btn svg { width: 16px; height: 16px; }
         """
     }
 
@@ -169,14 +196,20 @@ enum ProseRender {
         }
         if let v = notes("pdf-css") { cfg.css = v }
         if let v = notes("pdf-highlight") { cfg.highlight = v }
+        else { cfg.highlight = highlightTheme(c) }   // legible tokens on this theme
         cfg.themeCSS = themeCSS(c)
         var html = ProsePDF.screenHTML(note: src.path, cfg) ?? shell(src, cfg)
         // <base> so relative images resolve + the screen-only column width
         let base = URL(fileURLWithPath: (src.path as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
-        let override = "<base href=\"\(esc(base))\">\n<style>\n"
+        var override = "<base href=\"\(esc(base))\">\n<style>\n"
             + "body { max-width: \(Int(width))px !important; }\n"
             + ".meta { font-family: -apple-system, system-ui; font-size: .82em; color: \(css(c.dim)); margin: -.2em 0 1.6em; }\n"
             + "</style>"
+        // [notes] copy-buttons (default true): the style id is the switch the
+        // reading view's script checks — screen-only, so the PDF never has it
+        if tri(notes("copy-buttons")) ?? true {
+            override += "\n<style id=\"ws-copy\">\n" + copyButtonCSS(c) + "</style>"
+        }
         if let head = html.range(of: "</head>", options: .caseInsensitive) {
             html.insert(contentsOf: override, at: head.lowerBound)
         }
@@ -225,6 +258,58 @@ final class ProseView: NSView, WKScriptMessageHandler {
     private let pageFile = URL(fileURLWithPath: NSHomeDirectory()
         + "/.cache/kitchen-sink/prose/page-\(UUID().uuidString).html")
 
+    // Copy-to-clipboard for code blocks (ported from the dotfiles'
+    // markdown_generator/copy_button.js): wrap each <pre> in a flex
+    // .codeblock and put a .copy-btn to its left. Screen-only — the PDF path
+    // never loads this (weasyprint runs no JS). The page opts in by emitting
+    // <style id="ws-copy"> ([notes] copy-buttons); the function is re-run after
+    // an in-place body patch, which would otherwise drop the buttons.
+    static let copyButtonJS = """
+        (function () {
+          var COPY = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+          var CHECK = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+          function addCopyButtons() {
+            if (!document.getElementById('ws-copy')) return;
+            document.querySelectorAll('pre').forEach(function (pre) {
+              if (pre.parentElement && pre.parentElement.classList.contains('codeblock')) return;
+              var code = pre.querySelector('code') || pre;
+              var btn = document.createElement('button');
+              btn.className = 'copy-btn';
+              btn.type = 'button';
+              btn.innerHTML = COPY;
+              btn.setAttribute('aria-label', 'Copy code to clipboard');
+              btn.addEventListener('click', function () {
+                var text = code.innerText;
+                function done(ok) {
+                  btn.classList.toggle('copied', ok);
+                  btn.innerHTML = ok ? CHECK : COPY;
+                  setTimeout(function () { btn.innerHTML = COPY; btn.classList.remove('copied'); }, 1500);
+                }
+                function fallback() {
+                  var ta = document.createElement('textarea');
+                  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                  document.body.appendChild(ta); ta.select();
+                  var ok = false;
+                  try { ok = document.execCommand('copy'); } catch (e) {}
+                  document.body.removeChild(ta); done(ok);
+                }
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(text).then(function () { done(true); }, fallback);
+                } else { fallback(); }
+              });
+              var wrap = document.createElement('div');
+              wrap.className = 'codeblock';
+              pre.parentNode.insertBefore(wrap, pre);
+              wrap.appendChild(btn);
+              wrap.appendChild(pre);
+            });
+          }
+          window.__wsAddCopyButtons = addCopyButtons;
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', addCopyButtons);
+          else addCopyButtons();
+        })();
+        """
+
     override init(frame: NSRect) {
         let cfg = WKWebViewConfiguration()
         // double-click a picture -> its full-size popup (like the nvim view)
@@ -234,6 +319,8 @@ final class ProseView: NSView, WKScriptMessageHandler {
               if (t && t.tagName === 'IMG') window.webkit.messageHandlers.wsImage.postMessage(t.src);
             });
             """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        cfg.userContentController.addUserScript(WKUserScript(source: Self.copyButtonJS,
+                                                             injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         let w = ProseWebView(frame: frame, configuration: cfg)
         web = w
         super.init(frame: frame)
@@ -309,6 +396,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         if let v = notes("pdf-css") { c.css = v }
         if let v = notes("pdf-path") { c.outDir = v }
         if let v = notes("pdf-highlight") { c.highlight = v }
+        else { c.highlight = ProseRender.highlightTheme(themeColors) }
         c.themeCSS = ProseRender.themeCSS(themeColors)
         DispatchQueue.global(qos: .userInitiated).async {
             let r = ProsePDF.export(note: note, c)
@@ -335,11 +423,14 @@ final class ProseView: NSView, WKScriptMessageHandler {
         themeColors = colors
         layer?.backgroundColor = colors.base.cgColor
         let sig = ProseRender.css(colors.base) + ProseRender.css(colors.text) + ProseRender.css(colors.accentOn)
-        let key = "\(src.path)\u{1}\(Int(size))\u{1}\(font)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(src.markdown)"
+        // the copy-button style lives in the <head>: fold its config into both
+        // keys so toggling [notes] copy-buttons reloads the page
+        let copy = tri(configSectionValue("notes", "copy-buttons")) ?? true
+        let key = "\(src.path)\u{1}\(Int(size))\u{1}\(font)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(copy)\u{1}\(src.markdown)"
         guard key != lastKey else { return }   // nothing changed: keep what is on screen
         // The <head> (themeCSS, <base>, the column width) is what colors the
         // page; only patch the body in place when the head is unchanged too.
-        let headKey = "\(src.path)\u{1}\(Int(width))\u{1}\(sig)"
+        let headKey = "\(src.path)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(copy)"
         let same = src.path == loadedPath
         let sameHead = same && headKey == loadedHeadKey
         lastKey = key
@@ -390,6 +481,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         let lit = (try? JSONSerialization.data(withJSONObject: body, options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
         return "var __y=window.scrollY;document.body.innerHTML=\(lit);window.scrollTo(0,__y);"
+            + "window.__wsAddCopyButtons&&window.__wsAddCopyButtons();"
     }
 }
 
@@ -481,9 +573,16 @@ final class ProseModeSwitch: NSView {
 // The reading page on its own: a lean floating window (Figma B's "present"
 // idea) — no chrome but a thin draggable title strip, follows the note as
 // it is saved (debounced mtime check; the body is patched in place, no
-// reload), ⌘+ / ⌘− size, Esc / ⌘W close. A non-activating
-// panel like the tool panels: opening it never drags the shared window up.
-final class ProseWindow: NSPanel {
+// reload), ⌘+ / ⌘− size, Esc / ⌘W close.
+//
+// A plain NSWindow at NORMAL level — deliberately NOT a floating NSPanel.
+// JankyBorders only borders windows the window server tags as documents
+// (`window_suitable` in JankyBorders: document tag, or floating+modal). Any
+// window at a non-normal level, and any NSPanel, is tagged floating and
+// skipped — which is why the focused reading ("PDF") window had no highlight
+// border. A normal document window is also what AeroSpace's on-window-detected
+// tiling rule for this app expects.
+final class ProseWindow: NSWindow {
     private static var open: [ProseWindow] = []
     // true in the `kitchen-sink prose` process: closing the last window ends it
     static var standalone = false
@@ -520,9 +619,9 @@ final class ProseWindow: NSPanel {
         titlebarAppearsTransparent = true
         titleVisibility = .hidden
         isMovableByWindowBackground = true
-        isFloatingPanel = true
-        level = .floating
-        hidesOnDeactivate = false
+        // normal level / a document window: see the class comment. JankyBorders
+        // skips floating-level windows and NSPanels, so this must stay normal.
+        level = .normal
         isReleasedWhenClosed = false
         backgroundColor = colors.base
         collectionBehavior = [.fullScreenAuxiliary]

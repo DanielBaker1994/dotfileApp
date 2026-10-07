@@ -188,7 +188,7 @@ def want(name):
 
 # ---------------------------------------------------------------- setup
 if not os.path.exists(SOCK) or not state():
-    print(f"no daemon answering on {SOCK} — start it (./build.sh) first")
+    print(f"no daemon answering on {SOCK} — start it (./ws build) first")
     sys.exit(1)
 if not shutil.which("aerospace"):
     print("aerospace not on PATH")

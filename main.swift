@@ -231,7 +231,7 @@ if cliArgs.count > 1 {
 let showOnLaunch = cliArgs.count > 1 && cliArgs[1] == "show"
 
 // ONE daemon (acquireDaemonLock): another one is running -> hand it this
-// launch's request and exit. A daemon on its way out (build.sh / the
+// launch's request and exit. A daemon on its way out (./ws build / the
 // launcher pkill it first) frees the lock within moments: then this one
 // takes over.
 if !acquireDaemonLock(waitUpTo: 0) {

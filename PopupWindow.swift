@@ -1544,6 +1544,13 @@ final class PopupTabsBar: NSView {
             window?.invalidateCursorRects(for: self)
             onCollapse?(collapsed)
             superview?.needsLayout = true
+            // The rail just changed the sidebar's width, so the panes beside
+            // it have new rects (onCollapse lays them out) — but PaneNav's
+            // ring is positioned from windowRect(), which is only final after
+            // that layout settles. The window's own key monitor consumes ⌘\
+            // / Ctrl+B B before PaneNav's monitor can see it, so nudge PaneNav
+            // here; defer a turn so the layout pass runs first.
+            if let w = window { DispatchQueue.main.async { PaneNav.shared.refreshSoon(w) } }
         }
     }
     func width(expanded: CGFloat) -> CGFloat { vertical && collapsed ? Self.railWidth : expanded }

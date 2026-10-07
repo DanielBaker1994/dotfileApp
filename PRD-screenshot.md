@@ -645,7 +645,7 @@ icon, Flameshot's launcher dialog, translations.
 
 ## 9. Definition of done (acceptance checks)
 
-1. `./build.sh` builds with no new warnings. `bin/run-tests.sh screenshot`
+1. `./ws build` builds with no new warnings. `bin/run-tests.sh screenshot`
    passes.
 2. Hyper+X from any app shows the frozen, dimmed screen and the help card in
    ≤ 400 ms (the log line proves it). The frontmost app does not change.

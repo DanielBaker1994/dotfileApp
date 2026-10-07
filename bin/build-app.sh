@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build-app.sh — THE one build of kitchen-sink.app. INSTALL.sh and
-# bin/kitchen_sink.sh (build.sh) both call this, so the compiled file
+# bin/kitchen_sink.sh both call this, so the compiled file
 # list can never drift between them (install once missed the Jira files).
 #
 #   bin/build-app.sh            build if stale
@@ -43,6 +43,13 @@ shopt -s nullglob
 SOURCES=("$ROOT"/$SWIFT_SOURCES_GLOB)
 shopt -u nullglob
 [ "${#SOURCES[@]}" -gt 0 ] || { echo "build-app: no Swift sources in $ROOT" >&2; exit 1; }
+
+# Incremental build state. MODULE_NAME must be stable: swiftc derives the
+# module name from -o when it is not given, so a random BUILD_TMP path would
+# change it on every build and invalidate the incremental build record (a
+# full recompile each time). A fixed name keeps that record usable.
+OBJ_DIR="$ROOT/.build/obj"
+MODULE_NAME="KitchenSink"
 
 # The archive's ACTUAL build target: LC_BUILD_VERSION's minos + its arch. The
 # sentinel only records what a previous run *intended*; this reads the lib
@@ -189,14 +196,79 @@ bundle_resources() {
     find "$res" -name '__pycache__' -type d -prune -exec rm -rf {} +
     find "$res" -name '.DS_Store' -delete
 }
-compile() {
-    swiftc "$@" -swift-version 5 -target "$(uname -m)-apple-macosx$MACOS_MIN" \
+# Incremental compilation. Each source gets its own .build/obj/NAME.o through
+# an output-file-map, and the swift driver recompiles only the objects whose
+# source — or a dependency of it — changed; then every .o is linked once. The
+# timestamp pass skips even the driver when each .o is already newer than its
+# source (a relink-only build). The driver is what makes an interface change
+# safe: it pulls in the dependents too, which a naive "recompile only the
+# changed file" pass would leave stale.
+compile_incremental() {
+    local opt="$1" src base
+    mkdir -p "$OBJ_DIR"
+    : > "$LOG"
+
+    # Objects are only valid for the target/opt they were built with; a change
+    # (MACOS_MIN edit, or the -O → -Onone fallback) discards the cache.
+    local stamp="$OBJ_DIR/.stamp" want
+    want="$(uname -m)-apple-macosx$MACOS_MIN $opt"
+    if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
+        rm -f "$OBJ_DIR"/*.o "$OBJ_DIR"/*.swiftdeps "$OBJ_DIR"/master.* \
+              "$OBJ_DIR/output-file-map.json"
+        printf '%s\n' "$want" > "$stamp"
+    fi
+
+    # output-file-map: master build record + a per-file .o / .swiftdeps entry
+    local map="$OBJ_DIR/output-file-map.json"
+    {
+        printf '{\n'
+        printf '  "": { "swift-dependencies": "%s/master.swiftdeps" },\n' "$OBJ_DIR"
+        local i=0 n=${#SOURCES[@]}
+        for src in "${SOURCES[@]}"; do
+            base="$(basename "$src" .swift)"
+            (( i++ )) || true
+            printf '  "%s": { "object": "%s/%s.o", "swift-dependencies": "%s/%s.swiftdeps" }' \
+                "$src" "$OBJ_DIR" "$base" "$OBJ_DIR" "$base"
+            [ "$i" -lt "$n" ] && printf ','
+            printf '\n'
+        done
+        printf '}\n'
+    } > "$map"
+
+    # Only invoke the compiler when an object is missing or older than its
+    # source. The driver then recompiles exactly the stale set (plus any
+    # dependents of a changed interface).
+    local stale=0
+    for src in "${SOURCES[@]}"; do
+        base="$(basename "$src" .swift)"
+        if [ ! -f "$OBJ_DIR/$base.o" ] || [ "$src" -nt "$OBJ_DIR/$base.o" ]; then
+            stale=1
+            break
+        fi
+    done
+    if [ "$stale" = 1 ]; then
+        swiftc -c -incremental "$opt" -swift-version 5 -module-name "$MODULE_NAME" \
+            -target "$(uname -m)-apple-macosx$MACOS_MIN" \
+            -output-file-map "$map" \
+            -I "$TERM_MOD_DIR" \
+            "${SOURCES[@]}" >>"$LOG" 2>&1 || return 1
+    fi
+
+    # Link the whole object set once; the Info.plist is embedded here, not on
+    # each per-file compile.
+    local -a objs=()
+    for src in "${SOURCES[@]}"; do
+        objs+=("$OBJ_DIR/$(basename "$src" .swift).o")
+    done
+    swiftc "$opt" -swift-version 5 -module-name "$MODULE_NAME" \
+        -target "$(uname -m)-apple-macosx$MACOS_MIN" \
         -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST" \
         -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-        "${SOURCES[@]}" -o "$BUILD_TMP" >"$LOG" 2>&1
+        "${objs[@]}" -o "$BUILD_TMP" >>"$LOG" 2>&1
 }
-# unoptimized retry: works around an occasional -O compiler crash
-if ! compile -O && ! compile -Onone; then
+# -Onone retry: an occasional -O compiler crash, and (because the stamp
+# changes) a fresh object cache if the incremental state is ever corrupt.
+if ! compile_incremental -O && ! compile_incremental -Onone; then
     grep -E 'error:' -A3 "$LOG" >&2 || cat "$LOG" >&2
     echo "build-app: compile failed (full log: $LOG)" >&2
     rm -f "$BUILD_TMP" "$PLIST"
@@ -227,7 +299,6 @@ rm -f "$LOG"
 # permission after each build. Clear it before (and between) attempts.
 clear_cstemp() { rm -f "$APP/Contents/MacOS/"*.cstemp; }
 clear_cstemp
-signed=0
 # --dist with a Developer ID: hardened runtime + secure timestamp (what the
 # notary service requires); code inside Resources is signed first.
 if [ "$DIST" = 1 ] && [ -n "${DEVELOPER_ID:-}" ]; then
@@ -239,26 +310,19 @@ if [ "$DIST" = 1 ] && [ -n "${DEVELOPER_ID:-}" ]; then
             echo "build-app: Developer ID signing failed ($DEVELOPER_ID)" >&2; exit 1; }
     exit 0
 fi
-if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
-    perl -e 'alarm 30; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1 \
-        && signed=1
-    clear_cstemp
-fi
-if [ "$signed" = 0 ]; then
-    codesign --force --sign - --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1
-    clear_cstemp
-fi
-# say so when the stable signature didn't take: permissions then reset on
-# every rebuild (macOS keys them to the signature)
+# No ad-hoc fallback — ws build ensures the stable identity exists and is
+# usable before reaching here. If this fails, something is wrong and the
+# build should not succeed.
+perl -e 'alarm 30; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1 \
+    || { echo "build-app: codesign with '$SIGN_ID' failed — run 'ws permissions fix'" >&2; exit 1; }
+clear_cstemp
+
 # (captured first: under pipefail, `codesign | grep -q` reports a failure
 # when grep stops reading early and codesign gets SIGPIPE)
 SIGINFO="$(codesign -dvv "$APP" 2>&1)"
 # (a dist build says so in bin/make-dmg.sh, and never touches TCC: an
 # installed app gets the normal macOS permission prompts)
 [ "$DIST" = 1 ] && exit 0
-if [[ "$SIGINFO" != *"Authority=$SIGN_ID"* ]]; then
-    echo "build-app: WARNING not signed with '$SIGN_ID' (ad-hoc) — privacy grants won't survive rebuilds — run bin/fix-permissions.sh" >&2
-fi
 
 # fresh signature — (re)grant every privacy permission the app uses (mic,
 # speech, Downloads / Desktop / Documents) so no prompt interrupts you

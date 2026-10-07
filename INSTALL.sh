@@ -200,7 +200,7 @@ ok "configs linked to the repo ($CONFIG_DIRS)"
 # ------------------------------------------------------------- 4. build
 STEP="building the app"
 step "4/6 building kitchen-sink.app (compiling the Swift sources)"
-# the same build script ./build.sh uses (bin/build-app.sh): every top-level
+# the standard build path (bin/build-app.sh): every top-level
 # *.swift is compiled, SwiftTerm is precompiled once, then sign + the privacy
 # grants (mic, speech, Downloads / Desktop / Documents: bin/grant-permissions.sh)
 info "compiling (first run also precompiles SwiftTerm — a few minutes)…"

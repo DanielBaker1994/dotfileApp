@@ -3,6 +3,15 @@
 # JankyBorders (FelixKratz/formulae/borders) — window border highlighter.
 # Borders the focused window so you can see what's active under AeroSpace.
 # Colors: white active / muted grey inactive (Catppuccin Macchiato).
+#
+# How it picks windows (borders 1.9.0): NOT the accessibility API by default.
+# It resolves the front process + SkyLight window tags and only borders a
+# window tagged DOCUMENT, or FLOATING+MODAL (`window_suitable`, src/windows.c).
+# A window at any non-normal level — and every NSPanel — is tagged FLOATING and
+# skipped. `ax_focus=on` (auto-on when the process is trusted) only changes how
+# the focused window is resolved; it does NOT bypass the tag filter. No option
+# here can include a floating panel: the app has to present such a window as a
+# plain NSWindow at .normal level (see ProseWindow in NotesProse.swift).
 
 options=(
   style=round

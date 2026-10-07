@@ -65,7 +65,7 @@ fi
 # Build-if-stale — ONE build script (bin/build-app.sh) shared with
 # INSTALL.sh. Only when the binary is missing, in build-only mode, or when
 # no daemon answers: a hotkey press on a running daemon never pays for it
-# (./build.sh rebuilds + relaunches during development). The daemon ships
+# (`./ws build` rebuilds + relaunches during development). The daemon ships
 # as a real .app bundle: TCC (mic/speech) keys grants by the BUNDLE ID,
 # stable across rebuilds; build-app.sh re-signs + re-grants after every
 # build. A failed build keeps running the previous binary (a hotkey press

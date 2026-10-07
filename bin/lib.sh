@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # lib.sh — the helper functions behind the ./ws entry point.
 #
-# Sourced by ./ws and by the deprecated wrapper scripts (build.sh,
-# bin/make-dmg.sh, bin/fix-permissions.sh, bin/fake-*.sh) so the old names keep
-# working. The fixed-path scripts the app / aerospace / install.conf invoke
+# Sourced by ./ws and by the deprecated wrapper scripts (bin/make-dmg.sh,
+# bin/fix-permissions.sh, bin/fake-*.sh) so the old names keep working. The fixed-path scripts the app / aerospace / install.conf invoke
 # (kitchen_sink.sh, setup-home.sh, preflight.sh, build-app.sh, …) do NOT source
 # this: they are the internal contract and stay independent.
 set -uo pipefail
@@ -28,6 +27,9 @@ ws_die()  { printf '\033[31mws: %s\033[0m\n' "$*" >&2; exit 1; }
 # (hotkeys never pay for the stale check), so build here: build-app.sh kills the
 # old daemon after a new binary, kitchen_sink.sh then starts the fresh one.
 ws_cmd_build() {
+    # Ensure the stable signing identity exists, is trusted, and codesign can
+    # use it — before any compilation. No ad-hoc fallback.
+    ws_ensure_signing_identity
     if [ "${1:-}" = "--force" ]; then
         "$WS_ROOT/bin/build-app.sh" --force || exit 1
         shift
@@ -37,7 +39,55 @@ ws_cmd_build() {
     if [ "${1:-}" = "--build-only" ]; then
         export WS_BUILD_ONLY=1
     fi
+    # After a successful build, ensure permissions are valid for this
+    # binary. A fresh codesign resets TCC grants when the signature changes;
+    # ws_permissions_ensure() checks the TCC db against the current binary
+    # and re-grants only when needed.
+    ws_permissions_ensure
     exec "$WS_ROOT/bin/kitchen_sink.sh" window
+}
+
+# Ensure the stable signing identity exists, is trusted, and can be used by
+# codesign. Creates the self-signed cert if missing, trusts it, and unlocks
+# the keychain. Exits with a clear error if nothing works.
+ws_ensure_signing_identity() {
+    local KC="$HOME/Library/Keychains/login.keychain-db"
+    _ws_valid() { security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_ID\""; }
+    _ws_can_sign() {
+        local ff r
+        ff="$(mktemp)"; cp /bin/echo "$ff"
+        perl -e 'alarm 20; exec @ARGV' codesign --force --sign "$SIGN_ID" "$ff" >/dev/null 2>&1
+        r=$?; rm -f "$ff"; return $r
+    }
+
+    # Create the cert if it doesn't exist
+    if ! _ws_valid; then
+        local T
+        T="$(mktemp -d)"
+        printf '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=%s\n[ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n' "$SIGN_ID" > "$T/c.cnf"
+        /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$T/c.cnf" -keyout "$T/k.pem" -out "$T/c.pem" 2>/dev/null \
+          && /usr/bin/openssl pkcs12 -export -inkey "$T/k.pem" -in "$T/c.pem" -out "$T/c.p12" -passout pass:ws \
+          && security import "$T/c.p12" -k "$KC" -P ws -T /usr/bin/codesign >/dev/null \
+          && security add-trusted-cert -r trustRoot -p codeSign -k "$KC" "$T/c.pem" \
+          || ws_die "could not create or trust '$SIGN_ID'"
+        rm -rf "$T"
+        _ws_valid || ws_die "'$SIGN_ID' still not valid — Keychain Access ▸ it ▸ Trust ▸ Code Signing: Always Trust"
+    fi
+
+    # Make sure codesign can actually use the key (unlocks keychain if needed)
+    if ! _ws_can_sign; then
+        # Non-interactive (piped/CI): can't prompt for password
+        if ! [ -t 0 ]; then
+            ws_die "codesign can't access '$SIGN_ID' — run 'ws build' in a terminal to unlock the keychain"
+        fi
+        # Interactive: ask for the login password once to unlock
+        local PW rc
+        read -rs -p "  Login password (to unlock keychain for codesign): " PW; echo
+        { security unlock-keychain -p "$PW" "$KC" \
+          && security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PW" "$KC"; } >/dev/null 2>&1
+        rc=$?; unset PW
+        [ $rc = 0 ] && _ws_can_sign || ws_die "codesign still can't access '$SIGN_ID' (wrong password?) — fix it in Keychain Access"
+    fi
 }
 
 # =============================================================== dmg
@@ -152,6 +202,77 @@ ws_permissions_fix() {
     "$WS_ROOT/bin/kitchen_sink.sh" window >/dev/null 2>&1 &
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
     echo; echo "\342\234\224 done — press Hyper+X and click Allow once (quit + reopen the app if it still complains)."
+}
+
+# After a build, verify that TCC grants match the current binary and
+# re-grant only when needed. Quiet when everything is already valid.
+ws_permissions_ensure() {
+    local APP="$WS_ROOT/$APP_NAME.app"
+    [ -d "$APP" ] || return 0   # no bundle yet — nothing to check
+
+    # sudo-safe TCC.db path (same logic as grant-permissions.sh)
+    if [ -n "${SUDO_USER:-}" ]; then
+        local REAL_HOME
+        REAL_HOME="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+        local TCC_DB="${REAL_HOME:-/Users/$SUDO_USER}/Library/Application Support/com.apple.TCC/TCC.db"
+    else
+        local TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+    fi
+
+    # Can't check without the DB or sqlite3 — skip silently; the app will prompt
+    [ -f "$TCC_DB" ] && command -v sqlite3 >/dev/null 2>&1 || return 0
+    [ -r "$TCC_DB" ] && [ -w "$TCC_DB" ] || return 0   # no FDA — skip
+
+    # What services should be granted for this bundle ID
+    local -a SERVICES=(
+        kTCCServiceMicrophone
+        kTCCServiceSpeechRecognition
+        kTCCServiceSystemPolicyDownloadsFolder
+        kTCCServiceSystemPolicyDesktopFolder
+        kTCCServiceSystemPolicyDocumentsFolder
+    )
+
+    # Read the current code requirement from the binary (or detect ad-hoc)
+    local REQ IS_ADHOC=0
+    REQ="$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => //p')"
+    if [ -z "$REQ" ] || printf '%s' "$REQ" | grep -q 'cdhash'; then
+        IS_ADHOC=1   # ad-hoc: csreq is NULL in TCC.db
+    fi
+
+    # Check if every service has a valid grant for this bundle ID with the
+    # right csreq (NULL for ad-hoc, the binary blob for a real cert).
+    local need_grant=0
+    for svc in "${SERVICES[@]}"; do
+        if [ "$IS_ADHOC" = 1 ]; then
+            # ad-hoc grants use NULL csreq; client_type 0 = bundle ID
+            local has
+            has="$(sqlite3 "$TCC_DB" "SELECT count(*) FROM access WHERE service='$svc' AND client='$BUNDLE_ID' AND client_type=0 AND csreq IS NULL AND auth_value=2;" 2>/dev/null)"
+            [ "${has:-0}" -lt 1 ] && need_grant=1 && break
+        else
+            # real cert: build the expected csreq blob and compare
+            local TMP CSREQ_HEX
+            TMP="$(mktemp)"
+            if printf '%s' "$REQ" | csreq -r- -b "$TMP" 2>/dev/null; then
+                CSREQ_HEX="$(xxd -p "$TMP" | tr -d '\n')"
+                local has
+                has="$(sqlite3 "$TCC_DB" "SELECT count(*) FROM access WHERE service='$svc' AND client='$BUNDLE_ID' AND client_type=0 AND hex(csreq)='$CSREQ_HEX' AND auth_value=2;" 2>/dev/null)"
+                [ "${has:-0}" -lt 1 ] && need_grant=1
+            else
+                # csreq conversion failed — fall back to ad-hoc style
+                local has
+                has="$(sqlite3 "$TCC_DB" "SELECT count(*) FROM access WHERE service='$svc' AND client='$BUNDLE_ID' AND client_type=0 AND csreq IS NULL AND auth_value=2;" 2>/dev/null)"
+                [ "${has:-0}" -lt 1 ] && need_grant=1
+            fi
+            rm -f "$TMP"
+            [ "$need_grant" = 1 ] && break
+        fi
+    done
+
+    [ "$need_grant" = 0 ] && return 0   # all grants are valid
+
+    # Re-grant — delegate to grant-permissions.sh (it writes the correct
+    # csreq for the current signature, or NULL for ad-hoc).
+    "$WS_ROOT/bin/grant-permissions.sh" >/dev/null 2>&1 || true
 }
 
 # =============================================================== fake fixtures

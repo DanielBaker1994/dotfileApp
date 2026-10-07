@@ -667,7 +667,7 @@ Relative sizes. Each phase ships on its own and is usable.
 
 ## 9. Definition of done (acceptance checks)
 
-1. `./build.sh --build-only` passes; `bin/run-tests.sh compare` passes,
+1. `./ws build --build-only` passes; `bin/run-tests.sh compare` passes,
    including the KR4 parity corpus and byte-exact save round trips (UTF-8,
    UTF-8 BOM, UTF-16, CRLF, no final newline).
 2. `bin/ui-test-focus.py compare` passes (KR6): ✕ / Cmd+W / Hyper+N /

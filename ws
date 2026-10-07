@@ -4,7 +4,7 @@
 #   ./ws                     interactive menu (no args, on a terminal)
 #   ./ws <command> [flags]   one command (see ./ws help)
 #
-# The old names (build.sh, bin/make-dmg.sh, bin/fix-permissions.sh,
+# The old names (bin/make-dmg.sh, bin/fix-permissions.sh,
 # bin/fake-*.sh) still work as thin shims around the same functions in
 # bin/lib.sh. The app / aerospace / install.conf keep invoking their fixed-path
 # scripts (bin/kitchen_sink.sh, bin/setup-home.sh, …) directly.
@@ -35,7 +35,7 @@ ws — kitchen-sink entry point
   ws home app|repo|stack|status     the ~/.config/kitchen-sink home
   ws help                           this
 
-Old names (build.sh, bin/make-dmg.sh, bin/fix-permissions.sh,
+Old names (bin/make-dmg.sh, bin/fix-permissions.sh,
 bin/fake-confluence.sh, bin/fake-jira-tab.sh) are thin shims.
 EOF
 }

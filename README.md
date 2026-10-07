@@ -82,7 +82,7 @@ menu, or pass a command. `./ws help` lists everything.
 ./ws dmg                 # the distributable disk image
 ```
 
-The old names (`build.sh`, `bin/make-dmg.sh`, `bin/fix-permissions.sh`,
+The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
 `bin/fake-*.sh`) still work as thin shims around the same functions.
 
 - `PopupWindow.swift` — reusable AppKit popup framework (windows, chrome,
