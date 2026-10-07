@@ -65,32 +65,13 @@ struct FolderSideInfo {
         targetSize = (json["targetSize"] as? NSNumber)?.int64Value
         targetMtime = (json["targetMtime"] as? NSNumber)?.doubleValue ?? 0
     }
-
-    static func read(_ path: String, name: String) -> FolderSideInfo? {
-        var st = stat()
-        guard lstat(path, &st) == 0 else { return nil }
-        let mode = st.st_mode & S_IFMT
-        let isLink = mode == S_IFLNK
-        let isDir = mode == S_IFDIR
-        let mtime = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9
-        var info = FolderSideInfo(name: name, isDir: isDir, isLink: isLink,
-                                  link: isLink ? try? FileManager.default.destinationOfSymbolicLink(atPath: path) : nil,
-                                  size: isDir ? 0 : Int64(st.st_size), mtime: mtime)
-        if isLink {
-            var t = stat()
-            if stat(path, &t) == 0, t.st_mode & S_IFMT == S_IFREG {
-                info.targetSize = Int64(t.st_size)
-                info.targetMtime = Double(t.st_mtimespec.tv_sec) + Double(t.st_mtimespec.tv_nsec) / 1e9
-            }
-        }
-        return info
-    }
 }
 
 final class FolderNode {
     let id: Int
     let key: String
     let rel: String
+    var name: String
     var left: FolderSideInfo?
     var right: FolderSideInfo?
     var status: FolderStatus = .same
@@ -101,11 +82,19 @@ final class FolderNode {
     var expanded = false
     var depth = 0
     var diffBelow = 0, importantBelow = 0, unknownBelow = 0
-    init(id: Int, key: String, rel: String) { self.id = id; self.key = key; self.rel = rel }
 
-    var name: String { (left?.name ?? right?.name) ?? (rel as NSString).lastPathComponent }
+    init(id: Int, key: String, rel: String, name: String) {
+        self.id = id
+        self.key = key
+        self.rel = rel
+        self.name = name
+    }
+
     var isDir: Bool { (left?.isDir ?? false) || (right?.isDir ?? false) }
-    var kindMismatch: Bool { if let l = left, let r = right { return l.isDir != r.isDir } else { return false } }
+    var kindMismatch: Bool {
+        if let l = left, let r = right { return l.isDir != r.isDir }
+        return false
+    }
 }
 
 struct FolderOptions {
@@ -113,77 +102,73 @@ struct FolderOptions {
     var content = "auto"
     var hidden = true
     var exclude: [String] = []
-    var ignored: ((_ path: String, _ isDir: Bool) -> Bool)?
     var importance = Importance()
+    var useGitignore = false
+    var ignoreFile = ""
+    var recheck: Double = 30
 
     var json: [String: Any] {
-        ["timeTolerance": timeTolerance, "content": content, "hidden": hidden, "exclude": exclude]
+        ["timeTolerance": timeTolerance, "content": content, "hidden": hidden, "exclude": exclude,
+         "useGitignore": useGitignore, "ignoreFile": ignoreFile, "recheck": recheck]
     }
+}
+
+private func cfBox(_ method: String, _ params: [String: Any],
+                   timeout: TimeInterval = 600) -> [String: Any]? {
+    guard case .success(let box) = PythonHelper.shared.callSync(method, params, timeout: timeout),
+          let dict = box as? [String: Any] else { return nil }
+    return dict
 }
 
 final class FolderTree {
     let leftRoot: String
     let rightRoot: String
+    let handle: Int
     var roots: [FolderNode] = []
     private(set) var all: [FolderNode] = []
     var caseInsensitive = true
     var truncated = false
     var errors: [String] = []
 
-    init(left: String, right: String) { leftRoot = left; rightRoot = right }
+    init(left: String, right: String, handle: Int) {
+        leftRoot = left
+        rightRoot = right
+        self.handle = handle
+    }
+
+    deinit {
+        if handle >= 0 { _ = cfBox("folder.drop", ["handle": handle]) }
+    }
 
     func adopt(_ n: FolderNode) { all.append(n) }
-    func node(_ id: Int) -> FolderNode? { id >= 0 && id < all.count ? all[id] : nil }
+    func node(_ id: Int) -> FolderNode? { id >= 0 && id < all.count && all[id].id == id ? all[id] : nil }
 
     func path(_ n: FolderNode, _ side: CompareSide) -> String {
-        let root = side == .left ? leftRoot : rightRoot
-        var parts: [String] = []
-        var cur: FolderNode? = n
-        while let c = cur {
-            parts.append((side == .left ? c.left?.name : c.right?.name) ?? c.name)
-            cur = c.parent
-        }
-        return parts.reversed().reduce(root) { ($0 as NSString).appendingPathComponent($1) }
+        cfBox("folder.path", ["handle": handle, "id": n.id, "side": side.rawValue])?["path"] as? String
+            ?? n.rel
     }
 
-    var pending: [FolderNode] { all.filter { $0.status == .unknown && !$0.isDir } }
+    var pending: [FolderNode] {
+        (cfBox("folder.pending", ["handle": handle])?["ids"] as? [Int] ?? []).compactMap(node)
+    }
 
-    struct Counts { var different = 0, unimportant = 0, leftOnly = 0, rightOnly = 0, same = 0, sameByMetadata = 0, unknown = 0, error = 0 }
+    struct Counts {
+        var different = 0, unimportant = 0, leftOnly = 0, rightOnly = 0
+        var same = 0, sameByMetadata = 0, unknown = 0, error = 0
+    }
+
     func counts() -> Counts {
         var c = Counts()
-        for n in all where !n.isDir || n.kindMismatch {
-            switch n.status {
-            case .different: c.different += 1
-            case .unimportant: c.unimportant += 1
-            case .leftOnly: c.leftOnly += 1
-            case .rightOnly: c.rightOnly += 1
-            case .same: c.same += 1; if n.sameByMetadata { c.sameByMetadata += 1 }
-            case .unknown: c.unknown += 1
-            case .error: c.error += 1
-            }
-        }
+        guard let d = cfBox("folder.counts", ["handle": handle]) else { return c }
+        c.different = d["different"] as? Int ?? 0
+        c.unimportant = d["unimportant"] as? Int ?? 0
+        c.leftOnly = d["leftOnly"] as? Int ?? 0
+        c.rightOnly = d["rightOnly"] as? Int ?? 0
+        c.same = d["same"] as? Int ?? 0
+        c.sameByMetadata = d["sameByMetadata"] as? Int ?? 0
+        c.unknown = d["unknown"] as? Int ?? 0
+        c.error = d["error"] as? Int ?? 0
         return c
-    }
-
-    func settle() {
-        func walk(_ n: FolderNode) {
-            for c in n.children { walk(c) }
-            guard n.isDir, !n.kindMismatch else { return }
-            func isFolder(_ c: FolderNode) -> Bool { c.isDir && !c.kindMismatch }
-            n.diffBelow = n.children.reduce(0) { $0 + (isFolder($1) ? $1.diffBelow : ($1.status.isDiff ? 1 : 0)) }
-            n.unknownBelow = n.children.reduce(0) { $0 + (isFolder($1) ? $1.unknownBelow : ($1.status == .unknown ? 1 : 0)) }
-            n.importantBelow = n.children.reduce(0) { sum, c in
-                sum + (isFolder(c) ? c.importantBelow : (c.status.isDiff && c.status != .unimportant && c.status != .unknown ? 1 : 0))
-            }
-            if n.left != nil && n.right == nil { n.status = .leftOnly; return }
-            if n.right != nil && n.left == nil { n.status = .rightOnly; return }
-            if n.importantBelow > 0 { n.status = .different }
-            else if n.unknownBelow > 0 { n.status = .unknown }
-            else if n.diffBelow > 0 { n.status = .unimportant }
-            else { n.status = .same }
-            n.newer = .none
-        }
-        roots.forEach(walk)
     }
 
     struct Row {
@@ -197,192 +182,107 @@ final class FolderTree {
         var nameFilter = ""
     }
 
-    static func passes(_ n: FolderNode, _ f: FolderFilter) -> Bool {
-        switch f {
-        case .all: return true
-        case .diffs: return n.status.isDiff
-        case .same: return n.status == .same
-        case .orphans: return n.status.isOrphan
-        case .leftNewer: return n.newer == .left
-        case .rightNewer: return n.newer == .right
-        }
-    }
-
     static func matchesName(_ name: String, _ filter: String) -> Bool {
-        let parts = filter.split(whereSeparator: { $0 == "," || $0 == " " }).map(String.init).filter { !$0.isEmpty }
-        if parts.isEmpty { return true }
-        let inc = parts.filter { !$0.hasPrefix("!") }, exc = parts.filter { $0.hasPrefix("!") }.map { String($0.dropFirst()) }
-        func hit(_ g: String) -> Bool {
-            let pat = g.contains("*") || g.contains("?") || g.contains("[") ? g : "*\(g)*"
-            return fnmatch(pat, name, FNM_CASEFOLD) == 0
-        }
-        if exc.contains(where: hit) { return false }
-        return inc.isEmpty || inc.contains(where: hit)
+        cfBox("folder.matches_name", ["name": name, "filter": filter])?["matches"] as? Bool
+            ?? filter.isEmpty
     }
 
     func rows(_ v: View) -> [Row] {
-        var out: [Row] = []
-        let narrowing = v.filter != .all || !v.nameFilter.isEmpty
-        if v.flatten {
-            for n in all where !n.isDir || n.kindMismatch {
-                if Self.passes(n, v.filter), Self.matchesName(n.name, v.nameFilter) { out.append(Row(node: n, depth: 0)) }
-            }
-            return out
+        let expanded = all.filter(\.expanded).map(\.id)
+        let raw = cfBox("folder.rows", ["handle": handle, "filter": v.filter.rawValue,
+                                        "nameFilter": v.nameFilter, "flatten": v.flatten,
+                                        "expanded": expanded])?["rows"] as? [[String: Any]] ?? []
+        return raw.compactMap { r in
+            guard let id = r["id"] as? Int, let n = node(id) else { return nil }
+            return Row(node: n, depth: r["depth"] as? Int ?? 0)
         }
-        func shows(_ n: FolderNode) -> Bool {
-            if !n.isDir || n.kindMismatch { return Self.passes(n, v.filter) && Self.matchesName(n.name, v.nameFilter) }
-            if !narrowing { return true }
-            return n.children.contains(where: shows)
-        }
-        func walk(_ n: FolderNode, _ depth: Int) {
-            guard shows(n) else { return }
-            out.append(Row(node: n, depth: depth))
-            if n.isDir, !n.kindMismatch, n.expanded || narrowing {
-                for c in n.children { walk(c, depth + 1) }
-            }
-        }
-        roots.forEach { walk($0, 0) }
-        return out
     }
 
     func expandAll(_ open: Bool) { for n in all where n.isDir { n.expanded = open } }
+
+    func settle() {
+        let statuses: [[Any]] = all.map { [$0.id, $0.status.rawValue, $0.sameByMetadata] }
+        applyStatuses(cfBox("folder.settle", ["handle": handle, "statuses": statuses])?["statuses"])
+    }
+
+    func applyStatuses(_ list: Any?) {
+        for entry in (list as? [[Any]] ?? []) {
+            guard entry.count >= 4, let id = entry[0] as? Int, let n = node(id) else { continue }
+            n.status = FolderStatus(rawValue: entry[1] as? String ?? "same") ?? .same
+            n.sameByMetadata = entry[2] as? Bool ?? false
+            n.newer = FolderNewer(rawValue: entry[3] as? String ?? "none") ?? .none
+        }
+    }
 }
 
 enum FolderScan {
-    struct Entry {
-        var name: String
-        var info: FolderSideInfo
-    }
-
     static func isCaseInsensitive(_ path: String) -> Bool {
         let u = URL(fileURLWithPath: path)
         let v = try? u.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
         return !(v?.volumeSupportsCaseSensitiveNames ?? false)
     }
 
-    static func fold(_ name: String, _ ci: Bool) -> String {
-        let n = name.precomposedStringWithCanonicalMapping
-        return ci ? n.lowercased() : n
-    }
-
-    static func list(_ dir: String, hidden: Bool) -> [Entry]? {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
-        var out: [Entry] = []
-        out.reserveCapacity(names.count)
-        for name in names {
-            if !hidden && name.hasPrefix(".") { continue }
-            guard let info = FolderSideInfo.read((dir as NSString).appendingPathComponent(name), name: name) else { continue }
-            out.append(Entry(name: name, info: info))
-        }
-        return out
-    }
-
-    static func excluded(_ name: String, _ patterns: [String]) -> Bool {
-        patterns.contains { p in
-            p.contains("*") || p.contains("?") || p.contains("[") ? fnmatch(p, name, 0) == 0 : p == name
-        }
-    }
-
     static func run(left: String, right: String, options o: FolderOptions,
                     progress: ((Int) -> Void)? = nil, cancelled: (() -> Bool)? = nil) -> FolderTree {
-        let tree = FolderTree(left: left, right: right)
-        tree.caseInsensitive = isCaseInsensitive(left)
-        var last = Date()
-        func tick() {
-            if let p = progress, Date().timeIntervalSince(last) > 0.1 { last = Date(); p(tree.all.count) }
+        let empty = FolderTree(left: left, right: right, handle: -1)
+        empty.caseInsensitive = isCaseInsensitive(left)
+        guard let start = cfBox("folder.scan_start",
+                                ["left": left, "right": right, "options": o.json,
+                                 "caseInsensitive": empty.caseInsensitive]),
+              let session = start["session"] as? Int else { return empty }
+        var last = 0
+        while true {
+            if cancelled?() == true { break }
+            guard let step = cfBox("folder.scan_step", ["session": session, "maxDirs": 24]),
+                  let done = step["done"] as? Bool else { break }
+            let count = step["count"] as? Int ?? 0
+            if count != last { last = count; progress?(count) }
+            if done { break }
         }
-
-        func pair(_ lp: String?, _ rp: String?, rel: String, parent: FolderNode?, depth: Int) -> [FolderNode] {
-            if cancelled?() == true { return [] }
-            var le = lp.flatMap { list($0, hidden: o.hidden) }, re = rp.flatMap { list($0, hidden: o.hidden) }
-            if lp != nil && le == nil { tree.errors.append(lp!); le = [] }
-            if rp != nil && re == nil { tree.errors.append(rp!); re = [] }
-            func keep(_ e: Entry, in dir: String?) -> Bool {
-                if excluded(e.name, o.exclude) { return false }
-                if let ig = o.ignored, let d = dir, ig((d as NSString).appendingPathComponent(e.name), e.info.isDir) { return false }
-                return true
-            }
-            let l = (le ?? []).filter { keep($0, in: lp) }, r = (re ?? []).filter { keep($0, in: rp) }
-            var byKey: [String: (l: Entry?, r: Entry?)] = [:]
-            var order: [String] = []
-            for e in l {
-                let k = fold(e.name, tree.caseInsensitive)
-                if byKey[k] == nil { order.append(k) }
-                byKey[k, default: (nil, nil)].l = e
-            }
-            for e in r {
-                let k = fold(e.name, tree.caseInsensitive)
-                if byKey[k] == nil { order.append(k) }
-                byKey[k, default: (nil, nil)].r = e
-            }
-            let sorted = order.sorted { a, b in
-                let ea = byKey[a]!, eb = byKey[b]!
-                let da = (ea.l?.info.isDir ?? ea.r?.info.isDir) ?? false, db = (eb.l?.info.isDir ?? eb.r?.info.isDir) ?? false
-                if da != db { return da }
-                let na = ea.l?.name ?? ea.r?.name ?? "", nb = eb.l?.name ?? eb.r?.name ?? ""
-                return na.localizedStandardCompare(nb) == .orderedAscending
-            }
-            var nodes: [FolderNode] = []
-            for k in sorted {
-                if tree.all.count >= 400_000 { tree.truncated = true; break }
-                let e = byKey[k]!
-                let name = e.l?.name ?? e.r?.name ?? k
-                let n = FolderNode(id: tree.all.count, key: rel.isEmpty ? k : rel + "/" + k,
-                                   rel: rel.isEmpty ? name : rel + "/" + name)
-                tree.adopt(n)
-                n.left = e.l?.info
-                n.right = e.r?.info
-                n.parent = parent
-                n.depth = depth
-                nodes.append(n)
-                tick()
-                if n.isDir && !n.kindMismatch {
-                    let ld = n.left != nil ? lp.map { ($0 as NSString).appendingPathComponent(n.left!.name) } : nil
-                    let rd = n.right != nil ? rp.map { ($0 as NSString).appendingPathComponent(n.right!.name) } : nil
-                    n.children = pair(ld, rd, rel: n.key, parent: n, depth: depth + 1)
-                }
-            }
-            return nodes
-        }
-
-        tree.roots = pair(left, right, rel: "", parent: nil, depth: 0)
-        let items: [[String: Any]] = tree.all.map { n in
-            ["left": n.left.map { $0.json as Any } ?? NSNull(),
-             "right": n.right.map { $0.json as Any } ?? NSNull()]
-        }
-        if case .success(let box) = PythonHelper.shared.callSync(
-                "folder.classify_many", ["items": items, "options": o.json], timeout: 600),
-           let results = (box as? [String: Any])?["results"] as? [[String: Any]] {
-            for (i, n) in tree.all.enumerated() where i < results.count {
-                n.status = FolderStatus(rawValue: results[i]["status"] as? String ?? "same") ?? .error
-                n.sameByMetadata = results[i]["sameByMetadata"] as? Bool ?? false
-                n.newer = FolderNewer(rawValue: results[i]["newer"] as? String ?? "none") ?? .none
-            }
-        }
-        tree.settle()
-        return tree
+        guard let snap = cfBox("folder.scan_finish", ["session": session]) else { return empty }
+        return tree(from: snap, left: left, right: right)
     }
 
-    static func classify(_ n: FolderNode, left lp: String?, right rp: String?, _ o: FolderOptions) {
-        n.sameByMetadata = false
-        guard case .success(let box) = PythonHelper.shared.callSync(
-                "folder.classify",
-                ["left": n.left.map { $0.json as Any } ?? NSNull(),
-                 "right": n.right.map { $0.json as Any } ?? NSNull(),
-                 "options": o.json], timeout: 120),
-              let dict = box as? [String: Any] else { return }
-        n.status = FolderStatus(rawValue: dict["status"] as? String ?? "same") ?? .error
-        n.sameByMetadata = dict["sameByMetadata"] as? Bool ?? false
-        n.newer = FolderNewer(rawValue: dict["newer"] as? String ?? "none") ?? .none
+    static func tree(from snap: [String: Any], left: String, right: String) -> FolderTree {
+        guard let handle = snap["handle"] as? Int else {
+            return FolderTree(left: left, right: right, handle: -1)
+        }
+        let t = FolderTree(left: left, right: right, handle: handle)
+        t.caseInsensitive = snap["caseInsensitive"] as? Bool ?? true
+        t.truncated = snap["truncated"] as? Bool ?? false
+        t.errors = snap["errors"] as? [String] ?? []
+        let nodesJson = snap["nodes"] as? [[String: Any]] ?? []
+        var byID: [Int: FolderNode] = [:]
+        for j in nodesJson {
+            guard let id = j["id"] as? Int else { continue }
+            let n = FolderNode(id: id, key: j["key"] as? String ?? "",
+                               rel: j["rel"] as? String ?? "", name: j["name"] as? String ?? "")
+            n.left = (j["left"] as? [String: Any]).map(FolderSideInfo.init(json:))
+            n.right = (j["right"] as? [String: Any]).map(FolderSideInfo.init(json:))
+            n.status = FolderStatus(rawValue: j["status"] as? String ?? "same") ?? .same
+            n.sameByMetadata = j["sameByMetadata"] as? Bool ?? false
+            n.newer = FolderNewer(rawValue: j["newer"] as? String ?? "none") ?? .none
+            n.depth = j["depth"] as? Int ?? 0
+            byID[id] = n
+            t.adopt(n)
+        }
+        for j in nodesJson {
+            guard let id = j["id"] as? Int, let n = byID[id] else { continue }
+            if let p = j["parent"] as? Int, let parent = byID[p] { n.parent = parent }
+            n.children = (j["children"] as? [Int] ?? []).compactMap { byID[$0] }
+        }
+        t.roots = (snap["roots"] as? [Int] ?? []).compactMap { byID[$0] }
+        return t
     }
 
     static func restat(_ n: FolderNode, tree: FolderTree, _ o: FolderOptions) {
-        let lp = tree.path(n, .left), rp = tree.path(n, .right)
-        n.left = FolderSideInfo.read(lp, name: (lp as NSString).lastPathComponent)
-        n.right = FolderSideInfo.read(rp, name: (rp as NSString).lastPathComponent)
-        n.newer = .none
-        classify(n, left: lp, right: rp, o)
+        guard let box = cfBox("folder.restat", ["handle": tree.handle, "id": n.id,
+                                                "options": o.json]) else { return }
+        if let l = box["left"] as? [String: Any] { n.left = FolderSideInfo(json: l) }
+        if let r = box["right"] as? [String: Any] { n.right = FolderSideInfo(json: r) }
+        n.status = FolderStatus(rawValue: box["status"] as? String ?? "same") ?? .same
+        n.sameByMetadata = box["sameByMetadata"] as? Bool ?? false
+        n.newer = FolderNewer(rawValue: box["newer"] as? String ?? "none") ?? .none
     }
 }
 
@@ -390,12 +290,10 @@ enum FolderContent {
     enum Answer { case same, different, unimportant, error }
 
     static func check(left: String, right: String, size: (Int64, Int64), imp: Importance) -> Answer {
-        guard case .success(let box) = PythonHelper.shared.callSync(
-                "folder.content_check",
-                ["left": left, "right": right, "sizes": [size.0, size.1], "importance": imp.json],
-                timeout: 600),
-              let dict = box as? [String: Any] else { return .error }
-        switch dict["answer"] as? String {
+        guard let box = cfBox("folder.content_check",
+                              ["left": left, "right": right, "sizes": [size.0, size.1],
+                               "importance": imp.json]) else { return .error }
+        switch box["answer"] as? String {
         case "same": return .same
         case "unimportant": return .unimportant
         case "different": return .different
@@ -435,11 +333,8 @@ enum FolderContent {
     }
 
     static func ruleCandidates(_ tree: FolderTree) -> [FolderNode] {
-        tree.all.filter { n in
-            guard n.status == .different, let l = n.left, let r = n.right, !(l.isLink && r.isLink),
-                  let lf = l.asFile, let rf = r.asFile else { return false }
-            return lf.size <= 4 << 20 && rf.size <= 4 << 20
-        }
+        (cfBox("folder.rule_candidates", ["handle": tree.handle])?["ids"] as? [Int] ?? [])
+            .compactMap(tree.node)
     }
 }
 
@@ -474,36 +369,20 @@ struct SyncPlan {
 
     static func make(_ tree: FolderTree, _ mode: SyncMode, nameFilter: String = "") -> SyncPlan {
         var p = SyncPlan()
-        let toRight: Bool = [.updateRight, .updateBoth, .mirrorRight].contains(mode)
-        let toLeft: Bool = [.updateLeft, .updateBoth, .mirrorLeft].contains(mode)
-        let mirror: CompareSide? = mode == .mirrorRight ? .right : mode == .mirrorLeft ? .left : nil
-        func copy(_ n: FolderNode, to side: CompareSide) {
-            let other = side == .left ? n.left : n.right
-            p.copies.append(Copy(src: tree.path(n, side.other), dst: tree.path(n, side), to: side, rel: n.rel, replaces: other != nil))
+        guard let box = cfBox("folder.sync_plan", ["handle": tree.handle, "mode": mode.rawValue,
+                                                   "nameFilter": nameFilter]) else { return p }
+        p.copies = (box["copies"] as? [[String: Any]] ?? []).compactMap { c in
+            guard let src = c["src"] as? String, let dst = c["dst"] as? String,
+                  let to = c["to"] as? String, let side = CompareSide(rawValue: to) else { return nil }
+            return Copy(src: src, dst: dst, to: side, rel: c["rel"] as? String ?? "",
+                        replaces: c["replaces"] as? Bool ?? false)
         }
-        func passes(_ n: FolderNode) -> Bool { nameFilter.isEmpty || FolderTree.matchesName(n.name, nameFilter) }
-        func visit(_ n: FolderNode) {
-            let folder = n.isDir && !n.kindMismatch
-            if folder && n.left != nil && n.right != nil { n.children.forEach(visit); return }
-            if folder && !nameFilter.isEmpty { n.children.forEach(visit); return }
-            if !folder && !passes(n) { return }
-            switch n.status {
-            case .leftOnly:
-                if mirror == .left { p.trash.append((tree.path(n, .left), .left, n.rel)) } else if toRight { copy(n, to: .right) }
-            case .rightOnly:
-                if mirror == .right { p.trash.append((tree.path(n, .right), .right, n.rel)) } else if toLeft { copy(n, to: .left) }
-            case .different, .unknown:
-                if let m = mirror { copy(n, to: m); return }
-                switch n.newer {
-                case .left where toRight: copy(n, to: .right)
-                case .right where toLeft: copy(n, to: .left)
-                case .none: p.skipped.append(n.rel)
-                default: break
-                }
-            case .same, .unimportant, .error: break
-            }
+        p.trash = (box["trash"] as? [[String: Any]] ?? []).compactMap { t in
+            guard let path = t["path"] as? String, let to = t["side"] as? String,
+                  let side = CompareSide(rawValue: to) else { return nil }
+            return (path: path, side: side, rel: t["rel"] as? String ?? "")
         }
-        tree.roots.forEach(visit)
+        p.skipped = box["skipped"] as? [String] ?? []
         return p
     }
 }

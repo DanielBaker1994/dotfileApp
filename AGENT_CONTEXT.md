@@ -453,10 +453,11 @@ unchanged and can still be called directly.
   nspasteboard.org concealed / transient skipped; our own copies via
   `ownWrite`); filefast saves, Files-view Copy Path, `FileDrag.onDragOut`.
   Clipboard / explicit paths skip the ignore rules; files or folders.
-- `IgnoreRules`: gitignore syntax, git / ripgrep precedence — global git
-  excludes < per folder `.gitignore` (inside a repo only) < `.ignore` <
-  `.rgignore` (deeper wins) < `config/paths.ignore` (`[paths] ignore-file`;
-  ~/ and absolute patterns OK). Native regex matcher, cached per folder,
+- `IgnoreRules` (`pylib/ignore_rules.py`, Swift facade): gitignore syntax,
+  git / ripgrep precedence — global git excludes < per folder `.gitignore`
+  (inside a repo only) < `.ignore` < `.rgignore` (deeper wins) <
+  `config/paths.ignore` (`[paths] ignore-file`; ~/ and absolute patterns
+  OK), verified 1:1 against `git check-ignore`. Cached per folder,
   re-stat ≤ every 2 s; an ignored folder hides everything below (git).
   Parity-tested against `git check-ignore`. `load()` re-applies the rules
   to stored rows.
@@ -670,9 +671,12 @@ unchanged and can still be called directly.
   rows around the edit; `copyRows`/`copySection` = Opt+→ / Opt+← (Ctrl+R).
   `CharDiff` `diff`/`changes` (AI view) and `marks` (drawing, memoised
   in-process). `BinaryCompare` stays Swift: a 10-line byte compare on
-  in-memory Data, no hop.) `pylib/compare_folder.py` holds the folder
-  classifier and content equality; the walker (`FolderScan`), the mutable
-  tree the UI drags, `IgnoreRules` (gitignore) and `SyncPlan` stay Swift.
+  in-memory Data, no hop.) Folder compare is fully python too —
+  `pylib/compare_folder.py` owns the scan walker (chunked, progress +
+  cancel per step), the paired tree, classification/settle/roll-up,
+  rows/filters/counts/paths, rule candidates and `SyncPlan`;
+  `FolderNode`/`FolderTree` in Swift are mirrors over a tree handle, and
+  `IgnoreRules` (gitignore) is `pylib/ignore_rules.py` with a facade.
   `ComparePane.swift`: `CompareSession` (one pair + view state: filter →
   `visible` display rows, cursor/anchor/focus, dirty = side's undo count vs
   `cleanDepth`, `waiters` for `--wait`, DispatchSource `watchers`),
@@ -745,13 +749,16 @@ unchanged and can still be called directly.
   written to `~/.cache/kitchen-sink/compare-pasted/`, pruned by
   `CompareRecent.save`; the row reads "pasted text ⇆ …"). Hook
   `do:compare:start-paste`.
-- Folder Compare: `CompareFolder.swift` (Foundation only: `FolderScan.run` =
-  both trees walked off main + paired by relative path — case per volume,
-  NFC = NFD, symlinks as links; quick test = size + mtime ± `time-tolerance`;
-  `FolderTree.settle` = a folder's color is what is below it, `unknown` until
-  the content answers; `FolderContent` = 1 MB byte compare with early exit +
-  the Text Compare normalizer for "unimportant" (blue); `FolderTree.rows` =
-  filter / flatten / name filter (`*.swift, !*.o`)). `CompareFolderView.swift`:
+- Folder Compare: the engine is `pylib/compare_folder.py` (scan walker =
+  both trees walked off main in steps + paired by relative path — case per
+  volume, NFC = NFD, symlinks as links, exclude + gitignore rules applied
+  per entry; quick test = size + mtime ± `time-tolerance`; settle = a
+  folder's color is what is below it, `unknown` until the content answers;
+  `FolderContent` = 1 MB byte compare with early exit + the Text Compare
+  normalizer for "unimportant" (blue); rows = filter / flatten / name filter
+  (`*.swift, !*.o`); `SyncPlan`). `CompareFolder.swift` is the facade +
+  mirror (`FolderNode`/`FolderTree` over a tree handle), and
+  `CompareFolderView.swift`:
   `FolderSession`, `FolderTreeView` (ONE drawn view for both sides + the glyph
   column), `FolderPage` (toolbar, keys, menus, file actions). A folder session
   is a `CompareSession` with `.folder` set (text model empty); `openPair` sends

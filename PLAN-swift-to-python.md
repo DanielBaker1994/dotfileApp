@@ -33,6 +33,14 @@ locked below; no open questions.
       (Mach host_statistics via ctypes, vm_stat, pmset, notify script);
       `ws test status` (8 cases). All suites + full Swift sweep green;
       app builds.
+- [x] Extras 3 (owner call): folder compare completed —
+      `pylib/ignore_rules.py` (gitignore, `git check-ignore` parity 30/30)
+      and `pylib/compare_folder.py` now own the scan walker (chunked,
+      progress + cancel per step), the paired tree, settle/roll-up,
+      rows/filters/counts/paths, rule candidates and `SyncPlan`;
+      `FolderTree`/`FolderNode` are mirrors over a handle. `ws test ignore`
+      (5 cases) + the folder suite 68/68 through the new path. All suites
+      and the full Swift sweep green; app builds.
 - [x] Wrap-up — docs updated for everything that moved; nothing committed.
 
 ## Problem Statement

@@ -226,8 +226,11 @@ struct FolderTests {
         let cnt = tree.counts()
         check(cnt.leftOnly >= 2 && cnt.rightOnly == 1, "counts: orphans (\(cnt.leftOnly)/\(cnt.rightOnly))")
 
+        let shelf = tmp + "/test.ignore"
+        write(shelf, "sub/\n")
         var ig = FolderOptions()
-        ig.ignored = { p, _ in p.hasSuffix("/sub") }
+        ig.useGitignore = true
+        ig.ignoreFile = shelf
         let t4 = FolderScan.run(left: L, right: R, options: ig)
         check(node(t4, "sub") == nil && node(t4, "sub/ok.txt") == nil, "ignore rules: an ignored folder is never walked")
 

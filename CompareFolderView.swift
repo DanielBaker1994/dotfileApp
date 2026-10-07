@@ -461,13 +461,9 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         o.exclude = c.string("exclude", ".git, node_modules, .DS_Store").split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } + (session?.extraExclude ?? [])
         o.importance = c.importance
-        if c.bool("use-gitignore", true) {
-            let rules = IgnoreRules()
-            let file = (c.string("ignore-file", "") as NSString).expandingTildeInPath
-            if !file.isEmpty, FileManager.default.fileExists(atPath: file) { rules.shelfFile = file }
-            rules.recheck = 30
-            o.ignored = { rules.ignored($0, isDir: $1) }
-        }
+        o.useGitignore = c.bool("use-gitignore", true)
+        o.ignoreFile = (c.string("ignore-file", "") as NSString).expandingTildeInPath
+        o.recheck = 30
         return o
     }
 

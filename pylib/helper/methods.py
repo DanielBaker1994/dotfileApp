@@ -209,6 +209,86 @@ def _folder_content_check(params: dict) -> dict:
         int(sizes[0]), int(sizes[1]), params.get("importance") or {})}
 
 
+@method("folder.scan_start")
+def _folder_scan_start(params: dict) -> dict:
+    handle = compare_folder.scan_start(params.get("left") or "", params.get("right") or "",
+                                       params.get("options") or {},
+                                       bool(params.get("caseInsensitive")))
+    return {"session": handle}
+
+
+@method("folder.scan_step")
+def _folder_scan_step(params: dict) -> dict:
+    return compare_folder.scan_step(params.get("session"), int(params.get("maxDirs") or 24))
+
+
+@method("folder.scan_finish")
+def _folder_scan_finish(params: dict) -> dict:
+    return compare_folder.scan_finish(params.get("session"))
+
+
+@method("folder.drop")
+def _folder_drop(params: dict) -> dict:
+    compare_folder.tree_drop(params.get("handle"))
+    return {}
+
+
+@method("folder.path")
+def _folder_path(params: dict) -> dict:
+    return compare_folder.tree_path(params.get("handle"), int(params.get("id") or 0),
+                                    params.get("side") or "left")
+
+
+@method("folder.pending")
+def _folder_pending(params: dict) -> dict:
+    return compare_folder.tree_pending(params.get("handle"))
+
+
+@method("folder.counts")
+def _folder_counts(params: dict) -> dict:
+    return compare_folder.tree_count(params.get("handle"))
+
+
+@method("folder.rows")
+def _folder_rows(params: dict) -> dict:
+    return compare_folder.tree_rows(params.get("handle"), params.get("filter") or "all",
+                                    params.get("nameFilter") or "", bool(params.get("flatten")),
+                                    params.get("expanded") or [])
+
+
+@method("folder.matches_name")
+def _folder_matches_name(params: dict) -> dict:
+    return {"matches": compare_folder.matches_name(params.get("name") or "",
+                                                   params.get("filter") or "")}
+
+
+@method("folder.rule_candidates")
+def _folder_rule_candidates(params: dict) -> dict:
+    return compare_folder.tree_rule_candidates(params.get("handle"))
+
+
+@method("folder.sync_plan")
+def _folder_sync_plan(params: dict) -> dict:
+    return compare_folder.tree_sync_plan(params.get("handle"), params.get("mode") or "updateRight",
+                                         params.get("nameFilter") or "")
+
+
+@method("folder.settle")
+def _folder_settle(params: dict) -> dict:
+    return compare_folder.tree_settle(params.get("handle"), params.get("statuses"))
+
+
+@method("folder.apply_answers")
+def _folder_apply_answers(params: dict) -> dict:
+    return compare_folder.tree_apply_answers(params.get("handle"), params.get("answers") or {})
+
+
+@method("folder.restat")
+def _folder_restat(params: dict) -> dict:
+    return compare_folder.tree_restat(params.get("handle"), int(params.get("id") or 0),
+                                      params.get("options") or {})
+
+
 @method("ai.tables_as_text")
 def _ai_tables_as_text(params: dict) -> dict:
     return {"text": ai_format.tables_as_text(params.get("md") or "")}
