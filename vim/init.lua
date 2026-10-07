@@ -29,19 +29,24 @@ for _, k in ipairs({ 'd', 'D', 'c', 'C', 'x', 'X', 's', 'S' }) do
   vim.keymap.set({ 'n', 'x' }, k, '"_' .. k)
 end
 vim.keymap.set('x', 'p', 'P')
--- Space s f = search files: asks the app (its command socket, g:ws_sock) for
--- the find popup (NoteFindWindow.swift); Return there opens a notes tab
+-- Space s f = find among the open notes, Space s g = ripgrep their contents:
+-- asks the app (its command socket, g:ws_sock) for the popup
+-- (NoteFindWindow.swift); Return there switches to the note
 vim.g.mapleader = ' '
-vim.keymap.set('n', '<leader>sf', function()
+local function ask_app(msg)
   local sock = vim.g.ws_sock
   if not sock or sock == '' then return end
   local uv = vim.uv or vim.loop
   local pipe = uv.new_pipe(false)
   pipe:connect(sock, function(err)
     if err then pipe:close() return end
-    pipe:write('notes-find', function() pipe:close() end)
+    pipe:write(msg, function() pipe:close() end)
   end)
-end, { desc = 'search files (notes popup)', silent = true })
+end
+vim.keymap.set('n', '<leader>sf', function() ask_app('notes-find') end,
+  { desc = 'find among the open notes (popup)', silent = true })
+vim.keymap.set('n', '<leader>sg', function() ask_app('notes-grep') end,
+  { desc = 'ripgrep the open notes (popup)', silent = true })
 o.hidden = true
 o.autoread = true
 o.autowriteall = true

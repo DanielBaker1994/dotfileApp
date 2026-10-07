@@ -342,7 +342,10 @@ ignore-file = "config/paths.ignore"
 # the file name beats one in the folders). Return switches to that tab, Cmd+C
 # copies the path, Esc or Space s f again closes. Only from the notes view.
 # NoteFindWindow.swift; the key is in vim/init.lua.
-#   rows   rows shown (default 12)       width   popup width (640)
+# "Space s g" does the same with ripgrep over the open notes' CONTENTS: type
+# 2+ characters (smart-case regex), Return jumps to that line in its tab.
+#   rows   rows shown (default 12)       width      popup width (640)
+#   grep-max   hits kept (200)           rg-bin     path to rg (default: found)
 [notes-find]
 rows = 12
 width = 640
@@ -865,6 +868,7 @@ kitchen-sink = "*:app"
 "notes: Cmd+S" = "save the note"
 "notes: Cmd+F" = "search the note"
 "notes: Cmd+O" = "open a file by path as a tab"
+"notes: Space s g" = "vim pane: ripgrep the open notes, Return jumps to the line"
 "notes: Space s f" = "vim pane: find among the open notes (popup), Return switches to it"
 "notes: Cmd+P" = "reading view: export the note as a PDF (its path is copied)"
 "notes: Cmd+C / Cmd+V / Ctrl+V" = "copy / paste (editor + terminal)"

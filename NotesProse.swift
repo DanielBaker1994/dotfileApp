@@ -5,8 +5,7 @@ import WebKit
 // SAME document the PDF export produces — pandoc `-s -f gfm -t html5` with
 // `[notes] pdf-css` (else the built-in light style) as its header, so what
 // you read is what you export — in a centred column of `prose-width`
-// points, with a dim meta line (path · edited · words) under the first
-// heading. The switch at the editor's bottom right (Prose | Edit), ⌘⇧P or
+// points. The switch at the editor's bottom right (Prose | Edit), ⌘⇧P or
 // Esc goes back to the editor (nvim / native).
 //
 // pandoc missing → `ProseRender.basic` (headings, lists + task boxes,
@@ -174,8 +173,7 @@ enum ProseRender {
     // `-s -f gfm -t html5` with `[notes] pdf-css` (else the built-in style)
     // as its header — so what you read is what you export. The dark theme
     // layer (themeCSS) recolors it; the screen adds only a <base> for
-    // relative images, the `prose-width` column and the (screen-only) meta
-    // line under the first heading.
+    // relative images and the `prose-width` column.
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
         var cfg = ProsePDF.Config()
         cfg.pandoc = RichText.pandocBin
@@ -191,7 +189,6 @@ enum ProseRender {
         let base = URL(fileURLWithPath: (src.path as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
         var override = "<base href=\"\(esc(base))\">\n<style>\n"
             + "body { max-width: \(Int(width))px !important; }\n"
-            + ".meta { font-family: -apple-system, system-ui; font-size: .82em; color: \(css(c.dim)); margin: -.2em 0 1.6em; }\n"
             + "</style>"
         // [notes] copy-buttons (default true): the style id is the switch the
         // reading view's script checks — screen-only, so the PDF never has it
@@ -200,22 +197,6 @@ enum ProseRender {
         }
         if let head = html.range(of: "</head>", options: .caseInsensitive) {
             html.insert(contentsOf: override, at: head.lowerBound)
-        }
-        // the meta line (screen-only): under the first heading when there is
-        // one, else at the top of the body
-        let words = src.markdown.split { $0.isWhitespace || $0.isNewline }.count
-        var edited = ""
-        if let d = (try? FileManager.default.attributesOfItem(atPath: src.path))?[.modificationDate] as? Date {
-            let f = DateFormatter()
-            f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "MMM d, HH:mm"
-            edited = " · edited " + f.string(from: d)
-        }
-        let meta = "<div class=\"meta\">\(esc((src.path as NSString).abbreviatingWithTildeInPath))\(edited) · \(words) words</div>"
-        if let end = html.range(of: "</h1>", options: .caseInsensitive) {
-            html.insert(contentsOf: meta, at: end.upperBound)
-        } else if let body = html.range(of: "<body", options: .caseInsensitive),
-                  let gt = html[body.upperBound...].firstIndex(of: ">") {
-            html.insert(contentsOf: meta, at: html.index(after: gt))
         }
         return html
     }
@@ -233,6 +214,7 @@ enum ProseRender {
 // the reading page itself (a WKWebView painted in the card color)
 final class ProseView: NSView, WKScriptMessageHandler {
     let web: WKWebView
+    func scrollBy(_ dy: Int) { web.evaluateJavaScript("window.scrollBy(0, \(dy))") }
     var onLinkClick: ((URL) -> Void)?
     var onOpenImage: ((String) -> Void) = { FilePopup.show(path: $0, over: nil) }
     private var lastPath = ""
@@ -671,8 +653,7 @@ final class ProseWindow: NSWindow {
         // j / k scroll the page (the web view would swallow them as plain keys)
         if e.type == .keyDown, e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let c = e.charactersIgnoringModifiers, c == "j" || c == "k" {
-            let dy = c == "j" ? 60 : -60
-            page.web.evaluateJavaScript("window.scrollBy(0, \(dy))")
+            page.scrollBy(c == "j" ? 60 : -60)
             return
         }
         // the pinch never reaches the page's own view reliably: take it here

@@ -2739,6 +2739,7 @@ final class SwitcherController: NSObject {
     // /paths: the shelf popup + the clipboard watcher feeding it
     var pathsWindow: PathsWindow?
     var noteFindWindow: NoteFindWindow?
+    var noteGrepWindow: NoteFindWindow?
     var clipboardPaths: ClipboardPaths?
     var pathsSeedObserver: NSObjectProtocol?
     // /screenshot (Hyper+X): capture + annotate, a tool panel (Screenshot.swift)
@@ -3522,6 +3523,7 @@ final class SwitcherController: NSObject {
             case "toggle-terminal": noteWindow?.toggleTerminalDrawer()
             case "term": toggleTerminalPanel()
             case "notes-find": showNoteFind()
+            case "notes-grep": showNoteFind(grep: true)
             case "switcher": showViewSwitcher()
             case "switcher-hide": viewSwitcher?.window.hide(restore: false)
             case "reset-size": noteWindow?.resetToDefaultSize()
@@ -3840,8 +3842,8 @@ final class SwitcherController: NSObject {
                             self?.showNotes()
                         } else if name == "term" {
                             self?.toggleTerminalPanel()
-                        } else if name == "notes-find" {
-                            self?.showNoteFind()
+                        } else if name == "notes-find" || name == "notes-grep" {
+                            self?.showNoteFind(grep: name == "notes-grep")
                         } else if name == "jira-dashboard" {
                             self?.showJiraDashboard()
                         } else if name == "setup" {
@@ -6599,24 +6601,32 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // notes pad Space s f (socket `notes-find`): built once, kept
-    func showNoteFind() {
-        // only from the notes view (Space s f lives in its vim pane); the
-        // same key again closes it
-        if noteFindWindow?.isShown == true { noteFindWindow?.hide(); return }
+    // notes pad Space s f (socket `notes-find`) and Space s g (`notes-grep`):
+    // built once, kept. Only from the notes view; the same key closes it.
+    func showNoteFind(grep: Bool = false) {
+        let mine = grep ? noteGrepWindow : noteFindWindow
+        if mine?.isShown == true { mine?.hide(); return }
         guard let notes = noteWindow, slot.current == .notes else { return }
-        if noteFindWindow == nil {
-            let f = NoteFindWindow(commands.first(where: { $0.kind == .note }))
-            f.onOpen = { [weak self] path in self?.openNoteFile(path) }
-            f.log = { [weak self] in self?.log($0) }
-            noteFindWindow = f
-            subWindows.append(f.window)
-        }
-        noteFindWindow?.openPaths = { notes.openNotePaths?() ?? [] }
-        noteFindWindow?.show()
-        if let w = noteFindWindow?.window {
-            reclaimToolKey(w) { [weak w] in w?.focusSearchField() }
-        }
+        (grep ? noteFindWindow : noteGrepWindow)?.hide()
+        let f = mine ?? {
+            let n = NoteFindWindow(commands.first(where: { $0.kind == .note }), mode: grep ? .grep : .files)
+            n.onOpen = { [weak self] path, line in
+                self?.openNoteFile(path)
+                if let line {
+                    // the tab switch swaps the buffer first, then jump
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        self?.noteWindow?.vimCommand("normal! \(line)Gzz")
+                    }
+                }
+            }
+            n.log = { [weak self] in self?.log($0) }
+            if grep { noteGrepWindow = n } else { noteFindWindow = n }
+            subWindows.append(n.window)
+            return n
+        }()
+        f.openPaths = { notes.openNotePaths?() ?? [] }
+        f.show()
+        reclaimToolKey(f.window) { [weak f] in f?.window.focusSearchField() }
     }
 
     // Hyper+S → /paths: built once, kept; a reopen orders it back in

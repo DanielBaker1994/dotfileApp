@@ -10437,6 +10437,14 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if let r = windowSizeKey(code, mods) { return r }
         if mods.contains(.command) || mods.contains(.control),
            let r = modifiedKey(code, mods) { return r }
+        // reading view (prose as the main view): plain j / k scroll it, also
+        // after a click put the focus in the web view
+        if proseShown, let pv = proseView, !pv.isHidden,
+           mods.intersection([.command, .control, .option, .shift]).isEmpty,
+           code == 38 || code == 40, !(panel.firstResponder is NSText) {
+            pv.scrollBy(code == 38 ? 60 : -60)
+            return true
+        }
         return config.editMode ? editorKey(code, mods) : listKey(code, mods)
     }
 

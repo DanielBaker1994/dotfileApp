@@ -33,6 +33,11 @@ enum NoteFinder {
 }
 
 final class NoteFindWindow: NSObject {
+    enum Mode { case files, grep }
+    let mode: Mode
+    private var grepGen = 0
+    private var lines: [Int] = []           // grep: the line of each shown row
+    private var grepNote = ""
     let window: PopupWindow
     private let list: FileListPane
     private let scroll = NSScrollView()
@@ -44,11 +49,12 @@ final class NoteFindWindow: NSObject {
     private var iconCache: [String: NSImage] = [:]
     private static let rowH: CGFloat = 22
 
-    var onOpen: ((String) -> Void)?
+    var onOpen: ((String, Int?) -> Void)?
     var openPaths: (() -> [String])?       // the notes' open tabs
     var log: ((String) -> Void)?
 
-    init(_ cmd: CommandSpec?) {
+    init(_ cmd: CommandSpec?, mode: Mode = .files) {
+        self.mode = mode
         colors = cmd.map { windowColors($0) } ?? windowColors()
         var cfg = PopupConfig(name: "notes-find")
         let w = Double(configSectionValue("notes-find", "width") ?? "") ?? 640
@@ -63,14 +69,15 @@ final class NoteFindWindow: NSObject {
         cfg.colors = colors
         cfg.showSearchBar = true
         cfg.searchWidthFraction = 1
-        cfg.searchPlaceholder = configSectionValue("notes-find", "placeholder")
-            ?? "open notes — type to filter · ↩ switch · esc close"
+        cfg.searchPlaceholder = mode == .files
+            ? "open notes — type to filter · ↩ switch · esc close"
+            : "search the open notes (ripgrep) — ↩ jump to the line · esc close"
         window = PopupWindow(config: cfg)
         list = FileListPane(config: cfg)
         super.init()
         window.onFilter = { [weak self] q in
             self?.query = q
-            if self?.window.isShown == true { self?.reload() }
+            if self?.window.isShown == true { self?.queryChanged() }
             return []
         }
         window.onEscape = { [weak self] in self?.hide() }
@@ -115,10 +122,9 @@ final class NoteFindWindow: NSObject {
             }
         }
         query = window.currentSearchText.trimmingCharacters(in: .whitespaces)
-        reload()
         place()
         window.focusSearchField()
-        rescan()
+        if mode == .files { rescan() } else { queryChanged() }
     }
 
     func hide() {
@@ -141,6 +147,77 @@ final class NoteFindWindow: NSObject {
     private static func shortPath(_ p: String) -> String {
         let home = NSHomeDirectory()
         return p.hasPrefix(home + "/") ? "~" + p.dropFirst(home.count) : p
+    }
+
+    private func queryChanged() {
+        if mode == .files { reload() } else { runGrep() }
+    }
+
+    // ripgrep over the open notes' files, off main, debounced; a newer
+    // query drops the older answer
+    private func runGrep() {
+        grepGen += 1
+        let gen = grepGen
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let paths = (openPaths?() ?? []).filter { FileManager.default.fileExists(atPath: $0) }
+        guard q.count >= 2, !paths.isEmpty else {
+            grepNote = paths.isEmpty ? "No notes are open" : "Type 2+ characters to search \(paths.count) open notes"
+            showGrep([])
+            return
+        }
+        let rg = Self.rgPath()
+        let cap = max(1, Int(configSectionValue("notes-find", "grep-max") ?? "") ?? 200)
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, gen == self.grepGen else { return }
+            guard let rg else {
+                DispatchQueue.main.async { self.grepNote = "ripgrep (rg) not found — brew install ripgrep"; self.showGrep([]) }
+                return
+            }
+            let sep = "\u{1F}"
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            let r = try? runProcess(rg, ["--line-number", "--no-heading", "--with-filename", "--color", "never",
+                                         "--smart-case", "--max-columns", "300", "--max-columns-preview",
+                                         "--field-match-separator", sep, "-e", q, "--"] + paths)
+            var hits: [(String, Int, String)] = []
+            for l in (r?.out ?? "").split(separator: "\n", omittingEmptySubsequences: true) {
+                let p = l.split(separator: Character(sep), maxSplits: 2, omittingEmptySubsequences: false)
+                guard p.count == 3, let n = Int(p[1]) else { continue }
+                hits.append((String(p[0]), n, p[2].trimmingCharacters(in: .whitespaces)))
+                if hits.count >= cap { break }
+            }
+            // rg's file order is arbitrary: keep the notes' tab order
+            let order = Dictionary(uniqueKeysWithValues: paths.enumerated().map { ($1, $0) })
+            hits.sort { (order[$0.0] ?? 0, $0.1) < (order[$1.0] ?? 0, $1.1) }
+            DispatchQueue.main.async {
+                guard gen == self.grepGen else { return }
+                self.grepNote = "No match for “\(q)”"
+                self.showGrep(hits)
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+                self.log?(String(format: "notes-grep: '%@' %d hits, %.0f ms", q, hits.count, ms))
+            }
+        }
+    }
+
+    static func rgPath() -> String? {
+        let c = configSectionValue("notes-find", "rg-bin").flatMap { $0.isEmpty ? nil : ($0 as NSString).expandingTildeInPath }
+        return ([c].compactMap { $0 } + ["/opt/homebrew/bin/rg", "/usr/local/bin/rg", "/usr/bin/rg"])
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private func showGrep(_ hits: [(String, Int, String)]) {
+        let font = NSFont.systemFont(ofSize: 10)
+        shown = hits.map { NoteFinder.Hit(path: $0.0, rel: ($0.0 as NSString).lastPathComponent, mtime: 0, tab: 0) }
+        lines = hits.map { $0.1 }
+        let rows = max(5, Int(configSectionValue("notes-find", "rows") ?? "") ?? 12)
+        list.rows = hits.map { h in
+            let trailing = "\((h.0 as NSString).lastPathComponent):\(h.1)"
+            return PopupFileBrowser.Entry(name: h.2.isEmpty ? "(blank)" : h.2, path: h.0, isDir: false, size: 0,
+                                          icon: icon(h.0), trailingText: trailing,
+                                          trailingWidth: ceil((trailing as NSString).size(withAttributes: [.font: font]).width))
+        }
+        list.selection = 0
+        empty.stringValue = grepNote
+        layoutList(maxRows: rows)
     }
 
     private func reload() {
@@ -174,10 +251,10 @@ final class NoteFindWindow: NSObject {
         return i
     }
 
-    private func layoutList() {
+    private func layoutList(maxRows: Int? = nil) {
         guard let backdrop = window.nativeWindow.contentView else { return }
         let top = window.searchFieldFrame.maxY + 8
-        let n = CGFloat(max(1, shown.count))
+        let n = CGFloat(max(1, min(shown.count, maxRows ?? Int.max)))
         let vis = (window.nativeWindow.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
         let listH = min(n * Self.rowH, vis * 0.6)
         let total = ceil(top + listH + 10)
@@ -236,8 +313,9 @@ final class NoteFindWindow: NSObject {
     private func open(_ i: Int) {
         guard shown.indices.contains(i) else { NSSound.beep(); return }
         let p = shown[i].path
+        let line = mode == .grep && lines.indices.contains(i) ? lines[i] : nil
         hide()
-        onOpen?(p)
+        onOpen?(p, line)
         log?("notes-find: open \(p)")
     }
 
