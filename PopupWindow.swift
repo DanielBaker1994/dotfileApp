@@ -12758,6 +12758,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         if !on {
             guard proseShown else { return }
             proseShown = false
+            // carry the reading position into nvim: its cursor goes to the line at the page top
+            if vimView != nil, vimPaneActive, let pv = proseView {
+                pv.topSourceLine { [weak self] n in
+                    guard let n else { return }
+                    self?.vimCommand("call cursor(\(n), 1) | normal! zt")
+                }
+            }
             proseView?.isHidden = true
             if let ed = primaryEditor { panel.makeFirstResponder(ed); focusedPane = .editor }
             return
@@ -12768,12 +12775,20 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let pv = proseView ?? {
             let v = ProseView(frame: editorScroll?.frame ?? backdrop.bounds)
             if let sw = proseSwitch { backdrop.addSubview(v, positioned: .below, relativeTo: sw) } else { backdrop.addSubview(v) }
+            v.onJump = { [weak self] n in
+                guard let self, self.vimView != nil, self.vimPaneActive else { return }
+                self.vimCommand("call cursor(\(n), 1) | normal! zt")
+            }
             proseView = v
             return v
         }()
         proseShown = true
         pv.isHidden = false
         layoutEditorScroll()
+        // open the page where the nvim cursor is (the line at the window top when known)
+        if vimView != nil, vimPaneActive, let l = vimEval("line('w0')"), let n = Int(l.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            pv.syncLine = n
+        }
         pv.show(src, colors: config.colors, font: proseFont, size: proseFontSize * zoom, width: proseWidth)
         panel.makeFirstResponder(pv.web)
     }

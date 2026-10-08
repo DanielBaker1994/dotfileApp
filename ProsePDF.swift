@@ -51,10 +51,10 @@ enum ProsePDF {
         return list.filter { FileManager.default.fileExists(atPath: $0) }
     }
 
-    static func pandocArgs(note: String, css: String, html: String, _ c: Config) -> [String] {
+    static func pandocArgs(note: String, css: String, html: String, _ c: Config, sourcepos: Bool = false) -> [String] {
         let dir = (note as NSString).deletingLastPathComponent
         let stem = ((note as NSString).lastPathComponent as NSString).deletingPathExtension
-        return ["-s", "-f", "gfm", "-t", "html5", "--syntax-highlighting=\(c.highlight.isEmpty ? "tango" : c.highlight)",
+        return ["-s", "-f", sourcepos ? "gfm+sourcepos" : "gfm", "-t", "html5", "--syntax-highlighting=\(c.highlight.isEmpty ? "tango" : c.highlight)",
                 "-V", "lang=en", "--metadata", "pagetitle=\(stem)", "--resource-path=\(dir)",
                 "--include-in-header=\(css)",
                 // the header file holds the app theme's --p-* palette: diagrams.lua colors a
@@ -103,7 +103,7 @@ enum ProsePDF {
             let css = try headerFile(c)
             let html = scratchFile(c, "prose")
             defer { removeScratch(css, c); removeScratch(html, c) }
-            let p = try runProcess(expand(c.pandoc), pandocArgs(note: note, css: css, html: html, c))
+            let p = try runProcess(expand(c.pandoc), pandocArgs(note: note, css: css, html: html, c, sourcepos: true))
             guard p.code == 0 else { return nil }
             return try? String(contentsOfFile: html, encoding: .utf8)
         } catch { return nil }

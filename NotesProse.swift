@@ -227,7 +227,41 @@ enum ProseRender {
 final class ProseView: NSView, WKScriptMessageHandler {
     let web: WKWebView
     func scrollBy(_ dy: Int) { web.evaluateJavaScript("window.scrollBy(0, \(dy))") }
+
+    // Position sync with the nvim pane: pandoc's sourcepos tags every block
+    // with data-pos="LINE:COL-…", so a source line maps to an element.
+    // `syncLine` is applied once the next render lands (or at once when the
+    // page is already current).
+    var syncLine: Int?
+    func scrollToSourceLine(_ n: Int) {
+        web.evaluateJavaScript("""
+        (function(n){var best=null,bl=-1;n=+n;
+        document.querySelectorAll('[data-pos]').forEach(function(e){
+          var l=parseInt(e.getAttribute('data-pos'));
+          if(!isNaN(l)&&l<=n&&l>=bl){bl=l;best=e;}});
+        if(best){window.scrollTo(0,best.getBoundingClientRect().top+window.scrollY-8);}})(\(n))
+        """)
+    }
+    // the first source line at the top of the viewport
+    func topSourceLine(_ done: @escaping (Int?) -> Void) {
+        web.evaluateJavaScript("""
+        (function(){var r=null;
+        var all=document.querySelectorAll('[data-pos]');
+        for(var i=0;i<all.length;i++){var b=all[i].getBoundingClientRect();
+          if(b.bottom>4){var l=parseInt(all[i].getAttribute('data-pos'));if(!isNaN(l)){r=l;break;}}}
+        return r;})()
+        """) { v, _ in
+            let d = (v as? NSNumber)?.doubleValue
+            done(d.flatMap { $0.isFinite && $0 >= 1 && $0 < 1e9 ? Int($0) : nil })
+        }
+    }
+    private func applySyncLine() {
+        guard let n = syncLine else { return }
+        syncLine = nil
+        scrollToSourceLine(n)
+    }
     var onLinkClick: ((URL) -> Void)?
+    var onJump: ((Int) -> Void)?   // an outline click: the heading's source line
     var onOpenImage: ((String) -> Void) = { FilePopup.show(path: $0, over: nil) }
     private var lastPath = ""
     private var gen = 0
@@ -292,6 +326,76 @@ final class ProseView: NSView, WKScriptMessageHandler {
         })();
         """
 
+
+    // Outline + stats (screen-only, like the copy buttons): a fixed ≡ button
+    // opens a right-hand outline of the page's headings (click = scroll there
+    // and tell the host the heading's source line, so nvim's cursor follows);
+    // a slim strip at the bottom shows words and reading time. Both live
+    // OUTSIDE <body> so the in-place body patch keeps them; the function
+    // re-runs after a patch to refresh the entries and the counts.
+    static let outlineJS = """
+        (function () {
+          var root = document.documentElement;
+          var st = document.createElement('style');
+          st.textContent = [
+            '#ws-ol-btn{position:fixed;top:10px;right:14px;z-index:50;width:30px;height:30px;border-radius:8px;border:none;',
+            'background:var(--p-s0,#333);color:var(--p-dim,#999);font:16px/30px -apple-system,sans-serif;cursor:pointer;opacity:.75}',
+            '#ws-ol-btn:hover{opacity:1;color:var(--p-text,#eee)}',
+            '#ws-ol{position:fixed;top:0;right:0;bottom:0;width:260px;z-index:49;overflow:auto;padding:52px 8px 40px;box-sizing:border-box;',
+            'background:var(--p-well,#222);border-left:1px solid var(--p-rule,#444);display:none;font:13px -apple-system,sans-serif}',
+            '#ws-ol.open{display:block}',
+            '#ws-ol a{display:block;padding:5px 8px;border-radius:6px;color:var(--p-dim,#999);text-decoration:none;cursor:pointer;',
+            'white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+            '#ws-ol a:hover{background:var(--p-s0,#333);color:var(--p-text,#eee)}',
+            '#ws-ol a.cur{color:var(--p-accent,#8cf);background:var(--p-s0,#333)}',
+            '#ws-ol .none{padding:8px;color:var(--p-dim,#999)}',
+            '#ws-stats{position:fixed;left:0;right:0;bottom:0;z-index:48;padding:4px 14px;text-align:center;pointer-events:none;',
+            'font:11px -apple-system,sans-serif;color:var(--p-dim,#999);background:linear-gradient(transparent,var(--p-bg,#111) 70%)}'
+          ].join('');
+          root.appendChild(st);
+          var btn = document.createElement('button');
+          btn.id = 'ws-ol-btn'; btn.type = 'button'; btn.title = 'Outline'; btn.textContent = '\\u2261';
+          var ol = document.createElement('div'); ol.id = 'ws-ol';
+          var stats = document.createElement('div'); stats.id = 'ws-stats';
+          root.appendChild(ol); root.appendChild(btn); root.appendChild(stats);
+          var heads = [];
+          function line(e) { var l = parseInt(e.getAttribute('data-pos')); return isNaN(l) ? null : l; }
+          function build() {
+            heads = Array.prototype.slice.call(document.body.querySelectorAll('h1,h2,h3,h4,h5,h6'));
+            ol.innerHTML = '';
+            if (!heads.length) { var n = document.createElement('div'); n.className = 'none'; n.textContent = 'No headings'; ol.appendChild(n); }
+            var top = Math.min.apply(null, heads.map(function (h) { return +h.tagName[1]; }).concat([6]));
+            heads.forEach(function (h) {
+              var a = document.createElement('a');
+              a.textContent = h.textContent;
+              a.title = h.textContent;
+              a.style.paddingLeft = (8 + (+h.tagName[1] - top) * 14) + 'px';
+              a.addEventListener('click', function () {
+                window.scrollTo({ top: h.getBoundingClientRect().top + window.scrollY - 12 });
+                var l = line(h);
+                if (l !== null) window.webkit.messageHandlers.wsJump.postMessage(l);
+              });
+              ol.appendChild(a);
+            });
+            var text = document.body.innerText || '';
+            var words = (text.match(/\\S+/g) || []).length;
+            var mins = Math.max(1, Math.round(words / 230));
+            stats.textContent = words + ' words \\u00b7 ' + mins + ' min read';
+            mark();
+          }
+          function mark() {
+            var cur = -1;
+            for (var i = 0; i < heads.length; i++) { if (heads[i].getBoundingClientRect().top <= 40) cur = i; else break; }
+            Array.prototype.forEach.call(ol.querySelectorAll('a'), function (a, i) { a.classList.toggle('cur', i === cur); });
+          }
+          btn.addEventListener('click', function () { ol.classList.toggle('open'); });
+          window.addEventListener('scroll', mark, { passive: true });
+          window.__wsToggleOutline = function () { ol.classList.toggle('open'); };
+          window.__wsBuildOutline = build;
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build); else build();
+        })();
+        """
+
     override init(frame: NSRect) {
         let cfg = WKWebViewConfiguration()
         // double-click a picture -> its full-size popup (like the nvim view)
@@ -303,11 +407,14 @@ final class ProseView: NSView, WKScriptMessageHandler {
             """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         cfg.userContentController.addUserScript(WKUserScript(source: Self.copyButtonJS,
                                                              injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        cfg.userContentController.addUserScript(WKUserScript(source: Self.outlineJS,
+                                                             injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         let w = ProseWebView(frame: frame, configuration: cfg)
         web = w
         super.init(frame: frame)
         w.onMenu = { [weak self] menu in self?.addMenuItems(menu) }
         cfg.userContentController.add(WeakScriptHandler(self), name: "wsImage")
+        cfg.userContentController.add(WeakScriptHandler(self), name: "wsJump")
         web.autoresizingMask = [.width, .height]
         web.frame = bounds
         web.setValue(false, forKey: "drawsBackground")
@@ -342,6 +449,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
     override func smartMagnify(with e: NSEvent) { resetZoom(); saveZoom() }
 
     func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+        if m.name == "wsJump" { if let n = (m.body as? NSNumber)?.intValue { onJump?(n) }; return }
         guard let s = m.body as? String, let u = URL(string: s), u.isFileURL else { return }
         onOpenImage(u.path)
     }
@@ -354,6 +462,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         pdf.keyEquivalent = "p"
         pdf.keyEquivalentModifierMask = .command
         menu.addItem(pdf)
+        menu.addItem(menuItem("Outline") { [weak self] in self?.web.evaluateJavaScript("window.__wsToggleOutline&&window.__wsToggleOutline()") })
         let path = lastPath
         menu.addItem(menuItem("Copy Note Path") {
             NSPasteboard.general.clearContents()
@@ -410,7 +519,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         // keys so toggling [notes] copy-buttons reloads the page
         let copy = tri(configSectionValue("notes", "copy-buttons")) ?? true
         let key = "\(src.path)\u{1}\(Int(size))\u{1}\(font)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(copy)\u{1}\(src.markdown)"
-        guard key != lastKey else { return }   // nothing changed: keep what is on screen
+        guard key != lastKey else { applySyncLine(); return }   // nothing changed: keep what is on screen
         // The <head> (themeCSS, <base>, the column width) is what colors the
         // page; only patch the body in place when the head is unchanged too.
         let headKey = "\(src.path)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(copy)"
@@ -425,7 +534,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
             DispatchQueue.main.async {
                 guard let self, g == self.gen else { return }
                 if sameHead, let body = Self.bodyInner(html) {
-                    self.web.evaluateJavaScript(Self.patchJS(body))
+                    self.web.evaluateJavaScript(Self.patchJS(body)) { _, _ in self.applySyncLine() }
                     return
                 }
                 let dir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
@@ -434,7 +543,10 @@ final class ProseView: NSView, WKScriptMessageHandler {
                 guard (try? Data(html.utf8).write(to: file)) != nil else { return }
                 self.loadedPath = src.path
                 self.loadedHeadKey = headKey
-                if same {   // re-loading the same note: keep the scroll spot
+                if self.syncLine != nil {
+                    self.web.loadFileURL(file, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.applySyncLine() }
+                } else if same {   // re-loading the same note: keep the scroll spot
                     self.web.evaluateJavaScript("window.scrollY") { y, _ in
                         let y = (y as? Double) ?? 0
                         self.web.loadFileURL(file, allowingReadAccessTo: URL(fileURLWithPath: "/"))
@@ -464,7 +576,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         let lit = (try? JSONSerialization.data(withJSONObject: body, options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
         return "var __y=window.scrollY;document.body.innerHTML=\(lit);window.scrollTo(0,__y);"
-            + "window.__wsAddCopyButtons&&window.__wsAddCopyButtons();"
+            + "window.__wsAddCopyButtons&&window.__wsAddCopyButtons();window.__wsBuildOutline&&window.__wsBuildOutline();"
     }
 }
 
