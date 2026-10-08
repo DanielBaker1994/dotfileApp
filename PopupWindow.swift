@@ -12794,7 +12794,11 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         none.state = cur == nil ? .on : .off
         m.addItem(none)
         m.addItem(.separator())
-        for name in DocTemplates.names(configSectionValue("notes", "doc-templates")) {
+        // the styles = the palettes in [notes] pdf-css (the one stylesheet), unless
+        // [notes] doc-templates names them
+        let cssPath = (configSectionValue("notes", "pdf-css") ?? "").trimmingCharacters(in: .whitespaces)
+        let css = cssPath.isEmpty ? nil : try? String(contentsOfFile: (cssPath as NSString).expandingTildeInPath, encoding: .utf8)
+        for name in DocTemplates.names(configSectionValue("notes", "doc-templates"), css: css) {
             let it = ClosureMenuItem(name) { [weak self] in self?.applyDocTemplate(name) }
             it.state = cur == name ? .on : .off
             m.addItem(it)

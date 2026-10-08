@@ -35,5 +35,5 @@ description: Start a polished, shareable document from the reusable professional
 
 The CSS lives only in `~/.dotfiles/markdown_generator/friendly_document_styling.css`
 (shared by the app and `EXTERNAL_BUILD_AND_OPEN_PDF`). A new style = copy one
-`:root:has(.name) { … }` palette block there and add the name to
-`[notes] doc-templates` in `commands.toml`.
+`:root:has(.name) { … }` palette block there — the ◐ menu reads the names from
+the stylesheet, nothing else to edit (optional snippet only).

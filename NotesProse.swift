@@ -133,8 +133,8 @@ enum ProseRender {
             ("selection", rgba(c.accentOn, 0.28)),
         ]
         let root = ":root { " + vars.map { "--p-\($0.0): \($0.1);" }.joined(separator: " ") + " }"
-        let file = (try? String(contentsOfFile: assetDir + "/prose_theme.css", encoding: .utf8)) ?? ""
-        return "<style>\n" + root + "\n" + file + "\n</style>"
+        // only the palette: the rules that read it live in the ONE stylesheet ([notes] pdf-css)
+        return "<style>\n" + root + "\n</style>"
     }
 
     // pandoc's built-in `tango` is a LIGHT theme: its keywords/types are dark
@@ -167,6 +167,19 @@ enum ProseRender {
         """
     }
 
+    // The copy-button stylesheet: copy_button.css beside `[notes] pdf-css` (the same
+    // file the nvim build includes — one copy), else the built-in one above
+    static func copyButtonStyles(_ c: PopupColors, cssPath: String?) -> String {
+        if let p = cssPath, !p.isEmpty {
+            let f = ((p as NSString).expandingTildeInPath as NSString).deletingLastPathComponent + "/copy_button.css"
+            if var t = try? String(contentsOfFile: f, encoding: .utf8) {
+                t = t.replacingOccurrences(of: "<style>", with: "").replacingOccurrences(of: "</style>", with: "")
+                return t
+            }
+        }
+        return copyButtonCSS(c)
+    }
+
     // The reading page: the SAME document the PDF export produces — pandoc
     // `-s -f gfm -t html5` with `[notes] pdf-css` (else the built-in style)
     // as its header — so what you read is what you export. The dark theme
@@ -192,7 +205,7 @@ enum ProseRender {
         // [notes] copy-buttons (default true): the style id is the switch the
         // reading view's script checks — screen-only, so the PDF never has it
         if tri(notes("copy-buttons")) ?? true {
-            override += "\n<style id=\"ws-copy\">\n" + copyButtonCSS(c) + "</style>"
+            override += "\n<style id=\"ws-copy\">\n" + copyButtonStyles(c, cssPath: cfg.css) + "</style>"
         }
         if let head = html.range(of: "</head>", options: .caseInsensitive) {
             html.insert(contentsOf: override, at: head.lowerBound)

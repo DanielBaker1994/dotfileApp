@@ -29,6 +29,11 @@ struct Main {
         check(DocTemplates.apply("", template: "paper") == "<div class=\"doc paper\"></div>\n\n", "empty note")
         check(DocTemplates.names(nil) == DocTemplates.builtin, "default names")
         check(DocTemplates.names(" a , b,, ") == ["a", "b"], "configured names")
+        let css = ":root { --p-bg: #fff; }\n:root:has(.paper) {\n  --p-bg: #fff; --p-text: #000;\n}\n:root:has(.doc) body { page: doc; }\n:root:has(.nord) { --p-bg: #2e3440; }\n:root:has(.dracula) { --p-text: #fff; }"
+        check(DocTemplates.fromCSS(css) == ["paper", "nord"], "palette blocks only (needs --p-bg, not .doc): \(DocTemplates.fromCSS(css))")
+        check(DocTemplates.names(nil, css: css) == ["paper", "nord"], "names come from the css")
+        check(DocTemplates.names("x, y", css: css) == ["x", "y"], "config overrides the css")
+        check(DocTemplates.names(nil, css: "") == DocTemplates.builtin, "no css palettes = built-in")
         print("doc templates: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

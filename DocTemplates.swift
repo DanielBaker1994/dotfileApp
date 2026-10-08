@@ -7,11 +7,28 @@ import Foundation
 enum DocTemplates {
     static let builtin = ["tokyo-night", "paper", "executive", "terminal", "catppuccin-mocha", "catppuccin-latte", "dracula", "nord", "gruvbox-dark", "gruvbox-light", "solarized-dark", "solarized-light", "rose-pine", "rose-pine-dawn"]
 
-    // [notes] doc-templates = "a, b, c" (else the built-in four)
-    static func names(_ configured: String?) -> [String] {
+    // Every template the stylesheet defines: a `:root:has(.NAME) { … --p-bg … }`
+    // palette block, in file order. The CSS is the single source — add a palette
+    // block there and the menu has it.
+    static func fromCSS(_ css: String) -> [String] {
+        guard let re = try? NSRegularExpression(pattern: #":root:has\(\.([A-Za-z0-9_-]+)\)\s*\{[^}]*--p-bg"#) else { return [] }
+        var seen = Set<String>(), out: [String] = []
+        for m in re.matches(in: css, range: NSRange(css.startIndex..., in: css)) {
+            guard let r = Range(m.range(at: 1), in: css) else { continue }
+            let n = String(css[r])
+            if n != "doc", seen.insert(n).inserted { out.append(n) }
+        }
+        return out
+    }
+
+    // [notes] doc-templates = "a, b, c" overrides; else the palettes found in the
+    // stylesheet (`css` = its text); else the built-in four
+    static func names(_ configured: String?, css: String? = nil) -> [String] {
         let list = (configured ?? "").split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        return list.isEmpty ? builtin : list
+        if !list.isEmpty { return list }
+        let found = css.map(fromCSS) ?? []
+        return found.isEmpty ? builtin : found
     }
 
     // the marker on the first line: its template + footer (nil = no marker)
