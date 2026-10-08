@@ -10549,6 +10549,12 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // view); nil = not this stage's key. The order is documented in
     // AGENT_CONTEXT.md ("handleKey order").
     private func handleKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
+        // reading view: vim-style search (/, Cmd/Ctrl+F, n / N, Esc = :nohl)
+        if proseShown, let pv = proseView, !pv.isHidden, panel.attachedSheet == nil,
+           let r = pv.searchKey(code: code, mods: mods) {
+            if r, code != 53, panel.firstResponder !== pv.web { panel.makeFirstResponder(pv.web) }
+            return r
+        }
         if let r = overlayKey(code, mods) { return r }
         if let r = windowSizeKey(code, mods) { return r }
         if mods.contains(.command) || mods.contains(.control),
