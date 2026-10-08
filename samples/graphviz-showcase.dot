@@ -1,0 +1,82 @@
+// Graphviz showcase: one graph exercising most common features.
+// Render:  dot -Tsvg graphviz-showcase.dot -o graphviz-showcase.svg
+//          dot -Tpng -Gdpi=150 graphviz-showcase.dot -o graphviz-showcase.png
+digraph Platform {
+    label="Order platform: request flow, data model, deploy pipeline";
+    labelloc=t; fontsize=22; fontname="Helvetica-Bold";
+    rankdir=LR; compound=true; newrank=true;
+    splines=true; nodesep=0.35; ranksep=0.7; pad=0.4;
+    bgcolor="white";
+
+    node  [fontname="Helvetica" fontsize=11 shape=box style="rounded,filled" fillcolor="#f4f6fa" color="#5b6b8c"];
+    edge  [fontname="Helvetica" fontsize=9 color="#5b6b8c" arrowsize=0.8];
+
+    // ---- entry points: different shapes ----
+    user   [label="User" shape=oval fillcolor="#dff3e4" color="#2e7d4f"];
+    cron   [label="Nightly\njob" shape=doublecircle fixedsize=true width=0.8 fillcolor="#fff3cd" color="#a67c00"];
+    webhook[label="Partner\nwebhook" shape=parallelogram];
+
+    // ---- edge tier ----
+    subgraph cluster_edge {
+        label="Edge"; style="rounded,dashed"; color="#8892a6"; fontname="Helvetica-Bold";
+        cdn  [label="CDN" shape=hexagon];
+        lb   [label="Load\nbalancer" shape=trapezium];
+        authn[label="Auth?" shape=diamond fillcolor="#ffe3e3" color="#b03a3a"];
+    }
+
+    // ---- services ----
+    subgraph cluster_svc {
+        label="Services"; style="rounded,filled"; fillcolor="#eef2fb"; color="#5b6b8c";
+        api    [label=<<B>API gateway</B><BR/><FONT POINT-SIZE="9">REST + gRPC</FONT>>];
+        orders [label=<
+            <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4">
+              <TR><TD BGCOLOR="#c9d6f2" COLSPAN="2"><B>OrderService</B></TD></TR>
+              <TR><TD PORT="in">create()</TD><TD>v2.3</TD></TR>
+              <TR><TD PORT="out">emit()</TD><TD>3 pods</TD></TR>
+            </TABLE>> shape=plain];
+        billing [label="Billing" shape=component];
+        notify  [label="Notifier" shape=component];
+        {rank=same; billing; notify;}
+    }
+
+    // ---- data tier: records with ports ----
+    subgraph cluster_data {
+        label="Data"; style=rounded; color="#2e7d4f";
+        db    [label="Postgres" shape=cylinder fillcolor="#dff3e4"];
+        cache [label="Redis" shape=cylinder fillcolor="#ffe9d6"];
+        schema[shape=record fillcolor="#ffffff" label="{orders|<id>id : uuid|<cust>customer_id : uuid|<tot>total : numeric|<st>status : enum}"];
+        custs [shape=record fillcolor="#ffffff" label="{customers|<id>id : uuid|name : text|email : text}"];
+        schema:cust -> custs:id [arrowhead=crowodot label="N:1" style=dashed];
+    }
+
+    queue [label="Event bus" shape=box3d fillcolor="#e8dcf7" color="#6a3fb0"];
+
+    // ---- flow edges ----
+    user    -> cdn  [label="HTTPS"];
+    cdn     -> lb;
+    lb      -> authn;
+    authn   -> api  [label="yes" color="#2e7d4f" fontcolor="#2e7d4f" penwidth=2];
+    authn   -> user [label="no (401)" color="#b03a3a" fontcolor="#b03a3a" style=dashed constraint=false];
+    webhook -> api  [label="signed" style=bold];
+    cron    -> orders:out [label="reconcile" style=dotted];
+    api     -> orders:in;
+    orders:out -> queue [label="OrderCreated" arrowhead=odiamond];
+    queue   -> billing;
+    queue   -> notify  [style=dashed];
+    orders  -> cache [dir=both label="read-through" arrowtail=odot];
+    orders  -> db    [lhead=cluster_data label="writes" penwidth=2];
+    billing -> schema:st [label="status" headport=w];
+
+    // ---- tooltips / links / xlabel (visible in SVG) ----
+    notify [URL="https://graphviz.org/docs/nodes/" tooltip="Click: node docs" xlabel="email+push"];
+
+    // ---- legend as a free-floating cluster ----
+    subgraph cluster_legend {
+        label="Legend"; style="rounded"; color="#bbbbbb"; fontsize=10;
+        l1 [label="solid = sync call" shape=plaintext];
+        l2 [label="dashed = async / optional" shape=plaintext];
+        l3 [label="bold = trusted" shape=plaintext];
+        l1 -> l2 -> l3 [style=invis];
+    }
+    db -> l1 [style=invis];
+}
