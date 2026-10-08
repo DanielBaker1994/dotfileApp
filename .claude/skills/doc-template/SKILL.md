@@ -17,6 +17,11 @@ description: Start a polished, shareable document from the reusable professional
    - Alerts only as `> [!NOTE|TIP|IMPORTANT|WARNING|CAUTION]`.
    - Link sources instead of pasting; short paragraphs; tables for numbers.
    - `<div class="pagebreak"></div>` only for a deliberate new page.
+   - Developer callouts: `<div class="callout KIND">` + blank line + markdown +
+     blank line + `</div>`; KIND = decision risk breaking deprecated action
+     example question rollback perf (the label is drawn by CSS). Badges:
+     `<span class="badge ok|warn|bad|info|muted|accent">text</span>`.
+   - Skeletons: snippets `markdown_doc_adr|postmortem|runbook|pr|status` (nvim `<leader>i`).
 4. Export: in the app, Prose view ▸ ⌘P (PDF lands in `[notes] pdf-path`), or
    from a shell:
    ```bash

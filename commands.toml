@@ -558,7 +558,7 @@ sidebar-width = 234
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
-paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt"
+paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt, ~/.dotfiles/doc/Markdown_Examples.md, ~/notes/helloworld.md"
 # window 20% wider (640 -> 768) and the notepad ~30% taller; max-height lets
 # the taller window actually apply (the 60%-of-screen cap would clamp it)
 width = 768
@@ -878,6 +878,7 @@ kitchen-sink = "*:app"
 "palette: Esc" = "leave command mode, else close"
 "notes: Cmd+Shift+P" = "reading view ⇄ editor"
 "notes: Cmd+Shift+O" = "the reading view in its own window"
+"notes: Space i (nvim)" = "insert picker: search snippets, callouts, badges, tables (type 3x4 for a table)"
 "notes: Cmd+S" = "save the note"
 "notes: Cmd+F" = "search the note"
 "notes: Cmd+O" = "open a file by path as a tab"

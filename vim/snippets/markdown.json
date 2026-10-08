@@ -9,7 +9,8 @@
       "---",
       "",
       ""
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_professional": {
     "prefix": "markdown_doc_professional",
@@ -88,7 +89,8 @@
       "",
       "Supporting detail, glossary, and raw data go here.",
       ""
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_tokyo_night": {
     "prefix": "markdown_doc_tokyo_night",
@@ -103,7 +105,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_paper": {
     "prefix": "markdown_doc_paper",
@@ -118,7 +121,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_executive": {
     "prefix": "markdown_doc_executive",
@@ -133,7 +137,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_terminal": {
     "prefix": "markdown_doc_terminal",
@@ -148,7 +153,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_catppuccin_mocha": {
     "prefix": "markdown_doc_catppuccin_mocha",
@@ -163,7 +169,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_catppuccin_latte": {
     "prefix": "markdown_doc_catppuccin_latte",
@@ -178,7 +185,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_dracula": {
     "prefix": "markdown_doc_dracula",
@@ -193,7 +201,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_nord": {
     "prefix": "markdown_doc_nord",
@@ -208,7 +217,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_gruvbox_dark": {
     "prefix": "markdown_doc_gruvbox_dark",
@@ -223,7 +233,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_gruvbox_light": {
     "prefix": "markdown_doc_gruvbox_light",
@@ -238,7 +249,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_solarized_dark": {
     "prefix": "markdown_doc_solarized_dark",
@@ -253,7 +265,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_solarized_light": {
     "prefix": "markdown_doc_solarized_light",
@@ -268,7 +281,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_rose_pine": {
     "prefix": "markdown_doc_rose_pine",
@@ -283,7 +297,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_doc_rose_pine_dawn": {
     "prefix": "markdown_doc_rose_pine_dawn",
@@ -298,7 +313,8 @@
       "## ${4:Summary}",
       "",
       "$0"
-    ]
+    ],
+    "category": "Documents"
   },
   "markdown_bash_block": {
     "prefix": "markdown_bash_block",
@@ -306,7 +322,8 @@
       "```bash",
       "echo ${HOME}",
       "```"
-    ]
+    ],
+    "category": "Code"
   },
   "markdown_python_block": {
     "prefix": "markdown_python_block",
@@ -315,7 +332,8 @@
       "if 5 > 2:",
       "    print(\"Five is greater than two!\")",
       "```"
-    ]
+    ],
+    "category": "Code"
   },
   "markdown_lua_block": {
     "prefix": "markdown_lua_block",
@@ -327,7 +345,8 @@
       "end",
       "return dirs",
       "```"
-    ]
+    ],
+    "category": "Code"
   },
   "markdown_cpp_block": {
     "prefix": "markdown_cpp_block",
@@ -336,7 +355,8 @@
       "#include <iostream>",
       "int main(){ std::cout << \"hello\"; }",
       "```"
-    ]
+    ],
+    "category": "Code"
   },
   "markdown_log_block": {
     "prefix": "markdown_log_block",
@@ -345,7 +365,8 @@
       "[WARN] example warning",
       "[ERROR] example error",
       "```"
-    ]
+    ],
+    "category": "Code"
   },
   "markdown_file_block": {
     "prefix": "markdown_file_block",
@@ -354,47 +375,334 @@
       "/path/to/some/file.txt",
       "~/.config/markdown_generator/friendly_document_styling.css",
       "```"
-    ]
+    ],
+    "category": "Code"
   },
   "markdown_image_block": {
     "prefix": "markdown_image_block",
     "body": [
       "![](/path/to/image.png)"
-    ]
+    ],
+    "category": "Layout"
   },
   "markdown_alert_note": {
     "prefix": "markdown_alert_note",
     "body": [
       "> [!NOTE]",
       "> $0"
-    ]
+    ],
+    "category": "Callouts",
+    "description": "GitHub alert: note"
   },
   "markdown_alert_tip": {
     "prefix": "markdown_alert_tip",
     "body": [
       "> [!TIP]",
       "> $0"
-    ]
+    ],
+    "category": "Callouts",
+    "description": "GitHub alert: tip"
   },
   "markdown_alert_important": {
     "prefix": "markdown_alert_important",
     "body": [
       "> [!IMPORTANT]",
       "> $0"
-    ]
+    ],
+    "category": "Callouts",
+    "description": "GitHub alert: important"
   },
   "markdown_alert_warning": {
     "prefix": "markdown_alert_warning",
     "body": [
       "> [!WARNING]",
       "> $0"
-    ]
+    ],
+    "category": "Callouts",
+    "description": "GitHub alert: warning"
   },
   "markdown_alert_caution": {
     "prefix": "markdown_alert_caution",
     "body": [
       "> [!CAUTION]",
       "> $0"
+    ],
+    "category": "Callouts",
+    "description": "GitHub alert: caution"
+  },
+  "markdown_table_aligned": {
+    "prefix": "markdown_table_aligned",
+    "body": [
+      "| ${1:Left} | ${2:Center} | ${3:Right} |",
+      "| :--- | :---: | ---: |",
+      "| $4 | $5 | $6 |$0"
+    ],
+    "description": "Table with left / center / right alignment",
+    "category": "Tables"
+  },
+  "markdown_h1": {
+    "prefix": "markdown_h1",
+    "body": [
+      "# ${1:Heading}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_h2": {
+    "prefix": "markdown_h2",
+    "body": [
+      "## ${1:Heading}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_h3": {
+    "prefix": "markdown_h3",
+    "body": [
+      "### ${1:Heading}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_h4": {
+    "prefix": "markdown_h4",
+    "body": [
+      "#### ${1:Heading}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_h5": {
+    "prefix": "markdown_h5",
+    "body": [
+      "##### ${1:Heading}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_h6": {
+    "prefix": "markdown_h6",
+    "body": [
+      "###### ${1:Heading}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_link": {
+    "prefix": "markdown_link",
+    "body": [
+      "[${1:text}](${2:https://})$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_image": {
+    "prefix": "markdown_image",
+    "body": [
+      "![${1:alt}](${2:/path/to/image.png})$0"
+    ],
+    "category": "Layout"
+  },
+  "markdown_bold": {
+    "prefix": "markdown_bold",
+    "body": [
+      "**${1:bold}**$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_italic": {
+    "prefix": "markdown_italic",
+    "body": [
+      "*${1:italic}*$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_bold_italic": {
+    "prefix": "markdown_bold_italic",
+    "body": [
+      "***${1:text}***$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_strike": {
+    "prefix": "markdown_strike",
+    "body": [
+      "~~${1:text}~~$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_inline_code": {
+    "prefix": "markdown_inline_code",
+    "body": [
+      "`${1:code}`$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_quote": {
+    "prefix": "markdown_quote",
+    "body": [
+      "> ${1:quote}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_hr": {
+    "prefix": "markdown_hr",
+    "body": [
+      "",
+      "---",
+      ""
+    ],
+    "category": "Basics"
+  },
+  "markdown_list": {
+    "prefix": "markdown_list",
+    "body": [
+      "- ${1:item}",
+      "- ${2:item}",
+      "- ${3:item}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_list_numbered": {
+    "prefix": "markdown_list_numbered",
+    "body": [
+      "1. ${1:item}",
+      "2. ${2:item}",
+      "3. ${3:item}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_list_nested": {
+    "prefix": "markdown_list_nested",
+    "body": [
+      "- ${1:item}",
+      "  - ${2:child}",
+      "    - ${3:grandchild}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_task_list": {
+    "prefix": "markdown_task_list",
+    "body": [
+      "- [ ] ${1:todo}",
+      "- [ ] ${2:todo}",
+      "- [x] ${3:done}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_footnote": {
+    "prefix": "markdown_footnote",
+    "body": [
+      "${1:text}[^${2:1}]",
+      "",
+      "[^${2:1}]: ${3:note}$0"
+    ],
+    "category": "Inline",
+    "inline": true
+  },
+  "markdown_details": {
+    "prefix": "markdown_details",
+    "body": [
+      "<details>",
+      "<summary>${1:Summary}</summary>",
+      "",
+      "${2:Hidden content}",
+      "",
+      "</details>$0"
+    ],
+    "category": "Layout"
+  },
+  "markdown_code_block": {
+    "prefix": "markdown_code_block",
+    "body": [
+      "```${1:lang}",
+      "$2",
+      "```$0"
+    ],
+    "description": "Fenced code block, any language",
+    "category": "Code"
+  },
+  "markdown_js_block": {
+    "prefix": "markdown_js_block",
+    "body": [
+      "```js",
+      "log.info(\"hello\")",
+      "```"
+    ],
+    "category": "Code"
+  },
+  "markdown_json_block": {
+    "prefix": "markdown_json_block",
+    "category": "Code",
+    "description": "JSON block",
+    "body": [
+      "```json",
+      "{",
+      "  \"${1:key}\": \"${2:value}\"",
+      "}",
+      "```$0"
+    ]
+  },
+  "markdown_yaml_block": {
+    "prefix": "markdown_yaml_block",
+    "body": [
+      "```yaml",
+      "key: value",
+      "list:",
+      "  - one",
+      "```"
+    ],
+    "category": "Code"
+  },
+  "markdown_sql_block": {
+    "prefix": "markdown_sql_block",
+    "body": [
+      "```sql",
+      "SELECT * FROM table WHERE id = 1;",
+      "```"
+    ],
+    "category": "Code"
+  },
+  "markdown_diff_block": {
+    "prefix": "markdown_diff_block",
+    "category": "Code",
+    "description": "Diff block (green / red lines)",
+    "body": [
+      "```diff",
+      "- ${1:old line}",
+      "+ ${2:new line}",
+      "```$0"
+    ]
+  },
+  "markdown_frontmatter": {
+    "prefix": "markdown_frontmatter",
+    "body": [
+      "---",
+      "title: ${1:Title}",
+      "date: ${2:2026-01-01}",
+      "---",
+      "",
+      "$0"
+    ],
+    "category": "Layout"
+  },
+  "markdown_checklist_dated": {
+    "prefix": "markdown_checklist_dated",
+    "body": [
+      "## ${1:Title}",
+      "",
+      "- [ ] ${2:todo}$0"
+    ],
+    "category": "Basics"
+  },
+  "markdown_table": {
+    "prefix": "markdown_table",
+    "category": "Tables",
+    "description": "Table: 2 body rows x 3 columns (picker: type 3x4 for any size)",
+    "body": [
+      "| ${1:Header 1} | ${2:Header 2} | ${3:Header 3} |",
+      "| --- | --- | --- |",
+      "| $4 | $5 | $6 |",
+      "| $7 | $8 | $9 |$0"
     ]
   },
   "markdown_table_1x1": {
@@ -404,7 +712,8 @@
       "| --- |",
       "| $2 |$0"
     ],
-    "description": "Table: 1 body row x 1 column (+ header)"
+    "description": "Table: 1 body row x 1 column (+ header)",
+    "category": "Tables"
   },
   "markdown_table_1x2": {
     "prefix": "markdown_table_1x2",
@@ -413,7 +722,8 @@
       "| --- | --- |",
       "| $3 | $4 |$0"
     ],
-    "description": "Table: 1 body row x 2 columns (+ header)"
+    "description": "Table: 1 body row x 2 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_1x3": {
     "prefix": "markdown_table_1x3",
@@ -422,7 +732,8 @@
       "| --- | --- | --- |",
       "| $4 | $5 | $6 |$0"
     ],
-    "description": "Table: 1 body row x 3 columns (+ header)"
+    "description": "Table: 1 body row x 3 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_1x4": {
     "prefix": "markdown_table_1x4",
@@ -431,7 +742,8 @@
       "| --- | --- | --- | --- |",
       "| $5 | $6 | $7 | $8 |$0"
     ],
-    "description": "Table: 1 body row x 4 columns (+ header)"
+    "description": "Table: 1 body row x 4 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_1x5": {
     "prefix": "markdown_table_1x5",
@@ -440,7 +752,8 @@
       "| --- | --- | --- | --- | --- |",
       "| $6 | $7 | $8 | $9 | $10 |$0"
     ],
-    "description": "Table: 1 body row x 5 columns (+ header)"
+    "description": "Table: 1 body row x 5 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_1x6": {
     "prefix": "markdown_table_1x6",
@@ -449,7 +762,8 @@
       "| --- | --- | --- | --- | --- | --- |",
       "| $7 | $8 | $9 | $10 | $11 | $12 |$0"
     ],
-    "description": "Table: 1 body row x 6 columns (+ header)"
+    "description": "Table: 1 body row x 6 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_2x1": {
     "prefix": "markdown_table_2x1",
@@ -459,7 +773,8 @@
       "| $2 |",
       "| $3 |$0"
     ],
-    "description": "Table: 2 body rows x 1 column (+ header)"
+    "description": "Table: 2 body rows x 1 column (+ header)",
+    "category": "Tables"
   },
   "markdown_table_2x2": {
     "prefix": "markdown_table_2x2",
@@ -469,7 +784,8 @@
       "| $3 | $4 |",
       "| $5 | $6 |$0"
     ],
-    "description": "Table: 2 body rows x 2 columns (+ header)"
+    "description": "Table: 2 body rows x 2 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_2x3": {
     "prefix": "markdown_table_2x3",
@@ -479,7 +795,8 @@
       "| $4 | $5 | $6 |",
       "| $7 | $8 | $9 |$0"
     ],
-    "description": "Table: 2 body rows x 3 columns (+ header)"
+    "description": "Table: 2 body rows x 3 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_2x4": {
     "prefix": "markdown_table_2x4",
@@ -489,7 +806,8 @@
       "| $5 | $6 | $7 | $8 |",
       "| $9 | $10 | $11 | $12 |$0"
     ],
-    "description": "Table: 2 body rows x 4 columns (+ header)"
+    "description": "Table: 2 body rows x 4 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_2x5": {
     "prefix": "markdown_table_2x5",
@@ -499,7 +817,8 @@
       "| $6 | $7 | $8 | $9 | $10 |",
       "| $11 | $12 | $13 | $14 | $15 |$0"
     ],
-    "description": "Table: 2 body rows x 5 columns (+ header)"
+    "description": "Table: 2 body rows x 5 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_2x6": {
     "prefix": "markdown_table_2x6",
@@ -509,7 +828,8 @@
       "| $7 | $8 | $9 | $10 | $11 | $12 |",
       "| $13 | $14 | $15 | $16 | $17 | $18 |$0"
     ],
-    "description": "Table: 2 body rows x 6 columns (+ header)"
+    "description": "Table: 2 body rows x 6 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_3x1": {
     "prefix": "markdown_table_3x1",
@@ -520,7 +840,8 @@
       "| $3 |",
       "| $4 |$0"
     ],
-    "description": "Table: 3 body rows x 1 column (+ header)"
+    "description": "Table: 3 body rows x 1 column (+ header)",
+    "category": "Tables"
   },
   "markdown_table_3x2": {
     "prefix": "markdown_table_3x2",
@@ -531,7 +852,8 @@
       "| $5 | $6 |",
       "| $7 | $8 |$0"
     ],
-    "description": "Table: 3 body rows x 2 columns (+ header)"
+    "description": "Table: 3 body rows x 2 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_3x3": {
     "prefix": "markdown_table_3x3",
@@ -542,7 +864,8 @@
       "| $7 | $8 | $9 |",
       "| $10 | $11 | $12 |$0"
     ],
-    "description": "Table: 3 body rows x 3 columns (+ header)"
+    "description": "Table: 3 body rows x 3 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_3x4": {
     "prefix": "markdown_table_3x4",
@@ -553,7 +876,8 @@
       "| $9 | $10 | $11 | $12 |",
       "| $13 | $14 | $15 | $16 |$0"
     ],
-    "description": "Table: 3 body rows x 4 columns (+ header)"
+    "description": "Table: 3 body rows x 4 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_3x5": {
     "prefix": "markdown_table_3x5",
@@ -564,7 +888,8 @@
       "| $11 | $12 | $13 | $14 | $15 |",
       "| $16 | $17 | $18 | $19 | $20 |$0"
     ],
-    "description": "Table: 3 body rows x 5 columns (+ header)"
+    "description": "Table: 3 body rows x 5 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_3x6": {
     "prefix": "markdown_table_3x6",
@@ -575,7 +900,8 @@
       "| $13 | $14 | $15 | $16 | $17 | $18 |",
       "| $19 | $20 | $21 | $22 | $23 | $24 |$0"
     ],
-    "description": "Table: 3 body rows x 6 columns (+ header)"
+    "description": "Table: 3 body rows x 6 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_4x1": {
     "prefix": "markdown_table_4x1",
@@ -587,7 +913,8 @@
       "| $4 |",
       "| $5 |$0"
     ],
-    "description": "Table: 4 body rows x 1 column (+ header)"
+    "description": "Table: 4 body rows x 1 column (+ header)",
+    "category": "Tables"
   },
   "markdown_table_4x2": {
     "prefix": "markdown_table_4x2",
@@ -599,7 +926,8 @@
       "| $7 | $8 |",
       "| $9 | $10 |$0"
     ],
-    "description": "Table: 4 body rows x 2 columns (+ header)"
+    "description": "Table: 4 body rows x 2 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_4x3": {
     "prefix": "markdown_table_4x3",
@@ -611,7 +939,8 @@
       "| $10 | $11 | $12 |",
       "| $13 | $14 | $15 |$0"
     ],
-    "description": "Table: 4 body rows x 3 columns (+ header)"
+    "description": "Table: 4 body rows x 3 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_4x4": {
     "prefix": "markdown_table_4x4",
@@ -623,7 +952,8 @@
       "| $13 | $14 | $15 | $16 |",
       "| $17 | $18 | $19 | $20 |$0"
     ],
-    "description": "Table: 4 body rows x 4 columns (+ header)"
+    "description": "Table: 4 body rows x 4 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_4x5": {
     "prefix": "markdown_table_4x5",
@@ -635,7 +965,8 @@
       "| $16 | $17 | $18 | $19 | $20 |",
       "| $21 | $22 | $23 | $24 | $25 |$0"
     ],
-    "description": "Table: 4 body rows x 5 columns (+ header)"
+    "description": "Table: 4 body rows x 5 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_4x6": {
     "prefix": "markdown_table_4x6",
@@ -647,7 +978,8 @@
       "| $19 | $20 | $21 | $22 | $23 | $24 |",
       "| $25 | $26 | $27 | $28 | $29 | $30 |$0"
     ],
-    "description": "Table: 4 body rows x 6 columns (+ header)"
+    "description": "Table: 4 body rows x 6 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_5x1": {
     "prefix": "markdown_table_5x1",
@@ -660,7 +992,8 @@
       "| $5 |",
       "| $6 |$0"
     ],
-    "description": "Table: 5 body rows x 1 column (+ header)"
+    "description": "Table: 5 body rows x 1 column (+ header)",
+    "category": "Tables"
   },
   "markdown_table_5x2": {
     "prefix": "markdown_table_5x2",
@@ -673,7 +1006,8 @@
       "| $9 | $10 |",
       "| $11 | $12 |$0"
     ],
-    "description": "Table: 5 body rows x 2 columns (+ header)"
+    "description": "Table: 5 body rows x 2 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_5x3": {
     "prefix": "markdown_table_5x3",
@@ -686,7 +1020,8 @@
       "| $13 | $14 | $15 |",
       "| $16 | $17 | $18 |$0"
     ],
-    "description": "Table: 5 body rows x 3 columns (+ header)"
+    "description": "Table: 5 body rows x 3 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_5x4": {
     "prefix": "markdown_table_5x4",
@@ -699,7 +1034,8 @@
       "| $17 | $18 | $19 | $20 |",
       "| $21 | $22 | $23 | $24 |$0"
     ],
-    "description": "Table: 5 body rows x 4 columns (+ header)"
+    "description": "Table: 5 body rows x 4 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_5x5": {
     "prefix": "markdown_table_5x5",
@@ -712,7 +1048,8 @@
       "| $21 | $22 | $23 | $24 | $25 |",
       "| $26 | $27 | $28 | $29 | $30 |$0"
     ],
-    "description": "Table: 5 body rows x 5 columns (+ header)"
+    "description": "Table: 5 body rows x 5 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_5x6": {
     "prefix": "markdown_table_5x6",
@@ -725,7 +1062,8 @@
       "| $25 | $26 | $27 | $28 | $29 | $30 |",
       "| $31 | $32 | $33 | $34 | $35 | $36 |$0"
     ],
-    "description": "Table: 5 body rows x 6 columns (+ header)"
+    "description": "Table: 5 body rows x 6 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_6x1": {
     "prefix": "markdown_table_6x1",
@@ -739,7 +1077,8 @@
       "| $6 |",
       "| $7 |$0"
     ],
-    "description": "Table: 6 body rows x 1 column (+ header)"
+    "description": "Table: 6 body rows x 1 column (+ header)",
+    "category": "Tables"
   },
   "markdown_table_6x2": {
     "prefix": "markdown_table_6x2",
@@ -753,7 +1092,8 @@
       "| $11 | $12 |",
       "| $13 | $14 |$0"
     ],
-    "description": "Table: 6 body rows x 2 columns (+ header)"
+    "description": "Table: 6 body rows x 2 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_6x3": {
     "prefix": "markdown_table_6x3",
@@ -767,7 +1107,8 @@
       "| $16 | $17 | $18 |",
       "| $19 | $20 | $21 |$0"
     ],
-    "description": "Table: 6 body rows x 3 columns (+ header)"
+    "description": "Table: 6 body rows x 3 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_6x4": {
     "prefix": "markdown_table_6x4",
@@ -781,7 +1122,8 @@
       "| $21 | $22 | $23 | $24 |",
       "| $25 | $26 | $27 | $28 |$0"
     ],
-    "description": "Table: 6 body rows x 4 columns (+ header)"
+    "description": "Table: 6 body rows x 4 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_6x5": {
     "prefix": "markdown_table_6x5",
@@ -795,7 +1137,8 @@
       "| $26 | $27 | $28 | $29 | $30 |",
       "| $31 | $32 | $33 | $34 | $35 |$0"
     ],
-    "description": "Table: 6 body rows x 5 columns (+ header)"
+    "description": "Table: 6 body rows x 5 columns (+ header)",
+    "category": "Tables"
   },
   "markdown_table_6x6": {
     "prefix": "markdown_table_6x6",
@@ -809,229 +1152,449 @@
       "| $31 | $32 | $33 | $34 | $35 | $36 |",
       "| $37 | $38 | $39 | $40 | $41 | $42 |$0"
     ],
-    "description": "Table: 6 body rows x 6 columns (+ header)"
+    "description": "Table: 6 body rows x 6 columns (+ header)",
+    "category": "Tables"
   },
-  "markdown_table_aligned": {
-    "prefix": "markdown_table_aligned",
+  "markdown_callout_decision": {
+    "prefix": "markdown_callout_decision",
+    "category": "Callouts",
+    "description": "Callout: a decision and why (ADR style)",
     "body": [
-      "| ${1:Left} | ${2:Center} | ${3:Right} |",
-      "| :--- | :---: | ---: |",
-      "| $4 | $5 | $6 |$0"
-    ],
-    "description": "Table with left / center / right alignment"
-  },
-  "markdown_h1": {
-    "prefix": "markdown_h1",
-    "body": [
-      "# ${1:Heading}$0"
-    ]
-  },
-  "markdown_h2": {
-    "prefix": "markdown_h2",
-    "body": [
-      "## ${1:Heading}$0"
-    ]
-  },
-  "markdown_h3": {
-    "prefix": "markdown_h3",
-    "body": [
-      "### ${1:Heading}$0"
-    ]
-  },
-  "markdown_h4": {
-    "prefix": "markdown_h4",
-    "body": [
-      "#### ${1:Heading}$0"
-    ]
-  },
-  "markdown_h5": {
-    "prefix": "markdown_h5",
-    "body": [
-      "##### ${1:Heading}$0"
-    ]
-  },
-  "markdown_h6": {
-    "prefix": "markdown_h6",
-    "body": [
-      "###### ${1:Heading}$0"
-    ]
-  },
-  "markdown_link": {
-    "prefix": "markdown_link",
-    "body": [
-      "[${1:text}](${2:https://})$0"
-    ]
-  },
-  "markdown_image": {
-    "prefix": "markdown_image",
-    "body": [
-      "![${1:alt}](${2:/path/to/image.png})$0"
-    ]
-  },
-  "markdown_bold": {
-    "prefix": "markdown_bold",
-    "body": [
-      "**${1:bold}**$0"
-    ]
-  },
-  "markdown_italic": {
-    "prefix": "markdown_italic",
-    "body": [
-      "*${1:italic}*$0"
-    ]
-  },
-  "markdown_bold_italic": {
-    "prefix": "markdown_bold_italic",
-    "body": [
-      "***${1:text}***$0"
-    ]
-  },
-  "markdown_strike": {
-    "prefix": "markdown_strike",
-    "body": [
-      "~~${1:text}~~$0"
-    ]
-  },
-  "markdown_inline_code": {
-    "prefix": "markdown_inline_code",
-    "body": [
-      "`${1:code}`$0"
-    ]
-  },
-  "markdown_quote": {
-    "prefix": "markdown_quote",
-    "body": [
-      "> ${1:quote}$0"
-    ]
-  },
-  "markdown_hr": {
-    "prefix": "markdown_hr",
-    "body": [
+      "<div class=\"callout decision\">",
       "",
-      "---",
-      ""
-    ]
-  },
-  "markdown_list": {
-    "prefix": "markdown_list",
-    "body": [
-      "- ${1:item}",
-      "- ${2:item}",
-      "- ${3:item}$0"
-    ]
-  },
-  "markdown_list_numbered": {
-    "prefix": "markdown_list_numbered",
-    "body": [
-      "1. ${1:item}",
-      "2. ${2:item}",
-      "3. ${3:item}$0"
-    ]
-  },
-  "markdown_list_nested": {
-    "prefix": "markdown_list_nested",
-    "body": [
-      "- ${1:item}",
-      "  - ${2:child}",
-      "    - ${3:grandchild}$0"
-    ]
-  },
-  "markdown_task_list": {
-    "prefix": "markdown_task_list",
-    "body": [
-      "- [ ] ${1:todo}",
-      "- [ ] ${2:todo}",
-      "- [x] ${3:done}$0"
-    ]
-  },
-  "markdown_footnote": {
-    "prefix": "markdown_footnote",
-    "body": [
-      "${1:text}[^${2:1}]",
+      "${1:what we chose}",
       "",
-      "[^${2:1}]: ${3:note}$0"
-    ]
-  },
-  "markdown_details": {
-    "prefix": "markdown_details",
-    "body": [
-      "<details>",
-      "<summary>${1:Summary}</summary>",
+      "**Because:** ${2:the reason}",
       "",
-      "${2:Hidden content}",
+      "**Rejected:** ${3:alternatives}",
       "",
-      "</details>$0"
-    ]
-  },
-  "markdown_code_block": {
-    "prefix": "markdown_code_block",
-    "body": [
-      "```${1:lang}",
-      "$2",
-      "```$0"
-    ],
-    "description": "Fenced code block, any language"
-  },
-  "markdown_js_block": {
-    "prefix": "markdown_js_block",
-    "body": [
-      "```js",
-      "log.info(\"hello\")",
-      "```"
-    ]
-  },
-  "markdown_json_block": {
-    "prefix": "markdown_json_block",
-    "body": [
-      "```json",
-      "{ \"key\": \"value\" }",
-      "```"
-    ]
-  },
-  "markdown_yaml_block": {
-    "prefix": "markdown_yaml_block",
-    "body": [
-      "```yaml",
-      "key: value",
-      "list:",
-      "  - one",
-      "```"
-    ]
-  },
-  "markdown_sql_block": {
-    "prefix": "markdown_sql_block",
-    "body": [
-      "```sql",
-      "SELECT * FROM table WHERE id = 1;",
-      "```"
-    ]
-  },
-  "markdown_diff_block": {
-    "prefix": "markdown_diff_block",
-    "body": [
-      "```diff",
-      "- removed line",
-      "+ added line",
-      "```"
-    ]
-  },
-  "markdown_frontmatter": {
-    "prefix": "markdown_frontmatter",
-    "body": [
-      "---",
-      "title: ${1:Title}",
-      "date: ${2:2026-01-01}",
-      "---",
-      "",
+      "</div>",
       "$0"
     ]
   },
-  "markdown_checklist_dated": {
-    "prefix": "markdown_checklist_dated",
+  "markdown_callout_risk": {
+    "prefix": "markdown_callout_risk",
+    "category": "Callouts",
+    "description": "Callout: risk, likelihood, mitigation",
     "body": [
-      "## ${1:Title}",
+      "<div class=\"callout risk\">",
       "",
-      "- [ ] ${2:todo}$0"
+      "${1:what could go wrong}",
+      "",
+      "**Likelihood / impact:** ${2:medium / high}",
+      "",
+      "**Mitigation:** ${3:what we do about it}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_breaking": {
+    "prefix": "markdown_callout_breaking",
+    "category": "Callouts",
+    "description": "Callout: breaking change + migration",
+    "body": [
+      "<div class=\"callout breaking\">",
+      "",
+      "${1:what changes}",
+      "",
+      "**Migration:** ${2:what callers must do}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_deprecated": {
+    "prefix": "markdown_callout_deprecated",
+    "category": "Callouts",
+    "description": "Callout: deprecated, use X instead",
+    "body": [
+      "<div class=\"callout deprecated\">",
+      "",
+      "`${1:old thing}` — use `${2:new thing}` instead. Removed in ${3:vX.Y}.",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_action": {
+    "prefix": "markdown_callout_action",
+    "category": "Callouts",
+    "description": "Callout: an action with owner and date",
+    "body": [
+      "<div class=\"callout action\">",
+      "",
+      "${1:the task}",
+      "",
+      "**Owner:** ${2:name} · **Due:** ${3:YYYY-MM-DD}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_example": {
+    "prefix": "markdown_callout_example",
+    "category": "Callouts",
+    "description": "Callout: a worked example",
+    "body": [
+      "<div class=\"callout example\">",
+      "",
+      "${1:Show the input, then the result.}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_question": {
+    "prefix": "markdown_callout_question",
+    "category": "Callouts",
+    "description": "Callout: an open question",
+    "body": [
+      "<div class=\"callout question\">",
+      "",
+      "${1:the question}",
+      "",
+      "**Needs input from:** ${2:who}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_rollback": {
+    "prefix": "markdown_callout_rollback",
+    "category": "Callouts",
+    "description": "Callout: how to undo this",
+    "body": [
+      "<div class=\"callout rollback\">",
+      "",
+      "1. ${1:first step}",
+      "2. ${2:second step}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_callout_perf": {
+    "prefix": "markdown_callout_perf",
+    "category": "Callouts",
+    "description": "Callout: before / after measurement",
+    "body": [
+      "<div class=\"callout perf\">",
+      "",
+      "**Before:** ${1:340 ms p95} · **After:** ${2:210 ms p95}",
+      "",
+      "**Measured with:** ${3:tool, dataset}",
+      "",
+      "</div>",
+      "$0"
+    ]
+  },
+  "markdown_badge_ok": {
+    "prefix": "markdown_badge_ok",
+    "category": "Inline",
+    "inline": true,
+    "description": "Status badge (ok)",
+    "body": [
+      "<span class=\"badge ok\">${1:Shipped}</span>$0"
+    ]
+  },
+  "markdown_badge_warn": {
+    "prefix": "markdown_badge_warn",
+    "category": "Inline",
+    "inline": true,
+    "description": "Status badge (warn)",
+    "body": [
+      "<span class=\"badge warn\">${1:At risk}</span>$0"
+    ]
+  },
+  "markdown_badge_bad": {
+    "prefix": "markdown_badge_bad",
+    "category": "Inline",
+    "inline": true,
+    "description": "Status badge (bad)",
+    "body": [
+      "<span class=\"badge bad\">${1:Blocked}</span>$0"
+    ]
+  },
+  "markdown_badge_info": {
+    "prefix": "markdown_badge_info",
+    "category": "Inline",
+    "inline": true,
+    "description": "Status badge (info)",
+    "body": [
+      "<span class=\"badge info\">${1:In review}</span>$0"
+    ]
+  },
+  "markdown_badge_muted": {
+    "prefix": "markdown_badge_muted",
+    "category": "Inline",
+    "inline": true,
+    "description": "Status badge (muted)",
+    "body": [
+      "<span class=\"badge muted\">${1:Draft}</span>$0"
+    ]
+  },
+  "markdown_badge_accent": {
+    "prefix": "markdown_badge_accent",
+    "category": "Inline",
+    "inline": true,
+    "description": "Status badge (accent)",
+    "body": [
+      "<span class=\"badge accent\">${1:New}</span>$0"
+    ]
+  },
+  "markdown_kbd": {
+    "prefix": "markdown_kbd",
+    "category": "Inline",
+    "inline": true,
+    "description": "Keyboard key",
+    "body": [
+      "<kbd>${1:Cmd}</kbd>$0"
+    ]
+  },
+  "markdown_tree_block": {
+    "prefix": "markdown_tree_block",
+    "category": "Code",
+    "description": "File tree",
+    "body": [
+      "```text",
+      "${1:project}/",
+      "├── ${2:src}/",
+      "│   └── ${3:main.swift}",
+      "└── ${4:README.md}",
+      "```$0"
+    ]
+  },
+  "markdown_pagebreak": {
+    "prefix": "markdown_pagebreak",
+    "category": "Layout",
+    "description": "Force a new page in the PDF",
+    "body": [
+      "<div class=\"pagebreak\"></div>",
+      "$0"
+    ]
+  },
+  "markdown_api_endpoint": {
+    "prefix": "markdown_api_endpoint",
+    "category": "Documents",
+    "description": "API endpoint reference block",
+    "body": [
+      "### `${1:POST} ${2:/v1/things}`",
+      "",
+      "${3:What it does.}",
+      "",
+      "| Field | Type | Required | Notes |",
+      "| --- | --- | --- | --- |",
+      "| ${4:id} | ${5:string} | ${6:yes} | ${7:} |",
+      "",
+      "```bash",
+      "curl -X ${1:POST} https://api.example.com${2:/v1/things} \\\\",
+      "  -H 'Authorization: Bearer \\$TOKEN'",
+      "```$0"
+    ]
+  },
+  "markdown_changelog_entry": {
+    "prefix": "markdown_changelog_entry",
+    "category": "Documents",
+    "description": "Changelog entry (Added / Changed / Fixed)",
+    "body": [
+      "## ${1:v1.2.0} — ${2:YYYY-MM-DD}",
+      "",
+      "### Added",
+      "- ${3:}",
+      "",
+      "### Changed",
+      "- ${4:}",
+      "",
+      "### Fixed",
+      "- ${5:}$0"
+    ]
+  },
+  "markdown_doc_adr": {
+    "prefix": "markdown_doc_adr",
+    "category": "Documents",
+    "description": "Architecture decision record",
+    "body": [
+      "<div class=\"doc ${1:paper} clean\" data-foot=\"${2:ADR · Internal}\"></div>",
+      "",
+      "# ADR-${3:001}: ${4:Decision title}",
+      "",
+      "Status · ${5:Proposed} · ${6:YYYY-MM-DD}",
+      "",
+      "| | |",
+      "|---|---|",
+      "| **Status** | ${7:Proposed} |",
+      "| **Deciders** | ${8:names} |",
+      "| **Date** | ${6:YYYY-MM-DD} |",
+      "",
+      "## Context",
+      "",
+      "${9:The forces at play and why a decision is needed.}",
+      "",
+      "## Decision",
+      "",
+      "<div class=\"callout decision\">",
+      "",
+      "${10:what we will do}",
+      "",
+      "</div>",
+      "",
+      "## Options considered",
+      "",
+      "| Option | Pros | Cons |",
+      "| --- | --- | --- |",
+      "| ${11:A} | ${12:} | ${13:} |",
+      "| ${14:B} | ${15:} | ${16:} |",
+      "",
+      "## Consequences",
+      "",
+      "- ${17:What gets easier}",
+      "- ${18:What gets harder}",
+      "",
+      "## Rollback",
+      "",
+      "${19:How we undo this.}$0"
+    ]
+  },
+  "markdown_doc_postmortem": {
+    "prefix": "markdown_doc_postmortem",
+    "category": "Documents",
+    "description": "Incident postmortem with timeline",
+    "body": [
+      "<div class=\"doc ${1:paper} clean\" data-foot=\"${2:Postmortem · Blameless}\"></div>",
+      "",
+      "# Postmortem: ${3:Incident title}",
+      "",
+      "${4:SEV-2} · ${5:YYYY-MM-DD} · ${6:duration}",
+      "",
+      "<div class=\"callout risk\">",
+      "",
+      "**Impact:** ${7:who was affected, how badly, for how long}",
+      "",
+      "</div>",
+      "",
+      "## Summary",
+      "",
+      "${8:Two sentences: what happened and the fix.}",
+      "",
+      "## Timeline (UTC)",
+      "",
+      "| Time | Event |",
+      "| --- | --- |",
+      "| ${9:HH:MM} | ${10:Detected} |",
+      "| ${11:HH:MM} | ${12:Mitigated} |",
+      "| ${13:HH:MM} | ${14:Resolved} |",
+      "",
+      "## Root cause",
+      "",
+      "${15:The technical cause, not a person.}",
+      "",
+      "## What went well / badly",
+      "",
+      "- **Well:** ${16:}",
+      "- **Badly:** ${17:}",
+      "",
+      "## Action items",
+      "",
+      "| Action | Owner | Due |",
+      "| --- | --- | --- |",
+      "| ${18:} | ${19:} | ${20:YYYY-MM-DD} |$0"
+    ]
+  },
+  "markdown_doc_runbook": {
+    "prefix": "markdown_doc_runbook",
+    "category": "Documents",
+    "description": "Runbook with steps and rollback",
+    "body": [
+      "<div class=\"doc ${1:paper} clean\" data-foot=\"${2:Runbook · On-call}\"></div>",
+      "",
+      "# Runbook: ${3:Task or alert}",
+      "",
+      "${4:When to use this and who owns it}",
+      "",
+      "## Before you start",
+      "",
+      "- [ ] ${5:Access / prerequisite}",
+      "- [ ] ${6:Notify the channel}",
+      "",
+      "## Steps",
+      "",
+      "1. ${7:First step}",
+      "",
+      "   ```bash",
+      "   ${8:command}",
+      "   ```",
+      "",
+      "2. ${9:Verify}",
+      "",
+      "<div class=\"callout rollback\">",
+      "",
+      "1. ${10:undo step}",
+      "",
+      "</div>",
+      "",
+      "## Escalation",
+      "",
+      "${11:Who to page, and when.}$0"
+    ]
+  },
+  "markdown_doc_pr": {
+    "prefix": "markdown_doc_pr",
+    "category": "Documents",
+    "description": "Pull request description",
+    "body": [
+      "<div class=\"doc ${1:paper} clean\" data-foot=\"${2:PR description}\"></div>",
+      "",
+      "# ${3:PR title}",
+      "",
+      "${4:One line: what and why}",
+      "",
+      "## Changes",
+      "",
+      "- ${5:}",
+      "",
+      "## Testing",
+      "",
+      "- [ ] ${6:Unit tests}",
+      "- [ ] ${7:Manual check}",
+      "",
+      "<div class=\"callout risk\">",
+      "",
+      "**Risk:** ${8:what could break}",
+      "",
+      "**Rollback:** ${9:revert / flag off}",
+      "",
+      "</div>$0"
+    ]
+  },
+  "markdown_doc_status": {
+    "prefix": "markdown_doc_status",
+    "category": "Documents",
+    "description": "Weekly status update",
+    "body": [
+      "<div class=\"doc ${1:paper} clean\" data-foot=\"${2:Weekly status}\"></div>",
+      "",
+      "# Weekly Status — ${3:Week of YYYY-MM-DD}",
+      "",
+      "${4:Team or project}",
+      "",
+      "<span class=\"badge ok\">${5:On track}</span>",
+      "",
+      "## Done",
+      "",
+      "- ${6:}",
+      "",
+      "## Next",
+      "",
+      "- ${7:}",
+      "",
+      "## Risks",
+      "",
+      "<div class=\"callout risk\">",
+      "",
+      "**Risk:** ${8:}",
+      "",
+      "</div>$0"
     ]
   }
 }
