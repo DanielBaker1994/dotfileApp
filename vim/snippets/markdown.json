@@ -1596,5 +1596,115 @@
       "",
       "</div>$0"
     ]
+  },
+  "markdown_dot_flowchart": {
+    "prefix": "markdown_dot_flowchart",
+    "category": "Diagrams",
+    "description": "Graphviz flowchart (decision loop)",
+    "body": [
+      "```dot",
+      "digraph G {",
+      "  rankdir=LR",
+      "  start [label=\"${1:Start}\" shape=oval]",
+      "  step [label=\"${2:Do something}\"]",
+      "  check [label=\"${3:Done?}\" shape=diamond]",
+      "  finish [label=\"${4:Finish}\" shape=oval]",
+      "  start -> step -> check",
+      "  check -> finish [label=\"yes\"]",
+      "  check -> step [label=\"no\"]",
+      "}",
+      "```$0"
+    ]
+  },
+  "markdown_dot_architecture": {
+    "prefix": "markdown_dot_architecture",
+    "category": "Diagrams",
+    "description": "Graphviz architecture with grouped services",
+    "body": [
+      "```dot",
+      "digraph G {",
+      "  rankdir=LR",
+      "  user [label=\"${1:User}\" shape=oval]",
+      "  subgraph cluster_app {",
+      "    label=\"${2:Backend}\"",
+      "    api [label=\"${3:API}\"]",
+      "    worker [label=\"${4:Worker}\"]",
+      "  }",
+      "  db [label=\"${5:Database}\" shape=cylinder]",
+      "  user -> api [label=\"${6:HTTPS}\"]",
+      "  api -> worker",
+      "  api -> db",
+      "  worker -> db",
+      "}",
+      "```$0"
+    ]
+  },
+  "markdown_d2_flowchart": {
+    "prefix": "markdown_d2_flowchart",
+    "category": "Diagrams",
+    "description": "D2 flowchart",
+    "body": [
+      "```d2",
+      "direction: down",
+      "start: ${1:Start} { shape: oval }",
+      "step: ${2:Do something}",
+      "check: ${3:Done?} { shape: diamond }",
+      "finish: ${4:Finish} { shape: oval }",
+      "start -> step -> check",
+      "check -> finish: yes",
+      "check -> step: no",
+      "```$0"
+    ]
+  },
+  "markdown_d2_architecture": {
+    "prefix": "markdown_d2_architecture",
+    "category": "Diagrams",
+    "description": "D2 architecture with a grouped backend",
+    "body": [
+      "```d2",
+      "direction: right",
+      "client: ${1:Browser}",
+      "backend: ${2:Backend} {",
+      "  api: ${3:API}",
+      "  db: ${4:Postgres} { shape: cylinder }",
+      "  api -> db: ${5:query}",
+      "}",
+      "client -> backend.api: ${6:HTTPS}",
+      "```$0"
+    ]
+  },
+  "markdown_d2_sequence": {
+    "prefix": "markdown_d2_sequence",
+    "category": "Diagrams",
+    "description": "D2 sequence diagram",
+    "body": [
+      "```d2",
+      "shape: sequence_diagram",
+      "${1:user}: ${2:User}",
+      "${3:svc}: ${4:Service}",
+      "${1:user} -> ${3:svc}: ${5:request}",
+      "${3:svc} -> ${1:user}: ${6:response}",
+      "```$0"
+    ]
+  },
+  "markdown_d2_erd": {
+    "prefix": "markdown_d2_erd",
+    "category": "Diagrams",
+    "description": "D2 entity-relationship (SQL tables)",
+    "body": [
+      "```d2",
+      "users: {",
+      "  shape: sql_table",
+      "  id: int {constraint: primary_key}",
+      "  name: varchar",
+      "}",
+      "orders: {",
+      "  shape: sql_table",
+      "  id: int {constraint: primary_key}",
+      "  user_id: int {constraint: foreign_key}",
+      "}",
+      "orders.user_id -> users.id",
+      "```$0"
+    ]
   }
 }

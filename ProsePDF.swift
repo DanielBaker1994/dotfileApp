@@ -13,6 +13,7 @@ enum ProsePDF {
         var css = ""                                   // [notes] pdf-css: a <style> header snippet; "" = built in
         var outDir = "~/Downloads"                     // [notes] pdf-path
         var highlight = "tango"                        // [notes] pdf-highlight
+        var filter = ""                                // [notes] pdf-filter: Lua filters, comma list; "" = diagrams.lua beside pdf-css; "none" = off
         var themeCSS = ""                              // dark theme layer (ProseRender.themeCSS)
         var cacheDir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
     }
@@ -38,12 +39,27 @@ enum ProsePDF {
         return (expand(c.outDir) as NSString).appendingPathComponent((stem.isEmpty ? "note" : stem) + ".pdf")
     }
 
+    // the pandoc Lua filters: `[notes] pdf-filter` (comma list), else diagrams.lua
+    // in the folder of `pdf-css` (```dot / ```d2 → inline SVG); only files that exist
+    static func filterPaths(_ c: Config) -> [String] {
+        let want = c.filter.trimmingCharacters(in: .whitespaces)
+        if want.lowercased() == "none" { return [] }
+        var list = want.split(separator: ",").map { expand($0.trimmingCharacters(in: .whitespaces)) }
+        if list.isEmpty, !c.css.isEmpty {
+            list = [(expand(c.css) as NSString).deletingLastPathComponent + "/diagrams.lua"]
+        }
+        return list.filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
     static func pandocArgs(note: String, css: String, html: String, _ c: Config) -> [String] {
         let dir = (note as NSString).deletingLastPathComponent
         let stem = ((note as NSString).lastPathComponent as NSString).deletingPathExtension
         return ["-s", "-f", "gfm", "-t", "html5", "--syntax-highlighting=\(c.highlight.isEmpty ? "tango" : c.highlight)",
                 "-V", "lang=en", "--metadata", "pagetitle=\(stem)", "--resource-path=\(dir)",
-                "--include-in-header=\(css)", "-o", html, note]
+                "--include-in-header=\(css)",
+                // the header file holds the app theme's --p-* palette: diagrams.lua colors a
+                // document with no style marker from it
+                "--metadata=ws-header=\(css)"] + filterPaths(c).map { "--lua-filter=\($0)" } + ["-o", html, note]
     }
 
     static func engineArgs(note: String, html: String, out: String) -> [String] {

@@ -179,6 +179,7 @@ enum ProseRender {
             configSectionValue("notes", k).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
         }
         if let v = notes("pdf-css") { cfg.css = v }
+        if let v = notes("pdf-filter") { cfg.filter = v }
         if let v = notes("pdf-highlight") { cfg.highlight = v }
         else { cfg.highlight = highlightTheme(c) }   // legible tokens on this theme
         cfg.themeCSS = themeCSS(c)
@@ -362,6 +363,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
         }
         if let v = notes("pdf-engine-bin") { c.engine = v }
         if let v = notes("pdf-css") { c.css = v }
+        if let v = notes("pdf-filter") { c.filter = v }
         if let v = notes("pdf-path") { c.outDir = v }
         if let v = notes("pdf-highlight") { c.highlight = v }
         else { c.highlight = ProseRender.highlightTheme(themeColors) }

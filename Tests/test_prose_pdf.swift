@@ -33,6 +33,19 @@ struct Main {
         let pa = ProsePDF.pandocArgs(note: "/n/a.md", css: "/c.html", html: "/t/pdf.html", c)
         check(pa.contains("--syntax-highlighting=tango") && pa.contains("--include-in-header=/c.html")
               && pa.contains("--resource-path=/n") && pa.last == "/n/a.md", "pandoc argv: \(pa)")
+        // diagram filter: beside pdf-css by default, "none" turns it off, a missing file is skipped
+        let ftmp = NSTemporaryDirectory() + "ws-filter-test"
+        try? FileManager.default.createDirectory(atPath: ftmp, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: ftmp + "/diagrams.lua", contents: Data("return {}".utf8))
+        var fc = c
+        fc.css = ftmp + "/style.css"
+        check(ProsePDF.pandocArgs(note: "/n/a.md", css: "/c.html", html: "/t/pdf.html", fc).contains("--lua-filter=\(ftmp)/diagrams.lua"),
+              "diagrams.lua beside pdf-css is used")
+        fc.filter = "none"
+        check(!ProsePDF.pandocArgs(note: "/n/a.md", css: "/c.html", html: "/t/pdf.html", fc).contains { $0.hasPrefix("--lua-filter") },
+              "pdf-filter = none turns it off")
+        fc.filter = "/nope/missing.lua"
+        check(ProsePDF.filterPaths(fc).isEmpty, "a missing filter file is skipped")
         check(ProsePDF.engineArgs(note: "/n/a.md", html: "/t/p.html", out: "/o.pdf") == ["--pdf-tags", "-u", "file:///n/", "/t/p.html", "/o.pdf"],
               "weasyprint argv")
 

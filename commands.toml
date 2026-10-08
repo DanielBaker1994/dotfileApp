@@ -519,6 +519,10 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #   pdf-path            folder the PDF goes to, as NOTE.pdf (default ~/Downloads)
 #   pdf-highlight       pandoc code highlight style (default tango)
 #   pdf-engine-bin      weasyprint (default /opt/homebrew/bin/weasyprint)
+#   pdf-filter          pandoc Lua filters for the reading view + PDF, comma
+#                       list (default: diagrams.lua beside pdf-css, which turns
+#                       ```dot / ```d2 fences into diagrams — needs `brew
+#                       install graphviz d2`); "none" = off
 #   doc-templates       names the ◐ chip (left of ⤢ on the Prose | nvim switch)
 #                       offers: picking one writes <div class="doc NAME"></div>
 #                       on the note's first line (the CSS for each name is in
