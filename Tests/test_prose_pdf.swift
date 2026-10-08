@@ -33,7 +33,7 @@ struct Main {
         let pa = ProsePDF.pandocArgs(note: "/n/a.md", css: "/c.html", html: "/t/pdf.html", c)
         check(pa.contains("--syntax-highlighting=tango") && pa.contains("--include-in-header=/c.html")
               && pa.contains("--resource-path=/n") && pa.last == "/n/a.md", "pandoc argv: \(pa)")
-        check(ProsePDF.engineArgs(note: "/n/a.md", html: "/t/p.html", out: "/o.pdf") == ["-u", "file:///n/", "/t/p.html", "/o.pdf"],
+        check(ProsePDF.engineArgs(note: "/n/a.md", html: "/t/p.html", out: "/o.pdf") == ["--pdf-tags", "-u", "file:///n/", "/t/p.html", "/o.pdf"],
               "weasyprint argv")
 
         // missing engine → a hint, no crash

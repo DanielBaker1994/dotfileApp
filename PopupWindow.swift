@@ -12730,6 +12730,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let sw = ProseModeSwitch(colors: config.colors, editLabel: config.vimEditorExecutable != nil ? "nvim" : "Edit")
         sw.onChange = { [weak self] on in self?.setProse(on) }
         sw.onPopOut = { [weak self] in self?.popOutProse() }
+        sw.onStyle = { [weak self, weak sw] rect in
+            guard let self, let sw else { return }
+            self.docTemplateMenu().popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.maxY + 4), in: sw)
+        }
         if let chrome { backdrop.addSubview(sw, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(sw) }
         proseSwitch = sw
         layoutEditorScroll()
@@ -12773,6 +12777,63 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         pv.show(src, colors: config.colors, font: proseFont, size: proseFontSize * zoom, width: proseWidth)
         panel.makeFirstResponder(pv.web)
     }
+    // The switch's ◐ chip: pick a document template ([notes] doc-templates; the
+    // CSS is the dotfiles' friendly_document_styling.css). Picking rewrites the
+    // marker on the note's FIRST line (DocTemplates), so the style lives in the
+    // markdown and every pipeline (reading view, Export PDF, nvim's build)
+    // renders it.
+    private func docTemplateMenu() -> NSMenu {
+        let text = proseProvider?()?.markdown ?? ""
+        let cur = DocTemplates.current(in: text)
+        let m = NSMenu()
+        m.autoenablesItems = false
+        let head = NSMenuItem(title: "Document style", action: nil, keyEquivalent: "")
+        head.isEnabled = false
+        m.addItem(head)
+        let none = ClosureMenuItem("Plain (no style)") { [weak self] in self?.applyDocTemplate(nil) }
+        none.state = cur == nil ? .on : .off
+        m.addItem(none)
+        m.addItem(.separator())
+        for name in DocTemplates.names(configSectionValue("notes", "doc-templates")) {
+            let it = ClosureMenuItem(name) { [weak self] in self?.applyDocTemplate(name) }
+            it.state = cur == name ? .on : .off
+            m.addItem(it)
+        }
+        return m
+    }
+
+    // rewrite the note's first line(s) in whichever editor holds the note
+    private func applyDocTemplate(_ name: String?) {
+        guard let text = proseProvider?()?.markdown else { return }
+        let e = DocTemplates.edit(text, template: name)
+        if e.remove == 0 && e.insert.isEmpty { return }
+        if vimView != nil, vimPaneActive {
+            let lua = PopupWindow.vimLua([
+                "(function(a)",
+                "local n = tonumber(a:match('^(%d+)\\n'))",
+                "local rest = a:gsub('^%d+\\n', '')",
+                "local new = rest == '' and {} or vim.split(rest, '\\n', {plain = true})",
+                "vim.api.nvim_buf_set_lines(0, 0, n, false, new)",
+                "vim.cmd('silent! update') return 1 end)(_A)",
+            ])
+            _ = vimEval("luaeval(\(PopupWindow.vimString(lua)), \(PopupWindow.vimDQ("\(e.remove)\n" + e.insert.joined(separator: "\n"))))")
+        } else if let tv = editorView {
+            let ns = tv.string as NSString
+            var end = 0
+            for _ in 0..<e.remove where end < ns.length { end = NSMaxRange(ns.lineRange(for: NSRange(location: end, length: 0))) }
+            let r = NSRange(location: 0, length: end)
+            let new = e.insert.isEmpty ? "" : e.insert.joined(separator: "\n") + "\n"
+            if tv.shouldChangeText(in: r, replacementString: new) {
+                tv.replaceCharacters(in: r, with: new)
+                tv.didChangeText()
+            }
+        }
+        // the file is current (vim updated / the editor autosaves): re-render
+        // the page now when it is showing
+        DispatchQueue.main.asyncAfter(deadline: .now() + (vimPaneActive ? 0.05 : 0.6)) { [weak self] in self?.refreshProse() }
+        showToast(name.map { "Style: \($0)" } ?? "Style removed", symbol: "paintpalette")
+    }
+
     // the reading page in its own floating window (⌘⇧O / the ⤢ chip)
     public func popOutProse() {
         if vimView != nil, vimPaneActive { vimCommand("silent! update") }

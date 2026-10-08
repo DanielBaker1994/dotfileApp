@@ -519,6 +519,12 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #   pdf-path            folder the PDF goes to, as NOTE.pdf (default ~/Downloads)
 #   pdf-highlight       pandoc code highlight style (default tango)
 #   pdf-engine-bin      weasyprint (default /opt/homebrew/bin/weasyprint)
+#   doc-templates       names the ◐ chip (left of ⤢ on the Prose | nvim switch)
+#                       offers: picking one writes <div class="doc NAME"></div>
+#                       on the note's first line (the CSS for each name is in
+#                       pdf-css's file). Default: all of them (tokyo-night,
+#                       paper, executive, terminal, catppuccin-*, dracula,
+#                       nord, gruvbox-*, solarized-*, rose-pine*)
 [notes]
 enabled = true
 in-palette = false
@@ -528,6 +534,8 @@ pdf-css = "~/.dotfiles/markdown_generator/friendly_document_styling.css"
 # copy-to-clipboard button beside every code block in the reading view
 # (default true; screen only — the PDF export never includes it)
 copy-buttons = true
+# document styles offered by the reading view's ◐ chip (see doc-templates above)
+doc-templates = "tokyo-night, paper, executive, terminal, catppuccin-mocha, catppuccin-latte, dracula, nord, gruvbox-dark, gruvbox-light, solarized-dark, solarized-light, rose-pine, rose-pine-dawn"
 # pandoc --syntax-highlighting theme for the reading view + PDF; unset =
 # picked from the active theme (breezedark on dark pages, tango on light)
 # pdf-highlight = "breezedark"

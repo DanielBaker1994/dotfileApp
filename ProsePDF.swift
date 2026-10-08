@@ -48,7 +48,9 @@ enum ProsePDF {
 
     static func engineArgs(note: String, html: String, out: String) -> [String] {
         let base = URL(fileURLWithPath: (note as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
-        return ["-u", base, html, out]
+        // --pdf-tags: a tagged PDF (structure tree: headings, paragraphs, lists,
+        // tables) so readers / Word / Acrobat can reflow and copy by paragraph
+        return ["--pdf-tags", "-u", base, html, out]
     }
 
     // the header CSS file: the configured one, else the built-in style, with

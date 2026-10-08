@@ -147,7 +147,7 @@ enum ProseRender {
         c.isLight ? "tango" : "breezedark"
     }
 
-    // Screen-only copy-to-clipboard buttons: the reading view's JS wraps each
+    // Screen-only copy-to-clipboard buttons (code blocks only — tables have none): the reading view's JS wraps each
     // <pre> in .codeblock and adds a .copy-btn to its left; this is the flex
     // layout + hover/copied states. Never reaches the PDF (export() skips the
     // reading page entirely, and weasyprint runs no JS anyway).
@@ -155,16 +155,14 @@ enum ProseRender {
         """
         .codeblock { display: flex; align-items: stretch; }
         .codeblock pre { flex: 1 1 auto; min-width: 0; }
-        .codeblock table { flex: 0 1 auto; min-width: 0; margin: .8em 0; }
-        .codeblock:has(> table) { align-items: flex-start; }
-        .codeblock:has(> table) .copy-btn { align-self: flex-start; height: 34px; margin-top: .8em; }
         .copy-btn { flex: 0 0 auto; align-self: stretch; width: 34px; margin: .8em 8px .8em 0;
           display: flex; align-items: center; justify-content: center; padding: 0;
-          border: none; border-radius: 8px; background: \(css(c.surface0)); color: \(css(c.dim));
+          border: none; border-radius: 8px; background: var(--p-s0, \(css(c.surface0))); color: var(--p-dim, \(css(c.dim)));
           cursor: pointer; transition: background .15s, color .15s; }
-        .copy-btn:hover { background: \(css(c.surface1)); color: \(css(c.text)); }
-        .copy-btn:active { background: \(css(c.surface1)); }
-        .copy-btn.copied { background: \(rgba(c.tone(.success), 0.20)); color: \(css(c.tone(.success))); }
+        .copy-btn:hover { background: var(--p-s1, \(css(c.surface1))); color: var(--p-text, \(css(c.text))); }
+        .copy-btn:active { background: var(--p-s1, \(css(c.surface1))); }
+        .copy-btn.copied { background: var(--p-success-tint, \(rgba(c.tone(.success), 0.20))); color: var(--p-success, \(css(c.tone(.success)))); }
+        .copy-btn:focus { outline: none; }
         .copy-btn svg { width: 16px; height: 16px; }
         """
     }
@@ -240,22 +238,16 @@ final class ProseView: NSView, WKScriptMessageHandler {
           var CHECK = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
           function addCopyButtons() {
             if (!document.getElementById('ws-copy')) return;
-            document.querySelectorAll('pre, table').forEach(function (pre) {
+            document.querySelectorAll('pre').forEach(function (pre) {
               if (pre.parentElement && pre.parentElement.classList.contains('codeblock')) return;
-              var isTable = pre.tagName === 'TABLE';
               var code = pre.querySelector('code') || pre;
               var btn = document.createElement('button');
               btn.className = 'copy-btn';
               btn.type = 'button';
               btn.innerHTML = COPY;
-              btn.setAttribute('aria-label', isTable ? 'Copy table to clipboard' : 'Copy code to clipboard');
+              btn.setAttribute('aria-label', 'Copy code to clipboard');
               btn.addEventListener('click', function () {
-                // a table copies as tab-separated rows, so it pastes into a spreadsheet
-                var text = isTable
-                  ? Array.prototype.map.call(pre.rows, function (r) {
-                      return Array.prototype.map.call(r.cells, function (c) { return c.innerText.trim(); }).join('\\t');
-                    }).join('\\n')
-                  : code.innerText;
+                var text = code.innerText;
                 function done(ok) {
                   btn.classList.toggle('copied', ok);
                   btn.innerHTML = ok ? CHECK : COPY;
@@ -478,6 +470,7 @@ final class ProseModeSwitch: NSView {
     var editLabel = "Edit"
     var onChange: ((Bool) -> Void)?
     var onPopOut: (() -> Void)?          // the ⤢ chip: the page in its own floating window
+    var onStyle: ((NSRect) -> Void)?     // the style chip: the document template menu (rect = the chip, own coords)
     private var hover: Int?
     private var tracking: NSTrackingArea?
     private let labels: [(String, String)]
@@ -488,8 +481,8 @@ final class ProseModeSwitch: NSView {
         self.editLabel = editLabel
         labels = [("text.alignleft", "Prose"), ("chevron.left.forwardslash.chevron.right", editLabel)]
         super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 28))
-        frame.size.width = segW.reduce(6, +) + 34
-        toolTip = "Reading view ⌘⇧P — Esc goes back to the editor; ⤢ opens it in a floating window"
+        frame.size.width = segW.reduce(6, +) + 34 + 32
+        toolTip = "Reading view ⌘⇧P — Esc goes back to the editor; ◐ picks a document style; ⤢ opens it in a floating window"
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -497,6 +490,7 @@ final class ProseModeSwitch: NSView {
     private var segW: [CGFloat] { labels.map { ($0.1 as NSString).size(withAttributes: [.font: font]).width + 38 } }
     private func seg(_ i: Int) -> NSRect {
         if i == 2 { return NSRect(x: bounds.width - 3 - 30, y: 3, width: 30, height: bounds.height - 6) }
+        if i == 3 { return NSRect(x: bounds.width - 3 - 30 - 32, y: 3, width: 30, height: bounds.height - 6) }
         let x = 3 + segW.prefix(i).reduce(0, +)
         return NSRect(x: x, y: 3, width: segW[i], height: bounds.height - 6)
     }
@@ -509,14 +503,15 @@ final class ProseModeSwitch: NSView {
     }
     override func mouseMoved(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
-        let h = (0..<3).first { seg($0).contains(p) }
+        let h = (0..<4).first { seg($0).contains(p) }
         if h != hover { hover = h; needsDisplay = true }
     }
     override func mouseExited(with e: NSEvent) { hover = nil; needsDisplay = true }
     override func mouseDown(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
-        guard let i = (0..<3).first(where: { seg($0).contains(p) }) else { return }
+        guard let i = (0..<4).first(where: { seg($0).contains(p) }) else { return }
         if i == 2 { onPopOut?(); return }
+        if i == 3 { onStyle?(seg(3)); return }
         let want = i == 0
         if want != prose { prose = want; onChange?(want) }
     }
@@ -528,6 +523,10 @@ final class ProseModeSwitch: NSView {
         c.mantle.setFill()
         NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
         CapsuleStyle.track(track, c)
+        // ◐ document style
+        let sr = seg(3)
+        CapsuleStyle.chip(sr, c, on: false, hover: hover == 3)
+        ButtonStyle.symbol("paintpalette", in: sr, color: hover == 3 ? c.text : c.dim, size: 11)
         // ⤢ pop out
         let pr = seg(2)
         CapsuleStyle.chip(pr, c, on: false, hover: hover == 2)

@@ -13,6 +13,10 @@ Vendor/.swiftterm.tmp.*
 README.html
 README.pdf
 
+
+PRD-screenshot.html
+PRD-screenshot.pdf
+
 # junk
 .DS_Store
 *.log
