@@ -1686,7 +1686,7 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
   ticked row (`PopupWindow.actionRows`).
 - Favorite releases: ☆ on release rows / Cmd+K "Favorite release" →
   `jira_poll.py --favorite-release add|remove KEY…` (config.json
-  `favoriteReleases`); the jira sidebar's FAVORITE RELEASES pinned rows
+  `favoriteReleases`); the jira sidebar's PINNED shelf (board views, starred releases, labels, each with a dim kind tag; BOARDS to browse sit below it; the poll files are the SYNCED section: rows show the job's name — endpoint `title` in config.json, else "All projects" / "Releases" / "Starred issues" / the job name, `search.json` = "Search results", `blacklist_release.json` = "Hidden releases" — the file name is in the hover tip; a green badge draws nothing, an age + dot only show once a list is behind, and the card's foot says "Synced 3m ago") pinned rows
   (`setSidebarPinned`) show that release's issues IN PLACE in the main table (`ListSession.pinView` via `--release-view KEY`; `selectSidebarPin` = pin highlighted, no tab; any tab click or Esc returns). Return on a release ROW / Cmd+K "Show release issues" still open `showJiraReleaseView`.
 - Jira Config: STATUS ▸ Overview first (health headline, Connection / Poll
   jobs / Cache groups, `overviewSig` rebuild on change); quiet dim section

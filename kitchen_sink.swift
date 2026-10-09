@@ -6342,10 +6342,21 @@ final class SwitcherController: NSObject {
         w.tabRowIcon = { [weak w] i in
             guard let w, w.tabTitles.indices.contains(i) else { return nil }
             let name = w.tabTitles[i].lowercased()
-            if name.hasPrefix("release") || name.contains("blacklist_release") { return "shippingbox" }
+            if name.contains("blacklist_release") { return "eye.slash" }
+            if name.hasPrefix("release") { return "shippingbox" }
             if name.hasPrefix("favorites") { return "star" }
             if name.hasPrefix("search") { return "magnifyingglass" }
             return "list.bullet.rectangle"
+        }
+        if ListSession.isJira(cmd) {
+            // SYNCED rows carry the job's name, not its file ("KAN", "Starred
+            // issues"); the file name stays in the hover tip. Green badges go
+            // quiet: an age + dot only shows once a list is behind.
+            w.tabRowTitle = { [weak w] i in
+                guard let w, w.tabTitles.indices.contains(i) else { return nil }
+                return JiraPoll.listTitle(file: w.tabTitles[i])
+            }
+            w.quietOKTabBadges = true
         }
         placeSlotWindow(w)
         w.quietShow = slotPrewarming
@@ -6375,7 +6386,7 @@ final class SwitcherController: NSObject {
         // jira: its sources as a sidebar (drag its edge; `sidebar-width`)
         if isJira {
             cfg.tabsSidebarWidth = cmd.sidebarWidth
-            cfg.tabsSidebarTitle = "Lists"
+            cfg.tabsSidebarTitle = "Synced"
             cfg.inspectorWidth = cmd.inspectorWidth
         }
         cfg.opaqueTabs = cmd.tabsOpaque ?? true
@@ -9005,12 +9016,15 @@ extension SwitcherController {
 
         func syncReleasePins() {
             guard cmd.name == "jira" else { return }
+            // one PINNED shelf (board views, starred releases, labels), then
+            // the BOARDS to browse
             let ids = (showMyWork ? ListSession.myWork.map { ListSession.myWorkPrefix + $0.0 } : [])
                 + pinnedViews.map { ListSession.viewPinPrefix + $0 }
+                + favReleases
+                + pinnedLabels.map { ListSession.labelPinPrefix + $0 }
                 + sidebarBoards.map { ListSession.boardPinPrefix + $0 }
-                + pinnedLabels.map { ListSession.labelPinPrefix + $0 } + favReleases
             if let k = pinView?.key, !ids.contains(k) { leavePinView() }
-            w.setSidebarPinned(ids, title: "Favorite releases", icon: "star.fill",
+            w.setSidebarPinned(ids, title: "Pinned", icon: "pin.fill",
                                selected: sidebarSelection,
                                label: { [self] k in
                                    switch pin(k) {
@@ -9063,10 +9077,8 @@ extension SwitcherController {
                                section: { [self] k in
                                    switch pin(k) {
                                    case .myWork: return "My work"
-                                   case .view: return "Pinned"
+                                   case .view, .label, .release: return "Pinned"
                                    case .board: return "Boards"
-                                   case .label: return "Labels"
-                                   case .release: return "Favorite releases"
                                    }
                                },
                                iconFor: { [self] k in
@@ -9075,7 +9087,15 @@ extension SwitcherController {
                                    case .board: return "rectangle.split.3x1"
                                    case .view(let v): return v.hasSuffix("|table") ? "tablecells" : "rectangle.split.3x1.fill"
                                    case .label: return "tag"
-                                   case .release: return "star.fill"
+                                   case .release: return "shippingbox"
+                                   }
+                               },
+                               meta: { [self] k in
+                                   switch pin(k) {
+                                   case .view: return "Board"
+                                   case .label: return "Label"
+                                   case .release: return "Release"
+                                   case .myWork, .board: return nil
                                    }
                                },
                                maxShown: 60,
@@ -10012,6 +10032,8 @@ extension SwitcherController {
             badgeStamp = (st, Date())
             let status = JiraPoll.status, config = JiraPoll.readJSON(JiraPoll.configPath)
             w.tabBadges = tabs.map { JiraPoll.tabBadge(path: $0.path, status: status, config: config) }
+            let sum = JiraPoll.syncSummary(paths: tabs.map(\.path), status: status, config: config)
+            w.setSidebarStatus(sum?.text, tone: sum?.tone ?? .success)
         }
 
         // wire every window hook (before the first show)
@@ -10666,6 +10688,52 @@ enum JiraPoll {
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h" }
         return "\(s / 86400)d"
+    }
+
+    // the SYNCED row's name for a tab file: the job's `title` (config.json),
+    // else its kind, else the job's name ("all" = every project). nil = show
+    // the file name. Cached per config.json mtime: rows ask on every draw.
+    private static var titleCache: (stamp: Date?, names: [String: String]) = (nil, [:])
+    static func listTitle(file: String) -> String? {
+        let stamp = (try? FileManager.default.attributesOfItem(atPath: configPath))?[.modificationDate] as? Date
+        if titleCache.stamp != stamp || titleCache.names.isEmpty {
+            var names = [liveSearchFile: "Search results", blacklistFile: "Hidden releases"]
+            for ep in endpoints {
+                guard let name = ep["name"] as? String else { continue }
+                let f = ep["file"] as? String ?? "\(name).json"
+                if let t = ep["title"] as? String, !t.isEmpty { names[f] = t; continue }
+                switch ep["type"] as? String {
+                case "releases": names[f] = "Releases"
+                case "favorites": names[f] = "Starred issues"
+                default: names[f] = name == "all" ? "All projects" : name
+                }
+            }
+            titleCache = (stamp, names)
+        }
+        return titleCache.names[file]
+    }
+
+    // the sidebar foot: how fresh the polled lists are as a whole
+    static func syncSummary(paths: [String], status: [String: Any]?, config: [String: Any]?) -> (text: String, tone: PopupTone)? {
+        let eps = config?["endpoints"] as? [[String: Any]] ?? []
+        var newest: Date?, behind = 0, polled = 0, failing = false
+        for path in paths {
+            let file = (path as NSString).lastPathComponent
+            guard file != liveSearchFile, file != blacklistFile,
+                  let ep = eps.first(where: { ($0["file"] as? String ?? "\($0["name"] as? String ?? "").json") == file }),
+                  let name = ep["name"] as? String else { continue }
+            polled += 1
+            let entry = (status?["endpoints"] as? [[String: Any]] ?? []).first { ($0["name"] as? String) == name } ?? [:]
+            if let ok = parseStamp(entry["lastSuccess"] as? String) { newest = max(newest ?? ok, ok) }
+            let tone = tabBadge(path: path, status: status, config: config)?.tone
+            if tone != .success { behind += 1 }
+            if tone == .danger { failing = true }
+        }
+        guard polled > 0 else { return nil }
+        guard let newest else { return ("Never synced", .danger) }
+        let ago = age(Date().timeIntervalSince(newest))
+        if behind > 0 { return ("\(behind) out of date · last sync \(ago) ago", failing ? .danger : .warning) }
+        return ("Synced \(ago) ago", .success)
     }
 
     // A jira tab's poll freshness for the tab strip: green = polled

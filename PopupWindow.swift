@@ -1522,6 +1522,19 @@ final class PopupTabsBar: NSView {
     // per row section title (jira: FAVORITE RELEASES, LABELS): a label is
     // drawn wherever it changes; nil = one section titled pinnedTitle
     var pinnedSection: ((String) -> String)?
+    // a dim tag at the right edge of a pinned row ("Board", "Label")
+    var pinnedMeta: ((String) -> String?)?
+    // the shown name of tab i when it isn't the title (jira: the job's name;
+    // the file name stays in `titles` and in the tooltip)
+    var rowTitleFor: ((Int) -> String?)?
+    // a green badge draws nothing (age + dot only show once a row needs
+    // attention); its tooltip stays
+    var quietOKBadges = false
+    // the card's foot, beside the ◧ toggle: "Synced 3m ago"
+    var statusLine: (text: String, tone: PopupTone)? { didSet { needsDisplay = true } }
+    private func shownTitle(_ i: Int) -> String {
+        rowTitleFor?(i) ?? (titles.indices.contains(i) ? titles[i] : "")
+    }
     // ⌘\ / the ◧ button at the card's foot: collapse to an ICON RAIL
     // (railWidth wide: icons only, names as tooltips). Hosts lay the bar out
     // at `width(expanded:)` and re-lay out on onCollapse. Remembered per
@@ -1717,7 +1730,7 @@ final class PopupTabsBar: NSView {
             return pinnedLabel?(p) ?? (p as NSString).lastPathComponent
         }
         let i = row - pinnedShown
-        return titles.indices.contains(i) ? titles[i] : ""
+        return shownTitle(i)
     }
     private func revealCursor() {
         guard cursor >= pinnedShown else { needsDisplay = true; return }
@@ -1869,8 +1882,15 @@ final class PopupTabsBar: NSView {
                 let a: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12.5 * zoom, weight: sel ? .semibold : .regular),
                                                         .foregroundColor: c.text, .paragraphStyle: para]
                 let sz = name.size(withAttributes: a)
+                var tagW: CGFloat = 0
+                if let tag = pinnedMeta?(path), !tag.isEmpty {
+                    let ta: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10 * zoom), .foregroundColor: c.dim]
+                    let tsz = (tag as NSString).size(withAttributes: ta)
+                    (tag as NSString).draw(at: NSPoint(x: r.maxX - 8 * zoom - tsz.width, y: r.midY - tsz.height / 2), withAttributes: ta)
+                    tagW = tsz.width + 8 * zoom
+                }
                 name.draw(in: NSRect(x: r.minX + 30 * zoom, y: r.midY - sz.height / 2,
-                                     width: max(0, r.width - 38 * zoom), height: sz.height), withAttributes: a)
+                                     width: max(0, r.width - 38 * zoom - tagW), height: sz.height), withAttributes: a)
             }
         }
         // section label + "+"
@@ -1896,7 +1916,7 @@ final class PopupTabsBar: NSView {
             if collapsed {
                 ButtonStyle.symbol(vIcon(i), in: NSRect(x: r.midX - 8 * zoom, y: r.minY, width: 16 * zoom, height: r.height),
                                    color: sel ? c.accentOn : c.dim, size: 13 * zoom)
-                if let b = badge(i) {
+                if let b = badge(i), !(quietOKBadges && b.tone == .success) {
                     let dot = NSRect(x: r.midX + 5 * zoom, y: r.midY - 9 * zoom, width: dotW, height: dotW)
                     c.tone(b.tone).setFill()
                     NSBezierPath(ovalIn: dot).fill()
@@ -1907,7 +1927,8 @@ final class PopupTabsBar: NSView {
                                color: sel ? c.accentOn : c.dim, size: 11 * zoom)
             let showClose = close != nil && hov
             let b = badge(i)
-            let meta = showClose ? "" : (b.map { $0.text } ?? vMeta(i))
+            let quiet = quietOKBadges && b?.tone == .success
+            let meta = showClose || quiet ? "" : (b.map { $0.text } ?? vMeta(i))
             let metaAttrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 10 * zoom, weight: .regular),
                 .foregroundColor: c.dim,
@@ -1919,7 +1940,7 @@ final class PopupTabsBar: NSView {
                                         withAttributes: metaAttrs)
             }
             // a status badge's dot sits just left of its text
-            if let b, !showClose {
+            if let b, !showClose, !quiet {
                 let dot = NSRect(x: right - dotW, y: r.midY - dotW / 2, width: dotW, height: dotW)
                 c.tone(b.tone).setFill()
                 NSBezierPath(ovalIn: dot).fill()
@@ -1930,8 +1951,9 @@ final class PopupTabsBar: NSView {
                 .foregroundColor: c.text, .paragraphStyle: para,
             ]
             let tx = r.minX + 30 * zoom
-            let tsz = (titles[i] as NSString).size(withAttributes: tAttrs)
-            (titles[i] as NSString).draw(in: NSRect(x: tx, y: r.midY - tsz.height / 2,
+            let shown = shownTitle(i) as NSString
+            let tsz = shown.size(withAttributes: tAttrs)
+            shown.draw(in: NSRect(x: tx, y: r.midY - tsz.height / 2,
                                                     width: max(0, right - tx), height: tsz.height),
                                          withAttributes: tAttrs)
             if showClose, let close {
@@ -1950,6 +1972,19 @@ final class PopupTabsBar: NSView {
             ButtonStyle.draw(r, st, c, radius: radius, flat: true)
             ButtonStyle.symbol(collapsed ? "sidebar.right" : "sidebar.left", in: r,
                                color: hoverIndex == -4 ? c.text : c.dim, size: 12 * zoom)
+        }
+        if let st = statusLine, !collapsed {
+            let r = vToggleRect
+            let dot = NSRect(x: r.maxX + 8 * zoom, y: r.midY - dotW / 2, width: dotW, height: dotW)
+            c.tone(st.tone).setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            let sa: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10.5 * zoom), .foregroundColor: c.dim,
+                                                     .paragraphStyle: para]
+            let ssz = (st.text as NSString).size(withAttributes: sa)
+            let tx = dot.maxX + 6 * zoom
+            (st.text as NSString).draw(in: NSRect(x: tx, y: r.midY - ssz.height / 2,
+                                                  width: max(0, card.maxX - 10 * zoom - tx), height: ssz.height),
+                                       withAttributes: sa)
         }
         // a thin scroll hint when rows overflow
         if vContentH > list.height + 1 {
@@ -2051,7 +2086,7 @@ final class PopupTabsBar: NSView {
             let over = hit?.index, overClose = hit?.close == true ? hit?.index : nil
             let tip: String? = over.flatMap { i in
                 if i >= 0 {
-                    if collapsed { return [titles[i], badge(i)?.tip].compactMap { $0 }.joined(separator: " · ") }
+                    if collapsed { return [shownTitle(i), badge(i)?.tip].compactMap { $0 }.joined(separator: " · ") }
                     return badge(i)?.tip ?? pathTip?(i)
                 }
                 if i == -2 { return "New" }
@@ -8714,6 +8749,16 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     }
     // sidebar tabs: the SF Symbol for row i (nil = by file extension)
     public var tabRowIcon: ((Int) -> String?)?
+    // sidebar tabs: the name shown for row i when it isn't the tab title
+    public var tabRowTitle: ((Int) -> String?)?
+    // sidebar: green badges draw nothing; the footer line says how fresh the data is
+    public var quietOKTabBadges: Bool {
+        get { tabsBar?.quietOKBadges ?? false }
+        set { tabsBar?.quietOKBadges = newValue; tabsBar?.needsDisplay = true }
+    }
+    public func setSidebarStatus(_ text: String?, tone: PopupTone = .success) {
+        tabsBar?.statusLine = text.map { ($0, tone) }
+    }
     // a PINNED section on top of the sidebar tabs (list windows; jira =
     // starred releases): ids, then how each row looks and what a click does
     public func setSidebarPinned(_ ids: [String], title: String, icon: String,
@@ -8723,12 +8768,14 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                                  menu: ((String) -> NSMenu?)? = nil,
                                  section: ((String) -> String)? = nil,
                                  iconFor: ((String) -> String)? = nil,
+                                 meta: ((String) -> String?)? = nil,
                                  maxShown: Int = 8,
                                  onClick: @escaping (String) -> Void) {
         guard let bar = tabsBar, bar.vertical else { return }
         bar.pinnedTitle = title
         bar.pinnedSection = section
         bar.pinnedIconFor = iconFor
+        bar.pinnedMeta = meta
         bar.pinnedIcon = icon
         bar.pinnedLabel = label
         bar.pinnedTip = tip
@@ -9142,6 +9189,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         bar.pathTip = { [weak self] i in self?.tabPathTip?(i) }
         bar.onWidthChange = { [weak self] w, done in self?.setSidebarWidth(w, done: done) }
         bar.rowIcon = { [weak self] i in self?.tabRowIcon?(i) }
+        bar.rowTitleFor = { [weak self] i in self?.tabRowTitle?(i) }
         bar.sectionTitle = config.tabsSidebarTitle
         bar.collapseKey = config.name
         bar.onCollapse = { [weak self] _ in self?.sidebarRailChanged() }

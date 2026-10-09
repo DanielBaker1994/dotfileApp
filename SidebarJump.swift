@@ -3,7 +3,7 @@ import AppKit
 // MARK: - Jira sidebar jump: Space s f
 //
 // The notes pad's Space s f for the Jira sidebar: a popup listing every row
-// of the left panel (My work, Boards, Favorite releases, Labels, Lists),
+// of the left panel (My work, Pinned, Boards, Synced),
 // filtered as you type (the letters in order; title beats section). Return
 // does what clicking that row does. Esc closes. A tool panel
 // like NoteFindWindow: borderless, non-activating, never part of the shared
@@ -137,8 +137,7 @@ final class SidebarJumpWindow: NSObject {
         switch section {
         case "My work": return .accent
         case "Boards": return .info
-        case "Favorite releases": return .warning
-        case "Labels": return .success
+        case "Pinned": return .warning
         default: return .accent2
         }
     }

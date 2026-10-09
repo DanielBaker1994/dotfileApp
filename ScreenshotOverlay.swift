@@ -898,6 +898,16 @@ final class ShotOverlayView: NSView {
             ctx.fill(dirty)
         }
         ctx.restoreGState()
+        // mode cue: Copy Text is blue, Screenshot keeps the ui color; a tint
+        // + a thick frame around the whole display so the mode reads at a glance
+        let modeColor: CGColor = s.textMode ? shotTextBlue.cgColor : cfg.uiColor.cgColor
+        ctx.saveGState()
+        ctx.setFillColor(modeColor.copy(alpha: 0.14) ?? modeColor)
+        ctx.fill(dirty)
+        ctx.setStrokeColor(modeColor.copy(alpha: 0.6) ?? modeColor)
+        ctx.setLineWidth(8)
+        ctx.stroke(bounds.insetBy(dx: 4, dy: 4))
+        ctx.restoreGState()
         guard let sel = mine, sel.width > 0, sel.height > 0 else { return }
 
         // inside: the frozen pixels (drawn here so invert / marker blend
@@ -922,7 +932,7 @@ final class ShotOverlayView: NSView {
             ctx.restoreGState()
         }
         // the border + 8 round handles (60% of the button size)
-        ctx.setStrokeColor(cfg.uiColor.cgColor)
+        ctx.setStrokeColor(modeColor)
         if s.textMode {
             // Copy Text: a dashed marquee, no handles (a drag always starts anew)
             ctx.setLineWidth(2)
@@ -935,7 +945,7 @@ final class ShotOverlayView: NSView {
         ctx.stroke(sel.insetBy(dx: -0.5, dy: -0.5))
         if !s.isDragging || ringHidden {
             let hd = (cfg.buttonSize * 0.6 * 0.5).rounded()
-            ctx.setFillColor(cfg.uiColor.cgColor)
+            ctx.setFillColor(modeColor)
             for p in Self.handlePoints(sel) {
                 ctx.fillEllipse(in: CGRect(x: p.x - hd / 2, y: p.y - hd / 2, width: hd, height: hd))
             }
@@ -972,7 +982,7 @@ final class ShotOverlayView: NSView {
         if help != nil && helpIsText != s.textMode { help?.removeFromSuperview(); help = nil }
         if showHelp {
             if help == nil {
-                let h = ShotHelpCard(rows: s.textMode ? cfg.helpTextRows : cfg.helpRows, ui: cfg.uiColor)
+                let h = ShotHelpCard(rows: s.textMode ? cfg.helpTextRows : cfg.helpRows, ui: s.textMode ? shotTextBlue : cfg.uiColor)
                 helpIsText = s.textMode
                 addSubview(h, positioned: .below, relativeTo: nil)
                 help = h
@@ -999,7 +1009,7 @@ final class ShotOverlayView: NSView {
             let top = max(window?.screen.map { $0.frame.maxY - $0.visibleFrame.maxY } ?? 0, 24)
             if let m = modePill {
                 m.textMode = s.textMode
-                m.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2).rounded(), y: top + 12)
+                m.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2).rounded(), y: top + 16)
             }
             // recent screenshots button: right of the mode pill
             if recentBtn == nil {
@@ -1008,7 +1018,7 @@ final class ShotOverlayView: NSView {
                 recentBtn = r
             }
             if let m = modePill, let r = recentBtn {
-                r.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2 + m.frame.width + 8).rounded(), y: top + 16)
+                r.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2 + m.frame.width + 12).rounded(), y: top + 19)
             }
         } else {
             modePill?.removeFromSuperview()
@@ -1382,10 +1392,13 @@ final class ShotToolTab: NSView {
 }
 
 // "Screenshot | Copy Text": the overlay's mode switch (Tab / O toggle it)
+// Copy Text's color: pill segment, screen frame, marquee, help card
+let shotTextBlue = ShotColor(hex: "#0A84FF")!
+
 final class ShotModePill: NSView {
     private let ui: ShotColor
     private let action: (Bool) -> Void
-    private let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private let font = NSFont.systemFont(ofSize: 16, weight: .semibold)
     private let segments: [(symbol: String, title: String)] = [("text.viewfinder", "Copy Text"), ("camera", "Screenshot")]
     private var widths: [CGFloat] = []
     var textMode = false { didSet { if textMode != oldValue { needsDisplay = true } } }
@@ -1394,10 +1407,10 @@ final class ShotModePill: NSView {
         self.ui = ui
         self.action = action
         super.init(frame: .zero)
-        widths = segments.map { ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) + 16 + 6 + 24 }
-        frame = NSRect(x: 0, y: 0, width: widths.reduce(8, +), height: 34)
+        widths = segments.map { ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) + 18 + 8 + 28 }
+        frame = NSRect(x: 0, y: 0, width: widths.reduce(12, +), height: 42)
         wantsLayer = true
-        layer?.cornerRadius = 17
+        layer?.cornerRadius = 21
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
         layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
         layer?.borderWidth = 1
@@ -1424,22 +1437,23 @@ final class ShotModePill: NSView {
             let r = segmentRect(i)
             let on = (i == 0) == textMode
             if on, let ctx = NSGraphicsContext.current?.cgContext {
-                ctx.setFillColor(ui.cgColor)
+                let bgColor = (i == 0) ? shotTextBlue.cgColor : ui.cgColor
+                ctx.setFillColor(bgColor)
                 ctx.addPath(CGPath(roundedRect: r, cornerWidth: r.height / 2, cornerHeight: r.height / 2, transform: nil))
                 ctx.fillPath()
             }
-            let fg: NSColor = on ? (ui.isDark ? .white : .black) : NSColor.white.withAlphaComponent(0.75)
-            let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold).applying(.init(paletteColors: [fg]))
+            let fg: NSColor = on ? .white : NSColor.white.withAlphaComponent(0.75)
+            let cfg = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold).applying(.init(paletteColors: [fg]))
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fg]
             let tw = (seg.title as NSString).size(withAttributes: attrs)
-            let content = 16 + 6 + tw.width
+            let content = 18 + 8 + tw.width
             var x = r.minX + (r.width - content) / 2
             if let img = NSImage(systemSymbolName: seg.symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
                 let s = img.size
-                img.draw(in: CGRect(x: x + (16 - s.width) / 2, y: r.midY - s.height / 2, width: s.width, height: s.height),
+                img.draw(in: CGRect(x: x + (18 - s.width) / 2, y: r.midY - s.height / 2, width: s.width, height: s.height),
                          from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             }
-            x += 16 + 6
+            x += 18 + 8
             (seg.title as NSString).draw(at: CGPoint(x: x, y: r.midY - tw.height / 2), withAttributes: attrs)
         }
     }
