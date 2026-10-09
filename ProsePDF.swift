@@ -54,12 +54,51 @@ enum ProsePDF {
     static func pandocArgs(note: String, css: String, html: String, _ c: Config, sourcepos: Bool = false) -> [String] {
         let dir = (note as NSString).deletingLastPathComponent
         let stem = ((note as NSString).lastPathComponent as NSString).deletingPathExtension
+        let filters = (sourcepos ? [taskListFilterPath(c)] : []) + filterPaths(c)
         return ["-s", "-f", sourcepos ? "gfm+sourcepos" : "gfm", "-t", "html5", "--syntax-highlighting=\(c.highlight.isEmpty ? "tango" : c.highlight)",
                 "-V", "lang=en", "--metadata", "pagetitle=\(stem)", "--resource-path=\(dir)",
                 "--include-in-header=\(css)",
                 // the header file holds the app theme's --p-* palette: diagrams.lua colors a
                 // document with no style marker from it
-                "--metadata=ws-header=\(css)"] + filterPaths(c).map { "--lua-filter=\($0)" } + ["-o", html, note]
+                "--metadata=ws-header=\(css)"] + filters.map { "--lua-filter=\($0)" } + ["-o", html, note]
+    }
+
+    // gfm+sourcepos (the reading view, for the nvim position sync) splits a
+    // `- [ ] todo` item into Plain{☐} + a wrapper Div holding the text, so the
+    // HTML writer no longer sees a task item: a literal ☐ with the text on its
+    // own line. This puts the box back in front of the text → the same
+    // `<ul class="task-list"><li><label><input type="checkbox">` plain gfm makes.
+    static let taskListFilter = """
+    local box = { ["☐"] = true, ["☒"] = true }
+    function BulletList(el)
+      for i, item in ipairs(el.content) do
+        local a, b = item[1], item[2]
+        if a and b and a.t == "Plain" and #a.content == 1 and a.content[1].t == "Str"
+            and box[a.content[1].text] and b.t == "Div" and b.content[1]
+            and (b.content[1].t == "Plain" or b.content[1].t == "Para") then
+          local first = b.content[1]
+          local inl = pandoc.List({ a.content[1], pandoc.Space() })
+          inl:extend(first.content)
+          first.content = inl
+          local blocks = pandoc.List({ first })
+          for j = 2, #b.content do blocks:insert(b.content[j]) end
+          for j = 3, #item do blocks:insert(item[j]) end
+          el.content[i] = blocks
+        end
+      end
+      return el
+    end
+    """
+
+    // the filter as a file in cacheDir (rewritten only when its text changed)
+    static func taskListFilterPath(_ c: Config) -> String {
+        let path = (c.cacheDir as NSString).appendingPathComponent("sourcepos-tasklist.lua")
+        let data = Data(taskListFilter.utf8)
+        if FileManager.default.contents(atPath: path) != data {
+            try? FileManager.default.createDirectory(atPath: c.cacheDir, withIntermediateDirectories: true)
+            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
+        return path
     }
 
     static func engineArgs(note: String, html: String, out: String) -> [String] {

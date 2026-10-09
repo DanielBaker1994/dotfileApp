@@ -75,6 +75,14 @@ struct Main {
                 print("  export: \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
             case .failure(let e): check(false, "export failed: \(e)")
             }
+            // reading view (gfm+sourcepos): task items are real checkboxes, text beside the box
+            let tasks = tmp + "/tasks.md"
+            try? "- [ ] todo\n- [x] done\n  - [ ] nested\n- plain\n".write(toFile: tasks, atomically: true, encoding: .utf8)
+            let sh = ProsePDF.screenHTML(note: tasks, real) ?? ""
+            check(sh.contains("class=\"task-list\"") && sh.contains("<input type=\"checkbox\" />")
+                  && sh.contains("checked=\"\"") && !sh.contains("☐") && !sh.contains("☒"),
+                  "sourcepos task list renders checkboxes: \(sh)")
+            check(sh.contains("data-pos="), "sourcepos kept for the nvim sync")
         } else { print("  (pandoc / weasyprint missing: real export skipped)") }
 
         print("prose: \(passed) passed, \(failed) failed")
