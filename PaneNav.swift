@@ -25,6 +25,12 @@ struct NavPane {
     // the pane may use the key itself first (the nvim pane's own splits):
     // true = done, no jump
     var intercept: ((PaneDir) -> Bool)? = nil
+    // vim mode (VimKeys.swift): what normal mode drives (nil = found under
+    // `view`), what `i` / `a` focus (the pane's text input) and where Esc in
+    // that input goes (normal mode); nil = not offered
+    var vim: (() -> VimTarget?)? = nil
+    var insert: (() -> Void)? = nil
+    var normal: (() -> Void)? = nil
 
     init(_ id: String, _ view: NSView, part: (() -> NSRect)? = nil, focus: (() -> Void)? = nil,
          owns: ((NSResponder) -> Bool)? = nil, intercept: ((PaneDir) -> Bool)? = nil) {
@@ -123,6 +129,12 @@ final class PaneNav {
     private func topDown(_ r: NSRect, in w: NSWindow) -> CGRect {
         let h = w.contentView?.bounds.height ?? w.frame.height
         return CGRect(x: r.minX, y: h - r.maxY, width: r.width, height: r.height)
+    }
+
+    // the pane with the keyboard in w (VimKeys)
+    func currentPane(in w: NSWindow) -> NavPane? {
+        guard let p = provider?(w) else { return nil }
+        return current(in: w, panes(in: w, p))
     }
 
     func current(in w: NSWindow, _ list: [NavPane]) -> NavPane? {
@@ -239,20 +251,46 @@ final class PaneNav {
         for extra in root.subviews.compactMap({ $0 as? PaneFocusRing }) where extra !== ring {
             extra.removeFromSuperview()
         }
+        let badges = root.subviews.compactMap { $0 as? VimModeBadge }
+        for extra in badges.dropFirst() { extra.removeFromSuperview() }
+        let badge = root.subviews.compactMap { $0 as? VimModeBadge }.first ?? {
+            let b = VimModeBadge(frame: .zero)
+            root.addSubview(b, positioned: .above, relativeTo: nil)
+            return b
+        }()
         let wid = ObjectIdentifier(w)
         guard w.isKeyWindow, w.attachedSheet == nil, let p = provider?(w) else {
             ring.isHidden = true
+            badge.isHidden = true
             ringState[wid] = nil
+            VimKeys.shared.paneChanged(in: w, focused: nil)
             return
         }
         let list = panes(in: w, p)
-        guard list.count > 1, let cur = current(in: w, list) else {
+        let focused = current(in: w, list)
+        VimKeys.shared.paneChanged(in: w, focused: focused?.id)
+        // the vim mode chip: bottom-right of the focused pane
+        if VimKeys.showBadge, let cur = focused, let m = VimKeys.shared.mode(cur, in: w), m != .search {
+            let r = root.convert(cur.windowRect(), from: nil)
+            let sz = VimModeBadge.size(m)
+            badge.mode = m
+            badge.frame = NSRect(x: r.maxX - sz.width - 8, y: root.isFlipped ? r.maxY - sz.height - 6 : r.minY + 6,
+                                 width: sz.width, height: sz.height)
+            if root.subviews.last !== badge { root.addSubview(badge, positioned: .above, relativeTo: nil) }
+            badge.isHidden = false
+        } else {
+            badge.isHidden = true
+        }
+        guard list.count > 1, let cur = focused else {
             ring.isHidden = true
             ringState[wid] = nil
             return
         }
-        // stay on top of overlays added since
-        if root.subviews.last !== ring { root.addSubview(ring, positioned: .above, relativeTo: nil) }
+        // stay on top of overlays added since (the badge above the ring)
+        if root.subviews.last !== ring, root.subviews.last !== badge {
+            root.addSubview(ring, positioned: .above, relativeTo: nil)
+            if !badge.isHidden { root.addSubview(badge, positioned: .above, relativeTo: nil) }
+        }
         let wr = cur.windowRect()
         ring.frame = root.convert(wr, from: nil).insetBy(dx: 0.5, dy: 0.5)
         ring.apply(color: Self.ringColor, width: Self.ringWidth)
@@ -269,6 +307,8 @@ final class PaneNav {
         func box(_ r: CGRect) -> [Int] { [Int(r.minX), Int(r.minY), Int(r.width), Int(r.height)] }
         return [
             "focused": cur?.id ?? "",
+            "vimMode": VimKeys.shared.mode(cur, in: w)?.rawValue ?? "",
+            "vimSearch": VimKeys.shared.testState(w),
             "panes": list.map { ["id": $0.id, "rect": box(topDown($0.windowRect(), in: w))] },
             "ring": ring.map { ["pane": $0.pane, "rect": box($0.rect)] as [String: Any] } ?? ["pane": ""],
         ]

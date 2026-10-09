@@ -1483,7 +1483,7 @@ extension FolderPage {
         var out: [NavPane] = []
         if !nameBox.isHidden { out.append(.area("names", nameBox)) }
         for side in [CompareSide.left, .right] {
-            out.append(NavPane(side.rawValue, scroll, part: { [weak self] in
+            var p = NavPane(side.rawValue, scroll, part: { [weak self] in
                 guard let self else { return .zero }
                 let v = self.scroll.documentVisibleRect
                 let r = NSRect(x: self.tree.sideX(side), y: v.minY, width: self.tree.paneW, height: v.height)
@@ -1496,8 +1496,28 @@ extension FolderPage {
             }, owns: { [weak self] r in
                 guard let self else { return false }
                 return NavPane.inside(r, self.scroll) && self.session?.focus == side
-            }))
+            })
+            p.vim = { [weak self] in self.map { .rows(FolderVim($0)) } }
+            out.append(p)
         }
         return out
     }
+}
+
+// vim normal mode (VimKeys.swift): the tree's rows by relative path
+final class FolderVim: VimRows {
+    private weak var page: FolderPage?
+    init(_ p: FolderPage) { page = p }
+    var vimCount: Int { page?.session?.rows.count ?? 0 }
+    var vimCursor: Int { page?.session?.cursor ?? 0 }
+    var vimPage: Int { page?.vimPageRows ?? 20 }
+    func vimText(_ row: Int) -> String {
+        guard let r = page?.session?.rows, r.indices.contains(row) else { return "" }
+        return r[row].node.rel
+    }
+    func vimMove(to row: Int) { page?.move(to: row) }
+}
+
+extension FolderPage {
+    var vimPageRows: Int { max(1, Int(scroll.contentView.bounds.height / max(1, tree.rowH))) }
 }

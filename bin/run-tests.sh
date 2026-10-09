@@ -6,6 +6,7 @@
 #   ./bin/run-tests.sh fileops   run only the file browser's file operation tests
 #   ./bin/run-tests.sh ai        run only the AI view's rule / table / keep-words tests
 #   ./bin/run-tests.sh nvim      run only the notes pane's nvim RPC client tests (needs nvim)
+#   ./bin/run-tests.sh vim-keys  run only the vim "/" search tests (VimSearch.swift)
 #   ./bin/run-tests.sh filter    run only the list filter tests (parity + 20k-row keystroke timing)
 #   ./bin/run-tests.sh paths     run only the /paths shelf tests (ignore rules vs git, shelf, clipboard)
 #   ./bin/run-tests.sh screenshot run only the /screenshot model tests (button ring, undo, pixelate, render)
@@ -79,6 +80,9 @@ case "${1:-all}" in
         ;;
     panes)
         run_test "$TESTS/test_pane_geometry.swift"
+        ;;
+    vim-keys)
+        run_test "$TESTS/test_vim_search.swift"
         ;;
     compare)
         run_test "$TESTS/test_compare.swift"

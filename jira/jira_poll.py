@@ -85,6 +85,18 @@ Usage:
   jira_poll.py --pin-board add|remove ID...         pin agile boards (Jira sidebar
                                   BOARDS): reads the board's columns, filter
                                   JQL + quick filters, adds a board-ID job
+  jira_poll.py --sprints BOARD_ID                 the board's active + future sprints (JSON;
+                                  kanban boards have none)
+  jira_poll.py --board-catalog [--cached]         projects in scope -> boards -> sprints
+                                  (active, future, closed); the poll tick refreshes it
+                                  hourly; --cached = the last answer (board_catalog.json)
+  jira_poll.py --board-sprint-keys BOARD SPRINT|current   keys of the board's issues
+                                  in that sprint (the board view's sprint picker)
+  jira_poll.py --pin-view add|remove BOARD|SPRINT|MODE...   board views pinned to
+                                  the Jira sidebar (SPRINT = id|current|all,
+                                  MODE = columns|table)
+  jira_poll.py --pin-sprint add|remove SPRINT@BOARD...   pin sprints (Jira sidebar
+                                  SPRINTS): adds a sprint-ID job (`sprint = ID`)
   jira_poll.py --board-sprint ID on|off   scrum board job: only open sprints
   jira_poll.py --board-quickfilter ID QF...   the keys of the board's issues that
                                   match its quick filters (ANDed, like Jira);
@@ -282,6 +294,15 @@ def parse_args(argv: list) -> dict:
             return o
         elif name == "--label-view":
             o["label_view"] = val()
+        elif name == "--sprints":
+            o["sprints"] = val()
+        elif name == "--board-sprint-keys":
+            o["board_sprint_keys"] = argv[i + 1:i + 3]
+            return o
+        elif name == "--board-catalog":
+            o["board_catalog"] = True
+        elif name == "--cached":
+            o["cached"] = True
         elif name == "--board-sprint":
             o["board_sprint"] = argv[i + 1:i + 3]
             return o
@@ -292,12 +313,14 @@ def parse_args(argv: list) -> dict:
             o["import_filters"] = True
         elif name == "--my-work":
             o["my_work"] = True
-        elif name in ("--favorite", "--blacklist-release", "--favorite-release", "--pin-label", "--pin-board"):
+        elif name in ("--favorite", "--blacklist-release", "--favorite-release", "--pin-label", "--pin-board",
+                      "--pin-sprint", "--pin-view"):
             # --favorite add|remove KEY...  (the rest of argv = the keys)
             op = val()
             o[{"--favorite": "favorite", "--blacklist-release": "blacklist",
                "--favorite-release": "favorite_release", "--pin-label": "pin_label",
-               "--pin-board": "pin_board"}[name]] = (op, argv[i + 1:])
+               "--pin-board": "pin_board", "--pin-sprint": "pin_sprint",
+               "--pin-view": "pin_view"}[name]] = (op, argv[i + 1:])
             return o
         elif name in ("-h", "--help"):
             print(__doc__.strip())
@@ -833,6 +856,11 @@ def run_job(ctx: Ctx, ep: dict, window: str) -> int:
         return run_favorites(ctx, ep, rep)
     # custom jql: its own streamed search (its key set = its rows)
     kf = keys_file(ep["name"])
+    if window != "full" and not os.path.exists(kf):
+        # its key set is gone (a job removed and added again, a reset): a
+        # "since" window would publish only what changed since = nothing
+        say("no key set yet - full sync", ep["name"])
+        window = "full"
     fresh = window == "full" and not jira_api.load_checkpoint(ep["name"])
     base_keys = set() if fresh else set(jira_api.read_json(kf, []))
     f_ep, k_ep = job_fields(ep, team)
@@ -1527,6 +1555,240 @@ def board_info(c, bid: str, status_ids: dict) -> dict:
             "filterId": fid, "jql": jql, "columns": cols, "quickFilters": quick}
 
 
+SPRINT_RANK = {"active": 0, "future": 1, "closed": 2}
+
+
+def sprint_row(s: dict, bid: str) -> dict:
+    return {"id": str(s.get("id")), "name": s.get("name") or str(s.get("id")), "state": s.get("state") or "",
+            "board": bid, "startDate": s.get("startDate") or "", "endDate": s.get("endDate") or "",
+            "completeDate": s.get("completeDate") or "", "goal": s.get("goal") or ""}
+
+
+def sort_sprints(rows: list) -> list:
+    """active, then future (soonest first), then closed (newest first)."""
+    def when(s):
+        return s["completeDate"] or s["endDate"] or s["startDate"]
+    closed = sorted((s for s in rows if s["state"] == "closed"), key=when, reverse=True)
+    rest = sorted((s for s in rows if s["state"] != "closed"),
+                  key=lambda s: (SPRINT_RANK.get(s["state"], 3), s["startDate"] or "9999"))
+    return [s for s in rest if SPRINT_RANK.get(s["state"], 3) < 2] + closed + \
+        [s for s in rest if SPRINT_RANK.get(s["state"], 3) > 2]
+
+
+def fetch_sprints(c, bid: str, states: str = "active,future,closed", trace: list | None = None,
+                  limit: int = 500) -> tuple:
+    """GET /board/ID/sprint, every page -> (sprints, why_none). A 400 / 404 =
+    the board has no sprints: a kanban board, or a team-managed board whose
+    Sprints feature is off ("The board does not support sprints")."""
+    out, start, page = [], 0, 50
+    path = c.path("board_sprints", board_id=bid)
+    while True:
+        qs = f"state={states}&startAt={start}&maxResults={page}"
+        try:
+            got = c.get(path, qs) or {}
+        except jira_api.ApiError as err:
+            if err.code not in (400, 404):
+                raise
+            body = str(err)
+            msg = ""
+            try:
+                msg = (json.loads(body[body.index("{"):]).get("errorMessages") or [""])[0]
+            except (ValueError, AttributeError):
+                pass
+            if trace is not None:
+                trace.append(f"GET {path}?state={states} -> {err.code} {msg or 'no sprints'}")
+            return [], msg or f"HTTP {err.code}"
+        vals = [x for x in got.get("values") or [] if isinstance(x, dict) and x.get("id") is not None]
+        out += [sprint_row(x, bid) for x in vals]
+        start += len(vals)
+        if got.get("isLast", True) or not vals or len(out) >= limit:
+            break
+    if trace is not None:
+        trace.append(f"GET {path}?state={states} -> {len(out)} sprint(s)")
+    return sort_sprints(out), ""
+
+
+def board_sprints(c, bid: str, states: str = "active,future") -> list:
+    """The board's sprints (scrum only: a kanban board answers 400 -> [])."""
+    return fetch_sprints(c, bid, states)[0]
+
+
+def board_kind(b: dict, why_none: str) -> str:
+    """What the browser says a board is."""
+    t = b.get("type") or ""
+    if t == "kanban":
+        return "kanban"
+    if t == "simple":
+        return "team-managed" + (", sprints off" if why_none else "")
+    return t or "board"
+
+
+def board_catalog_path() -> str:
+    return os.path.join(jira_api.CACHE_DIR, jira_config.BOARD_CATALOG_FILE)
+
+
+def board_catalog(c, keys: list) -> dict:
+    """Projects in scope -> their boards -> each board's sprints, the way Jira
+    links them and never wider: GET /board?projectKeyOrId=KEY per project
+    (paged), then GET /board/ID/sprint (every state, paged) once per board.
+    `trace` = the requests in order, for the window to show where it looked."""
+    trace, problems, projects, seen = [], [], [], {}
+    bpath = c.path("boards")
+    for proj in keys:
+        boards, start = [], 0
+        try:
+            while True:
+                got = c.get(bpath, f"projectKeyOrId={jira_api.qenc(proj)}&startAt={start}&maxResults=50") or {}
+                vals = [b for b in got.get("values") or [] if isinstance(b, dict) and b.get("id") is not None]
+                boards += vals
+                start += len(vals)
+                if got.get("isLast", True) or not vals or len(boards) >= 500:
+                    break
+        except jira_api.ApiError as err:
+            problems.append(f"{proj}: {err}")
+            trace.append(f"GET {bpath}?projectKeyOrId={proj} -> error {err.code}")
+            projects.append({"key": proj, "boards": [], "error": str(err)})
+            continue
+        trace.append(f"GET {bpath}?projectKeyOrId={proj} -> {len(boards)} board(s)")
+        rows = []
+        for b in boards:
+            bid = str(b["id"])
+            if bid not in seen:
+                try:
+                    sprints, why = fetch_sprints(c, bid, trace=trace)
+                except jira_api.ApiError as err:
+                    sprints, why = [], f"error {err.code}"
+                    problems.append(f"board {bid}: {err}")
+                seen[bid] = {"id": bid, "name": b.get("name") or bid, "type": b.get("type") or "",
+                             "sprints": sprints, "noSprints": why,
+                             "kind": board_kind(b, why)}
+            rows.append(seen[bid])
+        projects.append({"key": proj, "boards": rows})
+    return {"ok": not problems, "projects": projects, "trace": trace, "problems": problems,
+            "boards": len(seen), "sprints": sum(len(b["sprints"]) for b in seen.values()),
+            "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "forProjects": keys}
+
+
+def run_board_catalog(cached: bool) -> int:
+    """--board-catalog [--cached]: the boards + sprints browser's data (JSON),
+    also kept in the cache; --cached = the last answer, no request."""
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "projects": [], "problems": [str(err)]}))
+        return 1
+    keys = jira_config.scope_projects(team)
+    if cached:
+        got = jira_api.read_json(board_catalog_path(), None)
+        if isinstance(got, dict) and got.get("forProjects") == keys:
+            print(json.dumps({**got, "cached": True}))
+            return 0
+        print(json.dumps({"ok": False, "projects": [], "problems": ["no cached catalog"], "cached": True}))
+        return 1
+    if not keys:
+        print(json.dumps({"ok": False, "projects": [], "problems": [jira_config.NO_SCOPE]}))
+        return 1
+    out = board_catalog(jira_api.Client.from_config(cfg), keys)
+    jira_api.write_json(board_catalog_path(), out, mode=0o644)
+    print(json.dumps(out))
+    return 0 if out["ok"] else 1
+
+
+def sprints_cache_path() -> str:
+    return os.path.join(jira_api.CACHE_DIR, jira_config.SPRINTS_FILE)
+
+
+def list_sprints(bid: str) -> int:
+    """--sprints BOARD_ID -> {ok, sprints: [...]}: one request."""
+    try:
+        cfg = jira_config.load()
+        sprints = board_sprints(jira_api.Client.from_config(cfg), bid)
+    except (jira_config.ConfigError, jira_api.ApiError) as err:
+        print(json.dumps({"ok": False, "sprints": [], "problems": [str(err)]}))
+        return 1
+    print(json.dumps({"ok": True, "sprints": sprints}))
+    return 0
+
+
+def sprint_job(s: dict, columns: str) -> dict:
+    return {"name": f"sprint-{s['id']}", "type": "issues", "jql": f"sprint = {s['id']}",
+            "boardId": s["board"], "sprintId": s["id"], "file": f"sprint-{s['id']}.json",
+            "window": "15m", "projects": "*", "enabled": True, "columns": columns}
+
+
+def edit_pinned_sprints(op: str, refs: list) -> int:
+    """--pin-sprint add|remove SPRINT@BOARD...: config.json pinnedSprints + a
+    sprint-ID job per sprint (`sprint = ID`, scope ANDed in by the sync)
+    publishing into BOARD_DIR, + name / state / board in sprints.json. remove
+    needs only the ids. Prints {ok, sprints, problems}."""
+    refs = [str(x).strip() for x in refs if str(x).strip()]
+    if op not in ("add", "remove") or not refs:
+        print(json.dumps({"ok": False, "problems": ["--pin-sprint add|remove SPRINT@BOARD..."]}))
+        return 1
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    cache = jira_api.read_json(sprints_cache_path(), {})
+    cache = cache if isinstance(cache, dict) else {}
+    eps = [dict(e) for e in cfg.endpoints]
+    cur = config_list(cfg, "pinnedSprints")
+    problems = []
+    if op == "add":
+        c = jira_api.Client.from_config(cfg)
+        by_board = {}
+        for r in refs:
+            sid, _, bid = r.partition("@")
+            by_board.setdefault(bid, []).append(sid)
+        cat = jira_api.read_json(board_catalog_path(), {}) or {}
+        cat_sprints = {s["id"]: s for p in cat.get("projects") or [] for b in p.get("boards") or []
+                       for s in b.get("sprints") or []}
+        for bid, sids in by_board.items():
+            try:
+                known = {k: v for k, v in cat_sprints.items() if v.get("board") == bid}
+                if any(x not in known for x in sids):
+                    known = {s["id"]: s for s in fetch_sprints(c, bid)[0]}
+            except jira_api.ApiError as err:
+                problems.append(f"board {bid}: {err}")
+                continue
+            for sid in sids:
+                s = known.get(sid)
+                if not s:
+                    problems.append(f"sprint {sid}: not on board {bid}")
+                    continue
+                cache[sid] = s
+                old = next((e for e in eps if e.get("name") == f"sprint-{sid}"), None)
+                job = sprint_job(s, (old or {}).get("columns") or main_columns(cfg))
+                if old is None:
+                    eps.append(job)
+                else:
+                    eps[eps.index(old)] = {**old, **job, "window": old.get("window", job["window"]),
+                                           "enabled": old.get("enabled", True)}
+                if sid not in cur:
+                    cur.append(sid)
+        ids = [r.partition("@")[0] for r in refs]
+    else:
+        ids = [r.partition("@")[0] for r in refs]
+        cur = [x for x in cur if x not in ids]
+        names = {f"sprint-{x}" for x in ids}
+        for e in [e for e in eps if e.get("name") in names]:
+            try:
+                os.unlink(job_path(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT, e))
+            except OSError:
+                pass
+            reset_job(e["name"])
+        eps = [e for e in eps if e.get("name") not in names]
+        for x in ids:
+            cache.pop(x, None)
+    jira_config.save({"pinnedSprints": cur, "endpoints": eps})
+    jira_api.write_json(sprints_cache_path(), cache, mode=0o644)
+    ok = op == "remove" or all(x in cur for x in ids)
+    print(json.dumps({"ok": ok, "sprints": cur, "jobs": [f"sprint-{x}" for x in cur], "problems": problems}))
+    return 0 if ok else 1
+
+
 def boards_cache_path() -> str:
     return os.path.join(jira_api.CACHE_DIR, jira_config.BOARDS_FILE)
 
@@ -1574,8 +1836,10 @@ def edit_pinned_boards(op: str, ids: list) -> int:
                 continue
             cache[bid] = info
             old = next((e for e in eps if e.get("name") == f"board-{bid}"), None)
-            # re-pinning keeps the job's own schedule, columns and sprint switch
-            sprint = old.get("sprintOnly", False) if old else info["type"] == "scrum"
+            # re-pinning keeps the job's own schedule, columns and sprint switch;
+            # a new board fetches every issue (the board view's sprint picker
+            # narrows it, past sprints included)
+            sprint = old.get("sprintOnly", False) if old else False
             job = board_job(bid, info["jql"], sprint, (old or {}).get("columns") or main_columns(cfg))
             if old is None:
                 eps.append(job)
@@ -1659,6 +1923,94 @@ def board_quickfilter(args: list) -> int:
         return 1
     print(json.dumps({"ok": True, "keys": keys, "jql": jql}))
     return 0
+
+
+def board_sprint_keys(args: list) -> int:
+    """--board-sprint-keys BOARD SPRINT: the keys of the board's issues in one
+    sprint (SPRINT = its id, or "current" = the board's open sprints), inside
+    the scope, fields=key -> {ok, keys}. The board view narrows the board's
+    rows to them (its job's rows carry no sprint field)."""
+    if len(args) != 2:
+        print(json.dumps({"ok": False, "problems": ["--board-sprint-keys BOARD SPRINT|current"]}))
+        return 1
+    bid, sprint = args
+    try:
+        cfg = jira_config.load()
+        team = jira_config.load_team(cfg.data)
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    info = (jira_api.read_json(boards_cache_path(), {}) or {}).get(bid) or {}
+    scope = jira_config.scope_projects(team)
+    if not scope:
+        print(json.dumps({"ok": False, "problems": [jira_config.NO_SCOPE]}))
+        return 1
+    if sprint == "current":
+        which = "sprint in openSprints()"
+    elif sprint.isdigit():
+        which = f"sprint = {sprint}"
+    else:
+        print(json.dumps({"ok": False, "problems": [f"not a sprint: {sprint}"]}))
+        return 1
+    clauses = ([f"({info['jql']})"] if info.get("jql") else []) + [which]
+    clauses.append("project in (" + ", ".join(f'"{jira_config.jql_quote(p)}"' for p in scope) + ")")
+    jql = " AND ".join(clauses)
+    c = jira_api.Client.from_config(cfg)
+    keys = []
+    try:
+        for got, _, _ in c.search_pages(jql, "key", max_total=5000):
+            keys += [i.get("key") for i in got if i.get("key")]
+    except jira_api.ApiError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)], "jql": jql}))
+        return 1
+    print(json.dumps({"ok": True, "keys": keys, "jql": jql}))
+    return 0
+
+
+def edit_pinned_views(op: str, specs: list) -> int:
+    """--pin-view add|remove BOARD|SPRINT|MODE...: board views pinned to the
+    Jira sidebar (config.json pinnedBoardViews, pin order). SPRINT = a sprint
+    id, current or all; MODE = columns or table. Prints {ok, views}."""
+    specs = [x.strip() for x in specs if x.strip()]
+    bad = [x for x in specs if len(x.split("|")) != 3]
+    if op not in ("add", "remove") or not specs or bad:
+        print(json.dumps({"ok": False, "problems": ["--pin-view add|remove BOARD|SPRINT|MODE..."]}))
+        return 1
+    try:
+        cfg = jira_config.load()
+    except jira_config.ConfigError as err:
+        print(json.dumps({"ok": False, "problems": [str(err)]}))
+        return 1
+    cur = config_list(cfg, "pinnedBoardViews")
+    new = (cur + [x for x in specs if x not in cur]) if op == "add" else [x for x in cur if x not in specs]
+    jira_config.save({"pinnedBoardViews": new})
+    print(json.dumps({"ok": True, "views": new}))
+    return 0
+
+
+def refresh_board_catalog(cfg, team: dict, force: bool = False) -> None:
+    """The poll tick keeps board_catalog.json (scope -> boards -> sprints, the
+    Jira sidebar's BOARDS and each board's sprint picker) fresh: asked again
+    every boardCatalogMinutes (60) or when the scope changed. Never fails the
+    tick."""
+    keys = jira_config.scope_projects(team)
+    if not keys:
+        return
+    got = jira_api.read_json(board_catalog_path(), None)
+    try:
+        age = time.time() - os.path.getmtime(board_catalog_path())
+    except OSError:
+        age = None
+    every = 60 * int(cfg.data.get("boardCatalogMinutes") or 60)
+    if not force and isinstance(got, dict) and got.get("forProjects") == keys and age is not None and age < every:
+        return
+    try:
+        out = board_catalog(jira_api.Client.from_config(cfg), keys)
+    except (jira_api.ApiError, jira_config.ConfigError) as err:
+        say(f"boards + sprints: {err}", "boards")
+        return
+    jira_api.write_json(board_catalog_path(), out, mode=0o644)
+    say(f"boards + sprints: {out['boards']} board(s), {out['sprints']} sprint(s)", "boards")
 
 
 def import_filters() -> int:
@@ -1845,6 +2197,16 @@ def main(argv: list) -> int:
         return edit_pinned_labels(*o["pin_label"])
     if o.get("pin_board"):
         return edit_pinned_boards(*o["pin_board"])
+    if o.get("pin_sprint"):
+        return edit_pinned_sprints(*o["pin_sprint"])
+    if o.get("sprints"):
+        return list_sprints(o["sprints"])
+    if o.get("pin_view"):
+        return edit_pinned_views(*o["pin_view"])
+    if o.get("board_sprint_keys") is not None:
+        return board_sprint_keys(o["board_sprint_keys"])
+    if o.get("board_catalog"):
+        return run_board_catalog(bool(o.get("cached")))
     if o.get("board_quick") is not None:
         return board_quickfilter(o["board_quick"])
     if o.get("board_sprint") is not None:
@@ -2082,6 +2444,8 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
             jira_status.endpoint_entry(d, SYNC).update(status="running", type="sync")
     jira_status.update(mark_running)
 
+    if not names:
+        refresh_board_catalog(cfg, team)
     if not plan and not sync_due:
         say("nothing due")
         jira_status.update(lambda d: None)

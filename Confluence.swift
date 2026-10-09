@@ -1745,12 +1745,46 @@ extension ConfluenceWindow: PaneProvider {
         if let bar = sidebar, bar.vertical {
             out.append(NavPane("sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
         }
-        out.append(.area("search", textBox))
-        out.append(NavPane("results", tableScroll, focus: { [weak self] in
+        var search = NavPane.area("search", textBox)
+        let results = NavPane("results", tableScroll, focus: { [weak self] in
             guard let self else { return }
             self.window.makeFirstResponder(self.table)
-        }))
+        })
+        search.normal = results.focus
+        var res = results
+        res.insert = { [weak self] in
+            guard let self else { return }
+            self.window.makeFirstResponder(self.textBox.field)
+        }
+        res.vim = { [weak self] in self.map { .rows(ConfluenceVim($0)) } }
+        out += [search, res]
         if let web { out.append(NavPane("preview", web)) }
         return out
     }
+}
+
+// vim normal mode on the results (VimKeys.swift)
+final class ConfluenceVim: VimRows {
+    private weak var w: ConfluenceWindow?
+    init(_ w: ConfluenceWindow) { self.w = w }
+    var vimCount: Int { w?.vimRows.count ?? 0 }
+    var vimCursor: Int { max(0, w?.vimTable.selectedRow ?? 0) }
+    var vimPage: Int {
+        guard let t = w?.vimTable else { return 10 }
+        return max(1, Int(t.visibleRect.height / max(1, t.rowHeight + t.intercellSpacing.height)))
+    }
+    func vimText(_ row: Int) -> String {
+        guard let r = w?.vimRows, r.indices.contains(row) else { return "" }
+        return "\(r[row].title) \(r[row].spaceName) \(r[row].excerpt)"
+    }
+    func vimMove(to row: Int) {
+        guard let t = w?.vimTable, row >= 0, row < t.numberOfRows else { return }
+        t.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        t.scrollRowToVisible(row)
+    }
+}
+
+extension ConfluenceWindow {
+    var vimRows: [ConfluenceRow] { rows }
+    var vimTable: NSTableView { table }
 }

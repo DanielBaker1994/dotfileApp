@@ -598,9 +598,10 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             r = json.loads(self.run_py(env, "jira_poll.py", "--pin-board", "add", "7").stdout)
             self.assertEqual((r["ok"], r["boards"]), (True, ["7"]))
             ep = next(e for e in self.cfgjson(env)["endpoints"] if e["name"] == "board-7")
-            # the filter's JQL, ORDER BY dropped; scrum = open sprints only
+            # the filter's JQL, ORDER BY dropped; every issue (the board view's
+            # sprint picker narrows it, past sprints included)
             self.assertEqual((ep["boardJql"], ep["jql"], ep["boardId"], ep["file"]),
-                             ("project = P1", "(project = P1) AND sprint in openSprints()", "7", "board-7.json"))
+                             ("project = P1", "project = P1", "7", "board-7.json"))
             with open(os.path.join(tmp, "cache", "boards.json")) as fh:
                 b = json.load(fh)["7"]
             self.assertEqual(b["columns"], [{"name": "Todo", "statuses": ["a"]},
@@ -608,9 +609,10 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             self.assertEqual(b["quickFilters"][0]["name"], "Mine")
             r = json.loads(self.run_py(env, "jira_poll.py", "--board-quickfilter", "7", "3").stdout)
             self.assertTrue(r["ok"], r)
-            self.assertEqual(r["jql"], '((project = P1) AND sprint in openSprints()) AND '
-                                       '(assignee = currentUser()) AND project in ("P1", "P2")')
+            self.assertEqual(r["jql"], '(project = P1) AND (assignee = currentUser()) AND project in ("P1", "P2")')
             self.assertEqual(r["keys"][:2], ["P-0", "P-1"])
+            r = json.loads(self.run_py(env, "jira_poll.py", "--board-sprint", "7", "on").stdout)
+            self.assertTrue(r["sprintOnly"])
             r = json.loads(self.run_py(env, "jira_poll.py", "--board-sprint", "7", "off").stdout)
             self.assertFalse(r["sprintOnly"])
             ep = next(e for e in self.cfgjson(env)["endpoints"] if e["name"] == "board-7")
@@ -1533,6 +1535,124 @@ class ResilientSyncTests(unittest.TestCase):
                               if "fields=comment" in r["curl"]])
 
 
+
+
+class FakeJiraSiteTests(unittest.TestCase):
+    """jira/fake_jira.py: discovery order project -> boards -> sprints, and
+    the sprint pin (--pin-sprint) end to end against the fake server."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        cls.port = s.getsockname()[1]
+        s.close()
+        cls.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "jira", "fake_jira.py"),
+                                     "serve", "--port", str(cls.port)], stdout=subprocess.DEVNULL)
+        for _ in range(50):
+            try:
+                socket.create_connection(("127.0.0.1", cls.port), 0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        cls.proc.wait()
+
+    def poll(self, env, *args):
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "jira", "jira_poll.py"), *args],
+                           env=env, capture_output=True, text=True)
+        return r
+
+    def test_boards_sprints_and_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = isolated_env(tmp, token="fake-token")
+            with open(env["JIRA_CONFIG_JSON"]) as fh:
+                cfg = json.load(fh)
+            cfg.update({"site": f"http://127.0.0.1:{self.port}", "email": "", "auth": "bearer",
+                        "outDir": os.path.join(tmp, "out")})
+            cfg["endpoints"][0]["columns"] = "key::20:left,summary::60:left,status::20:left"
+            with open(env["JIRA_CONFIG_JSON"], "w") as fh:
+                json.dump(cfg, fh)
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["DEMO", "OPS"]}, fh)
+            env["JIRA_TOKEN"] = "fake-token"
+            self.assertEqual(self.poll(env, "--directory").returncode, 0)
+            kanban = json.loads(self.poll(env, "--sprints", "1").stdout)
+            scrum = json.loads(self.poll(env, "--sprints", "2").stdout)
+            self.assertEqual(kanban["sprints"], [])          # kanban: no sprints
+            self.assertEqual([s["state"] for s in scrum["sprints"]], ["active", "future"])
+
+            # the browser's catalog: scope -> boards -> every sprint, nothing wider
+            r = self.poll(env, "--board-catalog")
+            cat = json.loads(r.stdout)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual([p["key"] for p in cat["projects"]], ["DEMO", "OPS"])
+            demo = {b["id"]: b for b in cat["projects"][0]["boards"]}
+            self.assertEqual(sorted(demo), ["1", "2"])        # WEB's boards never asked for
+            self.assertEqual(demo["1"]["kind"], "kanban")
+            self.assertEqual(demo["1"]["sprints"], [])
+            states = [s["state"] for s in demo["2"]["sprints"]]
+            self.assertEqual(states, ["active", "future"] + ["closed"] * 6)
+            closed = [s["name"] for s in demo["2"]["sprints"] if s["state"] == "closed"]
+            self.assertEqual(closed[0], "DEMO Sprint 6")     # newest past sprint first
+            ops = {b["name"]: b for b in cat["projects"][1]["boards"]}
+            self.assertEqual(ops["OPS board"]["kind"], "team-managed, sprints off")
+            self.assertIn("does not support sprints", ops["OPS board"]["noSprints"])
+            self.assertTrue(any("projectKeyOrId=DEMO" in t for t in cat["trace"]))
+            self.assertFalse(any("projectKeyOrId=WEB" in t for t in cat["trace"]))
+            again = json.loads(self.poll(env, "--board-catalog", "--cached").stdout)
+            self.assertTrue(again["cached"])
+            self.assertEqual(again["sprints"], cat["sprints"])
+
+            # the board view: pin the board (its filter + columns), then a
+            # sprint's keys narrow the board's rows
+            out = json.loads(self.poll(env, "--pin-board", "add", "2").stdout)
+            self.assertTrue(out["ok"], out)
+            cur = json.loads(self.poll(env, "--board-sprint-keys", "2", "current").stdout)
+            past = json.loads(self.poll(env, "--board-sprint-keys", "2", demo["2"]["sprints"][2]["id"]).stdout)
+            self.assertTrue(cur["ok"] and past["ok"], (cur, past))
+            self.assertIn("sprint in openSprints()", cur["jql"])
+            self.assertIn('project in ("DEMO", "OPS")', cur["jql"])
+            self.assertTrue(cur["keys"] and past["keys"])
+            self.assertFalse(set(cur["keys"]) & set(past["keys"]))     # an issue sits in one sprint
+            self.assertTrue(all(k.startswith("DEMO-") for k in cur["keys"] + past["keys"]))
+            # a board job that lost its key set (removed + added again) runs a
+            # full sync, never "changes since" = an empty board
+            self.assertEqual(self.poll(env, "--force", "--projects", "board-2").returncode, 0)
+            board = os.path.join(tmp, "jira_boards", "board-2.json")
+            with open(board) as fh:
+                n = len(json.load(fh))
+            self.assertGreater(n, 0)
+            os.unlink(os.path.join(env["JIRA_CACHE_DIR"], "endpoints", "board-2.keys.json"))
+            self.assertEqual(self.poll(env, "--force", "--projects", "board-2").returncode, 0)
+            with open(board) as fh:
+                self.assertEqual(len(json.load(fh)), n)
+            bad = json.loads(self.poll(env, "--board-sprint-keys", "2", "x;drop").stdout)
+            self.assertFalse(bad["ok"])
+            # pinned views
+            out = json.loads(self.poll(env, "--pin-view", "add", "2|current|columns", "1|all|table").stdout)
+            self.assertEqual(out["views"], ["2|current|columns", "1|all|table"])
+            out = json.loads(self.poll(env, "--pin-view", "remove", "1|all|table").stdout)
+            self.assertEqual(out["views"], ["2|current|columns"])
+            self.assertFalse(json.loads(self.poll(env, "--pin-view", "add", "nope").stdout)["ok"])
+
+            # pin the active sprint and a past one
+            active = demo["2"]["sprints"][0]["id"]
+            past = next(s["id"] for s in demo["2"]["sprints"] if s["name"] == "DEMO Sprint 2")
+            out = json.loads(self.poll(env, "--pin-sprint", "add", f"{active}@2", f"{past}@2").stdout)
+            self.assertTrue(out["ok"], out)
+            self.assertEqual(self.poll(env, "--force", "--projects", f"sprint-{past}").returncode, 0)
+            with open(os.path.join(tmp, "jira_boards", f"sprint-{past}.json")) as fh:
+                rows = json.load(fh)
+            self.assertGreater(len(rows), 0)
+            self.assertTrue(all(r.get("status") == "Done" for r in rows), rows[:2])   # a closed sprint is done
+            out = json.loads(self.poll(env, "--pin-sprint", "remove", active, past).stdout)
+            self.assertEqual(out["sprints"], [])
+            self.assertFalse(os.path.exists(os.path.join(tmp, "jira_boards", f"sprint-{past}.json")))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

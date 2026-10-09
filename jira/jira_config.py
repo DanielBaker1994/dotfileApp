@@ -106,6 +106,9 @@ DEFAULTS = {
     "favoriteReleases": [],          # starred release row keys, newest first (Jira sidebar)
     "pinnedLabels": [],              # labels pinned to the Jira sidebar (LABELS), in pin order
     "pinnedBoards": [],              # board ids pinned to the Jira sidebar (BOARDS); each = a board-ID job
+    "pinnedSprints": [],             # sprint ids pinned to the Jira sidebar (SPRINTS); each = a sprint-ID job
+    "pinnedBoardViews": [],          # board views pinned to the Jira sidebar: "BOARD|SPRINT|MODE"
+    "boardCatalogMinutes": 60,       # how often the poll re-reads scope -> boards -> sprints
 }
 
 LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
@@ -116,6 +119,8 @@ RELEASE_VIEW_DIR = "jira_releases"  # next to outDir: one <PROJECT>-<release>.js
 LABEL_VIEW_DIR = "jira_labels"      # next to outDir: one <label>.json per pinned label
 BOARD_DIR = "jira_boards"           # next to outDir: pinned boards' job files (no tab each)
 MY_WORK_DIR = "jira_mywork"         # next to outDir: the sidebar's MY WORK views
+SPRINTS_FILE = "sprints.json"       # in the jira cache: pinned sprints' name / state / board
+BOARD_CATALOG_FILE = "board_catalog.json"   # in the jira cache: scope -> boards -> sprints (the browser)
 BOARDS_FILE = "boards.json"         # in the jira cache: pinned boards' columns + quick filters
 
 # the directory job: projects + assignable users + statuses / types /
@@ -213,6 +218,7 @@ DEFAULT_API_ENDPOINTS = {
     "boards": "/board",                                   # ?projectKeyOrId=KEY (per scoped project)
     "board_configuration": "/board/{board_id}/configuration",
     "board_quickfilters": "/board/{board_id}/quickfilter",
+    "board_sprints": "/board/{board_id}/sprint",          # scrum boards only (kanban answers 400)
     "filter": "/filter/{filter_id}",
     "favourite_filters": "/filter/favourite",
 }

@@ -222,8 +222,8 @@ if cliArgs.count > 1 {
                 execv(script, argv)
             }
         }
-        // cold start: "window" opens the default view, files
-        openCommand = cliArgs[1] == "window" ? "files" : cliArgs[1]
+        // cold start: "window" opens the default view, notes
+        openCommand = cliArgs[1] == "window" ? "notes" : cliArgs[1]
     default:
         break
     }

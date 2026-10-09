@@ -8212,7 +8212,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             }
             return v
         }()
-        v.isHidden = false
+        v.isHidden = listOverlay != nil    // the board's columns take the whole width
         let top = (config.dragHeader ? config.headerHeight * zoom : 0) + topAccessoryHeight
         let w = min(config.inspectorWidth * zoom, backdrop.bounds.width * 0.6)
         let f = NSRect(x: backdrop.bounds.width - w, y: top, width: w, height: max(0, backdrop.bounds.height - top))
@@ -8308,6 +8308,52 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         }
     }
     public var hasTopAccessory: Bool { topAccessory != nil }
+
+    // list windows: a strip over the search box, right of the sidebar (the
+    // jira board bar), and a view laid over the rows area (the board's
+    // columns). nil = gone.
+    private var listBar: NSView?
+    private var listBarHeight: CGFloat = 0
+    public private(set) var listOverlay: NSView?
+    public func setListBar(_ v: NSView?, height: CGFloat = 0) {
+        if let old = listBar, old !== v { old.removeFromSuperview() }
+        listBar = v
+        listBarHeight = v == nil ? 0 : ceil(height)
+        if let v, let backdrop = panel.contentView, v.superview !== backdrop {
+            if let chrome { backdrop.addSubview(v, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(v) }
+        }
+        layoutForZoom()
+        layoutSearchField()
+        layoutScrollDocument()
+    }
+    public func setListOverlay(_ v: NSView?) {
+        if let old = listOverlay, old !== v { old.removeFromSuperview() }
+        listOverlay = v
+        if let v, let backdrop = panel.contentView, v.superview !== backdrop {
+            if let chrome { backdrop.addSubview(v, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(v) }
+        }
+        rowScroll?.isHidden = v != nil
+        tableHeader?.isHidden = v != nil
+        inspectorView?.isHidden = v != nil || !inspectorShown   // the columns take the whole width
+        layoutListExtras()
+    }
+    private func layoutListExtras() {
+        guard !config.editMode, let backdrop = panel.contentView else { return }
+        let top = (config.dragHeader ? config.headerHeight * zoom : 0) + topAccessoryHeight
+        // the bar stops at the issue panel (shown beside the table only)
+        let right = listOverlay == nil ? listRight : 0
+        listBar?.frame = NSRect(x: listLeft, y: top, width: backdrop.bounds.width - listLeft - right, height: listBarHeight)
+        if let ov = listOverlay {
+            let y = chromeBottom
+            ov.frame = NSRect(x: listLeft, y: y, width: backdrop.bounds.width - listLeft,
+                              height: max(0, backdrop.bounds.height - y))
+        }
+    }
+    // the rows changed (setRows): the host redraws what mirrors them
+    public var onRowsChanged: (() -> Void)?
+    // test hooks (socket do:board:…): the host's own actions + state
+    public var onTestAction: ((String) -> Void)?
+    public var testExtra: (() -> [String: Any])?
     // keyboard focus is inside the accessory (a field's editor counts)
     public var topAccessoryHasFocus: Bool {
         guard let acc = topAccessory, let fr = panel.firstResponder else { return false }
@@ -8852,7 +8898,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             layoutTerminal()
             layoutFileBrowser()
         } else {
-            let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight
+            let headerOffset = ((config.dragHeader) ? config.headerHeight * z + 4 : 0) + topAccessoryHeight + listBarHeight
             let fieldFrame = NSRect(x: listLeft + config.padding + 10,
                                     y: headerOffset + config.padding + 2,
                                     width: config.width - listLeft - listRight - 2 * (config.padding + 10),
@@ -9948,6 +9994,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     public func setRows(_ newRows: [PopupRow], resetScroll: Bool = true) {
         rows = newRows
+        defer { onRowsChanged?() }
         if selection >= rows.count {
             selection = max(0, rows.count - 1)
         }
@@ -10620,6 +10667,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             proseView?.exportPDF()
             return true
         }
+        // Ctrl+Shift+J / K in the nvim pane = add a cursor below / above
+        // (multi-cursor; the window-resize chord is for every other pane)
+        if (code == 38 || code == 40), mods.contains(.control), mods.contains(.shift),
+           !mods.contains(.command), !mods.contains(.option), focusedVim() != nil {
+            vimRemote(code == 38 ? "<Plug>(VM-Add-Cursor-Down)" : "<Plug>(VM-Add-Cursor-Up)")
+            return true
+        }
         if let r = paneResizeKey(code, mods) { return r }
         if let vv = focusedVim() { return vimPaneKey(vv, code, mods) }
         if let term = focusedTerm() { return terminalKey(term, code, mods) }
@@ -10654,28 +10708,28 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         // an Esc streak (N rapid Esc close the window) only counts
         // CONSECUTIVE presses — any other key starts it over
         if code != 53 { escStreak = 0 }
-        // Cmd + plus/minus (main "="/"+" and "-", plus the keypad): grow or
-        // shrink the window; rows stretch to fill from then on
+        // Cmd + plus/minus (main "="/"+" and "-", plus the keypad) zooms the
+        // TEXT (the reading view's page zoom, else the editor + terminal font):
+        // the text is what matters, not the panels around it. Cmd+Opt+= / -
+        // grows or shrinks the window (rows stretch to fill from then on).
         let cmd = mods.contains(.command)
-        // Cmd+Opt+= / Cmd+Opt+- : editor + terminal font size step
-        if cmd, mods.contains(.option), panel.attachedSheet == nil,
-           let step = onFontSizeStep {
-            switch code {
-            case 24, 69: step(1); return true
-            case 27, 78: step(-1); return true
-            default: break
+        let plus = code == 24 || code == 69, minus = code == 27 || code == 78
+        if cmd, (plus || minus), panel.attachedSheet == nil {
+            let sign = plus ? 1 : -1
+            if mods.contains(.option) {
+                resizeBy(CGFloat(80 * sign))
+            } else if proseShown, let pv = proseView {
+                pv.zoom(by: plus ? 1.1 : 1 / 1.1); pv.saveZoom()
+            } else if let step = onFontSizeStep {
+                step(sign)
+            } else {
+                resizeBy(CGFloat(80 * sign))
             }
+            return true
         }
-        // resize shortcuts never fire while a sheet's text field is up —
-        // Cmd+= / Cmd+- are typing/editing context, not window chrome
-        if cmd, panel.attachedSheet == nil {
-            switch code {
-            case 24: resizeBy(80); return true          // = / + (Cmd+Shift+=)
-            case 27: resizeBy(-80); return true         // -
-            case 69: resizeBy(80); return true          // keypad +
-            case 78: resizeBy(-80); return true         // keypad -
-            default: break
-            }
+        if cmd, code == 29, !mods.contains(.option), proseShown, let pv = proseView, panel.attachedSheet == nil {
+            pv.resetZoom(); pv.saveZoom()     // Cmd+0
+            return true
         }
         return nil
     }
@@ -11470,6 +11524,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 fb.frame.origin.x = listLeft
                 fb.frame.size.width = sw
             }
+            layoutListExtras()
         }
         // apply the WIDTH first: contentHeight measures at the live width, so
         // a stale width would make the document too short and clip the last
@@ -12321,6 +12376,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             "findBar": findBarShown, "accessory": topAccessory != nil,
             "pane": focusedPane.map { "\($0)" } ?? "",
             "tabs": tabTitles, "selectedTab": selectedTab,
+            "selection": selection, "rowCount": rows.count, "query": field.stringValue,
+            "board": testExtra?() ?? [:],
+            "sidebarCursor": tabsBar?.vertical == true ? tabsBar!.cursor : -1,
             "responder": panel.firstResponder.map { String(describing: type(of: $0)) } ?? "",
             "header": headerTestRects,
         ]
@@ -12957,9 +13015,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         let inset = config.padding + 10
         let fieldW = max(50, (w - 2 * inset) * config.searchWidthFraction)
         let x = listLeft + inset
-        let headerOffset = ((config.dragHeader) ? config.headerHeight * zoom + 4 : 0) + topAccessoryHeight
+        let headerOffset = ((config.dragHeader) ? config.headerHeight * zoom + 4 : 0) + topAccessoryHeight + listBarHeight
         let y = headerOffset + config.padding + 2
         field.frame = NSRect(x: x, y: y, width: fieldW, height: 24)
+        layoutListExtras()
     }
 
     // MARK: Placement
@@ -13334,14 +13393,30 @@ extension PopupWindow: PaneProvider {
         }
         if !config.editMode, fileBrowser == nil {
             // list windows: the filter box drives the rows, so one pane
-            let area: NSView = rowScroll ?? rowView
-            out.append(NavPane("list", area, focus: { [weak self] in
+            let area: NSView = listOverlay ?? rowScroll ?? rowView
+            var list = NavPane("list", area, focus: { [weak self] in
                 guard let self else { return }
                 self.panel.makeFirstResponder(self.field)
             }, owns: { [weak self] r in
                 guard let self else { return false }
                 return NavPane.inside(r, self.field) || NavPane.inside(r, area)
-            }))
+            })
+            let walker = PopupListVim(self)
+            list.vim = { [weak self] in
+                guard let self else { return nil }
+                if let ov = self.listOverlay { return VimTarget.find(in: ov) }   // the board's columns
+                return self.config.enableNavigation ? .rows(walker) : nil
+            }
+            list.normal = { [weak self] in
+                guard let self else { return }
+                if self.panel.firstResponder !== self.field.currentEditor() { self.panel.makeFirstResponder(self.field) }
+                VimKeys.shared.enterFieldNormal(self.field, in: self.panel)
+            }
+            list.insert = { [weak self] in
+                guard let self else { return }
+                if self.panel.firstResponder !== self.field.currentEditor() { self.panel.makeFirstResponder(self.field) }
+            }
+            out.append(list)
             if let iv = inspectorView, inspectorShown { out.append(.area("issue", iv)) }
         }
         return out
@@ -13367,14 +13442,21 @@ extension PopupFileBrowser: PaneProvider {
         if let bar = sidebar {
             out.append(NavPane("files-sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
         }
-        out.append(NavPane("files-filter", searchField, focus: { [weak self] in
+        var filter = NavPane("files-filter", searchField, focus: { [weak self] in
             guard let self else { return }
             self.window?.makeFirstResponder(self.searchField)
-        }))
-        out.append(NavPane("files-list", listScroll, focus: { [weak self] in
+        })
+        filter.normal = { [weak self] in
             guard let self else { return }
             self.window?.makeFirstResponder(self.listPane)
-        }))
+        }
+        out.append(filter)
+        var list = NavPane("files-list", listScroll, focus: { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self.listPane)
+        })
+        list.insert = filter.focus
+        out.append(list)
         if !previewListScroll.isHidden {
             out.append(NavPane("files-preview", previewListScroll, focus: { [weak self] in
                 guard let self else { return }
@@ -13389,5 +13471,57 @@ extension PopupFileBrowser: PaneProvider {
             out.append(NavPane("files-preview", previewImage))   // pictures, PDFs
         }
         return out
+    }
+}
+
+// MARK: - vim normal mode (VimKeys.swift): the rows each pane walks
+
+extension PopupTabsBar: VimRows {
+    var vimCount: Int { rowCount }
+    var vimCursor: Int { cursor }
+    var vimPage: Int { max(1, Int(vListRect.height / (vRowH + 1))) }
+    func vimText(_ row: Int) -> String {
+        guard row < pinnedShown else { return rowTitle(row) }
+        return rowTitle(row) + " " + (pinnedSection?(pinned[row]) ?? pinnedTitle)
+    }
+    func vimMove(to row: Int) { moveCursor(to: row) }
+}
+
+extension FileListPane: VimRows {
+    var vimCount: Int { rows.count }
+    var vimCursor: Int { selection }
+    var vimPage: Int { pageRows }
+    func vimText(_ row: Int) -> String { rows.indices.contains(row) ? rows[row].name : "" }
+    func vimMove(to row: Int) {
+        moveSelection(row - selection)
+        scrollToVisible(NSRect(x: 0, y: CGFloat(selection) * rowH, width: 1, height: rowH))
+    }
+}
+
+// a list window's rows (jira, output lists): the text of every column
+final class PopupListVim: VimRows {
+    private weak var w: PopupWindow?
+    init(_ w: PopupWindow) { self.w = w }
+    var vimCount: Int { w?.rows.count ?? 0 }
+    var vimCursor: Int { w?.selection ?? 0 }
+    var vimPage: Int { w?.vimVisibleRows ?? 10 }
+    func vimText(_ row: Int) -> String { w?.vimRowText(row) ?? "" }
+    func vimMove(to row: Int) {
+        guard let w, w.rows.indices.contains(row) else { return }
+        w.selection = row
+    }
+}
+
+extension PopupWindow {
+    var vimVisibleRows: Int {
+        let h = rowScroll?.contentView.bounds.height ?? rowView.bounds.height
+        return max(1, Int(h / max(18, config.rowHeight * zoom)))
+    }
+    func vimRowText(_ i: Int) -> String {
+        guard rows.indices.contains(i) else { return "" }
+        let r = rows[i]
+        var parts = [r.title, r.content ?? "", r.detail ?? "", r.trailing ?? ""]
+        for c in config.tableColumns { parts.append(r.cellText(c.field) ?? "") }
+        return parts.joined(separator: " ")
     }
 }

@@ -44,6 +44,16 @@ vim.keymap.set('x', 'p', 'P')
 -- asks the app (its command socket, g:ws_sock) for the popup
 -- (NoteFindWindow.swift); Return there switches to the note
 vim.g.mapleader = ' '
+-- vim-style paging: half page down / up keeps the cursor centered; the same
+-- keys in insert mode are vim's own (Ctrl+U = delete to line start,
+-- Ctrl+D = unindent), so they are left alone there
+vim.keymap.set('n', '<C-d>', '<C-d>zz', { silent = true })
+vim.keymap.set('n', '<C-u>', '<C-u>zz', { silent = true })
+-- multi-cursor (vim-visual-multi): NOT its default keys; the host sends
+-- Ctrl+Shift+J / K (a terminal can't tell them from Ctrl+J / K) as these plugs
+vim.g.VM_default_mappings = 0
+vim.g.VM_set_statusline = 0
+vim.g.VM_silent_exit = 1
 local function ask_app(msg)
   local sock = vim.g.ws_sock
   if not sock or sock == '' then return end
@@ -100,7 +110,8 @@ vim.api.nvim_create_autocmd({ 'BufWinEnter', 'WinEnter', 'FileType' }, {
 })
 o.scrolloff = 3
 o.expandtab, o.shiftwidth, o.tabstop = true, 2, 2
-o.ignorecase, o.smartcase = true, true
+-- / search ignores case always (no smartcase: a capital must not turn it back on)
+o.ignorecase, o.smartcase = true, false
 o.spelllang = 'en_us'
 
 -- --- colors: transparent background, notepad text color --------------------
@@ -232,6 +243,7 @@ if vim.uv.fs_stat(lazypath) then
         })
       end,
     },
+    { 'mg979/vim-visual-multi', branch = 'master' },
   }, {
     lockfile = vim.fn.expand('~/.cache/kitchen-sink/nvim-lazy-lock.json'),
     change_detection = { enabled = false, notify = false },

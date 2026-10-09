@@ -2953,17 +2953,20 @@ extension CompareWindow: PaneProvider {
             out.append(NavPane("sidebar", bar, focus: { [weak bar] in bar?.takeKeyboardFocus() }))
         }
         if session == nil {
-            out += [NavPane.area("left-path", leftBox), NavPane.area("right-path", rightBox),
-                    NavPane.area("recent-filter", recentFilter)]
-            out.append(NavPane("recent", recentScroll, focus: { [weak self] in
+            var filter = NavPane.area("recent-filter", recentFilter)
+            var recent = NavPane("recent", recentScroll, focus: { [weak self] in
                 guard let self else { return }
                 self.window.makeFirstResponder(self.recentList)
-            }))
+            })
+            filter.normal = recent.focus
+            recent.insert = filter.focus
+            recent.vim = { [weak self] in self.map { .rows(CompareRecentVim($0)) } }
+            out += [NavPane.area("left-path", leftBox), NavPane.area("right-path", rightBox), filter, recent]
         } else if session?.folder != nil {
             out += folderPage.navPanes
         } else {
             for side in [CompareSide.left, .right] {
-                out.append(NavPane(side.rawValue, scroll, part: { [weak self] in
+                var p = NavPane(side.rawValue, scroll, part: { [weak self] in
                     guard let self else { return .zero }
                     let v = self.scroll.documentVisibleRect
                     let r = NSRect(x: self.pane.paneX(side), y: v.minY, width: self.pane.paneW, height: v.height)
@@ -2977,9 +2980,56 @@ extension CompareWindow: PaneProvider {
                 }, owns: { [weak self] r in
                     guard let self else { return false }
                     return NavPane.inside(r, self.scroll) && self.session?.focus == side
-                }))
+                })
+                // normal mode walks the lines; i / a = the section editor
+                p.vim = { [weak self] in self.map { .rows(CompareTextVim($0)) } }
+                p.insert = { [weak self] in self?.beginEdit() }
+                out.append(p)
             }
         }
         return out
+    }
+}
+
+// vim normal mode (VimKeys.swift): the start page's Recent list, a text
+// compare's lines on the focused side
+final class CompareRecentVim: VimRows {
+    private weak var w: CompareWindow?
+    init(_ w: CompareWindow) { self.w = w }
+    var vimCount: Int { w?.vimRecent.rows.count ?? 0 }
+    var vimCursor: Int { w?.vimRecent.selection ?? 0 }
+    var vimPage: Int {
+        guard let l = w?.vimRecent else { return 10 }
+        return max(1, Int(l.visibleRect.height / max(1, l.rowH)))
+    }
+    func vimText(_ row: Int) -> String {
+        guard let r = w?.vimRecent.rows, r.indices.contains(row) else { return "" }
+        return "\(r[row].left) \(r[row].right)"
+    }
+    func vimMove(to row: Int) { w?.vimMoveRecent(to: row) }
+}
+
+final class CompareTextVim: VimRows {
+    private weak var w: CompareWindow?
+    init(_ w: CompareWindow) { self.w = w }
+    var vimCount: Int { w?.vimSession?.displayCount ?? 0 }
+    var vimCursor: Int { w?.vimSession?.cursor ?? 0 }
+    var vimPage: Int { w?.vimPageRows ?? 20 }
+    func vimText(_ row: Int) -> String {
+        guard let s = w?.vimSession, row >= 0, row < s.displayCount else { return "" }
+        let line = s.model.rows[s.modelRow(row)].line(s.focus)
+        return line >= 0 ? s.model.side(s.focus).lines[line] : ""
+    }
+    func vimMove(to row: Int) { w?.vimMoveCursor(to: row) }
+}
+
+extension CompareWindow {
+    var vimRecent: CompareRecentList { recentList }
+    var vimSession: CompareSession? { session }
+    var vimPageRows: Int { max(1, Int(scroll.contentView.bounds.height / max(1, pane.rowH))) }
+    func vimMoveRecent(to row: Int) { moveRecent(row - recentList.selection) }
+    func vimMoveCursor(to row: Int) {
+        moveCursor(row)
+        scrollCursorVisible()
     }
 }

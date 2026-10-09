@@ -1145,6 +1145,8 @@ private func parseAppConfig(_ vars: [String: String]) {
     // the focused pane's ring (PaneNav): Ctrl+H/J/K/L and clicks move it
     PaneNav.ringColor = hexColor(str("pane-focus-color")) ?? PaneNav.defaultRingColor
     PaneNav.ringWidth = str("pane-focus-width").flatMap { Double($0) }.map { CGFloat(max(0, min($0, 4))) } ?? 1
+    VimKeys.enabled = tri(str("vim-keys")) ?? true
+    VimKeys.showBadge = tri(str("vim-mode-badge")) ?? true
 }
 
 // MARK: - Theme presets (header icon menu ▸ Theme)
@@ -1403,7 +1405,7 @@ func wsLog(_ s: String) {
 private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
     "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload", "in-palette",
-    "panel",
+    "panel", "vim-keys", "vim-mode-badge",
     // [screenshot]
     "show-help", "show-side-panel-button", "show-size-badge", "magnifier", "square-magnifier",
     "copy-on-double-click", "save-path-fixed", "save-after-copy", "copy-path-after-save",
@@ -3553,6 +3555,9 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"not a card view\"}"
                 }
                 rebuildCard(v)
+            case _ where a.hasPrefix("board:"):
+                // board:open:ID | view:B|S|M | sprint:ID | mode:M | pin — the jira board view
+                (slotMember(.jira) as? PopupWindow)?.onTestAction?(String(a.dropFirst(6)))
             case _ where a.hasPrefix("paths:"):
                 // paths:show | hide | return | select:N — the /paths popup
                 let arg = String(a.dropFirst(6))
@@ -8740,6 +8745,20 @@ extension SwitcherController {
         // poll job writing jira_boards/) + the MY WORK views (`[jira] my-work`)
         var pinnedBoards: [String] = []
         var boards: [String: JiraPoll.BoardInfo] = [:]
+        // every board in the scope (board_catalog.json: the poll re-reads
+        // projects -> boards -> sprints hourly) and the board views pinned to
+        // the sidebar ("BOARD|SPRINT|MODE", config.json pinnedBoardViews)
+        var catalog: [JiraPoll.CatalogBoard] = []
+        var catalogStamp: Date?
+        var pinnedViews: [String] = []
+        static let viewPinPrefix = "view:"
+        // the board on screen (JiraBoard.swift): its sprint ("current", "all"
+        // or an id), the keys Jira returned for that sprint (nil = every row)
+        var boardSprint: [String: String] = [:]
+        var sprintKeys: Set<String>?
+        var sprintKeyCache: [String: (keys: Set<String>, at: Date)] = [:]
+        var boardBar: JiraBoardBar?
+        var boardCols: JiraBoardColumnsView?
         static let boardPinPrefix = "board:", myWorkPrefix = "mywork:"
         static let myWork = [("mine", "Assigned to me", "person"), ("reported", "Reported by me", "square.and.pencil"),
                              ("today", "Updated today", "clock"), ("watching", "Watching", "eye")]
@@ -8802,6 +8821,9 @@ extension SwitcherController {
             favReleases = isJira ? JiraPoll.favoriteReleases() : []
             pinnedLabels = isJira ? JiraPoll.pinnedLabels() : []
             pinnedBoards = isJira ? JiraPoll.pinnedBoards() : []
+            pinnedViews = isJira ? JiraPoll.pinnedViews() : []
+            catalog = isJira ? JiraPoll.boardCatalog() : []
+            catalogStamp = mtime(of: JiraPoll.boardCatalogPath)
             groupBy = isJira ? UserDefaults.standard.string(forKey: "listGroupBy.\(cmd.name)") : nil
             boards = isJira ? JiraPoll.boardsInfo() : [:]
             tabMtimes = tabs.map { mtime(of: $0.path) }
@@ -8962,10 +8984,10 @@ extension SwitcherController {
         // the jira window's sidebar: starred releases on top; a click lists
         // every issue in that release (the release view)
         // + MY WORK (`mywork:ID`), BOARDS (`board:ID`), LABELS (`label:NAME`)
-        enum Pin { case myWork(String), board(String), label(String), release(String) }
+        enum Pin { case myWork(String), board(String), view(String), label(String), release(String) }
         func pin(_ k: String) -> Pin {
             for (pre, f) in [(ListSession.myWorkPrefix, Pin.myWork), (ListSession.boardPinPrefix, Pin.board),
-                             (ListSession.labelPinPrefix, Pin.label)] as [(String, (String) -> Pin)]
+                             (ListSession.viewPinPrefix, Pin.view), (ListSession.labelPinPrefix, Pin.label)] as [(String, (String) -> Pin)]
                 where k.hasPrefix(pre) { return f(String(k.dropFirst(pre.count))) }
             return .release(k)
         }
@@ -8974,18 +8996,27 @@ extension SwitcherController {
             boards[id]?.name ?? JiraDirectory.load().boards.first { $0.id == id }?.name ?? "Board \(id)"
         }
 
+        // every board of the catalog, then any pinned board it lacks (the
+        // scope changed): the sidebar's BOARDS
+        var sidebarBoards: [String] {
+            let ids = catalog.map(\.id)
+            return ids + pinnedBoards.filter { !ids.contains($0) }
+        }
+
         func syncReleasePins() {
             guard cmd.name == "jira" else { return }
             let ids = (showMyWork ? ListSession.myWork.map { ListSession.myWorkPrefix + $0.0 } : [])
-                + pinnedBoards.map { ListSession.boardPinPrefix + $0 }
+                + pinnedViews.map { ListSession.viewPinPrefix + $0 }
+                + sidebarBoards.map { ListSession.boardPinPrefix + $0 }
                 + pinnedLabels.map { ListSession.labelPinPrefix + $0 } + favReleases
             if let k = pinView?.key, !ids.contains(k) { leavePinView() }
             w.setSidebarPinned(ids, title: "Favorite releases", icon: "star.fill",
-                               selected: pinView?.key,
+                               selected: sidebarSelection,
                                label: { [self] k in
                                    switch pin(k) {
                                    case .myWork(let v): return ListSession.myWork.first { $0.0 == v }?.1 ?? v
                                    case .board(let b): return boardName(b)
+                                   case .view(let v): return viewTitle(v)
                                    case .label(let l): return l
                                    case .release(let r):
                                        guard let d = r.firstIndex(of: "-") else { return r }
@@ -8995,9 +9026,8 @@ extension SwitcherController {
                                tip: { [self] k in
                                    switch pin(k) {
                                    case .myWork: return "From the issues already synced (no request)"
-                                   case .board(let b):
-                                       let t = boards[b]?.type ?? ""
-                                       return "\(boardName(b)) — \(t.isEmpty ? "board" : t + " board") #\(b), polled every 15m"
+                                   case .board(let b): return boardTip(b)
+                                   case .view(let v): return "\(viewTitle(v)) — \(v.split(separator: "|").last == "table" ? "table" : "columns")"
                                    case .label(let l): return "Show every issue labelled \(l) here"
                                    case .release(let r): return "Show every issue in \(r) here"
                                    }
@@ -9011,14 +9041,16 @@ extension SwitcherController {
                                            w.showToast("Set [jira] my-work = false in commands.toml", symbol: "info.circle")
                                        })
                                    case .board(let b):
-                                       m.addItem(menuItem("Show Issues") { [self] in showBoardPin(b) })
-                                       m.addItem(menuItem("Poll Board Now") { [self] in pollBoard(b) })
-                                       if boards[b]?.type == "scrum" {
-                                           let on = boardSprintOnly(b)
-                                           m.addItem(menuItem("Open Sprints Only", state: on) { [self] in setBoardSprint(b, !on) })
+                                       m.addItem(menuItem("Open Board") { [self] in openBoard(b) })
+                                       if pinnedBoards.contains(b) {
+                                           m.addItem(menuItem("Update Now") { [self] in pollBoard(b) })
+                                           m.addItem(.separator())
+                                           m.addItem(menuItem("Stop Updating This Board") { [self] in setPinnedBoards([b], on: false) })
                                        }
+                                   case .view(let v):
+                                       m.addItem(menuItem("Open") { [self] in openView(v) })
                                        m.addItem(.separator())
-                                       m.addItem(menuItem("Unpin Board") { [self] in setPinnedBoards([b], on: false) })
+                                       m.addItem(menuItem("Unpin") { [self] in setPinnedView(v, on: false) })
                                    case .label(let l):
                                        m.addItem(menuItem("Show Issues") { [self] in showLabelPin(l) })
                                        m.addItem(menuItem("Unpin Label") { [self] in setPinnedLabels([l], on: false) })
@@ -9031,6 +9063,7 @@ extension SwitcherController {
                                section: { [self] k in
                                    switch pin(k) {
                                    case .myWork: return "My work"
+                                   case .view: return "Pinned"
                                    case .board: return "Boards"
                                    case .label: return "Labels"
                                    case .release: return "Favorite releases"
@@ -9040,15 +9073,17 @@ extension SwitcherController {
                                    switch pin(k) {
                                    case .myWork(let v): return ListSession.myWork.first { $0.0 == v }?.2 ?? "person"
                                    case .board: return "rectangle.split.3x1"
+                                   case .view(let v): return v.hasSuffix("|table") ? "tablecells" : "rectangle.split.3x1.fill"
                                    case .label: return "tag"
                                    case .release: return "star.fill"
                                    }
                                },
-                               maxShown: 24,
+                               maxShown: 60,
                                onClick: { [self] k in
                                    switch pin(k) {
                                    case .myWork(let v): showMyWorkPin(v)
-                                   case .board(let b): showBoardPin(b)
+                                   case .board(let b): openBoard(b)
+                                   case .view(let v): openView(v)
                                    case .label(let l): showLabelPin(l)
                                    case .release(let r): showReleasePin(r)
                                    }
@@ -9119,6 +9154,259 @@ extension SwitcherController {
             }
         }
 
+        // MARK: board view (JiraBoard.swift)
+
+        func boardMode(_ b: String) -> String {
+            UserDefaults.standard.string(forKey: "jiraBoardMode.\(b)") ?? "columns"
+        }
+        func catalogBoard(_ b: String) -> JiraPoll.CatalogBoard? { catalog.first { $0.id == b } }
+        // a board opens on its current sprint when it has one, else everything
+        func defaultSprint(_ b: String) -> String {
+            catalogBoard(b)?.sprints.contains { $0.state == "active" } == true ? "current" : "all"
+        }
+        func sprintTitle(_ b: String, _ sp: String) -> String {
+            switch sp {
+            case "all": return "All issues"
+            case "current":
+                return catalogBoard(b)?.sprints.first { $0.state == "active" }.map { "\($0.name) (current)" } ?? "Current sprint"
+            default: return catalogBoard(b)?.sprints.first { $0.id == sp }?.name ?? "Sprint \(sp)"
+            }
+        }
+        func viewTitle(_ v: String) -> String {
+            let p = v.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard p.count == 3 else { return v }
+            return p[1] == "all" ? boardName(p[0]) : "\(boardName(p[0])) · \(sprintTitle(p[0], p[1]))"
+        }
+        func boardTip(_ b: String) -> String {
+            let c = catalogBoard(b)
+            let kind = c?.type == "simple" ? "team-managed board" : "\(c?.type ?? "") board"
+            let sprints = c.map { $0.sprints.isEmpty
+                ? ($0.type == "kanban" ? "no sprints (kanban)" : "no sprints (Sprints are off for it in Jira)")
+                : "\($0.sprints.count) sprints" } ?? ""
+            return [c?.project ?? "", kind, sprints].filter { !$0.isEmpty }.joined(separator: " · ")
+        }
+        // the spec of the board on screen, as a pinned view would store it
+        var currentViewSpec: String? {
+            onBoard.map { "\($0)|\(boardSprint[$0] ?? defaultSprint($0))|\(boardMode($0))" }
+        }
+        // the sidebar row lit: the pinned view showing, else the board / pin
+        var sidebarSelection: String? {
+            if let v = currentViewSpec, pinnedViews.contains(v) { return ListSession.viewPinPrefix + v }
+            return pinView?.key
+        }
+
+        // a board row: its issues (the board's job, made on first use) on
+        // its last sprint choice, in its last mode
+        func openBoard(_ b: String, sprint: String? = nil, mode: String? = nil) {
+            if let sp = sprint { boardSprint[b] = sp } else if boardSprint[b] == nil { boardSprint[b] = defaultSprint(b) }
+            if let m = mode { UserDefaults.standard.set(m, forKey: "jiraBoardMode.\(b)") }
+            if !pinnedBoards.contains(b) {
+                // first open: read the board (columns, filter) and fetch it
+                setPinnedBoards([b], on: true) { [weak self] in
+                    guard let self, self.pinnedBoards.contains(b) else { return }
+                    self.showBoardPin(b)
+                }
+                return
+            }
+            if boardSprintOnly(b) { setBoardSprint(b, false) }   // the old "open sprints only" switch: the picker does it now
+            showBoardPin(b)
+        }
+
+        func openView(_ v: String) {
+            let p = v.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard p.count == 3 else { return }
+            openBoard(p[0], sprint: p[1], mode: p[2])
+        }
+
+        func setPinnedView(_ v: String, on: Bool) {
+            pinnedViews = on ? pinnedViews + [v] : pinnedViews.filter { $0 != v }
+            syncReleasePins()
+            updateBoardChrome()
+            JiraPoll.run("jira_poll.py", ["--pin-view", on ? "add" : "remove", v]) { [weak self] code, _, err in
+                guard let self else { return }
+                if code != 0 {
+                    self.w.showToast("Not saved: \(JiraPoll.errorLine(err, fallback: "error"))", symbol: "exclamationmark.triangle")
+                }
+                self.pinnedViews = JiraPoll.pinnedViews()
+                self.syncReleasePins()
+            }
+            w.showToast(on ? "Pinned \(viewTitle(v))" : "Unpinned", symbol: on ? "pin.fill" : "pin.slash")
+        }
+
+        // the board bar + the columns follow what is on screen: shown on a
+        // board, gone anywhere else
+        func updateBoardChrome() {
+            guard isJira, let b = onBoard else {
+                if boardBar != nil { w.setListBar(nil); boardBar = nil }
+                if boardCols != nil { w.setListOverlay(nil); boardCols = nil }
+                sprintKeys = nil
+                w.onRowsChanged = nil
+                return
+            }
+            let sp = boardSprint[b] ?? defaultSprint(b)
+            let bar = boardBar ?? {
+                let v = JiraBoardBar(frame: .zero)
+                v.applyColors(w.config.colors)
+                boardBar = v
+                w.setListBar(v, height: JiraBoardBar.height)
+                return v
+            }()
+            bar.onSprint = { [weak self] id in self?.pickSprint(id) }
+            bar.onMode = { [weak self] m in
+                guard let self, let b = self.onBoard else { return }
+                UserDefaults.standard.set(m, forKey: "jiraBoardMode.\(b)")
+                self.updateBoardChrome()
+            }
+            bar.onPin = { [weak self] in
+                guard let self, let v = self.currentViewSpec else { return }
+                self.setPinnedView(v, on: !self.pinnedViews.contains(v))
+            }
+            var choices: [JiraBoardBar.SprintChoice] = []
+            let sprints = catalogBoard(b)?.sprints ?? []
+            if !sprints.isEmpty {
+                if sprints.contains(where: { $0.state == "active" }) {
+                    choices.append(.init(id: "current", title: sprintTitle(b, "current"), header: false))
+                }
+                for s in sprints where s.state == "future" {
+                    choices.append(.init(id: s.id, title: "\(s.name) (next)", header: false))
+                }
+                let past = sprints.filter { $0.state == "closed" }
+                if !past.isEmpty {
+                    choices.append(.init(id: "", title: "", header: true))
+                    choices.append(.init(id: "", title: "Past sprints", header: true))
+                    for s in past { choices.append(.init(id: s.id, title: s.name, header: false)) }
+                }
+                choices.append(.init(id: "", title: "", header: true))
+                choices.append(.init(id: "all", title: "All issues", header: false))
+            }
+            let mode = boardMode(b)
+            let n = w.rows.filter { !(($0 as? FieldRow)?.synthetic ?? false) }.count
+            bar.show(board: boardName(b), choices: choices, picked: sp, mode: mode,
+                     pinned: currentViewSpec.map(pinnedViews.contains) ?? false,
+                     summary: sprintSummary(b, sp, count: n))
+            if mode == "columns" {
+                if boardCols == nil {
+                    let v = JiraBoardColumnsView(frame: .zero)
+                    v.onOpen = { [weak self] key in self?.openIssue(key) }
+                    boardCols = v
+                    w.setListOverlay(v)
+                }
+                w.onRowsChanged = { [weak self] in self?.renderBoardColumns() }
+                renderBoardColumns()
+            } else {
+                if boardCols != nil { w.setListOverlay(nil); boardCols = nil }
+                w.onRowsChanged = { [weak self] in self?.refreshBoardSummary() }
+            }
+            w.selectSidebarPin(sidebarSelection ?? ListSession.boardPinPrefix + b)
+            // the sprint's keys: cached for a few minutes, else one search
+            if sp != "all" {
+                let ck = "\(b)|\(sp)"
+                if let hit = sprintKeyCache[ck], Date().timeIntervalSince(hit.at) < 300 {
+                    if sprintKeys != hit.keys { sprintKeys = hit.keys; w.setRows(filteredRows(query: w.currentQuery)) }
+                } else {
+                    fetchSprintKeys(b, sp)
+                }
+            } else if sprintKeys != nil {
+                sprintKeys = nil
+                w.setRows(filteredRows(query: w.currentQuery))
+            }
+        }
+
+        func pickSprint(_ id: String) {
+            guard let b = onBoard else { return }
+            boardSprint[b] = id
+            updateBoardChrome()
+        }
+
+        private func fetchSprintKeys(_ b: String, _ sp: String) {
+            JiraPoll.run("jira_poll.py", ["--board-sprint-keys", b, sp]) { [weak self] code, out, err in
+                guard let self else { return }
+                let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+                guard code == 0, let keys = d["keys"] as? [String] else {
+                    self.host.log("jira: sprint keys \(b) \(sp) failed (exit \(code)) \(err)")
+                    self.w.showToast("Couldn't load the sprint: \((d["problems"] as? [String])?.first ?? JiraPoll.errorLine(err, fallback: "error"))",
+                                     symbol: "exclamationmark.triangle")
+                    return
+                }
+                self.sprintKeyCache["\(b)|\(sp)"] = (Set(keys), Date())
+                guard self.onBoard == b, (self.boardSprint[b] ?? self.defaultSprint(b)) == sp else { return }
+                self.sprintKeys = Set(keys)
+                self.w.setRows(self.filteredRows(query: self.w.currentQuery))
+            }
+        }
+
+        // "6 issues · Sep 28 – Oct 12" / "18 issues · ended Sep 28"
+        func sprintSummary(_ b: String, _ sp: String, count: Int) -> String {
+            var parts = ["\(count) issue\(count == 1 ? "" : "s")"]
+            let s = sp == "current" ? catalogBoard(b)?.sprints.first { $0.state == "active" }
+                                    : catalogBoard(b)?.sprints.first { $0.id == sp }
+            func day(_ v: String) -> String? {
+                guard v.count >= 10 else { return nil }
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US_POSIX")
+                f.dateFormat = "yyyy-MM-dd"
+                guard let d = f.date(from: String(v.prefix(10))) else { return nil }
+                f.dateFormat = "MMM d"
+                return f.string(from: d)
+            }
+            if let s {
+                if s.state == "closed", let e = day(s.complete) ?? day(s.end) { parts.append("ended \(e)") }
+                else if let a = day(s.start) { parts.append("\(a) – \(day(s.end) ?? "?")") }
+            }
+            return parts.joined(separator: " · ")
+        }
+
+        private func refreshBoardSummary() {
+            guard let b = onBoard, let bar = boardBar else { return }
+            let sp = boardSprint[b] ?? defaultSprint(b)
+            let n = w.rows.filter { !(($0 as? FieldRow)?.synthetic ?? false) }.count
+            bar.setSummary(sprintSummary(b, sp, count: n))
+        }
+
+        // the cards: every row the filters keep (no paging), in the board's
+        // columns; statuses no column takes go last; a long Done column is cut
+        private func renderBoardColumns() {
+            guard let b = onBoard, let view = boardCols else { return }
+            let rows = filteredItems(query: w.currentQuery)
+            let cats = statusCats ?? JiraDirectory.load().statusCategories
+            statusCats = cats
+            var cols = (boards[b]?.columns ?? []).map { (name: $0.name, statuses: Set($0.statuses), cards: [JiraBoardCard]()) }
+            if cols.isEmpty { cols = JiraTicketPage.categoryNames.map { ($0, [], []) } }
+            var other: [JiraBoardCard] = []
+            for r in rows {
+                func f(_ k: String) -> String { r.fields[k] ?? "" }
+                let st = f("status"), cat = JiraTicketPage.category(of: st, in: cats)
+                let card = JiraBoardCard(key: f("key"), title: f("title").isEmpty ? r.title : f("title"),
+                                         type: f("type"), priority: f("priority"),
+                                         assignee: peopleName(f("assignee")), status: st, cat: cat)
+                if boards[b]?.columns.isEmpty == false {
+                    if let i = cols.firstIndex(where: { $0.statuses.contains(st) }) { cols[i].cards.append(card) }
+                    else { other.append(card) }
+                } else {
+                    cols[cat].cards.append(card)
+                }
+            }
+            var out = cols.map { c -> JiraBoardColumn in
+                // a done column holds the board's whole history: its newest 30
+                let doneCol = !c.cards.isEmpty && c.cards.allSatisfy { $0.cat == 2 }
+                let keep = doneCol ? Array(c.cards.prefix(30)) : c.cards
+                return JiraBoardColumn(name: c.name, cards: keep, more: c.cards.count - keep.count)
+            }
+            if !other.isEmpty { out.append(JiraBoardColumn(name: "Not on the board", cards: other, more: 0)) }
+            view.show(out, colors: w.config.colors)
+            refreshBoardSummary()
+        }
+
+        private func peopleName(_ v: String) -> String {
+            guard !v.isEmpty else { return "" }
+            return peopleByValue()[v]?.title ?? v
+        }
+
+        private func openIssue(_ key: String) {
+            guard let row = currentItems().first(where: { $0.fields["key"] == key }) else { return }
+            host.openRow(row, cmd: cmd, isJira: isJira)
+        }
+
         func boardSprintOnly(_ id: String) -> Bool {
             JiraPoll.endpoints.first { ($0["name"] as? String) == "board-\(id)" }?["sprintOnly"] as? Bool ?? false
         }
@@ -9138,10 +9426,11 @@ extension SwitcherController {
         }
 
         // pin (3 requests per board, once) / unpin; a new pin is polled at once
-        func setPinnedBoards(_ ids: [String], on: Bool) {
-            guard !ids.isEmpty else { return }
+        func setPinnedBoards(_ ids: [String], on: Bool, then: (() -> Void)? = nil) {
+            guard !ids.isEmpty else { then?(); return }
             if on { w.showToast("Reading \(ids.count == 1 ? boardName(ids[0]) : "\(ids.count) boards")…", symbol: "arrow.down.circle") }
             JiraPoll.run("jira_poll.py", ["--pin-board", on ? "add" : "remove"] + ids) { [weak self] code, out, err in
+                defer { then?() }
                 guard let self else { return }
                 let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
                 let probs = d["problems"] as? [String] ?? []
@@ -9161,34 +9450,6 @@ extension SwitcherController {
                     self.w.showToast("Unpinned", symbol: "pin.slash")
                 }
             }
-        }
-
-        // icon menu ▸ Pin Boards…: the directory's boards (found per project
-        // in scope) under their project, pinned ones ticked
-        func showBoardPicker() {
-            let dir = JiraDirectory.load()
-            guard !dir.boards.isEmpty else {
-                w.showToast("No boards yet — run the directory job (Jira Config ▸ Setup)", symbol: "rectangle.split.3x1")
-                return
-            }
-            let p = JiraMultiPicker(noun: "board")
-            p.applyColors(w.config.colors)
-            p.groupOrder = dir.projects.map(\.key)
-            p.options = dir.boards.map { b in
-                .init(id: b.id, title: b.name, detail: "\(b.type) #\(b.id)", group: b.projects.first ?? "")
-            }
-            p.set(pinnedBoards)
-            guard let a = w.sidebarAnchor else { return }
-            p.anchor = a
-            p.onClose = { [self, weak p] in
-                guard let p else { return }
-                openPicker = nil
-                let now = Set(p.selected), was = Set(pinnedBoards)
-                setPinnedBoards(Array(now.subtracting(was)).sorted(), on: true)
-                setPinnedBoards(Array(was.subtracting(now)).sorted(), on: false)
-            }
-            openPicker = p
-            p.togglePopover(nil)
         }
 
         // the board's quick filters, ANDed like Jira's; each change = one
@@ -9346,8 +9607,10 @@ extension SwitcherController {
             colFilters = [:]
             quickKeys = nil
             applyFilterData()
+            sprintKeys = onBoard.flatMap { b in sprintKeyCache["\(b)|\(boardSprint[b] ?? "")"]?.keys }
             w.setRows(filteredRows(query: ""))
             w.tabFooterText = ""
+            updateBoardChrome()
         }
 
         func setReleaseFavorite(_ rows: [FieldRow], on: Bool) {
@@ -9563,6 +9826,30 @@ extension SwitcherController {
             return out
         }
 
+        // the rows every filter keeps, sorted, unpaged (the board's columns)
+        func filteredItems(query: String) -> [FieldRow] {
+            let items = currentItems()
+            let index = filterIndex ?? FuzzyIndex(items.map(\.searchText))
+            filterIndex = index
+            var order = index.ranked(query)
+            if let qk = quickKeys { order = order.filter { qk.contains(items[$0].fields["key"] ?? "") } }
+            if onBoard != nil, let sk = sprintKeys { order = order.filter { sk.contains(items[$0].fields["key"] ?? "") } }
+            let active = colFilters.filter { !$0.value.isEmpty && $0.key != ListSession.quickDim }
+            if !active.isEmpty {
+                order = order.filter { i in
+                    active.allSatisfy { f, picked in cellValues(f, items[i]).contains(where: picked.contains) }
+                }
+            }
+            if let k = sortKey {
+                if sortRanks?.field != k.field || sortRanks?.ascending != k.ascending {
+                    sortRanks = (k.field, k.ascending,
+                                 SortRank.ranks(items.map { $0.fields[k.field] ?? "" }, ascending: k.ascending))
+                }
+                order = SortRank.order(order, by: sortRanks?.ranks ?? [])
+            }
+            return order.map { items[$0] }
+        }
+
         func filteredRows(query: String) -> [FieldRow] {
             let t0 = DispatchTime.now().uptimeNanoseconds
             let items = currentItems()
@@ -9573,6 +9860,9 @@ extension SwitcherController {
             let active = colFilters.filter { !$0.value.isEmpty && $0.key != ListSession.quickDim }
             if let qk = quickKeys {
                 order = order.filter { qk.contains(items[$0].fields["key"] ?? "") }
+            }
+            if onBoard != nil, let sk = sprintKeys {
+                order = order.filter { sk.contains(items[$0].fields["key"] ?? "") }
             }
             if !active.isEmpty {
                 order = order.filter { i in
@@ -9726,6 +10016,28 @@ extension SwitcherController {
 
         // wire every window hook (before the first show)
         func install() {
+            if isJira {
+                // do:board:open:ID | sprint:ID | mode:columns|table | pin (tests)
+                w.onTestAction = { [weak self] a in
+                    guard let self else { return }
+                    let p = a.split(separator: ":", maxSplits: 1).map(String.init)
+                    switch (p.first ?? "", p.count > 1 ? p[1] : "") {
+                    case ("open", let b): self.openBoard(b)
+                    case ("view", let v): self.openView(v)
+                    case ("sprint", let s): self.pickSprint(s)
+                    case ("mode", let m): self.boardBar?.onMode?(m)
+                    case ("pin", _): self.boardBar?.onPin?()
+                    default: break
+                    }
+                }
+                w.testExtra = { [weak self] in
+                    guard let self, let b = self.onBoard else { return [:] }
+                    return ["id": b, "sprint": self.boardSprint[b] ?? self.defaultSprint(b), "mode": self.boardMode(b),
+                            "columns": self.boardCols != nil, "bar": self.boardBar != nil,
+                            "sprintKeys": self.sprintKeys?.count ?? -1, "views": self.pinnedViews,
+                            "selected": self.sidebarSelection ?? "", "catalog": self.catalog.map(\.id)]
+                }
+            }
             // empty `title` in commands.toml = no header label (icon still shows)
             w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
             w.headerIcon = jiraAppIcon
@@ -10103,7 +10415,6 @@ extension SwitcherController {
                 })
                 groupMenuItems().forEach(menu.addItem)
                 menu.addItem(.separator())
-                menu.addItem(menuItem("Pin Boards…") { [self] in showBoardPicker() })
                 menu.addItem(menuItem("Import Favourite Filters") { [self] in importFilters() })
                 menu.addItem(menuItem("Open Jira Config Window") { [host] in
                     host.showJiraDashboard()
@@ -10144,6 +10455,12 @@ extension SwitcherController {
                 cacheStamp = mtime(of: JiraPoll.issueCachePath)
                 JiraPoll.run("jira_poll.py", ["--release-view"])
             }
+            if isJira, mtime(of: JiraPoll.boardCatalogPath) != catalogStamp {
+                catalogStamp = mtime(of: JiraPoll.boardCatalogPath)
+                catalog = JiraPoll.boardCatalog()
+                syncReleasePins()
+                updateBoardChrome()
+            }
             if let p = pinView, p.key.hasPrefix(ListSession.boardPinPrefix) || p.key == ListSession.myWorkPrefix + "watching",
                mtime(of: p.path) != pinStamp {
                 // a board's own job rewrote its file
@@ -10158,15 +10475,15 @@ extension SwitcherController {
                 case .label(let l): args = ["--label-view", l]
                 case .myWork: args = ["--my-work"]
                 case .release(let r): args = ["--release-view", r]
-                case .board: args = []
+                case .board, .view: args = []
                 }
-                JiraPoll.run("jira_poll.py", args) { [weak self] code, _, _ in
+                if !args.isEmpty { JiraPoll.run("jira_poll.py", args) { [weak self] code, _, _ in
                     guard let self, code == 0, self.pinView?.key == p.key else { return }
                     self.pinView?.items = self.host.loadListItems(p.path, cmd: self.cmd,
                                                                   columns: ListSession.tabColumns(self.cmd, p.path))
                     self.invalidateFilter()
                     self.w.setRows(self.filteredRows(query: self.w.currentQuery), resetScroll: false)
-                }
+                } }
             }
             var changed: [Int] = []
             for (i, t) in tabs.enumerated() {
@@ -10187,6 +10504,7 @@ extension SwitcherController {
                 favReleases = JiraPoll.favoriteReleases()
                 pinnedLabels = JiraPoll.pinnedLabels()
                 pinnedBoards = JiraPoll.pinnedBoards()
+                pinnedViews = JiraPoll.pinnedViews()
                 boards = JiraPoll.boardsInfo()
                 syncReleasePins()
             }
@@ -10264,6 +10582,33 @@ enum JiraPoll {
         let name, type: String
         let columns: [(name: String, statuses: [String])]
         var quickFilters: [(id: String, name: String, jql: String)] = []
+    }
+    // board_catalog.json (the poll keeps it fresh): every board of the
+    // projects in scope with its sprints (active, future, past newest first)
+    struct CatalogSprint { let id, name, state, start, end, complete: String }
+    struct CatalogBoard { let id, name, type, project: String; let sprints: [CatalogSprint] }
+    static let boardCatalogPath = NSHomeDirectory() + "/.cache/jira/board_catalog.json"
+    static func boardCatalog() -> [CatalogBoard] {
+        var out: [CatalogBoard] = []
+        for p in readJSON(boardCatalogPath)?["projects"] as? [[String: Any]] ?? [] {
+            let proj = p["key"] as? String ?? ""
+            for b in p["boards"] as? [[String: Any]] ?? [] {
+                guard let id = b["id"] as? String, !out.contains(where: { $0.id == id }) else { continue }
+                let sp = (b["sprints"] as? [[String: Any]] ?? []).compactMap { x -> CatalogSprint? in
+                    guard let sid = x["id"] as? String else { return nil }
+                    func f(_ k: String) -> String { x[k] as? String ?? "" }
+                    return CatalogSprint(id: sid, name: f("name").isEmpty ? sid : f("name"), state: f("state"),
+                                         start: f("startDate"), end: f("endDate"), complete: f("completeDate"))
+                }
+                out.append(CatalogBoard(id: id, name: b["name"] as? String ?? id, type: b["type"] as? String ?? "",
+                                        project: proj, sprints: sp))
+            }
+        }
+        return out
+    }
+    // the board views pinned to the sidebar: "BOARD|SPRINT|MODE"
+    static func pinnedViews() -> [String] {
+        readJSON(configPath)?["pinnedBoardViews"] as? [String] ?? []
     }
     static func boardsInfo() -> [String: BoardInfo] {
         var out: [String: BoardInfo] = [:]

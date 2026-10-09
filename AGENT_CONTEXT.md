@@ -162,8 +162,11 @@ unchanged and can still be called directly.
   `ensure` (4.5:1 against the real composited background)
 - `ConfigText.swift` — commands.toml's one-line TOML codec (`configEntry`,
   `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
+- `JiraBoard.swift` — the jira board view (bar + Jira-style columns; see "Board view")
 - `PaneGeometry.swift` + `PaneNav.swift` — Ctrl+H/J/K/L pane navigation + the
   focus ring (see "Pane navigation"; `bin/run-tests.sh panes`)
+- `VimKeys.swift` + `VimSearch.swift` — vim normal / insert mode in every
+  pane + the "/" search (see "Vim mode"; `bin/run-tests.sh vim-keys`)
 - `SwitcherStatus.swift` — the Hyper+S status row's data (unread via
   `notify/notify_poll.py --json`, CPU, RAM, battery); `gather()` blocks
 - `ProcessRun.swift` — `runProcess`: run a program to completion, stdin fed,
@@ -1437,6 +1440,30 @@ worked example):
 - Hooks: `do:pane:h|j|k|l`, `do:pane:focus:ID`, `do:key:SPEC` (a real key
   event into the current view, `CompareWindow.keyEvent` names; needs the
   window key); state `pane` {focused, panes[{id, rect}], ring {pane, rect}}.
+- Vim mode (`VimKeys.swift`, `[app] vim-keys` / `vim-mode-badge`, default
+  on): `SharedWindow.prefixKey` asks `VimKeys.shared.handle` after Ctrl+B /
+  Ctrl+HJKL, before the sidebar's keys (the "/" bar, while up, gets EVERY key
+  first). Mode of the focused pane: nvim / terminal / prose page = their own
+  (nil, no chip); an editable NSTextView = INSERT where the pane has
+  `NavPane.normal` (Esc goes there), else nil (editors keep their Esc);
+  anything else with a `VimTarget` = NORMAL. `VimTarget` = `.rows(VimRows)`
+  (PopupTabsBar, FileListPane, `PopupListVim` (jira / output lists, every
+  column's text), `ConfluenceVim`, `CompareRecentVim`, `CompareTextVim`
+  (the focused side's lines), `FolderVim`), `.text(NSTextView)` (scroll,
+  find selects + showFindIndicator), `.web(WKWebView)` (scroll JS,
+  `WKWebView.find`); `NavPane.vim` else `VimTarget.find(in: view)`.
+  NORMAL keys: j k, gg G, Ctrl+D / U (half page), / ? (search), n N, i a =
+  `NavPane.insert`. The jira list's filter box keeps the keyboard in normal
+  mode (`enterFieldNormal`: caret hidden, printable keys swallowed) —
+  `normalField` per window, dropped when focus moves. The "/" bar
+  (`VimSearchBar`) is DRAWN at the pane's bottom and never takes first
+  responder (cursor, ring, sidebar cursor stay); `searchKey` edits the query
+  (Cmd/Ctrl+V paste, Cmd+C / X / Z, Ctrl+W / U / H, Delete on empty =
+  cancel), ↑↓ / Ctrl+N/P step; Esc restores the start, Return keeps it as
+  n / N's. Badge `VimModeBadge` (PaneNav.refresh, bottom-right of the
+  focused pane). State `pane.vimMode`, `pane.vimSearch` {open, query,
+  status, last, fieldNormal}; PopupWindow testState `selection`, `rowCount`,
+  `query`, `sidebarCursor`. Drive with `do:key:j`, `do:key:/`, `do:key:esc`.
 - VS Code parity: `ws-settings parity [--view V] [--all] [--json]`
   (`settings_hub/parity.py`, data `settings_hub/data/parity.toml`: pane
   kinds per view, `[[expect]]` per kind, `[[waive]]`); matches chords from
@@ -1607,6 +1634,48 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
   status `syncedFields`). Board quick filters = filter-bar pill `__quick`
   (`showQuickFilterPicker` → `--board-quickfilter` keys → `quickKeys`). MY
   WORK ▸ Watching = job `mywork-watching` (`sideDir` jira_mywork).
+- Boards + sprints, narrowed by the SCOPE: projects in scope -> their boards
+  (`/board?projectKeyOrId=KEY`, paged) -> each board's sprints (`/board/ID/
+  sprint?state=active,future,closed`, paged). A 400 = no sprints: a kanban
+  board, or a team-managed ("simple") board whose Sprints feature is off
+  (Jira Cloud's default — the owner's SAM1 / KAN boards; Project settings ▸
+  Features ▸ Sprints). `board_catalog.json` (`board_catalog`,
+  `fetch_sprints`) is kept fresh by the poll tick itself
+  (`refresh_board_catalog`, every config.json `boardCatalogMinutes` = 60 or
+  on a scope change; never fails the tick); `--board-catalog [--cached]`
+  runs it by hand. NO picker / browser (the owner rejected one with
+  Refresh / Copy Requests / ticks — keep it out).
+- Board view (JiraBoard.swift, owner's pick "C": Jira-style columns): the
+  jira sidebar's BOARDS = every catalog board (`sidebarBoards`); a click =
+  `ListSession.openBoard` (first open makes its board-ID job via
+  `--pin-board add`, which no longer defaults scrum boards to open sprints
+  only — `openBoard` turns an old `sprintOnly` off). `updateBoardChrome()`
+  (from `showRows`) shows `JiraBoardBar` over the search box
+  (`PopupWindow.setListBar`): name · Sprint ▾ (current, next, Past sprints,
+  All issues; hidden without sprints) · Columns | Table (UserDefaults
+  `jiraBoardMode.ID`) · issue count · Pin to Sidebar; Columns =
+  `JiraBoardColumnsView` (WKWebView) via `PopupWindow.setListOverlay` (rows,
+  table header and issue panel hidden), the board's own columns from
+  boards.json, unmapped statuses → "Not on the board", a Done column cut to
+  its newest 30, card click = `host.openRow`. Cards follow the same filters
+  as the table (`filteredItems`: search, quick filters, ▾ filters, sprint;
+  re-rendered on `PopupWindow.onRowsChanged`). Sprint = `--board-sprint-keys
+  BOARD SPRINT|current` (board JQL AND sprint AND scope, keys only) →
+  `sprintKeys` (cached 5 min). Pin = `--pin-view add|remove
+  BOARD|SPRINT|MODE` (config.json `pinnedBoardViews`) → sidebar PINNED rows
+  (`Pin.view`, `view:` keys) that reopen that exact view. A custom-JQL job
+  whose key set is gone runs a full sync (it used to publish 0 rows forever
+  after a remove + re-add). Hooks `do:board:open:ID | view:B|S|M |
+  sprint:ID|current|all | mode:columns|table | pin`; state
+  `views.jira.board` {id, sprint, mode, columns, bar, sprintKeys, views,
+  selected, catalog}. The old `--pin-sprint` / `--sprints` CLI stays; the
+  window no longer uses them.
+  `jira/fake_jira.py` (Faker optional) = a fake Jira Server: DEMO/WEB/OPS,
+  a kanban + a scrum board each (6 closed + 1 active + 1 future sprint,
+  paged), OPS also a team-managed board with Sprints off (400), `/board/ID/
+  features`, `/sprint/ID`, `closedSprints()` / `futureSprints()`;
+  `./ws fake jira-site start|stop` (port 8766, bearer `fake-token`; only runs
+  it, point a throwaway config at it); test `FakeJiraSiteTests`.
 - Jira Cmd+K: "Open in browser" first; acts on the highlighted row + every
   ticked row (`PopupWindow.actionRows`).
 - Favorite releases: ☆ on release rows / Cmd+K "Favorite release" →

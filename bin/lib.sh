@@ -280,7 +280,28 @@ ws_cmd_fake() {
     case "${1:-}" in
         confluence)         shift; ws_fake_confluence "$@" ;;
         jira|jira-tab)      shift; ws_fake_jira "$@" ;;
-        *)                  ws_die "usage: ws fake confluence|jira [start|stop|status]" ;;
+        jira-site)          shift; ws_fake_jira_site "$@" ;;
+        *)                  ws_die "usage: ws fake confluence|jira|jira-site [start|stop|status]" ;;
+    esac
+}
+
+# a fake Jira SERVER (projects, kanban + scrum boards, sprints; jira/fake_jira.py).
+# Only runs it: point a throwaway config at it (site http://127.0.0.1:PORT,
+# auth bearer, token fake-token) - the real config.json is never touched.
+ws_fake_jira_site() {
+    local PORT="${FAKE_JIRA_PORT:-8766}" RUN_DIR="$HOME/.cache/jira"
+    local PID_FILE="$RUN_DIR/fake-site.pid"
+    _fjs_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+    case "${1:-status}" in
+    start)
+        mkdir -p "$RUN_DIR"
+        _fjs_running || { nohup python3 "$WS_ROOT/jira/fake_jira.py" serve --port "$PORT" >"$RUN_DIR/fake-site.log" 2>&1 & echo "$!" >"$PID_FILE"; sleep 0.5; }
+        _fjs_running || ws_die "fake Jira failed to start - see $RUN_DIR/fake-site.log"
+        echo "fake Jira: http://127.0.0.1:$PORT  (auth bearer, token fake-token; projects DEMO WEB OPS; boards 1-6)" ;;
+    stop)
+        _fjs_running && kill "$(cat "$PID_FILE")"; rm -f "$PID_FILE"; echo "fake Jira stopped" ;;
+    *)
+        _fjs_running && echo "fake Jira running (pid $(cat "$PID_FILE")) on port $PORT" || echo "fake Jira not running" ;;
     esac
 }
 

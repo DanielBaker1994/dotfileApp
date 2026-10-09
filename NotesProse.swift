@@ -513,6 +513,11 @@ final class ProseView: NSView, WKScriptMessageHandler {
             return true
         }
         if searchState == "typing" { return false }
+        // Ctrl+D / Ctrl+U = half page down / up, like vim
+        if (code == 2 || code == 32), m == .control {
+            web.evaluateJavaScript("window.scrollBy({top:\(code == 2 ? "" : "-")window.innerHeight/2})")
+            return true
+        }
         // gg = top, G (also GG) = bottom, like vim
         if code == 5, (m.isEmpty || m == .shift) {
             if m == .shift {

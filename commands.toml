@@ -243,6 +243,14 @@ preview-border-width = 2
 # (0 = none, max 4)
 pane-focus-color = "8cc8ced8"
 pane-focus-width = 1
+# vim normal / insert mode in every pane of the window (the sidebar, lists,
+# previews, Compare): j / k, gg / G, Ctrl+D / Ctrl+U, "/" and "?" search the
+# pane with the keyboard (ignore case), n / N, i / a = its text input, Esc in
+# an input = back to normal. vim-mode-badge = the NORMAL / INSERT chip in
+# the focused pane's corner. nvim, the terminal and the reading view keep
+# their own keys.
+vim-keys = true
+vim-mode-badge = true
 
 # [theme] — app-wide window colors as hex RRGGBB (every key optional; the
 # built-in Catppuccin Macchiato defaults fill any gaps). Edit
@@ -559,7 +567,7 @@ sidebar-width = 234
 
 # a directory (or file) — every .md file inside is a note tab. Adding a file
 # to the folder shows up automatically, no config edit needed.
-paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt, ~/.dotfiles/doc/Markdown_Examples.md, ~/notes/helloworld.md"
+paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt, ~/.dotfiles/doc/Markdown_Examples.md, ~/notes/helloworld.md, ~/.config/kitchen-sink/samples/graphviz-showcase.md"
 # window 20% wider (640 -> 768) and the notepad ~30% taller; max-height lets
 # the taller window actually apply (the 60%-of-screen cap would clamp it)
 width = 768
@@ -690,6 +698,7 @@ sidebar-width = 245
 # the issue panel on the right of the list: key, state chips, description and
 # people of the highlighted row. Cmd+I shows / hides it, 0 = never.
 inspector-width = 340
+table-sort = "project:desc"
 # Jira Config window (menu bar ▸ Open Jira Config Window): size + how often
 # it re-reads status (seconds). Unset = 1080 x 720, every 5s.
 # dashboard-width = 1080
@@ -868,10 +877,17 @@ kitchen-sink = "*:app"
 "preview: ↑ ↓ / PgUp / PgDn / Space" = "scroll the page (Shift+Space = back up)"
 "preview: Cmd+A / Cmd+C" = "select all / copy"
 "all: Ctrl+W" = "any text field (popups, search bars, sheets, editors): delete the word before the cursor (the vim pane / terminal keep their own Ctrl+W)"
+"all: j / k" = "normal mode (a sidebar, list, preview, Compare side — the NORMAL chip): down / up"
+"all: gg / G" = "normal mode: first / last row (a page: top / bottom)"
+"all: Ctrl+D / Ctrl+U" = "normal mode: half a screen down / up"
+"all: / or ?" = "normal mode: search the focused pane forward / backward as you type (ignore case); Return keeps the match, Esc goes back, ↑↓ / Ctrl+N/P step"
+"all: n / N" = "normal mode: next / previous match of the last search"
+"all: i / a" = "normal mode: insert — the pane's text input (a list's filter box, Compare's section editor)"
+"all: Esc (in an input)" = "back to normal mode (the filter stays); Esc again = the view's usual Esc"
 "all: Cmd+\\" = "collapse the sidebar to an icon rail / show it again"
-"all: Cmd+Plus / Cmd+Minus" = "grow / shrink the window"
-"all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "font size up / down"
-"all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt)"
+"all: Cmd+Plus / Cmd+Minus" = "zoom the text (font size; the reading view zooms its page, Cmd+0 resets)"
+"all: Cmd+Opt+Plus / Cmd+Opt+Minus" = "grow / shrink the window"
+"all: Ctrl+Shift+H / J / K / L" = "resize the window (tmux style; Ctrl+Shift only, no Cmd/Opt); in the notes vim pane Ctrl+Shift+J / K add a cursor below / above (multi-cursor)"
 "all: Cmd+/" = "this list"
 "palette: /" = "command mode (the \"/\" commands)"
 "palette: ↑ ↓ / Ctrl+N / Ctrl+P" = "move through the list"

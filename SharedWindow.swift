@@ -198,7 +198,7 @@ final class SharedWindow {
 
     private unowned let controller: SwitcherController
     private(set) var current: SlotView?     // the visible view (nil = hidden)
-    private var last: SlotView = .files     // what Hyper+N re-opens
+    private var last: SlotView = .notes     // what Hyper+N re-opens
     // the view group (nav id) shown before the current one: Ctrl+B L
     private(set) var previousNav: Int?
     private var prefixArmedAt: Date?
@@ -610,6 +610,8 @@ final class SharedWindow {
             prefixHeldKey = nil
         }
         guard let cur = current, controller.slotMember(cur)?.slotWindow === w else { return false }
+        // the vim "/" bar takes every key while it is up (VimKeys.swift)
+        if VimKeys.shared.searching(in: w) { return VimKeys.shared.handle(e, in: w) }
         let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
         let armed = prefixArmedAt.map { Date().timeIntervalSince($0) < 1.5 } ?? false
         if mods == .control && e.keyCode == 11 {                     // Ctrl+B
@@ -625,6 +627,8 @@ final class SharedWindow {
             if armed { prefixArmedAt = nil; return false }
             return PaneNav.shared.move(dir, in: w)
         }
+        // vim normal / insert mode in the focused pane (j k gg G / n N i Esc …)
+        if !armed, VimKeys.shared.handle(e, in: w) { return true }
         // a sidebar with the keyboard takes its keys before the view's own
         // handlers (jira's list, Confluence / Compare Ctrl+N/P)
         guard armed else { return (w.firstResponder as? PopupTabsBar)?.handleNavKey(e) ?? false }
@@ -657,11 +661,11 @@ final class SharedWindow {
         }
     }
 
-    // the view switcher: files (first, the default view) / notes /
+    // the view switcher: notes (first, the default view) / files /
     // jira / confluence / compare / AI as icons just right of the kitchen sink
     // (the app's icon menu), top-left in every view
     static var navIcons: [(image: NSImage, id: Int, tip: String)] {
-        [(filesNavIcon, navFiles, "Files"), (notesNavIcon, navNotes, "Notes")]
+        [(notesNavIcon, navNotes, "Notes"), (filesNavIcon, navFiles, "Files")]
             + [(jiraNavIcon, navJira, "Jira")]
             + (confluenceEnabled() ? [(confluenceNavIcon, navConfluence, "Confluence search")] : [])
             + (compareEnabled() ? [(compareNavIcon, navCompare, "Compare")] : [])
