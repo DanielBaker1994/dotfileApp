@@ -627,6 +627,30 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             self.assertFalse(any(e["name"] == "board-7" for e in self.cfgjson(env)["endpoints"]))
             self.assertFalse(os.path.exists(os.path.join(tmp, "jira_boards", "board-7.json")))
 
+    def test_pin_board_without_directory_reads_status_names(self):
+        # pinned before any directory job: the columns' status ids are looked
+        # up with GET /status (they used to be saved empty -> every card in
+        # "Not on the board"); a board saved empty is healed by the next tick
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.env(tmp)
+            self.fake_curl(tmp, env)
+            with open(env["JIRA_TEAM_JSON"], "w") as fh:
+                json.dump({"project_keys": ["P1", "P2"]}, fh)
+            r = json.loads(self.run_py(env, "jira_poll.py", "--pin-board", "add", "7").stdout)
+            self.assertEqual((r["ok"], r.get("problems") or []), (True, []), r)
+            path = os.path.join(tmp, "cache", "boards.json")
+            want = [{"name": "Todo", "statuses": ["a"]}, {"name": "Shipped", "statuses": ["B"]}]
+            with open(path) as fh:
+                cache = json.load(fh)
+            self.assertEqual(cache["7"]["columns"], want)
+            cache["7"]["columns"] = [{"name": "Todo", "statuses": []}, {"name": "Shipped", "statuses": []}]
+            with open(path, "w") as fh:
+                json.dump(cache, fh)
+            p = self.run_py(env, "jira_poll.py")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path) as fh:
+                self.assertEqual(json.load(fh)["7"]["columns"], want)
+
     def test_import_filters_makes_one_job_per_favourite(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self.env(tmp)

@@ -1660,7 +1660,10 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
   Return / double-click = `openListedBoard` (Esc = back to the list,
   `backToBoardList`), Cmd+K = `showBoardActions`. Hooks `do:board:list |
   list-open:ID | list-star:ID`, state `board` {list, rows, pinned}. A click =
-  `ListSession.openBoard` (first open makes its board-ID job via
+  `ListSession.openBoard` (columns: Jira names their statuses by id —
+  `board_info` resolves ids the directory lacks with ONE `GET /status`, and
+  the tick's `heal_board_columns` re-reads a pinned board saved with every
+  column empty; first open makes its board-ID job via
   `--pin-board add`, which no longer defaults scrum boards to open sprints
   only — `openBoard` turns an old `sprintOnly` off). `updateBoardChrome()`
   (from `showRows`) shows `JiraBoardBar` over the search box

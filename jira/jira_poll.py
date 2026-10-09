@@ -1537,10 +1537,23 @@ def reset_job(name: str) -> None:
 
 def board_info(c, bid: str, status_ids: dict) -> dict:
     """GET the board's configuration (columns -> status names, its filter),
-    the filter's JQL and the quick filters."""
+    the filter's JQL and the quick filters. A column status id the
+    directory doesn't know (no directory job yet, a status from a project
+    outside the scope) -> ONE GET /status fills `status_ids` in place:
+    otherwise the columns were saved empty and every card sat in "Not on
+    the board"."""
     conf = c.get(c.path("board_configuration", board_id=bid)) or {}
     fid = str((conf.get("filter") or {}).get("id") or "")
     jql = strip_order((c.get(c.path("filter", filter_id=fid)) or {}).get("jql") or "") if fid else ""
+    wanted = {str(st.get("id")) for col in ((conf.get("columnConfig") or {}).get("columns") or [])
+              for st in col.get("statuses") or []}
+    if wanted - set(status_ids):
+        try:
+            for v in c.get(c.path("statuses")) or []:
+                if isinstance(v, dict) and v.get("id") is not None and v.get("name"):
+                    status_ids[str(v["id"])] = v["name"]
+        except jira_api.ApiError as err:
+            say(f"board {bid}: status names not read ({err}) - columns may stay empty", "boards")
     cols = []
     for col in ((conf.get("columnConfig") or {}).get("columns") or []):
         names = [status_ids.get(str(st.get("id")), "") for st in col.get("statuses") or []]
@@ -1821,9 +1834,7 @@ def edit_pinned_boards(op: str, ids: list) -> int:
     problems = []
     if op == "add":
         d = jira_api.read_json(jira_api.DIRECTORY_FILE, {})
-        status_ids = (d or {}).get("statusIds") or {}
-        if not status_ids:
-            problems.append("directory has no status ids yet - run the directory job (columns stay empty)")
+        status_ids = dict((d or {}).get("statusIds") or {})
         c = jira_api.Client.from_config(cfg)
         for bid in ids:
             try:
@@ -1986,6 +1997,36 @@ def edit_pinned_views(op: str, specs: list) -> int:
     jira_config.save({"pinnedBoardViews": new})
     print(json.dumps({"ok": True, "views": new}))
     return 0
+
+
+def board_columns_empty(info) -> bool:
+    cols = (info or {}).get("columns") or []
+    return bool(cols) and not any(col.get("statuses") for col in cols)
+
+
+def heal_board_columns(cfg) -> None:
+    """A pinned board saved with columns but no statuses in any of them (it
+    was pinned before the directory had status ids) is read again once per
+    tick until it has them. Never fails the tick."""
+    cache = jira_api.read_json(boards_cache_path(), {})
+    if not isinstance(cache, dict):
+        return
+    bad = [b for b in config_list(cfg, "pinnedBoards") if board_columns_empty(cache.get(b))]
+    if not bad:
+        return
+    status_ids = dict((jira_api.read_json(jira_api.DIRECTORY_FILE, {}) or {}).get("statusIds") or {})
+    try:
+        c = jira_api.Client.from_config(cfg)
+        for bid in bad:
+            info = board_info(c, bid, status_ids)
+            if board_columns_empty(info):
+                continue
+            # keep anything the pin stored besides the board's own answer
+            cache[bid] = {**cache.get(bid, {}), **info}
+            say(f"board {bid}: columns re-read ({len(info['columns'])} columns)", "boards")
+    except (jira_api.ApiError, jira_config.ConfigError) as err:
+        say(f"board columns: {err}", "boards")
+    jira_api.write_json(boards_cache_path(), cache, mode=0o644)
 
 
 def refresh_board_catalog(cfg, team: dict, force: bool = False) -> None:
@@ -2446,6 +2487,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
 
     if not names:
         refresh_board_catalog(cfg, team)
+        heal_board_columns(cfg)
     if not plan and not sync_due:
         say("nothing due")
         jira_status.update(lambda d: None)
