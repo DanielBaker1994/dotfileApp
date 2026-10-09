@@ -4720,6 +4720,7 @@ final class SwitcherController: NSObject {
         w.copyPathButtonLabel = ""
         // only the view's own button goes: the shared window's back / home stay
         w.headerButtons = w.headerButtons.filter { $0.1 != 10 }
+        w.textZoomKey = "textZoom.jira"       // Cmd+± zooms the ticket page like the list
         w.setPageOverlay(v)
         let key = row.fields["key"] ?? ""
         let cms = JiraTicketPage.cachedComments(key) { [weak self, weak v] in
@@ -5236,6 +5237,7 @@ final class SwitcherController: NSObject {
         pb.clearContents()
         pb.setString(path, forType: .string)
         w.setStatus("saved: \(path)", isError: false)
+        w.showToast("Copied \((path as NSString).abbreviatingWithTildeInPath) to clipboard", symbol: "doc.on.clipboard")
         log("prettyprint saved to \(path)")
     }
 
@@ -6329,6 +6331,7 @@ final class SwitcherController: NSObject {
         let columns = ListSession.tabColumns(cmd, tabs.first?.path)
         let cfg = listWindowConfig(cmd, tabCount: tabs.count, columns: columns)
         let w = PopupWindow(config: cfg)
+        if ListSession.isJira(cmd) { w.textZoomKey = "textZoom.jira" }   // Cmd+± zooms the rows / board
         // the tabs, filters, sort and every window hook; the hooks keep the
         // session alive as long as the window lives
         let session = ListSession(host: self, cmd: cmd, window: w, tabs: tabs, columns: columns,
@@ -6707,6 +6710,7 @@ final class SwitcherController: NSObject {
         let fb = makeFileBrowser(cfg, startDir: root, in: w,
                                  tag: "files '\(cmd.name)'", opened: "opened")
         w.installFileBrowser(fb, drawer: false)
+        w.textZoomKey = "textZoom.files"       // Cmd+± zooms the file names
         // the places + pinned folders down the left (drag its edge; `sidebar-width`)
         fb.useSidebar(width: cmd.sidebarWidth)
         fb.onSidebarWidthChange = { width in
@@ -6878,6 +6882,9 @@ final class ServicesHandler: NSObject {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(paths.joined(separator: "\n"), forType: .string)
+        ScreenToast.show(paths.count == 1 ? "Copied \((paths[0] as NSString).abbreviatingWithTildeInPath) to clipboard"
+                                          : "Copied \(paths.count) paths to clipboard",
+                         on: nil, symbol: "doc.on.clipboard")
     }
     @objc func openInNotes(_ pboard: NSPasteboard, userData: String, error: NSErrorPointer) {
         guard let first = filePaths(from: pboard).first else { return }

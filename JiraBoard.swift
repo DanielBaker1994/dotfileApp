@@ -124,7 +124,8 @@ final class JiraBoardBar: NSView, PopupThemeable {
 
 // MARK: - the columns
 
-final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDelegate {
+final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDelegate, PageZoomable {
+    var pageZoom: CGFloat { get { web.pageZoom } set { web.pageZoom = newValue } }
     let web: WKWebView
     var onOpen: ((String) -> Void)?
     private var loaded = false

@@ -24,16 +24,16 @@ final class InlineRename: NSObject, NSTextFieldDelegate {
     //   onCommit   called when the user commits (Return, Tab, click away)
     @discardableResult
     static func begin(parent: NSView, nameRect: NSRect, name: String, isDir: Bool,
-                      colors: PopupColors, onCommit: (() -> Void)? = nil) -> InlineRename {
+                      colors: PopupColors, fontSize: CGFloat = 12, onCommit: (() -> Void)? = nil) -> InlineRename {
         let r = InlineRename()
         r.onCommit = onCommit
-        r._begin(parent: parent, nameRect: nameRect, name: name, isDir: isDir, colors: colors)
+        r._begin(parent: parent, nameRect: nameRect, name: name, isDir: isDir, colors: colors, fontSize: fontSize)
         return r
     }
 
-    private func _begin(parent: NSView, nameRect: NSRect, name: String, isDir: Bool, colors: PopupColors) {
+    private func _begin(parent: NSView, nameRect: NSRect, name: String, isDir: Bool, colors: PopupColors, fontSize: CGFloat) {
         let f = NSTextField(string: name)
-        f.font = NSFont.systemFont(ofSize: 12)
+        f.font = NSFont.systemFont(ofSize: fontSize)
         f.isBordered = false
         f.focusRingType = .none
         f.drawsBackground = true

@@ -1121,6 +1121,9 @@ final class FolderPage: NSObject, NSTextFieldDelegate, QLPreviewPanelDataSource,
         guard !paths.isEmpty else { return }
         copyText(paths.joined(separator: "\n"))
         s.status = "copied \(paths.count) path\(paths.count == 1 ? "" : "s")"
+        ScreenToast.show(paths.count == 1 ? "Copied \((paths[0] as NSString).abbreviatingWithTildeInPath) to clipboard"
+                                          : "Copied \(paths.count) paths to clipboard",
+                         on: nil, symbol: "doc.on.clipboard")
         sync()
     }
 

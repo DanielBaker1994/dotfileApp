@@ -46,6 +46,9 @@ func clampToScreen(_ f: NSRect) -> NSRect {
 // terminal output (doctor's colored PASS/FAIL/WARN lines) keeps its colors in
 // the popup editor. Text without escapes gets the base style; unhandled codes
 // are dropped. fg: 30-37 / 90-97 basic + bright, 39 reset; 1 bold, 22 normal.
+// a host page (web view) laid over the window that follows the Cmd+± text zoom
+protocol PageZoomable: AnyObject { var pageZoom: CGFloat { get set } }
+
 // editor font for the given family + zoom (13pt base, scales with zoom)
 func editorFont(_ name: String?, _ zoom: CGFloat, size: CGFloat = 13) -> NSFont {
     name.flatMap { NSFont(name: $0, size: size * zoom) }
@@ -3638,6 +3641,7 @@ final class PopupTextView: NSTextView {
         return m
     }
 
+    var onCopiedImagePath: ((String) -> Void)?
     var onCopyFilePath: (() -> Void)?
     @objc private func copyFilePath(_ sender: NSMenuItem) {
         onCopyFilePath?()
@@ -3656,6 +3660,7 @@ final class PopupTextView: NSTextView {
         guard let path = sender.representedObject as? String else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(path, forType: .string)
+        onCopiedImagePath?((path as NSString).abbreviatingWithTildeInPath)
     }
 
     static func image(from pb: NSPasteboard) -> NSImage? {
@@ -4118,8 +4123,13 @@ final class FileListPane: NSView, NSDraggingSource {
     private var dropRow: Int? { didSet { if dropRow != oldValue { needsDisplay = true } } }
     private var dropWhole = false { didSet { if dropWhole != oldValue { needsDisplay = true } } }
 
-    private let rowH: CGFloat = 22
+    // Cmd+± text zoom (the host's `textZoom`): row height, icon and fonts scale together
+    var textZoom: CGFloat = 1 { didSet { if oldValue != textZoom { needsDisplay = true } } }
+    var rowHeight: CGFloat { rowH }
+    private var rowH: CGFloat { (22 * textZoom).rounded() }
     private static let iconSize: CGFloat = 16
+    private var iconSz: CGFloat { (Self.iconSize * textZoom).rounded() }
+    private func trailW(_ e: PopupFileBrowser.Entry) -> CGFloat { e.trailingWidth * textZoom }
     // right gutter for the size/date column: clears the overlay scroller
     private static let trailingInset: CGFloat = 16
     private var trackingArea: NSTrackingArea?
@@ -4165,12 +4175,12 @@ final class FileListPane: NSView, NSDraggingSource {
     // where a row's name is drawn (the inline rename field sits here)
     func nameRect(_ i: Int) -> NSRect {
         let r = rowRect(i)
-        var tx = 10 + Self.iconSize + 6
+        var tx = 10 + iconSz + 6
         var trailing: CGFloat = 8
         if rows.indices.contains(i) {
             let e = rows[i]
             if e.isDir && e.name != ".." { tx += 4 }
-            if e.trailingWidth > 0 { trailing += e.trailingWidth + Self.trailingInset + 4 }
+            if e.trailingWidth > 0 { trailing += trailW(e) + Self.trailingInset + 4 }
         }
         return NSRect(x: tx, y: r.minY, width: max(60, r.width - tx - trailing), height: rowH)
     }
@@ -4224,44 +4234,45 @@ final class FileListPane: NSView, NSDraggingSource {
             let icon = e.icon ?? NSWorkspace.shared.icon(forFile: e.path)
             var ir = r
             ir.origin.x += 10
-            ir.size.width = Self.iconSize
+            ir.size.width = iconSz
             let img = icon
             NSGraphicsContext.saveGraphicsState()
-            let clip = NSBezierPath(roundedRect: ir.insetBy(dx: 1, dy: (rowH - Self.iconSize) / 2),
+            let clip = NSBezierPath(roundedRect: ir.insetBy(dx: 1, dy: (rowH - iconSz) / 2),
                                     xRadius: 2, yRadius: 2)
             clip.addClip()
-            img.draw(in: ir.insetBy(dx: 1, dy: (rowH - Self.iconSize) / 2))
+            img.draw(in: ir.insetBy(dx: 1, dy: (rowH - iconSz) / 2))
             NSGraphicsContext.restoreGraphicsState()
 
             let nameAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                .font: NSFont.systemFont(ofSize: 12 * textZoom, weight: .regular),
                 .foregroundColor: i == selection || marked.contains(i)
                     ? config.colors.text : config.colors.text.withAlphaComponent(0.85),
             ]
             var tx = ir.maxX + 6
             if e.isDir && e.name != ".." { tx += 4 }   // folder emoji leading space kept small
             let name = e.name as NSString
-            let avail = w - tx - 8 - (e.trailingWidth > 0 ? e.trailingWidth + Self.trailingInset + 4 : 0)
-            name.draw(with: NSRect(x: tx, y: r.minY + (rowH - 15) / 2, width: max(20, avail), height: 15),
+            let avail = w - tx - 8 - (e.trailingWidth > 0 ? trailW(e) + Self.trailingInset + 4 : 0)
+            let lineH = (15 * textZoom).rounded(.up)
+            name.draw(with: NSRect(x: tx, y: r.minY + (rowH - lineH) / 2, width: max(20, avail), height: lineH),
                       options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin],
                       attributes: nameAttrs)
             if e.isDir && e.name != ".." {
                 // folder mark after the name, in the theme's second hue
                 let dirAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                    .font: NSFont.systemFont(ofSize: 11 * textZoom, weight: .bold),
                     .foregroundColor: config.colors.tone(.accent2),
                 ]
                 let d = (e.name as NSString).size(withAttributes: nameAttrs)
                 let g = "/" as NSString
-                g.draw(at: NSPoint(x: tx + d.width + 2, y: r.minY + (rowH - 14) / 2), withAttributes: dirAttrs)
+                g.draw(at: NSPoint(x: tx + d.width + 2, y: r.minY + (rowH - 14 * textZoom) / 2), withAttributes: dirAttrs)
             }
             if e.trailingWidth > 0 {
                 let szAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 10, weight: .regular),
+                    .font: NSFont.systemFont(ofSize: 10 * textZoom, weight: .regular),
                     .foregroundColor: config.colors.dim,
                 ]
                 let s = e.trailingText as NSString
-                s.draw(at: NSPoint(x: w - e.trailingWidth - Self.trailingInset, y: r.minY + (rowH - 12) / 2),
+                s.draw(at: NSPoint(x: w - trailW(e) - Self.trailingInset, y: r.minY + (rowH - 12 * textZoom) / 2),
                        withAttributes: szAttrs)
             }
         }
@@ -4340,7 +4351,7 @@ final class FileListPane: NSView, NSDraggingSource {
     // only select
     private func nameTextRect(_ i: Int) -> NSRect {
         var r = nameRect(i)
-        let w = (rows[i].name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width
+        let w = (rows[i].name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12 * textZoom)]).width
         r.size.width = min(r.width, ceil(w) + 6)
         return r
     }
@@ -4919,6 +4930,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     var onCopyPath: ((String) -> Void)?      // copy an arbitrary path (hover/right-click)
     var onOpenInNotes: ((String) -> Void)?   // right-click "Open in Notes"
     var onStatus: ((String) -> Void)?        // transient feedback line
+    var onCopied: ((String) -> Void)?        // path(s) copied -> host shows the bottom toast ("~/x" or "3 items")
     var onOpenTerminal: ((String) -> Void)?  // `term` in the filter / right-click
     var onSortChange: ((String, Bool) -> Void)?  // persist (sort key, descending)
 
@@ -5090,7 +5102,10 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
             m.addItem(menuItem("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             })
-            m.addItem(menuItem("Copy Path") { copyText(path) })
+            m.addItem(menuItem("Copy Path") {
+                copyText(path)
+                self?.onCopied?((path as NSString).abbreviatingWithTildeInPath)
+            })
             if self?.pinnedFavorites.contains(path) == true {
                 m.addItem(.separator())
                 m.addItem(menuItem("Unpin") { self?.unpin(path) })
@@ -5240,6 +5255,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
             let p = self.rows[i].path
             self.onCopyPath?(p)
             self.onStatus?("copied \(p)")
+            self.onCopied?((p as NSString).abbreviatingWithTildeInPath)
         }
         listPane.onOpenInNotes = { [weak self] i in
             guard let self, self.rows.indices.contains(i) else { return }
@@ -5384,6 +5400,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
             let p = self.previewList.rows[i].path
             self.onCopyPath?(p)
             self.onStatus?("copied \(p)")
+            self.onCopied?((p as NSString).abbreviatingWithTildeInPath)
         }
         previewList.onOpenInNotes = { [weak self] i in
             guard let self, self.previewList.rows.indices.contains(i) else { return }
@@ -5525,15 +5542,26 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
     }
     // the list's document (the row pane) grows to fit every row; the scroll
     // view clips it at the pane height so long lists scroll in place
+    // Cmd+± on the Files view: the names / icons / size column of both lists
+    var textZoom: CGFloat = 1 {
+        didSet {
+            guard oldValue != textZoom else { return }
+            listPane.textZoom = textZoom
+            previewList.textZoom = textZoom
+            layoutListDocument()
+            layoutPreviewListDocument()
+            scrollSelectionVisible()
+        }
+    }
     private func layoutListDocument() {
         let clipH = max(0, listScroll.bounds.height)
-        let docH = max(clipH, CGFloat(listPane.rows.count) * 22)
+        let docH = max(clipH, CGFloat(listPane.rows.count) * listPane.rowHeight)
         listPane.frame = NSRect(x: 0, y: 0, width: max(0, listScroll.bounds.width), height: docH)
         listPane.needsDisplay = true
     }
     private func layoutPreviewListDocument() {
         let clipH = max(0, previewListScroll.bounds.height)
-        let docH = max(clipH, CGFloat(previewList.rows.count) * 22)
+        let docH = max(clipH, CGFloat(previewList.rows.count) * previewList.rowHeight)
         previewList.frame = NSRect(x: 0, y: 0, width: max(0, previewListScroll.bounds.width), height: docH)
         previewList.needsDisplay = true
     }
@@ -6150,7 +6178,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         scrollSelectionVisible()
         let r = InlineRename.begin(parent: listPane, nameRect: listPane.nameRect(i),
                                    name: (e.path as NSString).lastPathComponent,
-                                   isDir: e.isDir, colors: config.colors,
+                                   isDir: e.isDir, colors: config.colors, fontSize: 12 * textZoom,
                                    onCommit: { [weak self] in self?.commitRename() })
         r.setPath(e.path)
         rename = r
@@ -6364,6 +6392,9 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         Self.cutChange = cut ? pb.changeCount : nil
         let what = Self.items(paths.count, Self.leaf(paths.first))
         setStatus(cut ? "cut \(what) · ⌘V moves it here" : "copied \(what) · ⌘V pastes the file, or its path as text")
+        if !cut {
+            onCopied?(paths.count == 1 ? (paths[0] as NSString).abbreviatingWithTildeInPath : "\(paths.count) items")
+        }
     }
 
     // Cmd+V: copy the clipboard's files into the listed folder (move after a
@@ -6573,6 +6604,7 @@ final class PopupFileBrowser: NSView, NSTextFieldDelegate, QLPreviewPanelDataSou
         let p = rows[i].path
         onCopyPath?(p)
         onStatus?("copied \(p)")
+        onCopied?((p as NSString).abbreviatingWithTildeInPath)
         return p
     }
     private func openIndex(_ i: Int) {
@@ -8382,6 +8414,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public func setListOverlay(_ v: NSView?) {
         if let old = listOverlay, old !== v { old.removeFromSuperview() }
         listOverlay = v
+        if textZoomKey != nil { (v as? PageZoomable)?.pageZoom = textZoom }
         if let v, let backdrop = panel.contentView, v.superview !== backdrop {
             if let chrome { backdrop.addSubview(v, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(v) }
         }
@@ -8565,6 +8598,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public func setPageOverlay(_ v: NSView?) {
         if pageOverlay !== v { pageOverlay?.removeFromSuperview() }
         pageOverlay = v
+        if textZoomKey != nil { (v as? PageZoomable)?.pageZoom = textZoom }
         guard let v, let backdrop = panel.contentView else { return }
         if v.superview == nil {
             if let chrome { backdrop.addSubview(v, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(v) }
@@ -8922,7 +8956,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         didSet {
             guard oldValue != zoom else { return }
             config.zoom = zoom
-            rowView.zoom = zoom
+            rowView.zoom = zoom * textZoom
             chrome?.zoom = zoom
             tabsBar?.zoom = zoom
             filterBar?.zoom = zoom
@@ -8945,6 +8979,30 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             field.needsDisplay = true
             layoutForZoom()
         }
+    }
+
+    // Cmd+± zoom of the MAIN area only (file names, Jira rows / board / ticket
+    // page): the chrome around it keeps its size. Opt-in per view — the host
+    // sets `textZoomKey` (the UserDefaults slot the level is kept in).
+    public var textZoomKey: String? {
+        didSet {
+            guard let k = textZoomKey, k != oldValue else { return }
+            let z = CGFloat(UserDefaults.standard.double(forKey: k))
+            setTextZoom(z > 0 ? z : 1, save: false)
+        }
+    }
+    public private(set) var textZoom: CGFloat = 1
+    public func setTextZoom(_ z: CGFloat, save: Bool = true) {
+        let z = min(3, max(0.6, (z * 100).rounded() / 100))
+        if z != textZoom {
+            textZoom = z
+            rowView.zoom = zoom * z
+            if !fileBrowserDrawerMode { fileBrowser?.textZoom = z }
+            layoutScrollDocument()
+            rowView.needsDisplay = true
+        }
+        for case let v as PageZoomable in [listOverlay, pageOverlay] { v.pageZoom = z }
+        if save, let k = textZoomKey { UserDefaults.standard.set(Double(z), forKey: k) }
     }
 
     // Re-frame every subview for the current zoom: bars/pills draw at their
@@ -9185,6 +9243,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         }
         bar.onCopyPath = { [weak self] index in
             self?.onTabCopyPath?(index)
+            self?.toastPasteboardPath()
         }
         bar.pathTip = { [weak self] i in self?.tabPathTip?(i) }
         bar.onWidthChange = { [weak self] w, done in self?.setSidebarWidth(w, done: done) }
@@ -9261,7 +9320,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         }
         tv.onCopyFilePath = { [weak self] in
             self?.onCopyFilePath?()
+            self?.toastPasteboardPath()
         }
+        tv.onCopiedImagePath = { [weak self] shown in self?.toastCopiedPath(shown) }
         tv.onOpenImage = { [weak self] path in
             FilePopup.show(path: path, over: self?.panel)
         }
@@ -10788,6 +10849,8 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 pv.zoom(by: plus ? 1.1 : 1 / 1.1); pv.saveZoom()
             } else if let step = onFontSizeStep {
                 step(sign)
+            } else if textZoomKey != nil {
+                setTextZoom(textZoom * (plus ? 1.1 : 1 / 1.1))
             } else {
                 resizeBy(CGFloat(80 * sign))
             }
@@ -10795,6 +10858,10 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         }
         if cmd, code == 29, !mods.contains(.option), proseShown, let pv = proseView, panel.attachedSheet == nil {
             pv.resetZoom(); pv.saveZoom()     // Cmd+0
+            return true
+        }
+        if cmd, code == 29, !mods.contains(.option), onFontSizeStep == nil, textZoomKey != nil, panel.attachedSheet == nil {
+            setTextZoom(1)                    // Cmd+0: the main text back to 100%
             return true
         }
         return nil
@@ -11005,11 +11072,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             fb.listView.moveSelection(code == 45 ? 1 : -1)
             return true
         case 40 where cmd:  // Cmd+K — copy the selected row's absolute path
-            if let p = fb.copyRowPath(fb.listView.selection), !config.copyToast.isEmpty {
-                let shown = (p as NSString).abbreviatingWithTildeInPath
-                showToast(config.copyToast.replacingOccurrences(of: "{}", with: shown),
-                          symbol: "doc.on.clipboard")
-            }
+            fb.copyRowPath(fb.listView.selection)   // fb.onCopied shows the toast
             return true
         case 0:   // A — select all in the filter bar
             fb.searchView.selectText(nil)
@@ -11182,7 +11245,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             case (36, _), (38, true): acceptSelection(); return true              // Return / C-j
             case (115, false), (119, false), (116, false), (121, false):          // Home / End / PgUp / PgDn
                 guard !rows.isEmpty else { return true }
-                let page = max(1, Int((rowScroll?.contentSize.height ?? 300) / max(1, config.rowHeight * zoom)) - 1)
+                let page = max(1, Int((rowScroll?.contentSize.height ?? 300) / max(1, config.rowHeight * zoom * textZoom)) - 1)
                 let to = code == 115 ? 0 : code == 119 ? rows.count - 1
                     : selection + (code == 116 ? -page : page)
                 selection = min(max(0, to), rows.count - 1)   // clamp, never wrap
@@ -11361,11 +11424,26 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     // window (fade + small rise/scale), holds, then fades. A new toast
     // replaces the one on screen.
     private weak var toastView: NSView?
-    func showToast(_ text: String, symbol: String? = nil, centered: Bool = false) {
+    // the bottom pill for "a path went on the clipboard" (config.copyToast,
+    // "{}" = the shown path). Every path-copy affordance funnels through here.
+    func toastCopiedPath(_ shown: String) {
+        guard !config.copyToast.isEmpty else { return }
+        // centered terminal-style box, held 3 s: wide enough that the path never truncates
+        showToast(config.copyToast.replacingOccurrences(of: "{}", with: shown), symbol: "checkmark",
+                  centered: true, boxed: true, hold: 3.0)
+    }
+    // same, for callbacks that wrote the pasteboard themselves (host.copy)
+    func toastPasteboardPath() {
+        guard let s = NSPasteboard.general.string(forType: .string), !s.isEmpty else { return }
+        let n = s.split(separator: "\n").count
+        toastCopiedPath(n > 1 ? "\(n) items" : (s as NSString).abbreviatingWithTildeInPath)
+    }
+    func showToast(_ text: String, symbol: String? = nil, centered: Bool = false,
+                   boxed: Bool = false, hold: TimeInterval = 1.4) {
         guard let root = panel.contentView else { return }
         toastView?.removeFromSuperview()
         let pill = makeToastPill(text, symbol: symbol, colors: config.colors, zoom: zoom,
-                                 maxWidth: root.bounds.width - 32)
+                                 maxWidth: root.bounds.width - 32, boxed: boxed)
         // bottom-center, clear of the footer strip; the backdrop is flipped
         let h = pill.frame.height, w = pill.frame.width
         let inset = centered ? max(0, (root.bounds.height - h) / 2) : 30 * zoom
@@ -11376,7 +11454,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         pill.autoresizingMask = [.minXMargin, .maxXMargin, flipped ? .minYMargin : .maxYMargin]
         root.addSubview(pill, positioned: .above, relativeTo: nil)
         toastView = pill
-        animateToastPill(pill, rise: (flipped ? 6 : -6) * zoom)
+        animateToastPill(pill, rise: (flipped ? 6 : -6) * zoom, hold: hold, fade: boxed ? 0.7 : 0.25)
     }
 
     // counts one Esc press toward config.escCloseCount; true (and the streak
@@ -12050,7 +12128,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.setString(path, forType: .string)
-            self?.showToast("Copied image path", symbol: "doc.on.clipboard")
+            self?.toastCopiedPath((path as NSString).abbreviatingWithTildeInPath)
         })
         m.addItem(menuItem("Copy Image") { [weak self] in
             guard let img = NSImage(contentsOf: url) else { return }
@@ -12477,6 +12555,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     func installFileBrowser(_ fb: PopupFileBrowser, drawer: Bool) {
         fileBrowser = fb
         fileBrowserDrawerMode = drawer
+        fb.onCopied = { [weak self] shown in
+            self?.toastCopiedPath(shown)
+        }
         guard let backdrop = panel.contentView else { return }
         // drawer: bottom-anchored, FIXED height (layoutFileBrowser sizes it).
         // With a flexible height its autoresizing constraints kept the
@@ -13172,7 +13253,7 @@ public func sendToggle(name: String) -> Bool {
 // success-toned SF Symbol + text centered on both axes. Sized to its text
 // (≤ maxWidth); the caller places it.
 func makeToastPill(_ text: String, symbol: String?, colors c: PopupColors, zoom: CGFloat,
-                   maxWidth: CGFloat) -> NSView {
+                   maxWidth: CGFloat, boxed: Bool = false) -> NSView {
     let pill = NSView()
     pill.wantsLayer = true
     pill.layer?.backgroundColor = c.crust.withAlphaComponent(0.94).cgColor
@@ -13184,7 +13265,8 @@ func makeToastPill(_ text: String, symbol: String?, colors c: PopupColors, zoom:
     pill.layer?.shadowOffset = CGSize(width: 0, height: -2)
 
     let label = NSTextField(labelWithString: text)
-    label.font = .systemFont(ofSize: 12.5 * zoom, weight: .medium)
+    label.font = boxed ? .monospacedSystemFont(ofSize: 13.5 * zoom, weight: .medium)
+                       : .systemFont(ofSize: 12.5 * zoom, weight: .medium)
     label.textColor = c.text
     label.lineBreakMode = .byTruncatingMiddle
     label.cell?.truncatesLastVisibleLine = true
@@ -13198,10 +13280,10 @@ func makeToastPill(_ text: String, symbol: String?, colors c: PopupColors, zoom:
     // explicit frames (no stack view): symmetric side padding and the
     // icon + text group centered on both axes of the pill
     label.sizeToFit()
-    let padX = 16 * zoom, gap = 8 * zoom
+    let padX = (boxed ? 26 : 16) * zoom, gap = 8 * zoom
     let iconSize = icon?.fittingSize ?? .zero
     let groupExtra = icon == nil ? 0 : iconSize.width + gap
-    let h = 32 * zoom
+    let h = (boxed ? 56 : 32) * zoom
     let w = min(ceil(label.frame.width + groupExtra + padX * 2), maxWidth)
     let labelW = max(0, w - padX * 2 - groupExtra)
     let groupW = groupExtra + labelW
@@ -13216,13 +13298,21 @@ func makeToastPill(_ text: String, symbol: String?, colors c: PopupColors, zoom:
                          width: labelW, height: label.frame.height)
     pill.addSubview(label)
     pill.frame = NSRect(x: 0, y: 0, width: w, height: h)
-    pill.layer?.cornerRadius = h / 2
+    if boxed {   // terminal box: square corners, success-green border
+        pill.layer?.cornerRadius = 4 * zoom
+        pill.layer?.borderColor = c.tone(.success).cgColor
+        pill.layer?.borderWidth = 2
+        pill.layer?.backgroundColor = c.crust.cgColor
+    } else {
+        pill.layer?.cornerRadius = h / 2
+    }
     return pill
 }
 
-// pop in (rise `rise` pt + fade), hold 1.4 s, fade out, then `done`
-// (default: remove the pill)
-func animateToastPill(_ pill: NSView, rise: CGFloat, done: (() -> Void)? = nil) {
+// pop in (rise `rise` pt + fade), hold `hold` s (1.4 default), fade out over
+// `fade` s, then `done` (default: remove the pill)
+func animateToastPill(_ pill: NSView, rise: CGFloat, hold: TimeInterval = 1.4, fade: TimeInterval = 0.25,
+                      done: (() -> Void)? = nil) {
     let final = pill.frame
     pill.alphaValue = 0
     pill.setFrameOrigin(NSPoint(x: final.minX, y: final.minY + rise))
@@ -13232,10 +13322,10 @@ func animateToastPill(_ pill: NSView, rise: CGFloat, done: (() -> Void)? = nil) 
         pill.animator().alphaValue = 1
         pill.animator().setFrameOrigin(final.origin)
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak pill] in
+    DispatchQueue.main.asyncAfter(deadline: .now() + hold) { [weak pill] in
         guard let pill, pill.superview != nil else { return }
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.25
+            ctx.duration = fade
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             pill.animator().alphaValue = 0
         }, completionHandler: { if let done { done() } else { pill.removeFromSuperview() } })
@@ -13592,7 +13682,7 @@ final class PopupListVim: VimRows {
 extension PopupWindow {
     var vimVisibleRows: Int {
         let h = rowScroll?.contentView.bounds.height ?? rowView.bounds.height
-        return max(1, Int(h / max(18, config.rowHeight * zoom)))
+        return max(1, Int(h / max(18, config.rowHeight * zoom * textZoom)))
     }
     func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)]) {
         (rowView, rowView.shownRows())

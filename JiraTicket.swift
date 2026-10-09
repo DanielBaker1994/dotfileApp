@@ -227,8 +227,9 @@ enum JiraTicketPage {
     }
 }
 
-final class JiraTicketView: NSView, WKScriptMessageHandler {
+final class JiraTicketView: NSView, WKScriptMessageHandler, PageZoomable {
     let web: WKWebView
+    var pageZoom: CGFloat { get { web.pageZoom } set { web.pageZoom = newValue } }
     var onAction: ((String) -> Void)?
 
     override init(frame: NSRect) {

@@ -612,9 +612,11 @@ final class ProseView: NSView, WKScriptMessageHandler {
         menu.addItem(pdf)
         menu.addItem(menuItem("Outline") { [weak self] in self?.web.evaluateJavaScript("window.__wsToggleOutline&&window.__wsToggleOutline()") })
         let path = lastPath
-        menu.addItem(menuItem("Copy Note Path") {
+        menu.addItem(menuItem("Copy Note Path") { [weak self] in
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(path, forType: .string)
+            ScreenToast.show("Copied \((path as NSString).abbreviatingWithTildeInPath) to clipboard",
+                             on: self?.window?.screen, symbol: "doc.on.clipboard")
         })
     }
 
