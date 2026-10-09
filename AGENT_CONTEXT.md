@@ -1460,7 +1460,13 @@ worked example):
   responder (cursor, ring, sidebar cursor stay); `searchKey` edits the query
   (Cmd/Ctrl+V paste, Cmd+C / X / Z, Ctrl+W / U / H, Delete on empty =
   cancel), ↑↓ / Ctrl+N/P step; Esc restores the start, Return keeps it as
-  n / N's. Badge `VimModeBadge` (PaneNav.refresh, bottom-right of the
+  n / N's. Highlights (hlsearch): every match painted while the bar is up
+  and after Return (n / N too) until Esc in normal mode (eaten first), a
+  new pane or an empty query — rows = `VimMatchOverlay` over
+  `VimRows.vimShownRows()` (warning tint, the cursor's match stronger,
+  re-read on PaneNav refresh + scroll), text = layout-manager temporary
+  background, web = CSS Custom Highlight `vimsearch`; state
+  `pane.vimSearch.highlight` {query, pane, rows, current, text, web}. Badge `VimModeBadge` (PaneNav.refresh, bottom-right of the
   focused pane). State `pane.vimMode`, `pane.vimSearch` {open, query,
   status, last, fieldNormal}; PopupWindow testState `selection`, `rowCount`,
   `query`, `sidebarCursor`. Drive with `do:key:j`, `do:key:/`, `do:key:esc`.

@@ -72,6 +72,13 @@ struct VimSearchTests {
         check(VimSearch.dropWord("sprint") == "", "Ctrl+W on one word clears")
         check(VimSearch.dropWord("") == "", "Ctrl+W on empty")
 
+        // the highlights: which rows / text ranges are painted
+        check(VimSearch.matches("Résumé draft", "resume"), "row match ignores case + accents")
+        check(!VimSearch.matches("KAN-2", ""), "an empty query matches nothing")
+        let all = VimSearch.ranges("Kan kan KAN", query: "kan")
+        check(all.map { $0.location } == [0, 4, 8], "every text match in order, got \(all)")
+        check(VimSearch.ranges(String(repeating: "a", count: 50), query: "a", limit: 10).count == 10, "ranges stop at the limit")
+
         print("vim search: \(passed) passed, \(failed) failed")
         if failed > 0 { exit(1) }
     }

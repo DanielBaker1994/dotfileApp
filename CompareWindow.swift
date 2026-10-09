@@ -3007,6 +3007,12 @@ final class CompareRecentVim: VimRows {
         return "\(r[row].left) \(r[row].right)"
     }
     func vimMove(to row: Int) { w?.vimMoveRecent(to: row) }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
+        guard let l = w?.vimRecent else { return nil }
+        return Self.shownRows(in: l, count: l.rows.count, rowH: l.rowH) {
+            NSRect(x: 0, y: CGFloat($0) * l.rowH, width: l.bounds.width, height: l.rowH)
+        }
+    }
 }
 
 final class CompareTextVim: VimRows {
@@ -3021,11 +3027,18 @@ final class CompareTextVim: VimRows {
         return line >= 0 ? s.model.side(s.focus).lines[line] : ""
     }
     func vimMove(to row: Int) { w?.vimMoveCursor(to: row) }
+    // the focused side's text column only (both sides share one view)
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
+        guard let w, let s = w.vimSession else { return nil }
+        let p = w.vimPane
+        return Self.shownRows(in: p, count: s.displayCount, rowH: p.rowH) { p.textRect(s.focus, row: $0) }
+    }
 }
 
 extension CompareWindow {
     var vimRecent: CompareRecentList { recentList }
     var vimSession: CompareSession? { session }
+    var vimPane: ComparePaneView { pane }
     var vimPageRows: Int { max(1, Int(scroll.contentView.bounds.height / max(1, pane.rowH))) }
     func vimMoveRecent(to row: Int) { moveRecent(row - recentList.selection) }
     func vimMoveCursor(to row: Int) {

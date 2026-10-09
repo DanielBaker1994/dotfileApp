@@ -34,6 +34,23 @@ protocol VimRows: AnyObject {
     var vimPage: Int { get }
     func vimText(_ row: Int) -> String
     func vimMove(to row: Int)
+    // the rows on screen for the search highlights: the view drawing them
+    // and each row's rect in it (nil = no highlights in this pane)
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])?
+}
+
+extension VimRows {
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? { nil }
+
+    // fixed-height rows from y = 0 in `v`: the ones inside its visible rect
+    static func shownRows(in v: NSView, count: Int, rowH: CGFloat, rect: (Int) -> NSRect)
+        -> (view: NSView, rows: [(row: Int, rect: NSRect)]) {
+        let vis = v.visibleRect
+        guard count > 0, rowH > 0, !vis.isEmpty else { return (v, []) }
+        let first = max(0, Int(vis.minY / rowH)), last = min(count - 1, Int(vis.maxY / rowH))
+        guard first <= last else { return (v, []) }
+        return (v, (first...last).map { ($0, rect($0)) })
+    }
 }
 
 enum VimTarget {
@@ -72,6 +89,9 @@ final class VimKeys {
     private var lastQuery = ""
     private var lastBack = false
     private var bar: VimSearchBar?
+    // vim's hlsearch: what the matches of the current / last search are
+    // painted in, until Esc in normal mode, a new pane or an empty query
+    var hl: VimHighlight?
 
     // MARK: modes
 
@@ -138,6 +158,11 @@ final class VimKeys {
         } else {
             out["open"] = false
         }
+        if let h = hl, h.window === w {
+            out["highlight"] = ["query": h.query, "pane": h.paneID, "rows": h.overlay?.marks.count ?? 0,
+                                "current": h.overlay?.marks.contains { $0.current } ?? false,
+                                "text": h.textCount, "web": h.webCount]
+        }
         return out
     }
 
@@ -164,6 +189,12 @@ final class VimKeys {
             return true
         }
         guard let t = target(pane) else { return false }
+        if e.keyCode == 53, mods.isEmpty, let h = hl, h.window === w {
+            // Esc: the search highlights go first (vim's :noh), then Esc as before
+            pendingG = nil
+            clearHighlight(h)
+            return true
+        }
         if mods == .control, e.keyCode == 2 || e.keyCode == 32 {      // Ctrl+D / Ctrl+U
             pendingG = nil
             halfPage(t, down: e.keyCode == 2)
@@ -185,7 +216,7 @@ final class VimKeys {
         case "k": step(t, -1)
         case "G": edge(t, bottom: true)
         case "/", "?": openSearch(pane, t, back: ch == "?", in: w)
-        case "n", "N": repeatSearch(t, reverse: ch == "N")
+        case "n", "N": repeatSearch(t, reverse: ch == "N", pane: pane.id, in: w)
         case "i", "a":
             guard let ins = pane.insert else { return fieldNormal }
             leaveFieldNormal(w)
@@ -254,6 +285,7 @@ final class VimKeys {
     private func openSearch(_ pane: NavPane, _ t: VimTarget, back: Bool, in w: NSWindow) {
         guard let root = w.contentView else { return }
         let b = VimSearchBar(paneID: pane.id, target: t, back: back)
+        if let h = hl { clearHighlight(h) }
         switch t {
         case .rows(let r):
             b.origin = r.vimCursor
@@ -280,6 +312,7 @@ final class VimKeys {
         guard let b = bar else { return }
         bar = nil
         b.removeFromSuperview()
+        if let h = hl, !accept || b.query.isEmpty { clearHighlight(h) }
         if accept, !b.query.isEmpty {
             lastQuery = b.query
             lastBack = b.back
@@ -297,6 +330,9 @@ final class VimKeys {
 
     // the pane / window changed under the bar: keep what was found
     func paneChanged(in w: NSWindow, focused: String?) {
+        if let h = hl, h.window === w || h.window == nil {
+            if h.window == nil || focused != h.paneID || !w.isKeyWindow { clearHighlight(h) } else { paint(h) }
+        }
         guard let b = bar, b.window === w || b.window == nil else { return }
         if b.window == nil || focused != b.paneID || !w.isKeyWindow { closeSearch(accept: true, in: w) }
     }
@@ -361,6 +397,7 @@ final class VimKeys {
     private func incremental(_ b: VimSearchBar) {
         guard !b.query.isEmpty else {
             b.status = ""
+            if let h = hl { clearHighlight(h) }
             if case .rows(let r) = b.target, r.vimCount > 0 { r.vimMove(to: min(b.origin, r.vimCount - 1)) }
             return
         }
@@ -371,6 +408,7 @@ final class VimKeys {
     // wrapping; step = skip the match under the cursor
     private func find(_ b: VimSearchBar, from: Int?, reverse: Bool, step: Bool) {
         guard !b.query.isEmpty else { return }
+        defer { if let w = b.window { highlight(b.target, query: b.query, pane: b.paneID, in: w) } }
         switch b.target {
         case .rows(let r):
             let hit = VimSearch.rows(b.texts, query: b.query, from: from ?? r.vimCursor, back: reverse,
@@ -401,8 +439,9 @@ final class VimKeys {
     }
 
     // n / N: the last search again in this pane
-    private func repeatSearch(_ t: VimTarget, reverse: Bool) {
+    private func repeatSearch(_ t: VimTarget, reverse: Bool, pane: String, in w: NSWindow) {
         guard !lastQuery.isEmpty else { return }
+        defer { highlight(t, query: lastQuery, pane: pane, in: w) }
         let back = lastBack != reverse
         switch t {
         case .rows(let r):
@@ -427,6 +466,198 @@ final class VimKeys {
 
 private extension String {
     var oneLine: String { components(separatedBy: .newlines).joined(separator: " ") }
+}
+
+// MARK: - hlsearch: every match painted, the one under the cursor stronger
+//
+// rows: a VimMatchOverlay over the rows on screen (the pane's own drawing
+// untouched; re-read on every PaneNav refresh and scroll, so a list that
+// changes under it stays right); text: the layout manager's temporary
+// background (the selection + find indicator mark the current one); web:
+// the CSS Custom Highlight API (WKWebView.find marks the current one).
+
+final class VimHighlight {
+    let paneID: String
+    weak var window: NSWindow?
+    let target: VimTarget
+    var query = ""
+    var overlay: VimMatchOverlay?
+    var textCount = 0
+    var webCount = 0
+    var painted: (query: String, length: Int)?        // text / web: what is painted now
+    init(paneID: String, window: NSWindow, target: VimTarget) {
+        self.paneID = paneID
+        self.window = window
+        self.target = target
+    }
+}
+
+extension VimKeys {
+    static var matchColor: NSColor { PopupThemeDefaults.colors.palette.warning }
+
+    // the matches of `query` in pane's target, painted (a new pane / target
+    // replaces the old highlights)
+    func highlight(_ t: VimTarget, query: String, pane: String, in w: NSWindow) {
+        if let h = hl, h.paneID != pane || h.window !== w || !Self.same(h.target, t) { clearHighlight(h) }
+        guard !query.isEmpty else { if let h = hl { clearHighlight(h) }; return }
+        let h = hl ?? VimHighlight(paneID: pane, window: w, target: t)
+        h.query = query
+        hl = h
+        paint(h)
+    }
+
+    private static func same(_ a: VimTarget, _ b: VimTarget) -> Bool {
+        switch (a, b) {
+        case (.rows(let x), .rows(let y)): return x === y || Self.rowsView(x) === Self.rowsView(y)
+        case (.text(let x), .text(let y)): return x === y
+        case (.web(let x), .web(let y)): return x === y
+        default: return false
+        }
+    }
+    // the wrappers (PopupListVim…) are made fresh per key: compare what they draw into
+    private static func rowsView(_ r: VimRows) -> NSView? { r.vimShownRows()?.view }
+
+    func paint(_ h: VimHighlight) {
+        switch h.target {
+        case .rows(let r):
+            guard let shown = r.vimShownRows() else { return }
+            let host = shown.view
+            let o = h.overlay ?? VimMatchOverlay(frame: .zero)
+            if o.superview !== host {
+                o.removeFromSuperview()
+                host.addSubview(o, positioned: .above, relativeTo: nil)
+                o.follow(host.enclosingScrollView?.contentView)
+            }
+            h.overlay = o
+            let frame = host.visibleRect
+            o.frame = frame
+            let cursor = r.vimCursor
+            o.marks = shown.rows.filter { VimSearch.matches(r.vimText($0.row), h.query) }.map {
+                (rect: $0.rect.offsetBy(dx: -frame.minX, dy: -frame.minY), current: $0.row == cursor)
+            }
+        case .text(let tv):
+            let len = (tv.string as NSString).length
+            if let p = h.painted, p.query == h.query, p.length == len { return }
+            guard let lm = tv.layoutManager else { return }
+            lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: len))
+            let all = VimSearch.ranges(tv.string, query: h.query)
+            let color = Self.matchColor.withAlphaComponent(0.35)
+            for rg in all { lm.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: rg) }
+            h.textCount = all.count
+            h.painted = (h.query, len)
+        case .web(let web):
+            if let p = h.painted, p.query == h.query { return }
+            h.painted = (h.query, 0)
+            web.evaluateJavaScript(Self.webHighlightJS(h.query)) { [weak h] res, _ in
+                h?.webCount = (res as? Int) ?? 0
+            }
+        }
+    }
+
+    func clearHighlight(_ h: VimHighlight) {
+        if hl === h { hl = nil }
+        h.overlay?.removeFromSuperview()
+        h.overlay = nil
+        switch h.target {
+        case .rows: break
+        case .text(let tv):
+            tv.layoutManager?.removeTemporaryAttribute(
+                .backgroundColor, forCharacterRange: NSRange(location: 0, length: (tv.string as NSString).length))
+        case .web(let web):
+            web.evaluateJavaScript("window.CSS && CSS.highlights && CSS.highlights.delete('vimsearch')")
+        }
+    }
+
+    // a pane scrolled by itself (the sidebar's wheel): the overlay follows
+    func repaintHighlight() {
+        if let h = hl { paint(h) }
+    }
+
+    private static func webHighlightJS(_ q: String) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: [q])) ?? Data("[\"\"]".utf8)
+        let arg = String(data: data, encoding: .utf8) ?? "[\"\"]"
+        let c = matchColor.usingColorSpace(.sRGB) ?? matchColor
+        let rgba = "rgba(\(Int(c.redComponent * 255)), \(Int(c.greenComponent * 255)), \(Int(c.blueComponent * 255)), 0.35)"
+        return """
+        (function (q) {
+          if (!window.CSS || !CSS.highlights || !document.body) return 0;
+          var st = document.getElementById('__vimhl');
+          if (!st) { st = document.createElement('style'); st.id = '__vimhl'; (document.head || document.body).appendChild(st); }
+          st.textContent = '::highlight(vimsearch) { background-color: \(rgba); }';
+          CSS.highlights.delete('vimsearch');
+          var ql = q.toLowerCase(), out = [], n;
+          var walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          while ((n = walk.nextNode()) && out.length < 5000) {
+            var p = n.parentNode && n.parentNode.nodeName;
+            if (p === 'SCRIPT' || p === 'STYLE') continue;
+            var t = n.nodeValue.toLowerCase(), i = t.indexOf(ql);
+            while (i >= 0 && out.length < 5000) {
+              var r = new Range();
+              r.setStart(n, i);
+              r.setEnd(n, Math.min(n.nodeValue.length, i + q.length));
+              out.push(r);
+              i = t.indexOf(ql, i + Math.max(1, ql.length));
+            }
+          }
+          CSS.highlights.set('vimsearch', new Highlight(...out));
+          return out.length;
+        })(\(arg)[0])
+        """
+    }
+}
+
+// the row tints, laid over the rows on screen inside the view that draws them
+final class VimMatchOverlay: NSView {
+    var marks: [(rect: NSRect, current: Bool)] = [] { didSet { needsDisplay = true } }
+    private var scrollObserver: NSObjectProtocol?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.zPosition = 100            // above a table's row views, added after us
+        autoresizingMask = []
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    deinit { if let o = scrollObserver { NotificationCenter.default.removeObserver(o) } }
+    override var isFlipped: Bool { superview?.isFlipped ?? true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    // a scroll moves the visible rect: repaint for the new rows
+    func follow(_ clip: NSClipView?) {
+        if let o = scrollObserver { NotificationCenter.default.removeObserver(o) }
+        scrollObserver = nil
+        guard let clip else { return }
+        clip.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { _ in
+            VimKeys.shared.repaintHighlight()
+        }
+    }
+
+    override func removeFromSuperview() {
+        follow(nil)
+        super.removeFromSuperview()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let color = VimKeys.matchColor
+        for m in marks {
+            let r = m.rect.insetBy(dx: 1, dy: 1)
+            guard r.intersects(dirtyRect) else { continue }
+            let path = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
+            color.withAlphaComponent(m.current ? 0.40 : 0.22).setFill()
+            path.fill()
+            // a bar on the left edge: the match's place is readable at a glance
+            color.withAlphaComponent(m.current ? 1 : 0.7).setFill()
+            NSBezierPath(roundedRect: NSRect(x: r.minX, y: r.minY + 3, width: 3, height: max(0, r.height - 6)),
+                         xRadius: 1.5, yRadius: 1.5).fill()
+            if m.current {
+                path.lineWidth = 1.5
+                color.setStroke()
+                path.stroke()
+            }
+        }
+    }
 }
 
 // MARK: - the "/" bar: vim's command line at the bottom of the pane

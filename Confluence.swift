@@ -1782,6 +1782,11 @@ final class ConfluenceVim: VimRows {
         t.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         t.scrollRowToVisible(row)
     }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
+        guard let t = w?.vimTable else { return nil }
+        let r = t.rows(in: t.visibleRect)
+        return (t, (r.location..<(r.location + r.length)).map { ($0, t.rect(ofRow: $0)) })
+    }
 }
 
 extension ConfluenceWindow {

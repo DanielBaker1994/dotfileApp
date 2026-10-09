@@ -1791,6 +1791,7 @@ final class PopupTabsBar: NSView {
         vScroll -= dy
         clampScroll()
         needsDisplay = true
+        VimKeys.shared.repaintHighlight()
     }
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -2772,6 +2773,23 @@ final class PopupRowView: NSView {
             y += hs[i] + extra
         }
         return NSRect(x: 0, y: y, width: bounds.width, height: hs[index] + extra)
+    }
+
+    // the rows inside the visible rect with their drawn rects (one walk)
+    func shownRows() -> [(row: Int, rect: NSRect)] {
+        let vis = visibleRect
+        guard !vis.isEmpty else { return [] }
+        let hs = heights(forWidth: bounds.width)
+        let extra = stretchExtra()
+        var out: [(row: Int, rect: NSRect)] = []
+        var y = topInset
+        for i in hs.indices {
+            let h = hs[i] + extra
+            if y > vis.maxY { break }
+            if y + h > vis.minY { out.append((i, NSRect(x: 0, y: y, width: bounds.width, height: h))) }
+            y += h
+        }
+        return out
     }
 
     // Total height the window needs for the current rows (inset + all rows).
@@ -13485,6 +13503,13 @@ extension PopupTabsBar: VimRows {
         return rowTitle(row) + " " + (pinnedSection?(pinned[row]) ?? pinnedTitle)
     }
     func vimMove(to row: Int) { moveCursor(to: row) }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
+        guard vertical, !collapsed else { return nil }
+        let l = vListRect
+        var out = vPinnedRows().prefix(pinnedShown).enumerated().map { (row: $0.offset, rect: $0.element.rect) }
+        out += vRows().map { (row: pinnedShown + $0.index, rect: $0.rect.intersection(l)) }
+        return (self, out)
+    }
 }
 
 extension FileListPane: VimRows {
@@ -13495,6 +13520,9 @@ extension FileListPane: VimRows {
     func vimMove(to row: Int) {
         moveSelection(row - selection)
         scrollToVisible(NSRect(x: 0, y: CGFloat(selection) * rowH, width: 1, height: rowH))
+    }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
+        Self.shownRows(in: self, count: rows.count, rowH: rowH, rect: rowRect)
     }
 }
 
@@ -13510,12 +13538,16 @@ final class PopupListVim: VimRows {
         guard let w, w.rows.indices.contains(row) else { return }
         w.selection = row
     }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? { w?.vimShownRows() }
 }
 
 extension PopupWindow {
     var vimVisibleRows: Int {
         let h = rowScroll?.contentView.bounds.height ?? rowView.bounds.height
         return max(1, Int(h / max(18, config.rowHeight * zoom)))
+    }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)]) {
+        (rowView, rowView.shownRows())
     }
     func vimRowText(_ i: Int) -> String {
         guard rows.indices.contains(i) else { return "" }

@@ -1516,6 +1516,13 @@ final class FolderVim: VimRows {
         return r[row].node.rel
     }
     func vimMove(to row: Int) { page?.move(to: row) }
+    func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
+        guard let p = page else { return nil }
+        let t = p.tree
+        return Self.shownRows(in: t, count: vimCount, rowH: t.rowH) {
+            NSRect(x: 0, y: CGFloat($0) * t.rowH, width: t.bounds.width, height: t.rowH)
+        }
+    }
 }
 
 extension FolderPage {
