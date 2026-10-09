@@ -512,6 +512,14 @@ toast = "Screenshot of {pane} copied ({n} lines)"
 #                       many points wide (default 210; "+" beside the NOTES
 #                       label adds one, hover a row for its ✕, right-click
 #                       for Copy Path / Reveal / Close). 0 = the old tab strip
+#   new-note-name       Cmd+N: an empty note NAME-1.md, NAME-2.md… (the first
+#                       free number; spaces become "-") in the notes folder
+#                       (the first `paths` entry); no prompt (default Untitled)
+#   new-doc-name        Ctrl+N: the same, filled from new-doc-template (default doc)
+#   new-doc-template    the vim/snippets/markdown.json snippet Ctrl+N's doc
+#                       starts as, placeholders at their defaults
+#                       (default markdown_doc_catppuccin_latte). Ctrl+N stays
+#                       "next" in vim insert mode, the file browser, the shell
 #   prose-width         reading column width in points (default 900). The
 #                       reading view renders the SAME document as Export PDF
 #                       (pandoc -s + pdf-css below), so its font, size and
@@ -898,6 +906,8 @@ kitchen-sink = "*:app"
 "notes: Space i (nvim)" = "insert picker: search snippets, callouts, badges, tables (type 3x4 for a table)"
 "notes: Cmd+S" = "save the note"
 "notes: Cmd+F" = "search the note"
+"notes: Cmd+N" = "new empty note at once (Untitled-1.md, Untitled-2.md… in the notes folder; no prompt)"
+"notes: Ctrl+N" = "new document from the template (doc-1.md, doc-2.md…; not in vim insert mode / file browser / shell)"
 "notes: Cmd+O" = "open a file by path as a tab"
 "notes: Space s g" = "vim pane: ripgrep the open notes, Return jumps to the line"
 "notes: Space s f" = "vim pane: find among the open notes (popup), Return switches to it"

@@ -8889,6 +8889,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
     public var openNotePaths: (() -> [String])?
     // host prompt for the editor's "Open file at path…" context-menu item
     public var onOpenPathPrompt: (() -> Void)?
+    // Cmd+N (template false) / Ctrl+N (true): the host creates a new note —
+    // empty / from its document template — with no name prompt, and shows it
+    public var onNewNote: ((_ template: Bool) -> Void)?
     // editor right-click "Copy File Path": copies the open note's absolute
     // path (replaces the dedicated "copy <name> path" header button)
     public var onCopyFilePath: (() -> Void)?
@@ -10050,6 +10053,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         onTabChange = nil
         onTabClick = nil
         onAddTab = nil
+        onNewNote = nil
         onFilterChange = nil
     }
 
@@ -10792,6 +10796,23 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         // Cmd+P while reading: the note as a PDF (path copied)
         if code == 35, proseShown, mods.intersection([.command, .control, .option, .shift]) == .command {
             proseView?.exportPDF()
+            return true
+        }
+        // Cmd+N: a new empty note at once, no name prompt (every pane of the
+        // notes window; Cmd+Shift+N stays the browser's new folder)
+        if code == 45, mods.intersection([.command, .control, .option, .shift]) == .command,
+           let onNewNote {
+            onNewNote(false)
+            return true
+        }
+        // Ctrl+N: a new document from the template — except where Ctrl+N is
+        // already "next": the file browser's results, the shell's history,
+        // vim outside Normal mode (insert-mode completion / the snippet popup)
+        if code == 45, mods.intersection([.command, .control, .option, .shift]) == .control,
+           let onNewNote, focusedTerm() == nil,
+           !(fileBrowser.map(browserHasFocus) ?? false),
+           focusedVim() == nil || vimEval("mode()")?.trimmingCharacters(in: .whitespacesAndNewlines) == "n" {
+            onNewNote(true)
             return true
         }
         // Ctrl+Shift+J / K in the nvim pane = add a cursor below / above

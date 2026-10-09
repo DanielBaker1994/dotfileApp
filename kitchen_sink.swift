@@ -770,6 +770,18 @@ struct CommandSpec {
     var proseFont: String?            // note: reading view font stack (CSS)
     var proseFontSize: CGFloat = 0
     var proseWidth: CGFloat = 0
+    var newNoteName = "Untitled"      // note: Cmd+N's empty note NAME-1.md, NAME-2.md… (no spaces)
+    var newDocName = "doc"            // note: Ctrl+N's templated doc NAME-1.md, NAME-2.md…
+    var newDocTemplate = "markdown_doc_catppuccin_latte"  // note: Ctrl+N's body = this vim/snippets/markdown.json snippet
+    // the default notes folder: the first `paths` entry (a folder, or a file's folder)
+    var notesFolder: String? {
+        paths.first.map { p -> String in
+            let e = (p as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: e, isDirectory: &isDir)
+            return isDir.boolValue ? e : (e as NSString).deletingLastPathComponent
+        }
+    }
     var terminalDir: String?      // note: starting directory for the embedded shell
     var terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
     // per-window text palette (Theme ▸ presets); nil = the [theme] colors
@@ -1023,6 +1035,9 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.proseFont = vars["prose-font"].flatMap { $0.isEmpty ? nil : $0 }
     s.proseFontSize = num(vars["prose-font-size"])
     s.proseWidth = num(vars["prose-width"])
+    if let n = vars["new-note-name"]?.trimmingCharacters(in: .whitespaces), !n.isEmpty { s.newNoteName = n }
+    if let n = vars["new-doc-name"]?.trimmingCharacters(in: .whitespaces), !n.isEmpty { s.newDocName = n }
+    if let n = vars["new-doc-template"]?.trimmingCharacters(in: .whitespaces), !n.isEmpty { s.newDocTemplate = n }
     s.terminalDir = vars["terminal-dir"]
     s.terminalBackground = hexColor(vars["terminal-background"])
     s.terminalForeground = hexColor(vars["terminal-foreground"])
@@ -5513,10 +5528,13 @@ final class SwitcherController: NSObject {
             return
         }
         // is this note already listed? (e.g. + re-created with an existing name)
-        // — compare EXPANDED forms so ~/notes/x.md == /Users/me/notes/x.md
+        // — compare EXPANDED forms so ~/notes/x.md == /Users/me/notes/x.md.
+        // A .md straight inside a listed FOLDER (paths = ~/notes) is listed too:
+        // the folder entry already opens it
+        let parent = (path as NSString).deletingLastPathComponent
         let isListed = e.value.split(separator: ",").contains { entry in
-            let s = entry.trimmingCharacters(in: .whitespaces)
-            return (s as NSString).expandingTildeInPath == path
+            let s = (entry.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
+            return s == path || (s == parent && path.hasSuffix(".md"))
         }
         if isListed {
             log("commands.toml: \(display) already listed — no change")
@@ -7772,13 +7790,7 @@ extension SwitcherController {
             self?.noteWindow?.config.sticky = v
         })
         menu.addItem(.separator())
-        let firstDir = cmd.paths.first.map { p -> String in
-            let e = (p as NSString).expandingTildeInPath
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: e, isDirectory: &isDir)
-            return isDir.boolValue ? e : (e as NSString).deletingLastPathComponent
-        }
-        if let dir = firstDir {
+        if let dir = cmd.notesFolder {
             menu.addItem(menuItem("Open Notes Folder in Finder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: dir))
             })
@@ -7938,6 +7950,7 @@ extension SwitcherController {
                 host.showShortcuts(on: w, view: "notes")
             }
             w.onAddTab = { [self] in addTab() }
+            w.onNewNote = { [self] template in newNote(template: template) }
             // prose mode: the current note as a reading page (⌘⇧P / the
             // Prose | Edit switch); previews (rtf, docx, images) have none
             if let f = cmd.proseFont { w.proseFont = f }
@@ -8283,6 +8296,44 @@ extension SwitcherController {
                     break
                 }
             }
+        }
+
+        // Cmd+N: an empty note, Ctrl+N: a document from the `new-doc-template`
+        // snippet — at once, no prompt, in the notes folder (`notesFolder`) as
+        // NAME-1.md, NAME-2.md… (the first free number; never a space in the name)
+        func newNote(template: Bool) {
+            guard let dir = cmd.notesFolder ?? paths.first.map(noteDir) else { return }
+            let fm = FileManager.default
+            let base = (template ? cmd.newDocName : cmd.newNoteName)
+                .components(separatedBy: .whitespaces).filter { !$0.isEmpty }.joined(separator: "-")
+            var n = 1, path = ""
+            repeat {
+                path = dir + "/\(base)-\(n).md"
+                n += 1
+            } while fm.fileExists(atPath: path) || paths.contains(path)
+            let body = template ? snippetText(cmd.newDocTemplate) : ""
+            if template && body == nil {
+                host.log("note '\(cmd.name)': no snippet \(cmd.newDocTemplate) in vim/snippets/markdown.json — empty note")
+            }
+            guard fm.createFile(atPath: path, contents: Data((body ?? "").utf8)) else {
+                host.log("note '\(cmd.name)': could not create \(path)")
+                return
+            }
+            appendTab(path, logged: template ? "created from \(cmd.newDocTemplate)" : "created")
+        }
+
+        // a markdown snippet's text as it lands once expanded: placeholders →
+        // their defaults (${1:x} → x, $1 / ${1} → nothing), \$ → $
+        private func snippetText(_ name: String) -> String? {
+            let file = assetDir + "/vim/snippets/markdown.json"
+            guard let data = FileManager.default.contents(atPath: file),
+                  let all = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let snip = all[name] as? [String: Any] else { return nil }
+            var text = (snip["body"] as? [String])?.joined(separator: "\n") ?? (snip["body"] as? String ?? "")
+            for (pattern, with) in [(#"\$\{\d+:([^}]*)\}"#, "$1"), (#"\$\{\d+\}|(?<!\\)\$\d+"#, ""), (#"\\\$"#, "\\$")] {
+                text = text.replacingOccurrences(of: pattern, with: with, options: .regularExpression)
+            }
+            return text.hasSuffix("\n") ? text : text + "\n"
         }
 
         // a note added as the last tab and shown: listed in commands.toml, and

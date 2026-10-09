@@ -1238,6 +1238,18 @@ Line numbers drift; grep the symbol names (they're stable).
   `prose-width` column and the screen-only meta line. `prose-font`,
   `prose-font-size`, `prose-icon-font` no longer apply; pandoc missing →
   `ProseRender.basic` in the same style.
+  The reading view parses `gfm+sourcepos` (data-pos for the nvim sync), which
+  changes the HTML: `ProsePDF.sourceposFilter` (Lua, written to the prose
+  cache dir) puts task items back (☐ + text on its own line) and unwraps the
+  per-tag spans around inline raw HTML (`<kbd>`, badges came out empty).
+  `bin/run-tests.sh snippets` renders EVERY markdown snippet (expanded by
+  real `vim.snippet.expand`) both ways and compares the browser DOMs
+  (tinyhtml5 from weasyprint's python) + scans for leaked syntax.
+  Cmd+N / Ctrl+N (notes) = `newNote(template:)`: NAME-N.md in
+  `CommandSpec.notesFolder`, no prompt, no spaces; Ctrl+N's body = the
+  `[notes] new-doc-template` snippet (`snippetText`), and Ctrl+N stays "next"
+  in vim insert mode / the file browser / the shell. A .md inside a listed
+  folder is never added to `paths` (the folder entry opens it).
   Alerts: ONLY GitHub's five (`> [!NOTE|TIP|IMPORTANT|WARNING|CAUTION]`) —
   pandoc gfm's built-in `alerts` → `div.note` … styled by the PDF CSS
   (`RichText.styled` inlines them for Outlook / Webex). Same

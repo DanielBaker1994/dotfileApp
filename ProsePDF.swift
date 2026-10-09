@@ -54,7 +54,7 @@ enum ProsePDF {
     static func pandocArgs(note: String, css: String, html: String, _ c: Config, sourcepos: Bool = false) -> [String] {
         let dir = (note as NSString).deletingLastPathComponent
         let stem = ((note as NSString).lastPathComponent as NSString).deletingPathExtension
-        let filters = (sourcepos ? [taskListFilterPath(c)] : []) + filterPaths(c)
+        let filters = (sourcepos ? [sourceposFilterPath(c)] : []) + filterPaths(c)
         return ["-s", "-f", sourcepos ? "gfm+sourcepos" : "gfm", "-t", "html5", "--syntax-highlighting=\(c.highlight.isEmpty ? "tango" : c.highlight)",
                 "-V", "lang=en", "--metadata", "pagetitle=\(stem)", "--resource-path=\(dir)",
                 "--include-in-header=\(css)",
@@ -63,12 +63,26 @@ enum ProsePDF {
                 "--metadata=ws-header=\(css)"] + filters.map { "--lua-filter=\($0)" } + ["-o", html, note]
     }
 
-    // gfm+sourcepos (the reading view, for the nvim position sync) splits a
-    // `- [ ] todo` item into Plain{☐} + a wrapper Div holding the text, so the
-    // HTML writer no longer sees a task item: a literal ☐ with the text on its
-    // own line. This puts the box back in front of the text → the same
-    // `<ul class="task-list"><li><label><input type="checkbox">` plain gfm makes.
-    static let taskListFilter = """
+    // gfm+sourcepos (the reading view, for the nvim position sync) wraps
+    // things so the HTML no longer matches what plain gfm (Export PDF) makes;
+    // this filter undoes it (`bin/run-tests.sh prose` renders every markdown
+    // snippet both ways and compares the browser DOMs):
+    // - a `- [ ] todo` item is split into Plain{☐} + a wrapper Div holding the
+    //   text, so the writer misses the task item (a literal ☐, the text on its
+    //   own line) → the box goes back in front of the text;
+    // - every inline raw HTML tag gets its own position <span>, so
+    //   `<kbd>Cmd</kbd>` / `<span class="badge ok">…</span>` close at once in
+    //   the browser (an empty pill, plain text after it) → those spans go.
+    static let sourceposFilter = """
+    function Span(el)
+      if el.attributes.wrapper == "1" and #el.content > 0 then
+        for _, x in ipairs(el.content) do
+          if x.t ~= "RawInline" then return nil end
+        end
+        return el.content
+      end
+    end
+
     local box = { ["☐"] = true, ["☒"] = true }
     function BulletList(el)
       for i, item in ipairs(el.content) do
@@ -91,9 +105,9 @@ enum ProsePDF {
     """
 
     // the filter as a file in cacheDir (rewritten only when its text changed)
-    static func taskListFilterPath(_ c: Config) -> String {
-        let path = (c.cacheDir as NSString).appendingPathComponent("sourcepos-tasklist.lua")
-        let data = Data(taskListFilter.utf8)
+    static func sourceposFilterPath(_ c: Config) -> String {
+        let path = (c.cacheDir as NSString).appendingPathComponent("sourcepos-fix.lua")
+        let data = Data(sourceposFilter.utf8)
         if FileManager.default.contents(atPath: path) != data {
             try? FileManager.default.createDirectory(atPath: c.cacheDir, withIntermediateDirectories: true)
             try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
