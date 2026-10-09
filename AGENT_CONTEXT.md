@@ -1652,7 +1652,14 @@ nvim --server "$S" --remote-expr 'execute("set number? cursorline?")'
   runs it by hand. NO picker / browser (the owner rejected one with
   Refresh / Copy Requests / ticks — keep it out).
 - Board view (JiraBoard.swift, owner's pick "C": Jira-style columns): the
-  jira sidebar's BOARDS = every catalog board (`sidebarBoards`); a click =
+  jira sidebar's BOARDS = ONE "All boards" row (`boardListKey`) + only the
+  pinned boards (`sidebarBoards` = config.json `pinnedBoards`; a work site
+  has hundreds). "All boards" = `showBoardList`: the catalog as a table IN
+  PLACE (`boardListRows`, fixed `boardListColumns`: Board · Project · Type ·
+  Current sprint · ID, never saved; rows carry `__board`), ☆ = pin / unpin,
+  Return / double-click = `openListedBoard` (Esc = back to the list,
+  `backToBoardList`), Cmd+K = `showBoardActions`. Hooks `do:board:list |
+  list-open:ID | list-star:ID`, state `board` {list, rows, pinned}. A click =
   `ListSession.openBoard` (first open makes its board-ID job via
   `--pin-board add`, which no longer defaults scrum boards to open sprints
   only — `openBoard` turns an old `sprintOnly` off). `updateBoardChrome()`
