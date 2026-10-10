@@ -3,12 +3,10 @@ loaded from data/tables.json — data, not code. Commands.toml overrides
 stay where they were: these are only the shipped defaults."""
 from __future__ import annotations
 
-import json
-import os
+from . import paths  # noqa: F401  sys.path bootstrap for jsonmgr
+import jsonmgr
 
-_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tables.json")
-with open(_PATH, encoding="utf-8") as _fh:
-    T = json.load(_fh)
+T = jsonmgr.load("settings_hub/data/tables")
 
 LAYERS = tuple(T["layers"])
 LAYER_TITLE = T["layer_titles"]

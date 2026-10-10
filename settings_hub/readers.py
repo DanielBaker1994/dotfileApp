@@ -17,6 +17,7 @@ except ImportError:  # python < 3.11: bin/ws-settings refuses earlier
 
 from . import chords, paths
 from .model import Catalog, KeyRow
+import jsonmgr
 
 from config_text import (config_entry, config_section_entries,  # noqa: E402
                          config_section_header)
@@ -248,11 +249,13 @@ def ghostty(cat: Catalog) -> list:
 
 
 # ------------------------------------------------------------------ vim
-_LUA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "nvim_lua.json")
+import jsonmgr
+
+import jsonmgr
+
 # the nvim query program (data, rule 2) lives in data/nvim_lua.json;
 # positional %s slots stay code-side
-with open(_LUA_FILE, encoding="utf-8") as _fh:
-    _LUA = json.load(_fh)["query"]
+_LUA = jsonmgr.load("settings_hub/data/nvim_lua")["query"]
 
 
 def _vim_maps_nvim(init: str):

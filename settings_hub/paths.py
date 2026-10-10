@@ -2,7 +2,6 @@
 temp home through the environment ($WS_HOME, $WS_COMMANDS_CONF, …)."""
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -11,17 +10,9 @@ ROOT = os.path.dirname(PKG)                            # repo, or the home in ap
 sys.path.insert(0, os.path.join(ROOT, "pylib"))
 
 from config_text import config_entry, config_section_header  # noqa: E402
+import jsonmgr  # noqa: E402
 
 _hub_cache: dict = {}
-
-# the [settings-hub] defaults live in data/hub_defaults.json (transparent +
-# configurable; commands.toml [settings-hub] keys override them)
-_HUB_DEFAULTS_FILE = os.path.join(PKG, "data", "hub_defaults.json")
-try:
-    with open(_HUB_DEFAULTS_FILE, encoding="utf-8") as _fh:
-        HUB_DEFAULTS = json.load(_fh)
-except (OSError, ValueError):
-    HUB_DEFAULTS = {}
 
 
 def expand(p: str) -> str:
@@ -77,12 +68,14 @@ def hub(key: str, default: str = "") -> str:
         return v
     if default != "":
         return default
-    return HUB_DEFAULTS.get(key, "")
+    # soft: a broken file answers {} and is retried on the next call, never
+    # pinned (jsonmgr never caches a failure)
+    return jsonmgr.load("settings_hub/data/hub_defaults", soft=True).get(key, "")
 
 
 def hub_default(key: str, fallback: str = "") -> str:
     """The shipped default for a [settings-hub] key (no commands.toml)."""
-    return HUB_DEFAULTS.get(key, fallback)
+    return jsonmgr.load("settings_hub/data/hub_defaults", soft=True).get(key, fallback)
 
 
 def aerospace_conf() -> str:
