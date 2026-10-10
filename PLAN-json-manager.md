@@ -472,6 +472,7 @@ batch as the plan executes.
 | M3d | done | settings_hub tables/nvim_lua/hub_defaults (soft accessor, retried); `ws test settings` green; all import orders verified |
 | M3e | done | `pylib/jira_paths.py` via jsonmgr; `test_jira_poll` + `test_confluence` + `test_notifications` + `helper` + 3.9 green |
 | M4a | done | lazy: `shelf`, `doc_templates`, `ai_format`, `compare_text`, `prose_pdf`; internal rewrites via `jsonmgr.field`; new helper bad-JSON retry case |
+| M4b | done | lazy: `paneshot`, `ansi` (`_BASE16` projection); suites + `helper` green |
 | … | — | |
 
 ## 7. Validation hooks for this plan

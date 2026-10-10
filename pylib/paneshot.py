@@ -10,7 +10,12 @@ import jsonmgr
 # one tri in python: config_text owns the grammar
 from config_text import tri  # noqa: F401
 
-_DATA = jsonmgr.load("pylib/paneshot")
+# lazy (worker surface): a broken paneshot.json fails at the first method
+# call and is retried on the next one
+jsonmgr.lazy_module(__name__, globals(), {
+    "USAGE": ("pylib/paneshot", ("usage",)),
+    "MAX_LINES": ("pylib/paneshot", ("max_lines",)),
+})
 
 
 class Problem(Exception):
@@ -33,9 +38,6 @@ class Args:
     def __eq__(self, o):
         return isinstance(o, Args) and all(
             getattr(self, k) == getattr(o, k) for k in Args.__slots__)
-
-
-USAGE = _DATA["usage"]
 
 
 def parse_args(words) -> Args:
@@ -77,20 +79,19 @@ def parse_args(words) -> Args:
         elif w == "--no-copy":
             a.copy = False
         elif w in ("-h", "--help"):
-            raise Problem("usage: kitchen-sink " + USAGE)
+            raise Problem("usage: kitchen-sink "
+                          + jsonmgr.field("pylib/paneshot", "usage"))
         else:
-            raise Problem("unknown argument %s\nusage: kitchen-sink %s" % (w, USAGE))
+            raise Problem("unknown argument %s\nusage: kitchen-sink %s"
+                          % (w, jsonmgr.field("pylib/paneshot", "usage")))
         i += 1
     return a
-
-
-MAX_LINES = _DATA["max_lines"]
 
 
 class Config:
     def __init__(self, entries=None):
         e = entries if isinstance(entries, dict) else {}
-        d = _DATA["defaults"]
+        d = jsonmgr.field("pylib/paneshot", "defaults")
 
         def s(k, dflt):
             v = (e.get(k) or "").strip()
@@ -154,9 +155,10 @@ def pane_from_json(text: str) -> dict:
 
 
 def lines_for(viewport: int, history: int, all_lines: bool) -> int:
+    max_lines = jsonmgr.field("pylib/paneshot", "max_lines")
     if all_lines:
-        return MAX_LINES
-    return min(MAX_LINES, max(1, viewport + history))
+        return max_lines
+    return min(max_lines, max(1, viewport + history))
 
 
 def environment(env: dict) -> dict:

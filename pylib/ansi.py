@@ -11,7 +11,6 @@ import jsonmgr
 import re
 import unicodedata
 
-_DATA = jsonmgr.load("pylib/ansi")
 # the ghostty-mirror theme defaults + the base-16 palette are data;
 # the xterm cube / grays are generated
 
@@ -52,7 +51,16 @@ class RGB:
         return "RGB(%d, %d, %d)" % (self.r, self.g, self.b)
 
 
-_BASE16 = [RGB.from_hex(h) for h in _DATA["base16"]]
+def _base16() -> list:
+    """The ghostty base-16 palette, from the shipped hex strings."""
+    return [RGB.from_hex(h) for h in jsonmgr.field("pylib/ansi", "base16")]
+
+
+# lazy (worker surface): a broken ansi.json fails at the first method call
+# and is retried on the next one
+jsonmgr.lazy_module(__name__, globals(), {
+    "_BASE16": _base16,
+})
 
 
 class Style:
@@ -294,7 +302,7 @@ def parse(text: str) -> Grid:
 
 class Theme:
     def __init__(self):
-        d = _DATA["theme"]
+        d = jsonmgr.field("pylib/ansi", "theme")
         self.foreground = RGB.from_hex(d["foreground"])
         self.background = RGB.from_hex(d["background"])
         self.palette = xterm256()
@@ -320,7 +328,7 @@ class Theme:
 
 
 def xterm256() -> list:
-    p = list(_BASE16)
+    p = list(_base16())
     steps = (0, 95, 135, 175, 215, 255)
     for r in steps:
         for g in steps:
