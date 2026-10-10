@@ -13,10 +13,13 @@ below.
       comments, ticket/board pages, directory, search, dashboard, configs)
       — done so far: paths (pylib/jira_paths.py + paths.json), words/style
       rules, comment index, ticket page + comments HTML, live-search
-      criteria + filter kinds, directory parse (mtime-keyed) + picker
-      options, dashboard job/live drafts. Remaining: dashboard team/field
-      edits, board mapping, shared column/label pieces, setup parse,
-      Confluence auth/criteria/preview.
+      criteria + filter kinds, directory parse + picker options, dashboard
+      drafts + definition edits + status text, board mapping + page,
+      columns codec + label table (pylib/jira_fields.py, jira_config
+      imports it), setup project-key grammar, Confluence auth header +
+      rate-limit decision + criteria. Remaining: Confluence preview
+      assembly (template + URL rewriting + highlight JS) and the phase
+      cleanup.
 - [ ] Phase C — test-backed islands (screenshot model pieces, ANSI, pane-shot,
       recent files, path shelf, compare sessions, setup checks)
 - [ ] Phase D — config validation + typed parsing single-homed in Python
