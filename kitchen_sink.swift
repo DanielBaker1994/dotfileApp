@@ -9197,28 +9197,31 @@ final class FontPanelReceiver: NSObject {
     }
 }
 
-// jira/paths.json: the file locations the poller (jira_paths.py) uses too,
-// same env overrides
+// pylib/paths.json: the file locations the poller (jira_paths.py) uses too,
+// resolved through the helper so there is exactly ONE implementation.
 struct JiraPaths {
     let configJson, teamJson, legacyConfig, cacheDir, outDir: String
     let cache, tabs, sideDirs: [String: String]
 
-    init(file: String, env: [String: String] = ProcessInfo.processInfo.environment) {
-        let d = (try? Data(contentsOf: URL(fileURLWithPath: file)))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-        func path(_ envKey: String, _ key: String) -> String {
-            if let e = env[envKey], !e.isEmpty { return e }
-            return ((d[key] as? String ?? "") as NSString).expandingTildeInPath
+    /// One resolution per process (the helper reads pylib/jira_paths.py,
+    /// the same module the scripts import; env overrides included).
+    init() {
+        var d: [String: Any] = [:]
+        if case .success(let box) = pythonHelper.callSync("jira.paths", [:], timeout: 30),
+           let dict = box as? [String: Any] {
+            d = dict
+        } else {
+            wsLog("jira: paths unresolved (python helper unavailable)")
         }
-        configJson = path("JIRA_CONFIG_JSON", "configJson")
-        teamJson = path("JIRA_TEAM_JSON", "teamJson")
-        legacyConfig = path("JIRA_CONFIG_FILE", "legacyConfig")
-        cacheDir = path("JIRA_CACHE_DIR", "cacheDir")
-        outDir = ((d["outDir"] as? String ?? "") as NSString).expandingTildeInPath
+        func s(_ key: String) -> String { d[key] as? String ?? "" }
+        configJson = s("configJson")
+        teamJson = s("teamJson")
+        legacyConfig = s("legacyConfig")
+        cacheDir = s("cacheDir")
+        outDir = s("outDir")
         cache = d["cache"] as? [String: String] ?? [:]
         tabs = d["tabs"] as? [String: String] ?? [:]
         sideDirs = d["sideDirs"] as? [String: String] ?? [:]
-        if d.isEmpty { wsLog("jira: \(file) missing or unreadable — jira paths unset") }
     }
     func cacheFile(_ name: String) -> String {
         (cacheDir as NSString).appendingPathComponent(cache[name] ?? name)
@@ -9227,7 +9230,7 @@ struct JiraPaths {
 
 enum JiraPoll {
     static var dir: String { assetDir + "/jira" }
-    static let paths = JiraPaths(file: dir + "/paths.json")
+    static let paths = JiraPaths()
     static var configPath: String { paths.configJson }
     static var statusPath: String { paths.cacheFile("status") }
     static var curlLogPath: String { paths.cacheFile("curlLog") }

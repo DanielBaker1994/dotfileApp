@@ -1,5 +1,6 @@
-"""Jira file locations, from jira/paths.json - the ONE list the poller and
-the app (Swift `JiraPoll.paths`) share. Stdlib only, 3.9-compatible.
+"""Jira file locations, from pylib/paths.json - the ONE list the poller and
+the app share (the app asks the helper; there is no Swift copy).
+Stdlib only, 3.9-compatible.
 
 Env overrides (tests, throwaway installs): JIRA_CONFIG_JSON, JIRA_TEAM_JSON,
 JIRA_CONFIG_FILE, JIRA_CACHE_DIR."""

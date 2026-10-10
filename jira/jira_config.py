@@ -65,13 +65,15 @@ import shlex
 import sys
 import tempfile
 
-import jira_paths
-
 HOME = os.path.expanduser("~")
 JIRA_DIR = os.path.dirname(os.path.abspath(__file__))
 WS_ROOT = os.path.dirname(JIRA_DIR)
+# file locations live in the shared python library (pylib/jira_paths.py)
+sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 
-CONFIG_JSON = jira_paths.CONFIG_JSON      # file locations: jira/paths.json (shared with the app)
+import jira_paths  # noqa: E402
+
+CONFIG_JSON = jira_paths.CONFIG_JSON      # file locations: pylib/paths.json (shared with the app)
 TEAM_JSON = jira_paths.TEAM_JSON
 LEGACY_CONFIG = jira_paths.LEGACY_CONFIG
 COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "commands.toml")

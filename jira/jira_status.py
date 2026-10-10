@@ -33,7 +33,9 @@ import sys
 import tempfile
 import time
 
-import jira_paths
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pylib"))
+
+import jira_paths  # noqa: E402
 
 HOME = os.path.expanduser("~")
 CACHE_DIR = jira_paths.CACHE_DIR

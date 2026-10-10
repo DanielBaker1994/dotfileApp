@@ -118,6 +118,16 @@ class ScriptBridge(unittest.TestCase):
         self.assertFalse(reply["ok"])
         self.assertIn("timed out", reply["error"]["message"])
 
+    def test_jira_paths_method(self):
+        reply = dispatch({"id": 1, "method": "jira.paths"})
+        self.assertTrue(reply["ok"], reply)
+        res = reply["result"]
+        for key in ("configJson", "teamJson", "legacyConfig", "cacheDir", "outDir"):
+            self.assertIsInstance(res.get(key), str, key)
+            self.assertTrue(res[key], key)
+        self.assertIn("status", res["cache"])
+        self.assertIn("issues", res["cache"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

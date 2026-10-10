@@ -642,3 +642,21 @@ def _config_decode(params: dict) -> dict:
             record["key"], record["value"] = entry
         out.append(record)
     return {"lines": out}
+
+
+@method("jira.paths")
+def _jira_paths(params: dict) -> dict:
+    try:
+        import jira_paths
+    except Exception as e:
+        raise HelperError("jira.paths: %s" % e)
+    return {
+        "configJson": jira_paths.CONFIG_JSON,
+        "teamJson": jira_paths.TEAM_JSON,
+        "legacyConfig": jira_paths.LEGACY_CONFIG,
+        "cacheDir": jira_paths.CACHE_DIR,
+        "outDir": jira_paths.OUT_DIR_DEFAULT,
+        "cache": dict(jira_paths.CACHE),
+        "tabs": dict(jira_paths.TABS),
+        "sideDirs": dict(jira_paths.SIDE_DIRS),
+    }
