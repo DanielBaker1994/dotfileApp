@@ -717,13 +717,14 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             images.authHeader = nil
             return
         }
-        let token = j["token"] as? String ?? "", email = j["email"] as? String ?? ""
-        var auth = (j["auth"] as? String ?? "").lowercased()
-        if auth != "bearer" && auth != "basic" { auth = email.isEmpty ? "bearer" : "basic" }
-        guard !token.isEmpty else { images.authHeader = nil; return }
-        images.authHeader = auth == "basic"
-            ? "Basic " + Data("\(email):\(token)".utf8).base64EncodedString()
-            : "Bearer " + token
+        // the derivation lives in pylib/confluence_glue.py
+        if case .success(let box) = pythonHelper.callSync("confluence.auth", ["config": j], timeout: 30),
+           let r = box as? [String: Any] {
+            let header = r["header"] as? String ?? ""
+            images.authHeader = header.isEmpty ? nil : header
+        } else {
+            images.authHeader = nil
+        }
     }
 
     func showSetup() {
@@ -1407,8 +1408,13 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     }
 
     private func rateLimited(_ j: [String: Any], retry: (() -> Void)?) -> Bool {
-        guard j["rateLimited"] as? Bool == true else { return false }
-        let secs = max(3, (j["retryIn"] as? Int) ?? 30)
+        // the decision (limited? for how long?) lives in pylib/confluence_glue.py
+        var secs = 0
+        if case .success(let box) = pythonHelper.callSync("confluence.rate_limit", ["response": j], timeout: 30),
+           let r = box as? [String: Any], r["limited"] as? Bool == true {
+            secs = r["seconds"] as? Int ?? 30
+        }
+        guard secs > 0 else { return false }
         cooldownUntil = Date().addingTimeInterval(TimeInterval(secs))
         if let retry { pendingSearch = retry }
         cooldownTimer?.invalidate()

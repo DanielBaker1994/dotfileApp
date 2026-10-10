@@ -5,6 +5,7 @@ import threading
 
 import ai_format
 import compare_folder
+import confluence_glue
 import compare_text
 import config_text
 import doc_templates
@@ -786,3 +787,13 @@ def _jira_columns_serialize(params: dict) -> dict:
 @method("jira.project_keys")
 def _jira_project_keys(params: dict) -> dict:
     return jira_setup.project_keys(params.get("raw") or "")
+
+
+@method("confluence.auth")
+def _confluence_auth(params: dict) -> dict:
+    return {"header": confluence_glue.auth_header(params.get("config") or {})}
+
+
+@method("confluence.rate_limit")
+def _confluence_rate_limit(params: dict) -> dict:
+    return confluence_glue.rate_limit(params.get("response") or {})
