@@ -8,6 +8,7 @@ from __future__ import annotations
 from string import Template
 
 import jira_data
+import jira_pages
 
 # a done column only keeps this many cards (the Table view shows them all)
 DONE_LIMIT = 30
@@ -90,7 +91,7 @@ def board_columns(params: dict) -> dict:
     cats = params.get("categories") or {}
     words = params.get("words") or {}
     people = params.get("people") or {}
-    names = params.get("categoryNames") or ["To Do", "In Progress", "Done"]
+    names = params.get("categoryNames") or list(jira_pages.CATEGORY_NAMES)
 
     if spec:
         cols = [{"name": _s(c.get("name")),

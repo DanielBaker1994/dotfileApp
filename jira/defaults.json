@@ -256,5 +256,6 @@
     "urgent": "priority-urgent-words"
   },
   "dim_fields": ["key", "updated", "created", "duedate", "releasedate",
-                 "project", "releaselabel", "release"]
+                 "project", "releaselabel", "release"],
+  "category_names": ["To Do", "In Progress", "Done"]
 }

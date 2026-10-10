@@ -12,6 +12,7 @@ import re
 import threading
 
 import jira_data
+import jira_pages
 
 _LOCK = threading.Lock()
 _CACHE = {"path": None, "stamp": None, "data": None}
@@ -170,7 +171,7 @@ def value_options(values) -> list:
 
 
 def status_options(d: dict, words: dict, category_names=None) -> list:
-    category_names = category_names or ["To Do", "In Progress", "Done"]
+    category_names = category_names or list(jira_pages.CATEGORY_NAMES)
     cats = d.get("statusCategories") or {}
     return [_option(s, s, "", category_names[jira_data.category(s, cats, words)])
             for s in d.get("statuses") or []]

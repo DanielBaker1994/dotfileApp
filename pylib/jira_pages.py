@@ -9,11 +9,20 @@ app already caches.
 from __future__ import annotations
 
 import datetime
+import json
+import os
 from string import Template
 
 import jira_data
 
-CATEGORY_NAMES = ["To Do", "In Progress", "Done"]
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
+
+# the three status-category labels live in jira/defaults.json (one home; the
+# ticket stepper + the board/directory pickers all read them)
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _JIRA_DEFAULTS = json.load(_fh)
+
+CATEGORY_NAMES = list(_JIRA_DEFAULTS["category_names"])
 
 _PAGE = Template("""<!doctype html><html><head><meta charset="utf-8"><style>
 :root{--bg:$bg;--card:$card;--s0:$s0;--s1:$s1;--tx:$tx;--dim:$dim;
