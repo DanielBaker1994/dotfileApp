@@ -336,6 +336,18 @@
       {"key": "resolved", "title": "Resolved", "kind": "date", "suffix": " within"},
       {"key": "field:title", "title": "Summary", "kind": "text", "labelField": "title", "suffix": " contains"},
       {"key": "field:description", "title": "Description", "kind": "text", "labelField": "description", "suffix": " contains"}
-    ]
+    ],
+    "criteria": {
+      "lists": {
+        "projects": "project", "assignee": "assignee", "reporter": "reporter",
+        "status": "status", "statusCategory": "statusCategory",
+        "issuetype": "issuetype", "priority": "priority",
+        "labels": "labels", "fixVersion": "fixVersion"
+      },
+      "dates": ["updated", "created", "resolved", "duedate"],
+      "text_fields": {"title": "summary", "description": "description", "key": "issuekey",
+                      "release": "fixVersion", "releaseLabel": "fixVersion",
+                      "project": "project"}
+    }
   }
 }

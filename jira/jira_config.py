@@ -504,17 +504,13 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 
 # live search (the Jira window's Cmd+F panel): criteria -> JQL. Multi-value
 # criteria are ORed (`x in (...)`); criteria are ANDed together.
-CRITERIA_LISTS = {          # criteria key -> JQL field (values picked from lists)
-    "projects": "project", "assignee": "assignee", "reporter": "reporter",
-    "status": "status", "statusCategory": "statusCategory",   # To Do / In Progress / Done
-    "issuetype": "issuetype", "priority": "priority",
-    "labels": "labels", "fixVersion": "fixVersion",
-}
-CRITERIA_DATES = ("updated", "created", "resolved", "duedate")
+# the vocabulary (criteria key -> JQL field; date fields; text-field map)
+# lives in jira/defaults.json search_ui.criteria (mirrored by JiraSearch.swift)
+_CRITERIA = _D["search_ui"]["criteria"]
+CRITERIA_LISTS = dict(_CRITERIA["lists"])   # criteria key -> JQL field (values picked from lists)
+CRITERIA_DATES = tuple(_CRITERIA["dates"])
 # window-json column -> the JQL field a free-text criterion on it searches
-CRITERIA_TEXT_FIELDS = {"title": "summary", "description": "description", "key": "issuekey",
-                        "release": "fixVersion", "releaseLabel": "fixVersion",
-                        "project": "project"}
+CRITERIA_TEXT_FIELDS = dict(_CRITERIA["text_fields"])
 FUNC_RE = re.compile(r"^\w+\(\)$")                    # currentUser(), EMPTY-ish functions
 DATE_RE = re.compile(r"^(\d+)([hdw])$")
 
