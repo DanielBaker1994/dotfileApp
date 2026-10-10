@@ -5,14 +5,22 @@ The app hosts the page in a WKWebView; colors arrive as hex/rgba strings
 """
 from __future__ import annotations
 
+import json
+import os
 from string import Template
 
 import jira_data
 import jira_pages
 
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
+# board caps/labels/color schema live in jira/defaults.json (one home)
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _BOARD_DEFAULTS = json.load(_fh)["boards"]
+
 # a done column only keeps this many cards (the Table view shows them all)
-DONE_LIMIT = 30
-OTHER_COLUMN = "Not on the board"
+DONE_LIMIT = _BOARD_DEFAULTS["done_limit"]
+OTHER_COLUMN = _BOARD_DEFAULTS["other_column"]
+_HOT_PATTERN = "|".join(_BOARD_DEFAULTS["hot_words"])
 
 
 class _AT(Template):
@@ -61,7 +69,7 @@ function render(cols) {
     <div class="cards">${c.cards.map(k => `<div class="card c${k.cat}" data-key="${esc(k.key)}" title="${esc(k.status)}">
       <div class="f"><span class="dot"></span><span class="key">${esc(k.key)}</span><span>${esc(k.type)}</span></div>
       <div class="t">${esc(k.title)}</div>
-      <div class="f"><span class="${/highest|high|critical|blocker/i.test(k.priority) ? 'hot' : ''}">${esc(k.priority)}</span>
+      <div class="f"><span class="${/@hotPattern/i.test(k.priority) ? 'hot' : ''}">${esc(k.priority)}</span>
         ${k.assignee ? `<span class="av" title="${esc(k.assignee)}">${esc(initials(k.assignee).toUpperCase())}</span>` : ''}</div>
     </div>`).join('')}${c.more ? `<div class="more">+ ${c.more} more — Table shows them all</div>` : ''}
     ${!c.cards.length && !c.more ? '<div class="empty">Nothing here</div>' : ''}</div></section>`).join('');
@@ -74,7 +82,7 @@ window.webkit.messageHandlers.board.postMessage('ready');
 </script></body></html>
 """)
 
-_COLOR_KEYS = ["bg", "col", "card", "cardHover", "line", "text", "dim", "accent", "done", "hot"]
+_COLOR_KEYS = list(_BOARD_DEFAULTS["color_keys"])
 
 
 def _s(x) -> str:
@@ -133,4 +141,6 @@ def board_columns(params: dict) -> dict:
 
 
 def board_page(colors: dict) -> str:
-    return _PAGE.safe_substitute({k: _s((colors or {}).get(k)) for k in _COLOR_KEYS})
+    subst = {k: _s((colors or {}).get(k)) for k in _COLOR_KEYS}
+    subst["hotPattern"] = _HOT_PATTERN
+    return _PAGE.safe_substitute(subst)

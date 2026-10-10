@@ -84,7 +84,7 @@ document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(a){
 </script></body></html>
 """)
 
-_HEX_KEYS = ["bg", "card", "s0", "s1", "tx", "dim", "acc", "on", "ok", "warn"]
+_HEX_KEYS = list(_JIRA_DEFAULTS["pages"]["hex_keys"])
 
 
 def esc(s: str) -> str:

@@ -14,12 +14,16 @@ import threading
 import jira_data
 import jira_pages
 
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _DIRECTORY_DEFAULTS = json.load(_fh)["directory"]
+
 _LOCK = threading.Lock()
 _CACHE = {"path": None, "stamp": None, "data": None}
 
 # how many entries a picker shows before folding the tail (matches the app's
 # JiraMultiPicker.topN; folded entries carry unused=true)
-TOP_N = 50
+TOP_N = _DIRECTORY_DEFAULTS["top_n"]
 
 
 def _is_str(x) -> bool:

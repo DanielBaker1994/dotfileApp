@@ -257,5 +257,37 @@
   },
   "dim_fields": ["key", "updated", "created", "duedate", "releasedate",
                  "project", "releaselabel", "release"],
-  "category_names": ["To Do", "In Progress", "Done"]
+  "category_names": ["To Do", "In Progress", "Done"],
+  "pages": {
+    "hex_keys": ["bg", "card", "s0", "s1", "tx", "dim", "acc", "on", "ok", "warn"]
+  },
+  "boards": {
+    "done_limit": 30,
+    "other_column": "Not on the board",
+    "color_keys": ["bg", "col", "card", "cardHover", "line", "text", "dim", "accent", "done", "hot"],
+    "hot_words": ["highest", "high", "critical", "blocker"]
+  },
+  "directory": {
+    "top_n": 50
+  },
+  "search_ui": {
+    "skip_fields": ["key", "title", "status", "assignee", "release", "releaseLabel",
+                    "releaseDate", "releaseStatus", "priority", "labels", "description",
+                    "reporter", "project", "updated", "comments"],
+    "kinds": [
+      {"key": "assignee", "title": "Assignee", "kind": "users", "labelField": "assignee"},
+      {"key": "reporter", "title": "Reporter", "kind": "users", "labelField": "reporter"},
+      {"key": "status", "title": "Status", "kind": "list", "labelField": "status"},
+      {"key": "statusCategory", "title": "Status category", "kind": "list"},
+      {"key": "issuetype", "title": "Issue type", "kind": "list"},
+      {"key": "priority", "title": "Priority", "kind": "list", "labelField": "priority"},
+      {"key": "fixVersion", "title": "Release", "kind": "list", "labelField": "release"},
+      {"key": "labels", "title": "Labels", "kind": "list", "labelField": "labels"},
+      {"key": "updated", "title": "Updated", "kind": "date", "labelField": "updated", "suffix": " within"},
+      {"key": "created", "title": "Created", "kind": "date", "suffix": " within"},
+      {"key": "resolved", "title": "Resolved", "kind": "date", "suffix": " within"},
+      {"key": "field:title", "title": "Summary", "kind": "text", "labelField": "title", "suffix": " contains"},
+      {"key": "field:description", "title": "Description", "kind": "text", "labelField": "description", "suffix": " contains"}
+    ]
+  }
 }

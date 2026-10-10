@@ -2,11 +2,15 @@
 model (the base kinds plus the describe catalog with its skip list)."""
 from __future__ import annotations
 
-SKIP_CATALOG_FIELDS = {
-    "key", "title", "status", "assignee", "release", "releaseLabel",
-    "releaseDate", "releaseStatus", "priority", "labels", "description",
-    "reporter", "project", "updated", "comments",
-}
+import json
+import os
+
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
+# the filter-menu rows + the catalog skip list live in jira/defaults.json
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _SEARCH_UI = json.load(_fh)["search_ui"]
+
+SKIP_CATALOG_FIELDS = set(_SEARCH_UI["skip_fields"])
 
 
 def _label_for(catalog: list, field: str, fallback: str) -> str:
@@ -25,21 +29,14 @@ def filter_kinds(catalog) -> list:
     def lbl(field, fallback):
         return _label_for(catalog, field, fallback)
 
-    kinds = [
-        {"key": "assignee", "title": lbl("assignee", "Assignee"), "kind": "users"},
-        {"key": "reporter", "title": lbl("reporter", "Reporter"), "kind": "users"},
-        {"key": "status", "title": lbl("status", "Status"), "kind": "list"},
-        {"key": "statusCategory", "title": "Status category", "kind": "list"},
-        {"key": "issuetype", "title": "Issue type", "kind": "list"},
-        {"key": "priority", "title": lbl("priority", "Priority"), "kind": "list"},
-        {"key": "fixVersion", "title": lbl("release", "Release"), "kind": "list"},
-        {"key": "labels", "title": lbl("labels", "Labels"), "kind": "list"},
-        {"key": "updated", "title": lbl("updated", "Updated") + " within", "kind": "date"},
-        {"key": "created", "title": "Created within", "kind": "date"},
-        {"key": "resolved", "title": "Resolved within", "kind": "date"},
-        {"key": "field:title", "title": lbl("title", "Summary") + " contains", "kind": "text"},
-        {"key": "field:description", "title": lbl("description", "Description") + " contains", "kind": "text"},
-    ]
+    kinds = []
+    for row in _SEARCH_UI["kinds"]:
+        title = row["title"]
+        field = row.get("labelField")
+        if field:
+            title = lbl(field, title)
+        title += row.get("suffix", "")
+        kinds.append({"key": row["key"], "title": title, "kind": row["kind"]})
     for c in catalog:
         if not isinstance(c, dict):
             continue
