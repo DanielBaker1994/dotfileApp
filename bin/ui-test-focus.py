@@ -38,8 +38,10 @@ It moves your workspaces / focus while it runs (~15 s) and puts them back
 import json, os, shutil, socket, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-APP = os.path.join(ROOT, "kitchen-sink.app")
-BIN = os.path.join(APP, "Contents/MacOS/kitchen-sink")
+_DEFAULT_APP = os.path.join(ROOT, "kitchen-sink.app")
+# WS_BIN (dev/gate) points at another bundle's executable (e.g. the Rust port).
+BIN = os.environ.get("WS_BIN") or os.path.join(_DEFAULT_APP, "Contents/MacOS/kitchen-sink")
+APP = BIN.split("/Contents/MacOS/")[0] if "/Contents/MacOS/" in BIN else _DEFAULT_APP
 SOCK = os.path.join(os.environ.get("TMPDIR", "/tmp"), "ws-notes.sock")
 CONF = os.path.join(ROOT, "commands.toml")
 VERBOSE = "--verbose" in sys.argv
@@ -235,12 +237,13 @@ try:
     # ------------------------------------------------------------ single
     if want("single"):
         def daemons():
-            r = subprocess.run(["pgrep", "-f", "kitchen-sink.app/Contents/MacOS/kitchen-sink"],
+            pattern = BIN if os.environ.get("WS_BIN") else "kitchen-sink.app/Contents/MacOS/kitchen-sink"
+            r = subprocess.run(["pgrep", "-f", pattern],
                                capture_output=True, text=True)
             pids = []
             for p in r.stdout.split():
                 ps = subprocess.run(["ps", "-o", "command=", "-p", p], capture_output=True, text=True).stdout
-                if "kitchen-sink.app/Contents/MacOS/kitchen-sink" in ps and "nvim" not in ps:
+                if pattern in ps and "nvim" not in ps:
                     pids.append(p)
             return pids
         before = daemons()
@@ -460,7 +463,8 @@ try:
                 st = state()
                 c = cmp(st).get("current", {})
                 got = (c.get("cursorRow"), c.get("scrollY"))
-                dirty = cmp(st).get("sessions", [{}])[-1].get("dirtyL")
+                sessions = cmp(st).get("sessions") or [{}]
+                dirty = sessions[-1].get("dirtyL")
                 (ok if got == want_state and dirty else bad)(f"compare: {label} brought back the same session (cursor/scroll {got} vs {want_state}, dirty {dirty})")
 
             # Hyper+N (the hotkey binary) in it -> hidden; again -> back on Compare

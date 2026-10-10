@@ -26,15 +26,28 @@ wait_for() {
     return 0
 }
 
+daemon_pid() {
+    lsof -U 2>/dev/null | awk -v s="$WS_SOCK" 'index($0, s) {print $2; exit}'
+}
+
+# AX helpers target OUR daemon by pid: two kitchen-sink stacks (Swift + Rust)
+# can run at once during the port, and `process "kitchen-sink"` is ambiguous.
+ax_scope() {
+    local pid; pid="$(daemon_pid)"
+    [ -z "$pid" ] && return 1
+    echo "first process whose unix id is $pid"
+}
+
 window_count() {
-    osascript -e 'tell application "System Events" to count (windows of (processes where name is "kitchen-sink"))' 2>/dev/null || echo 0
+    local scope; scope="$(ax_scope)" || { echo 0; return; }
+    osascript -e "tell application \"System Events\" to count (windows of ($scope))" 2>/dev/null || echo 0
 }
 
 window_frame() {
-    local idx="${1:-1}"
+    local idx="${1:-1}" scope; scope="$(ax_scope)" || return 1
     osascript -e "
         tell application \"System Events\"
-            tell process \"kitchen-sink\"
+            tell ($scope)
                 set f to position of window $idx
                 set s to size of window $idx
                 return (item 1 of f as text) & \",\" & (item 2 of f as text) & \",\" & (item 1 of s as text) & \",\" & (item 2 of s as text)
@@ -44,10 +57,10 @@ window_frame() {
 }
 
 window_exists() {
-    local title="$1"
+    local title="$1" scope; scope="$(ax_scope)" || return 1
     osascript -e "
         tell application \"System Events\"
-            tell process \"kitchen-sink\"
+            tell ($scope)
                 return (count (windows whose title contains \"$title\")) > 0
             end tell
         end tell
@@ -103,7 +116,8 @@ send_shortcut() {
 }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="$ROOT/../kitchen-sink.app/Contents/MacOS/kitchen-sink"
+BIN="${WS_BIN:-$ROOT/../kitchen-sink.app/Contents/MacOS/kitchen-sink}"
+echo "  binary:    $BIN (override with WS_BIN)"
 
 echo "== kitchen-sink UI tests =="
 echo "  cliclick:  $CLICLICK"
@@ -117,7 +131,7 @@ cp "$CONF_FILE" "$CONF_SNAPSHOT" || { echo "cannot snapshot $CONF_FILE" >&2; exi
 restore_config() {
     if [ -s "$CONF_SNAPSHOT" ] && ! cmp -s "$CONF_SNAPSHOT" "$CONF_FILE"; then
         cp "$CONF_SNAPSHOT" "$CONF_FILE"
-        pkill -x kitchen-sink 2>/dev/null || true
+        pkill -f "$BIN" 2>/dev/null || true
     fi
     rm -f "$CONF_SNAPSHOT"
     [ -n "${CONF_BAK:-}" ] && rm -f "$CONF_BAK"
@@ -130,7 +144,7 @@ if grep -Eq '^vim-mode *= *true' "$CONF_FILE"; then
     echo "  (vim-mode temporarily off for this run)"
 fi
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 echo "== 1. App launches and shows popup =="
@@ -344,7 +358,7 @@ fi
 echo "== 11. Drag shake regression: position stability on open =="
 
 # Kill and restart fresh for a clean test
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -436,19 +450,20 @@ fi
 echo "== 13. Edge resize (non-key window regression) =="
 
 # Kill all and start fresh
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # Helper: get window 1 size as "W,H"
 window_size() {
-    osascript -e '
-        tell application "System Events"
-            tell process "kitchen-sink"
+    local scope; scope="$(ax_scope)" || return 1
+    osascript -e "
+        tell application \"System Events\"
+            tell ($scope)
                 set s to size of window 1
-                return (item 1 of s as text) & "," & (item 2 of s as text)
+                return (item 1 of s as text) & \",\" & (item 2 of s as text)
             end tell
         end tell
-    ' 2>/dev/null | tr -d ' '
+    " 2>/dev/null | tr -d ' '
 }
 
 # --- Test 13b: Notes window opens and size is readable ---
@@ -464,7 +479,7 @@ fi
 INIT_SIZE="$(window_size)"
 
 # --- Test 13c: Rapid open/close stress — no state corruption ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 RAPID_PASS=true
@@ -489,34 +504,34 @@ else
 fi
 
 # --- Test 13d: Window position stable after open (no jitter) ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
 sleep 0.8
 
-STABLE_POS="$(osascript -e '
-    tell application "System Events"
-        tell process "kitchen-sink"
+STABLE_POS="$(scope="$(ax_scope)" && osascript -e "
+    tell application \"System Events\"
+        tell ($scope)
             set p to position of window 1
-            return (item 1 of p as text) & "," & (item 2 of p as text)
+            return (item 1 of p as text) & \",\" & (item 2 of p as text)
         end tell
     end tell
-' 2>/dev/null | tr -d ' ')"
+" 2>/dev/null | tr -d ' ')"
 
 if [[ -n "$STABLE_POS" ]]; then
     IFS=',' read -r SPX SPY <<< "$STABLE_POS"
     JITTER_OK=true
     for i in 1 2 3 4 5; do
         sleep 0.1
-        CP="$(osascript -e '
-            tell application "System Events"
-                tell process "kitchen-sink"
+        CP="$(scope="$(ax_scope)" && osascript -e "
+            tell application \"System Events\"
+                tell ($scope)
                     set p to position of window 1
-                    return (item 1 of p as text) & "," & (item 2 of p as text)
+                    return (item 1 of p as text) & \",\" & (item 2 of p as text)
                 end tell
             end tell
-        ' 2>/dev/null | tr -d ' ')"
+        " 2>/dev/null | tr -d ' ')"
         if [[ "$CP" != "$STABLE_POS" ]]; then
             IFS=',' read -r CX CY <<< "$CP"
             DX=$(( CX - SPX )); DX=${DX#-}
@@ -537,7 +552,7 @@ else
 fi
 
 # --- Test 13e: Full drawer toggle cycle with resize checks ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -584,7 +599,7 @@ echo ""
 
 echo "== 14. Keyboard navigation =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 14a: Popup row navigation (Up/Down/Return) ---
@@ -724,7 +739,7 @@ else
 fi
 
 # --- Test 14g: Output window (health checks) ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" health >/dev/null 2>&1 &
@@ -751,7 +766,7 @@ else
 fi
 
 # --- Test 14h: Cmd+=/Cmd=- UI zoom ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -790,7 +805,7 @@ fi
 
 echo "== 15. Auto-save & tab management =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 15a: Auto-save on window close (Esc) ---
@@ -822,7 +837,7 @@ else
 fi
 
 # --- Test 15c: Tab add/close/switch cycle ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -860,7 +875,7 @@ fi
 
 echo "== 16. File browser =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 16a: File browser window opens ---
@@ -880,7 +895,7 @@ else
 fi
 
 # --- Test 16e: File browser drawer in notes window ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -910,7 +925,7 @@ fi
 
 echo "== 17. List window features =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 17a: List window opens (Jira) ---
@@ -937,7 +952,7 @@ fi
 
 echo "== 18. Config & resilience =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # --- Test 18a: App survives missing config file ---
@@ -950,7 +965,7 @@ if window_count | grep -q '^[0-9]'; then
 else
     fail "App crashed or hung with minimal config"
 fi
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.3
 
 # ============================================================================
@@ -1022,10 +1037,28 @@ fi
 
 echo "== 20. File browser E2E (fixture directory /tmp/ws-test) =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
-# Verify fixture directory exists
+# Verify fixture directory exists (create it when missing — the E2E section
+# owns its fixture so the suite is self-contained)
+if [[ ! -d /tmp/ws-test ]]; then
+    mkdir -p /tmp/ws-test/repos/backend/src /tmp/ws-test/repos/frontend/components \
+             /tmp/ws-test/repos/docs /tmp/ws-test/notes /tmp/ws-test/scripts
+    for f in /tmp/ws-test/repos/backend/src/main.py \
+             /tmp/ws-test/repos/backend/src/config.json \
+             /tmp/ws-test/repos/frontend/components/App.tsx \
+             /tmp/ws-test/repos/frontend/components/Button.tsx \
+             /tmp/ws-test/repos/docs/API.md \
+             /tmp/ws-test/repos/docs/README.md \
+             /tmp/ws-test/notes/daily.md \
+             /tmp/ws-test/notes/meeting.md \
+             /tmp/ws-test/scripts/build.sh \
+             /tmp/ws-test/scripts/deploy.sh; do
+        [[ -f "$f" ]] || printf '# TEST-FIXTURE %s\n' "$(basename "$f")" > "$f"
+    done
+    pass "Created fixture directory /tmp/ws-test"
+fi
 if [[ ! -d /tmp/ws-test ]]; then
     fail "Fixture directory /tmp/ws-test missing — cannot run E2E tests"
 else
@@ -1047,6 +1080,7 @@ if [[ "$HAS_FIXTURE" -eq 0 ]]; then
 
 # TEMPORARY: E2E test fixture (added by ui-test.sh)
 [files-test]
+    enabled = true
     type = "files"
     name = "files"
     root = "/tmp/ws-test"
@@ -1118,15 +1152,15 @@ rm -f "$CONF_BAK"
 
 echo "== 21. Real UI interactions =="
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # Helper: get window frame as "x,y,w,h" for window matching $1 title
 win_frame() {
-    local title="$1"
+    local title="$1" scope; scope="$(ax_scope)" || return 1
     osascript -e "
         tell application \"System Events\"
-            tell process \"kitchen-sink\"
+            tell ($scope)
                 repeat with w in windows
                     if title of w contains \"$title\" then
                         set f to position of w
@@ -1141,7 +1175,8 @@ win_frame() {
 
 # Helper: get window count
 win_count() {
-    osascript -e 'tell application "System Events" to count windows of (processes where name is "kitchen-sink")' 2>/dev/null || echo 0
+    local scope; scope="$(ax_scope)" || { echo 0; return; }
+    osascript -e "tell application \"System Events\" to count windows of ($scope)" 2>/dev/null || echo 0
 }
 
 # --- Test 21a: Tab close via X button click ---
@@ -1207,7 +1242,7 @@ mkdir -p "$HOME/notes" || fail "cannot create $HOME/notes"
 echo "# E2E Save Test" > "$TEST_NOTE" 2>/dev/null || fail "cannot write $TEST_NOTE"
 
 # Close existing notes and reopen fresh
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 # Create test file BEFORE app starts so it becomes a tab
@@ -1216,14 +1251,14 @@ sleep 2
 
 NOTE_FRAME="$(win_frame "notes")"
 if [[ -n "$NOTE_FRAME" ]]; then
-    osascript -e '
-        tell application "System Events"
-            tell process "kitchen-sink"
+    scope="$(ax_scope)" && osascript -e "
+        tell application \"System Events\"
+            tell ($scope)
                 set frontmost to true
-                perform action "AXRaise" of window 1
+                perform action \"AXRaise\" of window 1
             end tell
         end tell
-    ' 2>/dev/null
+    " 2>/dev/null
     sleep 1
 
     UNIQUE_MARKER="e2e-test-$(date +%s)"
@@ -1263,7 +1298,7 @@ fi
 rm -f "$TEST_NOTE"
 
 # --- Test 21c: File browser filter by typing ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 FB_FRAME="$(win_frame "files")"
@@ -1301,7 +1336,7 @@ else
 fi
 
 # --- Test 21d: Kitchen sink popup → type to filter → accept ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" show >/dev/null 2>&1 &
@@ -1333,7 +1368,7 @@ fi
 # We can't easily verify the external app opened, but we can verify the
 # code path exists and the file browser doesn't crash on Enter
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 OPEN_CODE=$(grep -c 'func openIndex\|NSWorkspace.*open\|onOpen.*path' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
@@ -1349,7 +1384,7 @@ fi
 # The other paths each become a tab
 # So there should be multiple tabs total
 
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" notes >/dev/null 2>&1 &
@@ -1410,7 +1445,7 @@ fi
 rm -f "$SURVIVE_NOTE"
 
 # --- Test 21h: Popup command mode (/ prefix) ---
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 "$BIN" show >/dev/null 2>&1 &
@@ -1461,7 +1496,7 @@ echo ""
 
 echo
 echo "== cleanup =="
-pkill -f "kitchen-sink.app" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
 echo

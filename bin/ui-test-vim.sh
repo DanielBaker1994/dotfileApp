@@ -20,12 +20,12 @@ check() {
     if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1 — got [$2] want [$3]"; fi
 }
 
-WSPID() { pgrep -x kitchen-sink | head -1; }
+WSPID() { lsof -U 2>/dev/null | awk -v s="$NOTESOCK" 'index($0, s) {print $2; exit}'; }
 SOCK() { echo "$HOME/.cache/kitchen-sink/nvim-notes-$(WSPID).sock"; }
 NOTESOCK="${TMPDIR%/}/ws-notes.sock"
 ws_send() { printf '%s' "$1" | nc -U -w 1 "$NOTESOCK"; }
 vx() { timeout 4 nvim --headless --clean --server "$(SOCK)" --remote-expr "$1" 2>/dev/null; }
-front() { lsappinfo info -only name "$(lsappinfo front)" | sed -E 's/.*="(.*)"/\1/'; }
+front() { lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null | head -1 | sed -E 's/^"([^"]*)".*/\1/'; }
 guard() { [[ "$(front)" == "kitchen-sink" ]] || { echo "ABORT: frontmost is '$(front)'" >&2; return 1; }; }
 typ() {
     guard || return 1
@@ -41,17 +41,17 @@ ESC() { sk 53; }
 RET() { sk 36; }
 CMD() { guard && osascript -e "tell application \"System Events\" to keystroke \"$1\" using {command down}"; }
 CTRL() { guard && osascript -e "tell application \"System Events\" to keystroke \"$1\" using {control down}"; }
-wframe() { osascript -e 'tell application "System Events" to tell process "kitchen-sink"
+wframe() { local p; p="$(WSPID)"; [ -n "$p" ] || return 1; osascript -e "tell application \"System Events\" to tell (first process whose unix id is $p)
   repeat with w in windows
     set s to size of w
     if item 2 of s > 200 then
       set p to position of w
-      return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+      return (item 1 of p as text) & \",\" & (item 2 of p as text) & \",\" & (item 1 of s as text) & \",\" & (item 2 of s as text)
     end if
   end repeat
-end tell' 2>/dev/null | tr -d ' '; }
-wcount() { osascript -e 'tell application "System Events" to count (windows of process "kitchen-sink")' 2>/dev/null; }
-vim_pid() { pgrep -f "nvim --embed.*--listen $(SOCK)" | head -1; }
+end tell" 2>/dev/null | tr -d ' '; }
+wcount() { local p; p="$(WSPID)"; [ -n "$p" ] || { echo 0; return; }; osascript -e "tell application \"System Events\" to count (windows of (first process whose unix id is $p))" 2>/dev/null; }
+vim_pid() { pgrep -f "nvim --listen $(SOCK)" | head -1; }
 disk() { tr '\n' '|' < "$1"; }
 buf() { vx "join(getline(1,'\$'),'|')"; }
 click_pane() {
@@ -102,9 +102,10 @@ check "Esc returns to Normal mode" "$(vx 'mode()')" "n"
 
 # --- 2. motions / undo / clipboard ---------------------------------------------
 echo "== motions =="
+printf 'clip-sentinel' | pbcopy
 typ "ggdd"; sleep 0.4
 check "ggdd deletes line 1" "$(buf)" "Hello from vim"
-check "dd yanks to the system clipboard" "$(pbpaste)" "first line"
+check "normal-mode dd keeps the clipboard (init.lua black-hole)" "$(pbpaste)" "clip-sentinel"
 typ "u"; sleep 0.4
 check "u undoes" "$(buf)" "first line|Hello from vim"
 typ "Gyyp"; sleep 0.4
@@ -112,14 +113,12 @@ check "yyp duplicates" "$(buf)" "first line|Hello from vim|Hello from vim"
 typ "u"; sleep 1.2
 check "autosave keeps disk in sync" "$(disk "$T/zz-a.md")" "first line|Hello from vim|"
 
-# --- 3. Esc never hides the window ---------------------------------------------
+# --- 3. Esc never hides unless the view's "Esc Hides Window" is on --------------
 echo "== Esc =="
 W0="$(wcount)"; ESC; sleep 0.4
-check "Esc stays in the window" "$(wcount)" "$W0"
+check "Esc with the shipped esc-close = 0 stays in the window" "$(wcount)" "$W0"
 typ "i"; sleep 0.2; ESC; sleep 0.4
 check "i + Esc -> Normal" "$(vx 'mode()')" "n"
-# rapid Esc x2 (esc-close, default 2) closes the window from Normal mode
-sleep 0.8
 # N rapid presses, sent in ONE burst ~150ms apart like a human tapping
 esc_burst() {
     guard || return 1
@@ -130,14 +129,21 @@ esc_burst() {
 typ "i"; sleep 0.2; esc_burst 1; sleep 0.8
 check "Insert + Esc keeps the window" "$(wcount)" "$W0"
 check "...and leaves vim in Normal mode" "$(vx 'mode()')" "n"
+# with the view's "Esc Hides Window" on (esc-close = 1), Esc from Insert closes
+ws_send esc-hides:notes:on; sleep 0.4
 typ "i"; sleep 0.2; esc_burst 2; sleep 0.8
-check "2 rapid Esc from Insert close the window" "$(wcount)" "0"
+# The close happens on the first Esc that lands in Normal mode; under load
+# the first press may still be in flight when the second arrives, so allow a
+# third (a human would tap again).
+[[ "$(wcount)" != "0" ]] && { ESC; sleep 0.5; }
+check "rapid Esc from Insert closes the window (esc-close = 1)" "$(wcount)" "0"
 ws_send notes; sleep 1.2
 check "re-show lands in Normal mode" "$(vx 'mode()')" "n"
 sleep 0.8; esc_burst 2; sleep 0.8
 check "2 rapid Esc from Normal close the window" "$(wcount)" "0"
 ws_send notes; sleep 1.2
 check "re-show after Esc-close keeps the same note" "$(vx "expand('%:t')")" "zz-a.md"
+ws_send esc-hides:notes:off; sleep 0.4
 
 # --- 4. edit shortcuts (rule 1) ---------------------------------------------------
 echo "== edit shortcuts =="

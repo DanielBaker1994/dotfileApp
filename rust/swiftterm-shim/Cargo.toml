@@ -1,0 +1,11 @@
+[package]
+name = "swiftterm-shim"
+version = "0.1.0"
+edition = "2021"
+description = "Thin Swift shim bridging SwiftTerm's terminal NSView to Rust (kitchen-sink port)"
+build = "build.rs"
+
+[dependencies]
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"

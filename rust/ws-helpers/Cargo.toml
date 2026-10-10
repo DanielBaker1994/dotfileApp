@@ -1,0 +1,21 @@
+[package]
+name = "ws-helpers"
+version = "0.1.0"
+edition = "2021"
+description = "AX helpers for kitchen-sink (Rust port of notify/helpers/*.swift)"
+
+[[bin]]
+name = "dock_badges"
+path = "src/dock_badges.rs"
+
+[[bin]]
+name = "webex_unread"
+path = "src/webex_unread.rs"
+
+[dependencies]
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+serde_json = "1"
+libc = "0.2"

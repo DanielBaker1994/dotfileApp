@@ -129,4 +129,4 @@ graph G {
 | Ignore edge in layout | `constraint=false` |
 | Port on record/HTML | `a:port -> b:port` |
 | Invisible spacer | `a -> b [style=invis]` |
-| Other engines | `layout=neato / fdp / circo / twopi` |
+| Other efgines | `layout=neato / fdp / circo / twopi` |

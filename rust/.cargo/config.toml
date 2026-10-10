@@ -1,0 +1,5 @@
+# Workspace rustflags. The final binary links SwiftTerm's Swift runtime, whose
+# concurrency dylibs live in /usr/lib/swift and are recorded as @rpath — add the
+# rpath so the app bundle binary resolves them without DYLD_* env (PLAN-rust-port.md).
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

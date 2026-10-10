@@ -6,7 +6,10 @@ ROOT="$(cd "$DIR/.." && pwd -P)"
 APP="$ROOT/$APP_NAME.app"
 BUNDLED=0
 case "$ROOT" in *.app/Contents/Resources) BUNDLED=1; APP="${ROOT%/Contents/Resources}" ;; esac
-BIN="$APP/Contents/MacOS/$APP_NAME"
+BIN="${WS_BIN:-$APP/Contents/MacOS/$APP_NAME}"
+# WS_BIN (dev/gate) points at another bundle's executable: follow it so the
+# LaunchServices `open` calls below launch the same app the ping uses.
+case "$BIN" in *.app/Contents/MacOS/*) APP="${BIN%/Contents/MacOS/*}" ;; esac
 TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/kitchen-sink-focus"
 MODE="${1:-}"
@@ -44,6 +47,7 @@ fi
 # must not go dead), except in build-only mode where the failure is the
 # answer.
 build() {
+    [ -n "${WS_BIN:-}" ] && return 0
     [ "$BUNDLED" = 1 ] && return 0
     if ! "$DIR/build-app.sh"; then
         [ "${WS_BUILD_ONLY:-}" = "1" ] || [ ! -x "$BIN" ] && exit 1
