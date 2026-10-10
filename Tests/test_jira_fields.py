@@ -80,5 +80,36 @@ class Labels(unittest.TestCase):
         self.assertEqual(jf.BASE_FIELD_LABELS["release"], "Fix versions")
 
 
+class MergedLabels(unittest.TestCase):
+    def test_no_team_is_the_base_table(self):
+        self.assertEqual(jf.merged_labels(None), jf.BASE_FIELD_LABELS)
+        self.assertEqual(jf.merged_labels({}), jf.BASE_FIELD_LABELS)
+
+    def test_custom_fields_alias_labels(self):
+        out = jf.merged_labels({"custom_fields": {
+            "story_points": {"field_id": "customfield_1", "label": "Points"},
+            "empty": {"label": ""},
+            "bare": {"field_id": "customfield_2"},
+        }})
+        self.assertEqual(out["story_points"], "Points")
+        self.assertEqual(out["empty"], "empty")   # empty label falls back to the alias
+        self.assertEqual(out["bare"], "bare")
+
+    def test_section_keys_are_matched_loosely(self):
+        out = jf.merged_labels({"Custom Fields": {"a": {"label": "A"}},
+                                "custom-fields": {"b": {"label": "B"}}})
+        self.assertEqual((out["a"], out["b"]), ("A", "B"))
+
+    def test_field_labels_win_and_are_trimmed(self):
+        out = jf.merged_labels({"custom_fields": {"alias": {"label": "Alias"}},
+                                "field_labels": {"alias": "  Custom  ", "key": "Ticket"}})
+        self.assertEqual(out["alias"], "Custom")
+        self.assertEqual(out["key"], "Ticket")
+
+    def test_non_string_field_labels_reject_the_whole_dict(self):
+        out = jf.merged_labels({"field_labels": {"key": "Ticket", "bad": 7}})
+        self.assertEqual(out["key"], "Key")  # unchanged
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

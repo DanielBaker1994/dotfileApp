@@ -785,6 +785,11 @@ def _jira_columns_serialize(params: dict) -> dict:
                                                   params.get("titles") is not False)}
 
 
+@method("jira.field_labels")
+def _jira_field_labels(params: dict) -> dict:
+    return {"labels": jira_fields.merged_labels(params.get("team") or {})}
+
+
 @method("jira.project_keys")
 def _jira_project_keys(params: dict) -> dict:
     return jira_setup.project_keys(params.get("raw") or "")

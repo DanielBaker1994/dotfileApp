@@ -250,6 +250,12 @@ class ScriptBridge(unittest.TestCase):
         self.assertIn("<p>hi</p>", html)
         self.assertIn("window.wsNext", html)
 
+    def test_jira_field_labels_method(self):
+        reply = dispatch({"id": 1, "method": "jira.field_labels",
+                          "params": {"team": {"field_labels": {"key": "Ticket"}}}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["labels"]["key"], "Ticket")
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

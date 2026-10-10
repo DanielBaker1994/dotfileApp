@@ -9500,36 +9500,35 @@ enum JiraPoll {
                              tip: tip.joined(separator: "\n"))
     }
 
-    static let baseFieldLabels: [String: String] = [
-        "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
-        "reporter": "Reporter", "priority": "Priority", "labels": "Labels",
-        "description": "Description", "project": "Project", "updated": "Updated",
-        "release": "Fix versions", "releaseLabel": "Release", "releaseDate": "Release date",
-        "releaseStatus": "Released", "comments": "Comments",
-        "components": "Components", "epic": "Epic / parent",
-    ]
+    private static var baseLabelsCache: [String: String]?
 
+    /// The built-in table comes from pylib/jira_fields.py (one home).
+    static var baseFieldLabels: [String: String] {
+        if let c = baseLabelsCache { return c }
+        var labels: [String: String] = [:]
+        if case .success(let box) = pythonHelper.callSync("jira.field_labels", [:], timeout: 30),
+           let d = box as? [String: Any], let l = d["labels"] as? [String: String] {
+            labels = l
+        } else {
+            wsLog("jira: base field labels unresolved (python helper unavailable)")
+        }
+        baseLabelsCache = labels
+        return labels
+    }
+
+    /// Base + custom_fields aliases + field_labels renames, merged by
+    /// pylib/jira_fields.py (the poller's field_label() reads the same
+    /// table). team.json is re-read per call, like before.
     static func fieldLabels() -> [String: String] {
-        var out = baseFieldLabels
         let teamPath = (readJSON(configPath)?["teamConfig"] as? String).map { ($0 as NSString).expandingTildeInPath }
             ?? paths.teamJson
-        guard let team = readJSON(teamPath) else { return out }
-        func norm(_ k: String) -> String {
-            k.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"[\s-]+"#, with: "_",
-                                                                        options: .regularExpression).lowercased()
+        let team = readJSON(teamPath) ?? [:]
+        if case .success(let box) = pythonHelper.callSync("jira.field_labels", ["team": team], timeout: 30),
+           let d = box as? [String: Any], let labels = d["labels"] as? [String: String] {
+            return labels
         }
-        for (k, v) in team where norm(k) == "custom_fields" {
-            for (alias, spec) in v as? [String: Any] ?? [:] {
-                let d = (spec as? [String: Any] ?? [:]).reduce(into: [String: Any]()) { $0[norm($1.key)] = $1.value }
-                out[alias] = (d["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? alias
-            }
-        }
-        for (k, v) in team where norm(k) == "field_labels" {
-            for (f, l) in v as? [String: String] ?? [:] where !l.trimmingCharacters(in: .whitespaces).isEmpty {
-                out[f] = l.trimmingCharacters(in: .whitespaces)
-            }
-        }
-        return out
+        wsLog("jira: field labels unresolved (python helper unavailable)")
+        return baseFieldLabels
     }
 
     static func labeled(_ cols: [ListColumn]) -> [ListColumn] {

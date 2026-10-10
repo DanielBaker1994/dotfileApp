@@ -1,8 +1,8 @@
 """Jira field knowledge shared by the poller scripts and the app: the
-column-spec codec and the built-in field labels.
+column-spec codec, the built-in field labels and the merged label map.
 
 ONE implementation: jira/jira_config.py imports these (its old copies are
-gone) and the app asks the helper for parse/serialize."""
+gone) and the app asks the helper for parse/serialize/labels."""
 from __future__ import annotations
 
 import re
@@ -64,3 +64,37 @@ def serialize_columns(cols, titles: bool = True) -> str:
                                w, c.get("align") or "left")
         out.append(seg + (":" + flags if flags else ""))
     return ", ".join(out)
+
+
+def _norm_key(k: str) -> str:
+    return re.sub(r"[\s-]+", "_", k.strip()).lower()
+
+
+def merged_labels(team) -> dict:
+    """The base labels + team.json custom_fields aliases + field_labels
+    renames (field_labels wins; section keys are matched loosely:
+    `custom-fields`, `Custom Fields`, ...)."""
+    out = dict(BASE_FIELD_LABELS)
+    if not isinstance(team, dict):
+        return out
+    for k, v in team.items():
+        if not isinstance(k, str) or _norm_key(k) != "custom_fields" or not isinstance(v, dict):
+            continue
+        for alias, spec in v.items():
+            d = {}
+            if isinstance(spec, dict):
+                for k2, v2 in spec.items():
+                    if isinstance(k2, str):
+                        d[_norm_key(k2)] = v2
+            label = d.get("label")
+            out[alias] = label if isinstance(label, str) and label else alias
+    for k, v in team.items():
+        if not isinstance(k, str) or _norm_key(k) != "field_labels" or not isinstance(v, dict):
+            continue
+        # the old Swift cast rejected the whole dict on any non-string value
+        if not all(isinstance(x, str) for x in v.values()):
+            continue
+        for f, label in v.items():
+            if label.strip():
+                out[f] = label.strip()
+    return out
