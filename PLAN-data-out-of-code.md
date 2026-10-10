@@ -418,3 +418,52 @@ mirror. Plus **J7** batch and risk notes 11–12.
 5. **`DEFAULT_STATE_PATH` alignment (P1) must not change `state_load("")`**
    behaviour (currently silent `{}`).
 
+## Progress (implementation log)
+
+Base: `0f3371e docs: data-out-of-code plan + architecture review`. All batches
+below are DONE with their guards green unless marked otherwise.
+
+| Batch | Commit | Notes |
+| --- | --- | --- |
+| P1 | `f1a346c` | `pylib/shot_model.json`; `DEFAULT_STATE_PATH` aligned to the app's `screenshot-state.json` (hygiene; `state_load("")` untouched). |
+| P2 | `beee210` | `pylib/paneshot.json` (per-key default/min/max records). |
+| P3 | `115f13d` | `pylib/ansi.json` (theme defaults + base-16 palette; cube/grays stay generated). |
+| P4 | `0a147e1` | `pylib/shelf.json`. |
+| P5 | `36cb343` | `pylib/prose_pdf.json`; `cacheDir` stored as `~` and expanded on load; SOURCEPOS_FILTER/BUILTIN_CSS byte-verified by sha256. |
+| P6 | `a654f73` | `pylib/doc_templates.json`. |
+| P7 | `f0d7533` | `pylib/ai_format.json`. |
+| P8 | `575641d` | `pylib/compare_text.json`; `EOL_BYTES`/`ROWS_*`/`OP_*` stay code. |
+| J1 | `a5b1409` | words/words_keys/dim_fields → `jira/defaults.json`. |
+| J2 | `87afb58` | category names one home (pages/boards/directory read it). |
+| J3 | `5854ec1` | pages/boards/directory/search_ui metadata; `boards.hot_words` replaces the hardcoded JS regex **behaviour-identically** (see follow-up #9). |
+| J4 | `0d65585` | `http` policy + `api.query_fields` + `logging.curl_log_max`. |
+| J5 | `3f9dc14` | sprints/my_work/poll limits + ALL cache-file names (`pylib/paths.json cache`: me, fieldsSeen, pollLog, legacyPollState, keysDir, state, versions, dumps, curlDump, trace, checkpoints, tz, pageCap, debugLog, raw) so `ME_FILE` is not a half-move. Touched `jira_api.py` beyond the listed files for that sweep. |
+| J6 | `87f0f07` | `poll_defaults` + `liveSearchMax`; migration 25/5 now read `DEFAULTS["defaultMax"]`/`["pollMarginMinutes"]` (same JSON home, no new `migration` key). |
+| J7 | `0708c07` | `search_ui.criteria` (lists/dates/text_fields). |
+| C1 | `96201b8` | `defaults.search.sort: "relevance"` added in the same commit; rate-limit gate numbers folded. |
+| C2 | `a26f74e` | `api.favorite_keys`, `api.search_expand`, `pages.color_keys`. |
+| N1 | `21a63a0` | `api_sources` + `webex` constants (webex_api reads the file itself). |
+| S1 | `fa8935b` | `MOD_ORDER`/`MOD_SYM`→`mods`; `LAYER_NAME` settled as a DISTINCT short-label table `layer_names` (not `layer_titles`); `label_mods` new key; cli choices derive from new `rebind_layers` key (the rebindable subset is not derivable from `layers` alone — rebind dispatch stays code); `readers._LUA` folded into `data/nvim_lua.json` (trivial, hash-verified); pinning test `Units.test_table_pins` added. |
+| #6a | `60e0e1f` | tri memo never caches a failed call (retries). |
+| #8 | `80101b9` | `pylib/helper/methods.py` guarded imports: a bad module/JSON makes that group answer with a clear HelperError; ping + other groups stay up. Python side only. |
+| X1 | (this commit) | `ws test all` now also runs `test_jira_poll.py`, `test_confluence.py`, `test_notifications.py` (Swift sweep kept) — review #10a. |
+
+### Follow-ups recorded (not done, deliberately)
+
+- **#9 remainder**: the board page's hot words are shipped default data
+  (`boards.hot_words`, byte-identical JS regex) but they do not yet follow the
+  user's `priority-urgent-words`; wiring that needs the Swift client to pass
+  the resolved words to `jira.board_page`. Same class: `JiraTicket.swift`
+  category(), `CompareText.swift` EOL/encoding labels, `PathShelf.swift`
+  `maxLimit`.
+- **#6a remainder**: other failure-caching sites are untouched
+  (`JiraStyle.fetch` `[:]`, `baseLabelsCache` `{}`, `JiraSearch.swift`
+  directory, `ListColumn.parse`, `JiraSetupWindow.parseProjectKeys`).
+- **#11**: shelf per-event IPC batching (`shelf.bump_many` + a ~0.2 s
+  coalescing window + canonical/ignore memo) is not trivially safe on the
+  Swift side — skipped, kept here as the plan.
+- **Optional Swift batches SW1/SW2** (ShotTool / AnsiTheme reading the shipped
+  JSON) are untouched; the Python JSON is now the reference they should read.
+- Deferred review findings 1,2,3,4,5,6b,6c,7,10b,10c,12,13 stay deferred.
+
+

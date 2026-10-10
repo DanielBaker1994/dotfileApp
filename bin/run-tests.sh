@@ -170,6 +170,12 @@ case "${1:-all}" in
         run_test "$TESTS/live_ai_rules.swift"
         ;;
     all|*)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        # the three ported python suites with no `ws test` case of their own
+        # (the rest have cases above); the Swift sweep stays unchanged
+        for t in "$TESTS/test_jira_poll.py" "$TESTS/test_confluence.py" "$TESTS/test_notifications.py"; do
+            [ -f "$t" ] && echo "Running $(basename "$t" .py)..." && "$py" "$t"
+        done
         for f in "$TESTS"/test_*.swift; do
             [ -f "$f" ] && run_test "$f"
         done
