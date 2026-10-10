@@ -130,6 +130,19 @@ class ScriptBridge(unittest.TestCase):
         self.assertIn("status", res["cache"])
         self.assertIn("issues", res["cache"])
 
+    def test_jsonmgr_report_method(self):
+        # touch a lazy home through a method so the ledger has a consumer
+        dispatch({"id": 1, "method": "jira.filter_kinds", "params": {"catalog": []}})
+        reply = dispatch({"id": 2, "method": "jsonmgr.report"})
+        self.assertTrue(reply["ok"], reply)
+        rep = reply["result"]
+        homes = {h["name"]: h for h in rep["homes"]}
+        self.assertIn("pylib/shelf", homes)
+        self.assertTrue(homes["pylib/shelf"]["exists"])
+        consumers = {row["consumer"] for row in rep["ledger"]}
+        self.assertIn("jira_search", consumers)
+        self.assertIn("jira_paths", consumers)
+
     def test_jira_style_method(self):
         reply = dispatch({"id": 1, "method": "jira.style", "params": {
             "values": {"status-done-words": "shipped"}}})

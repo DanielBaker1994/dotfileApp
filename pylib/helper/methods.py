@@ -29,6 +29,7 @@ _MODULES = {
     "jira_pages": "jira_pages",
     "jira_search": "jira_search",
     "jira_setup": "jira_setup",
+    "jsonmgr": "jsonmgr",
     "paneshot": "paneshot",
     "prose_pdf": "prose_pdf",
     "setup_checks": "setup_checks",
@@ -699,6 +700,15 @@ def _jira_paths(params: dict) -> dict:
         "tabs": dict(jira_paths.TABS),
         "sideDirs": dict(jira_paths.SIDE_DIRS),
     }
+
+
+@method("jsonmgr.report")
+def _jsonmgr_report(params: dict) -> dict:
+    try:
+        import jsonmgr
+    except Exception as e:
+        raise HelperError("jsonmgr.report: %s" % e)
+    return jsonmgr.report(with_data=bool(params.get("withData")))
 
 
 @method("jira.style")

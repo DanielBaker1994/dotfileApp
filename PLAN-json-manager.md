@@ -476,6 +476,7 @@ batch as the plan executes.
 | M4c | done | `shot_model` eager-by-decision (validation correction; no lazy conversion) |
 | M4d | done | lazy: `jira_data`, `jira_pages`, `jira_boards`, `jira_directory`, `jira_search` (`jira_fields` stays eager); all 5 suites + `helper` green |
 | M4e | done | lazy: `confluence_glue`, `confluence_pages`; suites + `helper` green. End state: 14/17 pylib loaders lazy (eager-by-decision: `shot_model`; eager by plan: `jira_fields`, `jira_paths`) |
+| M5 | done | `jsonmgr` in `_MODULES` + `jsonmgr.report` method (body in `methods.py`, `_jira_paths` pattern); helper test asserts consumers. Follow-up: optional `ws jsons` alias and JsonError→HelperError dispatch polish not taken |
 | … | — | |
 
 ## 7. Validation hooks for this plan
