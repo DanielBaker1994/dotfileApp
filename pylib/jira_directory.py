@@ -15,14 +15,16 @@ import jira_data
 import jira_pages
 import jsonmgr
 
-_DIRECTORY_DEFAULTS = jsonmgr.load("jira/defaults")["directory"]
-
 _LOCK = threading.Lock()
 _CACHE = {"path": None, "stamp": None, "data": None}
 
-# how many entries a picker shows before folding the tail (matches the app's
-# JiraMultiPicker.topN; folded entries carry unused=true)
-TOP_N = _DIRECTORY_DEFAULTS["top_n"]
+# lazy (worker surface): a broken jira/defaults.json fails at the first
+# method call and is retried on the next one; how many entries a picker
+# shows before folding the tail (matches the app's JiraMultiPicker.topN;
+# folded entries carry unused=true)
+jsonmgr.lazy_module(__name__, globals(), {
+    "TOP_N": ("jira/defaults", ("directory", "top_n")),
+})
 
 
 def _is_str(x) -> bool:
@@ -186,9 +188,10 @@ def _natural_key(name: str) -> list:
 
 
 def _fold_tail(opts: list) -> list:
-    if len(opts) <= TOP_N + 5:
+    top_n = jsonmgr.field("jira/defaults", "directory", "top_n")
+    if len(opts) <= top_n + 5:
         return opts
-    return [dict(o, unused=(i >= TOP_N)) for i, o in enumerate(opts)]
+    return [dict(o, unused=(i >= top_n)) for i, o in enumerate(opts)]
 
 
 def label_options(d: dict, scope=None) -> list:

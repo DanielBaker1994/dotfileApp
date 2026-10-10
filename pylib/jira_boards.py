@@ -11,13 +11,16 @@ import jira_data
 import jira_pages
 import jsonmgr
 
-# board caps/labels/color schema live in jira/defaults.json (one home)
-_BOARD_DEFAULTS = jsonmgr.load("jira/defaults")["boards"]
-
-# a done column only keeps this many cards (the Table view shows them all)
-DONE_LIMIT = _BOARD_DEFAULTS["done_limit"]
-OTHER_COLUMN = _BOARD_DEFAULTS["other_column"]
-_HOT_PATTERN = "|".join(_BOARD_DEFAULTS["hot_words"])
+# lazy (worker surface): a broken jira/defaults.json fails at the first
+# method call and is retried on the next one; a done column only keeps
+# DONE_LIMIT cards (the Table view shows them all)
+jsonmgr.lazy_module(__name__, globals(), {
+    "DONE_LIMIT": ("jira/defaults", ("boards", "done_limit")),
+    "OTHER_COLUMN": ("jira/defaults", ("boards", "other_column")),
+    "_HOT_PATTERN": ("jira/defaults", ("boards", "hot_words"),
+                     lambda hot: "|".join(hot)),
+    "_COLOR_KEYS": ("jira/defaults", ("boards", "color_keys"), list),
+})
 
 
 class _AT(Template):
@@ -79,8 +82,6 @@ window.webkit.messageHandlers.board.postMessage('ready');
 </script></body></html>
 """)
 
-_COLOR_KEYS = list(_BOARD_DEFAULTS["color_keys"])
-
 
 def _s(x) -> str:
     return x if isinstance(x, str) else ""
@@ -94,6 +95,8 @@ def board_columns(params: dict) -> dict:
     rows = [r for r in (params.get("rows") or []) if isinstance(r, dict)]
     spec = [c for c in (params.get("columns") or []) if isinstance(c, dict)]
     cats = params.get("categories") or {}
+    done_limit = jsonmgr.field("jira/defaults", "boards", "done_limit")
+    other_column = jsonmgr.field("jira/defaults", "boards", "other_column")
     words = params.get("words") or {}
     people = params.get("people") or {}
     names = params.get("categoryNames") or list(jira_pages.CATEGORY_NAMES)
@@ -130,14 +133,15 @@ def board_columns(params: dict) -> dict:
     out = []
     for c in cols:
         done = bool(c["cards"]) and all(k["cat"] == 2 for k in c["cards"])
-        keep = c["cards"][:DONE_LIMIT] if done else c["cards"]
+        keep = c["cards"][:done_limit] if done else c["cards"]
         out.append({"name": c["name"], "cards": keep, "more": len(c["cards"]) - len(keep)})
     if other:
-        out.append({"name": OTHER_COLUMN, "cards": other, "more": 0})
+        out.append({"name": other_column, "cards": other, "more": 0})
     return {"columns": out}
 
 
 def board_page(colors: dict) -> str:
-    subst = {k: _s((colors or {}).get(k)) for k in _COLOR_KEYS}
-    subst["hotPattern"] = _HOT_PATTERN
+    subst = {k: _s((colors or {}).get(k))
+             for k in jsonmgr.field("jira/defaults", "boards", "color_keys")}
+    subst["hotPattern"] = "|".join(jsonmgr.field("jira/defaults", "boards", "hot_words"))
     return _PAGE.safe_substitute(subst)

@@ -474,6 +474,7 @@ batch as the plan executes.
 | M4a | done | lazy: `shelf`, `doc_templates`, `ai_format`, `compare_text`, `prose_pdf`; internal rewrites via `jsonmgr.field`; new helper bad-JSON retry case |
 | M4b | done | lazy: `paneshot`, `ansi` (`_BASE16` projection); suites + `helper` green |
 | M4c | done | `shot_model` eager-by-decision (validation correction; no lazy conversion) |
+| M4d | done | lazy: `jira_data`, `jira_pages`, `jira_boards`, `jira_directory`, `jira_search` (`jira_fields` stays eager); all 5 suites + `helper` green |
 | … | — | |
 
 ## 7. Validation hooks for this plan

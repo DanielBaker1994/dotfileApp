@@ -12,24 +12,24 @@ import jsonmgr
 import os
 import threading
 
-# the word lists, the list->key map and the dim field set live in
-# jira/defaults.json (one home); callers keep the old symbol names
-_JIRA_DEFAULTS = jsonmgr.load("jira/defaults")
-
-WORDS_DEFAULTS = dict(_JIRA_DEFAULTS["words"])
-
-# list name -> [jira] config key
-_LIST_KEYS = dict(_JIRA_DEFAULTS["words_keys"])
-
-DIM_FIELDS = list(_JIRA_DEFAULTS["dim_fields"])
+# lazy (worker surface): a broken jira/defaults.json fails at the first
+# method call and is retried on the next one; the old symbol names stay
+# (callers unchanged) and internal uses go through jsonmgr.field
+jsonmgr.lazy_module(__name__, globals(), {
+    "WORDS_DEFAULTS": ("jira/defaults", ("words",), dict),
+    "_LIST_KEYS": ("jira/defaults", ("words_keys",), dict),
+    "DIM_FIELDS": ("jira/defaults", ("dim_fields",), list),
+})
 
 
 def words(values: dict) -> dict:
     """[jira] config values -> the seven lowercased word lists (defaults per
     key; an explicit value replaces only that list)."""
+    words_defaults = jsonmgr.field("jira/defaults", "words")
+    list_keys = jsonmgr.field("jira/defaults", "words_keys")
     out = {}
-    for name, key in _LIST_KEYS.items():
-        raw = values.get(key) or WORDS_DEFAULTS[key]
+    for name, key in list_keys.items():
+        raw = values.get(key) or words_defaults[key]
         out[name] = [p.strip().lower() for p in raw.split(",") if p.strip()]
     return out
 
@@ -70,7 +70,7 @@ def style_rules(values: dict) -> dict:
     w = words(values)
     return {
         "words": w,
-        "dimFields": list(DIM_FIELDS),
+        "dimFields": list(jsonmgr.field("jira/defaults", "dim_fields")),
         "status": [
             {"words": w["cancelled"], "style": {"tone": "dim", "mark": "hollow", "quietsRow": True}},
             {"words": w["done"], "style": {"tone": "success", "mark": "filled", "quietsRow": True}},

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import jsonmgr
 
-# the filter-menu rows + the catalog skip list live in jira/defaults.json
-_SEARCH_UI = jsonmgr.load("jira/defaults")["search_ui"]
-
-SKIP_CATALOG_FIELDS = set(_SEARCH_UI["skip_fields"])
+# lazy (worker surface): a broken jira/defaults.json fails at the first
+# method call and is retried on the next one
+jsonmgr.lazy_module(__name__, globals(), {
+    "SKIP_CATALOG_FIELDS": ("jira/defaults", ("search_ui", "skip_fields"), set),
+    "_SEARCH_UI": ("jira/defaults", ("search_ui",)),
+})
 
 
 def _label_for(catalog: list, field: str, fallback: str) -> str:
@@ -26,8 +28,10 @@ def filter_kinds(catalog) -> list:
     def lbl(field, fallback):
         return _label_for(catalog, field, fallback)
 
+    search_ui = jsonmgr.field("jira/defaults", "search_ui")
+    skip_fields = set(jsonmgr.field("jira/defaults", "search_ui", "skip_fields"))
     kinds = []
-    for row in _SEARCH_UI["kinds"]:
+    for row in search_ui["kinds"]:
         title = row["title"]
         field = row.get("labelField")
         if field:
@@ -38,7 +42,7 @@ def filter_kinds(catalog) -> list:
         if not isinstance(c, dict):
             continue
         field = c.get("field")
-        if not isinstance(field, str) or field in SKIP_CATALOG_FIELDS:
+        if not isinstance(field, str) or field in skip_fields:
             continue
         label = c.get("label")
         if not (isinstance(label, str) and label):

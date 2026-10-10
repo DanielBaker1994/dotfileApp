@@ -14,11 +14,13 @@ from string import Template
 import jira_data
 import jsonmgr
 
-# the three status-category labels live in jira/defaults.json (one home; the
-# ticket stepper + the board/directory pickers all read them)
-_JIRA_DEFAULTS = jsonmgr.load("jira/defaults")
-
-CATEGORY_NAMES = list(_JIRA_DEFAULTS["category_names"])
+# lazy (worker surface): a broken jira/defaults.json fails at the first
+# method call and is retried on the next one; the ticket stepper + the
+# board/directory pickers read CATEGORY_NAMES
+jsonmgr.lazy_module(__name__, globals(), {
+    "CATEGORY_NAMES": ("jira/defaults", ("category_names",), list),
+    "_HEX_KEYS": ("jira/defaults", ("pages", "hex_keys"), list),
+})
 
 _PAGE = Template("""<!doctype html><html><head><meta charset="utf-8"><style>
 :root{--bg:$bg;--card:$card;--s0:$s0;--s1:$s1;--tx:$tx;--dim:$dim;
@@ -80,8 +82,6 @@ document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(a){
 </script></body></html>
 """)
 
-_HEX_KEYS = list(_JIRA_DEFAULTS["pages"]["hex_keys"])
-
 
 def esc(s: str) -> str:
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -132,7 +132,7 @@ def _stepper(fields: dict, params: dict) -> str:
         return ""
     cur = jira_data.category(status, params.get("categories") or {}, params.get("words") or {})
     chunks = []
-    for i, s in enumerate(CATEGORY_NAMES):
+    for i, s in enumerate(jsonmgr.field("jira/defaults", "category_names")):
         cls = "done" if i < cur else "now" if i == cur else ""
         if i == cur and status.lower() != s.lower():
             name = '%s <span class="sub">· %s</span>' % (esc(s), esc(status))
@@ -224,7 +224,7 @@ def ticket_html(params: dict) -> str:
 
     colors = params.get("colors") or {}
     return _PAGE.safe_substitute(
-        {k: _s(colors.get(k)) for k in _HEX_KEYS},
+        {k: _s(colors.get(k)) for k in jsonmgr.field("jira/defaults", "pages", "hex_keys")},
         key=esc(key), title=esc(title),
         stepper_block='<div class="steps">%s</div>' % stepper if stepper else "",
         pills_block='<div class="pills">%s</div>' % "".join(pills) if pills else "",
