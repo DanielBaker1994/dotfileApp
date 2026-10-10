@@ -46,5 +46,13 @@
     "rawCapture": false,
     "rawKeepDays": 1,
     "rawMaxMB": 200
+  },
+  "api": {
+    "favorite_keys": ["id", "title", "space", "spaceName", "type", "url", "path"],
+    "search_expand": "content.space,content.version,content.ancestors,content.container"
+  },
+  "pages": {
+    "color_keys": ["light", "text", "text92", "dim", "accent", "mantle", "hairline",
+                   "warn", "warn35", "warn75", "info"]
   }
 }

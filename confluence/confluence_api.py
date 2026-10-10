@@ -54,11 +54,16 @@ import confluence_config as cc  # noqa: E402
 import jira_api  # type: ignore  # noqa: E402  (path set up by confluence_config)
 import jira_log  # type: ignore  # noqa: E402
 
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults.json")
+# the favourites key table + the search expand string live in confluence/defaults.json
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _DEFAULTS = json.load(_fh)
+
 jira_api.CURL_LOG = os.path.join(cc.CACHE_DIR, "curl.log")
 COOLDOWN_FILE = os.path.join(cc.CACHE_DIR, "ratelimit.json")
 USERS_FILE = os.path.join(cc.CACHE_DIR, "users.json")
 HL_OPEN, HL_CLOSE = "@@@hl@@@", "@@@endhl@@@"
-SEARCH_EXPAND = "content.space,content.version,content.ancestors,content.container"
+SEARCH_EXPAND = _DEFAULTS["api"]["search_expand"]
 
 
 class ConfluenceClient(jira_api.Client):
@@ -348,7 +353,7 @@ def do_spaces(cfg: cc.Config, op: str, keys: list) -> int:
     return emit({"ok": True, "spaces": spaces})
 
 
-FAV_KEYS = ("id", "title", "space", "spaceName", "type", "url", "path")
+FAV_KEYS = tuple(_DEFAULTS["api"]["favorite_keys"])
 
 
 def do_favorite(cfg: cc.Config, op: str, ids: list, rows: list) -> int:

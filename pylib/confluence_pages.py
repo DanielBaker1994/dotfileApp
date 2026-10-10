@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from string import Template
 from urllib.parse import urlsplit
@@ -103,8 +104,12 @@ mark.wsh.on { background: @warn75; color: #000;
 </script></body></html>
 """)
 
-_COLOR_KEYS = ["light", "text", "text92", "dim", "accent", "mantle", "hairline",
-               "warn", "warn35", "warn75", "info"]
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "confluence", "defaults.json")
+# the preview page's color-key schema lives in confluence/defaults.json
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _CONFLUENCE_DEFAULTS = json.load(_fh)
+
+_COLOR_KEYS = list(_CONFLUENCE_DEFAULTS["pages"]["color_keys"])
 
 _IMG = re.compile(r'(<img\b[^>]*?\bsrc\s*=\s*)"([^"]+)"', re.IGNORECASE)
 
