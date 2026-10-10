@@ -1,0 +1,23 @@
+{
+  "defaults": {
+    "enabled": "false",
+    "sources": "webex, outlook, imessage",
+    "poll-seconds": "60",
+    "hide-when-zero": "true",
+    "mention-max-age-hours": "24",
+    "webex-enabled": "true",
+    "webex-app": "Cisco-Systems.Spark",
+    "webex-tag": "WEBEX",
+    "webex-api": "true",
+    "webex-count": "window",
+    "webex-rooms": "30",
+    "outlook-enabled": "false",
+    "outlook-app": "com.microsoft.Outlook",
+    "outlook-tag": "MAIL",
+    "outlook-api": "false",
+    "imessage-enabled": "false",
+    "imessage-app": "com.apple.MobileSMS",
+    "imessage-tag": "MESSAGES",
+    "imessage-api": "false"
+  }
+}

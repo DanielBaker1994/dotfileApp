@@ -81,175 +81,48 @@ COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "com
 CACHE_DIR = jira_paths.CACHE_DIR
 OUT_DIR_DEFAULT = jira_paths.OUT_DIR_DEFAULT
 
-DEFAULTS = {
-    "site": "",
-    "auth": "",
-    "email": "",
-    "token": "",
-    "defaultProject": "",
-    "defaultMax": 25,
-    "pollMarginMinutes": 5,
-    "lockStaleMinutes": 10,
-    "fetchComments": True,
-    "snapshotKeep": 30,
-    "outDir": OUT_DIR_DEFAULT,
-    "endpoints": [],
-    "liveSearch": {},   # {columns, maxResults}: the Jira window's search tab
-    "rateLimitMaxWaitMinutes": 30,   # total sleep one poll may spend on 429 / 5xx / mid-run 401
-    "requestDelayMs": 0,             # pause between requests (gentle throttle)
-    "checkpointEvery": 500,          # issues between cache writes + resume points
-    "rebuildOnNextPoll": False,      # one-time: wipe the cache, re-populate (cleared when done)
-    "logLevel": "DEBUG",             # ~/.cache/jira/debug.log level (DEBUG / INFO / WARNING)
-    "rawCapture": True,              # every response body + headers -> ~/.cache/jira/raw/<run>/
-    "rawKeepDays": 3,                # raw run folders older than this are pruned
-    "rawMaxMB": 2048,                # ... and the oldest go until raw/ fits in this
-    "directoryResumeHours": 24,      # a failed / partial directory job resumes within this
-    "setup": None,                   # {state: pending|done, steps: {name: {...}}} (jira_poll --setup)
-    "favorites": [],                 # pinned issue keys, newest first (the favorites job re-queries them)
-    "releaseBlacklist": [],          # release row keys (PROJECT-NAME) hidden from the releases tab
-    "favoriteReleases": [],          # starred release row keys, newest first (Jira sidebar)
-    "pinnedLabels": [],              # labels pinned to the Jira sidebar (LABELS), in pin order
-    "pinnedBoards": [],              # board ids pinned to the Jira sidebar (BOARDS); each = a board-ID job
-    "pinnedSprints": [],             # sprint ids pinned to the Jira sidebar (SPRINTS); each = a sprint-ID job
-    "pinnedBoardViews": [],          # board views pinned to the Jira sidebar: "BOARD|SPRINT|MODE"
-    "boardCatalogMinutes": 60,       # how often the poll re-reads scope -> boards -> sprints
-}
-
-LIVE_SEARCH_FILE = jira_paths.TABS["liveSearch"] # the live search's tab (in outDir)
-LIVE_SEARCH_MAX = 100                # default max results of one live search
-FAVORITES_FILE = jira_paths.TABS["favorites"] # the pinned issues' tab (the favorites job)
-BLACKLIST_RELEASE_FILE = jira_paths.TABS["blacklistRelease"] # releases hidden from the releases tab
-RELEASE_VIEW_DIR = jira_paths.SIDE_DIRS["releases"] # next to outDir: one <PROJECT>-<release>.json per release
-LABEL_VIEW_DIR = jira_paths.SIDE_DIRS["labels"] # next to outDir: one <label>.json per pinned label
-BOARD_DIR = jira_paths.SIDE_DIRS["boards"] # next to outDir: pinned boards' job files (no tab each)
-MY_WORK_DIR = jira_paths.SIDE_DIRS["myWork"] # next to outDir: the sidebar's MY WORK views
-SPRINTS_FILE = jira_paths.CACHE["sprints"] # in the jira cache: pinned sprints' name / state / board
-BOARD_CATALOG_FILE = jira_paths.CACHE["boardCatalog"] # in the jira cache: scope -> boards -> sprints (the browser)
-BOARDS_FILE = jira_paths.CACHE["boards"] # in the jira cache: pinned boards' columns + quick filters
-
-# the directory job: projects + assignable users + statuses / types /
-# priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).
-# User search is expensive: weekly. Publishes no tab.
-DIRECTORY_ENDPOINT = {"name": "directory", "window": "1w", "projects": "*", "type": "directory",
-                      "enabled": True}
-
-# the favorites job: re-queries the pinned issues (config.json `favorites`,
-# the ☆ next to each row's checkbox in the Jira window) every tick ->
-# favorites.json. No favorites = no request.
-FAVORITES_ENDPOINT = {"name": "favorites", "window": "10m", "projects": "*", "type": "favorites",
-                      "file": FAVORITES_FILE, "enabled": True}
-
-DEFAULT_ENDPOINTS = [
-    {"name": "all", "window": "10m", "projects": "*", "type": "issues",
-     "file": "all.json", "enabled": True},
-    {"name": "releases", "window": "1h", "projects": "*", "type": "releases",
-     "file": "releases.json", "enabled": True},
-    FAVORITES_ENDPOINT,
-    DIRECTORY_ENDPOINT,
-]
-
-ENDPOINT_TYPES = ("issues", "releases", "favorites", "directory")
+# path-derived locations (paths.json values, not defaults)
+LIVE_SEARCH_FILE = jira_paths.TABS["liveSearch"]  # the live search's tab (in outDir)
+LIVE_SEARCH_MAX = 100                             # default max results of one live search
+FAVORITES_FILE = jira_paths.TABS["favorites"]     # the pinned issues' tab (the favorites job)
+BLACKLIST_RELEASE_FILE = jira_paths.TABS["blacklistRelease"]
+RELEASE_VIEW_DIR = jira_paths.SIDE_DIRS["releases"]
+LABEL_VIEW_DIR = jira_paths.SIDE_DIRS["labels"]
+BOARD_DIR = jira_paths.SIDE_DIRS["boards"]
+MY_WORK_DIR = jira_paths.SIDE_DIRS["myWork"]
+SPRINTS_FILE = jira_paths.CACHE["sprints"]
+BOARD_CATALOG_FILE = jira_paths.CACHE["boardCatalog"]
+BOARDS_FILE = jira_paths.CACHE["boards"]
 WINDOW_RE = re.compile(r"^(\d+)([smhdw])$")
-WINDOW_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
-# window json field -> the Jira REST field(s) it is derived from. A column /
-# [jira] field that is NOT listed here is passed through verbatim as a raw
-# Jira field (e.g. created, duedate, customfield_10010) and stringified.
-FIELD_SOURCES = {
-    "key": [],
-    "title": ["summary"],
-    "status": ["status"],
-    "assignee": ["assignee"],
-    "release": ["fixVersions"],
-    "releaseLabel": ["fixVersions"],
-    "releaseDate": ["fixVersions"],
-    "releaseStatus": ["fixVersions"],
-    "priority": ["priority"],
-    "labels": ["labels"],
-    "description": ["description"],
-    "updated": ["updated"],
-    "reporter": ["reporter"],
-    "project": ["project"],
-    "comments": [],   # the `comment` field of the search itself (fetchComments)
-    "components": ["components"],
-    "epic": ["parent"],   # + Server/DC "Epic Link" (epic_link_ids); see jira_api.cache_entry
-}
-# synced for every issue whatever the columns: the Jira window groups by them
-GROUP_FIELDS = ["components", "epic"]
-# always requested: updated drives sort + windows, project drives the
-# per-project files and the versions (release date) lookup
-ALWAYS_API_FIELDS = ["updated", "project"]
-# the legacy window-json shape (kept identical so copy-fields / checkbox /
-# detail window keep working); column fields are ADDED on top
-BASE_WINDOW_KEYS = ["key", "title", "status", "assignee", "release", "releaseLabel",
-                    "releaseDate", "releaseStatus", "priority", "labels",
-                    "description", "reporter", "project"]
-# field labels + the column codec live in pylib/jira_fields.py (shared with
-# the app through the helper); re-exported here so the poller's callers keep
-# working unchanged.
-# [jira] keys whose field names feed the API request
-FIELD_KEYS = ("primary", "content", "detail", "trailing", "body", "filter",
-              "filters", "copy-fields")
+# ---------------------------------------------------------------- defaults
+# The static tables (config defaults, endpoints, REST paths, search / JQL
+# defaults, field maps, key lists) live in jira/defaults.json and load here;
+# everything that is behaviour stays code.
+_DEFAULTS_FILE = os.path.join(JIRA_DIR, "defaults.json")
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _D = json.load(_fh)
 
+DEFAULTS = dict(_D["defaults"], outDir=OUT_DIR_DEFAULT)   # outDir expands paths.json
+DEFAULT_ENDPOINTS = _D["endpoints"]
+DIRECTORY_ENDPOINT = next(e for e in DEFAULT_ENDPOINTS if e["type"] == "directory")
+FAVORITES_ENDPOINT = next(e for e in DEFAULT_ENDPOINTS if e["type"] == "favorites")
+DEFAULT_API_ENDPOINTS = _D["api_endpoints"]
+API_BASE = _D["bases"]["api"]
+AGILE_BASE = _D["bases"]["agile"]
+CLOUD_SEARCH = _D["bases"]["cloud_search"]
+DEFAULT_SEARCH = _D["search"]
+DEFAULT_JQL_TEMPLATES = _D["jql_templates"]
+FIELD_SOURCES = _D["field_sources"]
+GROUP_FIELDS = list(_D["group_fields"])
+ALWAYS_API_FIELDS = list(_D["always_api_fields"])
+BASE_WINDOW_KEYS = list(_D["base_window_keys"])
+FIELD_KEYS = tuple(_D["field_keys"])
+ENDPOINT_TYPES = tuple(_D["endpoint_types"])
+AUTH_MODES = tuple(_D["auth_modes"])
+WINDOW_UNITS = _D["window_units"]
+TEAM_KEYS = tuple(_D["team_keys"])
 
-AUTH_MODES = ("bearer", "basic")
-
-# ------------------------------------------------------------ team.json
-# Every Jira REST path the tools call. Relative paths hang off /rest/api/2;
-# "board*" paths off /rest/agile/1.0; paths starting /rest/ are used as-is.
-# {name} placeholders are filled per request (url-encoded).
-DEFAULT_API_ENDPOINTS = {
-    "myself": "/myself",
-    "search": "/search",
-    "issue": "/issue/{key}",
-    "projects": "/project",
-    "project": "/project/{project}",
-    "project_versions": "/project/{project}/versions",
-    "statuses": "/status",
-    "fields": "/field",
-    "assignable_users": "/user/assignable/search",
-    "priorities": "/priority",
-    "issue_types": "/issuetype",
-    "board_issues": "/board/{board_id}/issue",
-    "boards": "/board",                                   # ?projectKeyOrId=KEY (per scoped project)
-    "board_configuration": "/board/{board_id}/configuration",
-    "board_quickfilters": "/board/{board_id}/quickfilter",
-    "board_sprints": "/board/{board_id}/sprint",          # scrum boards only (kanban answers 400)
-    "filter": "/filter/{filter_id}",
-    "favourite_filters": "/filter/favourite",
-}
-API_BASE = "/rest/api/2"
-AGILE_BASE = "/rest/agile/1.0"
-CLOUD_SEARCH = "/rest/api/3/search/jql"   # Cloud removed v2 /search
-
-DEFAULT_SEARCH = {
-    "max_results_users": 50,
-    "max_results_search": 500,    # page size of one search request (the server may cap it:
-                                  # Cloud 100 with fields, Server/DC jira.search.views.max 1000)
-    "page_size": 50,              # page size of one board request
-    "timeout_seconds": 30,        # curl -m
-    "timeout_search_seconds": 120,  # curl -m for one search page (big pages are slow)
-    "cache_timeout_seconds": 0,   # re-use versions.json this long (0 = always refetch)
-    "versions_lookback_days": 0,  # drop releases dated older than this (0 = keep all)
-    "labels_max_issues": 2000,    # directory job: labelled issues scanned per project (0 = no labels)
-}
-
-# {projects} = the project list ("A", "B"); every other {name} is a job /
-# --arg value (quotes inside values are escaped for JQL).
-DEFAULT_JQL_TEMPLATES = {
-    "partial_search": 'project in ({projects}) AND (summary ~ "{query}" OR description ~ "{query}") '
-                      "ORDER BY updated DESC",
-    "users_search": "project in ({projects}) ORDER BY updated ASC",
-    "assignee_search": 'project in ({projects}) AND assignee = "{username}" ORDER BY updated DESC',
-    "reporter_search": 'project in ({projects}) AND reporter = "{username}" ORDER BY updated DESC',
-    "assignee_reporter_search": 'project in ({projects}) AND assignee = "{assignee}" '
-                                'AND reporter = "{reporter}" ORDER BY updated DESC',
-    "release_search": 'project = "{project}" AND fixVersion = "{version}"',
-    "release_search_all": 'project = "{project}" AND fixVersion = "{version}" ORDER BY created ASC',
-}
-
-TEAM_KEYS = ("custom_fields", "field_mappings", "field_labels", "project_keys", "jobs",
-             "api_endpoints", "boards", "search_defaults", "jql_templates")
 CUSTOMFIELD_RE = re.compile(r"^customfield[ _-]*(\d+)$", re.I)
 PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 

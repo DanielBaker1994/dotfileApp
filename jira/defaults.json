@@ -1,0 +1,221 @@
+{
+  "defaults": {
+    "site": "",
+    "auth": "",
+    "email": "",
+    "token": "",
+    "defaultProject": "",
+    "defaultMax": 25,
+    "pollMarginMinutes": 5,
+    "lockStaleMinutes": 10,
+    "fetchComments": true,
+    "snapshotKeep": 30,
+    "endpoints": [],
+    "liveSearch": {},
+    "rateLimitMaxWaitMinutes": 30,
+    "requestDelayMs": 0,
+    "checkpointEvery": 500,
+    "rebuildOnNextPoll": false,
+    "logLevel": "DEBUG",
+    "rawCapture": true,
+    "rawKeepDays": 3,
+    "rawMaxMB": 2048,
+    "directoryResumeHours": 24,
+    "setup": null,
+    "favorites": [],
+    "releaseBlacklist": [],
+    "favoriteReleases": [],
+    "pinnedLabels": [],
+    "pinnedBoards": [],
+    "pinnedSprints": [],
+    "pinnedBoardViews": [],
+    "boardCatalogMinutes": 60
+  },
+  "endpoints": [
+    {
+      "name": "all",
+      "window": "10m",
+      "projects": "*",
+      "type": "issues",
+      "file": "all.json",
+      "enabled": true
+    },
+    {
+      "name": "releases",
+      "window": "1h",
+      "projects": "*",
+      "type": "releases",
+      "file": "releases.json",
+      "enabled": true
+    },
+    {
+      "name": "favorites",
+      "window": "10m",
+      "projects": "*",
+      "type": "favorites",
+      "file": "favorites.json",
+      "enabled": true
+    },
+    {
+      "name": "directory",
+      "window": "1w",
+      "projects": "*",
+      "type": "directory",
+      "enabled": true
+    }
+  ],
+  "api_endpoints": {
+    "myself": "/myself",
+    "search": "/search",
+    "issue": "/issue/{key}",
+    "projects": "/project",
+    "project": "/project/{project}",
+    "project_versions": "/project/{project}/versions",
+    "statuses": "/status",
+    "fields": "/field",
+    "assignable_users": "/user/assignable/search",
+    "priorities": "/priority",
+    "issue_types": "/issuetype",
+    "board_issues": "/board/{board_id}/issue",
+    "boards": "/board",
+    "board_configuration": "/board/{board_id}/configuration",
+    "board_quickfilters": "/board/{board_id}/quickfilter",
+    "board_sprints": "/board/{board_id}/sprint",
+    "filter": "/filter/{filter_id}",
+    "favourite_filters": "/filter/favourite"
+  },
+  "bases": {
+    "api": "/rest/api/2",
+    "agile": "/rest/agile/1.0",
+    "cloud_search": "/rest/api/3/search/jql"
+  },
+  "search": {
+    "max_results_users": 50,
+    "max_results_search": 500,
+    "page_size": 50,
+    "timeout_seconds": 30,
+    "timeout_search_seconds": 120,
+    "cache_timeout_seconds": 0,
+    "versions_lookback_days": 0,
+    "labels_max_issues": 2000
+  },
+  "jql_templates": {
+    "partial_search": "project in ({projects}) AND (summary ~ \"{query}\" OR description ~ \"{query}\") ORDER BY updated DESC",
+    "users_search": "project in ({projects}) ORDER BY updated ASC",
+    "assignee_search": "project in ({projects}) AND assignee = \"{username}\" ORDER BY updated DESC",
+    "reporter_search": "project in ({projects}) AND reporter = \"{username}\" ORDER BY updated DESC",
+    "assignee_reporter_search": "project in ({projects}) AND assignee = \"{assignee}\" AND reporter = \"{reporter}\" ORDER BY updated DESC",
+    "release_search": "project = \"{project}\" AND fixVersion = \"{version}\"",
+    "release_search_all": "project = \"{project}\" AND fixVersion = \"{version}\" ORDER BY created ASC"
+  },
+  "field_sources": {
+    "key": [],
+    "title": [
+      "summary"
+    ],
+    "status": [
+      "status"
+    ],
+    "assignee": [
+      "assignee"
+    ],
+    "release": [
+      "fixVersions"
+    ],
+    "releaseLabel": [
+      "fixVersions"
+    ],
+    "releaseDate": [
+      "fixVersions"
+    ],
+    "releaseStatus": [
+      "fixVersions"
+    ],
+    "priority": [
+      "priority"
+    ],
+    "labels": [
+      "labels"
+    ],
+    "description": [
+      "description"
+    ],
+    "updated": [
+      "updated"
+    ],
+    "reporter": [
+      "reporter"
+    ],
+    "project": [
+      "project"
+    ],
+    "comments": [],
+    "components": [
+      "components"
+    ],
+    "epic": [
+      "parent"
+    ]
+  },
+  "group_fields": [
+    "components",
+    "epic"
+  ],
+  "always_api_fields": [
+    "updated",
+    "project"
+  ],
+  "base_window_keys": [
+    "key",
+    "title",
+    "status",
+    "assignee",
+    "release",
+    "releaseLabel",
+    "releaseDate",
+    "releaseStatus",
+    "priority",
+    "labels",
+    "description",
+    "reporter",
+    "project"
+  ],
+  "field_keys": [
+    "primary",
+    "content",
+    "detail",
+    "trailing",
+    "body",
+    "filter",
+    "filters",
+    "copy-fields"
+  ],
+  "endpoint_types": [
+    "issues",
+    "releases",
+    "favorites",
+    "directory"
+  ],
+  "auth_modes": [
+    "bearer",
+    "basic"
+  ],
+  "window_units": {
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
+    "w": 604800
+  },
+  "team_keys": [
+    "custom_fields",
+    "field_mappings",
+    "field_labels",
+    "project_keys",
+    "jobs",
+    "api_endpoints",
+    "boards",
+    "search_defaults",
+    "jql_templates"
+  ]
+}

@@ -37,27 +37,10 @@ STATE = os.path.join(CACHE, "state.json")
 LOCK = os.path.join(CACHE, "poll.lock")
 LOG = os.path.join(CACHE, "poll.log")
 
-DEFAULTS = {
-    "enabled": "false",
-    "sources": "webex, outlook, imessage",
-    "poll-seconds": "60",
-    "hide-when-zero": "true",
-    "mention-max-age-hours": "24",
-    "webex-enabled": "true",
-    "webex-app": "Cisco-Systems.Spark",
-    "webex-tag": "WEBEX",
-    "webex-api": "true",
-    "webex-count": "window",
-    "webex-rooms": "30",
-    "outlook-enabled": "false",
-    "outlook-app": "com.microsoft.Outlook",
-    "outlook-tag": "MAIL",
-    "outlook-api": "false",
-    "imessage-enabled": "false",
-    "imessage-app": "com.apple.MobileSMS",
-    "imessage-tag": "MESSAGES",
-    "imessage-api": "false",
-}
+# the [notifications] defaults live in notify/defaults.json and load here
+with open(os.path.join(HERE, "defaults.json"), encoding="utf-8") as _fh:
+    DEFAULTS = json.load(_fh)["defaults"]
+
 API_SOURCES = {"webex"}
 
 

@@ -41,35 +41,17 @@ DEFAULT_CONFIG = os.path.join(HOME, ".config/confluence/config.json")
 CACHE_DIR = os.environ.get("CONFLUENCE_CACHE_DIR") or os.path.join(HOME, ".cache/confluence")
 COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "commands.toml")
 
-TYPES = ("page", "blogpost", "attachment", "comment")
-MODES = ("all", "phrase", "any")
-MODIFIED = {"": None, "any": None, "7d": "-7d", "30d": "-30d", "90d": "-90d", "1y": "-1y"}
-DEFAULTS = {
-    "site": "",
-    "auth": "",
-    "email": "",
-    "token": "",
-    "spaces": [],
-    "favorites": [],
-    "search": {"limit": 25, "types": ["page", "blogpost"]},
-    "timeoutSeconds": 20,
-    # rate limits (Confluence Cloud answers 429 + Retry-After): a short ask is
-    # waited out inside the request; a longer one starts a COOLDOWN
-    # (~/.cache/confluence/ratelimit.json) during which every call refuses
-    # up front, so previews / searches / refreshes never pile on
-    "rateLimitMaxWaitSeconds": 20,
-    "cooldownSeconds": 60,          # when the server gives no Retry-After
-    "requestDelayMs": 0,
-    # the Contributor picker: people seen on recent content in the scope
-    # (~/.cache/confluence/users.json), rebuilt when older than this
-    "usersMaxAgeHours": 24,
-    "usersScanItems": 1000,         # newest items read to find them
-    "usersScanDelayMs": 300,        # pause between those pages (gentle)
-    "logLevel": "INFO",             # ~/.cache/confluence/debug.log
-    "rawCapture": False,            # raw response dumps (off: nothing is cached)
-    "rawKeepDays": 1,
-    "rawMaxMB": 200,
-}
+# ---------------------------------------------------------------- defaults
+# the static tables (content types, search modes, the modified windows and
+# the config defaults) live in confluence/defaults.json and load here;
+# behaviour stays code.
+_DEFAULTS_FILE = os.path.join(CONF_DIR, "defaults.json")
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _D = json.load(_fh)
+TYPES = tuple(_D["types"])
+MODES = tuple(_D["modes"])
+MODIFIED = _D["modified"]
+DEFAULTS = _D["defaults"]
 
 ConfigError = jira_config.ConfigError
 

@@ -1,0 +1,47 @@
+{
+  "types": [
+    "page",
+    "blogpost",
+    "attachment",
+    "comment"
+  ],
+  "modes": [
+    "all",
+    "phrase",
+    "any"
+  ],
+  "modified": {
+    "": null,
+    "any": null,
+    "7d": "-7d",
+    "30d": "-30d",
+    "90d": "-90d",
+    "1y": "-1y"
+  },
+  "defaults": {
+    "site": "",
+    "auth": "",
+    "email": "",
+    "token": "",
+    "spaces": [],
+    "favorites": [],
+    "search": {
+      "limit": 25,
+      "types": [
+        "page",
+        "blogpost"
+      ]
+    },
+    "timeoutSeconds": 20,
+    "rateLimitMaxWaitSeconds": 20,
+    "cooldownSeconds": 60,
+    "requestDelayMs": 0,
+    "usersMaxAgeHours": 24,
+    "usersScanItems": 1000,
+    "usersScanDelayMs": 300,
+    "logLevel": "INFO",
+    "rawCapture": false,
+    "rawKeepDays": 1,
+    "rawMaxMB": 200
+  }
+}
