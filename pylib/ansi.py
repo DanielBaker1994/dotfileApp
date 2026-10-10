@@ -7,8 +7,16 @@ suite's parser cases moved here (ws test ansi).
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import unicodedata
+
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ansi.json")
+# the ghostty-mirror theme defaults + the base-16 palette are data;
+# the xterm cube / grays are generated
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
 
 NONE = ("none",)
 
@@ -45,6 +53,9 @@ class RGB:
 
     def __repr__(self):
         return "RGB(%d, %d, %d)" % (self.r, self.g, self.b)
+
+
+_BASE16 = [RGB.from_hex(h) for h in _DATA["base16"]]
 
 
 class Style:
@@ -286,13 +297,14 @@ def parse(text: str) -> Grid:
 
 class Theme:
     def __init__(self):
-        self.foreground = RGB(0xC0, 0xCA, 0xF5)
-        self.background = RGB(0x1A, 0x1B, 0x26)
+        d = _DATA["theme"]
+        self.foreground = RGB.from_hex(d["foreground"])
+        self.background = RGB.from_hex(d["background"])
         self.palette = xterm256()
-        self.font_name = "Menlo"
-        self.font_size = 13.0
-        self.bold_is_bright = False
-        self.display_p3 = False
+        self.font_name = d["font_name"]
+        self.font_size = float(d["font_size"])
+        self.bold_is_bright = bool(d["bold_is_bright"])
+        self.display_p3 = bool(d["display_p3"])
 
     def colors(self, s: Style):
         def res(c, bright):
@@ -311,10 +323,7 @@ class Theme:
 
 
 def xterm256() -> list:
-    p = [RGB(0x00, 0x00, 0x00), RGB(0xCD, 0x00, 0x00), RGB(0x00, 0xCD, 0x00), RGB(0xCD, 0xCD, 0x00),
-         RGB(0x00, 0x00, 0xEE), RGB(0xCD, 0x00, 0xCD), RGB(0x00, 0xCD, 0xCD), RGB(0xE5, 0xE5, 0xE5),
-         RGB(0x7F, 0x7F, 0x7F), RGB(0xFF, 0x00, 0x00), RGB(0x00, 0xFF, 0x00), RGB(0xFF, 0xFF, 0x00),
-         RGB(0x5C, 0x5C, 0xFF), RGB(0xFF, 0x00, 0xFF), RGB(0x00, 0xFF, 0xFF), RGB(0xFF, 0xFF, 0xFF)]
+    p = list(_BASE16)
     steps = (0, 95, 135, 175, 215, 255)
     for r in steps:
         for g in steps:
