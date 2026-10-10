@@ -699,3 +699,23 @@ def _jira_criteria(params: dict) -> dict:
 @method("jira.directory")
 def _jira_directory(params: dict) -> dict:
     return jira_directory.load(params.get("path") or "")
+
+
+@method("jira.options")
+def _jira_options(params: dict) -> dict:
+    kind = params.get("kind") or ""
+    if kind == "value":
+        return {"options": jira_directory.value_options(params.get("values") or [])}
+    d = jira_directory.load(params.get("path") or "")
+    if kind == "project":
+        return {"options": jira_directory.project_options(d, params.get("scope") or [])}
+    if kind == "user":
+        return {"options": jira_directory.user_options(d, params.get("me") is not False)}
+    if kind == "status":
+        return {"options": jira_directory.status_options(
+            d, params.get("words") or {}, params.get("categoryNames") or None)}
+    if kind == "label":
+        return {"options": jira_directory.label_options(d, params.get("scope"))}
+    if kind == "version":
+        return {"options": jira_directory.version_options(d, params.get("scope"))}
+    raise HelperError("jira.options: unknown kind: %s" % kind)

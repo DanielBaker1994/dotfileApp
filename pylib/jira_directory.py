@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
+
+import jira_data
 
 _LOCK = threading.Lock()
 _CACHE = {"path": None, "stamp": None, "data": None}
+
+# how many entries a picker shows before folding the tail (matches the app's
+# JiraMultiPicker.topN; folded entries carry unused=true)
+TOP_N = 50
 
 
 def _is_str(x) -> bool:
@@ -126,3 +133,84 @@ def load(path: str) -> dict:
         if c["path"] != path or c["stamp"] != stamp:
             c.update(path=path, stamp=stamp, data=_parse(path))
         return c["data"]
+
+
+# ------------------------------------------------------------ picker options
+
+def _option(id_, title, detail="", group="", unused=False) -> dict:
+    return {"id": id_, "title": title, "detail": detail, "group": group, "unused": unused}
+
+
+def _matches(projects, scope) -> bool:
+    if not scope:
+        return True
+    return any(p in scope for p in projects)
+
+
+def project_options(d: dict, scope) -> list:
+    names = {p["key"]: p["name"] for p in d.get("projects") or []}
+    return [_option(k, k, names.get(k, "")) for k in scope or []]
+
+
+def user_options(d: dict, me: bool = True) -> list:
+    out = [_option("currentUser()", "Me", "currentUser()")] if me else []
+    for u in d.get("users") or []:
+        who = []
+        if u["username"] and u["username"] != u["name"]:
+            who.append(u["username"])
+        if u["email"]:
+            who.append(u["email"])
+        projects = ", ".join(u["projects"])
+        out.append(_option(u["id"], u["name"], " · ".join(who + ([projects] if projects else []))))
+    return out
+
+
+def value_options(values) -> list:
+    return [_option(v, v) for v in values or [] if isinstance(v, str)]
+
+
+def status_options(d: dict, words: dict, category_names=None) -> list:
+    category_names = category_names or ["To Do", "In Progress", "Done"]
+    cats = d.get("statusCategories") or {}
+    return [_option(s, s, "", category_names[jira_data.category(s, cats, words)])
+            for s in d.get("statuses") or []]
+
+
+def _natural_key(name: str) -> list:
+    """Case-folded natural ordering (the localizedStandardCompare stand-in)."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name.casefold())]
+
+
+def _fold_tail(opts: list) -> list:
+    if len(opts) <= TOP_N + 5:
+        return opts
+    return [dict(o, unused=(i >= TOP_N)) for i, o in enumerate(opts)]
+
+
+def label_options(d: dict, scope=None) -> list:
+    labs = [l for l in d.get("labels") or [] if _matches(l["projects"], scope)]
+    labs.sort(key=lambda l: (-l["count"], _natural_key(l["name"])))
+    out = []
+    for l in labs:
+        n = "%d issue%s · " % (l["count"], "" if l["count"] == 1 else "s") if l["count"] > 0 else ""
+        out.append(_option(l["name"], l["name"], n + ", ".join(l["projects"])))
+    return _fold_tail(out)
+
+
+def version_options(d: dict, scope=None) -> list:
+    order, by = [], {}
+    for v in d.get("versions") or []:
+        if not _matches([v["project"]], scope):
+            continue
+        if v["name"] not in by:
+            order.append(v["name"])
+            by[v["name"]] = []
+        by[v["name"]].append(v)
+    out = []
+    for name in order:
+        vs = by[name]
+        date = next((v["releaseDate"] for v in vs if v["releaseDate"]), "no date")
+        state = "released" if all(v["released"] for v in vs) else "unreleased"
+        detail = " · ".join([", ".join(v["project"] for v in vs), date, state])
+        out.append(_option(name, name, detail))
+    return out

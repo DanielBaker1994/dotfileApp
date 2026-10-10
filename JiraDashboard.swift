@@ -1059,7 +1059,9 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         nameField.isEditable = new
         nameField.isSelectable = true
         nameField.placeholderString = "e.g. team-bugs"
-        projectsPicker.options = dir.projectOptions(scope: scope)
+        JiraDirectory.fetchOptions(kind: "project", scope: scope) { [weak self] opts in
+            self?.projectsPicker.options = opts
+        }
         if let p = d["projects"] as? [String] { projectsPicker.set(p) } else { projectsPicker.set([], all: true) }
         loadColumns(d["columnsSpec"] as? String, me: d["name"] as? String)
 

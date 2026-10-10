@@ -178,6 +178,22 @@ class ScriptBridge(unittest.TestCase):
         self.assertEqual(reply["result"]["fetchedAt"], "t")
         self.assertEqual(reply["result"]["projects"], [{"key": "APP", "name": ""}])
 
+    def test_jira_options_method(self):
+        tmp = tempfile.mkdtemp(prefix="jira-opts-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "directory.json")
+        with open(path, "w") as fh:
+            json.dump({"users": [{"id": "u1", "name": "Ada"}]}, fh)
+        reply = dispatch({"id": 1, "method": "jira.options",
+                          "params": {"kind": "user", "path": path}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual([o["id"] for o in reply["result"]["options"]], ["currentUser()", "u1"])
+        reply = dispatch({"id": 2, "method": "jira.options",
+                          "params": {"kind": "value", "values": ["A"]}})
+        self.assertEqual(reply["result"]["options"][0]["title"], "A")
+        reply = dispatch({"id": 3, "method": "jira.options", "params": {"kind": "nope"}})
+        self.assertFalse(reply["ok"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

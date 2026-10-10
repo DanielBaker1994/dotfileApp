@@ -91,61 +91,38 @@ struct JiraDirectory {
         }
     }
 
-    func projectOptions(scope: [String]) -> [JiraMultiPicker.Option] {
-        scope.map { k in
-            .init(id: k, title: k, detail: projects.first { $0.key == k }?.name ?? "")
-        }
-    }
-
-    func userOptions(me: Bool = true) -> [JiraMultiPicker.Option] {
-        var out: [JiraMultiPicker.Option] = me ? [.init(id: "currentUser()", title: "Me", detail: "currentUser()")] : []
-        out += users.map { u in
-            let who = [u.username == u.name ? "" : u.username, u.email].filter { !$0.isEmpty }
-            let detail = (who + [u.projects.joined(separator: ", ")]).filter { !$0.isEmpty }.joined(separator: " · ")
-            return .init(id: u.id, title: u.name, detail: detail)
-        }
-        return out
-    }
-
     static func options(_ vals: [String]) -> [JiraMultiPicker.Option] {
         vals.map { .init(id: $0, title: $0, detail: "") }
     }
 
-    func statusOptions() -> [JiraMultiPicker.Option] {
-        statuses.map { s in
-            .init(id: s, title: s, detail: "",
-                  group: JiraTicketPage.categoryNames[JiraTicketPage.category(of: s, in: statusCategories)])
+    /// The picker shapings live in pylib/jira_directory.py (`jira.options`);
+    /// python loads the directory itself (mtime-cached). Completion on main.
+    static func fetchOptions(kind: String, scope: [String]? = nil, values: [String] = [],
+                             me: Bool = true, done: @escaping ([JiraMultiPicker.Option]) -> Void) {
+        var params: [String: Any] = ["kind": kind]
+        if kind != "value" { params["path"] = JiraPoll.directoryPath }
+        if let scope { params["scope"] = scope }
+        if !values.isEmpty { params["values"] = values }
+        if !me { params["me"] = false }
+        if kind == "status" {
+            params["words"] = JiraStyle.current.words
+            params["categoryNames"] = JiraTicketPage.categoryNames
         }
-    }
-
-    private static func matches(_ ps: [String], _ scope: [String]?) -> Bool {
-        guard let scope, !scope.isEmpty else { return true }
-        return ps.contains(where: scope.contains)
-    }
-
-    func labelOptions(in scope: [String]?) -> [JiraMultiPicker.Option] {
-        let opts: [JiraMultiPicker.Option] = labels.filter { Self.matches($0.projects, scope) }
-            .sorted { $0.count != $1.count ? $0.count > $1.count
-                                           : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            .map { l in
-                let n = l.count > 0 ? "\(l.count) issue\(l.count == 1 ? "" : "s") · " : ""
-                return .init(id: l.name, title: l.name, detail: n + l.projects.joined(separator: ", "))
+        pythonHelper.call("jira.options", params, timeout: 60) { result in
+            var opts: [JiraMultiPicker.Option] = []
+            if case .success(let box) = result, let d = box as? [String: Any],
+               let list = d["options"] as? [[String: Any]] {
+                opts = list.compactMap { o in
+                    guard let id = o["id"] as? String, let title = o["title"] as? String else { return nil }
+                    return JiraMultiPicker.Option(id: id, title: title,
+                                                  detail: o["detail"] as? String ?? "",
+                                                  group: o["group"] as? String ?? "",
+                                                  unused: o["unused"] as? Bool ?? false)
+                }
+            } else {
+                wsLog("jira: options (\(kind)) unresolved (python helper unavailable)")
             }
-        return JiraMultiPicker.foldTail(opts)
-    }
-
-    func versionOptions(in scope: [String]?) -> [JiraMultiPicker.Option] {
-        var order: [String] = [], by: [String: [Version]] = [:]
-        for v in versions where Self.matches([v.project], scope) {
-            if by[v.name] == nil { order.append(v.name) }
-            by[v.name, default: []].append(v)
-        }
-        return order.map { n in
-            let vs = by[n] ?? []
-            let date = vs.first { !$0.releaseDate.isEmpty }?.releaseDate ?? "no date"
-            let state = vs.allSatisfy(\.released) ? "released" : "unreleased"
-            return .init(id: n, title: n, detail: ([vs.map(\.project).joined(separator: ", "), date, state])
-                            .joined(separator: " · "))
+            done(opts)
         }
     }
 }
@@ -1043,7 +1020,9 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
 
     fileprivate func reloadLists() {
         dir = JiraDirectory.load()
-        projects.options = dir.projectOptions(scope: info["projectKeys"] as? [String] ?? [])
+        JiraDirectory.fetchOptions(kind: "project", scope: info["projectKeys"] as? [String] ?? []) { [weak self] opts in
+            self?.projects.options = opts
+        }
         for r in rows { fillOptions(r) }
         fetchButton.isHidden = !dir.isEmpty && !dir.versions.isEmpty
         if dir.isEmpty && status.stringValue.isEmpty {
@@ -1062,7 +1041,10 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
             guard let self, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] else { return }
             self.info = d
             self.kindsCache = nil
-            self.projects.options = self.dir.projectOptions(scope: d["projectKeys"] as? [String] ?? [])
+            let keys = d["projectKeys"] as? [String] ?? []
+            JiraDirectory.fetchOptions(kind: "project", scope: keys) { [weak self] opts in
+                self?.projects.options = opts
+            }
             if self.projects.selected.isEmpty && !self.projects.isAll && !self.hasSavedState {
                 let pk = d["projectKeys"] as? [String] ?? []
                 self.projects.set(pk, all: pk.isEmpty)
@@ -1186,19 +1168,31 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private func fillOptions(_ r: Row) {
         guard let p = r.control as? JiraMultiPicker else { return }
         let keep = p.selected
+        func apply(_ opts: [JiraMultiPicker.Option]) {
+            guard rows.contains(where: { $0.control === p }) else { return }
+            p.options = opts
+            p.set(keep)
+        }
         switch r.kind.key {
-        case "assignee", "reporter": p.options = dir.userOptions()
-        case "status": p.groupOrder = JiraTicketPage.categoryNames; p.options = dir.statusOptions()
-        case "statusCategory": p.options = JiraDirectory.options(JiraTicketPage.categoryNames)
-        case "issuetype": p.options = JiraDirectory.options(dir.issueTypes)
-        case "priority": p.options = JiraDirectory.options(dir.priorities)
+        case "assignee", "reporter":
+            JiraDirectory.fetchOptions(kind: "user") { apply($0) }
+        case "status":
+            p.groupOrder = JiraTicketPage.categoryNames
+            JiraDirectory.fetchOptions(kind: "status") { apply($0) }
+        case "statusCategory":
+            apply(JiraDirectory.options(JiraTicketPage.categoryNames))
+        case "issuetype":
+            apply(JiraDirectory.options(dir.issueTypes))
+        case "priority":
+            apply(JiraDirectory.options(dir.priorities))
         case "labels":
             p.foldTitle = { [weak p] n in "Show all \(p?.options.count ?? n) labels" }
-            p.options = dir.labelOptions(in: projectScope)
-        case "fixVersion": p.options = dir.versionOptions(in: projectScope)
-        default: break
+            JiraDirectory.fetchOptions(kind: "label", scope: projectScope) { apply($0) }
+        case "fixVersion":
+            JiraDirectory.fetchOptions(kind: "version", scope: projectScope) { apply($0) }
+        default:
+            p.set(keep)
         }
-        p.set(keep)
     }
 
     private func projectsChanged() {

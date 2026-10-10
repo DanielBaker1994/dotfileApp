@@ -15,6 +15,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pylib"))
 
+import jira_data
 import jira_directory as jdir
 
 
@@ -97,6 +98,85 @@ class Load(unittest.TestCase):
         self.assertIs(jdir.load(path), first)
         os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
         self.assertEqual(jdir.load(path)["fetchedAt"], "two")
+
+
+class Options(unittest.TestCase):
+    def test_project_options_follow_the_scope_order(self):
+        d = {"projects": [{"key": "A", "name": "Alpha"}, {"key": "B", "name": "Beta"}]}
+        self.assertEqual(jdir.project_options(d, ["B", "A", "Z"]),
+                         [{"id": "B", "title": "B", "detail": "Beta", "group": "", "unused": False},
+                          {"id": "A", "title": "A", "detail": "Alpha", "group": "", "unused": False},
+                          {"id": "Z", "title": "Z", "detail": "", "group": "", "unused": False}])
+
+    def test_user_options_me_first_and_detail_composition(self):
+        d = {"users": [
+            {"id": "u1", "name": "Ada", "username": "ada", "email": "a@x", "projects": ["A", "B"]},
+            {"id": "u2", "name": "Bob", "username": "Bob", "email": "", "projects": []},
+        ]}
+        opts = jdir.user_options(d)
+        self.assertEqual(opts[0], {"id": "currentUser()", "title": "Me",
+                                   "detail": "currentUser()", "group": "", "unused": False})
+        self.assertEqual(opts[1]["detail"], "ada · a@x · A, B")
+        self.assertEqual(opts[2]["detail"], "")  # username == name, no email, no projects
+        self.assertEqual(jdir.user_options(d, me=False)[0]["id"], "u1")
+
+    def test_value_options(self):
+        self.assertEqual(jdir.value_options(["Bug", 7, "Task"]),
+                         [{"id": "Bug", "title": "Bug", "detail": "", "group": "", "unused": False},
+                          {"id": "Task", "title": "Task", "detail": "", "group": "", "unused": False}])
+
+    def test_status_options_group_by_category(self):
+        d = {"statuses": ["To Do", "Doing", "Done"],
+             "statusCategories": {"To Do": "new", "Doing": "indeterminate", "Done": "done"}}
+        opts = jdir.status_options(d, {})
+        self.assertEqual([o["group"] for o in opts], ["To Do", "In Progress", "Done"])
+
+    def test_status_options_word_fallback_and_custom_names(self):
+        d = {"statuses": ["Won't Do"], "statusCategories": {}}
+        opts = jdir.status_options(d, jira_data.words({}), ["N", "P", "D"])
+        self.assertEqual(opts[0]["group"], "D")
+
+    def test_label_options_sort_scope_and_detail(self):
+        d = {"labels": [
+            {"name": "L10", "projects": ["A"], "count": 2},
+            {"name": "L2", "projects": ["A"], "count": 2},
+            {"name": "zzz", "projects": ["B"], "count": 9},
+            {"name": "one", "projects": ["A"], "count": 1},
+            {"name": "none", "projects": ["A"], "count": 0},
+        ]}
+        opts = jdir.label_options(d, ["A"])
+        self.assertEqual([o["id"] for o in opts], ["L2", "L10", "one", "none"])
+        self.assertEqual(opts[0]["detail"], "2 issues · A")
+        self.assertEqual(opts[2]["detail"], "1 issue · A")
+        self.assertEqual(opts[3]["detail"], "A")
+        self.assertEqual([o["id"] for o in jdir.label_options(d, None)], ["zzz", "L2", "L10", "one", "none"])
+
+    def test_label_options_fold_tail_marks_unused(self):
+        d = {"labels": [{"name": "n%03d" % i, "projects": [], "count": 0} for i in range(60)]}
+        opts = jdir.label_options(d)
+        self.assertEqual(len(opts), 60)
+        self.assertFalse(opts[49]["unused"])
+        self.assertTrue(opts[50]["unused"])
+        self.assertTrue(opts[59]["unused"])
+        small = jdir.label_options({"labels": [{"name": "a", "projects": [], "count": 0}] * 40})
+        self.assertFalse(any(o["unused"] for o in small))
+
+    def test_version_options_group_dates_and_state(self):
+        d = {"versions": [
+            {"name": "2026.2", "project": "A", "releaseDate": "", "released": False},
+            {"name": "2026.2", "project": "B", "releaseDate": "2026-06-01", "released": False},
+            {"name": "2026.1", "project": "A", "releaseDate": "2026-01-01", "released": True},
+            {"name": "2027.1", "project": "C", "releaseDate": "2027-01-01", "released": False},
+        ]}
+        opts = jdir.version_options(d, ["A", "B"])
+        self.assertEqual([o["id"] for o in opts], ["2026.2", "2026.1"])
+        self.assertEqual(opts[0]["detail"], "A, B · 2026-06-01 · unreleased")
+        self.assertEqual(opts[1]["detail"], "A · 2026-01-01 · released")
+        self.assertEqual(jdir.version_options(d, None)[2]["detail"], "C · 2027-01-01 · unreleased")
+
+    def test_version_options_no_date_fallback(self):
+        d = {"versions": [{"name": "v", "project": "A", "releaseDate": "", "released": True}]}
+        self.assertEqual(jdir.version_options(d, None)[0]["detail"], "A · no date · released")
 
 
 if __name__ == "__main__":
