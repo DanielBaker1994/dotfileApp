@@ -1,0 +1,5 @@
+{
+  "max_limit": 25,
+  "whys": ["created", "modified", "downloaded", "clipboard", "filefast", "copied", "screenshot"],
+  "activity_whys": ["created", "modified", "downloaded"]
+}

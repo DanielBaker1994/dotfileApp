@@ -8,9 +8,13 @@ import os
 import stat as stat_mod
 from urllib.parse import unquote, urlsplit
 
-MAX_LIMIT = 25
-WHYS = ("created", "modified", "downloaded", "clipboard", "filefast", "copied", "screenshot")
-ACTIVITY_WHYS = ("created", "modified", "downloaded")
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shelf.json")
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
+
+MAX_LIMIT = _DATA["max_limit"]
+WHYS = tuple(_DATA["whys"])
+ACTIVITY_WHYS = tuple(_DATA["activity_whys"])
 
 
 def canonical(p):
