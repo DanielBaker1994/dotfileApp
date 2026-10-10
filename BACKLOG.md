@@ -113,7 +113,7 @@ same — Python, Swift, JSON all look alike. It should read differently per
 language.
 
 **Where.** Prose reading view + Export PDF go through pandoc
-`--syntax-highlighting=\(highlight)` (`ProsePDF.swift:44`, default `tango`,
+`--syntax-highlighting=\(highlight)` (`pylib/prose_pdf.py`, default `tango`,
 `[notes] pdf-highlight`). pandoc/skylighting does emit per-language classes
 (`pre.sourceCode.LANG`), and the dotfiles `friendly_document_styling.css`
 styles code, so the shared look is most likely the one theme mapping the same
@@ -139,7 +139,7 @@ hover/copied states). The `friendly_document_styling.css` language icons
 Prose view/PDF.
 
 **Investigate.** `ProseRender` (`NotesProse.swift`) builds the reading view's
-HTML and `ProsePDF.pandocArgs` (`ProsePDF.swift:44`) builds the exported
+HTML and `prose_pdf.pandoc_args` (`pylib/prose_pdf.py`) builds the exported
 document — neither injects copy buttons today.
 
 - In the **reading view** (a `WKWebView`) a button with `navigator.clipboard`

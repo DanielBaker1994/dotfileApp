@@ -849,7 +849,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         let l = s.model.left, r = s.model.right
         if l.lines.isEmpty && r.lines.isEmpty { return "" }
         if let a = s.disk[.left], let b = s.disk[.right], a == b, !s.isDirty { return cfg.label("same", "Identical") }
-        if l.encoded() == r.encoded() { return cfg.label("same", "Identical") }
+        if l.encoding == r.encoding && l.lines == r.lines && l.eols == r.eols { return cfg.label("same", "Identical") }
         var why: [String] = []
         if l.encoding != r.encoding { why.append("encoding \(l.encoding.rawValue) vs \(r.encoding.rawValue)") }
         if l.eolLabel != r.eolLabel || l.eols.last != r.eols.last { why.append("line endings") }
@@ -1264,7 +1264,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         s.binary[side] = nil
         s.tooLarge[side] = nil
         if d.count > cfg.maxBytes { s.tooLarge[side] = true; return nil }
-        if TextSide.isBinary(d) { s.binary[side] = d; return nil }
         guard let t = TextSide.decode(d) else { s.binary[side] = d; return nil }
         if t.lines.count > cfg.maxLines { s.tooLarge[side] = true; return nil }
         return t
@@ -1767,7 +1766,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
         s.willEdit(from.other)
         let cursorModel = rows.lowerBound
-        if s.model.copyRows(rows, from: from) != nil {
+        if s.model.copyRows(rows, from: from) {
             s.anchor = nil
             s.status = "copied to the \(from.other.rawValue)"
             modelChanged(s, keepCursor: true)
@@ -1781,7 +1780,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         commitEditor()
         let m = s.modelRow(s.cursor)
         s.willEdit(from.other)
-        if s.model.copyRows(m..<(m + 1), from: from) != nil {
+        if s.model.copyRows(m..<(m + 1), from: from) {
             s.status = "line copied to the \(from.other.rawValue)"
             modelChanged(s, keepCursor: true)
         }
@@ -1841,9 +1840,9 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         guard let s = session else { return }
         if s.folder != nil { if !redo { folderPage.undo() }; return }
         commitEditor()
-        let side = redo ? nil : (s.model.undoStack.contains { $0.0 == s.focus } ? s.focus : nil)
-        let e = redo ? s.model.redo() : s.model.undo(side)
-        guard e != nil else { s.status = redo ? "nothing to redo" : "nothing to undo"; syncAll(); return }
+        let side = redo ? nil : (s.model.hasUndo(s.focus) ? s.focus : nil)
+        let ok = redo ? s.model.redo() : s.model.undo(side)
+        guard ok else { s.status = redo ? "nothing to redo" : "nothing to undo"; syncAll(); return }
         s.status = redo ? "redone" : "undone"
         modelChanged(s, keepCursor: true)
     }

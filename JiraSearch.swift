@@ -751,7 +751,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         p.unhook()
     }
 
-    static func park(from w: PopupWindow) {}
     static func unpark(to w: PopupWindow) {
         guard let p = live, p.host === w, p.attached else { return }
         p.applyTheme(w.config)

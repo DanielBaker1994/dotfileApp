@@ -30,21 +30,6 @@ window_count() {
     osascript -e 'tell application "System Events" to count (windows of (processes where name is "kitchen-sink"))' 2>/dev/null || echo 0
 }
 
-app_pid() {
-    pgrep -f "kitchen-sink.app/Contents/MacOS" | head -1
-}
-
-windows_named() {
-    local pattern="$1"
-    osascript -e "
-        tell application \"System Events\"
-            tell process \"kitchen-sink\"
-                count (windows whose name contains \"$pattern\")
-            end tell
-        end tell
-    " 2>/dev/null || echo 0
-}
-
 window_frame() {
     local idx="${1:-1}"
     osascript -e "
@@ -67,16 +52,6 @@ window_exists() {
             end tell
         end tell
     " 2>/dev/null | grep -q 'true'
-}
-
-status_item_count() {
-    osascript -e '
-        tell application "System Events"
-            tell process "kitchen-sink"
-                count (menu bars of menu bar 1)
-            end tell
-        end tell
-    ' 2>/dev/null || echo 0
 }
 
 TMPDIR="${TMPDIR:-/tmp}"

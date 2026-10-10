@@ -59,6 +59,7 @@ let assetDir: String = {
     return bundleParentDir
 }()
 let userDir: String = isRepoBuild ? bundleParentDir : homeDir
+let pythonHelper = PythonHelper.shared
 
 let commandsConfName = "commands.toml"
 
@@ -721,17 +722,17 @@ func loadCommands() -> [CommandSpec] {
         }
         section = nil
     }
-    for line in content.split(separator: "\n") {
-        let s = line.trimmingCharacters(in: .whitespaces)
+    for rec in configDecodedLines(content) {
+        let s = rec.trimmed
         if s.isEmpty || s.hasPrefix("#") { continue }
-        if let name = configSectionHeader(s) {
+        if let name = rec.header {
             flushSection()
             if !name.isEmpty {
                 section = (name, [:])
             }
             continue
         }
-        guard let (key, val) = configEntry(s) else { continue }
+        guard let key = rec.key, let val = rec.value else { continue }
         if section?.name == "shortcuts" {
             if let colon = key.firstIndex(of: ":") {
                 let view = key[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
@@ -1352,13 +1353,12 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
     var seenKeys: Set<String> = []
     var entries = 0
     var garbage = 0
-    for (i, raw) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-        let n = i + 1
-        let s = raw.trimmingCharacters(in: .whitespaces)
+    for rec in configDecodedLines(text) {
+        let n = rec.index + 1
+        let s = rec.trimmed
         if s.isEmpty || s.hasPrefix("#") { continue }
         if s.hasPrefix("[") {
-            let name = s.hasSuffix("]")
-                ? String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces) : ""
+            let name = rec.header ?? ""
             guard !name.isEmpty, !name.contains("["), !name.contains("]") else {
                 fail(n, "malformed section header '\(s.prefix(40))' (expected [name])")
                 continue
@@ -1371,7 +1371,7 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
             seenKeys = []
             continue
         }
-        guard let (key, val) = configEntry(s) else {
+        guard let key = rec.key, let val = rec.value else {
             garbage += 1
             warn(n, "ignored line (no '='): \(s.prefix(40))")
             continue
@@ -1517,8 +1517,8 @@ func saveConfigValue(section: String, key: String, value: String) {
 
 func saveConfigValues(section: String, _ kv: [(String, String?)]) {
     guard let content = readConfigText() else { return }
-    writeConfigText(configSetting(configLines(content), section: section, kv)
-        .joined(separator: "\n"))
+    guard let text = configSettingText(content, section: section, kv) else { return }
+    writeConfigText(text)
 }
 
 func removeConfigValue(section: String, key: String) {
@@ -4649,7 +4649,8 @@ final class SwitcherController: NSObject {
             log("commands.toml: \(display) already listed — no change")
             return
         }
-        lines[e.index] = configLine("paths", e.value.isEmpty ? display : e.value + ", " + display)
+        guard let line = configLine("paths", e.value.isEmpty ? display : e.value + ", " + display) else { return }
+        lines[e.index] = line
         writeConfigText(lines.joined(separator: "\n"))
         log("commands.toml: added note \(display)")
     }
@@ -4667,7 +4668,8 @@ final class SwitcherController: NSObject {
             if kept.isEmpty {
                 lines.remove(at: e.index)
             } else {
-                lines[e.index] = configLine("paths", kept.joined(separator: ", "))
+                guard let line = configLine("paths", kept.joined(separator: ", ")) else { return }
+                lines[e.index] = line
             }
             writeConfigText(lines.joined(separator: "\n"))
             log("commands.toml: removed \(display) from [\(section)]")
@@ -8861,7 +8863,6 @@ extension SwitcherController {
                 host.slot.back(esc: true)
             }
             if cmd.name == "jira" && inSlot {
-                w.onPark = { [w] in JiraSearchPanel.park(from: w) }
                 w.onUnpark = { [w] in JiraSearchPanel.unpark(to: w) }
             }
             w.onHide = { [self] restore in

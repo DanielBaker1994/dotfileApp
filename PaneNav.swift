@@ -145,13 +145,6 @@ final class PaneNav {
         return true
     }
 
-    func neighbour(of id: String, _ dir: PaneDir, in w: NSWindow) -> String? {
-        guard let p = provider?(w) else { return nil }
-        let list = panes(in: w, p)
-        let rects = list.map { PaneRect(id: $0.id, rect: topDown($0.windowRect(), in: w)) }
-        return PaneGeometry.next(from: id, dir, panes: rects, came: came[ObjectIdentifier(p)] ?? [:])
-    }
-
     func track(_ w: NSWindow) {
         let id = ObjectIdentifier(w)
         if tracked[id] == nil {

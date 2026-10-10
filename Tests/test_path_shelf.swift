@@ -1,4 +1,4 @@
-// sources: PathShelf.swift RecentFiles.swift ProcessRun.swift
+// sources: PythonHelper.swift PathShelf.swift RecentFiles.swift ProcessRun.swift
 import AppKit
 
 @main
@@ -22,147 +22,20 @@ struct PathShelfTests {
         try? text.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
-    static func git(_ dir: String, _ args: [String], stdin: String? = nil) -> (Int32, String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", dir, "-c", "core.excludesFile=/dev/null"] + args
-        let out = Pipe(), inp = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        p.standardInput = inp
-        try? p.run()
-        if let s = stdin { inp.fileHandleForWriting.write(Data(s.utf8)) }
-        try? inp.fileHandleForWriting.close()
-        let o = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        p.waitUntilExit()
-        return (p.terminationStatus, o)
-    }
-
     static func main() {
         let tmp = NSTemporaryDirectory() + "pathshelf-\(getpid())"
         try? fm.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         let root = PathShelf.canonical(tmp)?.path ?? tmp
         defer { try? fm.removeItem(atPath: root) }
 
-        patterns()
-        gitParity(root)
-        ripgrepFiles(root)
+        PythonHelper.shared.configure(libDir: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("pylib").path)
         shelf(root)
         clipboard(root)
 
         print("\npath shelf: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
-    }
-
-    static func patterns() {
-        func m(_ pat: String, _ rel: String, dir: Bool = false) -> Bool {
-            guard let p = IgnoreRules.compile(pat) else { return false }
-            if p.dirOnly && !dir { return false }
-            return p.regex.firstMatch(in: rel, range: NSRange(rel.startIndex..., in: rel)) != nil
-        }
-        check(m("*.pyc", "a/b/x.pyc"), "unanchored glob matches at any depth")
-        check(!m("*.pyc", "a/b/x.pyc.txt"), "glob is whole-name")
-        check(m("/top.txt", "top.txt") && !m("/top.txt", "a/top.txt"), "leading / anchors")
-        check(m("a/b.txt", "a/b.txt") && !m("a/b.txt", "x/a/b.txt"), "middle / anchors")
-        check(m("build/", "x/build", dir: true) && !m("build/", "x/build"), "trailing / = folders only")
-        check(m("**/cache", "a/b/cache") && m("**/cache", "cache"), "leading **/")
-        check(m("docs/**", "docs/a/b.md") && !m("docs/**", "docs"), "trailing /**")
-        check(m("a/**/z", "a/z") && m("a/**/z", "a/b/c/z"), "middle /**/")
-        check(m("[Tt]humbs.db", "Thumbs.db") && m("[Tt]humbs.db", "x/thumbs.db"), "character class")
-        check(m("[!a]x", "bx") && !m("[!a]x", "ax"), "negated class")
-        check(m("?.txt", "a.txt") && !m("?.txt", "ab.txt") && !m("?.txt", "/.txt"), "? = one non-slash")
-        check(m("\\#hash", "#hash"), "escaped #")
-        check(IgnoreRules.compile("# comment") == nil && IgnoreRules.compile("   ") == nil, "comments / blanks")
-        check(IgnoreRules.compile("!keep.log")?.negate == true, "! negates")
-        check(m("trail\\ ", "trail "), "escaped trailing space kept")
-        check(m("x  ", "x"), "trailing spaces dropped")
-        let home = "/Users/someone"
-        if let p = IgnoreRules.compile("~/Secret/", global: true, home: home) {
-            let rel = "Users/someone/Secret"
-            check(p.dirOnly && p.regex.firstMatch(in: rel, range: NSRange(rel.startIndex..., in: rel)) != nil,
-                  "~/ path in the shelf file")
-        } else { check(false, "~/ pattern compiles") }
-    }
-
-    static func gitParity(_ root: String) {
-        let repo = root + "/repo"
-        guard git(root, ["init", "-q", repo]).0 == 0 else {
-            print("  SKIP: git not available — parity checks skipped")
-            return
-        }
-        write(repo + "/.gitignore", """
-        # comments and blanks are skipped
-
-        *.log
-        !keep.log
-        build/
-        /top.txt
-        docs/**/*.tmp
-        **/cache/
-        a/b/c.txt
-        [Tt]humbs.db
-        \\#hash.txt
-        deep/**
-        !deep/keep.txt
-        name-only
-        """)
-        write(repo + "/sub/.gitignore", "*.md\n!README.md\n/local.txt\n")
-        let rels = [
-            "x.log", "keep.log", "sub/y.log", "sub/keep.log", "build/out.o", "src/build/out.o", "build.txt",
-            "top.txt", "sub/top.txt", "docs/a/b/c.tmp", "docs/c.tmp", "other/c.tmp", "cache/x", "q/cache/x",
-            "a/b/c.txt", "x/a/b/c.txt", "Thumbs.db", "z/thumbs.db", "#hash.txt", "deep/x/y", "deep/keep.txt",
-            "name-only", "z/name-only", "name-only/inside.txt", "sub/notes.md", "sub/README.md", "sub/local.txt",
-            "sub/deeper/local.txt", "plain.txt", "sub/plain.md.txt",
-        ]
-        for r in rels { write(repo + "/" + r) }
-        let (_, out) = git(repo, ["check-ignore", "--stdin"], stdin: rels.joined(separator: "\n") + "\n")
-        let gitIgnored = Set(out.split(whereSeparator: \.isNewline).map(String.init))
-        let rules = IgnoreRules(home: root, shelfFile: nil)
-        rules.gitExcludes = root + "/no-such-global"
-        rules.recheck = 0
-        var agree = 0
-        for r in rels {
-            let mine = rules.ignored(repo + "/" + r)
-            let theirs = gitIgnored.contains(r)
-            if mine == theirs { agree += 1 } else { check(false, "git parity: \(r) git=\(theirs) ours=\(mine)") }
-        }
-        check(agree == rels.count, "git check-ignore parity on \(rels.count) paths (\(gitIgnored.count) ignored)")
-        write(root + "/norepo/.gitignore", "*.txt\n")
-        write(root + "/norepo/a.txt")
-        check(!rules.ignored(root + "/norepo/a.txt"), ".gitignore outside a git repo is not honored")
-    }
-
-    static func ripgrepFiles(_ root: String) {
-        let d = root + "/rg"
-        write(d + "/.ignore", "*.secret\nx.txt\n")
-        write(d + "/.rgignore", "!x.txt\n")
-        write(d + "/inner/.ignore", "!inner.secret\n")
-        for f in ["a.secret", "x.txt", "inner/inner.secret", "inner/other.secret", "fine.md"] { write(d + "/" + f) }
-        let shelfFile = root + "/paths.ignore"
-        write(shelfFile, "*.md\n!special.md\n~/Private/\n")
-        let rules = IgnoreRules(home: root, shelfFile: shelfFile)
-        rules.gitExcludes = root + "/no-such-global"
-        rules.recheck = 0
-        check(rules.ignored(d + "/a.secret"), ".ignore applies outside a repo")
-        check(!rules.ignored(d + "/x.txt"), ".rgignore beats .ignore in the same folder")
-        check(!rules.ignored(d + "/inner/inner.secret"), "a deeper folder's ! re-includes")
-        check(rules.ignored(d + "/inner/other.secret"), "the parent folder's rule still applies below")
-        check(rules.ignored(d + "/fine.md"), "the shelf file applies everywhere")
-        write(d + "/special.md")
-        check(!rules.ignored(d + "/special.md"), "the shelf file's ! re-includes")
-        write(root + "/Private/doc.pdf")
-        check(rules.ignored(root + "/Private/doc.pdf"), "~/ folder in the shelf file")
-        let global = root + "/global-ignore"
-        write(global, "*.bak\n")
-        rules.gitExcludes = global
-        write(d + "/old.bak")
-        check(rules.ignored(d + "/old.bak"), "global git excludes apply")
-        write(shelfFile, "*.md\n")
-        usleep(20_000)
-        write(shelfFile, "*.md\n# edited\n")
-        check(rules.ignored(d + "/special.md"), "ignore-file edits apply without a restart")
-        write(root + "/.gitconfig", "[user]\n  name = x\n[core]\n  excludesFile = ~/my-ignore\n")
-        check(IgnoreRules.gitExcludesFile(home: root) == root + "/my-ignore", "core.excludesFile from ~/.gitconfig (~ expanded)")
     }
 
     static func shelf(_ root: String) {

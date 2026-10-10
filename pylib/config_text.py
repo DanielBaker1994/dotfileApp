@@ -142,12 +142,6 @@ def config_section_header(line: str):
     return None
 
 
-def config_lines(text: str) -> list:
-    """The file as editable lines; "\n".join() restores it byte for byte.
-    Never splitlines(): it also splits on \x1c, \u2028, ..."""
-    return text.split("\n")
-
-
 def config_section_entries(lines: list, section: str) -> list:
     """[(index, key, value)] of every entry in [section], file order."""
     out, cur = [], None

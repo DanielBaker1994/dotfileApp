@@ -114,12 +114,6 @@ def app_binary() -> str:
     return os.path.join(home(), "kitchen-sink.app", "Contents", "MacOS", "kitchen-sink")
 
 
-def socket_path() -> str:
-    tmp = os.environ.get("TMPDIR") or "/tmp/"
-    name = section("app").get("notes-socket", "") or "ws-notes.sock"
-    return os.path.join(tmp, name)
-
-
 def cache_dir() -> str:
     d = expand(os.environ.get("WS_SETTINGS_CACHE") or "~/.cache/kitchen-sink")
     os.makedirs(d, exist_ok=True)

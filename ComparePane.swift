@@ -33,7 +33,7 @@ final class CompareSession {
         Self.nextID += 1
     }
 
-    private func edits(_ s: CompareSide) -> Int { model.undoStack.reduce(0) { $0 + ($1.0 == s ? 1 : 0) } }
+    private func edits(_ s: CompareSide) -> Int { model.undoCount(s) }
     func dirty(_ s: CompareSide) -> Bool { edits(s) != cleanDepth[s] }
     var isDirty: Bool { dirty(.left) || dirty(.right) }
     func markClean(_ s: CompareSide) { cleanDepth[s] = edits(s) }

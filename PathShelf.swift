@@ -203,207 +203,50 @@ final class PathShelf {
 }
 
 final class IgnoreRules {
-    struct Pattern {
-        let regex: NSRegularExpression
-        let negate: Bool
-        let dirOnly: Bool
-    }
-    struct RuleSet {
-        let base: String
-        let patterns: [Pattern]
-        var isGit = false
+    private var handle = -1
+
+    var shelfFile: String? {
+        didSet {
+            guard handle >= 0, shelfFile != oldValue else { return }
+            _ = irBox("ignore.set_shelf", ["handle": handle, "file": shelfFile ?? NSNull()])
+        }
     }
 
-    var shelfFile: String? { didSet { if shelfFile != oldValue { fileCache[oldValue ?? ""] = nil } } }
-    var gitExcludes: String?
-    private let home: String
-    private var fileCache: [String: (mtime: Double, checked: Double, set: RuleSet?)] = [:]
-    private var dirCache: [String: (checked: Double, repo: Bool, sets: [RuleSet])] = [:]
-    var recheck: Double = 2
+    var gitExcludes: String? {
+        didSet {
+            guard handle >= 0, gitExcludes != oldValue else { return }
+            _ = irBox("ignore.set_git_excludes", ["handle": handle, "path": gitExcludes ?? NSNull()])
+        }
+    }
+
+    var recheck: Double = 2 {
+        didSet { if handle >= 0 { _ = irBox("ignore.set_recheck", ["handle": handle, "seconds": recheck]) } }
+    }
 
     init(home: String = NSHomeDirectory(), shelfFile: String? = nil) {
-        self.home = home
-        self.shelfFile = shelfFile
+        if let box = irBox("ignore.new", ["home": home, "shelfFile": shelfFile ?? NSNull()]) {
+            handle = box["handle"] as? Int ?? -1
+        }
+    }
+
+    deinit {
+        if handle >= 0 { _ = irBox("ignore.drop", ["handle": handle]) }
     }
 
     func ignored(_ path: String, isDir: Bool = false) -> Bool {
-        let comps = (path as NSString).pathComponents
-        guard comps.count > 1 else { return false }
-        let global = [globalSet()].compactMap { $0 }
-        let shelf = [shelfSet()].compactMap { $0 }
-        var sets: [RuleSet] = []
-        var dir = "/"
-        var inRepo = false
-        for i in 1..<comps.count {
-            let d = folder(dir)
-            if d.repo { inRepo = true }
-            sets += d.sets.filter { inRepo || !$0.isGit }
-            dir = (dir as NSString).appendingPathComponent(comps[i])
-            let last = i == comps.count - 1
-            if decide(dir, isDir: last ? isDir : true, global + sets + shelf) { return true }
-        }
-        return false
+        guard handle >= 0,
+              case .success(let box) = PythonHelper.shared.callSync(
+                "ignore.ignored", ["handle": handle, "path": path, "isDir": isDir], timeout: 30),
+              let dict = box as? [String: Any] else { return false }
+        return dict["ignored"] as? Bool ?? false
     }
+}
 
-    private func decide(_ path: String, isDir: Bool, _ sets: [RuleSet]) -> Bool {
-        var ignored = false
-        for s in sets {
-            guard let rel = Self.relative(path, to: s.base) else { continue }
-            let range = NSRange(rel.startIndex..., in: rel)
-            for p in s.patterns where !p.dirOnly || isDir {
-                if p.regex.firstMatch(in: rel, range: range) != nil { ignored = !p.negate }
-            }
-        }
-        return ignored
-    }
-
-    static func relative(_ path: String, to base: String) -> String? {
-        if base == "/" { return String(path.dropFirst()) }
-        guard path.hasPrefix(base + "/") else { return nil }
-        return String(path.dropFirst(base.count + 1))
-    }
-
-    private func folder(_ dir: String) -> (repo: Bool, sets: [RuleSet]) {
-        let now = Date().timeIntervalSince1970
-        if let c = dirCache[dir], now - c.checked < recheck { return (c.repo, c.sets) }
-        let fm = FileManager.default
-        let repo = fm.fileExists(atPath: (dir as NSString).appendingPathComponent(".git"))
-        var sets: [RuleSet] = []
-        for name in [".gitignore", ".ignore", ".rgignore"] {
-            let f = (dir as NSString).appendingPathComponent(name)
-            if var s = file(f, base: dir) {
-                s.isGit = name == ".gitignore"
-                sets.append(s)
-            }
-        }
-        dirCache[dir] = (now, repo, sets)
-        return (repo, sets)
-    }
-
-    private func globalSet() -> RuleSet? {
-        file(gitExcludes ?? Self.gitExcludesFile(home: home), base: "/", global: true)
-    }
-
-    private func shelfSet() -> RuleSet? {
-        guard let f = shelfFile else { return nil }
-        return file(f, base: "/", global: true)
-    }
-
-    private func file(_ path: String, base: String, global: Bool = false) -> RuleSet? {
-        let now = Date().timeIntervalSince1970
-        if let c = fileCache[path], now - c.checked < recheck { return c.set }
-        var st = stat()
-        guard stat(path, &st) == 0 else {
-            fileCache[path] = (0, now, nil)
-            return nil
-        }
-        let mt = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9
-        if let c = fileCache[path], c.mtime == mt {
-            fileCache[path] = (mt, now, c.set)
-            return c.set
-        }
-        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-        let set = RuleSet(base: base, patterns: text.split(whereSeparator: \.isNewline).compactMap {
-            Self.compile(String($0), global: global, home: home)
-        })
-        fileCache[path] = (mt, now, set)
-        return set
-    }
-
-    static func gitExcludesFile(home: String) -> String {
-        if let text = try? String(contentsOfFile: home + "/.gitconfig", encoding: .utf8) {
-            var inCore = false
-            for raw in text.split(whereSeparator: \.isNewline) {
-                let line = raw.trimmingCharacters(in: .whitespaces)
-                if line.hasPrefix("[") { inCore = line.lowercased().hasPrefix("[core") ; continue }
-                guard inCore, let eq = line.firstIndex(of: "=") else { continue }
-                let key = line[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
-                if key == "excludesfile" {
-                    var v = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-                    if v.hasPrefix("\"") && v.hasSuffix("\"") && v.count > 1 { v = String(v.dropFirst().dropLast()) }
-                    return v.hasPrefix("~/") ? home + v.dropFirst(1) : v
-                }
-            }
-        }
-        let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] ?? (home + "/.config")
-        return xdg + "/git/ignore"
-    }
-
-    static func compile(_ line: String, global: Bool = false, home: String = NSHomeDirectory()) -> Pattern? {
-        var s = Substring(line)
-        while s.hasSuffix(" ") && !s.hasSuffix("\\ ") { s = s.dropLast() }
-        guard !s.isEmpty, !s.hasPrefix("#") else { return nil }
-        var negate = false
-        if s.hasPrefix("!") { negate = true; s = s.dropFirst() }
-        else if s.hasPrefix("\\!") || s.hasPrefix("\\#") { s = s.dropFirst() }
-        var dirOnly = false
-        if s.hasSuffix("/") && !s.hasSuffix("\\/") { dirOnly = true; s = s.dropLast() }
-        guard !s.isEmpty else { return nil }
-        var pat = String(s)
-        if global, pat.hasPrefix("~/") { pat = home + pat.dropFirst(1) }
-        let anchored = pat.contains("/")
-        if pat.hasPrefix("/") { pat.removeFirst() }
-        var rx = anchored ? "^" : "^(?:.*/)?"
-        rx += globToRegex(pat)
-        rx += "$"
-        guard let re = try? NSRegularExpression(pattern: rx) else { return nil }
-        return Pattern(regex: re, negate: negate, dirOnly: dirOnly)
-    }
-
-    static func globToRegex(_ glob: String) -> String {
-        let c = Array(glob)
-        var out = ""
-        var i = 0
-        while i < c.count {
-            let ch = c[i]
-            switch ch {
-            case "*":
-                if i + 1 < c.count, c[i + 1] == "*" {
-                    let atStart = i == 0 || c[i - 1] == "/"
-                    let atEnd = i + 2 == c.count
-                    let slashAfter = i + 2 < c.count && c[i + 2] == "/"
-                    if atStart && slashAfter {
-                        out += "(?:.*/)?"
-                        i += 3
-                        continue
-                    }
-                    if atStart && atEnd {
-                        out += ".*"
-                        i += 2
-                        continue
-                    }
-                    out += "[^/]*"
-                    i += 2
-                    continue
-                }
-                out += "[^/]*"
-            case "?":
-                out += "[^/]"
-            case "[":
-                var j = i + 1
-                if j < c.count, c[j] == "!" || c[j] == "^" { j += 1 }
-                if j < c.count, c[j] == "]" { j += 1 }
-                while j < c.count, c[j] != "]" { j += 1 }
-                guard j < c.count else { out += "\\["; break }
-                var body = String(c[(i + 1)..<j])
-                if body.hasPrefix("!") { body = "^" + body.dropFirst() }
-                body = body.replacingOccurrences(of: "\\", with: "\\\\")
-                out += "[" + body + "]"
-                i = j
-            case "\\":
-                if i + 1 < c.count {
-                    out += NSRegularExpression.escapedPattern(for: String(c[i + 1]))
-                    i += 1
-                } else {
-                    out += "\\\\"
-                }
-            default:
-                out += NSRegularExpression.escapedPattern(for: String(ch))
-            }
-            i += 1
-        }
-        return out
-    }
+private func irBox(_ method: String, _ params: [String: Any],
+                   timeout: TimeInterval = 60) -> [String: Any]? {
+    guard case .success(let box) = PythonHelper.shared.callSync(method, params, timeout: timeout),
+          let dict = box as? [String: Any] else { return nil }
+    return dict
 }
 
 final class ClipboardPaths {

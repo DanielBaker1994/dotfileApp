@@ -37,6 +37,35 @@ struct FolderSideInfo {
         return isDir ? nil : (size, mtime)
     }
 
+    var json: [String: Any] {
+        ["name": name, "isDir": isDir, "isLink": isLink,
+         "link": link ?? NSNull(), "size": size, "mtime": mtime,
+         "targetSize": targetSize ?? NSNull(), "targetMtime": targetMtime]
+    }
+
+    init(name: String, isDir: Bool, isLink: Bool, link: String?, size: Int64, mtime: Double,
+         targetSize: Int64? = nil, targetMtime: Double = 0) {
+        self.name = name
+        self.isDir = isDir
+        self.isLink = isLink
+        self.link = link
+        self.size = size
+        self.mtime = mtime
+        self.targetSize = targetSize
+        self.targetMtime = targetMtime
+    }
+
+    init(json: [String: Any]) {
+        name = json["name"] as? String ?? ""
+        isDir = json["isDir"] as? Bool ?? false
+        isLink = json["isLink"] as? Bool ?? false
+        link = json["link"] as? String
+        size = (json["size"] as? NSNumber)?.int64Value ?? 0
+        mtime = (json["mtime"] as? NSNumber)?.doubleValue ?? 0
+        targetSize = (json["targetSize"] as? NSNumber)?.int64Value
+        targetMtime = (json["targetMtime"] as? NSNumber)?.doubleValue ?? 0
+    }
+
     static func read(_ path: String, name: String) -> FolderSideInfo? {
         var st = stat()
         guard lstat(path, &st) == 0 else { return nil }
@@ -86,6 +115,10 @@ struct FolderOptions {
     var exclude: [String] = []
     var ignored: ((_ path: String, _ isDir: Bool) -> Bool)?
     var importance = Importance()
+
+    var json: [String: Any] {
+        ["timeTolerance": timeTolerance, "content": content, "hidden": hidden, "exclude": exclude]
+    }
 }
 
 final class FolderTree {
@@ -304,8 +337,6 @@ enum FolderScan {
                 n.depth = depth
                 nodes.append(n)
                 tick()
-                classify(n, left: lp.map { ($0 as NSString).appendingPathComponent(e.l?.name ?? "") },
-                         right: rp.map { ($0 as NSString).appendingPathComponent(e.r?.name ?? "") }, o)
                 if n.isDir && !n.kindMismatch {
                     let ld = n.left != nil ? lp.map { ($0 as NSString).appendingPathComponent(n.left!.name) } : nil
                     let rd = n.right != nil ? rp.map { ($0 as NSString).appendingPathComponent(n.right!.name) } : nil
@@ -316,38 +347,34 @@ enum FolderScan {
         }
 
         tree.roots = pair(left, right, rel: "", parent: nil, depth: 0)
+        let items: [[String: Any]] = tree.all.map { n in
+            ["left": n.left.map { $0.json as Any } ?? NSNull(),
+             "right": n.right.map { $0.json as Any } ?? NSNull()]
+        }
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "folder.classify_many", ["items": items, "options": o.json], timeout: 600),
+           let results = (box as? [String: Any])?["results"] as? [[String: Any]] {
+            for (i, n) in tree.all.enumerated() where i < results.count {
+                n.status = FolderStatus(rawValue: results[i]["status"] as? String ?? "same") ?? .error
+                n.sameByMetadata = results[i]["sameByMetadata"] as? Bool ?? false
+                n.newer = FolderNewer(rawValue: results[i]["newer"] as? String ?? "none") ?? .none
+            }
+        }
         tree.settle()
         return tree
     }
 
     static func classify(_ n: FolderNode, left lp: String?, right rp: String?, _ o: FolderOptions) {
         n.sameByMetadata = false
-        switch (n.left, n.right) {
-        case (.some, nil): n.status = .leftOnly; return
-        case (nil, .some): n.status = .rightOnly; return
-        case (nil, nil): n.status = .error; return
-        default: break
-        }
-        guard let l = n.left, let r = n.right else { return }
-        if l.isDir != r.isDir { n.status = .different; return }
-        if l.isDir { return }
-        if l.isLink && r.isLink {
-            n.status = l.link == r.link ? .same : .different
-            return
-        }
-        guard let lf = l.asFile, let rf = r.asFile else { n.status = .different; return }
-        n.newer = lf.mtime > rf.mtime + o.timeTolerance ? .left : rf.mtime > lf.mtime + o.timeTolerance ? .right : .none
-        if lf.size != rf.size {
-            n.status = .different
-            return
-        }
-        let timesMatch = abs(lf.mtime - rf.mtime) <= o.timeTolerance
-        switch o.content {
-        case "always": n.status = .unknown
-        case "never": n.status = timesMatch ? .same : .different
-        default: n.status = timesMatch ? .same : .unknown
-        }
-        n.sameByMetadata = n.status == .same
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "folder.classify",
+                ["left": n.left.map { $0.json as Any } ?? NSNull(),
+                 "right": n.right.map { $0.json as Any } ?? NSNull(),
+                 "options": o.json], timeout: 120),
+              let dict = box as? [String: Any] else { return }
+        n.status = FolderStatus(rawValue: dict["status"] as? String ?? "same") ?? .error
+        n.sameByMetadata = dict["sameByMetadata"] as? Bool ?? false
+        n.newer = FolderNewer(rawValue: dict["newer"] as? String ?? "none") ?? .none
     }
 
     static func restat(_ n: FolderNode, tree: FolderTree, _ o: FolderOptions) {
@@ -362,38 +389,18 @@ enum FolderScan {
 enum FolderContent {
     enum Answer { case same, different, unimportant, error }
 
-    static func sameBytes(_ a: String, _ b: String) -> Bool? {
-        guard let fa = FileHandle(forReadingAtPath: a), let fb = FileHandle(forReadingAtPath: b) else { return nil }
-        defer { try? fa.close(); try? fb.close() }
-        let chunk = 1 << 20
-        while true {
-            let da = (try? fa.read(upToCount: chunk)) ?? Data()
-            let db = (try? fb.read(upToCount: chunk)) ?? Data()
-            if da != db { return false }
-            if da.isEmpty { return true }
-        }
-    }
-
-    static func textEqualUnderRules(_ a: String, _ b: String, _ imp: Importance, limit: Int = 4 << 20) -> Bool {
-        guard let da = FileManager.default.contents(atPath: a), let db = FileManager.default.contents(atPath: b),
-              da.count <= limit, db.count <= limit,
-              !TextSide.isBinary(da), !TextSide.isBinary(db),
-              let ta = TextSide.decode(da), let tb = TextSide.decode(db) else { return false }
-        if ta.lines.count != tb.lines.count && !imp.blankLines { return false }
-        let ka = zip(ta.lines, ta.eols).map { imp.key($0, $1) }.filter { !(imp.blankLines && $0.isEmpty) }
-        let kb = zip(tb.lines, tb.eols).map { imp.key($0, $1) }.filter { !(imp.blankLines && $0.isEmpty) }
-        return ka == kb
-    }
-
     static func check(left: String, right: String, size: (Int64, Int64), imp: Importance) -> Answer {
-        if size.0 == size.1 {
-            switch sameBytes(left, right) {
-            case .some(true): return .same
-            case .none: return .error
-            default: break
-            }
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "folder.content_check",
+                ["left": left, "right": right, "sizes": [size.0, size.1], "importance": imp.json],
+                timeout: 600),
+              let dict = box as? [String: Any] else { return .error }
+        switch dict["answer"] as? String {
+        case "same": return .same
+        case "unimportant": return .unimportant
+        case "different": return .different
+        default: return .error
         }
-        return textEqualUnderRules(left, right, imp) ? .unimportant : .different
     }
 
     static func run(tree: FolderTree, nodes: [FolderNode], imp: Importance, queue: DispatchQueue,

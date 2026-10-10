@@ -1,4 +1,4 @@
-// sources: AIFormat.swift ProcessRun.swift
+// sources: PythonHelper.swift AIFormat.swift ProcessRun.swift
 import Foundation
 
 func aiSetting(_ key: String, _ fallback: String) -> String { fallback }
@@ -64,6 +64,8 @@ func flat(_ s: String) -> String { WordGuard.words(s).joined(separator: " ") }
 @main
 struct Main {
     static func main() {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().path
+        PythonHelper.shared.configure(libDir: root + "/pylib")
         guard fm(["available"], stdin: "").code == 0 else {
             print("live_ai_rules: skipped — fm / Apple Intelligence not available")
             exit(0)

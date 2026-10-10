@@ -1,4 +1,4 @@
-// sources: CompareText.swift CompareFolder.swift FileOps.swift
+// sources: PythonHelper.swift CompareText.swift CompareFolder.swift FileOps.swift
 import Foundation
 
 var passed = 0
@@ -92,6 +92,8 @@ struct FolderTests {
     }
 
     static func main() {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().path
+        PythonHelper.shared.configure(libDir: root + "/pylib")
         let tmp = NSTemporaryDirectory() + "compare-folder-test-\(getpid())"
         try? fm.removeItem(atPath: tmp)
         let L = tmp + "/L", R = tmp + "/R"

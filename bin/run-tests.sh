@@ -26,16 +26,24 @@ run_test() {
 
 case "${1:-all}" in
     config)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_config_text.py"
         run_test "$TESTS/test_config.swift"
         ;;
     recent)
         run_test "$TESTS/test_recent_files.swift"
         ;;
     fileops)
-        run_test "$TESTS/test_file_ops.swift"
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_file_ops.py"
+        ;;
+    status)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_status.py"
         ;;
     ai)
-        run_test "$TESTS/test_ai_format.swift"
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_ai_format.py"
         ;;
     nvim)
         run_test "$TESTS/test_nvim_rpc.swift"
@@ -46,6 +54,10 @@ case "${1:-all}" in
     paths)
         run_test "$TESTS/test_path_shelf.swift"
         ;;
+    ignore)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_ignore_rules.py"
+        ;;
     screenshot)
         run_test "$TESTS/test_screenshot.swift"
         ;;
@@ -55,11 +67,12 @@ case "${1:-all}" in
     prose)
         run_test "$TESTS/test_prose_pdf.swift"
         ;;
+    prose-pdf)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_prose_pdf.py"
+        ;;
     snippets)
         run_test "$TESTS/test_snippet_render.swift"
-        ;;
-    doctemplates)
-        run_test "$TESTS/test_doc_templates.swift"
         ;;
     panes)
         run_test "$TESTS/test_pane_geometry.swift"
@@ -68,12 +81,31 @@ case "${1:-all}" in
         run_test "$TESTS/test_vim_search.swift"
         ;;
     compare)
-        run_test "$TESTS/test_compare.swift"
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_compare.py"
         run_test "$TESTS/test_compare_folder.swift"
         ;;
     settings)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_settings_hub.py"
+        ;;
+    helper)
+        py=""
+        for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
+            [ -n "$c" ] && [ -x "$c" ] || continue
+            if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+                py="$c"; break
+            fi
+        done
+        [ -n "$py" ] || { echo "helper tests need python 3.11+ (brew install python, or set WS_PYTHON)" >&2; exit 1; }
+        "$py" "$TESTS/test_helper.py"
+        ;;
+    helper-client)
+        run_test "$TESTS/test_python_helper.swift"
+        ;;
+    doc-templates)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_doc_templates.py"
         ;;
     ai-live)
         run_test "$TESTS/live_ai_rules.swift"

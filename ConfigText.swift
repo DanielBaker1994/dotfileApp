@@ -1,170 +1,93 @@
 import Foundation
 
-func configEntry(_ line: String) -> (key: String, value: String)? {
-    let s = line.trimmingCharacters(in: .whitespaces)
-    guard !s.isEmpty, !s.hasPrefix("#"), !s.hasPrefix("[") else { return nil }
-    var rest = Substring(s)
-    let key: String
-    if s.hasPrefix("\"") || s.hasPrefix("'") {
-        guard let (k, after) = tomlScanString(rest) else { return nil }
-        rest = after.drop(while: { $0 == " " || $0 == "\t" })
-        guard rest.first == "=" else { return nil }
-        key = k
-        rest = rest.dropFirst()
-    } else {
-        guard let eq = rest.firstIndex(of: "=") else { return nil }
-        key = rest[..<eq].trimmingCharacters(in: .whitespaces)
-        rest = rest[rest.index(after: eq)...]
+struct ConfigDecodedLine {
+    let index: Int
+    let trimmed: String
+    let header: String?
+    let key: String?
+    let value: String?
+}
+
+private let configCacheDir = NSHomeDirectory() + "/.cache/kitchen-sink"
+
+private func configCacheKey(_ parts: String...) -> String {
+    var hash: UInt64 = 14695981039346656037
+    for byte in parts.joined(separator: "\u{1}").utf8 {
+        hash = (hash ^ UInt64(byte)) &* 1099511628211
     }
-    return (key, tomlValue(rest.trimmingCharacters(in: .whitespaces)))
+    return String(format: "%016llx", hash)
 }
 
-func configSectionHeader(_ line: String) -> String? {
-    let s = line.trimmingCharacters(in: .whitespaces)
-    guard s.hasPrefix("[") && s.hasSuffix("]") else { return nil }
-    return String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+private func configCacheRead(_ key: String) -> Any? {
+    let path = configCacheDir + "/config-" + key + ".json"
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    return try? JSONSerialization.jsonObject(with: data)
 }
 
-func configLines(_ text: String) -> [String] {
-    text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+private func configCacheWrite(_ key: String, _ json: Any) {
+    try? FileManager.default.createDirectory(atPath: configCacheDir, withIntermediateDirectories: true)
+    guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
+    try? data.write(to: URL(fileURLWithPath: configCacheDir + "/config-" + key + ".json"),
+                    options: .atomic)
+}
+
+func configDecodedLines(_ text: String) -> [ConfigDecodedLine] {
+    let key = configCacheKey("decode", text)
+    let raw: [[String: Any]]
+    if let cached = configCacheRead(key) as? [[String: Any]] {
+        raw = cached
+    } else {
+        guard case .success(let box) = PythonHelper.shared.callSync("config.decode", ["text": text]),
+              let live = (box as? [String: Any])?["lines"] as? [[String: Any]] else { return [] }
+        configCacheWrite(key, live)
+        raw = live
+    }
+    return raw.map {
+        ConfigDecodedLine(index: $0["index"] as? Int ?? 0,
+                          trimmed: $0["trimmed"] as? String ?? "",
+                          header: $0["header"] as? String,
+                          key: $0["key"] as? String,
+                          value: $0["value"] as? String)
+    }
 }
 
 func configSectionEntries(_ lines: [String], _ section: String)
     -> [(index: Int, key: String, value: String)] {
-    var out: [(index: Int, key: String, value: String)] = []
-    var inSection = false
-    for (i, line) in lines.enumerated() {
-        if let name = configSectionHeader(line) {
-            inSection = name == section
-        } else if inSection, let e = configEntry(line) {
-            out.append((i, e.key, e.value))
-        }
+    let text = lines.joined(separator: "\n")
+    let key = configCacheKey("section", section, text)
+    let raw: [[String: Any]]
+    if let cached = configCacheRead(key) as? [[String: Any]] {
+        raw = cached
+    } else {
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "config.section_entries", ["text": text, "section": section]),
+              let live = (box as? [String: Any])?["entries"] as? [[String: Any]] else { return [] }
+        configCacheWrite(key, live)
+        raw = live
     }
+    return raw.compactMap {
+        guard let i = $0["index"] as? Int, let k = $0["key"] as? String, let v = $0["value"] as? String
+        else { return nil }
+        return (i, k, v)
+    }
+}
+
+func configLine(_ key: String, _ value: String) -> String? {
+    guard case .success(let box) = PythonHelper.shared.callSync("config.line", ["key": key, "value": value]),
+          let line = (box as? [String: Any])?["line"] as? String else { return nil }
+    return line
+}
+
+func configSettingText(_ text: String, section: String, _ kv: [(String, String?)]) -> String? {
+    let pairs: [[Any]] = kv.map { [$0.0, $0.1 ?? NSNull()] }
+    guard case .success(let box) = PythonHelper.shared.callSync(
+            "config.setting", ["text": text, "section": section, "kv": pairs]),
+          let out = (box as? [String: Any])?["text"] as? String else { return nil }
     return out
 }
 
-func configLine(_ key: String, _ value: String) -> String {
-    let bare = !key.isEmpty && key.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
-    return (bare ? key : tomlQuote(key)) + " = "
-        + (tomlBareScalar(value) ? value : tomlQuote(value))
-}
-
-private func tomlBareScalar(_ v: String) -> Bool {
-    v == "true" || v == "false"
-        || v.range(of: #"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$"#, options: .regularExpression) != nil
-}
-
-private func tomlQuote(_ v: String) -> String {
-    var out = "\""
-    for u in v.unicodeScalars {
-        switch u {
-        case "\"": out += "\\\""
-        case "\\": out += "\\\\"
-        case "\n": out += "\\n"
-        case "\t": out += "\\t"
-        case "\r": out += "\\r"
-        case _ where u.value < 0x20 || u.value == 0x7F: out += String(format: "\\u%04X", u.value)
-        default: out.unicodeScalars.append(u)
-        }
-    }
-    return out + "\""
-}
-
-private func tomlScanString(_ s: Substring) -> (String, Substring)? {
-    guard let q = s.first, q == "\"" || q == "'" else { return nil }
-    var i = s.index(after: s.startIndex)
-    if q == "'" {
-        guard let end = s[i...].firstIndex(of: "'") else { return nil }
-        return (String(s[i..<end]), s[s.index(after: end)...])
-    }
-    var out = ""
-    while i < s.endIndex {
-        let c = s[i]
-        if c == "\"" { return (out, s[s.index(after: i)...]) }
-        if c == "\\" {
-            i = s.index(after: i)
-            guard i < s.endIndex else { return nil }
-            switch s[i] {
-            case "n": out += "\n"
-            case "t": out += "\t"
-            case "r": out += "\r"
-            case "b": out += "\u{8}"
-            case "f": out += "\u{C}"
-            case "\"": out += "\""
-            case "\\": out += "\\"
-            case "u", "U":
-                let n = s[i] == "u" ? 4 : 8
-                guard let end = s.index(i, offsetBy: n, limitedBy: s.index(before: s.endIndex)),
-                      let v = UInt32(s[s.index(after: i)...end], radix: 16),
-                      let u = Unicode.Scalar(v) else { return nil }
-                out.unicodeScalars.append(u)
-                i = end
-            default: return nil
-            }
-        } else {
-            out.append(c)
-        }
-        i = s.index(after: i)
-    }
-    return nil
-}
-
-private func tomlValue(_ raw: String) -> String {
-    func onlyComment(_ rest: Substring) -> Bool {
-        let t = rest.trimmingCharacters(in: .whitespaces)
-        return t.isEmpty || t.hasPrefix("#")
-    }
-    if raw.hasPrefix("\"") || raw.hasPrefix("'") {
-        if let (v, after) = tomlScanString(Substring(raw)), onlyComment(after) { return v }
-        return raw
-    }
-    if raw.hasPrefix("[") {
-        var items: [String] = []
-        var rest = Substring(raw).dropFirst()
-        while true {
-            rest = rest.drop(while: { $0 == " " || $0 == "\t" })
-            if rest.first == "]" { return onlyComment(rest.dropFirst()) ? items.joined(separator: ", ") : raw }
-            if let (v, after) = tomlScanString(rest) {
-                items.append(v)
-                rest = after
-            } else {
-                let end = rest.firstIndex(where: { $0 == "," || $0 == "]" }) ?? rest.endIndex
-                let v = rest[..<end].trimmingCharacters(in: .whitespaces)
-                guard tomlBareScalar(v) else { return raw }
-                items.append(v)
-                rest = rest[end...]
-            }
-            rest = rest.drop(while: { $0 == " " || $0 == "\t" })
-            if rest.first == "," { rest = rest.dropFirst() } else if rest.first != "]" { return raw }
-        }
-    }
-    if let hash = raw.range(of: " #") {
-        let head = raw[..<hash.lowerBound].trimmingCharacters(in: .whitespaces)
-        if tomlBareScalar(head) { return head }
-    }
-    return raw
-}
-
-func configSetting(_ lines: [String], section: String, _ kv: [(String, String?)]) -> [String] {
-    var lines = lines
-    for (key, value) in kv {
-        let entries = configSectionEntries(lines, section)
-        let found = entries.last(where: { $0.key == key })?.index
-        let header = lines.indices.last(where: { configSectionHeader(lines[$0]) == section })
-        let lastInSection = entries.last.map { max($0.index, header ?? -1) } ?? header
-        switch (found, value) {
-        case (let i?, let v?): lines[i] = configLine(key, v)
-        case (let i?, nil): lines.remove(at: i)
-        case (nil, let v?):
-            if let at = lastInSection {
-                lines.insert(configLine(key, v), at: at + 1)
-            } else {
-                lines += ["", "[\(section)]", configLine(key, v)]
-            }
-        case (nil, nil): break
-        }
-    }
-    return lines
+func configLines(_ text: String) -> [String] {
+    text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 }
 
 func tri(_ s: String?) -> Bool? {

@@ -1,4 +1,4 @@
-// sources: AnsiRender.swift PaneShot.swift ConfigText.swift ProcessRun.swift
+// sources: AnsiRender.swift PaneShot.swift PythonHelper.swift ConfigText.swift ProcessRun.swift
 import CoreGraphics
 import Foundation
 import ImageIO

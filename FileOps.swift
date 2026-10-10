@@ -1,5 +1,12 @@
 import Foundation
 
+private func foBox(_ method: String, _ params: [String: Any],
+                   timeout: TimeInterval = 300) -> [String: Any]? {
+    guard case .success(let box) = PythonHelper.shared.callSync(method, params, timeout: timeout),
+          let dict = box as? [String: Any] else { return nil }
+    return dict
+}
+
 enum FileOps {
     typealias Change = (from: String?, to: String)
 
@@ -7,46 +14,47 @@ enum FileOps {
         var changes: [Change] = []
         var failed: String?
         var paths: [String] { changes.map { $0.to } }
-    }
 
-    enum Record {
-        case moved([(from: String, to: String)])
-        case created([String])
-        case trashed([(from: String, to: String)])
-        indirect case group(String, [Record])
+        init() {}
+
+        init(json: [String: Any]) {
+            changes = (json["changes"] as? [[Any]] ?? []).compactMap { c in
+                guard c.count == 2, let to = c[1] as? String else { return nil }
+                return (from: c[0] as? String, to: to)
+            }
+            failed = json["failed"] as? String
+        }
     }
 
     final class UndoStack {
-        private let lock = NSLock()
-        private var stack: [Record] = []
+        private(set) var handle = -1
         let limit: Int
-        init(limit: Int = 50) { self.limit = limit }
 
-        var canUndo: Bool { lock.lock(); defer { lock.unlock() }; return !stack.isEmpty }
-        var count: Int { lock.lock(); defer { lock.unlock() }; return stack.count }
-
-        func push(_ r: Record) {
-            lock.lock(); defer { lock.unlock() }
-            stack.append(r)
-            if stack.count > limit { stack.removeFirst(stack.count - limit) }
+        init(limit: Int = 50) {
+            self.limit = limit
+            handle = foBox("fileops.stack_new", ["limit": limit])?["handle"] as? Int ?? -1
         }
 
-        func pop() -> Record? {
-            lock.lock(); defer { lock.unlock() }
-            return stack.popLast()
+        deinit {
+            if handle >= 0 { _ = foBox("fileops.stack_drop", ["handle": handle]) }
+        }
+
+        var canUndo: Bool {
+            handle >= 0 && (foBox("fileops.stack_state", ["handle": handle])?["canUndo"] as? Bool ?? false)
+        }
+
+        var count: Int {
+            handle >= 0 ? (foBox("fileops.stack_state", ["handle": handle])?["count"] as? Int ?? 0) : 0
         }
 
         func forget() {
-            lock.lock(); defer { lock.unlock() }
-            stack.removeAll()
+            if handle >= 0 { _ = foBox("fileops.stack_forget", ["handle": handle]) }
         }
 
         func collapse(since: Int, _ what: String) {
-            lock.lock(); defer { lock.unlock() }
-            guard since >= 0, stack.count - since > 1 else { return }
-            let tail = Array(stack[since...])
-            stack.removeSubrange(since...)
-            stack.append(.group(what, tail))
+            if handle >= 0 {
+                _ = foBox("fileops.stack_collapse", ["handle": handle, "since": since, "what": what])
+            }
         }
     }
 
@@ -54,228 +62,44 @@ enum FileOps {
 
     static var canUndo: Bool { shared.canUndo }
 
-    static func push(_ r: Record) { shared.push(r) }
-
     static func forgetUndo() { shared.forget() }
 
-    static func freeURL(_ name: String, in dir: URL) -> URL {
-        let fm = FileManager.default
-        var url = dir.appendingPathComponent(name)
-        let base = (name as NSString).deletingPathExtension
-        let ext = (name as NSString).pathExtension
-        var n = 2
-        while fm.fileExists(atPath: url.path) {
-            url = dir.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
-            n += 1
-        }
-        return url
-    }
-
-    static func copyURL(of url: URL) -> URL {
-        let name = url.lastPathComponent
-        let base = (name as NSString).deletingPathExtension
-        let ext = (name as NSString).pathExtension
-        let stem = base.isEmpty ? name : base
-        let copy = ext.isEmpty || base.isEmpty ? "\(stem) copy" : "\(stem) copy.\(ext)"
-        return freeURL(copy, in: url.deletingLastPathComponent())
-    }
-
-    private static func note(_ out: inout Outcome, _ name: String, _ error: Error) {
-        if out.failed == nil { out.failed = "\(name): \(error.localizedDescription)" }
-    }
-
-    static func transfer(_ urls: [URL], into dir: String, move: Bool, undo: UndoStack = shared) -> Outcome {
-        let fm = FileManager.default
-        let dest = URL(fileURLWithPath: dir, isDirectory: true)
-        var out = Outcome()
-        for u in urls {
-            let src = u.standardizedFileURL
-            if dir == src.path || dir.hasPrefix(src.path + "/") {
-                if out.failed == nil { out.failed = "\(u.lastPathComponent): can't go inside itself" }
-                continue
-            }
-            if move, src.deletingLastPathComponent().path == dest.standardizedFileURL.path { continue }
-            let target = freeURL(u.lastPathComponent, in: dest)
-            do {
-                if move { try fm.moveItem(at: src, to: target) } else { try fm.copyItem(at: src, to: target) }
-                out.changes.append((move ? src.path : nil, target.path))
-            } catch {
-                note(&out, u.lastPathComponent, error)
-            }
-        }
-        if !out.changes.isEmpty {
-            undo.push(move ? .moved(out.changes.map { ($0.from ?? "", $0.to) }) : .created(out.paths))
-        }
-        return out
+    static func transfer(_ urls: [URL], into dir: String, move: Bool,
+                         undo: UndoStack = shared) -> Outcome {
+        Outcome(json: foBox("fileops.transfer", ["paths": urls.map(\.path), "into": dir,
+                                                 "move": move, "stack": undo.handle]) ?? [:])
     }
 
     static func duplicate(_ paths: [String], undo: UndoStack = shared) -> Outcome {
-        var out = Outcome()
-        for p in paths {
-            let src = URL(fileURLWithPath: p)
-            let target = copyURL(of: src)
-            do {
-                try FileManager.default.copyItem(at: src, to: target)
-                out.changes.append((nil, target.path))
-            } catch {
-                note(&out, src.lastPathComponent, error)
-            }
-        }
-        if !out.changes.isEmpty { undo.push(.created(out.paths)) }
-        return out
-    }
-
-    private static func trashOnly(_ paths: [String]) -> Outcome {
-        var out = Outcome()
-        for p in paths {
-            var landed: NSURL?
-            do {
-                try FileManager.default.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: &landed)
-                out.changes.append((p, landed?.path ?? p))
-            } catch {
-                note(&out, (p as NSString).lastPathComponent, error)
-            }
-        }
-        return out
+        Outcome(json: foBox("fileops.duplicate", ["paths": paths, "stack": undo.handle]) ?? [:])
     }
 
     static func trash(_ paths: [String], undo: UndoStack = shared) -> Outcome {
-        let out = trashOnly(paths)
-        if !out.changes.isEmpty { undo.push(.trashed(out.changes.map { ($0.from ?? "", $0.to) })) }
-        return out
+        Outcome(json: foBox("fileops.trash", ["paths": paths, "stack": undo.handle]) ?? [:])
     }
 
-    static func create(_ name: String, in dir: String, folder: Bool, undo: UndoStack = shared) -> Outcome {
-        let fm = FileManager.default
-        let url = freeURL(name, in: URL(fileURLWithPath: dir, isDirectory: true))
-        var out = Outcome()
-        do {
-            if folder {
-                try fm.createDirectory(at: url, withIntermediateDirectories: false)
-            } else {
-                try Data().write(to: url, options: .withoutOverwriting)
-            }
-            out.changes.append((nil, url.path))
-            undo.push(.created([url.path]))
-        } catch {
-            note(&out, url.lastPathComponent, error)
-        }
-        return out
+    static func create(_ name: String, in dir: String, folder: Bool,
+                       undo: UndoStack = shared) -> Outcome {
+        Outcome(json: foBox("fileops.create", ["name": name, "dir": dir,
+                                               "folder": folder, "stack": undo.handle]) ?? [:])
     }
 
     static func recordRename(from: String, to: String, undo: UndoStack = shared) {
-        undo.push(.moved([(from, to)]))
+        _ = foBox("fileops.record_rename", ["from": from, "to": to, "stack": undo.handle])
     }
 
-    private static func moveBack(_ pairs: [(from: String, to: String)]) -> Outcome {
-        let fm = FileManager.default
-        var out = Outcome()
-        for (from, to) in pairs.reversed() {
-            let sameFile = from.lowercased() == to.lowercased()
-            if fm.fileExists(atPath: from), !sameFile {
-                if out.failed == nil {
-                    out.failed = "\((from as NSString).lastPathComponent): something else is there now"
-                }
-                continue
-            }
-            do {
-                try fm.moveItem(atPath: to, toPath: from)
-                out.changes.append((to, from))
-            } catch {
-                note(&out, (to as NSString).lastPathComponent, error)
-            }
-        }
-        return out
-    }
+    enum Clash: String { case replace, keepBoth, skip }
 
-    enum Clash { case replace, keepBoth, skip }
-
-    static func place(_ items: [(src: String, dst: String)], move: Bool, clash: Clash, undo: UndoStack = shared) -> Outcome {
-        let fm = FileManager.default
-        var out = Outcome()
-        var group: [Record] = []
-        var trashed: [(from: String, to: String)] = []
-        var made: [String] = []
-        var moved: [(from: String, to: String)] = []
-        for (src, want) in items {
-            if want == src || want.hasPrefix(src + "/") {
-                if out.failed == nil { out.failed = "\((src as NSString).lastPathComponent): can't go inside itself" }
-                continue
-            }
-            var dst = want
-            var exists = (try? fm.attributesOfItem(atPath: dst)) != nil
-            if exists {
-                switch clash {
-                case .skip: continue
-                case .keepBoth:
-                    dst = freeURL((want as NSString).lastPathComponent, in: URL(fileURLWithPath: (want as NSString).deletingLastPathComponent)).path
-                    exists = false
-                case .replace:
-                    let t = trashOnly([dst])
-                    if let f = t.failed {
-                        if out.failed == nil { out.failed = f }
-                        continue
-                    }
-                    trashed += t.changes.map { ($0.from ?? "", $0.to) }
-                }
-            }
-            var parent = (dst as NSString).deletingLastPathComponent
-            var firstNew: String?
-            while parent != "/", !parent.isEmpty, !fm.fileExists(atPath: parent) {
-                firstNew = parent
-                parent = (parent as NSString).deletingLastPathComponent
-            }
-            do {
-                try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-                if move { try fm.moveItem(atPath: src, toPath: dst) } else { try fm.copyItem(atPath: src, toPath: dst) }
-                out.changes.append((move ? src : nil, dst))
-                if let f = firstNew { made.append(f) }
-                if move { moved.append((src, dst)) } else if firstNew == nil { made.append(dst) }
-            } catch {
-                note(&out, (src as NSString).lastPathComponent, error)
-            }
-        }
-        let top = Set(made).filter { m in !made.contains { $0 != m && m.hasPrefix($0 + "/") } }
-        let madeTop = made.filter { top.contains($0) }
-        if !trashed.isEmpty { group.append(.trashed(trashed)) }
-        if !madeTop.isEmpty { group.append(.created(Array(NSOrderedSet(array: madeTop)) as? [String] ?? madeTop)) }
-        if !moved.isEmpty { group.append(.moved(moved)) }
-        if !group.isEmpty {
-            let n = out.changes.count
-            undo.push(.group((move ? "move" : "copy") + (n == 1 ? " of \(((out.changes.first?.to ?? "") as NSString).lastPathComponent)" : " of \(n) items"), group))
-        }
-        return out
+    static func place(_ items: [(src: String, dst: String)], move: Bool, clash: Clash,
+                      undo: UndoStack = shared) -> Outcome {
+        Outcome(json: foBox("fileops.place", ["items": items.map { [$0.src, $0.dst] },
+                                              "move": move, "clash": clash.rawValue,
+                                              "stack": undo.handle]) ?? [:])
     }
 
     static func undo(_ stack: UndoStack = shared) -> (what: String, outcome: Outcome)? {
-        guard let r = stack.pop() else { return nil }
-        return undo(r)
-    }
-
-    private static func undo(_ r: Record) -> (what: String, outcome: Outcome) {
-        func n(_ c: Int, _ one: String) -> String { c == 1 ? one : "\(c) items" }
-        switch r {
-        case .group(let what, let records):
-            var out = Outcome()
-            for rec in records.reversed() {
-                let u = undo(rec).outcome
-                out.changes += u.changes
-                if out.failed == nil { out.failed = u.failed }
-            }
-            return (what, out)
-        case .moved(let pairs):
-            let one = pairs.first.map { p -> String in
-                let same = (p.from as NSString).deletingLastPathComponent == (p.to as NSString).deletingLastPathComponent
-                return (same ? "rename of " : "move of ") + (p.from as NSString).lastPathComponent
-            } ?? "move"
-            return (pairs.count == 1 ? one : "move of \(pairs.count) items", moveBack(pairs))
-        case .created(let paths):
-            let live = paths.filter { FileManager.default.fileExists(atPath: $0) }
-            return ("creating " + n(paths.count, (paths.first.map { ($0 as NSString).lastPathComponent } ?? "")),
-                    trashOnly(live))
-        case .trashed(let pairs):
-            return ("trash of " + n(pairs.count, (pairs.first.map { ($0.from as NSString).lastPathComponent } ?? "")),
-                    moveBack(pairs))
-        }
+        guard let box = foBox("fileops.undo", ["stack": stack.handle]),
+              let outcome = box["outcome"] as? [String: Any] else { return nil }
+        return (box["what"] as? String ?? "", Outcome(json: outcome))
     }
 }

@@ -103,6 +103,11 @@ files in the way, UNINSTALL.sh removes only links into the repo.
 ./ws test install           # the two install kinds (needs the dist bundle)
 ./ws test nvim              # the vim pane's RPC client against a real nvim
 ./ws test screenshot        # /screenshot's model: button ring, undo, pixelate, render
+./ws test config            # commands.toml codec (python) + tri/resolveBinary
+./ws test helper            # the python worker's JSON-lines protocol
+./ws test helper-client     # the Swift client: ping, concurrency, restart, timeout
+./ws test doc-templates     # notes document styles (python)
+./ws test prose-pdf         # prose preview/export (python; real pandoc+weasyprint when installed)
 ```
 
 The underlying scripts (`bin/ui-test.sh`, `bin/ui-test-vim.sh`,
@@ -135,10 +140,15 @@ unchanged and can still be called directly.
   tool (see "/screenshot" below; model tested by `bin/run-tests.sh screenshot`)
 - `PaneShot.swift` + `AnsiRender.swift` — `pane-shot`, the herdr pane's
   full-height capture (see "/pane-shot" below; `bin/run-tests.sh ansi`)
-- `ProsePDF.swift` — prose Export PDF (pandoc -s → weasyprint; `bin/run-tests.sh prose`)
+- `PythonHelper.swift` + `pylib/helper/` — the persistent python worker
+  (python ≥ 3.11, JSON-lines over stdin/stdout; `bin/run-tests.sh helper`,
+  `helper-client`). Cold-path logic lives in `pylib/`: `doc_templates.py`
+  (`bin/run-tests.sh doc-templates`) and `prose_pdf.py` (pandoc -s →
+  weasyprint; `bin/run-tests.sh prose-pdf`)
 - `CompareText.swift` + `ComparePane.swift` + `CompareWindow.swift` — the
-  Compare view (Text Compare; see "Compare view" below; engine tested by
-  `bin/run-tests.sh compare`)
+  Compare view (Text Compare engine in `pylib/compare_text.py`, folder
+  classifier in `pylib/compare_folder.py`; see "Compare view" below;
+  suites `bin/run-tests.sh compare`)
 - `PathShelf.swift` + `PathsWindow.swift` — the /paths recent-file shelf
   (see "/paths" below; `bin/run-tests.sh paths`)
 - `kitchen_sink.swift` — app logic (~9200 lines)
@@ -160,15 +170,20 @@ unchanged and can still be called directly.
   (their first responder is not an `NSTextView`), so they keep their own
   Ctrl+W. Text on a tint: `PopupColors.over` +
   `ensure` (4.5:1 against the real composited background)
-- `ConfigText.swift` — commands.toml's one-line TOML codec (`configEntry`,
-  `configLine`, `configSetting`, `tri`); Foundation only (`bin/run-tests.sh config`)
+- `ConfigText.swift` — commands.toml transport only: `configDecodedLines` /
+  `configSectionEntries` / `configLine` / `configSettingText` call the helper
+  (`compare`-style sync), with a content-hash cache under
+  `~/.cache/kitchen-sink/config-*.json`; the codec itself is
+  `pylib/config_text.py`, plus `tri`/`resolveBinary` (`bin/run-tests.sh config`)
 - `JiraBoard.swift` — the jira board view (bar + Jira-style columns; see "Board view")
 - `PaneGeometry.swift` + `PaneNav.swift` — Ctrl+H/J/K/L pane navigation + the
   focus ring (see "Pane navigation"; `bin/run-tests.sh panes`)
 - `VimKeys.swift` + `VimSearch.swift` — vim normal / insert mode in every
   pane + the "/" search (see "Vim mode"; `bin/run-tests.sh vim-keys`)
 - `SwitcherStatus.swift` — the Hyper+S status row's data (unread via
-  `notify/notify_poll.py --json`, CPU, RAM, battery); `gather()` blocks
+  `notify/notify_poll.py --json`, CPU, RAM, battery): the samplers live in
+  `pylib/status.py` (Mach host_statistics via ctypes, vm_stat, pmset);
+  `gather()` blocks
 - `ProcessRun.swift` — `runProcess`: run a program to completion, stdin fed,
   stdout + stderr drained concurrently (Foundation only — the tested files use it)
 - Closure actions: `menuItem(title) { … }` (a `ClosureMenuItem` owns its
@@ -263,10 +278,12 @@ unchanged and can still be called directly.
   `bin/grant-permissions.sh` pre-grants mic, speech, Downloads, Desktop,
   Documents (TCC.db rows with the stable cert's csreq) after every build.
 - `commands.toml` — config (windows, commands, colors, paths). Valid TOML,
-  read LINE BY LINE: every reader/writer goes through `configEntry` /
-  `configLine` (Swift) or `jira_config.config_entry` / `config_line`
-  (python) — never split on '=' by hand. Values reach code as strings;
-  lists are one comma-separated string; one-line entries only.
+  read LINE BY LINE. ONE codec: `pylib/config_text.py` — every reader/writer
+  (python directly; Swift through the helper's `config.*` methods) goes
+  through it, never split on '=' by hand. Swift caches decoded lines by
+  content hash under `~/.cache/kitchen-sink/config-*.json`, so the hotkey
+  fast path never pays for a python round trip. Values reach code as
+  strings; lists are one comma-separated string; one-line entries only.
 - `jira/jira_*.py` — python jira poller (see AGENT_CONTEXT.md "Jira poller";
   `jira_log.py` = debug.log + raw response dumps);
   tests: `python3 Tests/test_jira_poll.py`
@@ -604,8 +621,10 @@ unchanged and can still be called directly.
   keeps the earlier answer), `keep-words:` (`WordGuard`: a layout answer that
   adds/loses words is thrown away, status warns), `csv-tables:`
   (`CSVTables.convert`: comma rows → a Markdown table, in code, before the
-  model). `AIRule` lives in `AIFormat.swift` (testable without the window).
-  Tests: `bin/run-tests.sh ai` (pure), `ai-live` (the rules through fm). One
+  model). `AIRule` and the rest of this logic live in `pylib/ai_format.py`
+  (reached through the helper); `AIFormat.swift` is a facade — only
+  `rtf`/pasteboard stay AppKit. Tests: `bin/run-tests.sh ai` (python),
+  `ai-live` (the rules through fm). One
   `PopupTabsBar` pill each (`closable = false`, `menuFor` right-click: Edit
   in Notes → `openNoteFile`, Reveal, Copy Path, Duplicate, Delete). "+" =
   `jiraFormSheet` → a template file, opened in notes. Dir watched
@@ -615,7 +634,8 @@ unchanged and can still be called directly.
   keys → ⚠ in the command line) + body = `-i` instructions, REFLOWED
   (`Reflow.instructions`: fm's ~3B model ignores hard-wrapped rules — it
   wrapped answers in ``` and added emoji until the lines were joined).
-- Run (`AIFormat.swift` helpers): `CodeGuard` swaps fenced blocks + `inline`
+- Run (`ai_format.py` through the helper; `AIFormat.swift` is the facade):
+  `CodeGuard` swaps fenced blocks + `inline`
   for `[[CODEn]]` (+ one instruction line) and restores them; a dropped
   token → warning status. `TokenBudget.parts` splits long text at blank
   lines to fit `context-tokens` (chunk: default for diff rules), parts run
@@ -627,7 +647,7 @@ unchanged and can still be called directly.
 - Right pane: `ConfSegmented` over `PaneMode` Diff | Markdown | Outlook |
   Webex (click; plain rules drop Diff). Diff = `WordDiff` (spacing-only changes are not
   marked). Outlook / Webex = `WKWebView` preview of EXACTLY what Copy
-  writes: `RichText.html` = pandoc `-f gfm -t html --syntax-highlighting=none`
+  writes: `RichText.html` (python, `pylib/ai_format.py`) = pandoc `-f gfm -t html --syntax-highlighting=none`
   + every style inline (`styled`: Aptos 11pt, bordered tables, code
   blocks); Webex has no tables → `tablesAsText` (aligned block in a fence).
   ⧉ Copy = ONE pasteboard item: html + rtf (NSAttributedString
@@ -639,20 +659,20 @@ unchanged and can still be called directly.
 
 ## Compare view (PRD-compare.md; Text Compare + Folder Compare)
 
-- Files: `CompareText.swift` (Foundation only): `TextSide` (decode: UTF-8 ±
+- Files: `CompareText.swift` is now a THIN facade (mirror + helper calls):
+  the engine lives in `pylib/compare_text.py` (`TextSide`: decode UTF-8 ±
   BOM, UTF-16 LE/BE with BOM, else Latin-1; NUL in the first 8 KB = binary;
-  per-line `EOL` incl. `none` for a last line without newline; `encoded()`
-  is byte-exact, nil when Latin-1 can't hold an edit → saved as UTF-8),
-  `Importance` (`key(line, eol)` = the comparison key; `.exact` = git's
-  view), `LineDiff` (a PORT of git's xhistogram.c + xdl_change_compact +
-  the indent heuristic; Myers via CollectionDifference where git falls
-  back; a work list, no recursion), `TextCompare` (rows `CompareRow` l/r
-  line or -1 filler, kind same/changed/leftOnly/rightOnly + `important`;
-  sections = runs of `isDiff` rows; `replace` → `TextSide.replace` →
-  `rediff` = only ± `rediffContext` (50) same rows around the edit;
-  `copyRows` / `copySection` = Opt+→ / Opt+← (Ctrl+R); per-side undo stacks), `CharDiff`
-  (the old AI `WordDiff`, moved here: `diff` / `changes` for the AI view,
-  `marks` = changed spans for drawing), `BinaryCompare`.
+  per-line `EOL` incl. `none`; `encode` byte-exact, None when Latin-1 can't
+  hold an edit. `Importance` `key(line, eol)`; `.exact` = git's view.
+  `LineDiff` = git's xhistogram + xdl_change_compact + indent heuristic,
+  Myers fallback. `TextCompare` = the handle-based model the helper keeps:
+  rows, sections, anchors, per-side undo; `replace` re-diffs only ± 50 same
+  rows around the edit; `copyRows`/`copySection` = Opt+→ / Opt+← (Ctrl+R).
+  `CharDiff` `diff`/`changes` (AI view) and `marks` (drawing, memoised
+  in-process). `BinaryCompare` stays Swift: a 10-line byte compare on
+  in-memory Data, no hop.) `pylib/compare_folder.py` holds the folder
+  classifier and content equality; the walker (`FolderScan`), the mutable
+  tree the UI drags, `IgnoreRules` (gitignore) and `SyncPlan` stay Swift.
   `ComparePane.swift`: `CompareSession` (one pair + view state: filter →
   `visible` display rows, cursor/anchor/focus, dirty = side's undo count vs
   `cleanDepth`, `waiters` for `--wait`, DispatchSource `watchers`),
@@ -1242,14 +1262,14 @@ Line numbers drift; grep the symbol names (they're stable).
   Jira detail: no header title, the page's first line = KEY — summary.
 - Prose mode (NotesProse.swift): ⌘⇧P / the Prose | nvim switch (bottom
   right) / Esc back; the reading view renders the SAME document as Export
-  PDF — `ProsePDF.screenHTML` = pandoc `-s -f gfm -t html5` with
-  `[notes] pdf-css` (else `builtinCSS`) as its header — so what you read is
-  what you export; `ProseRender.page` adds only a `<base>`, the
+  PDF — `prose.screen_html` (`pylib/prose_pdf.py`) = pandoc `-s -f gfm -t
+  html5` with `[notes] pdf-css` (else the builtin CSS) as its header — so what
+  you read is what you export; `ProseRender.page` adds only a `<base>`, the
   `prose-width` column and the screen-only meta line. `prose-font`,
   `prose-font-size`, `prose-icon-font` no longer apply; pandoc missing →
   `ProseRender.basic` in the same style.
   The reading view parses `gfm+sourcepos` (data-pos for the nvim sync), which
-  changes the HTML: `ProsePDF.sourceposFilter` (Lua, written to the prose
+  changes the HTML: `prose_pdf.SOURCEPOS_FILTER` (Lua, written to the prose
   cache dir) puts task items back (☐ + text on its own line) and unwraps the
   per-tag spans around inline raw HTML (`<kbd>`, badges came out empty).
   `bin/run-tests.sh snippets` renders EVERY markdown snippet (expanded by
@@ -1262,7 +1282,7 @@ Line numbers drift; grep the symbol names (they're stable).
   folder is never added to `paths` (the folder entry opens it).
   Alerts: ONLY GitHub's five (`> [!NOTE|TIP|IMPORTANT|WARNING|CAUTION]`) —
   pandoc gfm's built-in `alerts` → `div.note` … styled by the PDF CSS
-  (`RichText.styled` inlines them for Outlook / Webex). Same
+  (`ai_format.styled` inlines them for Outlook / Webex). Same
   syntax as the dotfiles PDF builder (`-f gfm`, no Lua filter) + nvim.
 - Capsule look everywhere (`CapsuleStyle` track + raised chip, PopupWindow.swift):
   view switcher, `ConfSegmented` / `ConfToggle` (compare + folder filters,
@@ -1276,12 +1296,12 @@ Line numbers drift; grep the symbol names (they're stable).
   `pdf-css` header, so fenced code keeps pandoc's highlight theme, the
   CSS's Nerd Font language icons (`pre.sourceCode.LANG::before`) and its
   GitHub-alert blocks; the AI view's pastes keep `--syntax-highlighting=none`.
-  Export PDF (`ProsePDF.swift`,
-  Foundation, `bin/run-tests.sh prose`): Cmd+P in the reading view / pop-out
+  Export PDF (`pylib/prose_pdf.py` via the helper,
+  `bin/run-tests.sh prose-pdf`): Cmd+P in the reading view / pop-out
   or its right-click menu (`ProseWebView.willOpenMenu`) → `pandoc -s -f gfm
   -t html5 --syntax-highlighting=tango --include-in-header=[notes] pdf-css`
   (the owner's = the dotfiles `friendly_document_styling.css`; dist / empty =
-  `ProsePDF.builtinCSS`) → `weasyprint` → `[notes] pdf-path`/NOTE.pdf
+  `prose_pdf.BUILTIN_CSS`) → `weasyprint` → `[notes] pdf-path`/NOTE.pdf
   (default ~/Downloads, overwritten). The PDF's PATH goes on the clipboard +
   `ScreenToast` (copy-toast text). Keys `pdf-engine-bin`, `pdf-highlight`;
   preflight warns without weasyprint.
@@ -1542,7 +1562,8 @@ worked example):
   the row's name (`FileListPane.nameRect`, stem selected). Return / Tab /
   clicking away renames, Esc cancels only the rename (`transientEscape`);
   edit shortcuts go to `renameEditor` in `handleKey`. Main list only.
-- File browser file actions (`FileOps.swift` = the ops + undo stack, AppKit-free,
+- File browser file actions (`FileOps.swift` = the facade; the ops + undo
+  stack live in `pylib/file_ops.py`, AppKit-free,
   `bin/run-tests.sh fileops`; `PopupFileBrowser.handleShortcut` /
   `perform(_:)` / `run`; right-click = `FileListPane.Action`). While the LIST
   has focus (in the filter bar they stay text keys): Cmd+Delete trash, Cmd+D

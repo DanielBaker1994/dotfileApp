@@ -172,7 +172,6 @@ final class ConfToggle: NSView, PopupThemeable {
         NSSize(width: ceil((title as NSString).size(withAttributes: [.font: font]).width) + 22, height: JiraTheme.height)
     }
     override func draw(_ dirty: NSRect) {
-        let st: ButtonState = isOn ? .on : .idle
         CapsuleStyle.track(bounds.insetBy(dx: 0.5, dy: 0.5), colors)
         if isOn { CapsuleStyle.chip(bounds.insetBy(dx: 3, dy: 3), colors, on: true, hover: false) }
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: isOn ? colors.text : colors.dim]

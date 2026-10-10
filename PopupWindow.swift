@@ -7496,10 +7496,6 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         return bar.jumpItems()
     }
     public func sidebarJump(_ row: Int) { tabsBar?.activate(row: row) }
-    public var sidebarAnchor: (view: NSView, rect: NSRect)? {
-        guard let bar = tabsBar, bar.vertical, !bar.isHidden else { return nil }
-        return (bar, NSRect(x: bar.bounds.maxX - 4, y: 30, width: 1, height: 1))
-    }
     public var tabPathTip: ((Int) -> String?)? {
         didSet { tabsBar?.pathTip = tabPathTip }
     }
@@ -10560,24 +10556,6 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         layoutEditorScroll()
     }
 
-    public func toggleFileBrowser() {
-        guard fileBrowser != nil, fileBrowserDrawerMode else { return }
-        fileBrowserShown.toggle()
-        fileBrowser?.isHidden = !fileBrowserShown
-        if fileBrowserShown {
-            currentBrowserHeight = preferredBrowserHeight
-        }
-        syncDrawerLayout()
-        if fileBrowserShown, let lp = fileBrowser?.listView {
-            panel.makeFirstResponder(lp)
-            focusedPane = .browser
-        } else if let ed = primaryEditor {
-            panel.makeFirstResponder(ed)
-            focusedPane = .editor
-        }
-        updateFocusIndicator()
-    }
-
     private func drawerInsetTotal() -> CGFloat {
         (terminalShown ? currentTerminalHeight : 0)
             + (fileBrowserShown ? currentBrowserHeight : 0)
@@ -10838,7 +10816,9 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         sw.onPopOut = { [weak self] in self?.popOutProse() }
         sw.onStyle = { [weak self, weak sw] rect in
             guard let self, let sw else { return }
-            self.docTemplateMenu().popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.maxY + 4), in: sw)
+            self.docTemplateMenu { menu in
+                menu.popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.maxY + 4), in: sw)
+            }
         }
         if let chrome { backdrop.addSubview(sw, positioned: .below, relativeTo: chrome) } else { backdrop.addSubview(sw) }
         proseSwitch = sw
@@ -10890,9 +10870,31 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         pv.show(src, colors: config.colors, font: proseFont, size: proseFontSize * zoom, width: proseWidth)
         panel.makeFirstResponder(pv.web)
     }
-    private func docTemplateMenu() -> NSMenu {
+    private func docTemplateMenu(done: @escaping (NSMenu) -> Void) {
         let text = proseProvider?()?.markdown ?? ""
-        let cur = DocTemplates.current(in: text)
+        let configured = configSectionValue("notes", "doc-templates") ?? ""
+        let cssPath = (configSectionValue("notes", "pdf-css") ?? "").trimmingCharacters(in: .whitespaces)
+        let css = cssPath.isEmpty ? "" : (try? String(contentsOfFile: (cssPath as NSString).expandingTildeInPath, encoding: .utf8)) ?? ""
+        pythonHelper.call("doc_templates.menu",
+                          ["text": text, "configured": configured, "css": css],
+                          timeout: 3) { [weak self] result in
+            guard let self else { return }
+            if case .success(let value) = result, let menu = value as? [String: Any],
+               let names = menu["names"] as? [String] {
+                done(self.buildDocTemplateMenu(current: menu["current"] as? String, names: names))
+            } else {
+                let m = NSMenu()
+                m.autoenablesItems = false
+                let head = NSMenuItem(title: "Document styles unavailable (python helper)",
+                                      action: nil, keyEquivalent: "")
+                head.isEnabled = false
+                m.addItem(head)
+                done(m)
+            }
+        }
+    }
+
+    private func buildDocTemplateMenu(current cur: String?, names: [String]) -> NSMenu {
         let m = NSMenu()
         m.autoenablesItems = false
         let head = NSMenuItem(title: "Document style", action: nil, keyEquivalent: "")
@@ -10902,9 +10904,7 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
         none.state = cur == nil ? .on : .off
         m.addItem(none)
         m.addItem(.separator())
-        let cssPath = (configSectionValue("notes", "pdf-css") ?? "").trimmingCharacters(in: .whitespaces)
-        let css = cssPath.isEmpty ? nil : try? String(contentsOfFile: (cssPath as NSString).expandingTildeInPath, encoding: .utf8)
-        for name in DocTemplates.names(configSectionValue("notes", "doc-templates"), css: css) {
+        for name in names {
             let it = ClosureMenuItem(name) { [weak self] in self?.applyDocTemplate(name) }
             it.state = cur == name ? .on : .off
             m.addItem(it)
@@ -10914,8 +10914,19 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
 
     private func applyDocTemplate(_ name: String?) {
         guard let text = proseProvider?()?.markdown else { return }
-        let e = DocTemplates.edit(text, template: name)
-        if e.remove == 0 && e.insert.isEmpty { return }
+        pythonHelper.call("doc_templates.edit", ["text": text, "template": name ?? NSNull()]) { [weak self] result in
+            guard let self else { return }
+            if case .success(let value) = result, let edit = value as? [String: Any],
+               let remove = edit["remove"] as? Int, let insert = edit["insert"] as? [String] {
+                self.applyDocTemplateChange(remove: remove, insert: insert, name: name)
+            } else {
+                self.showToast("Style change failed (python helper)", symbol: "exclamationmark.triangle.fill")
+            }
+        }
+    }
+
+    private func applyDocTemplateChange(remove: Int, insert: [String], name: String?) {
+        if remove == 0 && insert.isEmpty { return }
         if vimView != nil, vimPaneActive {
             let lua = PopupWindow.vimLua([
                 "(function(a)",
@@ -10925,13 +10936,13 @@ public final class PopupWindow: NSObject, NSTextFieldDelegate, NSWindowDelegate 
                 "vim.api.nvim_buf_set_lines(0, 0, n, false, new)",
                 "vim.cmd('silent! update') return 1 end)(_A)",
             ])
-            _ = vimEval("luaeval(\(PopupWindow.vimString(lua)), \(PopupWindow.vimDQ("\(e.remove)\n" + e.insert.joined(separator: "\n"))))")
+            _ = vimEval("luaeval(\(PopupWindow.vimString(lua)), \(PopupWindow.vimDQ("\(remove)\n" + insert.joined(separator: "\n"))))")
         } else if let tv = editorView {
             let ns = tv.string as NSString
             var end = 0
-            for _ in 0..<e.remove where end < ns.length { end = NSMaxRange(ns.lineRange(for: NSRange(location: end, length: 0))) }
+            for _ in 0..<remove where end < ns.length { end = NSMaxRange(ns.lineRange(for: NSRange(location: end, length: 0))) }
             let r = NSRange(location: 0, length: end)
-            let new = e.insert.isEmpty ? "" : e.insert.joined(separator: "\n") + "\n"
+            let new = insert.isEmpty ? "" : insert.joined(separator: "\n") + "\n"
             if tv.shouldChangeText(in: r, replacementString: new) {
                 tv.replaceCharacters(in: r, with: new)
                 tv.didChangeText()

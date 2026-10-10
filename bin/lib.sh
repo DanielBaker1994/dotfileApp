@@ -6,11 +6,8 @@ WS_ROOT="$(cd "$_ws_lib_dir/.." && pwd -P)"
 . "$WS_ROOT/install.conf"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-ws_ok()   { printf '\033[32m  \342\234\224 %s\033[0m\n' "$*"; }
-ws_fail() { printf '\033[31m  \342\234\230 %s\033[0m\n' "$*"; }
 ws_warn() { printf '\033[33m  ! %s\033[0m\n' "$*"; }
 ws_step() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
-ws_info() { printf '\033[2m    %s\033[0m\n' "$*"; }
 ws_die()  { printf '\033[31mws: %s\033[0m\n' "$*" >&2; exit 1; }
 
 ws_cmd_build() {

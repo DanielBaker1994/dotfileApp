@@ -152,36 +152,43 @@ enum ProseRender {
     }
 
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
-        var cfg = ProsePDF.Config()
-        cfg.pandoc = RichText.pandocBin
         func notes(_ k: String) -> String? {
             configSectionValue("notes", k).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
         }
-        if let v = notes("pdf-css") { cfg.css = v }
-        if let v = notes("pdf-filter") { cfg.filter = v }
-        if let v = notes("pdf-highlight") { cfg.highlight = v }
-        else { cfg.highlight = highlightTheme(c) }
-        cfg.themeCSS = themeCSS(c)
-        var html = ProsePDF.screenHTML(note: src.path, cfg) ?? shell(src, cfg)
+        var cfg: [String: Any] = ["pandoc": RichText.pandocBin]
+        if let v = notes("pdf-css") { cfg["css"] = v }
+        if let v = notes("pdf-filter") { cfg["filter"] = v }
+        if let v = notes("pdf-highlight") { cfg["highlight"] = v }
+        else { cfg["highlight"] = highlightTheme(c) }
+        cfg["themeCSS"] = themeCSS(c)
+        var html: String
+        if case .success(let value) = pythonHelper.callSync("prose.screen_html",
+                                                            ["note": src.path, "config": cfg], timeout: 120),
+           let box = value as? [String: Any], let rendered = box["html"] as? String {
+            html = rendered
+        } else {
+            var css = ""
+            if case .success(let value) = pythonHelper.callSync("prose.css_content", ["config": cfg]),
+               let box = value as? [String: Any], let text = box["css"] as? String {
+                css = text
+            }
+            html = """
+            <!doctype html><html><head><meta charset="utf-8">
+            \(css)
+            </head><body>\(basic(src.markdown))</body></html>
+            """
+        }
         let base = URL(fileURLWithPath: (src.path as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
         var override = "<base href=\"\(esc(base))\">\n<style>\n"
             + "body { max-width: \(Int(width))px !important; }\n"
             + "</style>"
         if tri(notes("copy-buttons")) ?? true {
-            override += "\n<style id=\"ws-copy\">\n" + copyButtonStyles(c, cssPath: cfg.css) + "</style>"
+            override += "\n<style id=\"ws-copy\">\n" + copyButtonStyles(c, cssPath: cfg["css"] as? String) + "</style>"
         }
         if let head = html.range(of: "</head>", options: .caseInsensitive) {
             html.insert(contentsOf: override, at: head.lowerBound)
         }
         return html
-    }
-
-    private static func shell(_ src: ProseSource, _ c: ProsePDF.Config) -> String {
-        """
-        <!doctype html><html><head><meta charset="utf-8">
-        \(ProsePDF.cssContent(c))
-        </head><body>\(basic(src.markdown))</body></html>
-        """
     }
 }
 
@@ -216,7 +223,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         syncLine = nil
         scrollToSourceLine(n)
     }
-    var onLinkClick: ((URL) -> Void)?
     var onJump: ((Int) -> Void)?
     var onOpenImage: ((String) -> Void) = { FilePopup.show(path: $0, over: nil) }
     private var lastPath = ""
@@ -549,31 +555,39 @@ final class ProseView: NSView, WKScriptMessageHandler {
         guard !note.isEmpty, !Self.exporting else { return }
         Self.exporting = true
         let screen = window?.screen
-        var c = ProsePDF.Config()
-        c.pandoc = RichText.pandocBin
         func notes(_ k: String) -> String? {
             configSectionValue("notes", k).map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 }
         }
-        if let v = notes("pdf-engine-bin") { c.engine = v }
-        if let v = notes("pdf-css") { c.css = v }
-        if let v = notes("pdf-filter") { c.filter = v }
-        if let v = notes("pdf-path") { c.outDir = v }
-        if let v = notes("pdf-highlight") { c.highlight = v }
-        else { c.highlight = ProseRender.highlightTheme(themeColors) }
-        c.themeCSS = ProseRender.themeCSS(themeColors)
+        var cfg: [String: Any] = ["pandoc": RichText.pandocBin]
+        if let v = notes("pdf-engine-bin") { cfg["engine"] = v }
+        if let v = notes("pdf-css") { cfg["css"] = v }
+        if let v = notes("pdf-filter") { cfg["filter"] = v }
+        if let v = notes("pdf-path") { cfg["outDir"] = v }
+        if let v = notes("pdf-highlight") { cfg["highlight"] = v }
+        else { cfg["highlight"] = ProseRender.highlightTheme(themeColors) }
+        cfg["themeCSS"] = ProseRender.themeCSS(themeColors)
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = ProsePDF.export(note: note, c)
+            let r = pythonHelper.callSync("prose.pdf_export",
+                                          ["note": note, "config": cfg], timeout: 300)
             DispatchQueue.main.async {
                 Self.exporting = false
+                var failure: String?
                 switch r {
-                case .success(let out):
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(out, forType: .string)
-                    let tilde = (out as NSString).abbreviatingWithTildeInPath
-                    let fmt = settings.copyToast.isEmpty ? "Copied {} to clipboard" : settings.copyToast
-                    ScreenToast.show(fmt.replacingOccurrences(of: "{}", with: tilde), on: screen, symbol: "doc.richtext")
+                case .success(let value):
+                    if let box = value as? [String: Any], let out = box["out"] as? String {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(out, forType: .string)
+                        let tilde = (out as NSString).abbreviatingWithTildeInPath
+                        let fmt = settings.copyToast.isEmpty ? "Copied {} to clipboard" : settings.copyToast
+                        ScreenToast.show(fmt.replacingOccurrences(of: "{}", with: tilde), on: screen, symbol: "doc.richtext")
+                        return
+                    }
+                    failure = (value as? [String: Any])?["error"] as? String ?? "pdf export failed"
                 case .failure(let e):
-                    ScreenToast.show(e.description, on: screen, symbol: "exclamationmark.triangle.fill")
+                    failure = e.description
+                }
+                if let failure {
+                    ScreenToast.show(failure, on: screen, symbol: "exclamationmark.triangle.fill")
                 }
             }
         }

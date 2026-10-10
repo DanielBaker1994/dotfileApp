@@ -30,7 +30,6 @@ struct AnsiStyle: Equatable {
 struct AnsiCell: Equatable {
     var text: String
     var style: AnsiStyle
-    var wide: Bool { width == 2 }
     var width: Int
 }
 

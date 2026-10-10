@@ -3,6 +3,7 @@ import Foundation
 
 setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
 if !isRepoBuild { setenv("WS_COMMANDS_CONF", settings.commandsConfPath, 0) }
+pythonHelper.configure(libDir: assetDir + "/pylib")
 
 if CommandLine.arguments.count > 1 {
     switch CommandLine.arguments[1] {
@@ -201,4 +202,10 @@ if !acquireDaemonLock(waitUpTo: 0) {
 let app = NSApplication.shared
 let delegate = AppDelegate(showOnLaunch: showOnLaunch, openCommand: openCommand)
 app.delegate = delegate
+pythonHelper.call("ping", timeout: 20) { result in
+    switch result {
+    case .success(let value): wsLog("python helper ready: \(value)")
+    case .failure(let e): wsLog("python helper unavailable: \(e.description)")
+    }
+}
 app.run()
