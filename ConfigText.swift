@@ -91,14 +91,15 @@ func configLines(_ text: String) -> [String] {
 }
 
 private let triLock = NSLock()
-private var triMemo: [String: Any] = [:]
+private var triMemo: [String: Bool] = [:]
 
 func tri(_ s: String?) -> Bool? {
     // the grammar lives in pylib/config_text.py; memoised because config
-    // loaders call this per key and the answer set is tiny
+    // loaders call this per key and the answer set is tiny. A failed call is
+    // NEVER memoised: the next call retries (the helper may still be starting).
     let key = (s ?? "").lowercased()
     triLock.lock()
-    if let hit = triMemo[key] { triLock.unlock(); return hit as? Bool }
+    if let hit = triMemo[key] { triLock.unlock(); return hit }
     triLock.unlock()
     var value: Bool?
     if case .success(let box) = PythonHelper.shared.callSync(
@@ -106,9 +107,11 @@ func tri(_ s: String?) -> Bool? {
        let d = box as? [String: Any] {
         value = d["value"] as? Bool
     }
-    triLock.lock()
-    triMemo[key] = value ?? NSNull()
-    triLock.unlock()
+    if let value {
+        triLock.lock()
+        triMemo[key] = value
+        triLock.unlock()
+    }
     return value
 }
 
