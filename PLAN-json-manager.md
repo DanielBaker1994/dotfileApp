@@ -470,6 +470,7 @@ batch as the plan executes.
 | M3b | done | confluence package shares `confluence/defaults`; `test_confluence.py` + 3.9 import green |
 | M3c | done | notify package shares `notify/defaults`; `test_notifications.py` + `status` + 3.9 import green |
 | M3d | done | settings_hub tables/nvim_lua/hub_defaults (soft accessor, retried); `ws test settings` green; all import orders verified |
+| M3e | done | `pylib/jira_paths.py` via jsonmgr; `test_jira_poll` + `test_confluence` + `test_notifications` + `helper` + 3.9 green |
 | … | — | |
 
 ## 7. Validation hooks for this plan

@@ -4,12 +4,11 @@ Stdlib only, 3.9-compatible.
 
 Env overrides (tests, throwaway installs): JIRA_CONFIG_JSON, JIRA_TEAM_JSON,
 JIRA_CONFIG_FILE, JIRA_CACHE_DIR."""
-import json
 import os
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(_HERE, "paths.json"), encoding="utf-8") as _fh:
-    _P = json.load(_fh)
+import jsonmgr
+
+_P = jsonmgr.load("pylib/paths")
 
 
 def _path(env: str, key: str) -> str:
