@@ -164,7 +164,7 @@ class OneShot(unittest.TestCase):
 
 
 class Server(unittest.TestCase):
-    def serve(self, lines, replies, timeout=10):
+    def serve(self, lines, replies, timeout=20):
         p = subprocess.Popen(
             [sys.executable, "-B", "-m", "helper"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -176,6 +176,9 @@ class Server(unittest.TestCase):
             json.loads(raw)
         return p.returncode, [json.loads(l) for l in out.splitlines()], err
 
+    def by_id(self, replies):
+        return {r["id"]: r for r in replies}
+
     def test_loop_with_shutdown(self):
         code, replies, _ = self.serve(
             ["\n",
@@ -186,10 +189,12 @@ class Server(unittest.TestCase):
             replies=4,
         )
         self.assertEqual(code, 0)
-        self.assertEqual([r["id"] for r in replies], [1, 2, 3, 4])
-        self.assertTrue(replies[0]["ok"])
-        self.assertFalse(replies[1]["ok"])
-        self.assertTrue(replies[3]["ok"])
+        got = self.by_id(replies)
+        self.assertEqual(sorted(got), [1, 2, 3, 4])
+        self.assertTrue(got[1]["ok"])
+        self.assertFalse(got[2]["ok"])
+        self.assertTrue(got[3]["ok"])
+        self.assertTrue(got[4]["ok"])
 
     def test_a_bad_line_does_not_kill_the_server(self):
         code, replies, _ = self.serve(
@@ -197,13 +202,64 @@ class Server(unittest.TestCase):
             replies=2,
         )
         self.assertEqual(code, 0)
-        self.assertIn("bad json", replies[0]["error"]["message"])
-        self.assertTrue(replies[1]["ok"])
+        bad = [r for r in replies if r["id"] is None][0]
+        self.assertIn("bad json", bad["error"]["message"])
+        self.assertTrue([r for r in replies if r["id"] == 1][0]["ok"])
 
     def test_unknown_requests_never_print_to_stderr(self):
         code, _, err = self.serve([line({"id": 1, "method": "nope"})], replies=1)
         self.assertEqual(code, 0)
         self.assertEqual(err.strip(), "")
+
+    def test_a_slow_call_does_not_block_fast_calls(self):
+        code, replies, _ = self.serve([
+            line({"id": 1, "method": "script.run", "params": {
+                "folder": FIXTURES, "script": "sleepy_script.py", "args": ["1"]}}),
+            line({"id": 2, "method": "ping"}),
+            line({"id": 3, "method": "ping"}),
+            line({"id": 4, "method": "shutdown"}),
+        ], replies=4)
+        self.assertEqual(code, 0)
+        ids = [r["id"] for r in replies]
+        self.assertLess(ids.index(2), ids.index(1), "fast calls overtake the slow one")
+        self.assertLess(ids.index(3), ids.index(1), "fast calls overtake the slow one")
+        self.assertEqual(ids[-1], 4, "shutdown answers last, after the drain")
+        self.assertTrue(self.by_id(replies)[1]["ok"])
+
+    def test_errors_do_not_poison_other_calls(self):
+        code, replies, _ = self.serve([
+            line({"id": 1, "method": "nope"}),
+            line({"id": 2, "method": "script.run", "params": {
+                "folder": FIXTURES, "script": "fail_script.py"}}),
+            "{nope\n",
+            line({"id": 3, "method": "ping"}),
+            line({"id": 4, "method": "shutdown"}),
+        ], replies=5)
+        self.assertEqual(code, 0)
+        got = self.by_id(replies)
+        self.assertFalse(got[1]["ok"])
+        self.assertTrue(got[2]["ok"])
+        self.assertEqual(got[2]["result"]["code"], 3)
+        self.assertTrue(got[3]["ok"])
+        self.assertFalse(got[None]["ok"])
+
+    def test_shutdown_drains_in_flight(self):
+        code, replies, _ = self.serve([
+            line({"id": 1, "method": "script.run", "params": {
+                "folder": FIXTURES, "script": "sleepy_script.py", "args": ["0.6"]}}),
+            line({"id": 2, "method": "shutdown"}),
+        ], replies=2)
+        self.assertEqual(code, 0)
+        self.assertEqual([r["id"] for r in replies], [1, 2])
+        self.assertTrue(replies[0]["ok"])
+
+    def test_eof_drains_in_flight(self):
+        code, replies, _ = self.serve([
+            line({"id": 1, "method": "script.run", "params": {
+                "folder": FIXTURES, "script": "sleepy_script.py", "args": ["0.6"]}}),
+        ], replies=1)
+        self.assertEqual(code, 0)
+        self.assertTrue(replies[0]["ok"])
 
 
 if __name__ == "__main__":

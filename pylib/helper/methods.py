@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import threading
 
 import ai_format
 import compare_folder
@@ -20,6 +21,9 @@ _IGNORE_NEXT = [1]
 _COMPARE_MODELS = {}
 _COMPARE_NEXT = [1]
 
+# Requests run concurrently now; handle allocation must not race.
+_HANDLE_LOCK = threading.Lock()
+
 
 def _compare_model(params):
     model = _COMPARE_MODELS.get(params.get("handle"))
@@ -33,8 +37,9 @@ def _compare_new(params: dict) -> dict:
     model = compare_text.TextCompare(params.get("left"), params.get("right"),
                                      params.get("importance"),
                                      bool(params.get("ignoreUnimportant")))
-    handle = _COMPARE_NEXT[0]
-    _COMPARE_NEXT[0] += 1
+    with _HANDLE_LOCK:
+        handle = _COMPARE_NEXT[0]
+        _COMPARE_NEXT[0] += 1
     _COMPARE_MODELS[handle] = model
     snap = model.snapshot()
     snap["handle"] = handle
@@ -501,8 +506,9 @@ def _ignore_new(params: dict) -> dict:
     rules = ignore.Rules(home=params.get("home") or None,
                          shelf_file=params.get("shelfFile"),
                          git_excludes=params.get("gitExcludes"))
-    handle = _IGNORE_NEXT[0]
-    _IGNORE_NEXT[0] += 1
+    with _HANDLE_LOCK:
+        handle = _IGNORE_NEXT[0]
+        _IGNORE_NEXT[0] += 1
     _IGNORE_RULES[handle] = rules
     return {"handle": handle}
 

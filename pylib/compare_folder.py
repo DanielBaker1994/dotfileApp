@@ -4,6 +4,7 @@ import fnmatch
 import os
 import re
 import stat
+import threading
 import time
 import unicodedata
 
@@ -14,6 +15,7 @@ _TREES = {}
 _TREE_NEXT = [1]
 _SESSIONS = {}
 _SESSION_NEXT = [1]
+_ALLOC = threading.Lock()
 
 
 def _stat_side(path: str, name: str):
@@ -127,8 +129,9 @@ def scan_start(left: str, right: str, options: dict, case_insensitive: bool) -> 
         "rules": rules, "nodes": [], "roots": [], "errors": [], "truncated": False,
         "stack": [(left, right, "", None, 0)],
     }
-    handle = _SESSION_NEXT[0]
-    _SESSION_NEXT[0] += 1
+    with _ALLOC:
+        handle = _SESSION_NEXT[0]
+        _SESSION_NEXT[0] += 1
     _SESSIONS[handle] = session
     return handle
 
@@ -263,8 +266,9 @@ def scan_finish(handle: int) -> dict:
         n["sameByMetadata"] = r["sameByMetadata"]
         n["newer"] = r["newer"]
     _settle(session)
-    tree_handle = _TREE_NEXT[0]
-    _TREE_NEXT[0] += 1
+    with _ALLOC:
+        tree_handle = _TREE_NEXT[0]
+        _TREE_NEXT[0] += 1
     _TREES[tree_handle] = session
     return {"handle": tree_handle, "nodes": nodes, "roots": session["roots"],
             "errors": session["errors"], "truncated": session["truncated"],

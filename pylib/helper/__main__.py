@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from . import VERSION, dispatch
 from . import methods as _methods
+
+# The app holds a handful of calls in flight and some of them (the script
+# bridge, prose export) run for seconds. A small bounded pool keeps one slow
+# call from serialising every other request; replies are matched by id, so
+# out-of-order completion is fine.
+MAX_WORKERS = 8
+
+_write_lock = threading.Lock()
 
 
 def main(argv=None) -> int:
@@ -29,19 +39,34 @@ def main(argv=None) -> int:
 
 
 def _serve(stream) -> int:
-    for line in stream:
-        line = line.strip()
-        if not line:
-            continue
-        request, error = _parse(line)
-        if error is not None:
-            _emit(error)
-            continue
-        if request.get("method") == "shutdown":
-            _emit({"id": request.get("id"), "ok": True, "result": {}})
-            return 0
-        _emit(dispatch(request))
-    return 0
+    pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    try:
+        pending = []
+        shutdown = None
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            request, error = _parse(line)
+            if error is not None:
+                _emit(error)
+                continue
+            if request.get("method") == "shutdown":
+                shutdown = request
+                break
+            pending.append(pool.submit(_answer, request))
+        # EOF or shutdown: every accepted request still gets its reply.
+        for fut in pending:
+            fut.result()
+        if shutdown is not None:
+            _emit({"id": shutdown.get("id"), "ok": True, "result": {}})
+        return 0
+    finally:
+        pool.shutdown()
+
+
+def _answer(request) -> None:
+    _emit(dispatch(request))
 
 
 def _once(line: str) -> int:
@@ -74,8 +99,14 @@ def _emit_reply(reply: dict) -> int:
 
 
 def _emit(obj) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
+    try:
+        with _write_lock:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    except OSError:
+        # The parent is gone; EOF on stdin ends the loop on its own.
+        pass
 
 
 if __name__ == "__main__":

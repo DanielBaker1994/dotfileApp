@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 
 _STACKS = {}
 _NEXT = [1]
+_ALLOC = threading.Lock()
 
 
 def stack_new(limit: int = 50) -> int:
-    handle = _NEXT[0]
-    _NEXT[0] += 1
+    with _ALLOC:
+        handle = _NEXT[0]
+        _NEXT[0] += 1
     _STACKS[handle] = {"limit": limit, "stack": []}
     return handle
 

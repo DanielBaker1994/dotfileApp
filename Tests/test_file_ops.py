@@ -196,12 +196,21 @@ class Protocol(unittest.TestCase):
         env = dict(os.environ)
         env["PYTHONPATH"] = os.path.join(ROOT, "pylib")
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        p = subprocess.run(
+        p = subprocess.Popen(
             [sys.executable, "-B", "-m", "helper"],
-            input="".join(json.dumps(r) + "\n" for r in requests),
-            capture_output=True, text=True, cwd=ROOT, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=ROOT, env=env,
         )
-        return [json.loads(line) for line in p.stdout.splitlines()]
+        replies = []
+        for req in requests:
+            p.stdin.write(json.dumps(req) + "\n")
+            p.stdin.flush()
+            replies.append(json.loads(p.stdout.readline()))
+        p.stdin.close()
+        code = p.wait(timeout=10)
+        err = p.stderr.read()
+        self.assertEqual(code, 0, err)
+        return replies
 
     def test_round_trip(self):
         tmp = tempfile.mkdtemp(prefix="fileops-proto-")
@@ -215,12 +224,13 @@ class Protocol(unittest.TestCase):
             {"id": 5, "method": "fileops.stack_drop", "params": {"handle": 1}},
         ])
         self.assertEqual(len(replies), 5)
-        path = replies[1]["result"]["changes"][0][1]
+        got = {r["id"]: r for r in replies}
+        path = got[2]["result"]["changes"][0][1]
         self.assertTrue(path.startswith(tmp))
-        self.assertEqual(replies[2]["result"]["count"], 1)
-        self.assertIn("outcome", replies[3]["result"])
+        self.assertEqual(got[3]["result"]["count"], 1)
+        self.assertIn("outcome", got[4]["result"])
         self.assertFalse(os.path.exists(path))
-        self.assertTrue(replies[4]["ok"])
+        self.assertTrue(got[5]["ok"])
 
 
 if __name__ == "__main__":
