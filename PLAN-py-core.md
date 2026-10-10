@@ -20,6 +20,12 @@ below.
       (structured methods can replace it later).
 - [ ] Phase C — test-backed islands (screenshot model pieces, ANSI, pane-shot,
       recent files, path shelf, compare sessions, setup checks)
+      — screenshot part 1 DONE: pylib/shot_model.py + 24 cases mirroring the
+      Swift suite's non-CG cases (ring, snap, pixelate, files, args, colors,
+      state), Swift untouched. Part 2 (switch call sites) scoped: ring
+      composition, args parse, files, state, ButtonRing.layout can move;
+      snap + pixelate-drag + HSV-wheel color math stay Swift mirrors because
+      they run per mouse-move (the python copies are the tested reference).
 - [ ] Phase D — config validation + typed parsing single-homed in Python
 - [ ] Phase E — theme/colour algebra
 - [ ] Phase F — bridge finish, leftovers, docs, final boundary
