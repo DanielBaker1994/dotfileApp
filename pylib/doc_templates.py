@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import json
-import os
+import jsonmgr
 import re
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "doc_templates.json")
+_DATA = jsonmgr.load("pylib/doc_templates")
 # the preset list is data; the CSS grammar stays code
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
 
 BUILTIN = list(_DATA["builtin"])
 

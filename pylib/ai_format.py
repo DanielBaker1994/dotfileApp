@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import json
+import jsonmgr
 import math
 import os
 import re
 import subprocess
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_format.json")
+_DATA = jsonmgr.load("pylib/ai_format")
 # the guard instruction + the filler word list are data; the pipeline is code
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
 
 CODE_INSTRUCTION = _DATA["code_instruction"]
 

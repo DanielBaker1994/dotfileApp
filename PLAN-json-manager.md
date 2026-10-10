@@ -461,6 +461,7 @@ batch as the plan executes.
 | --- | --- | --- |
 | M0 | done | `pylib/jsonmgr.py` + `Tests/test_jsonmgr.py` + `ws test jsonmgr` case; 28 tests; 3.9 CLI green |
 | M1 | done | pilot `pylib/compare_text.py` via `jsonmgr.load`; `compare` + `helper` green |
+| M2a | done | `shelf`, `doc_templates`, `ai_format`; suites + `helper` green; mutation grep clean |
 | … | — | |
 
 ## 7. Validation hooks for this plan

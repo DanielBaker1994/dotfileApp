@@ -4,13 +4,12 @@ lock-guarded snapshot plumbing."""
 from __future__ import annotations
 
 import json
+import jsonmgr
 import os
 import stat as stat_mod
 from urllib.parse import unquote, urlsplit
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shelf.json")
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
+_DATA = jsonmgr.load("pylib/shelf")
 
 MAX_LIMIT = _DATA["max_limit"]
 WHYS = tuple(_DATA["whys"])
