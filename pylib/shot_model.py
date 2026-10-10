@@ -16,67 +16,32 @@ import time
 
 # ---------------------------------------------------------------- tools
 
-DRAW_KINDS = {"pencil", "line", "arrow", "selection", "rectangle", "circle",
-              "marker", "text", "counter", "pixelate", "invert"}
-LETTERS = {"pencil": "p", "line": "d", "arrow": "a", "selection": "s",
-           "rectangle": "r", "circle": "c", "marker": "m", "text": "t",
-           "pixelate": "b", "invert": "i"}
-FINISHES = {"copy", "save", "accept", "exit", "pin", "copy-text"}
-DEFAULT_SIZES = {"text": 8, "marker": 5, "pixelate": 2, "counter": 1, "rectangle": 1}
-SYMBOLS = {
-    "pencil": "pencil", "line": "line.diagonal", "arrow": "arrow.down.left",
-    "selection": "square", "rectangle": "square.fill", "circle": "circle",
-    "marker": "highlighter", "text": "textformat", "counter": "1.circle",
-    "pixelate": "square.grid.3x3.fill", "invert": "circle.lefthalf.filled",
-    "size": "", "move": "arrow.up.and.down.and.arrow.left.and.right",
-    "undo": "arrow.uturn.backward", "redo": "arrow.uturn.forward",
-    "copy": "doc.on.doc", "save": "square.and.arrow.down", "accept": "checkmark",
-    "exit": "xmark", "pin": "pin.fill", "recent": "clock",
-    "copy-text": "text.viewfinder", "size-increase": "plus", "size-decrease": "minus",
-}
-TOOLTIPS = {
-    "pencil": "Set the Pencil as the paint tool (P)",
-    "line": "Set the Line as the paint tool (D)",
-    "arrow": "Set the Arrow as the paint tool (A)",
-    "selection": "Set Selection as the paint tool (S)",
-    "rectangle": "Set the Rectangle as the paint tool (R)",
-    "circle": "Set the Circle as the paint tool (C)",
-    "marker": "Set the Marker as the paint tool (M)",
-    "text": "Add text to your capture (T)",
-    "counter": "Add an autoincrementing counter bubble",
-    "pixelate": "Set Pixelate as the paint tool (B)",
-    "invert": "Set Inverter as the paint tool (I)",
-    "size": "Selection size",
-    "move": "Move the selection area (⌘M)",
-    "undo": "Undo the last modification (⌘Z)",
-    "redo": "Redo the next modification (⇧⌘Z)",
-    "copy": "Copy selection to clipboard (⌘C)",
-    "save": "Save screenshot to a file (⌘S)",
-    "accept": "Accept the capture (Return)",
-    "exit": "Leave the capture screen (⌘Q)",
-    "pin": "Pin image on the desktop",
-    "recent": "Recent screenshots",
-    "copy-text": "Copy the text in the selection (⇧⌘C)",
-    "size-increase": "Increase tool size",
-    "size-decrease": "Decrease tool size",
-}
-ALL_TOOLS = ["pencil", "line", "arrow", "selection", "rectangle", "circle", "marker",
-             "text", "counter", "pixelate", "invert", "size", "move", "undo", "redo",
-             "copy", "save", "accept", "exit", "pin", "recent", "copy-text",
-             "size-increase", "size-decrease"]
-DEFAULT_BUTTONS = ("pencil, line, arrow, selection, rectangle, circle, marker, text, "
-                   "counter, pixelate, invert, move, undo, redo, copy, copy-text, save, "
-                   "exit, pin, recent")
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shot_model.json")
+# the tool table is data (readable/overridable); the session mechanics stay code
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
+
+_TOOLS = _DATA["tools"]
+_TOOL_DEFAULTS = _DATA["tool_defaults"]
+
+# old symbol names kept so callers (helper protocol, tests) don't churn
+DRAW_KINDS = {t["name"] for t in _TOOLS if t["kind"] == "draw"}
+LETTERS = {t["name"]: t["letter"] for t in _TOOLS if "letter" in t}
+FINISHES = {t["name"] for t in _TOOLS if t.get("finishes")}
+DEFAULT_SIZES = {t["name"]: t["size"] for t in _TOOLS if "size" in t}
+SYMBOLS = {t["name"]: t["symbol"] for t in _TOOLS}
+TOOLTIPS = {t["name"]: t["tooltip"] for t in _TOOLS}
+ALL_TOOLS = [t["name"] for t in _TOOLS]
+DEFAULT_BUTTONS = _DATA["default_buttons"]
+
+_TOOL_KIND = {t["name"]: t["kind"] for t in _TOOLS}
+_TOOL_SIZE_RANGE = {t["name"]: tuple(t["size_range"]) for t in _TOOLS if "size_range" in t}
+_DEFAULT_TOOL_SIZE = _TOOL_DEFAULTS["size"]
+_DEFAULT_SIZE_RANGE = tuple(_TOOL_DEFAULTS["size_range"])
 
 
 def tool_kind(tool: str) -> str:
-    if tool in DRAW_KINDS:
-        return "draw"
-    if tool == "move":
-        return "mode"
-    if tool == "size":
-        return "info"
-    return "action"
+    return _TOOL_KIND.get(tool, "action")
 
 
 def tool_is_drawing(tool: str) -> bool:
@@ -88,11 +53,11 @@ def tool_finishes(tool: str) -> bool:
 
 
 def tool_default_size(tool: str) -> int:
-    return DEFAULT_SIZES.get(tool, 3)
+    return DEFAULT_SIZES.get(tool, _DEFAULT_TOOL_SIZE)
 
 
 def tool_size_range(tool: str):
-    return (0, 100) if tool == "rectangle" else (1, 100)
+    return _TOOL_SIZE_RANGE.get(tool, _DEFAULT_SIZE_RANGE)
 
 
 def tool_for_letter(c: str):
@@ -593,14 +558,14 @@ def secure_blocks(pixels: Pixels, px: Rect, size: int, scale: float = 1) -> list
 
 def expand_pattern(pattern: str, date=None) -> str:
     date = date or time.time()
-    pattern = pattern or "%F_%H-%M"
+    pattern = pattern or _DATA["filename"]["pattern"]
     pattern = pattern.replace("%F", "%Y-%m-%d")
     try:
         s = time.strftime(pattern, time.localtime(date))
     except ValueError:
         s = ""
     if not s:
-        s = "screenshot"
+        s = _DATA["filename"]["fallback"]
     return s.replace("/", "-")
 
 
@@ -641,10 +606,10 @@ class Args:
                  "acceptOnSelect", "pin", "raw", "printGeometry", "screenNumber")
 
     def __init__(self):
-        self.mode = "gui"
+        self.mode = _DATA["args"]["mode"]
         self.path = None
         self.clipboard = False
-        self.delayMs = 0
+        self.delayMs = _DATA["args"]["delayMs"]
         self.region = None
         self.lastRegion = False
         self.acceptOnSelect = False
@@ -744,7 +709,7 @@ def parse_args(words) -> Args:
 
 # ---------------------------------------------------------------- state
 
-DEFAULT_STATE_PATH = os.path.expanduser("~/.cache/kitchen-sink/screenshot.json")
+DEFAULT_STATE_PATH = os.path.expanduser("~/.cache/kitchen-sink/screenshot-state.json")
 
 
 class State:
@@ -754,7 +719,8 @@ class State:
         self.color = data.get("color") if isinstance(data.get("color"), str) else None
         self.style = data.get("style") if isinstance(data.get("style"), dict) else {}
         self.lastRegion = data.get("lastRegion") if isinstance(data.get("lastRegion"), dict) else None
-        self.gridSize = data.get("gridSize") if isinstance(data.get("gridSize"), int) else 10
+        self.gridSize = data.get("gridSize") if isinstance(data.get("gridSize"), int) \
+            else _DATA["state"]["gridSize"]
         self.grid = bool(data.get("grid"))
 
     def size(self, tool: str) -> int:
