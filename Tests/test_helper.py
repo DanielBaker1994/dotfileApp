@@ -205,6 +205,16 @@ class ScriptBridge(unittest.TestCase):
         self.assertFalse(reply["result"]["ok"])
         self.assertIn("Page size", reply["result"]["message"])
 
+    def test_jira_edit_methods(self):
+        reply = dispatch({"id": 1, "method": "jira.field_label", "params": {
+            "field": "title", "value": " Heading ", "default": "Title", "current": {}}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["value"], {"title": "Heading"})
+        reply = dispatch({"id": 2, "method": "jira.default", "params": {
+            "key": "maxResults", "value": "x"}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(reply["result"]["ok"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

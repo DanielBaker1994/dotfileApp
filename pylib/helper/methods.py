@@ -727,3 +727,23 @@ def _jira_draft(params: dict) -> dict:
     if params.get("kind") == "live":
         return jira_dashboard.live_persist(params)
     return jira_dashboard.draft(params)
+
+
+@method("jira.custom_field")
+def _jira_custom_field(params: dict) -> dict:
+    return jira_dashboard.custom_field_entry(params)
+
+
+@method("jira.field_label")
+def _jira_field_label(params: dict) -> dict:
+    return jira_dashboard.field_label_save(params)
+
+
+@method("jira.key_value")
+def _jira_key_value(params: dict) -> dict:
+    return jira_dashboard.key_value_save(params)
+
+
+@method("jira.default")
+def _jira_default(params: dict) -> dict:
+    return jira_dashboard.default_save(params)

@@ -2265,13 +2265,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    private func snakeCase(_ s: String) -> String {
-        let parts = s.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-        var out = parts.joined(separator: "_")
-        if let f = out.first, !f.isLetter { out = "f_" + out }
-        return out
-    }
-
     private func editCustomField(_ alias: String?) {
         let cur = alias.flatMap { own("custom_fields")[$0] as? [String: Any] ?? (team["custom_fields"] as? [String: Any])?[$0] as? [String: Any] } ?? [:]
         let customs = dir.fields.filter { $0.custom }
@@ -2295,30 +2288,39 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                       rows: [("Jira field", field), ("Alias", aliasF), ("Label", label), ("Description", desc)],
                       first: alias == nil ? field : label) { [weak self] ok in
             guard ok, let self else { return }
-            let raw = field.stringValue
-            var fid = raw.range(of: #"customfield_\d+"#, options: .regularExpression).map { String(raw[$0]) } ?? ""
-            if fid.isEmpty, let hit = customs.first(where: { $0.name.caseInsensitiveCompare(raw) == .orderedSame }) {
-                fid = hit.id
+            let params: [String: Any] = [
+                "raw": field.stringValue,
+                "alias": aliasF.stringValue,
+                "isNew": alias == nil,
+                "label": label.stringValue,
+                "description": desc.stringValue,
+                "customs": customs.map { ["id": $0.id, "name": $0.name] },
+                "currentCustomFields": self.own("custom_fields"),
+                "currentLabels": self.own("field_labels"),
+            ]
+            pythonHelper.call("jira.custom_field", params, timeout: 30) { [weak self] result in
+                guard let self else { return }
+                guard case .success(let box) = result, let r = box as? [String: Any] else {
+                    self.defMsg.textColor = JC.err
+                    self.defMsg.stringValue = "✗ cannot build the custom-field entry"
+                    return
+                }
+                guard r["ok"] as? Bool == true else {
+                    self.defMsg.textColor = JC.err
+                    self.defMsg.stringValue = r["message"] as? String ?? "✗ invalid custom field"
+                    return
+                }
+                guard let save = r["save"] as? [String: Any] else { return }
+                let followup = r["followup"] as? [String: Any]
+                self.teamSet(save["key"] as? String ?? "custom_fields", save["value"] ?? [:],
+                             done: save["done"] as? String ?? "",
+                             then: followup.map { fu in
+                                 { [weak self] in
+                                     self?.teamSet(fu["key"] as? String ?? "field_labels",
+                                                   fu["value"] ?? [:], done: fu["done"] as? String ?? "")
+                                 }
+                             })
             }
-            guard !fid.isEmpty else {
-                self.defMsg.textColor = JC.err
-                self.defMsg.stringValue = "✗ pick a Jira custom field (or type its customfield_NNNNN id)"
-                return
-            }
-            let jiraName = customs.first { $0.id == fid }?.name ?? ""
-            let lbl = label.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ? jiraName
-                : label.stringValue.trimmingCharacters(in: .whitespaces)
-            var a = aliasF.stringValue.trimmingCharacters(in: .whitespaces)
-            if a.isEmpty { a = self.snakeCase(lbl.isEmpty ? fid : lbl) }
-            var d = self.own("custom_fields")
-            var entry: [String: Any] = ["field_id": fid, "label": lbl.isEmpty ? a : lbl]
-            let ds = desc.stringValue.trimmingCharacters(in: .whitespaces)
-            if !ds.isEmpty { entry["description"] = ds }
-            d[a] = entry
-            var fl = self.own("field_labels")
-            let clear = fl.removeValue(forKey: a) != nil
-            self.teamSet("custom_fields", d, done: alias == nil ? "added \(a)" : "updated \(a)",
-                         then: clear ? { self.teamSet("field_labels", fl, done: "label of \(a)") } : nil)
         }
     }
 
@@ -2333,10 +2335,18 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                           + "filter. Empty = the default (\(def)).",
                       rows: [("Label", l)], first: l) { [weak self] ok in
             guard ok, let self else { return }
-            var d = self.own("field_labels")
-            let v = l.stringValue.trimmingCharacters(in: .whitespaces)
-            if v.isEmpty || v == def { d.removeValue(forKey: f) } else { d[f] = v }
-            self.teamSet("field_labels", d, done: v.isEmpty || v == def ? "\(f) back to “\(def)”" : "\(f) → “\(v)”")
+            let params: [String: Any] = ["field": f, "value": l.stringValue, "default": def,
+                                         "current": self.own("field_labels")]
+            pythonHelper.call("jira.field_label", params, timeout: 30) { [weak self] result in
+                guard let self else { return }
+                guard case .success(let box) = result, let r = box as? [String: Any],
+                      r["ok"] as? Bool == true else {
+                    self.defMsg.textColor = JC.err
+                    self.defMsg.stringValue = "✗ cannot build the label change"
+                    return
+                }
+                self.teamSet("field_labels", r["value"] ?? [:], done: r["done"] as? String ?? "")
+            }
         }
     }
 
@@ -2357,12 +2367,14 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                       rows: [("Name", k), (tk == "api_endpoints" ? "Path" : "JQL", v)],
                       first: key == nil ? k : v) { [weak self] ok in
             guard ok, let self else { return }
-            let name = k.stringValue.trimmingCharacters(in: .whitespaces)
-            let val = v.stringValue.trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty, !val.isEmpty else { NSSound.beep(); return }
-            var nd = self.own(tk)
-            nd[name] = val
-            self.teamSet(tk, nd, done: key == nil ? "added \(name)" : "updated \(name)")
+            let params: [String: Any] = ["name": k.stringValue, "value": v.stringValue,
+                                         "existing": key != nil, "current": self.own(tk)]
+            pythonHelper.call("jira.key_value", params, timeout: 30) { [weak self] result in
+                guard let self else { return }
+                guard case .success(let box) = result, let r = box as? [String: Any] else { return }
+                guard r["ok"] as? Bool == true else { NSSound.beep(); return }
+                self.teamSet(tk, r["value"] ?? [:], done: r["done"] as? String ?? "")
+            }
         }
     }
 
@@ -2372,14 +2384,22 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         jiraFormSheet(on: window, title: "Edit \(key)", info: Self.defaultMeaning[key] ?? "",
                       rows: [("Value", v)], first: v) { [weak self] ok in
             guard ok, let self else { return }
-            guard let n = Int(v.stringValue.trimmingCharacters(in: .whitespaces)), n >= 0 else {
-                self.defMsg.textColor = JC.err
-                self.defMsg.stringValue = "✗ \(key) must be a whole number"
-                return
+            let params: [String: Any] = ["key": key, "value": v.stringValue,
+                                         "current": self.own("search_defaults")]
+            pythonHelper.call("jira.default", params, timeout: 30) { [weak self] result in
+                guard let self else { return }
+                guard case .success(let box) = result, let r = box as? [String: Any] else {
+                    self.defMsg.textColor = JC.err
+                    self.defMsg.stringValue = "✗ cannot save the default"
+                    return
+                }
+                guard r["ok"] as? Bool == true else {
+                    self.defMsg.textColor = JC.err
+                    self.defMsg.stringValue = r["message"] as? String ?? "✗ \(key) must be a whole number"
+                    return
+                }
+                self.teamSet("search_defaults", r["value"] ?? [:], done: r["done"] as? String ?? "")
             }
-            var d = self.own("search_defaults")
-            d[key] = n
-            self.teamSet("search_defaults", d, done: "\(key) = \(n)")
         }
     }
 

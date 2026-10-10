@@ -92,5 +92,105 @@ class Draft(unittest.TestCase):
         self.assertFalse(jdash.live_persist({"maxResults": "-2"})["ok"])
 
 
+class SnakeCase(unittest.TestCase):
+    def test_words_symbols_and_leading_digit(self):
+        self.assertEqual(jdash.snake_case("Story Points"), "story_points")
+        self.assertEqual(jdash.snake_case("  Type-of  thing__x "), "type_of_thing_x")
+        self.assertEqual(jdash.snake_case("1st Place"), "f_1st_place")
+        self.assertEqual(jdash.snake_case("already_ok"), "already_ok")
+        self.assertEqual(jdash.snake_case(""), "")
+
+
+class CustomField(unittest.TestCase):
+    def params(self, **over):
+        p = {"raw": "Story Points — customfield_10016", "alias": "", "isNew": True, "label": "",
+             "description": "", "customs": [{"id": "customfield_10016", "name": "Story Points"}],
+             "currentCustomFields": {}, "currentLabels": {}}
+        p.update(over)
+        return p
+
+    def test_id_alias_and_label_defaults(self):
+        out = jdash.custom_field_entry(self.params())
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["alias"], "story_points")
+        self.assertEqual(out["save"]["value"]["story_points"],
+                         {"field_id": "customfield_10016", "label": "Story Points"})
+        self.assertEqual(out["save"]["done"], "added story_points")
+        self.assertIsNone(out["followup"])
+
+    def test_name_match_is_case_insensitive(self):
+        out = jdash.custom_field_entry(self.params(raw="story points"))
+        self.assertEqual(out["save"]["value"]["story_points"]["field_id"], "customfield_10016")
+
+    def test_unresolved_field(self):
+        out = jdash.custom_field_entry(self.params(raw="nope", customs=[]))
+        self.assertFalse(out["ok"])
+        self.assertIn("customfield_NNNNN", out["message"])
+
+    def test_alias_derives_from_label_then_id(self):
+        out = jdash.custom_field_entry(self.params(raw="customfield_9", customs=[],
+                                                   alias="", label="My Custom Label"))
+        self.assertEqual(out["alias"], "my_custom_label")
+        self.assertEqual(out["save"]["value"]["my_custom_label"]["label"], "My Custom Label")
+        out = jdash.custom_field_entry(self.params(raw="customfield_9", customs=[],
+                                                   alias="given", label=""))
+        self.assertEqual(out["save"]["value"]["given"], {"field_id": "customfield_9", "label": "given"})
+
+    def test_description_and_updated_done(self):
+        out = jdash.custom_field_entry(self.params(alias="sp", isNew=False, description=" points "))
+        self.assertEqual(out["save"]["value"]["sp"]["description"], "points")
+        self.assertEqual(out["save"]["done"], "updated sp")
+
+    def test_label_clear_followup(self):
+        out = jdash.custom_field_entry(self.params(alias="sp", isNew=False,
+                                                   currentLabels={"sp": "x", "k": "y"}))
+        self.assertEqual(out["followup"]["value"], {"k": "y"})
+        self.assertEqual(out["followup"]["done"], "label of sp")
+
+
+class FieldLabel(unittest.TestCase):
+    def test_custom_value_sets_and_reports(self):
+        out = jdash.field_label_save({"field": "title", "value": " Heading ",
+                                      "default": "Title", "current": {"k": "v"}})
+        self.assertEqual(out["value"], {"k": "v", "title": "Heading"})
+        self.assertEqual(out["done"], "title → “Heading”")
+
+    def test_empty_or_default_removes(self):
+        for value in ("", "   ", "Title"):
+            out = jdash.field_label_save({"field": "title", "value": value,
+                                          "default": "Title", "current": {"title": "Old"}})
+            self.assertEqual(out["value"], {}, value)
+            self.assertEqual(out["done"], "title back to “Title”")
+
+
+class KeyValue(unittest.TestCase):
+    def test_trim_and_save(self):
+        out = jdash.key_value_save({"name": " my_bugs ", "value": " p in ({projects}) ",
+                                    "existing": False, "current": {}})
+        self.assertEqual(out["value"], {"my_bugs": "p in ({projects})"})
+        self.assertEqual(out["done"], "added my_bugs")
+        out = jdash.key_value_save({"name": "my_bugs", "value": "x", "existing": True, "current": {}})
+        self.assertEqual(out["done"], "updated my_bugs")
+
+    def test_empty_fields_beep(self):
+        self.assertEqual(jdash.key_value_save({"name": " ", "value": "x"}),
+                         {"ok": False, "beep": True})
+        self.assertEqual(jdash.key_value_save({"name": "x", "value": " "}),
+                         {"ok": False, "beep": True})
+
+
+class Defaults(unittest.TestCase):
+    def test_whole_number_saves(self):
+        out = jdash.default_save({"key": "maxResults", "value": " 25 ", "current": {"k": 1}})
+        self.assertEqual(out["value"], {"k": 1, "maxResults": 25})
+        self.assertEqual(out["done"], "maxResults = 25")
+
+    def test_bad_values_carry_the_message(self):
+        for bad in ("x", "-1", "3.5", ""):
+            out = jdash.default_save({"key": "pageSize", "value": bad})
+            self.assertFalse(out["ok"], bad)
+            self.assertEqual(out["message"], "✗ pageSize must be a whole number")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

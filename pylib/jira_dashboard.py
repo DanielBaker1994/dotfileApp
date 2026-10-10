@@ -1,7 +1,47 @@
 """Jira dashboard edits: the poll-job draft assembly and the live-search
-persist payload, with the limit parsing both share (jira_config.py re-runs
-the authoritative validation on upsert)."""
+persist payload (with the limit parsing both share), plus the team.json
+definition edits (custom fields, field labels, key/value pairs, search
+defaults). jira_config.py re-runs the authoritative validation on save."""
 from __future__ import annotations
+
+import json
+import re
+
+_CF_RE = re.compile(r"customfield_\d+")
+
+
+def _scalar_str(v) -> str:
+    """The app's `str()` for JSON scalars: strings pass, numbers stringify,
+    everything else serialises as JSON."""
+    if isinstance(v, str):
+        return v
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return "%g" % v
+    return json.dumps(v, separators=(",", ":"))
+
+
+def snake_case(s: str) -> str:
+    """Lowercase, runs of non-alphanumerics -> single underscores; a leading
+    non-letter gets an `f_` prefix."""
+    parts, cur = [], []
+    for ch in (s or "").lower():
+        if ch.isalnum():
+            cur.append(ch)
+        elif cur:
+            parts.append("".join(cur))
+            cur = []
+    if cur:
+        parts.append("".join(cur))
+    out = "_".join(parts)
+    if out and not out[0].isalpha():
+        out = "f_" + out
+    return out
 
 
 def parse_args(s: str) -> dict:
@@ -61,3 +101,83 @@ def live_persist(params: dict) -> dict:
         return m
     o = {"columns": params.get("columns") or "", "maxResults": m["value"]}
     return {"ok": True, "draft": o}
+
+
+# ------------------------------------------------------- definition edits
+
+def custom_field_entry(params: dict) -> dict:
+    """The custom-field sheet: id from the typed text or a case-insensitive
+    name match, label/alias defaults, entry shape, label clearing."""
+    customs = [c for c in (params.get("customs") or []) if isinstance(c, dict)]
+    raw = params.get("raw") or ""
+    alias = (params.get("alias") or "").strip()
+    label = (params.get("label") or "").strip()
+    desc = (params.get("description") or "").strip()
+    m = _CF_RE.search(raw)
+    fid = m.group(0) if m else ""
+    if not fid:
+        for c in customs:
+            name = c.get("name")
+            if isinstance(name, str) and name.lower() == raw.lower():
+                fid = _scalar_str(c.get("id"))
+                break
+    if not fid:
+        return {"ok": False,
+                "message": "✗ pick a Jira custom field (or type its customfield_NNNNN id)"}
+    jira_name = next((c["name"] for c in customs
+                      if _scalar_str(c.get("id")) == fid and isinstance(c.get("name"), str)), "")
+    lbl = label or jira_name
+    a = alias
+    if not a:
+        a = snake_case(lbl or fid)
+    entry = {"field_id": fid, "label": lbl or a}
+    if desc:
+        entry["description"] = desc
+    d = dict(params.get("currentCustomFields") or {})
+    d[a] = entry
+    fl = dict(params.get("currentLabels") or {})
+    clear = fl.pop(a, None) is not None
+    return {"ok": True, "alias": a,
+            "save": {"key": "custom_fields", "value": d,
+                     "done": ("added %s" if params.get("isNew") else "updated %s") % a},
+            "followup": ({"key": "field_labels", "value": fl, "done": "label of %s" % a}
+                         if clear else None)}
+
+
+def field_label_save(params: dict) -> dict:
+    f = params.get("field") or ""
+    v = (params.get("value") or "").strip()
+    default = params.get("default") or ""
+    d = dict(params.get("current") or {})
+    if not v or v == default:
+        d.pop(f, None)
+        done = "%s back to “%s”" % (f, default)
+    else:
+        d[f] = v
+        done = "%s → “%s”" % (f, v)
+    return {"ok": True, "value": d, "done": done}
+
+
+def key_value_save(params: dict) -> dict:
+    name = (params.get("name") or "").strip()
+    val = (params.get("value") or "").strip()
+    if not name or not val:
+        return {"ok": False, "beep": True}
+    nd = dict(params.get("current") or {})
+    nd[name] = val
+    return {"ok": True, "value": nd,
+            "done": ("updated %s" if params.get("existing") else "added %s") % name}
+
+
+def default_save(params: dict) -> dict:
+    key = params.get("key") or ""
+    v = (params.get("value") or "").strip()
+    try:
+        n = int(v)
+    except ValueError:
+        n = None
+    if n is None or n < 0:
+        return {"ok": False, "message": "✗ %s must be a whole number" % key}
+    d = dict(params.get("current") or {})
+    d[key] = n
+    return {"ok": True, "value": d, "done": "%s = %d" % (key, n)}
