@@ -644,25 +644,26 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         guard let data = FileManager.default.contents(atPath: JiraPoll.statusPath),
               let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         let held = (st["lock"] as? [String: Any])?["held"] as? Bool ?? false
-        let text = held ? progressText(st["progress"] as? [String: Any] ?? [:]) : ""
-        if liveHeld && !held { refresh() }
-        liveHeld = held
+        if !held {
+            if liveHeld { refresh() }
+            liveHeld = false
+            if current == .setup { setupProgress.stringValue = ""; setupProgress.isHidden = true }
+            return
+        }
+        liveHeld = true
+        // The 1 Hz ticker only crosses the boundary while a poll is running
+        // (progress_text is a pure format in pylib/jira_dashboard.py).
+        var text = ""
+        if case .success(let box) = pythonHelper.callSync(
+                "jira.progress_text", ["progress": st["progress"] as? [String: Any] ?? [:]], timeout: 30),
+           let d = box as? [String: Any] {
+            text = d["text"] as? String ?? ""
+        }
         if current == .setup { setupProgress.stringValue = text; setupProgress.isHidden = text.isEmpty }
-        if held, !text.isEmpty, setupDone {
+        if !text.isEmpty, setupDone {
             statusLine.stringValue = "● Polling on — " + text
             statusLine.textColor = JC.text
         }
-    }
-
-    private func progressText(_ p: [String: Any]) -> String {
-        let stage = p["stage"] as? String ?? ""
-        if let wu = p["waitingUntil"] as? Double, wu > Date().timeIntervalSince1970 {
-            let left = Int(wu - Date().timeIntervalSince1970)
-            let reason = p["reason"] as? String ?? "waiting"
-            return "\(stage.isEmpty ? "" : stage + ": ")\(reason) — resuming in "
-                + (left < 60 ? "\(left)s" : "\(left / 60)m \(left % 60)s")
-        }
-        return p["message"] as? String ?? ""
     }
 
     func refresh(then: (() -> Void)? = nil) {
@@ -718,34 +719,45 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
 
     private func updateHeader() {
         let enabled = info["enabled"] as? Bool ?? jiraEnabledInConfig()
-        let bg = info["backgroundPoll"] as? Bool ?? false
         let lock = info["lock"] as? [String: Any] ?? [:]
         let lr = info["lastRun"] as? String ?? ""
-        let failed = !(info["lastError"] as? String ?? "").isEmpty
-        var line = enabled ? "● Polling on" : bg ? "◐ Polling in the background (Jira window off)" : "○ Polling off"
-        if !setupDone {
-            line += scope.isEmpty ? " — enter the projects in scope (Setup)" : " — setup not finished (Setup)"
-        } else if lockHeld {
-            let p = progressText(info["progress"] as? [String: Any] ?? [:])
-            line += " — " + (p.isEmpty ? "polling now…" : p)
-        } else if !lr.isEmpty {
-            line += failed ? " — last poll failed \(JiraPoll.short(lr))" : " — last checked \(JiraPoll.short(lr))"
+        let params: [String: Any] = [
+            "enabled": enabled,
+            "background": info["backgroundPoll"] as? Bool ?? false,
+            "setupDone": setupDone,
+            "scopeEmpty": scope.isEmpty,
+            "lockHeld": lockHeld,
+            "failed": !(info["lastError"] as? String ?? "").isEmpty,
+            "lastRun": lr,
+            "lastRunShort": JiraPoll.short(lr),
+            "progress": info["progress"] as? [String: Any] ?? [:],
+            "epsCount": eps.count,
+            "configPath": info["configPath"] as? String ?? JiraPoll.configPath,
+            "tick": info["tick"] as? String ?? "60s",
+            "status": info["status"] as? String ?? "",
+            "lockPid": "\(lock["pid"] ?? "?")",
+            "lockSinceShort": JiraPoll.short(lock["since"] as? String),
+            "problems": info["problems"] as? [String] ?? [],
+            "lastError": info["lastError"] as? String ?? "",
+            "enableError": JiraPoll.lastEnableError ?? "",
+        ]
+        pythonHelper.call("jira.header_state", params, timeout: 30) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let box) = result, let r = box as? [String: Any] else { return }
+            self.statusLine.stringValue = r["line"] as? String ?? ""
+            switch r["tone"] as? String {
+            case "dim": self.statusLine.textColor = JC.dim
+            case "warn": self.statusLine.textColor = JC.warn
+            default: self.statusLine.textColor = JC.text
+            }
+            self.statusLine.toolTip = (r["tip"] as? [String] ?? []).joined(separator: "\n")
+            let probs = r["problems"] as? [String] ?? []
+            self.problemsLine.stringValue = probs.map { "⚠ " + $0 }.joined(separator: "\n")
+            self.problemsLine.isHidden = probs.isEmpty
+            self.enableButton.title = r["enableTitle"] as? String ?? "Enable Jira"
+            self.enableButton.role = (r["enablePrimary"] as? Bool ?? false) ? .primary : .normal
+            self.stopButton.isHidden = !(self.lockHeld || !JiraPoll.running.isEmpty)
         }
-        statusLine.stringValue = line
-        statusLine.textColor = !enabled ? JC.dim : failed ? JC.warn : JC.text
-        var tip = ["\(eps.count) poll job\(eps.count == 1 ? "" : "s") in \(info["configPath"] as? String ?? JiraPoll.configPath)",
-                   "launchd tick: \(info["tick"] as? String ?? "60s") — each job runs when its own interval is due"]
-        if !lr.isEmpty { tip.append("last run \(lr) \(info["status"] as? String ?? "")") }
-        if lockHeld { tip.append("polling now: pid \(lock["pid"] ?? "?") since \(JiraPoll.short(lock["since"] as? String))") }
-        statusLine.toolTip = tip.joined(separator: "\n")
-        var probs = info["problems"] as? [String] ?? []
-        if let e = info["lastError"] as? String, !e.isEmpty { probs.append("last error: \(e)") }
-        if let e = JiraPoll.lastEnableError { probs.append("enable failed: \(e)") }
-        problemsLine.stringValue = probs.map { "⚠ " + $0 }.joined(separator: "\n")
-        problemsLine.isHidden = probs.isEmpty
-        enableButton.title = enabled ? "Disable Jira" : "Enable Jira"
-        enableButton.role = enabled ? .normal : .primary
-        stopButton.isHidden = !(lockHeld || !JiraPoll.running.isEmpty)
 
         while openMenu.numberOfItems > 1 { openMenu.removeItem(at: 1) }
         let fm = FileManager.default
@@ -1683,7 +1695,12 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         runSetupButton.title = setupDone ? "Run Setup Again" : "Run Setup"
         runSetupButton.isEnabled = !busy && !scope.isEmpty
         rebuildButton.isEnabled = !JiraPoll.running.contains("rebuild") && !scope.isEmpty
-        let p = lockHeld ? progressText(info["progress"] as? [String: Any] ?? [:]) : ""
+        var p = ""
+        if lockHeld, case .success(let box) = pythonHelper.callSync(
+                "jira.progress_text", ["progress": info["progress"] as? [String: Any] ?? [:]], timeout: 30),
+           let d = box as? [String: Any] {
+            p = d["text"] as? String ?? ""
+        }
         setupProgress.stringValue = p
         setupProgress.isHidden = p.isEmpty
 

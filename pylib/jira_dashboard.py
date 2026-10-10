@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import time as _time
 
 _CF_RE = re.compile(r"customfield_\d+")
 
@@ -181,3 +182,67 @@ def default_save(params: dict) -> dict:
     d = dict(params.get("current") or {})
     d[key] = n
     return {"ok": True, "value": d, "done": "%s = %d" % (key, n)}
+
+
+# ------------------------------------------------------- status text
+
+def progress_text(p, now=None) -> str:
+    """The poll-status line: stage/reason while waiting, else the message."""
+    p = p if isinstance(p, dict) else {}
+    stage = p.get("stage") if isinstance(p.get("stage"), str) else ""
+    now = _time.time() if now is None else now
+    wu = p.get("waitingUntil")
+    if isinstance(wu, (int, float)) and wu > now:
+        left = int(wu - now)
+        reason = p.get("reason") if isinstance(p.get("reason"), str) else "waiting"
+        wait = "%ds" % left if left < 60 else "%dm %ds" % (left // 60, left % 60)
+        return ("%s: " % stage if stage else "") + "%s — resuming in %s" % (reason, wait)
+    return p.get("message") if isinstance(p.get("message"), str) else ""
+
+
+def header_state(params: dict) -> dict:
+    """The dashboard status line, its tone and tooltip, the problems list and
+    the enable button's face. Tones are symbolic: dim/warn/text."""
+    enabled = bool(params.get("enabled"))
+    background = bool(params.get("background"))
+    failed = bool(params.get("failed"))
+    lock_held = bool(params.get("lockHeld"))
+    last_run = params.get("lastRun") or ""
+    last_run_short = params.get("lastRunShort") or "never"
+
+    if enabled:
+        line = "● Polling on"
+    elif background:
+        line = "◐ Polling in the background (Jira window off)"
+    else:
+        line = "○ Polling off"
+    if not params.get("setupDone"):
+        line += (" — enter the projects in scope (Setup)" if params.get("scopeEmpty")
+                 else " — setup not finished (Setup)")
+    elif lock_held:
+        p = progress_text(params.get("progress"))
+        line += " — " + (p or "polling now…")
+    elif last_run:
+        line += (" — last poll failed %s" if failed else " — last checked %s") % last_run_short
+
+    eps = params.get("epsCount")
+    eps = eps if isinstance(eps, int) else 0
+    tip = ["%d poll job%s in %s" % (eps, "" if eps == 1 else "s", params.get("configPath") or ""),
+           "launchd tick: %s — each job runs when its own interval is due" % (params.get("tick") or "60s")]
+    if last_run:
+        tip.append("last run %s %s" % (last_run, params.get("status") or ""))
+    if lock_held:
+        tip.append("polling now: pid %s since %s" % (params.get("lockPid") or "?",
+                                                     params.get("lockSinceShort") or "never"))
+
+    problems = [s for s in (params.get("problems") or []) if isinstance(s, str)]
+    if params.get("lastError"):
+        problems.append("last error: %s" % params["lastError"])
+    if params.get("enableError"):
+        problems.append("enable failed: %s" % params["enableError"])
+
+    return {"line": line,
+            "tone": "dim" if not enabled else ("warn" if failed else "text"),
+            "tip": tip, "problems": problems,
+            "enableTitle": "Disable Jira" if enabled else "Enable Jira",
+            "enablePrimary": not enabled}

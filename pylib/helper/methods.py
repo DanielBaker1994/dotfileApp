@@ -747,3 +747,13 @@ def _jira_key_value(params: dict) -> dict:
 @method("jira.default")
 def _jira_default(params: dict) -> dict:
     return jira_dashboard.default_save(params)
+
+
+@method("jira.progress_text")
+def _jira_progress_text(params: dict) -> dict:
+    return {"text": jira_dashboard.progress_text(params.get("progress"))}
+
+
+@method("jira.header_state")
+def _jira_header_state(params: dict) -> dict:
+    return jira_dashboard.header_state(params)

@@ -215,6 +215,14 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertFalse(reply["result"]["ok"])
 
+    def test_jira_status_text_methods(self):
+        reply = dispatch({"id": 1, "method": "jira.progress_text", "params": {"progress": {"message": "x"}}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["text"], "x")
+        reply = dispatch({"id": 2, "method": "jira.header_state", "params": {"enabled": False, "setupDone": True}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["line"], "○ Polling off")
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

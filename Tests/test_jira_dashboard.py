@@ -192,5 +192,75 @@ class Defaults(unittest.TestCase):
             self.assertEqual(out["message"], "✗ pageSize must be a whole number")
 
 
+class StatusText(unittest.TestCase):
+    def test_waiting_formats_stage_reason_and_wait(self):
+        now = 1_000_000.0
+        self.assertEqual(jdash.progress_text(
+            {"stage": "sync", "waitingUntil": now + 90, "reason": "rate limit"}, now=now),
+            "sync: rate limit — resuming in 1m 30s")
+        self.assertEqual(jdash.progress_text(
+            {"waitingUntil": now + 45, "reason": "cooling"}, now=now),
+            "cooling — resuming in 45s")
+
+    def test_waiting_in_the_past_or_missing_falls_back_to_message(self):
+        now = 1_000_000.0
+        self.assertEqual(jdash.progress_text(
+            {"stage": "sync", "waitingUntil": now - 5, "message": "downloading"}, now=now),
+            "downloading")
+        self.assertEqual(jdash.progress_text({"message": "downloading"}, now=now), "downloading")
+        self.assertEqual(jdash.progress_text({}, now=now), "")
+        self.assertEqual(jdash.progress_text(None, now=now), "")
+
+
+class HeaderState(unittest.TestCase):
+    def params(self, **over):
+        p = {"enabled": True, "background": False, "setupDone": True, "scopeEmpty": False,
+             "lockHeld": False, "failed": False, "lastRun": "", "lastRunShort": "never",
+             "progress": {}, "epsCount": 3, "configPath": "/c.json", "tick": "60s",
+             "status": "ok", "lockPid": "42", "lockSinceShort": "10:00",
+             "problems": [], "lastError": "", "enableError": ""}
+        p.update(over)
+        return p
+
+    def test_off_and_background(self):
+        out = jdash.header_state(self.params(enabled=False))
+        self.assertEqual(out["line"], "○ Polling off")
+        self.assertEqual(out["tone"], "dim")
+        self.assertEqual(out["enableTitle"], "Enable Jira")
+        self.assertTrue(out["enablePrimary"])
+        out = jdash.header_state(self.params(enabled=False, background=True))
+        self.assertEqual(out["line"], "◐ Polling in the background (Jira window off)")
+
+    def test_setup_suffixes(self):
+        self.assertEqual(jdash.header_state(self.params(setupDone=False, scopeEmpty=True))["line"],
+                         "● Polling on — enter the projects in scope (Setup)")
+        self.assertEqual(jdash.header_state(self.params(setupDone=False, scopeEmpty=False))["line"],
+                         "● Polling on — setup not finished (Setup)")
+
+    def test_lock_and_last_run_suffixes(self):
+        self.assertEqual(jdash.header_state(self.params(lockHeld=True, progress={"message": "downloading"}))["line"],
+                         "● Polling on — downloading")
+        self.assertEqual(jdash.header_state(self.params(lockHeld=True))["line"],
+                         "● Polling on — polling now…")
+        self.assertEqual(jdash.header_state(self.params(lastRun="2026-01-01T10:00:00Z",
+                                                        lastRunShort="10:00", failed=True))["line"],
+                         "● Polling on — last poll failed 10:00")
+        self.assertEqual(jdash.header_state(self.params(lastRun="x", lastRunShort="10:00"))["line"],
+                         "● Polling on — last checked 10:00")
+        self.assertEqual(jdash.header_state(self.params(lastRun="x", lastRunShort="10:00", failed=True))["tone"],
+                         "warn")
+
+    def test_tip_and_problems(self):
+        out = jdash.header_state(self.params(lastRun="raw", lockHeld=True,
+                                             problems=["p1"], lastError="e", enableError="nope"))
+        self.assertEqual(out["tip"], ["3 poll jobs in /c.json",
+                                      "launchd tick: 60s — each job runs when its own interval is due",
+                                      "last run raw ok",
+                                      "polling now: pid 42 since 10:00"])
+        self.assertEqual(out["problems"], ["p1", "last error: e", "enable failed: nope"])
+        self.assertEqual(jdash.header_state(self.params(epsCount=1))["tip"][0], "1 poll job in /c.json")
+        self.assertEqual(jdash.header_state(self.params(enabled=True))["enableTitle"], "Disable Jira")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
