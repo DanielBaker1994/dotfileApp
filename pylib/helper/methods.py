@@ -17,6 +17,7 @@ import jira_directory
 import jira_fields
 import jira_pages
 import jira_search
+import jira_setup
 import prose_pdf
 import status as ws_status
 
@@ -780,3 +781,8 @@ def _jira_columns_parse(params: dict) -> dict:
 def _jira_columns_serialize(params: dict) -> dict:
     return {"spec": jira_fields.serialize_columns(params.get("columns") or [],
                                                   params.get("titles") is not False)}
+
+
+@method("jira.project_keys")
+def _jira_project_keys(params: dict) -> dict:
+    return jira_setup.project_keys(params.get("raw") or "")

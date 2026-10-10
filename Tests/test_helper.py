@@ -236,6 +236,11 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"]["spec"], "a::120:left:filter+sort")
 
+    def test_jira_project_keys_method(self):
+        reply = dispatch({"id": 1, "method": "jira.project_keys", "params": {"raw": "sam1, 1x"}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"], {"keys": ["SAM1"], "bad": ["1X"]})
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

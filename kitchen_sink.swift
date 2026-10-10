@@ -10070,13 +10070,14 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     }
 
     static func parseProjectKeys(_ raw: String) -> (keys: [String], bad: [String]) {
-        var keys: [String] = [], bad: [String] = []
-        for part in raw.uppercased().split(whereSeparator: { $0 == "," || $0.isWhitespace }) {
-            let k = String(part)
-            if k.range(of: "^[A-Z][A-Z0-9_]*$", options: .regularExpression) == nil { bad.append(k) }
-            else if !keys.contains(k) { keys.append(k) }
+        // the grammar lives in pylib/jira_setup.py (shared with the scope
+        // editor in the dashboard, which calls the same helper method)
+        if case .success(let box) = pythonHelper.callSync("jira.project_keys", ["raw": raw], timeout: 30),
+           let d = box as? [String: Any] {
+            return (d["keys"] as? [String] ?? [], d["bad"] as? [String] ?? [])
         }
-        return (keys, bad)
+        wsLog("jira: project keys unresolved (python helper unavailable)")
+        return ([], [])
     }
 
     @objc private func test(_ sender: Any?) {
