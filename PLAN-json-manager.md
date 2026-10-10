@@ -477,7 +477,7 @@ batch as the plan executes.
 | M4d | 3f61e09 | lazy: `jira_data`, `jira_pages`, `jira_boards`, `jira_directory`, `jira_search` (`jira_fields` stays eager); all 5 suites + `helper` green |
 | M4e | 6635f92 | lazy: `confluence_glue`, `confluence_pages`; suites + `helper` green. End state: 14/17 pylib loaders lazy (eager-by-decision: `shot_model`; eager by plan: `jira_fields`, `jira_paths`) |
 | M5 | 9b4600d | `jsonmgr` in `_MODULES` + `jsonmgr.report` method (body in `methods.py`, `_jira_paths` pattern); helper test asserts consumers. Follow-up: optional `ws jsons` alias and JsonError→HelperError dispatch polish not taken |
-| M6 | this commit | checkpoint: AGENT_CONTEXT note + full sweep (`ws test all`, settings, compare, 3.9 `--report --check`, build-app) |
+| M6 | c7f50bc | checkpoint: AGENT_CONTEXT note + full sweep (`ws test all`, settings, compare, 3.9 `--report --check`, build-app) |
 
 Blocked: none. Follow-ups recorded: optional `ws jsons` alias; optional `JsonError`→`HelperError` dispatch branch; `settings_hub/cli.py:342` still names `hub_defaults.json` by hand (cosmetic); lazy coverage 14/17 as recorded in M4e.
 
