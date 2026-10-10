@@ -468,6 +468,7 @@ batch as the plan executes.
 | M2e | done | `confluence_glue`, `confluence_pages` share `confluence/defaults`; suites + `helper` green |
 | M3a | done | jira package 4 loaders share one parse; `test_jira_poll.py` + `jira-setup`/`jira-dashboard` + `helper` green |
 | M3b | done | confluence package shares `confluence/defaults`; `test_confluence.py` + 3.9 import green |
+| M3c | done | notify package shares `notify/defaults`; `test_notifications.py` + `status` + 3.9 import green |
 | … | — | |
 
 ## 7. Validation hooks for this plan

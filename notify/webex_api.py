@@ -34,10 +34,13 @@ import urllib.parse
 import urllib.request
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# run directly (--login / --poll) too: jsonmgr lives in the sibling pylib
+sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "pylib"))
+import jsonmgr  # noqa: E402
+
 # the Webex service constants + the copy-paste login hint live in
 # notify/defaults.json (one home with the [notifications] defaults)
-with open(os.path.join(_HERE, "defaults.json"), encoding="utf-8") as _fh:
-    _WEBEX = json.load(_fh)["webex"]
+_WEBEX = jsonmgr.load("notify/defaults")["webex"]
 
 API = _WEBEX["api"]
 SCOPES = _WEBEX["scopes"]

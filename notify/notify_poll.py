@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "jira"))
 sys.path.insert(0, HERE)
 
 import jira_config  # noqa: E402
+import jsonmgr  # noqa: E402
 
 CACHE = os.environ.get("NOTIFY_CACHE_DIR") or os.path.expanduser("~/.cache/notifications")
 STATE = os.path.join(CACHE, "state.json")
@@ -38,8 +39,7 @@ LOCK = os.path.join(CACHE, "poll.lock")
 LOG = os.path.join(CACHE, "poll.log")
 
 # the [notifications] defaults live in notify/defaults.json and load here
-with open(os.path.join(HERE, "defaults.json"), encoding="utf-8") as _fh:
-    _ALL = json.load(_fh)
+_ALL = jsonmgr.load("notify/defaults")
 
 DEFAULTS = _ALL["defaults"]
 
