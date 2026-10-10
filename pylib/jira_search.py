@@ -2,13 +2,10 @@
 model (the base kinds plus the describe catalog with its skip list)."""
 from __future__ import annotations
 
-import json
-import os
+import jsonmgr
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
 # the filter-menu rows + the catalog skip list live in jira/defaults.json
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _SEARCH_UI = json.load(_fh)["search_ui"]
+_SEARCH_UI = jsonmgr.load("jira/defaults")["search_ui"]
 
 SKIP_CATALOG_FIELDS = set(_SEARCH_UI["skip_fields"])
 

@@ -13,10 +13,9 @@ import threading
 
 import jira_data
 import jira_pages
+import jsonmgr
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _DIRECTORY_DEFAULTS = json.load(_fh)["directory"]
+_DIRECTORY_DEFAULTS = jsonmgr.load("jira/defaults")["directory"]
 
 _LOCK = threading.Lock()
 _CACHE = {"path": None, "stamp": None, "data": None}

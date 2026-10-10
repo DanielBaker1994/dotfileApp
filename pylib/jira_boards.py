@@ -5,17 +5,14 @@ The app hosts the page in a WKWebView; colors arrive as hex/rgba strings
 """
 from __future__ import annotations
 
-import json
-import os
 from string import Template
 
 import jira_data
 import jira_pages
+import jsonmgr
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
 # board caps/labels/color schema live in jira/defaults.json (one home)
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _BOARD_DEFAULTS = json.load(_fh)["boards"]
+_BOARD_DEFAULTS = jsonmgr.load("jira/defaults")["boards"]
 
 # a done column only keeps this many cards (the Table view shows them all)
 DONE_LIMIT = _BOARD_DEFAULTS["done_limit"]

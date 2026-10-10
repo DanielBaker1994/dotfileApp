@@ -8,15 +8,13 @@ grouping that runs per keystroke — never crosses the process boundary.
 from __future__ import annotations
 
 import json
+import jsonmgr
 import os
 import threading
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
-
 # the word lists, the list->key map and the dim field set live in
 # jira/defaults.json (one home); callers keep the old symbol names
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _JIRA_DEFAULTS = json.load(_fh)
+_JIRA_DEFAULTS = jsonmgr.load("jira/defaults")
 
 WORDS_DEFAULTS = dict(_JIRA_DEFAULTS["words"])
 
