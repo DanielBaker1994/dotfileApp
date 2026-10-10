@@ -299,7 +299,7 @@ def cmd_tui(a) -> int:
 
 def cmd_open(a) -> int:
     """Hyper+/: focus the picker window if it's up, else start one."""
-    title = paths.hub("window-title", "ws-settings")
+    title = paths.hub("window-title")
     aero = shutil.which("aerospace")
 
     def aq(*args) -> str:
@@ -330,18 +330,15 @@ def cmd_open(a) -> int:
             return 0
     me = os.path.join(paths.ROOT, "bin", "ws-settings")
     # --command, not -e: launched through `open`, Ghostty asks "Allow Ghostty
-    # to execute …?" for an -e program (and for ANY --keybind flag).
-    # A transparent title bar with no window buttons = a plain strip in the
-    # picker's own background to drag the window by (the owner's config hides
-    # title bars: nothing to grab); {bg} = [theme] background, so the strip
-    # and the picker are one surface. {x} {y} = centered on the screen
-    # (window-position-x/y, points from the visible area's top-left)
-    default = ("open -na Ghostty --args --title={title} --quit-after-last-window-closed=true "
-               "--confirm-close-surface=false --macos-option-as-alt=true "
-               "--macos-titlebar-style=transparent --macos-window-buttons=hidden {bg} "
-               "--window-width=118 --window-height=36 "
-               "--window-position-x={x} --window-position-y={y} --command={cmd}")
-    tmpl = paths.hub("terminal-command", default)
+    # to execute …?" for an -e program (and for ANY --keybind flag); a
+    # transparent title bar with no window buttons is a plain drag strip in
+    # the picker's own background. The default template and its placeholders
+    # ({title} {bg} {x} {y} {cmd}) live in settings_hub/data/hub_defaults.json;
+    # [settings-hub] terminal-command overrides it.
+    tmpl = paths.hub("terminal-command")
+    if not tmpl.strip():
+        return err("[settings-hub] terminal-command is empty (default: "
+                   "settings_hub/data/hub_defaults.json)", 2)
     x, y = _center(aq if aero else None)
     tmpl = tmpl.replace("{x}", str(x)).replace("{y}", str(y)).replace("{bg}", _bg_flag())
     cmd = ["/usr/bin/env", f"WS_SETTINGS_T0={time.time():.3f}", me, "tui"]
@@ -373,7 +370,7 @@ def _bg_flag() -> str:
     """--background=RRGGBB from [theme] background (AARRGGBB → its RGB), when
     the picker uses the theme's colors; else nothing."""
     import re
-    if paths.hub("colors", "theme") != "theme":
+    if paths.hub("colors") != "theme":
         return ""
     v = paths.section("theme").get("background", "").strip().lstrip("#")
     if v.lower().startswith("0x"):

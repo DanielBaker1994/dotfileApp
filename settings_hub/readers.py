@@ -2,6 +2,8 @@
 a missing or broken file (the catalog gets a warning instead)."""
 from __future__ import annotations
 
+from .tables import VIM_MODES  # data/tables.json
+
 import hashlib
 import json
 import os
@@ -246,8 +248,6 @@ def ghostty(cat: Catalog) -> list:
 
 
 # ------------------------------------------------------------------ vim
-VIM_MODES = {"n": "normal", "x": "visual", "v": "visual", "s": "select", "o": "operator",
-             "i": "insert", "c": "command", "t": "terminal"}
 _LUA = ('lua local p=vim.fn.fnamemodify(%s,":p"); local i=vim.fn.getscriptinfo({name=p})[1];'
         'local out={}; if i then for _,m in ipairs({"n","x","s","o","i","c","t"}) do '
         'for _,k in ipairs(vim.api.nvim_get_keymap(m)) do if k.sid==i.sid then '

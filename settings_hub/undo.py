@@ -25,7 +25,7 @@ def _load() -> list:
 def _save(recs: list) -> None:
     limit = 20
     try:
-        limit = max(1, int(paths.hub("undo-limit", "20")))
+        limit = max(1, int(paths.hub("undo-limit")))
     except ValueError:
         pass
     tmp = _log() + ".tmp"

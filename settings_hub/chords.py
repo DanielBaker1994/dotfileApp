@@ -2,29 +2,13 @@
 modifier filter and the clash check compare like with like."""
 from __future__ import annotations
 
+from .tables import ARROWS, KEY_NAMES, MOD_WORDS, VIM_SPECIAL as _VIM_SPECIAL  # data/tables.json
+
 import re
 
 from .model import MODS, Chord, Stroke
 
-MOD_WORDS = {
-    "ctrl": "ctrl", "control": "ctrl", "c": "ctrl", "⌃": "ctrl",
-    "alt": "alt", "opt": "alt", "option": "alt", "meta": "alt", "m": "alt", "⌥": "alt",
-    "shift": "shift", "s": "shift", "⇧": "shift",
-    "cmd": "cmd", "command": "cmd", "super": "cmd", "d": "cmd", "⌘": "cmd",
-}
 # key names → the one display form
-KEY_NAMES = {
-    "minus": "-", "equal": "=", "plus": "=", "slash": "/", "backslash": "\\",
-    "comma": ",", "period": ".", "semicolon": ";", "quote": "'", "backtick": "`",
-    "grave": "`", "leftsquarebracket": "[", "rightsquarebracket": "]",
-    "esc": "Esc", "escape": "Esc", "enter": "Return", "return": "Return", "cr": "Return",
-    "tab": "Tab", "space": "Space", "backspace": "Delete", "delete": "Delete", "bs": "Delete",
-    "del": "Fwd Delete", "left": "Left", "right": "Right", "up": "Up", "down": "Down",
-    "home": "Home", "end": "End", "pageup": "PgUp", "pagedown": "PgDn", "pgup": "PgUp",
-    "pgdn": "PgDn", "↑": "Up", "↓": "Down", "←": "Left", "→": "Right",
-    "ampersand": "&", "pipe": "|", "lt": "<", "gt": ">",
-}
-ARROWS = {"Up": "↑", "Down": "↓", "Left": "←", "Right": "→"}
 
 
 def key_name(k: str) -> str:
@@ -107,8 +91,6 @@ def ghostty(s: str) -> Chord | None:
 
 
 # ------------------------------------------------------------- vim
-_VIM_SPECIAL = {"cr": "Return", "esc": "Esc", "tab": "Tab", "space": "Space", "bs": "Delete",
-                "leader": "Leader", "localleader": "LocalLeader"}
 
 
 def vim(lhs: str) -> Chord | None:

@@ -1,12 +1,12 @@
 """Cheat sheet (Markdown) and the full catalog (JSON)."""
 from __future__ import annotations
 
+from .tables import LAYER_TITLE  # data/tables.json
+
 import json
 
 from .model import Catalog
 
-LAYER_TITLE = {"aerospace": "Global hotkeys (AeroSpace)", "app": "kitchen-sink",
-               "herdr": "herdr (terminal)", "ghostty": "Ghostty", "vim": "Notes vim pane"}
 
 
 def key_json(r) -> dict:

@@ -3,6 +3,8 @@ current value, its documentation (the `#   key   text` comment blocks the
 file already carries) and a best-guess type."""
 from __future__ import annotations
 
+from .tables import APPLY, APP_LAUNCH_ONLY, COLOR_KEYS, NOT_SETTINGS  # data/tables.json
+
 import re
 
 from . import paths
@@ -16,9 +18,6 @@ _DOC = re.compile(r"^#(\s+)([a-z0-9][a-z0-9_-]*(?:\s*[/,]\s*[a-z0-9][a-z0-9_-]*)
 _OFF = re.compile(r"^#\s?([a-z0-9][a-z0-9_-]*)\s*=\s*(.+)$")
 _ENUM = re.compile(r"\b([a-z0-9][\w.-]*)((?:\s*\|\s*[a-z0-9][\w.-]*)+)")
 _HEX = re.compile(r"^(0x)?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
-COLOR_KEYS = {"background", "highlight", "text", "dim", "accent", "header", "browser",
-              "terminal", "border", "accent2", "success", "warning", "danger", "info"}
-NOT_SETTINGS = {"shortcuts", "themes", "icons"}       # rows, not knobs (keys view / own lists)
 
 
 def parse_docs(comment_lines: list) -> dict:
@@ -70,14 +69,6 @@ def guess_type(section: str, key: str, value: str, doc: str, allowed: list) -> s
     return "text"
 
 
-APPLY = {
-    "screenshot": "trigger", "pane-shot": "trigger", "setup": "open",
-    "confluence": "open", "ai": "open", "jira-config": "open",
-    "theme": "restart", "themes": "restart",
-    "notifications": "open", "settings-hub": "none",
-}
-APP_LAUNCH_ONLY = {"notes-socket", "focus-file", "focus-bridge", "switcher-name", "detail-name",
-                   "crash-log", "shell", "shell-args", "aerospace-socket"}
 
 
 def apply_mode(section: str, key: str) -> str:

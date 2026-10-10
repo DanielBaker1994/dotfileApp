@@ -1,11 +1,10 @@
 """The catalog's rows: keys (every layer) and settings (commands.toml)."""
 from __future__ import annotations
 
+from .tables import MODS, MOD_NAME, MOD_SYMBOL  # data/tables.json
+
 from dataclasses import dataclass, field
 
-MODS = ("ctrl", "alt", "shift", "cmd")          # display order ⌃ ⌥ ⇧ ⌘
-MOD_NAME = {"ctrl": "Ctrl", "alt": "Opt", "shift": "Shift", "cmd": "Cmd"}
-MOD_SYMBOL = {"ctrl": "⌃", "alt": "⌥", "shift": "⇧", "cmd": "⌘"}
 
 
 @dataclass(frozen=True)

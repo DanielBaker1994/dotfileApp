@@ -2,6 +2,7 @@
 temp home through the environment ($WS_HOME, $WS_COMMANDS_CONF, …)."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -12,6 +13,15 @@ sys.path.insert(0, os.path.join(ROOT, "pylib"))
 from config_text import config_entry, config_section_header  # noqa: E402
 
 _hub_cache: dict = {}
+
+# the [settings-hub] defaults live in data/hub_defaults.json (transparent +
+# configurable; commands.toml [settings-hub] keys override them)
+_HUB_DEFAULTS_FILE = os.path.join(PKG, "data", "hub_defaults.json")
+try:
+    with open(_HUB_DEFAULTS_FILE, encoding="utf-8") as _fh:
+        HUB_DEFAULTS = json.load(_fh)
+except (OSError, ValueError):
+    HUB_DEFAULTS = {}
 
 
 def expand(p: str) -> str:
@@ -60,8 +70,19 @@ def section(name: str) -> dict:
 
 
 def hub(key: str, default: str = "") -> str:
+    """[settings-hub] KEY of commands.toml, else the JSON default
+    (data/hub_defaults.json), else the caller's own default."""
     v = section("settings-hub").get(key, "")
-    return v if v != "" else default
+    if v != "":
+        return v
+    if default != "":
+        return default
+    return HUB_DEFAULTS.get(key, "")
+
+
+def hub_default(key: str, fallback: str = "") -> str:
+    """The shipped default for a [settings-hub] key (no commands.toml)."""
+    return HUB_DEFAULTS.get(key, fallback)
 
 
 def aerospace_conf() -> str:
@@ -77,7 +98,7 @@ def aerospace_conf() -> str:
 
 
 def herdr_conf() -> str:
-    return expand(hub("herdr-config", "~/.config/herdr/config.toml"))
+    return expand(hub("herdr-config") or hub_default("herdr-config"))
 
 
 def ghostty_conf() -> str:
@@ -100,7 +121,7 @@ def vim_init() -> str:
 
 
 def vim_bin() -> str:
-    return expand(hub("vim-bin") or section("notes").get("vim-bin", "") or "nvim")
+    return expand(hub("vim-bin") or section("notes").get("vim-bin", "") or hub_default("vim-bin"))
 
 
 def app_binary() -> str:

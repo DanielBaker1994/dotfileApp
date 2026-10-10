@@ -1,0 +1,8 @@
+{
+  "terminal-command": "open -na Ghostty --args --title={title} --quit-after-last-window-closed=true --confirm-close-surface=false --macos-option-as-alt=true --macos-titlebar-style=transparent --macos-window-buttons=hidden {bg} --window-width=118 --window-height=36 --window-position-x={x} --window-position-y={y} --command={cmd}",
+  "window-title": "ws-settings",
+  "colors": "theme",
+  "undo-limit": "20",
+  "herdr-config": "~/.config/herdr/config.toml",
+  "vim-bin": "nvim"
+}

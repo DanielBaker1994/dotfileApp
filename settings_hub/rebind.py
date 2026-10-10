@@ -5,6 +5,8 @@ automatically when the check fails. App keys are not rebindable: they live
 in the Swift code; [shortcuts] is only their label list."""
 from __future__ import annotations
 
+from .tables import AERO_KEY, AERO_MOD, HERDR_KEY  # data/tables.json
+
 import os
 import re
 
@@ -18,15 +20,6 @@ from .model import MODS, Chord, Stroke
 
 from config_text import config_entry_span, config_line_parts, toml_array, toml_string  # noqa: E402
 
-AERO_KEY = {"-": "minus", "=": "equal", "/": "slash", "\\": "backslash", ",": "comma",
-            ".": "period", ";": "semicolon", "'": "quote", "`": "backtick", "[": "leftSquareBracket",
-            "]": "rightSquareBracket", "Esc": "esc", "Return": "enter", "Tab": "tab",
-            "Space": "space", "Delete": "backspace", "Left": "left", "Right": "right",
-            "Up": "up", "Down": "down", "Home": "home", "End": "end", "PgUp": "pageUp",
-            "PgDn": "pageDown"}
-HERDR_KEY = {"Esc": "esc", "Return": "enter", "Tab": "tab", "Space": "space", "Delete": "backspace",
-             "Left": "left", "Right": "right", "Up": "up", "Down": "down", "-": "-", "|": "|"}
-AERO_MOD = {"alt": "alt", "cmd": "cmd", "ctrl": "ctrl", "shift": "shift"}
 
 
 def to_aerospace(st: Stroke) -> str:

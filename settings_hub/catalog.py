@@ -1,10 +1,11 @@
 """Build the whole catalog: every key reader + the settings."""
 from __future__ import annotations
 
+from .tables import LAYERS as ALL_LAYERS  # data/tables.json
+
 from . import paths, readers, settings
 from .model import Catalog
 
-ALL_LAYERS = ("app", "aerospace", "herdr", "ghostty", "vim")   # list order
 
 
 def layers() -> list:
