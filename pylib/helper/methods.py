@@ -12,7 +12,7 @@ import ignore_rules as ignore
 import prose_pdf
 import status as ws_status
 
-from . import HelperError, method
+from . import HelperError, method, script_bridge
 
 _IGNORE_RULES = {}
 _IGNORE_NEXT = [1]
@@ -616,6 +616,11 @@ def _config_setting(params: dict) -> dict:
             kv.append((pair[0] if isinstance(pair[0], str) else "",
                        pair[1] if isinstance(pair[1], str) else None))
     return {"text": "\n".join(config_text.config_setting(lines, params.get("section") or "", kv))}
+
+
+@method("script.run")
+def _script_run(params: dict) -> dict:
+    return script_bridge.run(params)
 
 
 @method("config.decode")

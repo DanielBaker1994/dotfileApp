@@ -15,7 +15,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "pylib"))
 
+FIXTURES = os.path.join(ROOT, "Tests", "helper_fixtures")
+
 from helper import VERSION, dispatch, method
+
+import helper.methods as _methods  # noqa: F401 — registers the production methods
 
 
 def helper_env():
@@ -70,6 +74,49 @@ class Dispatch(unittest.TestCase):
         self.assertFalse(reply["ok"])
         self.assertIn("ValueError: kaboom", reply["error"]["message"])
         self.assertIn("kaboom", reply["error"]["traceback"])
+
+
+class ScriptBridge(unittest.TestCase):
+    def run_script(self, **params):
+        return dispatch({"id": 1, "method": "script.run", "params": params})
+
+    def test_runs_a_script_in_its_folder(self):
+        reply = self.run_script(folder=FIXTURES, script="echo_script.py",
+                                args=["a", "b"], stdin="hello\n")
+        self.assertTrue(reply["ok"], reply)
+        res = reply["result"]
+        self.assertEqual(res["code"], 0)
+        self.assertEqual(res["stderr"], "")
+        payload = json.loads(res["stdout"].strip().splitlines()[-1])
+        self.assertEqual(payload["echo"], "hello\n")
+        self.assertEqual(payload["argv"], ["a", "b"])
+
+    def test_unicode_stdin_round_trips(self):
+        reply = self.run_script(folder=FIXTURES, script="echo_script.py", stdin="héllo ✓\n")
+        payload = json.loads(reply["result"]["stdout"].strip().splitlines()[-1])
+        self.assertEqual(payload["echo"], "héllo ✓\n")
+
+    def test_a_failing_script_is_data_not_an_error(self):
+        reply = self.run_script(folder=FIXTURES, script="fail_script.py")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["code"], 3)
+        self.assertIn("boom: fixture failure", reply["result"]["stderr"])
+
+    def test_missing_script_is_an_error(self):
+        reply = self.run_script(folder=FIXTURES, script="no_such_script.py")
+        self.assertFalse(reply["ok"])
+        self.assertIn("no such script", reply["error"]["message"])
+
+    def test_script_without_a_name_is_an_error(self):
+        reply = self.run_script(folder=FIXTURES)
+        self.assertFalse(reply["ok"])
+        self.assertIn("script is required", reply["error"]["message"])
+
+    def test_timeout_is_an_error(self):
+        reply = self.run_script(folder=FIXTURES, script="sleepy_script.py",
+                                args=["5"], timeout=0.1)
+        self.assertFalse(reply["ok"])
+        self.assertIn("timed out", reply["error"]["message"])
 
 
 class OneShot(unittest.TestCase):
