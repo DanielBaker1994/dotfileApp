@@ -463,6 +463,7 @@ batch as the plan executes.
 | M1 | done | pilot `pylib/compare_text.py` via `jsonmgr.load`; `compare` + `helper` green |
 | M2a | done | `shelf`, `doc_templates`, `ai_format`; suites + `helper` green; mutation grep clean |
 | M2b | done | `paneshot`, `ansi`, `prose_pdf`; suites + `helper` green |
+| M2c | done | `shot_model` eager-via-manager (lazy wave keeps it eager-by-decision) |
 | … | — | |
 
 ## 7. Validation hooks for this plan

@@ -9,6 +9,7 @@ asks here for the pure decisions. Ported case-for-case from the Swift suite
 from __future__ import annotations
 
 import json
+import jsonmgr
 import math
 import os
 import re
@@ -16,10 +17,8 @@ import time
 
 # ---------------------------------------------------------------- tools
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shot_model.json")
+_DATA = jsonmgr.load("pylib/shot_model")
 # the tool table is data (readable/overridable); the session mechanics stay code
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
 
 _TOOLS = _DATA["tools"]
 _TOOL_DEFAULTS = _DATA["tool_defaults"]
