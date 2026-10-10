@@ -439,5 +439,49 @@ class Server(unittest.TestCase):
         self.assertTrue(replies[0]["ok"])
 
 
+class JsonLaziness(unittest.TestCase):
+    """REVIEW #6a/#8: a lazy module's bad JSON fails the CALL, not the
+    worker, and the next call retries - the failure is never cached."""
+
+    def test_bad_json_is_retried_in_the_same_worker(self):
+        root = tempfile.mkdtemp(prefix="helper-lazy-")
+        self.addCleanup(shutil.rmtree, root, True)
+        env = helper_env()
+        env["WS_JSON_ROOT"] = root
+        p = subprocess.Popen(
+            [sys.executable, "-B", "-m", "helper"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=ROOT, env=env,
+        )
+        try:
+            def call(rid, method, params=None):
+                req = {"id": rid, "method": method}
+                if params is not None:
+                    req["params"] = params
+                p.stdin.write(line(req))
+                p.stdin.flush()
+                return json.loads(p.stdout.readline())
+
+            first = call(1, "shelf.bump", {"items": [], "path": "/x"})
+            self.assertFalse(first["ok"], first)
+            self.assertIn("json data", first["error"]["message"])
+            self.assertIn("missing", first["error"]["message"])
+            self.assertTrue(call(2, "ping")["ok"], "the worker stays alive")
+            os.makedirs(os.path.join(root, "pylib"), exist_ok=True)
+            with open(os.path.join(root, "pylib", "shelf.json"), "w") as fh:
+                json.dump({"max_limit": 9, "whys": ["a"], "activity_whys": ["b"]}, fh)
+            third = call(3, "shelf.bump", {"items": [], "path": "/x"})
+            self.assertTrue(third["ok"], third)
+            self.assertEqual(third["result"]["items"][0]["path"], "/x")
+            self.assertTrue(call(4, "shutdown")["ok"])
+        finally:
+            if p.poll() is None:
+                p.stdin.close()
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import jsonmgr
 
-_DATA = jsonmgr.load("pylib/compare_text")
-# EOL display labels + supported-encoding names are data; the byte codes and
-# ROWS_*/OP_* wire codes stay code (contracts with stored data / the Swift peer)
+
+def _eol_label() -> dict:
+    """EOL display labels keyed by the wire code (projection: JSON keys are
+    strings)."""
+    return {int(k): v for k, v in
+            jsonmgr.field("pylib/compare_text", "eol_labels").items()}
+
+
+# lazy (worker surface): a broken compare_text.json fails at the first
+# method call and is retried on the next one; the byte codes and ROWS_*/OP_*
+# wire codes stay code (contracts with stored data / the Swift peer)
+jsonmgr.lazy_module(__name__, globals(), {
+    "EOL_LABEL": _eol_label,
+    "ENCODINGS": ("pylib/compare_text", ("encodings",), tuple),
+})
 
 EOL_BYTES = {0: b"", 1: b"\n", 2: b"\r\n", 3: b"\r"}
-EOL_LABEL = {int(k): v for k, v in _DATA["eol_labels"].items()}
-ENCODINGS = tuple(_DATA["encodings"])
 
 ROWS_SAME, ROWS_CHANGED, ROWS_LEFT_ONLY, ROWS_RIGHT_ONLY = 0, 1, 2, 3
 LEFT, RIGHT = "left", "right"
@@ -98,12 +108,13 @@ def dominant_eol(side: dict) -> int:
 
 
 def eol_label(side: dict) -> str:
+    labels = _eol_label()
     kinds = {e for e in side["eols"] if e != 0}
     if len(kinds) > 1:
         return "mixed"
     if kinds:
-        return EOL_LABEL[kinds.pop()]
-    return EOL_LABEL[dominant_eol(side)]
+        return labels[kinds.pop()]
+    return labels[dominant_eol(side)]
 
 
 def side_text(side: dict) -> str:

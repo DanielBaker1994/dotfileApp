@@ -9,11 +9,13 @@ import os
 import stat as stat_mod
 from urllib.parse import unquote, urlsplit
 
-_DATA = jsonmgr.load("pylib/shelf")
-
-MAX_LIMIT = _DATA["max_limit"]
-WHYS = tuple(_DATA["whys"])
-ACTIVITY_WHYS = tuple(_DATA["activity_whys"])
+# lazy (worker surface): a broken shelf.json fails at the first method call
+# and is retried on the next one; internal uses go through jsonmgr.field
+jsonmgr.lazy_module(__name__, globals(), {
+    "MAX_LIMIT": ("pylib/shelf", ("max_limit",)),
+    "WHYS": ("pylib/shelf", ("whys",), tuple),
+    "ACTIVITY_WHYS": ("pylib/shelf", ("activity_whys",), tuple),
+})
 
 
 def canonical(p):
@@ -83,6 +85,8 @@ def load_candidates(raw):
     """paths.json entries -> the ones that still exist and pass the
     activity rule (dirs only ever come from non-activity whys). The app
     filters its ignore rules between this and finalize()."""
+    whys = jsonmgr.field("pylib/shelf", "whys")
+    activity_whys = jsonmgr.field("pylib/shelf", "activity_whys")
     out = []
     for d in raw if isinstance(raw, list) else []:
         if not isinstance(d, dict):
@@ -93,8 +97,8 @@ def load_candidates(raw):
         c = canonical(p)
         if c is None:
             continue
-        why = d.get("why") if d.get("why") in WHYS else "modified"
-        keep = c["isFile"] if why in ACTIVITY_WHYS else (c["isFile"] or c["isDir"])
+        why = d.get("why") if d.get("why") in whys else "modified"
+        keep = c["isFile"] if why in activity_whys else (c["isFile"] or c["isDir"])
         if not keep:
             continue
         out.append({"path": c["path"], "at": float(t), "why": why})

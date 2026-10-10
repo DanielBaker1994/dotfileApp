@@ -3,10 +3,11 @@ from __future__ import annotations
 import jsonmgr
 import re
 
-_DATA = jsonmgr.load("pylib/doc_templates")
-# the preset list is data; the CSS grammar stays code
-
-BUILTIN = list(_DATA["builtin"])
+# lazy (worker surface): a broken doc_templates.json fails at the first
+# method call and is retried on the next one
+jsonmgr.lazy_module(__name__, globals(), {
+    "BUILTIN": ("pylib/doc_templates", ("builtin",), list),
+})
 
 _PALETTE = re.compile(r":root:has\(\.([A-Za-z0-9_-]+)\)\s*\{[^}]*--p-bg")
 _CLASS = re.compile(r'class="([^"]*)"')
@@ -29,7 +30,7 @@ def names(configured, css=None) -> list:
     if configured:
         return configured
     found = from_css(css) if css else []
-    return found or list(BUILTIN)
+    return found or list(jsonmgr.field("pylib/doc_templates", "builtin"))
 
 
 def parse(line: str):

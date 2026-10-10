@@ -6,12 +6,12 @@ import os
 import re
 import subprocess
 
-_DATA = jsonmgr.load("pylib/ai_format")
-# the guard instruction + the filler word list are data; the pipeline is code
-
-CODE_INSTRUCTION = _DATA["code_instruction"]
-
-FILLER = set(_DATA["filler"])
+# lazy (worker surface): a broken ai_format.json fails at the first method
+# call and is retried on the next one
+jsonmgr.lazy_module(__name__, globals(), {
+    "CODE_INSTRUCTION": ("pylib/ai_format", ("code_instruction",)),
+    "FILLER": ("pylib/ai_format", ("filler",), set),
+})
 
 _SEPARATOR = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _RULE_LINE = re.compile(r"^[-=]{3,}$")
@@ -315,7 +315,7 @@ def rule_chain(path: str) -> list:
 
 def rule_instructions(rule: dict, guarded: bool) -> str:
     i = reflow_instructions(rule["instructions"])
-    return i + "\n- " + CODE_INSTRUCTION if guarded else i
+    return i + "\n- " + jsonmgr.field("pylib/ai_format", "code_instruction") if guarded else i
 
 
 def rule_wrap(rule: dict, text: str) -> str:
@@ -450,6 +450,7 @@ def word_words(s: str) -> list:
 
 
 def word_check(input_text: str, output: str) -> dict:
+    filler = set(jsonmgr.field("pylib/ai_format", "filler"))
     count = {}
     for w in word_words(input_text):
         count[w] = count.get(w, 0) + 1
@@ -458,12 +459,12 @@ def word_check(input_text: str, output: str) -> dict:
         n = count.get(w, 0)
         if n > 0:
             count[w] = n - 1
-        elif w not in FILLER:
+        elif w not in filler:
             added.append(w)
     dropped = []
     for w in word_words(input_text):
         n = count.get(w, 0)
-        if n > 0 and w not in FILLER:
+        if n > 0 and w not in filler:
             count[w] = n - 1
             dropped.append(w)
     return {"ok": not added and not dropped, "added": added, "dropped": dropped}

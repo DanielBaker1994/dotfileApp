@@ -6,20 +6,27 @@ import subprocess
 import uuid
 from pathlib import Path
 
-_DATA = jsonmgr.load("pylib/prose_pdf")
-# shipped prose defaults + the pandoc Lua filter + the builtin CSS are data;
-# the pipeline around them stays code
 
-DEFAULTS = dict(_DATA["defaults"])
-DEFAULTS["cacheDir"] = os.path.expanduser(DEFAULTS["cacheDir"])  # never bake the home into JSON
+def _defaults() -> dict:
+    """The shipped prose defaults (projection: cacheDir expands ~ on access;
+    the home is never baked into JSON)."""
+    defaults = dict(jsonmgr.field("pylib/prose_pdf", "defaults"))
+    defaults["cacheDir"] = os.path.expanduser(defaults["cacheDir"])
+    return defaults
 
-SOURCEPOS_FILTER = _DATA["sourcepos_filter"]
 
-BUILTIN_CSS = _DATA["builtin_css"]
+# lazy (worker surface): a broken prose_pdf.json fails at the first method
+# call and is retried on the next one; the pandoc Lua filter + the builtin
+# CSS are data, the pipeline around them stays code
+jsonmgr.lazy_module(__name__, globals(), {
+    "DEFAULTS": _defaults,
+    "SOURCEPOS_FILTER": ("pylib/prose_pdf", ("sourcepos_filter",)),
+    "BUILTIN_CSS": ("pylib/prose_pdf", ("builtin_css",)),
+})
 
 
 def config(raw) -> dict:
-    merged = dict(DEFAULTS)
+    merged = _defaults()
     for key, value in (raw or {}).items():
         if key in merged and value is not None:
             merged[key] = value
@@ -47,16 +54,17 @@ def filter_paths(c: dict) -> list:
 
 
 def sourcepos_filter_path(c: dict) -> str:
+    filter_text = jsonmgr.field("pylib/prose_pdf", "sourcepos_filter")
     path = os.path.join(c["cacheDir"], "sourcepos-fix.lua")
     try:
         with open(path, encoding="utf-8") as f:
             current = f.read()
     except OSError:
         current = None
-    if current != SOURCEPOS_FILTER:
+    if current != filter_text:
         os.makedirs(c["cacheDir"], exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(SOURCEPOS_FILTER)
+            f.write(filter_text)
     return path
 
 
@@ -93,7 +101,7 @@ def header_file(c: dict) -> str:
         except OSError:
             text = None
     if text is None:
-        text = BUILTIN_CSS
+        text = jsonmgr.field("pylib/prose_pdf", "builtin_css")
     if c["themeCSS"]:
         text += "\n" + c["themeCSS"]
     path = _scratch(c, "header")
@@ -111,7 +119,7 @@ def css_content(c: dict) -> str:
         except OSError:
             text = None
     if text is None:
-        text = BUILTIN_CSS
+        text = jsonmgr.field("pylib/prose_pdf", "builtin_css")
     if c["themeCSS"]:
         text += "\n" + c["themeCSS"]
     return text
