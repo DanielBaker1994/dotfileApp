@@ -1,0 +1,6 @@
+{
+  "code_instruction": "Tokens like [[CODE1]] stand for code: keep every one exactly as written, in place.",
+  "filler": ["first", "second", "third", "fourth", "fifth", "firstly", "secondly", "thirdly", "then", "next",
+             "finally", "lastly", "and", "also", "is", "are", "was", "were", "has", "have", "had", "with", "the",
+             "a", "an", "of", "at", "in", "on", "it", "to", "for", "that", "which", "or"]
+}

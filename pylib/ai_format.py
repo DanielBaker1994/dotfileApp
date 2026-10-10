@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
 import subprocess
 
-CODE_INSTRUCTION = "Tokens like [[CODE1]] stand for code: keep every one exactly as written, in place."
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_format.json")
+# the guard instruction + the filler word list are data; the pipeline is code
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
 
-FILLER = {
-    "first", "second", "third", "fourth", "fifth", "firstly", "secondly", "thirdly", "then", "next",
-    "finally", "lastly", "and", "also", "is", "are", "was", "were", "has", "have", "had", "with", "the",
-    "a", "an", "of", "at", "in", "on", "it", "to", "for", "that", "which", "or",
-}
+CODE_INSTRUCTION = _DATA["code_instruction"]
+
+FILLER = set(_DATA["filler"])
 
 _SEPARATOR = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _RULE_LINE = re.compile(r"^[-=]{3,}$")
