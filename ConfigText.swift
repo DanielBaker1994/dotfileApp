@@ -91,24 +91,16 @@ func configLines(_ text: String) -> [String] {
 }
 
 func tri(_ s: String?) -> Bool? {
-    switch s?.lowercased() {
-    case "true", "yes", "1", "on": return true
-    case "false", "no", "0", "off": return false
-    default: return nil
-    }
+    // the grammar lives in pylib/config_text.py (ws test config covers it)
+    guard case .success(let box) = PythonHelper.shared.callSync(
+            "config.tri", ["text": s ?? ""], timeout: 30),
+          let d = box as? [String: Any] else { return nil }
+    return d["value"] as? Bool
 }
 
 func resolveBinary(_ name: String) -> String? {
-    if name.hasPrefix("/") {
-        return FileManager.default.isExecutableFile(atPath: name) ? name : nil
-    }
-    let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin")
-        .split(separator: ":").map(String.init)
-    for dir in paths {
-        let fullPath = dir + "/" + name
-        if FileManager.default.isExecutableFile(atPath: fullPath) {
-            return fullPath
-        }
-    }
-    return nil
+    guard case .success(let box) = PythonHelper.shared.callSync(
+            "config.resolve_binary", ["name": name], timeout: 30),
+          let d = box as? [String: Any] else { return nil }
+    return d["path"] as? String
 }

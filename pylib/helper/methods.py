@@ -23,6 +23,7 @@ import jira_search
 import jira_setup
 import paneshot
 import prose_pdf
+import setup_checks
 import shot_model
 import status as ws_status
 
@@ -919,3 +920,23 @@ def _paneshot_lines(params: dict) -> dict:
 @method("paneshot.environment")
 def _paneshot_environment(params: dict) -> dict:
     return {"env": paneshot.environment(params.get("env") or {})}
+
+
+@method("config.tri")
+def _config_tri(params: dict) -> dict:
+    return {"value": config_text.tri(params.get("text"))}
+
+
+@method("config.resolve_binary")
+def _config_resolve_binary(params: dict) -> dict:
+    return {"path": config_text.resolve_binary(params.get("name") or "")}
+
+
+@method("setup.parse_checks")
+def _setup_parse_checks(params: dict) -> dict:
+    return {"checks": setup_checks.parse_checks(params.get("checks"))}
+
+
+@method("setup.summarize")
+def _setup_summarize(params: dict) -> dict:
+    return setup_checks.summarize(params.get("checks"))

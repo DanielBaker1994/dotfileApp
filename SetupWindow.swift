@@ -273,12 +273,18 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                     self.say("The checks could not run: \(r.out.prefix(160))", tone: .danger)
                     return
                 }
-                self.checks = list.map { d in
-                    let s = { (k: String) in d[k] as? String ?? "" }
-                    return SetupCheck(id: s("id"), group: s("group"), level: s("level"), title: s("title"),
-                                      detail: s("detail"), fix: s("fix"), action: s("action"),
-                                      ok: d["ok"] as? Bool ?? false)
+                // the models live in pylib/setup_checks.py
+                var parsed: [SetupCheck] = []
+                if case .success(let box) = pythonHelper.callSync("setup.parse_checks", ["checks": list], timeout: 30),
+                   let d = box as? [String: Any], let rows = d["checks"] as? [[String: Any]] {
+                    parsed = rows.map {
+                        SetupCheck(id: $0["id"] as? String ?? "", group: $0["group"] as? String ?? "",
+                                   level: $0["level"] as? String ?? "", title: $0["title"] as? String ?? "",
+                                   detail: $0["detail"] as? String ?? "", fix: $0["fix"] as? String ?? "",
+                                   action: $0["action"] as? String ?? "", ok: $0["ok"] as? Bool ?? false)
+                    }
                 }
+                self.checks = parsed
                 self.rebuildRows()
                 self.summarize()
             }
@@ -286,18 +292,24 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     }
 
     private func summarize() {
-        let failed = checks.filter { !$0.ok && $0.required }
-        let warned = checks.filter { !$0.ok && !$0.required && $0.group != "stack" }
-        let stackMissing = checks.filter { !$0.ok && $0.group == "stack" }
-        if let f = failed.first {
-            say("\(f.title): \(f.detail)", tone: .danger)
-        } else if !warned.isEmpty {
-            say("Ready. \(warned.count) optional feature\(warned.count == 1 ? " is" : "s are") off — see the list.", tone: .warning)
-        } else if !stackMissing.isEmpty {
-            say("Ready. Hotkeys and window borders are not set up (optional).", tone: .dim)
-        } else {
-            say("Everything is in place.", tone: .success)
+        // the decision lives in pylib/setup_checks.py
+        let payload: [[String: Any]] = checks.map {
+            ["id": $0.id, "group": $0.group, "level": $0.level, "ok": $0.ok,
+             "title": $0.title, "detail": $0.detail]
         }
+        var message = "Everything is in place."
+        var tone = PopupTone.success
+        if case .success(let box) = pythonHelper.callSync("setup.summarize", ["checks": payload], timeout: 30),
+           let d = box as? [String: Any] {
+            message = d["message"] as? String ?? message
+            switch d["tone"] as? String {
+            case "danger": tone = .danger
+            case "warning": tone = .warning
+            case "dim": tone = .dim
+            default: tone = .success
+            }
+        }
+        say(message, tone: tone)
         updateButtons()
     }
 

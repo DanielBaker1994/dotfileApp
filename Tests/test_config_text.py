@@ -179,3 +179,34 @@ class Protocol(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class Tri(unittest.TestCase):
+    def test_truths(self):
+        for s in ("true", "yes", "1", "on", "TRUE", "On"):
+            self.assertIs(ct.tri(s), True, s)
+
+    def test_falses(self):
+        for s in ("false", "no", "0", "off", "No"):
+            self.assertIs(ct.tri(s), False, s)
+
+    def test_none(self):
+        for s in (None, "", "maybe", "2"):
+            self.assertIsNone(ct.tri(s), s)
+
+
+class ResolveBinary(unittest.TestCase):
+    def test_absolute(self):
+        self.assertEqual(ct.resolve_binary("/bin/sh"), "/bin/sh", "absolute executable path")
+        self.assertIsNone(ct.resolve_binary("/etc/hosts"), "absolute non-executable path")
+
+    def test_path_lookup(self):
+        got = ct.resolve_binary("ls")
+        self.assertTrue(got and got.endswith("/ls"), "'ls' found on PATH")
+        self.assertIsNone(ct.resolve_binary("definitely-not-a-real-binary-xyz"))
+
+    def test_injected_path_and_exists(self):
+        seen = []
+        got = ct.resolve_binary("tool", path="/a:/b", exists=lambda p: seen.append(p) or p == "/b/tool")
+        self.assertEqual(got, "/b/tool")
+        self.assertEqual(seen, ["/a/tool", "/b/tool"])

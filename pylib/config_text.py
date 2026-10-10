@@ -263,3 +263,39 @@ def toml_array(items) -> str:
 
 def toml_string(v: str) -> str:
     return _toml_quote(v)
+
+
+# ------------------------------------------------------------ tri + binaries
+
+def tri(s):
+    """true/yes/1/on -> True; false/no/0/off -> False; anything else None."""
+    v = (s or "").lower()
+    if v in ("true", "yes", "1", "on"):
+        return True
+    if v in ("false", "no", "0", "off"):
+        return False
+    return None
+
+
+def _executable(p, exists=None):
+    if exists is not None:
+        return bool(exists(p))
+    import os
+    return os.path.isfile(p) and os.access(p, os.X_OK)
+
+
+def resolve_binary(name, path=None, exists=None):
+    """Absolute path through unchanged when executable; bare names searched
+    on PATH (the env's, or the app's default list)."""
+    import os
+    name = name or ""
+    if name.startswith("/"):
+        return name if _executable(name, exists) else None
+    dirs = (path if path is not None else
+            os.environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+            ).split(":")
+    for d in dirs:
+        full = d + "/" + name
+        if _executable(full, exists):
+            return full
+    return None

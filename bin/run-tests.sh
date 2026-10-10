@@ -28,7 +28,6 @@ case "${1:-all}" in
     config)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_config_text.py"
-        run_test "$TESTS/test_config.swift"
         ;;
     recent)
         run_test "$TESTS/test_recent_files.swift"
@@ -136,6 +135,10 @@ case "${1:-all}" in
     confluence-pages)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_confluence_pages.py"
+        ;;
+    setup-checks)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_setup_checks.py"
         ;;
     shot-model)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3

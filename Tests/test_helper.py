@@ -284,6 +284,17 @@ class ScriptBridge(unittest.TestCase):
         reply = dispatch({"id": 3, "method": "paneshot.pane_json", "params": {"text": "{}"}})
         self.assertFalse(reply["result"]["ok"])
 
+    def test_config_and_setup_methods(self):
+        reply = dispatch({"id": 1, "method": "config.tri", "params": {"text": "On"}})
+        self.assertEqual(reply["result"]["value"], True)
+        reply = dispatch({"id": 2, "method": "config.tri", "params": {"text": "maybe"}})
+        self.assertIsNone(reply["result"]["value"])
+        reply = dispatch({"id": 3, "method": "config.resolve_binary", "params": {"name": "/bin/sh"}})
+        self.assertEqual(reply["result"]["path"], "/bin/sh")
+        reply = dispatch({"id": 4, "method": "setup.summarize", "params": {"checks": [
+            {"group": "features", "level": "optional", "ok": False}]}})
+        self.assertEqual(reply["result"]["tone"], "warning")
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):
