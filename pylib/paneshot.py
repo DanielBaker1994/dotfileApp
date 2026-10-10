@@ -5,15 +5,12 @@ Swift suite's arg/config/JSON cases moved here, ws test paneshot)."""
 from __future__ import annotations
 
 import json
-import os
+import jsonmgr
 
 # one tri in python: config_text owns the grammar
 from config_text import tri  # noqa: F401
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paneshot.json")
-# shipped [pane-shot] defaults + the CLI help line; user config overrides
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
+_DATA = jsonmgr.load("pylib/paneshot")
 
 
 class Problem(Exception):

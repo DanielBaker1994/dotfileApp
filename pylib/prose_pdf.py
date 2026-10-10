@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
+import jsonmgr
 import os
 import subprocess
 import uuid
 from pathlib import Path
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prose_pdf.json")
+_DATA = jsonmgr.load("pylib/prose_pdf")
 # shipped prose defaults + the pandoc Lua filter + the builtin CSS are data;
 # the pipeline around them stays code
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
 
 DEFAULTS = dict(_DATA["defaults"])
 DEFAULTS["cacheDir"] = os.path.expanduser(DEFAULTS["cacheDir"])  # never bake the home into JSON

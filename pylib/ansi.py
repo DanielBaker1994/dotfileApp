@@ -7,16 +7,13 @@ suite's parser cases moved here (ws test ansi).
 """
 from __future__ import annotations
 
-import json
-import os
+import jsonmgr
 import re
 import unicodedata
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ansi.json")
+_DATA = jsonmgr.load("pylib/ansi")
 # the ghostty-mirror theme defaults + the base-16 palette are data;
 # the xterm cube / grays are generated
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _DATA = json.load(_fh)
 
 NONE = ("none",)
 
