@@ -20,7 +20,7 @@ Read with: `REVIEW-architecture.md` #6a (never cache a failure), #8
 `settings_hub/paths.py` are hard `with open(...) as fh: json.load(fh)` at
 import (a missing/corrupt file raises `FileNotFoundError` /
 `JSONDecodeError` at import). In the worker those imports are per-module
-guarded (`pylib/helper/methods.py:9-54`, commit `80101b9`): a bad module's
+guarded (`pylib/helper/methods.py:13-55` — was ~~9-54~~; commit `80101b9`): a bad module's
 group answers `HelperError … unavailable`, `ping` stays up. In the CLIs a bad
 file dies with a traceback at process start.
 
@@ -92,7 +92,10 @@ is a guard for every pylib row and is not repeated below.
   `vim/snippets/markdown.json` (kitchen_sink.swift:7142) and the Resources
   mirrors (SW1/SW2) — this manager is Python-only.
 - Unregistered JSON in the shipped dirs: `jira/team.example.json` (docs
-  example, never loaded by code) — allowlisted by the registry test.
+  example, never loaded by code) and `vim/snippets/markdown.json` (Swift-side
+  snippet template, `kitchen_sink.swift:7142`; shipped via `RESOURCE_LINK_DIRS`)
+  — was ~~only team.example.json~~; both allowlisted by the registry test, to
+  match §7's "15 homes + 2 non-homes".
 
 ## 2. Proposed design
 
@@ -217,7 +220,10 @@ lives; the CLI's ledger only sees the CLI process. Not surfacing via
   worker restart otherwise — exactly today's "loaded at import" behaviour.
 - **Locking**: one `threading.RLock` guards `_CACHE`/`_LEDGER`/`_LAST_ERROR`
   and the parse (files are ≤ a few KB; a hit is ~1 µs). Ledger dedup is a
-  plain dict check-then-set (GIL-atomic; a duplicate insert is harmless).
+  plain dict check-then-set — was ~~(GIL-atomic; a duplicate insert is
+  harmless)~~: check-then-set is *not* atomic; it is only safe because it
+  runs under the same RLock (keep it there; a duplicate insert is harmless
+  if it ever leaks).
   Lazy module attributes are computed idempotently and cached into the
   module dict (`ns[attr] = value`) — a double compute under race is
   harmless.
@@ -235,14 +241,23 @@ lives; the CLI's ledger only sees the CLI process. Not surfacing via
   has no external references, verified).
 - **3.9 compatibility**: `from __future__ import annotations`, no `match`,
   no `tomllib`, no `functools.cache`; only `json/os/sys/threading/hashlib/
-  time/expanduser`. The floor is checked for real: this machine's
+  time` — was ~~time/expanduser~~ (`os.path.expanduser` is a function, not a
+  module; `math.isfinite`, 3.2+, is fine if numeric validation is added but
+  then `math` joins the list). The floor is checked for real: this machine's
   `/usr/bin/python3` (the CLT interpreter launchd scripts land on) is 3.9.6.
   The CLI report also runs on 3.9 (no settings_hub import).
-- **Helper integration**: add `"jsonmgr": "jsonmgr"` to `_MODULES` in
-  `pylib/helper/methods.py` (same guard style); optionally convert
-  `JsonError` to the message-only `HelperError` branch in
-  `helper/__init__.dispatch` (M5 polish) — until then the generic branch
-  already surfaces the full message + traceback.
+- **Helper integration**: the `jsonmgr.report` method function belongs in
+  `pylib/helper/methods.py` (the `_jira_paths` pattern at `:686`, which does
+  `import jira_paths` inside the body) so `jsonmgr.py` keeps its
+  no-pylib-imports rule and `python3 pylib/jsonmgr.py` / `-m pylib.jsonmgr`
+  never import `helper`; also add `"jsonmgr": "jsonmgr"` to `_MODULES`
+  (same guard style) so a broken jsonmgr answers `HelperError … unavailable`
+  instead of killing the worker. Optionally convert `JsonError` to the
+  message-only `HelperError` branch in `helper/__init__.dispatch` (M5
+  polish) — until then the generic branch already surfaces the full message
+  + traceback. (Corrected: the plan was silent on where the method body
+  lives — a top-level `from helper import method` in jsonmgr would break the
+  CLI and the no-pylib-import rule.)
 
 ### 2.6 Lazy loading — feasibility and the decision
 
@@ -280,6 +295,20 @@ while keeping eager module-level names.
     projections (`prose_pdf` `cacheDir` expands `~` on access);
     `lazy_module` installs `__getattr__`/`__all__`/`__dir__`, caches in the
     module namespace, never caches failure.
+  - **Derived module tables become projections** (correction: the plan
+    undercounted this). Every lazy module builds module-level derived
+    constants at import (`ansi._BASE16`; `shot_model`'s ~12 names;
+    `jira_boards.DONE_LIMIT/OTHER_COLUMN/_HOT_PATTERN/_COLOR_KEYS`;
+    `jira_pages.CATEGORY_NAMES/_HEX_KEYS`; `jira_data.WORDS_DEFAULTS/
+    _LIST_KEYS/DIM_FIELDS`; `confluence_glue.MODES/_SEARCH`;
+    `shelf.MAX_LIMIT/WHYS/ACTIVITY_WHYS`; …). A module-level
+    `jsonmgr.field(...)` there would load at import, so each becomes a
+    callable projection in the export table plus internal-use rewrites.
+    Verified no *def-time* capture — `paneshot.Config`, `shot_model.Args`/
+    `State`, `ansi.Theme` all read at call time — so nothing is structurally
+    un-lazyable; but `shot_model` (~10 projections + ~10 rewrites) should be
+    declared eager-by-decision up front. Private test-visible names must be
+    exported too: `Tests/test_jira_pages.py:21` reads `jp._HEX_KEYS`.
 
 ## 3. Migration batches (each tiny, ordered, guard-green, symbols kept)
 
@@ -301,7 +330,7 @@ byte-identical, `git status` clean after commit; new files tracked before any
 | **M3b** | confluence package | `confluence/confluence_config.py`, `confluence_api.py` | `python3 Tests/test_confluence.py` |
 | **M3c** | notify package | `notify/notify_poll.py`, `webex_api.py` | `python3 Tests/test_notifications.py` |
 | **M3d** | settings_hub | `settings_hub/tables.py`, `readers.py` (`_LUA`), `paths.py` (soft accessor; `from . import paths` bootstrap in `tables.py`) | `./ws test settings` |
-| **M3e** | jira path table | `pylib/jira_paths.py` | `python3 Tests/test_jira_poll.py`; `helper` |
+| **M3e** | jira path table | `pylib/jira_paths.py` | `python3 Tests/test_jira_poll.py`, `Tests/test_confluence.py`, `Tests/test_notifications.py` (jira_paths is import-reached by both stacks via `jira_config`); `helper` |
 | **M4a** | lazy: small data | `shelf.py`, `doc_templates.py`, `ai_format.py`, `compare_text.py`, `prose_pdf.py` | their suites + `helper` (incl. new bad-JSON laziness case) |
 | **M4b** | lazy: pane-shot/ANSI | `paneshot.py`, `ansi.py` | `paneshot`, `ansi-parse`, `helper` |
 | **M4c** | lazy: screenshot | `shot_model.py` | `shot-model`, `helper` |
@@ -318,12 +347,18 @@ math or bare `except ValueError → {}` outside `soft=True` for `hub_defaults`.
 
 - registry integrity: every `_HOMES` entry exists and parses (dict root);
   scan shipped dirs for unregistered `*.json` (allowlist
-  `jira/team.example.json`) — pins the end state.
+  `jira/team.example.json` + `vim/snippets/markdown.json` — was ~~only
+  team.example.json~~; §7's "15 homes + 2 non-homes" needs both, and
+  `vim/snippets/markdown.json` is a shipped Swift-side template at
+  `kitchen_sink.swift:7142`) — pins the end state.
 - error style: `WS_JSON_ROOT` temp root → missing file raises `JsonError`
   (name/path in message); writing the file then calling again succeeds
   (failure not cached); malformed likewise.
-- mtime: edit → `load(refresh=True)` sees it; plain `load` keeps the
-  snapshot; `reload()` re-reads.
+- mtime: while the stat key is unchanged, plain `load` returns the same
+  snapshot object; after an edit plain `load` re-parses and sees it (load
+  always stats, §2.5 — was ~~plain `load` keeps the snapshot~~, which
+  contradicted §2.5); `load(refresh=True)` forces a re-parse even when the
+  key is unchanged; `reload()` drops the snapshot(s) and re-reads.
 - ledger: `load`/`get`/`field` from a helper module record consumer+keypath;
   dedupe; `WS_JSON_TRACE=1` records `_DATA["key"]` indexing and emits lines.
 - `lazy_module`: export resolves, caches, retries after a fixed failure,
@@ -355,12 +390,15 @@ math or bare `except ValueError → {}` outside `soft=True` for `hub_defaults`.
 4. **`WS_JSON_TRACE` changes the returned object type** (dict subclass).
    Grep `type(x) is dict` — none today; trace-off path is plain. Verify
    before M0 lands the trace mode.
-5. **Import-order bootstrap in settings_hub.** `readers.py` imports
-   `.tables` before anything inserts `pylib` on `sys.path`; `tables.py` must
+5. **Import-order bootstrap in settings_hub.** *Verified:* `readers.py:5`
+   imports `.tables` before `readers.py:18` imports `.paths`, and
+   `model.py:4` / `chords.py:5` / `settings.py:5` / `catalog.py:4` do the
+   same, so a direct `settings_hub.readers`/`model` import reaches `.tables`
+   first; `tables.py` must
    `from . import paths  # noqa: F401, sys.path bootstrap` before
-   `import jsonmgr` (no cycle: paths imports only jsonmgr/config_text). The
-   same check applies to any module that runs before `paths.py` today —
-   audit the settings_hub import graph in M3d.
+   `import jsonmgr` (no cycle: `paths.py` inserts `<root>/pylib` and imports
+   only `config_text` + `jsonmgr` after M3d). `cli.py` reaches `.paths`
+   first via `apply.py:10`; the `tables.py` fix covers every other entry.
 6. **`from jira_fields import BASE_FIELD_LABELS`** (`jira_config.py:362`)
    keeps `jira_fields` eager — accepted; documented so M4d doesn't "fix" it
    halfway.
@@ -371,8 +409,11 @@ math or bare `except ValueError → {}` outside `soft=True` for `hub_defaults`.
    app spawns the worker without them — the app-visible trace is
    `jsonmgr.report` (M5), not stderr. Document; a Swift-side debug env is
    out of scope.
-9. **New file must be `git add`ed before `ws dmg`** (bundle copies
-   `git ls-files -c`); same rule the sweep already established.
+9. **New file in the bundle.** `bin/build-app.sh:122` copies per shipped
+   dir with `git ls-files -co --exclude-standard`, i.e. cached *and*
+   untracked-not-ignored files — was ~~copies `git ls-files -c`~~, so an
+   untracked `pylib/jsonmgr.py` would actually ship; `git add` it before
+   `ws dmg` anyway (source-of-truth hygiene; the sweep's rule).
 10. **`report --check` is not a substitute for tests** — it parses values
     but the per-module suites are what pin byte-compatibility; keep both.
 
@@ -391,6 +432,9 @@ Unknowns to verify during implementation:
 - Real-world consumers seen by the ledger after M6 (`jsonmgr.report` on a
   live worker) — use it to find any path we missed and any remaining
   per-access `load()` call (the one anti-pattern the report should surface).
+- `reload()` drops `_CACHE` snapshots but not values already cached into
+  lazy module namespaces by `lazy_module`; document the boundary (it only
+  matters for tests/debug in one process — imports behave like today).
 
 ## 5. Out of scope
 
@@ -466,5 +510,81 @@ batch as the plan executes.
   imports only `jsonmgr` + `config_text` after the change).
 - **Bundle deployment unchanged**: `install.conf` `RESOURCE_LINK_DIRS`
   covers bin/jira/confluence/notify/vim/pylib/settings_hub and
-  `bin/build-app.sh` copies via `git ls-files` — `pylib/jsonmgr.py` ships
-  exactly like the JSON homes it reads.
+  `bin/build-app.sh` copies via `git ls-files -co --exclude-standard`
+  (cached + untracked-not-ignored) — `pylib/jsonmgr.py` ships exactly like
+  the JSON homes it reads.
+
+## 9. Validation (independent re-check, HEAD `ec0f264`)
+
+Re-verified against the tree with `grep -rn "json.load\|json.loads"` over
+pylib/jira/confluence/notify/settings_hub/bin, `git ls-files '*.json'`,
+`bin/run-tests.sh`, `install.conf` + `bin/build-app.sh`, `bin/setup-home.sh` +
+`symlinks.sh`, `jira/jira-doctor.sh` + the launchd plist, and the helper.
+
+**Confirmed (no change):**
+
+- **Inventory**: 15 homes / 28 load sites / 17 pylib loader modules — exact.
+  9 pylib homes (17 pylib load sites incl. 6 jira-glue + 2 confluence-glue);
+  `jira/defaults.json` 10×, `confluence/defaults.json` 4×,
+  `notify/defaults.json` 2×, settings_hub 3×. All loader line refs
+  spot-checked (e.g. `jira_config.py:102`/`:509`, `jira_poll.py:1580`/
+  `:2125`, `confluence_api.py:356`, `cli.py:342`). Nothing loads a shipped
+  home outside the 28; the many other `json.load` hits are user/runtime data.
+- **Path math holds in all four contexts** — repo; bundle
+  (`RESOURCE_LINK_DIRS` → `Contents/Resources/{pylib,jira,confluence,notify,
+  settings_hub}`); app-home (`setup-home.sh cmd_app` links each shipped dir
+  into `$WS_HOME`, and `settings_hub/paths.py:8` says "NOT realpath: the
+  home's link"); launchd (`jira-doctor.sh:223` substitutes `__WS_CONFIG__` →
+  `$HOME/.config/kitchen-sink`, script path absolute so cwd is irrelevant,
+  `jira_config.py:69` inserts `<root>/pylib`). No assumption breaks.
+- **3.9**: `/usr/bin/python3` = 3.9.6; `python3 -m pylib.jira_paths` works
+  (namespace package, no `pylib/__init__.py`); plan uses no 3.10+ construct
+  (PEP 562 `__getattr__` 3.7+, `sys._getframe` CPython-only but both
+  interpreters are CPython, `math.isfinite` 3.2+ if used).
+- **Never-cache-failure (#6a) is achievable** in the stated flow: parse →
+  write `_CACHE` last; failure drops the stale entry, keeps `_LAST_ERROR`,
+  raises; next call re-stats/re-parses. Trade-off (intended): a transient
+  bad read of a previously good file raises instead of serving the old
+  snapshot.
+- **Lazy wave structurally safe**: no def-time capture — `paneshot.Config`,
+  `shot_model.Args`/`State`, `ansi.Theme` read JSON at call time; verified
+  two modules the task flagged plus the rest.
+- **Batch guards all exist**: every suite named (`compare` … `settings`,
+  `all`, `jira-*`, `confluence-*`, `shot-model`, `ansi-parse`, `prose-pdf`,
+  `doc-templates`, `shelf`) is a case in `bin/run-tests.sh`, and
+  `test_jira_poll.py` / `test_confluence.py` / `test_notifications.py` exist.
+- **settings_hub bootstrap**: `readers.py:5` imports `.tables` before
+  `:18` `.paths`; fix + no-cycle claim (paths → config_text/jsonmgr only)
+  correct.
+- **Helper/report pattern fits**: `_MODULES` guard loop + `_jira_paths`
+  precedent; `helper/__init__.dispatch` already has the generic
+  message+traceback branch.
+- **No `type(x) is dict`, no mutation of loaded payloads, `WS_JSON_ROOT`/
+  `WS_JSON_TRACE` unused today, guard commit `80101b9` exists.**
+
+**Corrected (10):** guard ref 9-54→13-55; import list
+`expanduser`→`os.path.expanduser`; ledger check-then-set is not GIL-atomic
+(keep under the RLock); helper-method body must live in `methods.py`, not
+jsonmgr; mtime test bullet vs §2.5 contradiction; registry-test allowlist
+must include `vim/snippets/markdown.json`; M3e guard missing
+confluence/notify suites; risk 5 made exact; risk 9's `git ls-files -c` →
+`-co --exclude-standard`; §8 bundle copy command.
+
+**Added (2):** derived-table projection bullet in §2.6 (all 15 modules build
+module-level derived constants; `shot_model` should be pre-declared
+eager-by-decision; private `_HEX_KEYS` must be exported — test pin); and the
+`reload()` vs lazy namespace-cache caveat (unknowns). The M3e suite extension
+is counted under corrected. **Removed: 0.**
+
+**Blockers:** none. Implementation can start as-is (M0–M3 are
+correction-independent). M4 needs the one pre-decision above.
+
+**Riskiest unresolved (2-3):** (1) M4's promised "15 of 17 lazy" may shrink:
+every converted module needs callable projections + internal rewrites;
+`shot_model` (~10 projections, ~10 rewrites) is the likely eager-by-decision
+fallback — end state unaffected. (2) `jsonmgr` must stay helper-free; keep
+`@method("jsonmgr.report")` in `pylib/helper/methods.py` or
+`-m pylib.jsonmgr` and settings_hub imports break. (3) Eager (M2) modules'
+field reads are ledger-invisible without `WS_JSON_TRACE`, so the report's
+"which field" answer is partial until M4 — acceptable, but don't promise
+more.
