@@ -12,6 +12,7 @@ import time
 
 from . import apply, catalog, chords, conflicts, doctor, export, favorites, parity, paths, schema, search
 from . import rebind, undo, writer
+from .tables import REBIND_LAYERS  # data/tables.json
 
 
 def err(msg: str, code: int = 1) -> int:
@@ -447,7 +448,7 @@ def main(argv=None) -> int:
     u.add_argument("--no-apply", action="store_true")
     u.set_defaults(fn=cmd_undo)
     b = sub.add_parser("bind", help="rebind an AeroSpace or herdr key: LAYER OLD NEW")
-    b.add_argument("layer", choices=["aerospace", "herdr"])
+    b.add_argument("layer", choices=REBIND_LAYERS)
     b.add_argument("old", help="the current keys (alt-h, opt+h, prefix+w) or a herdr action name")
     b.add_argument("new", help="the new keys (cmd+shift+y, hyper+/, prefix+g)")
     b.add_argument("--mode", default="main", help="aerospace binding mode (main, service)")

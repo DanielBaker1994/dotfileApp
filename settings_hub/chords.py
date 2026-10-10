@@ -2,7 +2,7 @@
 modifier filter and the clash check compare like with like."""
 from __future__ import annotations
 
-from .tables import ARROWS, KEY_NAMES, MOD_WORDS, VIM_SPECIAL as _VIM_SPECIAL  # data/tables.json
+from .tables import ARROWS, KEY_NAMES, LABEL_MOD as _LABEL_MOD, MOD_WORDS, VIM_SPECIAL as _VIM_SPECIAL  # data/tables.json
 
 import re
 
@@ -118,8 +118,8 @@ def vim(lhs: str) -> Chord | None:
 
 # ------------------------------------------------------------- [shortcuts] labels
 GESTURE = re.compile(r"click|drag|wheel|mouse|while|\*\*|^term$|hold|scroll", re.I)
-_LABEL_MOD = {"cmd": "cmd", "ctrl": "ctrl", "opt": "alt", "option": "alt", "alt": "alt",
-              "shift": "shift", "hyper": "hyper"}
+# `_LABEL_MOD` comes from data/tables.json (label_mods): label word -> modifier;
+# it adds hyper and omits mod_words' symbol/letter aliases
 
 
 def _label_stroke(tok: str) -> Stroke | None:

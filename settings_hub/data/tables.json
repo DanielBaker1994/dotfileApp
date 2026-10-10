@@ -13,6 +13,17 @@
     "ghostty": "Ghostty",
     "vim": "Notes vim pane"
   },
+  "layer_names": {
+    "app": "app",
+    "aerospace": "AeroSpace",
+    "herdr": "herdr",
+    "ghostty": "Ghostty",
+    "vim": "vim"
+  },
+  "rebind_layers": [
+    "aerospace",
+    "herdr"
+  ],
   "mods": {
     "order": [
       "ctrl",
@@ -52,6 +63,15 @@
     "super": "cmd",
     "d": "cmd",
     "⌘": "cmd"
+  },
+  "label_mods": {
+    "cmd": "cmd",
+    "ctrl": "ctrl",
+    "opt": "alt",
+    "option": "alt",
+    "alt": "alt",
+    "shift": "shift",
+    "hyper": "hyper"
   },
   "key_names": {
     "minus": "-",

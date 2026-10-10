@@ -248,11 +248,11 @@ def ghostty(cat: Catalog) -> list:
 
 
 # ------------------------------------------------------------------ vim
-_LUA = ('lua local p=vim.fn.fnamemodify(%s,":p"); local i=vim.fn.getscriptinfo({name=p})[1];'
-        'local out={}; if i then for _,m in ipairs({"n","x","s","o","i","c","t"}) do '
-        'for _,k in ipairs(vim.api.nvim_get_keymap(m)) do if k.sid==i.sid then '
-        'table.insert(out,{mode=m,lhs=k.lhs,rhs=k.rhs or "",lnum=k.lnum,desc=k.desc or ""}) '
-        'end end end end vim.fn.writefile({vim.json.encode(out)}, %s)')
+_LUA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "nvim_lua.json")
+# the nvim query program (data, rule 2) lives in data/nvim_lua.json;
+# positional %s slots stay code-side
+with open(_LUA_FILE, encoding="utf-8") as _fh:
+    _LUA = json.load(_fh)["query"]
 
 
 def _vim_maps_nvim(init: str):

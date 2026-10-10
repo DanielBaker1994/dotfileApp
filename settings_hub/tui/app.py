@@ -12,12 +12,13 @@ import unicodedata
 
 from .. import catalog, conflicts, favorites, paths
 from ..model import KeyRow, SettingRow
+from ..tables import LAYER_NAME, MODS, MOD_SYMBOL  # data/tables.json
 from .keys import Decoder, Ev
 from .lineedit import LineEdit, pbcopy
 
-MOD_ORDER = ("ctrl", "alt", "shift", "cmd")
-MOD_SYM = {"ctrl": "⌃", "alt": "⌥", "shift": "⇧", "cmd": "⌘"}
-LAYER_NAME = {"aerospace": "AeroSpace", "app": "app", "herdr": "herdr", "ghostty": "Ghostty", "vim": "vim"}
+# old local names kept (the data now lives in data/tables.json)
+MOD_ORDER = MODS
+MOD_SYM = MOD_SYMBOL
 
 
 # ------------------------------------------------------------------ text

@@ -625,6 +625,18 @@ class Units(unittest.TestCase):
         self.assertEqual(chords.vim("<C-x>").text, "Ctrl+X")
         self.assertEqual(chords.query_mods("⌘⇧k"), ({"cmd", "shift"}, "k"))
 
+    def test_table_pins(self):
+        """The TUI symbols stay pinned to data/tables.json (added with the S1
+        collapse: MOD_ORDER/MOD_SYM/LAYER_NAME had no test before)."""
+        from settings_hub import chords, tables
+        from settings_hub.tui import app
+        self.assertEqual(app.MOD_ORDER, tables.MODS)
+        self.assertEqual(app.MOD_SYM, tables.MOD_SYMBOL)
+        self.assertEqual(app.LAYER_NAME, tables.LAYER_NAME)
+        self.assertEqual(app.LAYER_NAME["app"], "app", "short layer label, not layer_titles")
+        self.assertEqual(chords._LABEL_MOD, tables.LABEL_MOD)
+        self.assertEqual(tables.REBIND_LAYERS, ("aerospace", "herdr"))
+
     def test_doc_parser(self):
         from settings_hub.settings import parse_docs
         docs = parse_docs(["#   a / b     shared text", "#             goes on",

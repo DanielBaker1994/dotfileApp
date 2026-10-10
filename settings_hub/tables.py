@@ -12,10 +12,13 @@ with open(_PATH, encoding="utf-8") as _fh:
 
 LAYERS = tuple(T["layers"])
 LAYER_TITLE = T["layer_titles"]
+LAYER_NAME = T["layer_names"]
+REBIND_LAYERS = tuple(T["rebind_layers"])
 MODS = tuple(T["mods"]["order"])
 MOD_NAME = T["mods"]["names"]
 MOD_SYMBOL = T["mods"]["symbols"]
 MOD_WORDS = T["mod_words"]
+LABEL_MOD = T["label_mods"]
 KEY_NAMES = T["key_names"]
 ARROWS = T["arrows"]
 VIM_SPECIAL = T["vim_special"]

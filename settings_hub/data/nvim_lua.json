@@ -1,0 +1,3 @@
+{
+  "query": "lua local p=vim.fn.fnamemodify(%s,\":p\"); local i=vim.fn.getscriptinfo({name=p})[1];local out={}; if i then for _,m in ipairs({\"n\",\"x\",\"s\",\"o\",\"i\",\"c\",\"t\"}) do for _,k in ipairs(vim.api.nvim_get_keymap(m)) do if k.sid==i.sid then table.insert(out,{mode=m,lhs=k.lhs,rhs=k.rhs or \"\",lnum=k.lnum,desc=k.desc or \"\"}) end end end end vim.fn.writefile({vim.json.encode(out)}, %s)"
+}
