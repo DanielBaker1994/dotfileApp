@@ -264,6 +264,7 @@ function M.pick()
                  bs = vim.api.nvim_replace_termcodes('<BS>', true, false, true),
                  pgup = vim.api.nvim_replace_termcodes('<PageUp>', true, false, true),
                  pgdn = vim.api.nvim_replace_termcodes('<PageDown>', true, false, true) }
+  vim.g.ws_picking = 1  -- the app's Ctrl+N (new note) must not fire while the picker owns the keys
   while true do
     local shown = render()
     vim.cmd('redraw')
@@ -279,6 +280,7 @@ function M.pick()
     elseif ch == '\23' then q = q:gsub('%s*%S+%s*$', ''); sel = 1
     elseif #ch >= 1 and ch:byte(1) >= 32 and ch:byte(1) ~= 128 then q = q .. ch; sel = 1 end
   end
+  vim.g.ws_picking = 0
   for _, w in ipairs({ lw, pw }) do if vim.api.nvim_win_is_valid(w) then vim.api.nvim_win_close(w, true) end end
   if result then place(result) end
 end

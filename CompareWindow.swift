@@ -1,26 +1,10 @@
 import AppKit
 import Quartz
 
-// MARK: - Compare view (a shared-window view): Beyond Compare-style Text Compare
-//
-// PRD-compare.md. Phase 1 = Text Compare: two files, pasted texts, or one of
-// each, side by side, lined up (CompareText.swift = the engine, ComparePane
-// .swift = the drawn panes). Sessions are pills; "+" = the start page (two
-// path fields + Recent). It lives in the shared window like notes / AI and is
-// dismissed exactly like them (✕, Cmd+W, Hyper+N, focus loss, Ctrl+Tab,
-// Esc only with its "Esc Hides Window" on). `.compareText` = a Text Compare
-// pushed ON the view (a back step, the way jira detail sits on jira): Folder
-// Compare (phase 2) opens file pairs there; `do:compare:open-sub` today.
-// Config: commands.toml [compare]. Opened from the Hyper+S palette
-// (/compare), the header icon, the file browser / /paths right-click
-// ("Select for Compare", "Compare to …"), the CLI (`kitchen-sink
-// compare [--wait] [--title1 T] [--title2 T] LEFT [RIGHT]`, git difftool).
-
 func compareEnabled() -> Bool {
     tri(configSectionValue("compare", "enabled")) == true
 }
 
-// [compare], read once per open / show (configSectionValue reads the file)
 struct CompareConfig {
     var entries: [String: String] = [:]
 
@@ -38,7 +22,6 @@ struct CompareConfig {
     }
     func number(_ k: String, _ d: Double) -> Double { entries[k].flatMap { Double($0.trimmingCharacters(in: .whitespaces)) } ?? d }
     func bool(_ k: String, _ d: Bool) -> Bool { tri(entries[k]) ?? d }
-    // a user-facing string ([compare] *-label); `{}` = the variable part
     func label(_ k: String, _ d: String, _ arg: String = "") -> String {
         string(k + "-label", d).replacingOccurrences(of: "{}", with: arg)
     }
@@ -51,12 +34,12 @@ struct CompareConfig {
     var contextLines: Int { max(0, Int(number("context-lines", 3))) }
     var tabWidth: Int { max(1, min(16, Int(number("tab-width", 4)))) }
     var maxLines: Int { max(1000, Int(number("max-lines", 200_000))) }
+    var maxBytes: Int { max(1024 * 1024, Int(number("max-bytes", 50 * 1024 * 1024))) }
     var recentLimit: Int { max(0, min(500, Int(number("recent", 30)))) }
     var gutterArrows: String {
         let v = string("gutter-arrows", "hover").lowercased()
         return ["hover", "always", "off"].contains(v) ? v : "hover"
     }
-    // the panes' font: [compare] font / font-size, else the notes font
     var font: NSFont {
         let notes = (try? String(contentsOfFile: settings.commandsConfPath, encoding: .utf8)).map(configLines)
             .map { configSectionEntries($0, "notes") } ?? []
@@ -79,8 +62,6 @@ let compareNavIcon: NSImage = {
         ?? glyphIcon("arrow.left.arrow.right", fallback: "⇆", tint: compareTint, size: 32, tile: false)
 }()
 
-// MARK: - Recent pairs (~/.cache/kitchen-sink/compare-recent.json)
-
 struct CompareRecentEntry: Equatable {
     var left: String
     var right: String
@@ -89,7 +70,6 @@ struct CompareRecentEntry: Equatable {
 
 enum CompareRecent {
     static var path: String { NSHomeDirectory() + "/.cache/kitchen-sink/compare-recent.json" }
-    // snapshots of pasted sides (a Recent row opens them like files)
     static var pastedDir: String { NSHomeDirectory() + "/.cache/kitchen-sink/compare-pasted" }
     static func isPasted(_ p: String) -> Bool { p.hasPrefix(pastedDir + "/") }
 
@@ -118,7 +98,6 @@ enum CompareRecent {
     }
 
     static func save(_ all: [CompareRecentEntry]) {
-        // a snapshot nothing lists any more goes away
         let keep = Set(all.flatMap { [$0.left, $0.right] })
         for f in (try? FileManager.default.contentsOfDirectory(atPath: pastedDir)) ?? [] where !keep.contains(pastedDir + "/" + f) {
             try? FileManager.default.removeItem(atPath: pastedDir + "/" + f)
@@ -141,9 +120,7 @@ enum CompareRecent {
     }
 }
 
-// the start page's Recent list, drawn (cursor pill + accent edge like every list)
 final class CompareRecentList: NSView {
-    // a pane (Ctrl+H/J/K/L): the window's keys drive it while it has focus
     override var acceptsFirstResponder: Bool { true }
     var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
     var rows: [CompareRecentEntry] = [] {
@@ -152,7 +129,7 @@ final class CompareRecentList: NSView {
     var selection = 0 { didSet { needsDisplay = true } }
     var onOpen: ((Int) -> Void)?
     var menuFor: ((Int) -> NSMenu?)?
-    var onRemove: ((Int) -> Void)?       // the row's ✕ (shown on hover)
+    var onRemove: ((Int) -> Void)?
     let rowH: CGFloat = 28
     private var hover: Int?
     private var hoverX = false
@@ -175,7 +152,6 @@ final class CompareRecentList: NSView {
     override func mouseExited(with e: NSEvent) { hover = nil; hoverX = false; needsDisplay = true }
     override var isFlipped: Bool { true }
 
-    // row index → which sides point at a file that no longer exists
     private var missingCache: [Int: (left: Bool, right: Bool)] = [:]
     private func tilde(_ p: String) -> String { (p as NSString).abbreviatingWithTildeInPath }
     func isMissing(_ i: Int) -> Bool { missingCache[i].map { $0.left || $0.right } ?? false }
@@ -184,7 +160,6 @@ final class CompareRecentList: NSView {
         return (m.left ? [rows[i].left] : []) + (m.right && rows[i].right != rows[i].left ? [rows[i].right] : [])
     }
 
-    // re-checked whenever the rows are set and every time the start page shows
     func refreshMissing() {
         missingCache.removeAll()
         let fm = FileManager.default
@@ -225,8 +200,6 @@ final class CompareRecentList: NSView {
             let rn = pr ? "pasted text" : (e.right as NSString).lastPathComponent
             let name = ln == rn ? ln : "\(ln) ⇆ \(rn)"
             let y = r.minY + 6
-            // a pair with a vanished side: ⚠ before the name, the name dimmed,
-            // the missing side's folder struck through in the danger hue
             var nameX: CGFloat = 14
             if missing {
                 ButtonStyle.symbol("exclamationmark.triangle.fill", in: NSRect(x: 12, y: r.minY, width: 16, height: r.height),
@@ -253,7 +226,6 @@ final class CompareRecentList: NSView {
             let dr = pr ? "(pasted)" : tilde((e.right as NSString).deletingLastPathComponent)
             let dirs = NSMutableAttributedString()
             if dl == dr && gone.left == gone.right {
-                // both in one folder: say it once
                 dirs.append(NSAttributedString(string: dl, attributes: gone.left ? goneAttrs : base))
             } else {
                 dirs.append(NSAttributedString(string: dl, attributes: gone.left ? goneAttrs : base))
@@ -268,14 +240,11 @@ final class CompareRecentList: NSView {
             if missing {
                 let tag = "missing" as NSString
                 let tagAttrs: [NSAttributedString.Key: Any] = [.font: warnFont, .foregroundColor: colors.tone(.danger)]
-                // "missing" at the right edge, the age just left of it
                 let tw = tag.size(withAttributes: tagAttrs).width
                 tag.draw(at: NSPoint(x: rightEdge - tw, y: y + 1), withAttributes: tagAttrs)
                 ageX -= tw + 10
             }
-            // the folders take what's left of the age / tag cluster
             dirs.draw(in: NSRect(x: 240, y: y + 1, width: max(40, ageX - 14 - 240), height: 18))
-            // the ✕ takes the right end on hover (age / "missing" step left)
             if hover == i, onRemove != nil {
                 let xr = xRect(i)
                 if hoverX {
@@ -295,8 +264,6 @@ final class CompareRecentList: NSView {
             return
         }
         selection = i
-        // one click opens (a start page's list of links); a missing pair
-        // explains itself instead of doing nothing
         if e.clickCount == 1 { onOpen?(i) }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -307,7 +274,6 @@ final class CompareRecentList: NSView {
     }
 }
 
-// a side's path above its pane (click = edit it: Cmd+L)
 final class CompareHeaderLabel: NSView {
     var colors = PopupThemeDefaults.colors { didSet { needsDisplay = true } }
     var text = "" { didSet { needsDisplay = true } }
@@ -335,36 +301,28 @@ final class CompareHeaderLabel: NSView {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
-// MARK: - the window
-
 final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NSTextViewDelegate, NSTextFieldDelegate {
     private static var live: CompareWindow?
     private static var subLive: CompareWindow?
     static var current: CompareWindow? { live }
-    // `.compareText`: a Text Compare pushed on the view (back = the view)
     static var sub: CompareWindow? { subLive }
 
     let isSub: Bool
     private var colors = cardColors("compare")
     private var cfg = CompareConfig.load()
 
-    // sessions (pills); nil selection = the start page
     private(set) var sessions: [CompareSession] = []
     private var selected: Int?
-    // the Ctrl+B W view switcher's "where": the session shown, or Home
     var whereText: String { session?.label ?? "Home" }
     var session: CompareSession? { selected.flatMap { sessions.indices.contains($0) ? sessions[$0] : nil } }
 
-    // chrome
     private var root: ConfPane!
     private var pills: PopupTabsBar!
     private var sidebarWide: CGFloat = 0
-    // the icon rail (⌘\\) when collapsed
     private var sidebarW: CGFloat {
         get { pills?.width(expanded: sidebarWide) ?? sidebarWide }
         set { sidebarWide = newValue }
     }
-    // start page
     private let start = ConfPane()
     private let leftBox = JiraInputBox(placeholder: "Left: a file or folder path (Tab completes)")
     private let rightBox = JiraInputBox(placeholder: "Right: a file or folder path")
@@ -372,7 +330,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private let rightLabel = NSTextField(labelWithString: "Right")
     private var browseL: ThemeButton!
     private var browseR: ThemeButton!
-    // Compare ⏎ | Compare Pasted Text… in one capsule; Recent's own pair
     private var startActions: CapsuleButtons!
     private var recentActions: CapsuleButtons!
     private var suggestActions: CapsuleButtons!
@@ -383,7 +340,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private let recentScroll = NSScrollView()
     private let startHint = NSTextField(wrappingLabelWithString: "")
     private var recentAll: [CompareRecentEntry] = []
-    // text compare
     private let body = ConfPane()
     private lazy var folderPage = FolderPage(host: self)
     private let toolbar = ConfPane()
@@ -410,13 +366,10 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private var editor: CompareEditor?
     private var showDetails = UserDefaults.standard.object(forKey: "compareDetails") as? Bool ?? true
     private var showWhitespace = UserDefaults.standard.bool(forKey: "compareWhitespace")
-    // Align With: the first line picked (side + line); the other side's pick aligns
     private var alignPick: (side: CompareSide, line: Int)?
     private var targets: [ClosureTarget] = []
     private var diffGen = 0
     private var diffRunning = false
-
-    // MARK: open
 
     static func discard() { live = nil }
 
@@ -460,7 +413,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
     }
 
-    // the shared window brought the view back
     override func didShow() {
         cfg = CompareConfig.load()
         applyConfig()
@@ -472,16 +424,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // hidden (whole window: stopVoice) or parked for another view: the
-    // section editor commits (nothing typed is ever dropped). A whole-window
-    // hide = "done" for `compare --wait` (git difftool).
     override func slotPark(stopVoice: Bool) {
         commitEditor()
         super.slotPark(stopVoice: stopVoice)
         if stopVoice {
             finishWaiters()
-            // hidden from the pushed Text Compare: the view under it (a git
-            // --dir-diff folder session) is done too
             if isSub { CompareWindow.current?.finishWaiters() }
         }
         persistNow()
@@ -494,7 +441,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             let w = s.waiters
             s.waiters = []
             w.forEach { $0() }
-            // git deletes its temp files now: a clean git session goes with them
             if s.git && !s.isDirty, let i = sessions.firstIndex(where: { $0 === s }) { removeSession(i) }
         }
     }
@@ -503,8 +449,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         pane.setFont(cfg.font)
         pane.needsDisplay = true
     }
-
-    // MARK: build
 
     private func label(_ f: NSTextField, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor? = nil) {
         f.font = .systemFont(ofSize: size, weight: weight)
@@ -528,7 +472,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         root = r
         var pcfg = PopupConfig(name: "compare-sessions")
         pcfg.colors = colors
-        // sidebar mode has permanent Home + New rows instead of a "+"
         pcfg.tabsAddButton = !isSub && (configSectionValue("compare", "sidebar-width").flatMap { Double($0) } ?? 210) <= 0
         pills = PopupTabsBar(config: pcfg)
         pills.closable = true
@@ -543,15 +486,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             return "\(s.path[.left] ?? s.name(.left))\n\(s.path[.right] ?? s.name(.right))"
         }
         pills.isHidden = isSub
-        // the sessions as a left sidebar (`[compare] sidebar-width`, 0 = pills);
-        // "+" beside the label = the start page; its edge drags to resize
         sidebarW = isSub ? 0 : (configSectionValue("compare", "sidebar-width").flatMap { Double($0) }.map { CGFloat($0) } ?? 210)
         if sidebarW > 0 {
             pills.vertical = true
             pills.sectionTitle = "Open"
             pills.collapseKey = "compare"
-            // Home (the start page: recent pairs, open files / folders) and
-            // New (two empty sides) never move: the PINNED rows on top
             pills.pinnedTitle = "Compare"
             pills.pinned = ["home", "new"]
             pills.maxPinnedShown = 2
@@ -710,8 +649,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         body.onLayout = { [weak self] b in self?.layoutText(b) }
     }
 
-    // MARK: layout
-
     private func layoutAll(_ b: NSRect) {
         var top: CGFloat = 0
         if !isSub, pills.vertical {
@@ -738,8 +675,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         let w = min(b.width - pad * 2, 900)
         let x = (b.width - w) / 2
         var y: CGFloat = 26
-        // Left / Right: the label, the folder button (left: closest to
-        // reach), then the path field
         for (l, box, br) in [(leftLabel, leftBox, browseL!), (rightLabel, rightBox, browseR!)] {
             l.frame = NSRect(x: x, y: y + 5, width: lw, height: 18)
             br.frame = NSRect(x: x + lw, y: y, width: bw, height: JiraTheme.height + 2)
@@ -809,7 +744,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         details.frame = NSRect(x: 0, y: y + mainH, width: b.width, height: detH)
         status.frame = NSRect(x: 12, y: y + mainH + detH + 4, width: b.width - 24, height: 16)
         sizePane()
-        // the header follows the pane's columns
         headerL.frame.size.width = pane.paneW
         headerR.frame.origin.x = paneLeft + pane.paneW + pane.gutterW
     }
@@ -820,8 +754,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if pane.frame.size != NSSize(width: w, height: h) { pane.frame = NSRect(x: 0, y: 0, width: w, height: h) }
         positionEditor()
     }
-
-    // MARK: pages
 
     private func showPage() {
         persistSoon()
@@ -856,7 +788,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         bindSession()
     }
 
-    // the selected session onto the panes
     private func bindSession() {
         guard let s = session else { return }
         if let f = s.folder {
@@ -874,7 +805,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         window.makeFirstResponder(pane)
     }
 
-    // everything that reads the session: pills, headers, summary, status, thumbnail
     private func syncAll() {
         persistSoon()
         guard let s = session else {
@@ -884,7 +814,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         pills.titles = sessions.map(\.label)
         pills.badges = sessions.map { $0.isDirty ? PopupTabBadge(tone: .warning, text: "", tip: "unsaved changes") : nil }
         pills.selected = selected ?? -1
-        if s.folder != nil { return }       // the folder page paints itself (FolderPage.sync)
+        if s.folder != nil { return }
         filterSeg.selected = CompareFilter.allCases.firstIndex(of: s.filter) ?? 0
         for (h, side) in [(headerL, CompareSide.left), (headerR, .right)] {
             h.text = s.title[side].map { "\($0)  ·  \(s.path[side].map(tilde) ?? "")" } ?? s.path[side].map(tilde)
@@ -920,7 +850,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if l.lines.isEmpty && r.lines.isEmpty { return "" }
         if let a = s.disk[.left], let b = s.disk[.right], a == b, !s.isDirty { return cfg.label("same", "Identical") }
         if l.encoded() == r.encoded() { return cfg.label("same", "Identical") }
-        // the text reads the same: say what differs (never "identical")
         var why: [String] = []
         if l.encoding != r.encoding { why.append("encoding \(l.encoding.rawValue) vs \(r.encoding.rawValue)") }
         if l.eolLabel != r.eolLabel || l.eols.last != r.eols.last { why.append("line endings") }
@@ -931,10 +860,9 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
 
     private func binarySummary(_ s: CompareSession) -> String {
         if s.tooLarge.values.contains(true) && s.binary.isEmpty {
-            // too big to show: a byte compare only
             let a = s.disk[.left] ?? Data(), b = s.disk[.right] ?? Data()
             let d = BinaryCompare.firstDifference(a, b)
-            return cfg.label("too-large", "Too large for Text Compare ([compare] max-lines): {}",
+            return cfg.label("too-large", "Too large for Text Compare ([compare] max-lines / max-bytes): {}",
                              d == nil ? "identical bytes" : "differ (first difference at byte \(d!))")
         }
         let a = s.binary[.left] ?? s.disk[.left] ?? Data(), b = s.binary[.right] ?? s.disk[.right] ?? Data()
@@ -964,8 +892,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if !s.status.isEmpty { parts.append(s.status) }
         return parts.joined(separator: "   ·   ")
     }
-
-    // MARK: ComparePaneHost
 
     var paneSession: CompareSession? { session }
     var paneColors: PopupColors { colors }
@@ -1025,10 +951,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return false
     }
 
-    // MARK: sessions
-
-    // open a pair (either side may be nil = empty, takes a paste / drop).
-    // Folders are phase 2: refused with a word on the start page.
     @discardableResult
     func openPair(_ left: String?, _ right: String?, titles: [CompareSide: String] = [:], git: Bool = false,
                   waiter: (() -> Void)? = nil, then: ((CompareSession) -> Void)? = nil) -> CompareSession? {
@@ -1042,7 +964,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
         let dirs = [left, right].compactMap(isDir)
         if dirs.contains(true) {
-            // folders: both sides must be folders
             if let l = left, let r = right, isDir(l) == true, isDir(r) == true {
                 return openFolders(l, r, titles: titles, git: git, waiter: waiter)
             }
@@ -1089,7 +1010,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         startHint.stringValue = ""
         let l = loaded[.left] ?? TextSide(), r = loaded[.right] ?? TextSide()
         if lines > 60_000 {
-            // big: diff off the main thread (Esc stops it), the view shows at once
             diffGen += 1
             let gen = diffGen
             diffRunning = true
@@ -1116,7 +1036,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return s
     }
 
-    // two folders: a Folder Compare session (the scan streams in on its own)
     @discardableResult
     func openFolders(_ left: String, _ right: String, titles: [CompareSide: String] = [:], git: Bool = false,
                      waiter: (() -> Void)? = nil) -> CompareSession? {
@@ -1139,15 +1058,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         bindSession()
         return s
     }
-
-    // MARK: session restore + recovery copies (PRD §7.3.4)
-    //
-    // compare-sessions.json = the open sessions (pairs, filters, cursor,
-    // importance, alignments); compare-recovery/ = the text of every side
-    // with unsaved edits (and pasted sides), written 2 s after the last
-    // change, on hide and on quit. A restart brings them back as
-    // "unsaved (recovered)"; a save / discard drops the copy. git sessions
-    // (temp files) are never kept.
 
     static var stateDir: String { NSHomeDirectory() + "/.cache/kitchen-sink" }
     static var sessionsPath: String { stateDir + "/compare-sessions.json" }
@@ -1214,7 +1124,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             }
             out.append(o)
         }
-        // a copy no session needs any more (saved, discarded, closed) goes
         for f in (try? fm.contentsOfDirectory(atPath: Self.recoveryDir)) ?? [] where !keep.contains(Self.recoveryDir + "/" + f) {
             try? fm.removeItem(atPath: Self.recoveryDir + "/" + f)
         }
@@ -1252,7 +1161,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
                 if let t = e[k + "Title"] as? String { titles[side] = t }
                 if let f = e[k + "Recovery"] as? String, fm.fileExists(atPath: f) {
                     let pasted = e[k + "Pasted"] as? Bool ?? false
-                    // a file that is gone keeps its unsaved text as a pasted side
                     recovery[side] = (f, pasted || paths[side] == nil)
                 }
             }
@@ -1273,7 +1181,7 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
                         continue
                     }
                     let cur = s.model.side(side)
-                    guard cur.lines != t.lines || cur.eols != t.eols else { continue }    // saved after all
+                    guard cur.lines != t.lines || cur.eols != t.eols else { continue }
                     s.willEdit(side)
                     s.model.replace(side, 0..<cur.lines.count, lines: t.lines, eols: t.eols)
                     s.recovered = true
@@ -1294,8 +1202,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         persistSoon()
     }
 
-    // MARK: FolderHost
-
     var folderWindow: NSWindow { window }
     var folderColors: PopupColors { colors }
     func folderPrompt(_ title: String, info: String, text: String, ok: String, then: @escaping (String?) -> Void) {
@@ -1314,8 +1220,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     func folderLog(_ s: String) { controller?.log(s) }
     func folderOpenNote(_ path: String) { controller?.openNoteFile(path) }
 
-    // Return / double-click on a file pair: a Text Compare ON the view (Esc = back,
-    // same row). Without the shared window it opens as another session here.
     func folderOpenPair(_ left: String?, _ right: String?) {
         guard let c = controller, !isSub, settings.sharedWindow else { _ = openPair(left, right); return }
         let sub = CompareWindow.createSub(controller: c, frame: c.slot.currentFrame())
@@ -1323,8 +1227,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         c.slot.push(.compareText)
     }
 
-    // the pushed Text Compare: the same pair again keeps its edits + scroll;
-    // another pair replaces the clean sessions
     func openSubPair(_ left: String?, _ right: String?) {
         if let s = sessions.first(where: { $0.path[.left] == left && $0.path[.right] == right && $0.folder == nil }),
            let i = sessions.firstIndex(where: { $0 === s }) {
@@ -1353,7 +1255,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         bindSession()
     }
 
-    // read a side's file: text, binary (byte compare) or too large
     private func load(_ p: String, into s: CompareSession, side: CompareSide) -> TextSide? {
         guard let d = FileManager.default.contents(atPath: p) else {
             s.status = "can't read \(tilde(p))"
@@ -1362,14 +1263,13 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         s.disk[side] = d
         s.binary[side] = nil
         s.tooLarge[side] = nil
-        if d.count > 50 * 1024 * 1024 { s.tooLarge[side] = true; return nil }
+        if d.count > cfg.maxBytes { s.tooLarge[side] = true; return nil }
         if TextSide.isBinary(d) { s.binary[side] = d; return nil }
         guard let t = TextSide.decode(d) else { s.binary[side] = d; return nil }
         if t.lines.count > cfg.maxLines { s.tooLarge[side] = true; return nil }
         return t
     }
 
-    // a file into one side of the current session (Cmd+O, a drop, the path field)
     func openFile(_ p: String, into side: CompareSide) {
         guard let s = session else { _ = openPair(side == .left ? p : nil, side == .right ? p : nil); return }
         commitEditor()
@@ -1382,8 +1282,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         placeFile(p, into: side)
     }
 
-    // unsaved edits on one side stand in the way of a replacement: Save is the
-    // default (Return), Discard is red, Esc = Cancel
     private func askDiscard(_ s: CompareSession, _ side: CompareSide, what: String, then go: @escaping () -> Void) {
         let name = (s.path[side] as NSString?)?.lastPathComponent ?? side.rawValue
         confirm(cfg.label("unsaved-side", "Unsaved changes in {}", "“\(name)”"),
@@ -1423,9 +1321,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if let l = s.path[.left], let r = s.path[.right], !s.git { CompareRecent.add(l, r, limit: cfg.recentLimit) }
     }
 
-    // pasted text as one side (a pane's Cmd+V, "Paste Clipboard Here"). An empty
-    // side takes it as its content; a side with text is REPLACED by an
-    // undoable edit (Cmd+Z brings the old text back)
     func setPasted(_ text: String, _ side: CompareSide) {
         if session == nil || session?.folder != nil { openPair(nil, nil) }
         guard let s = session else { return }
@@ -1451,7 +1346,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         modelChanged(s)
     }
 
-    // the model changed wholesale: filter, caches, cursor, views
     private func modelChanged(_ s: CompareSession, keepCursor: Bool = false) {
         s.refresh(context: cfg.contextLines)
         if !keepCursor, let first = s.model.sections.first { s.cursor = s.displayRow(first.rows.lowerBound) }
@@ -1460,8 +1354,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // a pair with pasted text isn't lost with its pill: both sides are written
-    // as snapshot files (file-backed sides keep their path) → one Recent row
     private func rememberPasted(_ s: CompareSession) {
         guard s.folder == nil, !s.git, !s.isBinary, cfg.recentLimit > 0 else { return }
         let sides: [CompareSide] = [.left, .right]
@@ -1494,21 +1386,18 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             selected = sel > i ? sel - 1 : min(sel, sessions.count - 1)
         }
         if isSub && sessions.isEmpty, let c = controller {
-            // the pushed text compare closed: back to the view under it
             c.slot.back()
         }
         showPage()
         if session != nil { bindSession() }
     }
 
-    // the pill's ✕ / Close: unsaved edits ask first (a sheet, never app-modal)
     func closeSession(_ i: Int, force: Bool = false) {
         guard sessions.indices.contains(i) else { return }
         commitEditor()
         let s = sessions[i]
         guard s.isDirty, !force else { removeSession(i); return }
         if selected != i { select(i) }
-        // Save is the default (Return), Don't Save is red, Esc = Cancel
         confirm(cfg.label("unsaved", "Save changes to {}?", s.label),
                 info: cfg.label("unsaved-info", "Your edits are lost if you don't save them."),
                 choices: [(cfg.label("discard-button", "Don't Save"), .danger),
@@ -1524,8 +1413,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
     }
 
-    // MARK: start page
-
     private func compareFromStart() {
         let l = expand(leftBox.field.stringValue), r = expand(rightBox.field.stringValue)
         if l.isEmpty && r.isEmpty {
@@ -1540,9 +1427,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         openPair(l.isEmpty ? nil : l, r.isEmpty ? nil : r)
     }
 
-    // "New Text Compare": two EMPTY sides. Nothing is read from the
-    // clipboard — click a side and ⌘V (or type); the diff runs as soon as
-    // both sides hold text
     func startPasted() {
         guard let s = openPair(nil, nil) else { return }
         s.focus = .left
@@ -1556,8 +1440,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return t.isEmpty ? "" : (t as NSString).expandingTildeInPath
     }
 
-    // the message line under the start page's buttons (sized by layoutStart,
-    // so the START page must lay out again — root alone left it 0 pt tall)
     private func showStartHint(_ text: String, _ tone: PopupTone) {
         startHint.stringValue = text
         startHint.textColor = colors.tone(tone)
@@ -1565,8 +1447,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         start.needsLayout = true
     }
 
-    // "READY": what the user was just doing, one click each: a path marked
-    // in the file browser.
     private func refreshSuggestions() {
         var items: [CapsuleButtons.Item] = []
         let fm = FileManager.default
@@ -1583,7 +1463,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
            expand(leftBox.field.stringValue) != pick, expand(rightBox.field.stringValue) != pick {
             items.append(.init(title: "Marked: " + (pick as NSString).lastPathComponent, symbol: "checkmark.circle", primary: false) { fill(pick) })
         }
-        // (the clipboard is never guessed at: you paste into the side you pick)
         suggestActions?.items = items
         start.needsLayout = true
     }
@@ -1676,7 +1555,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
     }
 
-    // Tab in a path field: complete the name (the common prefix; a folder gets its "/")
     static func complete(_ typed: String) -> String {
         let exp = (typed as NSString).expandingTildeInPath
         let dir = exp.hasSuffix("/") ? exp : (exp as NSString).deletingLastPathComponent
@@ -1691,8 +1569,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         if hits.count == 1, FileManager.default.fileExists(atPath: out, isDirectory: &isDir), isDir.boolValue { out += "/" }
         return typed.hasPrefix("~") ? (out as NSString).abbreviatingWithTildeInPath : out
     }
-
-    // MARK: text field delegate (start page, find, path edit)
 
     func controlTextDidChange(_ n: Notification) {
         guard let f = n.object as? NSTextField else { return }
@@ -1747,8 +1623,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
                                           width: 10, height: recentList.rowH))
     }
 
-    // MARK: path edit (Cmd+L)
-
     private func beginPathEdit(_ side: CompareSide) {
         guard let s = session else { return }
         commitEditor()
@@ -1782,8 +1656,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         window.makeFirstResponder(pane)
     }
 
-    // MARK: find / go to line
-
     private func openFind(_ mode: FindMode) {
         guard session != nil else { return }
         commitEditor()
@@ -1805,8 +1677,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         window.makeFirstResponder(pane)
     }
 
-    // the next (dir 1) / previous (-1) line holding `q` on the focused side;
-    // dir 0 = from the cursor (typing)
     private func find(_ q: String, dir: Int) {
         guard let s = session, !q.isEmpty, s.displayCount > 0 else { return }
         let n = s.displayCount
@@ -1840,8 +1710,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
     }
 
-    // MARK: cursor + sections
-
     private func scrollCursorVisible(center: Bool = false) {
         guard let s = session else { return }
         let y = CGFloat(s.cursor) * pane.rowH
@@ -1862,7 +1730,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // Ctrl+N / Ctrl+P: the next / previous difference section
     func jumpSection(_ dir: Int) {
         guard let s = session else { return }
         commitEditor()
@@ -1880,7 +1747,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // the rows Opt+→ / Opt+← (Ctrl+R) act on: a row selection, else the cursor's section
     private func targetRows(_ s: CompareSession) -> Range<Int>? {
         if let a = s.anchor {
             let lo = s.modelRow(min(a, s.cursor)), hi = s.modelRow(max(a, s.cursor))
@@ -1891,7 +1757,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return nil
     }
 
-    // Opt+→ / Ctrl+R (from: left) / Opt+← (from: right)
     func copyAcross(from: CompareSide) {
         guard let s = session else { return }
         commitEditor()
@@ -1911,7 +1776,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
     }
 
-    // Ctrl+Opt+R / Ctrl+Opt+L: just the cursor's line
     func copyLine(from: CompareSide) {
         guard let s = session, s.displayCount > 0 else { return }
         commitEditor()
@@ -1954,8 +1818,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         modelChanged(s, keepCursor: true)
     }
 
-    // F5: both files read again (an edited side asks nothing: its edits stay
-    // in the undo stack only if it isn't reloaded — so edited sides are kept)
     func reload() {
         guard let s = session else { return }
         if s.folder != nil { folderPage.rescan(); return }
@@ -1986,15 +1848,10 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         modelChanged(s, keepCursor: true)
     }
 
-    // MARK: the section editor
-
-    // Return / typing / double-click: an NSTextView over the cursor's section
-    // (or line) on the focused side
     func beginEdit(typing: String? = nil) {
         guard let s = session, !s.isBinary else { return }
         commitEditor()
         if s.displayCount == 0 {
-            // an empty pair: one empty line to type into
         }
         let m = s.displayCount > 0 ? s.modelRow(s.cursor) : 0
         let rows: Range<Int>
@@ -2047,7 +1904,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         pane.addSubview(ed)
         positionEditor()
         ed.fit()
-        // the caret: the cursor's line at the clicked column
         let ns = text as NSString
         var caret = 0
         if s.displayCount > 0 {
@@ -2081,7 +1937,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         ed.fit()
     }
 
-    // the editor's text back into the model (one undo step); true = it was open
     @discardableResult
     func commitEditor() -> Bool {
         guard let ed = editor else { return false }
@@ -2105,9 +1960,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return true
     }
 
-    // MARK: save
-
-    // Cmd+S: the focused side; a side without a file asks where (a sheet)
     func save(_ side: CompareSide, then: ((Bool) -> Void)? = nil) {
         guard let s = session else { then?(false); return }
         save(s, side, then: then)
@@ -2136,7 +1988,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             if side == .left { s.model.left.encoding = .utf8 } else { s.model.right.encoding = .utf8 }
         }
         guard let data else { then?(false); return }
-        // write the link's target, keep its permissions
         let target = URL(fileURLWithPath: p).resolvingSymlinksInPath()
         let perms = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.posixPermissions]
         do {
@@ -2147,7 +1998,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             s.changedOnDisk[side] = nil
             s.status = "saved \(tilde(p))" + note
             FileDrag.onFileOp?(nil, target.path)
-            // atomic writes replace the inode: watch the new one
             watch(s, side)
             updateBanner()
             syncAll()
@@ -2159,7 +2009,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
     }
 
-    // both dirty sides (Cmd+Opt+S, the close sheet's Save)
     private func saveAll(_ s: CompareSession, then: @escaping (Bool) -> Void) {
         let sides = [CompareSide.left, .right].filter { s.dirty($0) }
         func next(_ rest: ArraySlice<CompareSide>) {
@@ -2168,8 +2017,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         }
         next(sides[...])
     }
-
-    // MARK: changed on disk
 
     private func watch(_ s: CompareSession, _ side: CompareSide) {
         s.watchers[side]?.cancel()
@@ -2183,7 +2030,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             guard let self, let s else { return }
             let ev = src.data
             if ev.contains(.delete) || ev.contains(.rename) {
-                // an editor's atomic save swaps the file: look again shortly
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak s] in
                     guard let self, let s else { return }
                     self.diskChanged(s, side)
@@ -2198,7 +2044,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         s.watchers[side] = src
     }
 
-    // not edited here → reload silently; edited here → the banner asks
     private func diskChanged(_ s: CompareSession, _ side: CompareSide) {
         guard let p = s.path[side], let d = FileManager.default.contents(atPath: p), d != s.disk[side] else { return }
         if s.dirty(side) {
@@ -2229,7 +2074,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     private func resolveBanner(keep: Bool) {
         guard let s = session, let side = bannerSide else { return }
         if !keep, s.dirty(side), s.path[side] != nil {
-            // Reload throws the side's edits away: ask first
             askDiscard(s, side, what: cfg.label("reload-info", "Reloading brings back the file as it is on disk.")) { [weak self] in
                 self?.applyBanner(keep: false)
             }
@@ -2247,14 +2091,11 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             s.markClean(side)
             modelChanged(s, keepCursor: true)
         } else if keep {
-            // "mine" wins: saving later overwrites the disk version
             s.disk[side] = FileManager.default.contents(atPath: s.path[side] ?? "")
         }
         updateBanner()
         syncAll()
     }
-
-    // MARK: open into a side, paste
 
     func openPanel(into side: CompareSide) {
         let p = NSOpenPanel()
@@ -2273,7 +2114,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return pb.string(forType: .string)
     }
 
-    // the clipboard into a side: a copied FILE opens it, text is pasted text
     func pasteClipboard(into side: CompareSide) {
         guard let t = pasteboardText() else { return }
         if t.hasPrefix("file:") {
@@ -2283,8 +2123,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             setPasted(t, side)
         }
     }
-
-    // MARK: menus
 
     private func pillMenu(_ i: Int) -> NSMenu? {
         guard sessions.indices.contains(i) else { return nil }
@@ -2302,7 +2140,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return m
     }
 
-    // the text pane's right-click menu (rule 2)
     func paneMenu(row: Int, side: CompareSide) -> NSMenu? {
         guard let s = session else { return nil }
         let m = NSMenu()
@@ -2322,7 +2159,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         })
         m.addItem(menuItem("Find…  (⌘F)") { [weak self] in self?.openFind(.find) })
         m.addItem(.separator())
-        // Align With (BC): pick a line on one side, then its partner on the other
         let mrow = s.displayCount > 0 ? s.modelRow(row) : -1
         let line = mrow >= 0 ? s.model.rows[mrow].line(side) : -1
         if let pick = alignPick, pick.side != side, line >= 0 {
@@ -2358,9 +2194,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return m
     }
 
-    // MARK: Align With, Convert (phase 3)
-
-    // the first call picks a line; a call on the other side aligns the two
     func alignWith(side: CompareSide, line: Int) {
         guard let s = session, line >= 0 else { return }
         if let pick = alignPick, pick.side != side {
@@ -2433,7 +2266,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // Cmd+C: the focused side's lines of the selection (else the cursor's line)
     private func copyRowsText() {
         guard let s = session, s.displayCount > 0 else { return }
         let lo = min(s.anchor ?? s.cursor, s.cursor), hi = max(s.anchor ?? s.cursor, s.cursor)
@@ -2447,7 +2279,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         syncAll()
     }
 
-    // ⚙: importance switches for this session; "Save as Default" writes [compare]
     private func showImportanceMenu() {
         guard let s = session else { return }
         let m = NSMenu()
@@ -2492,7 +2323,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         m.popUp(positioning: nil, at: NSPoint(x: b.frame.minX, y: b.frame.maxY + 4), in: toolbar)
     }
 
-    // Cmd+K: every action of the view by name (type to jump, ⏎ runs it)
     private func actionPicker() {
         let m = NSMenu()
         for (title, f) in actions() { m.addItem(menuItem(title, f)) }
@@ -2582,7 +2412,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         layoutText(body.bounds)
     }
 
-    // the kitchen sink
     override func showIconMenu() {
         let menu = iconMenu(view: isSub ? .compareText : .compare)
         func add(_ t: String, enabled: Bool = true, state: Bool? = nil, _ f: @escaping () -> Void) {
@@ -2635,9 +2464,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         popUpIconMenu(menu)
     }
 
-    // commands.toml [shortcuts] as the shared themed card: the mode you are
-    // in first ("compare: …" Text, "compare-folders: …" Folder), the other
-    // mode next, then "all: …"
     private func showShortcuts() {
         func items(_ v: String) -> [(keys: String, what: String)] {
             shortcutEntries.filter { $0.view == v }.map { ($0.keys, $0.what) }
@@ -2652,11 +2478,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         showShortcutsCard(groups, colors: colors, title: cfg.label("shortcuts-title", "Compare Shortcuts"))
     }
 
-    // MARK: keys (CardWindowController's monitor: sheets, Ctrl+Tab, Cmd+W first)
-
-    // Esc, first match wins (PRD §7.1): (1) a find bar / path field / the
-    // section editor closes; (2) a running diff stops; (3) the pushed text
-    // compare steps back; (4) at the top: hide only with "Esc Hides Window"
     private func escape() {
         if findMode != .none { closeFind(); return }
         if pathEditSide != nil { cancelPathEdit(); return }
@@ -2679,18 +2500,17 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         let cmd = mods.contains(.command), ctrl = mods.contains(.control)
         let opt = mods.contains(.option), shift = mods.contains(.shift)
         let code = e.keyCode
-        if code == 53 { escape(); return true }                                   // Esc
-        if cmd && code == 44 { showShortcuts(); return true }                     // Cmd+/
-        if cmd && code == 40 { actionPicker(); return true }                      // Cmd+K
-        if cmd && !shift && code == 29, !isSub { showStartPage(); return true }   // Cmd+0: Home
-        if cmd && !shift && code == 45, !isSub, editor == nil { startPasted(); return true }   // Cmd+N: new text compare
+        if code == 53 { escape(); return true }
+        if cmd && code == 44 { showShortcuts(); return true }
+        if cmd && code == 40 { actionPicker(); return true }
+        if cmd && !shift && code == 29, !isSub { showStartPage(); return true }
+        if cmd && !shift && code == 45, !isSub, editor == nil { startPasted(); return true }
         let inText = window.firstResponder is NSText
         let inEditor = editor != nil && window.firstResponder === editor
-        // the start page: its fields + the Recent list
         guard let s = session else {
-            if ctrl && !cmd && (code == 45 || code == 35) { moveRecent(code == 45 ? 1 : -1); return true }   // Ctrl+N / P
+            if ctrl && !cmd && (code == 45 || code == 35) { moveRecent(code == 45 ? 1 : -1); return true }
             if cmd && code == 31 { browse(into: window.firstResponder === rightBox.field.currentEditor() ? rightBox : leftBox); return true }
-            if cmd && code == 37 { window.makeFirstResponder(leftBox.field); return true }                  // Cmd+L
+            if cmd && code == 37 { window.makeFirstResponder(leftBox.field); return true }
             if (cmd || ctrl) && code == 9, !inText { pasteClipboard(into: .left); return true }
             if !inText, code == 36 || code == 76 { compareFromStart(); return true }
             if !inText, code == 125 || code == 126 { moveRecent(code == 125 ? 1 : -1); return true }
@@ -2700,63 +2520,59 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             if ctrl && !cmd && code == 48 { return false }
             return folderPage.handleKey(e)
         }
-        // the section editor: typing is its own; these leave / act on it
         if inEditor {
             if ctrl && !cmd && (code == 45 || code == 35) { jumpSection(code == 45 ? 1 : -1); return true }
-            if cmd && code == 1 { commitEditor(); save(s.focus); return true }    // Cmd+S
-            return false                                                          // the text view + edit keys
-        }
-        if findMode != .none, inText {
-            if cmd && code == 5 { find(findBox.field.stringValue, dir: shift ? -1 : 1); return true }   // Cmd+G
+            if cmd && code == 1 { commitEditor(); save(s.focus); return true }
             return false
         }
-        if inText { return false }                                                // a path field: its own keys
+        if findMode != .none, inText {
+            if cmd && code == 5 { find(findBox.field.stringValue, dir: shift ? -1 : 1); return true }
+            return false
+        }
+        if inText { return false }
         switch code {
-        case 45 where ctrl && !cmd: jumpSection(1)                                // Ctrl+N
-        case 35 where ctrl && !cmd: jumpSection(-1)                               // Ctrl+P
-        // copy across: Opt+→ / Opt+← (WinMerge), Ctrl+R too; plain Ctrl+L is
-        // the pane move now (SharedWindow), Ctrl+Opt+L/R copy one line
-        case 15 where ctrl && !cmd: opt ? copyLine(from: .left) : copyAcross(from: .left)     // Ctrl+R / Ctrl+Opt+R
-        case 37 where ctrl && opt && !cmd: copyLine(from: .right)                             // Ctrl+Opt+L
-        case 124 where opt && !cmd && !ctrl: copyAcross(from: .left)                          // Opt+→: to the right
-        case 123 where opt && !cmd && !ctrl: copyAcross(from: .right)                         // Opt+←: to the left
-        case 5 where ctrl && !cmd: openFind(.goTo)                                // Ctrl+G
-        case 6 where cmd: undo(redo: shift)                                       // Cmd+Z / Cmd+Shift+Z
-        case 1 where cmd: opt ? saveAll(s) { _ in } : save(s.focus)              // Cmd+S / Cmd+Opt+S
-        case 31 where cmd: openPanel(into: s.focus)                               // Cmd+O
-        case 37 where cmd: beginPathEdit(s.focus)                                 // Cmd+L
-        case 18 where cmd, 19 where cmd, 20 where cmd, 21 where cmd:              // Cmd+1…4
+        case 45 where ctrl && !cmd: jumpSection(1)
+        case 35 where ctrl && !cmd: jumpSection(-1)
+        case 15 where ctrl && !cmd: opt ? copyLine(from: .left) : copyAcross(from: .left)
+        case 37 where ctrl && opt && !cmd: copyLine(from: .right)
+        case 124 where opt && !cmd && !ctrl: copyAcross(from: .left)
+        case 123 where opt && !cmd && !ctrl: copyAcross(from: .right)
+        case 5 where ctrl && !cmd: openFind(.goTo)
+        case 6 where cmd: undo(redo: shift)
+        case 1 where cmd: opt ? saveAll(s) { _ in } : save(s.focus)
+        case 31 where cmd: openPanel(into: s.focus)
+        case 37 where cmd: beginPathEdit(s.focus)
+        case 18 where cmd, 19 where cmd, 20 where cmd, 21 where cmd:
             setFilter(CompareFilter.allCases[[18: 0, 19: 1, 20: 2, 21: 3][Int(code)]!])
-        case 3 where cmd: openFind(.find)                                         // Cmd+F
-        case 5 where cmd:                                                         // Cmd+G / Cmd+Shift+G
+        case 3 where cmd: openFind(.find)
+        case 5 where cmd:
             if !findBox.field.stringValue.isEmpty { find(findBox.field.stringValue, dir: shift ? -1 : 1) }
-        case 7 where cmd && opt: swapSides()                                      // Cmd+Opt+X
-        case 96: reload()                                                         // F5
-        case 8 where cmd || ctrl: copyRowsText()                                  // Cmd+C / Ctrl+C
-        case 9 where cmd || ctrl:                                                 // Cmd+V / Ctrl+V: an empty pane takes the paste
+        case 7 where cmd && opt: swapSides()
+        case 96: reload()
+        case 8 where cmd || ctrl: copyRowsText()
+        case 9 where cmd || ctrl:
             pasteClipboard(into: s.focus)
-        case 0 where cmd:                                                         // Cmd+A: every row
+        case 0 where cmd:
             s.anchor = 0
             s.cursor = max(0, s.displayCount - 1)
             syncAll()
-        case 48 where !ctrl && !cmd:                                              // Tab: the other side
+        case 48 where !ctrl && !cmd:
             s.focus = s.focus.other
             syncAll()
-        case 126 where !cmd: moveCursor(s.cursor - 1, extend: shift)              // ↑
-        case 125 where !cmd: moveCursor(s.cursor + 1, extend: shift)              // ↓
-        case 126 where cmd, 115: moveCursor(0, extend: shift)                     // Cmd+↑ / Home
-        case 125 where cmd, 119: moveCursor(s.displayCount - 1, extend: shift)    // Cmd+↓ / End
-        case 116: moveCursor(s.cursor - pageRows(), extend: shift)                // PgUp
-        case 121: moveCursor(s.cursor + pageRows(), extend: shift)                // PgDn
-        case 123 where !cmd && !ctrl:                                             // ← / →: focus a side
+        case 126 where !cmd: moveCursor(s.cursor - 1, extend: shift)
+        case 125 where !cmd: moveCursor(s.cursor + 1, extend: shift)
+        case 126 where cmd, 115: moveCursor(0, extend: shift)
+        case 125 where cmd, 119: moveCursor(s.displayCount - 1, extend: shift)
+        case 116: moveCursor(s.cursor - pageRows(), extend: shift)
+        case 121: moveCursor(s.cursor + pageRows(), extend: shift)
+        case 123 where !cmd && !ctrl:
             s.focus = .left
             syncAll()
         case 124 where !cmd && !ctrl:
             s.focus = .right
             syncAll()
-        case 36, 76: beginEdit()                                                  // Return: edit
+        case 36, 76: beginEdit()
         default:
-            // typing starts the section editor with that character
             if !cmd && !ctrl, let ch = e.characters, !ch.isEmpty,
                ch.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && $0.value < 0xF700 }) {
                 beginEdit(typing: ch)
@@ -2768,8 +2584,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     }
 
     private func pageRows() -> Int { max(1, Int(scroll.contentSize.height / pane.rowH) - 2) }
-
-    // MARK: test hooks (do:compare:… / state compare)
 
     var testState: [String: Any] {
         var st: [String: Any] = [
@@ -2785,7 +2599,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         ]
         let f = window.frame
         st["frame"] = [f.origin.x, f.origin.y, f.width, f.height].map { Int($0.rounded()) }
-        // the header ✕ in cliclick's coordinates (top-left of the main screen)
         if let ch = chrome, let main = NSScreen.screens.first {
             let r = ch.closeButtonRect
             st["close"] = [Int((f.minX + r.midX).rounded()), Int((main.frame.height - (f.maxY - r.midY)).rounded())]
@@ -2813,7 +2626,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return st
     }
 
-    // one `do:compare:` action; nil = done, else the error
     func testDo(_ a: String) -> String? {
         func side(_ w: String) -> CompareSide? { CompareSide(rawValue: w) }
         let parts = a.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
@@ -2848,7 +2660,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         case "close-all":
             while !sessions.isEmpty { removeSession(0) }
         case "align":
-            // align:L,R = left line L onto right line R (1-based, as shown)
             let n = (parts.count > 1 ? parts[1] : "").split(separator: ",").compactMap { Int($0) }
             guard n.count == 2 else { return "align:LEFT,RIGHT (1-based lines)" }
             alignPick = nil
@@ -2869,11 +2680,9 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             confirmCard?.cancel()
             closeShortcutsCard()
         case "paste":
-            // paste:left|right:TEXT (\n = newline)
             guard parts.count > 2, let sd = side(parts[1]) else { return "paste:left|right:TEXT" }
             setPasted(parts[2].replacingOccurrences(of: "\\n", with: "\n"), sd)
         case "edit":
-            // edit:left|right:TEXT — the section editor on that side gets TEXT, commits
             guard parts.count > 2, let sd = side(parts[1]), let s = session else { return "edit:left|right:TEXT" }
             s.focus = sd
             beginEdit()
@@ -2886,8 +2695,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
             guard parts.count > 1, let e = Self.keyEvent(parts.dropFirst().joined(separator: ":"), window: window) else {
                 return "key:SPEC (ctrl+n, cmd+z, esc, return, tab, up, f5, a…)"
             }
-            // the monitor's path when the window is key; else (a test run from a
-            // terminal that keeps focus) straight to the view's own keys
             if window.isKeyWindow {
                 if routeKey(e) != nil { window.firstResponder?.keyDown(with: e) }
             } else if !handleKey(e) {
@@ -2898,7 +2705,6 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
         return nil
     }
 
-    // "ctrl+shift+z", "esc", "f5", "a" -> a keyDown event
     static func keyEvent(_ spec: String, window: NSWindow) -> NSEvent? {
         let names: [String: (UInt16, String)] = [
             "esc": (53, "\u{1b}"), "return": (36, "\r"), "enter": (76, "\r"), "tab": (48, "\t"), "space": (49, " "),
@@ -2934,18 +2740,12 @@ final class CompareWindow: CardWindowController, ComparePaneHost, FolderHost, NS
     }
 }
 
-// the pasteboard as plain text (Copy Path, Copy Paths)
 func copyText(_ s: String) {
     let pb = NSPasteboard.general
     pb.clearContents()
     pb.setString(s, forType: .string)
 }
 
-// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift)
-//
-// sessions sidebar; start page: the two path boxes, Recent's filter and
-// list; text compare: the two sides of the one pane view (focus = the
-// side, like Tab / ← →); folder compare: FolderPage's own.
 extension CompareWindow: PaneProvider {
     var navPanes: [NavPane] {
         var out: [NavPane] = []
@@ -2981,7 +2781,6 @@ extension CompareWindow: PaneProvider {
                     guard let self else { return false }
                     return NavPane.inside(r, self.scroll) && self.session?.focus == side
                 })
-                // normal mode walks the lines; i / a = the section editor
                 p.vim = { [weak self] in self.map { .rows(CompareTextVim($0)) } }
                 p.insert = { [weak self] in self?.beginEdit() }
                 out.append(p)
@@ -2991,8 +2790,6 @@ extension CompareWindow: PaneProvider {
     }
 }
 
-// vim normal mode (VimKeys.swift): the start page's Recent list, a text
-// compare's lines on the focused side
 final class CompareRecentVim: VimRows {
     private weak var w: CompareWindow?
     init(_ w: CompareWindow) { self.w = w }
@@ -3027,7 +2824,6 @@ final class CompareTextVim: VimRows {
         return line >= 0 ? s.model.side(s.focus).lines[line] : ""
     }
     func vimMove(to row: Int) { w?.vimMoveCursor(to: row) }
-    // the focused side's text column only (both sides share one view)
     func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? {
         guard let w, let s = w.vimSession else { return nil }
         let p = w.vimPane

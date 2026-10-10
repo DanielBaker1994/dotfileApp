@@ -1,24 +1,7 @@
 #!/usr/bin/env bash
-# preflight.sh — THE list of things this Mac needs, for both doors:
-# INSTALL.sh (repo) prints it, the app's Setup window (DMG install) reads
-# `--json`. One script so the two can never disagree.
-#
-#   bin/preflight.sh                  repo install, coloured text
-#   bin/preflight.sh --mode app --app /Applications/kitchen-sink.app
-#   bin/preflight.sh --json           one JSON object on stdout
-#
-# Exit 1 only when a REQUIRED check fails. Everything else is a warning: the
-# app runs, a feature is off (no Apple model -> no AI view, no python3 -> no
-# Jira / Confluence / notification counts, no Homebrew stack -> no hotkeys).
-#
-# Each check: id, group (core | features | stack | dev), level (required |
-# warn), ok, title, detail, fix (what to do, for people) and action (what the
-# Setup window's Fix button runs: move-app | setup-home | brew:NAME |
-# cask:NAME | stack | url:… | "").
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$DIR/.." && pwd -P)"
-# shellcheck source=../install.conf
 . "$ROOT/install.conf"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
@@ -35,18 +18,16 @@ while [ $# -gt 0 ]; do
     shift
 done
 WS_HOME="${WS_HOME:-$WS_HOME_DEFAULT}"
-# the user's commands.toml: the repo's own, or the one in the home
 CONF="$ROOT/commands.toml"
 [ "$MODE" = app ] && CONF="$WS_HOME/commands.toml"
 [ -f "$CONF" ] || CONF="$ROOT/commands.default.toml"
 
 IDS=(); GROUPS_=(); LEVELS=(); OKS=(); TITLES=(); DETAILS=(); FIXES=(); ACTIONS=()
-add() {   # id group level ok(0|1) title detail fix action
+add() {
     IDS+=("$1"); GROUPS_+=("$2"); LEVELS+=("$3"); OKS+=("$4")
     TITLES+=("$5"); DETAILS+=("$6"); FIXES+=("${7:-}"); ACTIONS+=("${8:-}")
 }
 
-# value of KEY in [SECTION] of the config (first match, quotes stripped)
 conf_value() {
     [ -f "$CONF" ] || return 0
     awk -v sec="[$1]" -v key="$2" '
@@ -60,7 +41,6 @@ conf_value() {
         }' "$CONF"
 }
 
-# ---------------------------------------------------------------- core
 HOST="$(sw_vers -productVersion 2>/dev/null || echo '?')"
 if "$DIR/check-macos.sh" >/dev/null 2>&1; then
     add macos core required 1 "macOS $MACOS_MIN or newer" "this Mac runs macOS $HOST"
@@ -100,7 +80,6 @@ else
         "Fix the folder's permissions: chmod u+w '${WS_HOME/#$HOME/~}'"
 fi
 
-# which install owns the home right now
 MARK_MODE=""
 [ -f "$WS_HOME/.install" ] && MARK_MODE="$(sed -n 's/^mode=//p' "$WS_HOME/.install" | head -1)"
 if [ -z "$MARK_MODE" ] && { [ -L "$WS_HOME" ] || [ -e "$WS_HOME/.git" ]; }; then MARK_MODE=repo; fi
@@ -118,8 +97,6 @@ else
     add other-install core warn 1 "No other install in the way" "${MARK_MODE:-first install}"
 fi
 
-# a second copy of the app on disk: same bundle id -> LaunchServices and the
-# privacy grants can pick either one
 COPIES="$(mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null \
     | grep -v -e '/\.build/' -e '/\.Trash/' -e '^/Volumes/' | sort -u)"
 NCOPIES="$(printf '%s\n' "$COPIES" | grep -c . || true)"
@@ -130,8 +107,6 @@ else
     add copies core warn 1 "One copy of the app" "${COPIES:-not indexed yet}"
 fi
 
-# ------------------------------------------------------------- features
-# Apple's on-device model (the AI view). Never required.
 FM_BIN="$(conf_value ai fm-bin)"; FM_BIN="${FM_BIN:-/usr/bin/fm}"
 FM_BIN="${FM_BIN/#\~/$HOME}"
 if [ ! -x "$FM_BIN" ]; then
@@ -148,8 +123,6 @@ else
     fi
 fi
 
-# python3: /usr/bin/python3 without the command-line tools is a stub that
-# pops an install dialog when run — never run it to find out
 PY="$(command -v python3 2>/dev/null || true)"
 PY_OK=0; PY_DETAIL="not found"
 if [ -n "$PY" ]; then
@@ -168,9 +141,6 @@ else
         "Jira, Confluence and the notification counts need python3: run  xcode-select --install  (or  brew install python)." "term:xcode-select --install"
 fi
 
-# Screen Recording (/screenshot, Hyper+X): TCC grants it per app, in the
-# SYSTEM database (bin/grant-permissions.sh can't pre-grant it). Only the
-# app itself can tell: ask the running daemon over its socket.
 SHOT_ON="$(conf_value screenshot enabled)"
 if [ "$SHOT_ON" != false ]; then
     SOCK_NAME="$(conf_value app notes-socket)"; SOCK_NAME="${SOCK_NAME:-ws-notes.sock}"
@@ -204,8 +174,6 @@ else
         "The reading view's Export PDF (Cmd+P) is off. To turn it on:  brew install weasyprint" brew:weasyprint
 fi
 
-# ---------------------------------------------------------------- stack
-# hotkeys + borders: optional for an app install, part of the repo install
 HAVE_BREW=0
 if command -v brew >/dev/null 2>&1; then
     HAVE_BREW=1
@@ -218,7 +186,6 @@ else
     FORMULAE=" "; CASKS=" "
 fi
 for f in $BREW_FORMULAE; do
-    # a formula installed another way (own build, MacPorts) counts too
     if [[ "$FORMULAE" == *" $f "* ]] || command -v "$f" >/dev/null 2>&1 \
         || { [ "$f" = ripgrep ] && command -v rg >/dev/null 2>&1; }; then
         add "brew-$f" stack warn 1 "$f" "installed"
@@ -235,9 +202,7 @@ for c in $BREW_CASKS; do
 done
 [ "$HAVE_BREW" = 1 ] || true
 
-# the per-file config links (~/.config/aerospace/… -> the home's config/…)
 if [ -f "$ROOT/symlinks.sh" ]; then
-    # (app install: the copies live in the home; repo: in the checkout)
     LINK_ENV=(); [ "$MODE" = app ] && LINK_ENV=(WS_LINK_ROOT="$WS_HOME")
     if LINKS="$(env "${LINK_ENV[@]}" bash "$ROOT/symlinks.sh" --check 2>&1)"; then
         add links stack warn 1 "Config links" "all in place"
@@ -248,7 +213,6 @@ if [ -f "$ROOT/symlinks.sh" ]; then
     fi
 fi
 
-# ------------------------------------------------------------------ dev
 if [ "$MODE" = repo ]; then
     if command -v swiftc >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then
         add swiftc dev required 1 "Swift compiler" "$(swiftc --version 2>/dev/null | head -1)"
@@ -263,7 +227,6 @@ if [ "$MODE" = repo ]; then
     fi
 fi
 
-# ---------------------------------------------------------------- output
 FAILED=0
 for i in "${!IDS[@]}"; do
     [ "${LEVELS[$i]}" = required ] && [ "${OKS[$i]}" = 0 ] && FAILED=1

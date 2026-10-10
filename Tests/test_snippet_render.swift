@@ -1,15 +1,4 @@
 // sources: ProsePDF.swift ProcessRun.swift
-// Every markdown snippet (vim/snippets/markdown.json, expanded by the real
-// vim.snippet.expand in headless nvim) rendered through BOTH prose pipelines
-// with the app's own pandoc argv (ProsePDF.pandocArgs): the reading view
-// (gfm+sourcepos + its fix-up filter) and Export PDF (gfm). The browser DOMs
-// must match and no markdown syntax may leak into the text
-// (Tests/snippet_render/dom_compare.py, tinyhtml5 = weasyprint's parser).
-// Catches what broke `- [ ] todo` (☐ + text on its own line) and
-// `<kbd>` / badge spans (emptied by sourcepos wrappers).
-// Needs nvim + pandoc + weasyprint; skips (exit 0) without them.
-// Usage: bin/run-tests.sh snippets
-
 import Foundation
 
 @main
@@ -20,10 +9,8 @@ struct Main {
         let here = root + "/Tests/snippet_render"
         let nvim = ["/opt/homebrew/bin/nvim", "/usr/local/bin/nvim"].first { fm.isExecutableFile(atPath: $0) }
         var c = ProsePDF.Config()
-        // the diagram filter the owner's notes use, when it is there
         let diagrams = ProsePDF.expand("~/.dotfiles/markdown_generator/diagrams.lua")
         c.filter = fm.fileExists(atPath: diagrams) ? diagrams : "none"
-        // python with tinyhtml5: weasyprint's own interpreter
         let wp = (try? fm.destinationOfSymbolicLink(atPath: c.engine)).map {
             (( c.engine as NSString).deletingLastPathComponent as NSString).appendingPathComponent($0)
         } ?? c.engine

@@ -1,10 +1,3 @@
-// webex_unread: print what the Webex app itself shows as unread, read from its
-// window's accessibility tree (no API, no sign-in — Webex sets no Dock badge):
-//   "count\t<N>"      the badge on the Messaging tab (WTMessagingHubButton)
-//   "space\t<title>"  one per space / person with new messages (spaces_list)
-// Exit 2 = no Accessibility permission, 3 = Webex not running / no window.
-// Needs Accessibility for the process that runs it (the kitchen-sink app).
-// Built on demand by notify/notify_poll.py into ~/.cache/kitchen-sink/helpers/.
 import AppKit
 import ApplicationServices
 
@@ -30,7 +23,6 @@ func text(_ e: AXUIElement, _ name: String) -> String {
     return (v as? String) ?? (v as? NSNumber)?.stringValue ?? ""
 }
 
-/// First element with this AXIdentifier, breadth-first (menus are skipped).
 func find(_ id: String, in root: AXUIElement, depth: Int = 8) -> AXUIElement? {
     var level = [root]
     for _ in 0..<depth {
@@ -55,10 +47,8 @@ if let list = find("spaces_list", in: window) {
     for row in kids(list) where text(row, "AXRole") == "AXRow" {
         guard let cell = kids(row).first, let brick = kids(cell).first,
               text(brick, "AXIdentifier") == "RegularSpaceBrickletCellView" else { continue }
-        // cell = "<title>, New messages"; the title alone is the button inside
         let title = kids(brick).first.map { text($0, "AXDescription") } ?? ""
         let desc = text(cell, "AXDescription")
-        // read: "<title>" / "Favorites, <title>" — anything after the title = unread
         if !title.isEmpty, title != "Recommended messages", desc.contains(title + ", ") {
             out += "space\t\(title)\n"
         }

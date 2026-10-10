@@ -1,9 +1,4 @@
 // sources: CompareText.swift CompareFolder.swift FileOps.swift
-// Folder Compare's engine (CompareFolder.swift): pairing, the quick test,
-// content + rules checks, folder roll-up, row filters, and FileOps.place +
-// its single undo step, all on real folders in a temp dir.
-// Usage: bin/run-tests.sh compare
-
 import Foundation
 
 var passed = 0
@@ -30,8 +25,6 @@ struct FolderTests {
 
     static func node(_ t: FolderTree, _ rel: String) -> FolderNode? { t.all.first { $0.rel == rel } }
 
-    // Synchronize plans, scoped undo stacks, and a link facing a file
-    // (git difftool -d: the right side links the work tree's files)
     static func syncAndLinks(_ tmp: String) {
         let A = tmp + "/sync/A", B = tmp + "/sync/B"
         let t0 = 1_700_000_000.0
@@ -61,7 +54,6 @@ struct FolderTests {
         check(mr.trash.map(\.rel) == ["bonly.txt"] && mr.trash[0].side == .right, "mirror right trashes right-only")
         check(SyncPlan.make(t, .mirrorRight, nameFilter: "*.md").isEmpty, "a name filter narrows the plan")
 
-        // run mirror right on a private undo stack: one collapsed step
         let stack = FileOps.UndoStack()
         FileOps.forgetUndo()
         let mark = stack.count
@@ -80,7 +72,6 @@ struct FolderTests {
               && !fm.fileExists(atPath: B + "/aonly"), "undo restores the right side")
         check(!stack.canUndo, "the session stack is empty again")
 
-        // links: a link to an identical file is "same", a link to another file differs
         let G = tmp + "/git/L", H = tmp + "/git/R", W = tmp + "/git/work"
         write(G + "/a.txt", "same\n", mtime: t0)
         write(W + "/a.txt", "same\n", mtime: t0 + 999)
@@ -110,24 +101,24 @@ struct FolderTests {
 
         let t0 = 1_700_000_000.0
         write(L + "/same.txt", "a\nb\n", mtime: t0)
-        write(R + "/same.txt", "a\nb\n", mtime: t0 + 1)                       // inside the tolerance
+        write(R + "/same.txt", "a\nb\n", mtime: t0 + 1)
         write(L + "/size.txt", "short\n", mtime: t0)
-        write(R + "/size.txt", "much longer\n", mtime: t0 + 100)                // different, right newer
+        write(R + "/size.txt", "much longer\n", mtime: t0 + 100)
         write(L + "/newer.txt", "xx\n", mtime: t0 + 500)
-        write(R + "/newer.txt", "yy\n", mtime: t0)                              // same size, content differs, left newer
+        write(R + "/newer.txt", "yy\n", mtime: t0)
         write(L + "/touched.txt", "same bytes\n", mtime: t0)
-        write(R + "/touched.txt", "same bytes\n", mtime: t0 + 900)             // time differs, content same → same
+        write(R + "/touched.txt", "same bytes\n", mtime: t0 + 900)
         write(L + "/ws.txt", "a b\n", mtime: t0)
-        write(R + "/ws.txt", "a b \n", mtime: t0 + 50)                         // trailing space only → unimportant
+        write(R + "/ws.txt", "a b \n", mtime: t0 + 50)
         write(L + "/only-left.txt", "l\n")
         write(R + "/only-right.txt", "r\n")
         write(L + "/sub/deep/x.txt", "1\n", mtime: t0)
-        write(R + "/sub/deep/x.txt", "2\n", mtime: t0 + 300)   // same size, time differs: content decides
+        write(R + "/sub/deep/x.txt", "2\n", mtime: t0 + 300)
         write(L + "/sub/ok.txt", "ok\n", mtime: t0)
         write(R + "/sub/ok.txt", "ok\n", mtime: t0)
         write(L + "/clean/a.txt", "a\n", mtime: t0)
         write(R + "/clean/a.txt", "a\n", mtime: t0)
-        write(L + "/orph/inside.txt", "i\n")                                  // a folder only on the left
+        write(L + "/orph/inside.txt", "i\n")
         write(L + "/node_modules/pkg/index.js", "x\n")
         write(R + "/node_modules/pkg/index.js", "y\n")
         write(L + "/Mixed.TXT", "a\n", mtime: t0)
@@ -155,7 +146,6 @@ struct FolderTests {
         check(st("sub") == .unknown, "a folder with unchecked pairs is unknown until the content answers")
         check(tree.pending.count == 3, "pending = unknown pairs (\(tree.pending.count))")
 
-        // content check
         let pend = tree.pending
         let sem = DispatchSemaphore(value: 0)
         let q = DispatchQueue(label: "t")
@@ -169,7 +159,6 @@ struct FolderTests {
         check(st("sub") == .different && st("sub/deep") == .different, "a folder is red when something inside differs")
         check(st("touched.txt") == .same, "content same, mtime differs → same")
         check(st("ws.txt") == .unknown || st("ws.txt") == .unimportant || st("ws.txt") == .different, "ws.txt settled")
-        // rules pass over the different ones
         let cands = FolderContent.ruleCandidates(tree)
         check(cands.contains { $0.rel == "ws.txt" } || st("ws.txt") == .unimportant, "ws.txt is a rules candidate")
         for n in cands where FolderContent.check(left: tree.path(n, .left), right: tree.path(n, .right),
@@ -180,7 +169,6 @@ struct FolderTests {
         check(st("ws.txt") == .unimportant, "whitespace-only difference → unimportant (blue)")
         check(st("size.txt") == .different, "size.txt stays different under the rules")
 
-        // never / always
         var never = o; never.content = "never"
         let t2 = FolderScan.run(left: L, right: R, options: never)
         check(t2.pending.isEmpty, "content = never: nothing pending")
@@ -189,11 +177,9 @@ struct FolderTests {
         let t3 = FolderScan.run(left: L, right: R, options: always)
         check(node(t3, "same.txt")?.status == .unknown, "always: even equal times are checked")
 
-        // a "same" from size + time alone is flagged (bytes never read): the
-        // view shows it dim and counts it apart, so it never passes for equal
         let ML = tmp + "/ML", MR = tmp + "/MR"
         write(ML + "/masked.txt", "x\n", mtime: t0)
-        write(MR + "/masked.txt", "y\n", mtime: t0)                      // same size + time, other bytes
+        write(MR + "/masked.txt", "y\n", mtime: t0)
         write(ML + "/touched.txt", "z\n", mtime: t0)
         write(MR + "/touched.txt", "z\n", mtime: t0 + 500)
         let tm = FolderScan.run(left: ML, right: MR, options: FolderOptions())
@@ -216,7 +202,6 @@ struct FolderTests {
         var mnever = FolderOptions(); mnever.content = "never"
         check(FolderScan.run(left: ML, right: MR, options: mnever).counts().sameByMetadata == 1, "never: metadata-only same is flagged")
 
-        // rows
         var v = FolderTree.View()
         let all = tree.rows(v)
         check(all.contains { $0.node.rel == "same.txt" }, "All lists same files")
@@ -239,13 +224,11 @@ struct FolderTests {
         let cnt = tree.counts()
         check(cnt.leftOnly >= 2 && cnt.rightOnly == 1, "counts: orphans (\(cnt.leftOnly)/\(cnt.rightOnly))")
 
-        // an ignore closure
         var ig = FolderOptions()
         ig.ignored = { p, _ in p.hasSuffix("/sub") }
         let t4 = FolderScan.run(left: L, right: R, options: ig)
         check(node(t4, "sub") == nil && node(t4, "sub/ok.txt") == nil, "ignore rules: an ignored folder is never walked")
 
-        // case + normalization pairing (APFS default is case-insensitive)
         write(R + "/mixed.txt", "a\n", mtime: t0)
         let t5 = FolderScan.run(left: L, right: R, options: o)
         if t5.caseInsensitive {
@@ -258,14 +241,12 @@ struct FolderTests {
         let t6 = FolderScan.run(left: L, right: R, options: o)
         check(node(t6, "caf\u{00e9}.txt")?.right != nil, "NFC / NFD names pair")
 
-        // restat after an operation
         if let n = node(tree, "only-left.txt") {
             try? fm.copyItem(atPath: L + "/only-left.txt", toPath: R + "/only-left.txt")
             FolderScan.restat(n, tree: tree, o)
             check(n.right != nil && (n.status == .same || n.status == .unknown), "restat sees the copy (\(n.status))")
         }
 
-        // FileOps.place
         let P = tmp + "/P", Q = tmp + "/Q"
         write(P + "/f.txt", "new\n")
         write(Q + "/f.txt", "old\n")
@@ -293,7 +274,6 @@ struct FolderTests {
         out = FileOps.place([(P + "/d", P + "/d/in")], move: false, clash: .replace)
         check(out.failed != nil, "a folder can't go inside itself")
 
-        // trash + undo (the folder view's Delete)
         let tr = FileOps.trash([Q + "/f.txt"])
         check(tr.failed == nil && !fm.fileExists(atPath: Q + "/f.txt"), "trash")
         _ = FileOps.undo()

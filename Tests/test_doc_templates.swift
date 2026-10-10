@@ -1,7 +1,4 @@
 // sources: DocTemplates.swift
-// Document template marker: parse / switch / remove on the note's first line.
-// Usage: bin/run-tests.sh doctemplates
-
 import Foundation
 
 var passed = 0

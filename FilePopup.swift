@@ -1,12 +1,5 @@
 import AppKit
 
-// Quick, read-only look at a file: double-click / Enter on a picture or a text
-// file in the file browser (and the Hyper+S recent list), or click a picture
-// in a note, opens it in its own borderless panel. Pinch (or Cmd +/-/0, or a
-// two-finger double-tap) zooms; dragging a corner resizes it proportionally, an edge freely, dragging the body (text: its top strip) moves it; Esc closes and hands the keyboard back;
-// clicking elsewhere closes it too. A non-activating panel — the app is never
-// re-activated, so the shared window and AeroSpace are untouched (like the
-// tool panels). Right-click ▸ Open With in the browsers still picks any app.
 final class FilePopupPanel: NSPanel {
     var onEscape: (() -> Void)?
     weak var zoomView: NSScrollView?
@@ -14,10 +7,6 @@ final class FilePopupPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { onEscape?() }
-    // Mouse-down in the border band = resize (tracked here, not through the
-    // subview hit-test, so the scroll view can never swallow it); elsewhere a
-    // picture drags the whole panel, text only by its top strip (the rest
-    // selects text).
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown, event.window === self, let box = contentView {
             let p = event.locationInWindow, w = box.bounds.width, h = box.bounds.height
@@ -62,12 +51,7 @@ final class FilePopupPanel: NSPanel {
     }
 }
 
-// Invisible resize handle on a panel edge or corner. A corner keeps the
-// proportions (the opposite corner stays put, the content zooms by the same
-// factor); an edge resizes that side freely (an image is scaled to cover the
-// new frame and scrolls on the other axis, text just shows more or less).
 final class FilePopupGrip: NSView {
-    // dx / dy: -1 = the left / bottom side moves, 1 = right / top, 0 = not
     let dx: Int, dy: Int
     weak var scroll: NSScrollView?
     private var start: (frame: NSRect, mouse: NSPoint, mag: CGFloat, anchor: NSPoint)?
@@ -92,7 +76,6 @@ final class FilePopupGrip: NSView {
     override func resetCursorRects() {
         var c = NSCursor.arrow
         if dx == 0 { c = .resizeUpDown } else if dy == 0 { c = .resizeLeftRight } else {
-            // AppKit's private diagonal resize cursors; arrow if they go away
             let sel = Selector(dx * dy > 0 ? "_windowResizeNorthEastSouthWestCursor"
                                            : "_windowResizeNorthWestSouthEastCursor")
             if NSCursor.responds(to: sel), let d = NSCursor.perform(sel)?.takeUnretainedValue() as? NSCursor { c = d }
@@ -102,7 +85,6 @@ final class FilePopupGrip: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard let w = window else { return }
-        // anchor = the visible rect's left and top as fractions of the picture
         var anchor = NSPoint.zero
         if let sv = scroll, let doc = sv.documentView, doc.bounds.width > 0, doc.bounds.height > 0 {
             let vis = sv.documentVisibleRect
@@ -120,7 +102,6 @@ final class FilePopupGrip: NSView {
         var size = st.frame.size
         var k: CGFloat = 1
         if dx != 0 && dy != 0 {
-            // follow whichever axis the pointer moved further, as a fraction
             k = max((st.frame.width + dw) / st.frame.width, (st.frame.height + dh) / st.frame.height)
             k = min(k, visible.width / st.frame.width, visible.height / st.frame.height)
             k = max(k, 120 / st.frame.width, 80 / st.frame.height)
@@ -132,7 +113,6 @@ final class FilePopupGrip: NSView {
             if dx != 0 { size.width = min(max(st.frame.width + dw, 120), visible.width) }
             if dy != 0 { size.height = min(max(st.frame.height + dh, 80), visible.height) }
         }
-        // the side opposite the dragged one stays put
         let x = dx < 0 ? st.frame.maxX - size.width : st.frame.minX
         let y = dy < 0 ? st.frame.maxY - size.height : st.frame.minY
         w.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
@@ -141,15 +121,11 @@ final class FilePopupGrip: NSView {
             sv.magnification = st.mag * k
         } else if let iv = sv.documentView as? NSImageView, let img = iv.image,
                   img.size.width > 0, img.size.height > 0 {
-            // free resize: the picture COVERS the panel (proportions kept, never
-            // letterboxed) — widening a long scrollback shot makes it wider and
-            // the rest scrolls; fitting inside would pin it to the height
             let s = max(size.width / img.size.width, size.height / img.size.height)
             let doc = NSSize(width: max(size.width, (img.size.width * s).rounded()),
                              height: max(size.height, (img.size.height * s).rounded()))
             sv.magnification = 1
             iv.frame = NSRect(origin: .zero, size: doc)
-            // the visible top-left keeps its place in the picture (unflipped doc)
             let x = min(max(0, st.anchor.x * doc.width), doc.width - size.width)
             let top = st.anchor.y * doc.height
             let y = min(max(0, doc.height - top - size.height), doc.height - size.height)
@@ -161,7 +137,6 @@ final class FilePopupGrip: NSView {
     override func mouseUp(with event: NSEvent) { start = nil }
 }
 
-// the popup's border ring; clicks fall through to the content / grips
 final class FilePopupRing: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
@@ -170,8 +145,6 @@ enum FilePopup {
     private static var panel: FilePopupPanel?
     private static var resignObserver: NSObjectProtocol?
     private static let textLimit = 512 * 1024
-    // [app] preview-border / preview-border-width: a silver ring so the
-    // popup stands out (above all on the screen a capture was just taken of)
     static let defaultBorder = NSColor(srgbRed: 0.867, green: 0.882, blue: 0.91, alpha: 1)
     static var borderColor = defaultBorder
     static var borderWidth: CGFloat = 2
@@ -181,8 +154,6 @@ enum FilePopup {
         imageExts.contains((path as NSString).pathExtension.lowercased())
     }
 
-    // the text of a text-like file (first `textLimit` bytes), nil for
-    // anything binary: no NUL byte and valid UTF-8 in the sample
     static func previewText(_ path: String) -> String? {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue,
@@ -192,7 +163,6 @@ enum FilePopup {
         if data.contains(0) { return nil }
         let cut = data.count > textLimit
         var body = cut ? data.prefix(textLimit) : data
-        // a multi-byte character cut in half is not "invalid"
         var s = String(data: body, encoding: .utf8)
         var trim = 0
         while s == nil, trim < 3, !body.isEmpty { body = body.dropLast(); trim += 1; s = String(data: body, encoding: .utf8) }
@@ -200,8 +170,6 @@ enum FilePopup {
         return cut ? text + "\n\n… (preview stops at \(textLimit / 1024) KB)" : text
     }
 
-    // the default "open" for files: pictures and text pop up as a preview,
-    // the rest go to their default app
     static func open(_ path: String, over parent: NSWindow?) {
         if isImage(path), NSImage(contentsOfFile: path) != nil {
             show(path: path, over: parent)
@@ -247,8 +215,6 @@ enum FilePopup {
         scroll.frame = box.bounds
         scroll.autoresizingMask = [.width, .height]
         box.addSubview(scroll)
-        // the ring: its own click-through view over the content (a border
-        // on the scroll view's own layer never shows — AppKit owns it)
         if borderWidth > 0 {
             let ring = FilePopupRing(frame: box.bounds)
             ring.autoresizingMask = [.width, .height]
@@ -260,7 +226,6 @@ enum FilePopup {
         }
         let g = FilePopupGrip.size, e = FilePopupGrip.edge
         let w = frame.width, h = frame.height
-        // edges first, so the corners sit on top of them
         let handles: [(Int, Int, NSRect)] = [
             (-1, 0, NSRect(x: 0, y: g, width: e, height: h - 2 * g)),
             (1, 0, NSRect(x: w - e, y: g, width: e, height: h - 2 * g)),
@@ -284,13 +249,10 @@ enum FilePopup {
             close()
             parent?.makeKey()
         }
-        // key lost = the user clicked elsewhere: just go away
         resignObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification, object: p, queue: .main
         ) { _ in close() }
         panel = p
-        // front + key without activating: works while another app is
-        // frontmost (a capture fired from a terminal)
         p.orderFrontRegardless()
         p.makeKey()
         if let text { p.makeFirstResponder(text) }
@@ -305,11 +267,9 @@ enum FilePopup {
         show(image: img, label: (path as NSString).lastPathComponent, over: parent)
     }
 
-    // a fresh capture (/screenshot, pane-shot): `img.size` in points
     static func show(image img: NSImage, label: String, over parent: NSWindow?, on screen: NSScreen? = nil) {
         guard img.size.width > 0, img.size.height > 0 else { return }
         let room = room(for: parent, on: screen)
-        // natural size (points), shrunk to fit the screen, never upscaled
         let scale = min(1, room.width / img.size.width, room.height / img.size.height)
         let size = NSSize(width: floor(img.size.width * scale), height: floor(img.size.height * scale))
         let frame = NSRect(x: room.midX - size.width / 2, y: room.midY - size.height / 2,
@@ -333,7 +293,6 @@ enum FilePopup {
         tv.insertionPointColor = .clear
         tv.selectedTextAttributes = ButtonStyle.selection(colors)
         tv.textContainerInset = NSSize(width: 14, height: 12)
-        // no wrapping: code stays readable; scroll / pinch to move around
         tv.isHorizontallyResizable = true
         tv.isVerticallyResizable = true
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)

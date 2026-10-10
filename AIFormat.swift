@@ -1,17 +1,10 @@
 import AppKit
 
-// MARK: - AI view: Markdown -> Outlook / Webex, and fitting text into fm
-//
-// Copy writes ONE pasteboard item: HTML (pandoc, every style inline because
-// mail clients drop <style>), RTF, and the Markdown as text. Webex has no
-// tables: for it a table becomes an aligned monospace block.
-
 enum PasteTarget: Int {
     case outlook = 0, webex = 1
     var title: String { self == .outlook ? "Outlook" : "Webex" }
 }
 
-// the AI view's right pane: the diff, the Markdown, or a paste preview
 enum PaneMode: String {
     case diff, markdown, outlook, webex
     var title: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
@@ -23,7 +16,6 @@ enum RichText {
     static var pandocBin: String { (aiSetting("pandoc-bin", "/opt/homebrew/bin/pandoc") as NSString).expandingTildeInPath }
     static var available: Bool { FileManager.default.isExecutableFile(atPath: pandocBin) }
 
-    // Webex can't show tables: each becomes an aligned block in a code fence
     static func tablesAsText(_ md: String) -> String {
         let lines = md.components(separatedBy: "\n")
         var out: [String] = []
@@ -64,7 +56,6 @@ enum RichText {
         s.range(of: #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#, options: .regularExpression) != nil
     }
 
-    // a table row's cells, inline markup stripped (they land in plain text)
     private static func cells(_ row: String) -> [String] {
         var s = row.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("|") { s.removeFirst() }
@@ -76,14 +67,10 @@ enum RichText {
         }
     }
 
-    // the Markdown that target gets
     static func markdown(_ md: String, for t: PasteTarget) -> String {
         t == .webex ? tablesAsText(md) : md
     }
 
-    // pandoc: gfm -> an HTML fragment (nil = no pandoc / it failed).
-    // highlight = token spans (`span.kw` …) for a page with its own CSS;
-    // pastes keep `none` (classes don't survive Outlook / Webex)
     static func pandocHTML(_ md: String, highlight: Bool = false) -> String? {
         guard available,
               let r = try? runProcess(pandocBin, ["-f", "gfm", "-t", "html",
@@ -93,7 +80,6 @@ enum RichText {
         return r.out
     }
 
-    // every style inline, in the target's own type
     static func styled(_ fragment: String, for t: PasteTarget) -> String {
         let font = t == .outlook ? "Aptos,Calibri,'Segoe UI',Helvetica,Arial,sans-serif"
                                  : "-apple-system,'Segoe UI',Helvetica,Arial,sans-serif"
@@ -107,7 +93,6 @@ enum RichText {
         sub(#"<table[^>]*>"#, "<table style=\"border-collapse:collapse;margin:6px 0 10px 0;font-family:\(font);font-size:\(size)\">")
         sub(#"<th( style=\"([^\"]*)\")?>"#, "<th style=\"\(cell)background:#f2f2f2;font-weight:bold;text-align:left;$2\">")
         sub(#"<td( style=\"([^\"]*)\")?>"#, "<td style=\"\(cell)$2\">")
-        // code blocks first (their <code> gets attributes), then inline code
         sub(#"<pre[^>]*>\s*<code[^>]*>"#, "<pre style=\"background:#f6f8fa;border:1px solid #d0d7de;border-radius:4px;"
             + "padding:8px 10px;margin:6px 0 10px 0;white-space:pre-wrap;font-family:\(mono);font-size:9.5pt;"
             + "color:#1f2328\"><code style=\"font-family:\(mono);font-size:9.5pt\">")
@@ -115,7 +100,6 @@ enum RichText {
             + "border-radius:3px;color:#1f2328\">")
         sub(#"<p>"#, "<p style=\"margin:0 0 8px 0\">")
         sub(#"<(ul|ol)>"#, "<$1 style=\"margin:0 0 8px 0;padding-left:22px\">")
-        // GitHub alerts (pandoc gfm `alerts`): classes don't survive a paste
         for (name, color, tint) in [("note", "#0969da", "#eef5fd"), ("tip", "#1a7f37", "#eef8f0"),
                                     ("important", "#8250df", "#f4effc"), ("warning", "#9a6700", "#fdf6e6"),
                                     ("caution", "#cf222e", "#fdeff0")] {
@@ -130,7 +114,6 @@ enum RichText {
         return "<div style=\"font-family:\(font);font-size:\(size);color:#1f1f1f;line-height:1.35\">\(h)</div>"
     }
 
-    // the fragment the pasteboard (and the preview) get for a target
     static func html(_ md: String, for t: PasteTarget) -> String? {
         pandocHTML(markdown(md, for: t)).map { styled($0, for: t) }
     }
@@ -139,7 +122,6 @@ enum RichText {
         "<html><head><meta charset=\"utf-8\"></head><body>\(fragment)</body></html>"
     }
 
-    // RTF from the HTML (main thread: AppKit's HTML importer is WebKit)
     static func rtf(_ fragment: String) -> Data? {
         guard let a = try? NSAttributedString(data: Data(document(fragment).utf8),
                                               options: [.documentType: NSAttributedString.DocumentType.html,
@@ -149,7 +131,6 @@ enum RichText {
                            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
     }
 
-    // ONE pasteboard item: HTML + RTF + the Markdown as text
     static func copy(markdown md: String, fragment: String?, for t: PasteTarget) {
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -163,7 +144,6 @@ enum RichText {
     }
 }
 
-// code the model must not touch: fenced blocks + `inline` -> [[CODEn]]
 struct CodeGuard {
     var text: String
     var codes: [String] = []
@@ -189,7 +169,6 @@ struct CodeGuard {
                 fence = String(t.prefix(while: { $0 == t.first }))
                 block = [line]
             } else {
-                // inline spans, left to right
                 var out = ""
                 var rest = Substring(line)
                 while let r = rest.range(of: #"`[^`\n]+`"#, options: .regularExpression) {
@@ -201,19 +180,17 @@ struct CodeGuard {
                 lines.append(out + rest)
             }
         }
-        if let b = block { lines += b }     // an unclosed fence stays as text
+        if let b = block { lines += b }
         text = lines.joined(separator: "\n")
         self.codes = codes
     }
 
-    // put the code back; `missing` = tokens the model dropped
     func restore(_ s: String) -> (text: String, missing: Int) {
         var out = s
         var missing = 0
         for (i, code) in codes.enumerated() {
             let tok = Self.token(i + 1)
             guard out.contains(tok) else { missing += 1; continue }
-            // a model that wraps the token in backticks: the code has its own
             out = out.replacingOccurrences(of: "`" + tok + "`", with: code)
                 .replacingOccurrences(of: tok, with: code)
         }
@@ -221,18 +198,13 @@ struct CodeGuard {
     }
 }
 
-// fm's window: instructions + input + an answer about as long as the input
 enum TokenBudget {
     static var context: Int { max(512, Int(aiNumber("context-tokens", 4096))) }
-    // rough count for splitting (the footer shows fm's real count)
     static func estimate(_ s: String) -> Int { Int((Double(s.utf8.count) / 3.2).rounded(.up)) }
-    // the room one part's input may take
     static func partBudget(instructions: String) -> Int {
         max(200, (Int(Double(context) * 0.9) - estimate(instructions) - 64) / 2)
     }
 
-    // split at blank lines into parts that fit (a paragraph, table or code
-    // token never splits; one that's too big alone goes as its own part)
     static func parts(_ s: String, budget: Int) -> [String] {
         guard estimate(s) > budget else { return [s] }
         var parts: [String] = []
@@ -251,10 +223,6 @@ enum TokenBudget {
     }
 }
 
-// fm's small model follows one-line rules far better than hard-wrapped
-// ones: the rule file stays wrapped for reading, the instructions it gets
-// are reflowed (a wrapped line joins the line above; blank lines, bullets,
-// numbers, headings, table rows and code blocks start their own)
 enum Reflow {
     static func instructions(_ s: String) -> String {
         var out: [String] = []
@@ -275,11 +243,7 @@ enum Reflow {
     }
 }
 
-// what small models add around an answer
 enum AnswerCleanup {
-    // the whole answer wrapped in one ``` / ```markdown fence (often never
-    // closed, which shifts every later fence): drop the wrapper. Runs on
-    // the model's text BEFORE [[CODEn]] go back, so the user's code is safe.
     static func unwrapFence(_ s: String) -> String {
         var lines = s.components(separatedBy: "\n")
         guard let first = lines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else { return s }
@@ -290,7 +254,6 @@ enum AnswerCleanup {
             let t = lines[$0].trimmingCharacters(in: .whitespaces)
             return t.hasPrefix("```") || t.hasPrefix("~~~")
         }
-        // odd = the wrapper's close is still there: it's the last fence
         if fences.count % 2 == 1, let last = fences.last,
            ["```", "~~~"].contains(lines[last].trimmingCharacters(in: .whitespaces)),
            lines[(last + 1)...].allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
@@ -300,29 +263,26 @@ enum AnswerCleanup {
     }
 }
 
-// MARK: - rule files
-
 struct AIRule {
     let path: String
     var name: String
-    var output = "plain"            // diff | plain
+    var output = "plain"
     var placeholder = ""
-    var flags: [String] = []        // fm respond options, in file order
+    var flags: [String] = []
     var instructions = ""
     var warnings: [String] = []
-    var protectCodeSet: Bool?       // protect-code (default on)
-    var chunkSet: Bool?             // chunk: split long text (default: diff rules)
-    var prompt = ""                 // a line put before the text ("Proofread this draft:")
-    var then = ""                   // the rule file that gets this rule's answer next
-    var keepWords = false           // an answer that changes the words is dropped
-    var csvTables = false           // comma rows become a Markdown table first
+    var protectCodeSet: Bool?
+    var chunkSet: Bool?
+    var prompt = ""
+    var then = ""
+    var keepWords = false
+    var csvTables = false
 
     var file: String { (path as NSString).lastPathComponent }
     var diff: Bool { output == "diff" }
     var protectCode: Bool { protectCodeSet ?? true }
     var chunk: Bool { chunkSet ?? diff }
 
-    // `---` frontmatter (key: value, # comments) + the body as instructions
     static func load(_ path: String) -> AIRule {
         let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
         let base = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
@@ -364,8 +324,6 @@ struct AIRule {
         return r
     }
 
-    // this rule, then every rule its `then:` leads to (same folder; a
-    // missing file or a loop ends the chain with a warning on the first)
     static func chain(_ first: AIRule) -> [AIRule] {
         var out = [first]
         let dir = (first.path as NSString).deletingLastPathComponent
@@ -384,20 +342,15 @@ struct AIRule {
         return out
     }
 
-    // the instructions a run sends (plus the code-token rule when needed)
     func instructions(guarded: Bool) -> String {
         let i = Reflow.instructions(instructions)
         return guarded ? i + "\n- " + CodeGuard.instruction : i
     }
 
-    // what goes to fm on stdin: `prompt:` on its own line, then the text
     func wrap(_ text: String) -> String { prompt.isEmpty ? text : prompt + "\n\n" + text }
 
-    // what the rule does to its text before the model sees it
     func prepare(_ text: String) -> String { csvTables ? CSVTables.convert(text) : text }
 
-    // the model's answer to `input` (what prepare returned), or the input
-    // back when a keep-words rule's answer changed the words
     func accept(input: String, answer: String) -> (text: String, note: String?) {
         guard keepWords else { return (answer, nil) }
         let c = WordGuard.check(input, answer)
@@ -408,19 +361,16 @@ struct AIRule {
         return (input, "“\(name)” skipped: it \(what)")
     }
 
-    // the argv after the fm binary; the input goes on stdin
     func arguments(guarded: Bool) -> [String] {
         let i = instructions(guarded: guarded)
         return ["respond", "--stream"] + (i.isEmpty ? [] : ["-i", i]) + flags
     }
 
-    // what the view shows: the instructions by file, the input by name
     var preview: String {
         (["fm", "respond"] + (instructions.isEmpty ? [] : ["-i", "@rules/" + file]) + flags.map(shq))
             .joined(separator: " ") + " < input" + (then.isEmpty ? "" : "  → then " + then)
     }
 
-    // a command you can paste into a shell (instructions + input inline)
     func runnable(input: String) -> String {
         let args = ["fm", "respond"] + (instructions.isEmpty ? [] : ["-i", shq(Reflow.instructions(instructions))]) + flags.map(shq)
         return args.joined(separator: " ") + " <<'WS_INPUT'\n" + wrap(prepare(input)) + "\nWS_INPUT"
@@ -432,10 +382,7 @@ private func shq(_ s: String) -> String {
         ? s : "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-// comma rows typed as a quick table ("name,status" / "---" / "web01,up")
-// -> a Markdown table. Done here, not by the model: it's exact every time.
 enum CSVTables {
-    // a row's cells, or nil when the line doesn't look like one
     static func cells(_ line: String) -> [String]? {
         let t = line.trimmingCharacters(in: .whitespaces)
         guard t.contains(","), !["|", "#", "- ", "* ", "> "].contains(where: { t.hasPrefix($0) }) else { return nil }
@@ -468,7 +415,6 @@ enum CSVTables {
                     rows.append(r)
                     j += 1
                 }
-                // without the --- line it takes more to be sure it's a table
                 if ruled ? rows.count >= 1 : (rows.count >= 2 || (rows.count == 1 && head.count >= 3)) {
                     func row(_ c: [String]) -> String {
                         "| " + c.map { $0.replacingOccurrences(of: "|", with: "\\|") }.joined(separator: " | ") + " |"
@@ -489,8 +435,6 @@ enum CSVTables {
     }
 }
 
-// a layout-only rule (keep-words) may move the words, never change them:
-// nothing new (a table's header row aside), nothing lost but filler
 enum WordGuard {
     static let filler: Set<String> = [
         "first", "second", "third", "fourth", "fifth", "firstly", "secondly", "thirdly", "then", "next",
@@ -498,7 +442,6 @@ enum WordGuard {
         "a", "an", "of", "at", "in", "on", "it", "to", "for", "that", "which", "or",
     ]
 
-    // lowercase words, table header rows and list numbers left out
     static func words(_ s: String) -> [String] {
         let lines = s.components(separatedBy: "\n")
         var kept: [String] = []
@@ -507,7 +450,6 @@ enum WordGuard {
             let nextSep = i + 1 < lines.count && lines[i + 1].contains("|")
                 && lines[i + 1].range(of: #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#, options: .regularExpression) != nil
             if (sep && l.contains("|")) || (nextSep && l.contains("|")) { continue }
-            // "1." of a numbered list is a marker, not a word
             kept.append(l.replacingOccurrences(of: #"^\s*\d+[.)]\s"#, with: "", options: .regularExpression))
         }
         return kept.joined(separator: "\n").lowercased()

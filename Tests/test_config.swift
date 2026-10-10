@@ -1,8 +1,4 @@
 // sources: ConfigText.swift
-// commands.toml as text (ConfigText.swift): the one-line TOML codec, the
-// section scanner, the writer's edits (configSetting), tri, resolveBinary.
-// Usage: bin/run-tests.sh config
-
 import Foundation
 
 var passed = 0
@@ -22,12 +18,10 @@ func checkEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String, lin
           line: line)
 }
 
-// configEntry as a comparable pair (nil = not an entry)
 func entry(_ line: String) -> [String]? {
     configEntry(line).map { [$0.key, $0.value] }
 }
 
-// configSetting over text, joined back (what saveConfigValues writes)
 func setting(_ text: String, _ section: String, _ kv: [(String, String?)]) -> String {
     configSetting(configLines(text), section: section, kv).joined(separator: "\n")
 }
@@ -59,7 +53,6 @@ func testLines() {
     checkEqual(configLine("width", "007"), "width = \"007\"", "leading-zero number is a string")
     checkEqual(configLine("shell", "/bin/zsh"), "shell = \"/bin/zsh\"", "string quoted")
     checkEqual(configLine("view: keys", "x"), "\"view: keys\" = \"x\"", "non-bare key quoted")
-    // everything written must read back as written
     let tricky = ["", "plain", "with \"quotes\"", "back\\slash", "tab\tand\nnewline",
                   "# not a comment", "a, b, c", "é ü 🐙", "bell\u{7}", "[not an array]", "true", "3.14"]
     for v in tricky {

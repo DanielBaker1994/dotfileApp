@@ -109,7 +109,7 @@ vim.api.nvim_create_autocmd({ 'BufWinEnter', 'WinEnter', 'FileType' }, {
   callback = soft_wrap,
 })
 o.scrolloff = 3
-o.expandtab, o.shiftwidth, o.tabstop = true, 2, 2
+o.expandtab, o.shiftwidth, o.tabstop, o.softtabstop = true, 2, 2, 2
 -- / search ignores case always (no smartcase: a capital must not turn it back on)
 o.ignorecase, o.smartcase = true, false
 o.spelllang = 'en_us'

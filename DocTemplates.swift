@@ -1,15 +1,8 @@
 import Foundation
 
-// Document templates for the prose view / PDF (CSS lives in the dotfiles'
-// friendly_document_styling.css): one marker line at the top of the note,
-//     <div class="doc tokyo-night" data-foot="Confidential"></div>
-// picks the template. Foundation only (bin/run-tests.sh doctemplates).
 enum DocTemplates {
     static let builtin = ["tokyo-night", "paper", "executive", "terminal", "catppuccin-mocha", "catppuccin-latte", "dracula", "nord", "gruvbox-dark", "gruvbox-light", "solarized-dark", "solarized-light", "rose-pine", "rose-pine-dawn"]
 
-    // Every template the stylesheet defines: a `:root:has(.NAME) { … --p-bg … }`
-    // palette block, in file order. The CSS is the single source — add a palette
-    // block there and the menu has it.
     static func fromCSS(_ css: String) -> [String] {
         guard let re = try? NSRegularExpression(pattern: #":root:has\(\.([A-Za-z0-9_-]+)\)\s*\{[^}]*--p-bg"#) else { return [] }
         var seen = Set<String>(), out: [String] = []
@@ -21,8 +14,6 @@ enum DocTemplates {
         return out
     }
 
-    // [notes] doc-templates = "a, b, c" overrides; else the palettes found in the
-    // stylesheet (`css` = its text); else the built-in four
     static func names(_ configured: String?, css: String? = nil) -> [String] {
         let list = (configured ?? "").split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -31,7 +22,6 @@ enum DocTemplates {
         return found.isEmpty ? builtin : found
     }
 
-    // the marker on the first line: its template + footer (nil = no marker)
     static func parse(_ line: String) -> (template: String, foot: String)? {
         let t = line.trimmingCharacters(in: .whitespaces)
         guard t.hasPrefix("<div"), t.hasSuffix("</div>"),
@@ -49,10 +39,6 @@ enum DocTemplates {
         "<div class=\"doc \(template)\"" + (foot.isEmpty ? "" : " data-foot=\"\(foot)\"") + "></div>"
     }
 
-    // Edit of the top of the note: replace `remove` lines at line 0 with
-    // `insert`. nil template = remove the marker. The footer is kept. A blank
-    // line follows the marker (an HTML block runs to the next blank line and
-    // would swallow the title).
     static func edit(_ text: String, template: String?) -> (remove: Int, insert: [String]) {
         let lines = text.components(separatedBy: "\n")
         let first = lines.first ?? ""

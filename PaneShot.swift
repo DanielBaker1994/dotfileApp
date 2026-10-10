@@ -1,25 +1,12 @@
-// PaneShot.swift — /pane-shot: a full-height image of the focused herdr
-// pane (its scrollback + the visible screen), copied + saved like a
-// /screenshot capture. Why herdr and not Ghostty: herdr draws its whole UI
-// as one full-screen app inside Ghostty, so Ghostty's own scrollback never
-// holds a single pane's history — herdr's server does, and `herdr pane read
-// --format ansi` hands it over with its colors (≤ 1000 rows, a server cap).
-//   this file          CLI args, [pane-shot] config, the herdr calls
-//   AnsiRender.swift   ANSI → cell grid → image (Ghostty's font + palette)
-//   Screenshot.swift   `ScreenshotController.paneShot` (outputs, toast)
-// Foundation only: bin/run-tests.sh ansi compiles it with AnsiRender.swift.
-
 import Foundation
 
-// `kitchen-sink pane-shot [--pane ID] [--lines N|all] [--file PATH|-]
-// [--no-save] [--no-copy]`
 struct PaneShotArgs: Equatable {
     var pane: String?
-    var lines: Int?          // history rows above the screen; nil = [pane-shot] lines
-    var all = false          // every row herdr hands out (Herdr.maxLines)
-    var file: String?        // render this ANSI file instead of a pane
-    var save: Bool?          // nil = [pane-shot] save
-    var copy: Bool?          // nil = [pane-shot] copy
+    var lines: Int?
+    var all = false
+    var file: String?
+    var save: Bool?
+    var copy: Bool?
 
     struct Problem: Error, Equatable { let message: String }
 
@@ -61,19 +48,18 @@ struct PaneShotArgs: Equatable {
     }
 }
 
-// [pane-shot] in commands.toml (not a palette command)
 struct PaneShotConfig {
     var lines = 200
     var save = true
     var copy = true
-    var preview = true           // open the capture in the preview popup
+    var preview = true
     var herdrBin = "~/.local/bin/herdr"
     var ghosttyBin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
-    var font = ""                // "" = Ghostty's font-family
-    var fontSize: Double = 0     // 0 = Ghostty's font-size
-    var background = ""          // "" = Ghostty's background
+    var font = ""
+    var fontSize: Double = 0
+    var background = ""
     var padding: Double = 16
-    var savePath = ""            // "" = [screenshot] save-path
+    var savePath = ""
     var filenamePattern = "%F_%H-%M-%S pane"
     var toast = "Screenshot of {pane} copied ({n} lines)"
 
@@ -104,9 +90,8 @@ struct PaneShotConfig {
     }
 }
 
-// the herdr CLI (JSON answers on stdout, `{"error":{…}}` + exit 1 on failure)
 enum Herdr {
-    static let maxLines = 1000   // herdr's server-side cap on pane.read
+    static let maxLines = 1000
 
     struct Pane: Equatable {
         var id: String
@@ -116,7 +101,6 @@ enum Herdr {
 
     struct Failure: Error, Equatable { let message: String }
 
-    // `pane current` / `pane get` output → the pane
     static func pane(fromJSON text: String) -> Result<Pane, Failure> {
         guard let d = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
             return .failure(Failure(message: "herdr answered no JSON"))
@@ -133,14 +117,10 @@ enum Herdr {
         return .success(Pane(id: id, title: title, viewportRows: rows))
     }
 
-    // rows to ask for: the screen + `history`, within herdr's cap
     static func lines(viewport: Int, history: Int, all: Bool) -> Int {
         all ? maxLines : min(maxLines, max(1, viewport + history))
     }
 
-    // herdr's env vars name the pane THIS process runs in (a daemon started
-    // from a pane inherits them): drop them so `pane current` = the focused
-    // pane. HERDR_SOCKET_PATH stays (it picks the session).
     static func environment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
         env.filter { !["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"].contains($0.key) }
     }
@@ -154,7 +134,6 @@ enum Herdr {
             return .failure(Failure(message: "could not run \(bin)"))
         }
         if r.code != 0 {
-            // errors come as `{"error":{…}}` on stderr
             let msg = r.err.trimmingCharacters(in: .whitespacesAndNewlines)
             if msg.hasPrefix("{"), case .failure(let f) = pane(fromJSON: msg) { return .failure(f) }
             return .failure(Failure(message: msg.isEmpty ? "herdr exited \(r.code)" : msg))
@@ -162,7 +141,6 @@ enum Herdr {
         return .success(r.out)
     }
 
-    // the pane to shoot: `id`, else herdr's focused pane
     static func pane(_ bin: String, id: String?) -> Result<Pane, Failure> {
         run(bin, id.map { ["pane", "get", $0] } ?? ["pane", "current"]).flatMap { pane(fromJSON: $0) }
     }

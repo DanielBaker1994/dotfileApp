@@ -1,12 +1,6 @@
 import Foundation
 
-// The vim "/" search over a pane (VimKeys.swift): which row / text range is
-// the next match. Foundation only — tested by `bin/run-tests.sh vim-keys`
-// (Tests/test_vim_search.swift).
 enum VimSearch {
-    // the row holding `query` (ignore case) after `from` (before it when
-    // back), wrapping; skipCurrent = never `from` itself unless it is the only
-    // one. index = the hit's place among every matching row (1-based)
     static func rows(_ texts: [String], query: String, from: Int, back: Bool, skipCurrent: Bool)
         -> (row: Int?, index: Int, count: Int) {
         let n = texts.count
@@ -23,13 +17,10 @@ enum VimSearch {
         return (row, (hits.firstIndex(of: row) ?? 0) + 1, hits.count)
     }
 
-    // does a row hold `query` (the search's rule: ignore case and accents)
     static func matches(_ text: String, _ query: String) -> Bool {
         !query.isEmpty && text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
     }
 
-    // every match in a text, in order (UTF-16 ranges; at most `limit`) — the
-    // search steps through them, the highlights paint them
     static func ranges(_ s: String, query: String, limit: Int = 5000) -> [NSRange] {
         let ns = s as NSString
         guard ns.length > 0, !query.isEmpty else { return [] }
@@ -45,7 +36,6 @@ enum VimSearch {
         return all
     }
 
-    // the same over a text's characters (UTF-16 offsets, NSRange)
     static func text(_ s: String, query: String, from: Int, back: Bool, skipCurrent: Bool)
         -> (range: NSRange?, index: Int, count: Int) {
         let ns = s as NSString
@@ -61,7 +51,6 @@ enum VimSearch {
         return (hit, (all.firstIndex { $0.location == hit.location } ?? 0) + 1, all.count)
     }
 
-    // Ctrl+W / Opt+Delete in the "/" bar: the last word and the spaces before it
     static func dropWord(_ s: String) -> String {
         var t = s
         while t.last == " " { t.removeLast() }

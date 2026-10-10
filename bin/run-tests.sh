@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# run-tests.sh — compile and run the kitchen-sink tests
-#   ./bin/run-tests.sh           run all tests
-#   ./bin/run-tests.sh config    run only config tests
-#   ./bin/run-tests.sh recent    run only the file browser's Recent list tests
-#   ./bin/run-tests.sh fileops   run only the file browser's file operation tests
-#   ./bin/run-tests.sh ai        run only the AI view's rule / table / keep-words tests
-#   ./bin/run-tests.sh nvim      run only the notes pane's nvim RPC client tests (needs nvim)
-#   ./bin/run-tests.sh vim-keys  run only the vim "/" search tests (VimSearch.swift)
-#   ./bin/run-tests.sh filter    run only the list filter tests (parity + 20k-row keystroke timing)
-#   ./bin/run-tests.sh paths     run only the /paths shelf tests (ignore rules vs git, shelf, clipboard)
-#   ./bin/run-tests.sh screenshot run only the /screenshot model tests (button ring, undo, pixelate, render)
-#   ./bin/run-tests.sh ansi      run only the /pane-shot tests (ANSI parser, Ghostty theme, render, herdr JSON)
-#   ./bin/run-tests.sh prose     run only the prose tests (highlighted fences, Export PDF via pandoc + weasyprint)
-#   ./bin/run-tests.sh snippets  render every markdown snippet via the reading view + PDF paths, compare the DOMs
-#   ./bin/run-tests.sh doctemplates run only the prose document-template marker tests
-#   ./bin/run-tests.sh panes     run only the Ctrl+H/J/K/L pane navigation geometry tests
-#   ./bin/run-tests.sh compare   run only the Compare engine tests (git --histogram parity, round trips, copy + undo, timings)
-#   ./bin/run-tests.sh settings  run the ws-settings tests (python; WS_LIVE=1 adds the running-daemon check)
-#   ./bin/run-tests.sh ai-live   run the shipped rules through fm's on-device model (slow; not in "all")
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
@@ -27,8 +8,6 @@ run_test() {
     local file="$1"
     local name="$(basename "$file" .swift)"
     echo "Running $name..."
-    # "// sources: A.swift B.swift" = a test of the app's own files: built
-    # together with them (the test file has an @main type)
     local sources
     sources="$(sed -n 's|^// sources: *||p' "$file" | head -1)"
     if [ -n "$sources" ]; then

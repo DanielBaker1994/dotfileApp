@@ -1,35 +1,14 @@
 import Foundation
 
-// MARK: - Compare: the text engine (Foundation only)
-//
-// What the Compare view's Text Compare runs on (CompareWindow.swift draws it):
-//   TextSide      one side's bytes <-> lines: encoding (UTF-8 ± BOM,
-//                 UTF-16 LE / BE with BOM, else Latin-1), each line's own
-//                 line ending, binary sniffing. decode → encode is byte-exact.
-//   Importance    the normalizer: which differences are "unimportant" (blue)
-//   LineDiff      git's histogram diff (xdiff/xhistogram.c) + its group
-//                 compaction and indent heuristic (xdiff/xdiffi.c), Myers
-//                 (CollectionDifference) where git falls back to Myers —
-//                 hunks match `git diff --no-index --histogram`
-//   TextCompare   two sides + rows (filler-aligned) + sections, edits with
-//                 a windowed re-diff, copy across, undo / redo
-//   CharDiff      word / space / punctuation tokens within a changed line
-//                 pair (the AI view's word diff lives here too)
-// Tests: bin/run-tests.sh compare (Tests/test_compare.swift: git parity
-// corpus, byte-exact round trips, copy + undo, timings).
-
 enum CompareSide: String {
     case left, right
     var other: CompareSide { self == .left ? .right : .left }
 }
 
-// MARK: - TextSide
-
 enum TextEncodingKind: String {
     case utf8 = "UTF-8", utf8BOM = "UTF-8 BOM", utf16LE = "UTF-16 LE", utf16BE = "UTF-16 BE", latin1 = "Latin-1"
 }
 
-// a line's terminator; `none` = the last line of a file without a final newline
 enum EOL: UInt8 {
     case none, lf, crlf, cr
     var bytes: [UInt8] {
@@ -52,16 +31,14 @@ enum EOL: UInt8 {
 
 struct TextSide {
     var lines: [String] = []
-    var eols: [EOL] = []                // parallel to lines
+    var eols: [EOL] = []
     var encoding: TextEncodingKind = .utf8
 
-    // NUL in the first 8 KB (no UTF-16 BOM) = binary: not shown as text
     static func isBinary(_ data: Data) -> Bool {
         if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) { return false }
         return data.prefix(8192).contains(0)
     }
 
-    // bytes -> lines; nil only for binary data (check isBinary first)
     static func decode(_ data: Data) -> TextSide? {
         if isBinary(data) { return nil }
         var side = TextSide()
@@ -81,7 +58,6 @@ struct TextSide {
         if String(data: body, encoding: .utf8) != nil {
             side.split([UInt8](body))
         } else {
-            // not UTF-8: Latin-1 maps every byte to one character (round trips)
             side.encoding = .latin1
             let s = String(data: data, encoding: .isoLatin1) ?? ""
             side.split(Array(s.utf8))
@@ -89,7 +65,6 @@ struct TextSide {
         return side
     }
 
-    // split UTF-8 bytes at LF / CRLF / CR (never inside a multi-byte character)
     private mutating func split(_ u: [UInt8]) {
         lines = []
         eols = []
@@ -120,13 +95,10 @@ struct TextSide {
 
     init() {}
 
-    // pasted text / an editor's string (UTF-8, its own line endings)
     init(text: String) {
         split(Array(text.utf8))
     }
 
-    // the bytes to save; nil = a character the side's encoding can't hold
-    // (Latin-1): the caller saves as UTF-8 instead
     func encoded() -> Data? {
         var u: [UInt8] = []
         u.reserveCapacity(lines.reduce(0) { $0 + $1.utf8.count + 2 })
@@ -161,7 +133,6 @@ struct TextSide {
         return s
     }
 
-    // the most common line ending (LF when there is none yet)
     var dominantEOL: EOL {
         var n = [0, 0, 0, 0]
         for e in eols.prefix(5000) { n[Int(e.rawValue)] += 1 }
@@ -169,17 +140,12 @@ struct TextSide {
         return n[best] == 0 ? .lf : EOL(rawValue: UInt8(best)) ?? .lf
     }
 
-    // one side's mixed endings, for the status line ("LF", "CRLF", "mixed")
     var eolLabel: String {
         let kinds = Set(eols.filter { $0 != .none })
         if kinds.count > 1 { return "mixed" }
         return kinds.first?.label ?? dominantEOL.label
     }
 
-    // replace lines `range` with `new` (their endings: the side's usual one,
-    // and the file's last line keeps whether it had a final newline). The
-    // edit that happened comes back (its range may grow by one line: text
-    // appended after a last line that had no newline gives that line one)
     mutating func replace(_ range: Range<Int>, with new: [String]) -> TextEdit {
         var range = range
         var new = new
@@ -187,7 +153,6 @@ struct TextSide {
         var newEols = [EOL](repeating: eol, count: new.count)
         if range.upperBound == lines.count {
             if range.isEmpty, range.lowerBound > 0, eols[range.lowerBound - 1] == .none, !new.isEmpty {
-                // appending after a last line without newline: it gets one
                 range = (range.lowerBound - 1)..<range.upperBound
                 new.insert(lines[range.lowerBound], at: 0)
                 newEols.insert(eol, at: 0)
@@ -202,7 +167,6 @@ struct TextSide {
         return e
     }
 
-    // lines AND their endings given (trim whitespace, convert line endings)
     mutating func replace(_ range: Range<Int>, lines new: [String], eols newEols: [EOL]) -> TextEdit {
         let e = TextEdit(start: range.lowerBound, old: Array(lines[range]), oldEols: Array(eols[range]),
                          new: new, newEols: newEols)
@@ -210,7 +174,6 @@ struct TextSide {
         return e
     }
 
-    // exactly the lines + endings of an edit (undo / redo)
     mutating func apply(_ e: TextEdit, reverse: Bool = false) {
         let r = e.start..<(e.start + (reverse ? e.new.count : e.old.count))
         lines.replaceSubrange(r, with: reverse ? e.old : e.new)
@@ -218,7 +181,6 @@ struct TextSide {
     }
 }
 
-// one replacement of a run of lines (one undo step)
 struct TextEdit {
     var start: Int
     var old: [String]
@@ -227,25 +189,19 @@ struct TextEdit {
     var newEols: [EOL]
 }
 
-// MARK: - Importance
-
-// Which differences don't matter (drawn blue, "unimportant"). The shown text
-// never changes: lines are compared by their `key`.
 struct Importance: Equatable {
     var leadingWS = true
     var trailingWS = true
     var embeddedWS = false
     var ignoreCase = false
-    var lineEndings = true      // CRLF vs LF (and a missing final newline) ignored
-    var blankLines = false      // inserted / deleted blank lines are unimportant
+    var lineEndings = true
+    var blankLines = false
 
-    // everything counts (git's view of a file)
     static let exact = Importance(leadingWS: false, trailingWS: false, embeddedWS: false,
                                   ignoreCase: false, lineEndings: false, blankLines: false)
 
     private static func ws(_ c: UInt8) -> Bool { c == 32 || c == 9 || c == 11 || c == 12 }
 
-    // the comparison key of a line (its line ending rides along unless ignored)
     func key(_ s: String, _ eol: EOL) -> String {
         var k = normalized(s)
         if !lineEndings { k.unicodeScalars.append(Unicode.Scalar(0xE000 + UInt32(eol.rawValue))!) }
@@ -267,7 +223,6 @@ struct Importance: Equatable {
                 out = String(s[lo..<hi])
             }
         } else {
-            // leading / trailing per their switches, every space inside dropped
             let b = Array(u)
             var lo = 0, hi = b.count
             var first = 0, last = b.count
@@ -286,16 +241,11 @@ struct Importance: Equatable {
     func isBlank(_ s: String) -> Bool { s.utf8.allSatisfy(Self.ws) }
 }
 
-// MARK: - LineDiff (git histogram)
-
 enum LineDiff {
-    // a change group: lines a..<a+n on the left replaced by b..<b+m on the right
     struct Hunk: Equatable {
         var a, n, b, m: Int
     }
 
-    // hunks between two lists of line ids (equal id = equal line). `textA` /
-    // `textB` feed the indent heuristic (git's default)
     static func hunks(_ A: [Int32], _ B: [Int32], textA: [String], textB: [String]) -> [Hunk] {
         var ca = [Bool](repeating: false, count: A.count)
         var cb = [Bool](repeating: false, count: B.count)
@@ -323,10 +273,6 @@ enum LineDiff {
         return out
     }
 
-    // xhistogram.c: common ends trimmed (xdl_trim_ends), then regions split
-    // at their longest common run of rarest lines; a region whose common
-    // lines all repeat more than 64 times falls back to Myers. A work list
-    // instead of recursion (deep files on a 512 KB thread stack).
     static func histogram(_ A: [Int32], _ B: [Int32], _ ca: inout [Bool], _ cb: inout [Bool]) {
         let n = A.count, m = B.count
         var pre = 0
@@ -363,8 +309,6 @@ enum LineDiff {
 
     private static func findLCS(_ A: [Int32], _ B: [Int32], _ l1: Int, _ c1: Int, _ l2: Int, _ c2: Int) -> LCS {
         let end1 = l1 + c1 - 1, end2 = l2 + c2 - 1
-        // scanA: one record per distinct line (first occurrence + count), a
-        // chain of later occurrences, each line's record
         var recOf = [Int32: Int](minimumCapacity: c1)
         var recPtr: [Int] = [], recCnt: [Int] = []
         var next = [Int](repeating: -1, count: c1)
@@ -436,13 +380,8 @@ enum LineDiff {
         return found ? .lcs(lb1, le1, lb2, le2) : .none
     }
 
-    // xdl_change_compact: slide every change group up / down as far as
-    // equal lines allow (merging groups it bumps into), line it up with a
-    // change on the other side, else place it by git's indent heuristic.
-    // `ch` = this side's changed lines, `other` = the other side's (read only)
     static func compact(_ ch: inout [Bool], _ other: [Bool], _ ids: [Int32], _ text: [String]) {
         let n = ids.count, no = other.count
-        // sentinels: r[0] = line -1, r[n+1] = line n — both unchanged
         var r = [Bool](repeating: false, count: n + 2)
         for i in 0..<n { r[i + 1] = ch[i] }
         var ro = [Bool](repeating: false, count: no + 2)
@@ -459,8 +398,8 @@ enum LineDiff {
             indents[i] = Int16(v)
             return v
         }
-        var gs = 0, ge = 0          // this side's group [gs, ge)
-        var os = 0, oe = 0          // the other side's
+        var gs = 0, ge = 0
+        var os = 0, oe = 0
         while r[ge + 1] { ge += 1 }
         while ro[oe + 1] { oe += 1 }
         func next(_ s: inout Int, _ e: inout Int, _ rr: [Bool], _ cnt: Int) -> Bool {
@@ -474,7 +413,7 @@ enum LineDiff {
             if s == 0 { return false }
             e = s - 1
             s = e
-            while rr[s] { s -= 1 }      // rr[s] = line s - 1
+            while rr[s] { s -= 1 }
             return true
         }
         func slideDown() -> Bool {
@@ -590,16 +529,13 @@ enum LineDiff {
     }
 }
 
-// MARK: - rows + sections
-
 enum RowKind: UInt8 { case same, changed, leftOnly, rightOnly }
 
-// one display row: a left line and / or a right line (-1 = filler)
 struct CompareRow: Equatable {
     var l: Int32
     var r: Int32
     var kind: RowKind
-    var important: Bool         // false = only unimportant differences (blue)
+    var important: Bool
     func line(_ s: CompareSide) -> Int { Int(s == .left ? l : r) }
 }
 
@@ -620,8 +556,6 @@ enum CompareFilter: String, CaseIterable {
     }
 }
 
-// MARK: - TextCompare (one Text Compare session's model)
-
 struct TextCompare {
     var left = TextSide()
     var right = TextSide()
@@ -629,18 +563,13 @@ struct TextCompare {
     var ignoreUnimportant = false
     private(set) var rows: [CompareRow] = []
     private(set) var sections: [CompareSection] = []
-    // interned comparison keys (equal id = equal key)
     private var keysL: [Int32] = []
     private var keysR: [Int32] = []
     private var intern: [String: Int32] = [:]
-    // undo / redo: (side, edit)
     private(set) var undoStack: [(CompareSide, TextEdit)] = []
     private(set) var redoStack: [(CompareSide, TextEdit)] = []
-    // Align With: line pairs the user forced onto one row (left line, right
-    // line), increasing on both sides; the diff runs between them
     private(set) var anchors: [(l: Int, r: Int)] = []
     static let undoLimit = 500
-    // the context the windowed re-diff keeps around an edit
     static let rediffContext = 50
 
     init() {}
@@ -669,7 +598,6 @@ struct TextCompare {
         return out
     }
 
-    // the full diff (open, reload, importance change)
     mutating func recompute() {
         intern = [:]
         intern.reserveCapacity(left.lines.count + right.lines.count)
@@ -680,8 +608,6 @@ struct TextCompare {
         computeSections()
     }
 
-    // rows for left lines `la` against right lines `ra` (absolute indices);
-    // an Align With anchor inside both ranges splits the diff there
     private func buildRows(_ la: Range<Int>, _ ra: Range<Int>) -> [CompareRow] {
         let inside = anchors.filter { la.contains($0.l) && ra.contains($0.r) }
         guard !inside.isEmpty else { return diffRows(la, ra) }
@@ -698,10 +624,6 @@ struct TextCompare {
         return out
     }
 
-    // MARK: Align With
-
-    // put left line `l` and right line `r` on one row. An anchor that would
-    // cross it (before on one side, after on the other) is dropped
     mutating func align(left l: Int, right r: Int) {
         guard left.lines.indices.contains(l), right.lines.indices.contains(r) else { return }
         anchors.removeAll { $0.l == l || $0.r == r || ($0.l < l) != ($0.r < r) }
@@ -711,7 +633,6 @@ struct TextCompare {
         computeSections()
     }
 
-    // drop every anchor (or the one on a row) and diff again
     mutating func clearAlignment(row: Int? = nil) {
         if let row, rows.indices.contains(row) {
             let rr = rows[row]
@@ -755,8 +676,6 @@ struct TextCompare {
             && (importance.lineEndings || left.eols[li] == right.eols[rj])
     }
 
-    // a hunk's rows: lines similar enough are lined up (the DP below picks
-    // where the fillers go when the counts differ); the rest side by side
     private func pairRows(_ h: LineDiff.Hunk, _ lo: Int, _ ro: Int, _ out: inout [CompareRow]) {
         let a0 = lo + h.a, b0 = ro + h.b
         func row(_ l: Int?, _ r: Int?) {
@@ -785,7 +704,6 @@ struct TextCompare {
             zip(a0..<(a0 + h.n), b0..<(b0 + h.m))
             return
         }
-        // anchors: the monotone pairing with the most similarity (≥ 0.5 each)
         let n = h.n, m = h.m
         let ga = (0..<n).map { Self.bigrams(importance.normalized(left.lines[a0 + $0])) }
         let gb = (0..<m).map { Self.bigrams(importance.normalized(right.lines[b0 + $0])) }
@@ -842,8 +760,6 @@ struct TextCompare {
         return 2 * Double(common) / Double(ta + tb)
     }
 
-    // a row that counts as a difference (with Ignore Unimportant on, blue
-    // rows count as the same)
     func isDiff(_ r: CompareRow) -> Bool {
         r.kind != .same && (r.important || !ignoreUnimportant)
     }
@@ -874,7 +790,6 @@ struct TextCompare {
     var unimportantCount: Int { sections.count - importantCount }
     var identicalText: Bool { rows.allSatisfy { $0.kind == .same } }
 
-    // the section holding row `row` (nil = a same row)
     func section(at row: Int) -> Int? {
         var lo = 0, hi = sections.count - 1
         while lo <= hi {
@@ -885,11 +800,9 @@ struct TextCompare {
         return nil
     }
 
-    // the next / previous section after / before row `row` (no wrap)
     func nextSection(after row: Int) -> Int? { sections.firstIndex { $0.rows.lowerBound > row } }
     func prevSection(before row: Int) -> Int? { sections.lastIndex { $0.rows.lowerBound < row } }
 
-    // lines of `side` before row `row` (an insertion point at a filler)
     func lineIndex(_ side: CompareSide, atRow row: Int) -> Int {
         var i = row
         while i < rows.count {
@@ -900,8 +813,6 @@ struct TextCompare {
         return side == .left ? left.lines.count : right.lines.count
     }
 
-    // the lines of `side` inside rows `range` (contiguous), or the insertion
-    // point when the side has only fillers there
     func lineRange(_ side: CompareSide, rows range: Range<Int>) -> Range<Int> {
         let start = lineIndex(side, atRow: range.lowerBound)
         let end = range.upperBound >= rows.count ? (side == .left ? left.lines.count : right.lines.count)
@@ -909,7 +820,6 @@ struct TextCompare {
         return start..<max(start, end)
     }
 
-    // the rows a display filter shows (nil = every row)
     func visibleRows(_ f: CompareFilter, context: Int) -> [Int]? {
         switch f {
         case .all: return nil
@@ -925,10 +835,6 @@ struct TextCompare {
         }
     }
 
-    // MARK: edits
-
-    // replace `side`'s lines `range` with `new`; one undo step. Re-diffs
-    // only around the edit (± rediffContext unchanged rows)
     @discardableResult
     mutating func replace(_ side: CompareSide, _ range: Range<Int>, with new: [String], undoable: Bool = true) -> TextEdit {
         let e: TextEdit
@@ -942,7 +848,6 @@ struct TextCompare {
         return e
     }
 
-    // lines and endings both given: one undo step
     @discardableResult
     mutating func replace(_ side: CompareSide, _ range: Range<Int>, lines new: [String], eols: [EOL]) -> TextEdit {
         let e: TextEdit
@@ -954,7 +859,6 @@ struct TextCompare {
         return e
     }
 
-    // Convert ▸ Trim Trailing Whitespace: one undo step; the lines changed
     @discardableResult
     mutating func trimTrailingWhitespace(_ s: CompareSide) -> Int {
         let t = side(s)
@@ -969,8 +873,6 @@ struct TextCompare {
         return changed.count
     }
 
-    // Convert ▸ Line Endings: every line ending of the side becomes `eol`
-    // (a last line without one keeps having none); one undo step
     @discardableResult
     mutating func convertLineEndings(_ s: CompareSide, to eol: EOL) -> Int {
         let t = side(s)
@@ -980,7 +882,6 @@ struct TextCompare {
         return changed.count
     }
 
-    // an edit already in the side's lines: keys + rows follow
     private mutating func applied(_ side: CompareSide, _ e: TextEdit, reverse: Bool = false) {
         let oldCount = reverse ? e.new.count : e.old.count
         let newLines = reverse ? e.old : e.new
@@ -993,12 +894,9 @@ struct TextCompare {
             rediff(side, start: e.start, oldCount: oldCount, newCount: newLines.count)
             return
         }
-        // with Align With anchors: they follow the edit (one inside it goes),
-        // then a full diff (the windowed one could cut an anchor in half)
         let delta = newLines.count - oldCount
         anchors = anchors.compactMap { a in
             let v = side == .left ? a.l : a.r
-            // a line-for-line rewrite (trim, line endings) keeps it; else an edit over it drops it
             if v >= e.start && v < e.start + oldCount { return oldCount == newLines.count ? a : nil }
             guard v >= e.start + oldCount else { return a }
             return side == .left ? (a.l + delta, a.r) : (a.l, a.r + delta)
@@ -1007,12 +905,8 @@ struct TextCompare {
         computeSections()
     }
 
-    // the windowed re-diff: rows from the last `rediffContext` unchanged
-    // rows before the edit to as many after it are diffed again; the rest
-    // only shift their line numbers
     private mutating func rediff(_ side: CompareSide, start: Int, oldCount: Int, newCount: Int) {
         let delta = newCount - oldCount
-        // first row at / after the edit on `side`
         var rs = rows.count
         for (i, r) in rows.enumerated() where r.line(side) >= start { rs = i; break }
         var re = rs
@@ -1021,7 +915,6 @@ struct TextCompare {
             re = rs
             while re < rows.count && (rows[re].line(side) < 0 || rows[re].line(side) <= last) { re += 1 }
         }
-        // grow to `rediffContext` same rows on each side (or the ends)
         var ws = rs, seen = 0
         while ws > 0 {
             if rows[ws - 1].kind == .same {
@@ -1039,7 +932,6 @@ struct TextCompare {
             }
             we += 1
         }
-        // a window boundary must sit between two same rows' lines on both sides
         func lineAt(_ s: CompareSide, _ row: Int, oldCount total: Int) -> Int {
             var i = row
             while i < rows.count {
@@ -1066,8 +958,6 @@ struct TextCompare {
         computeSections()
     }
 
-    // copy rows `range` from `from` to the other side (a section, a row
-    // selection, one line): the other side's lines there become these
     @discardableResult
     mutating func copyRows(_ range: Range<Int>, from: CompareSide) -> TextEdit? {
         guard !range.isEmpty, range.upperBound <= rows.count else { return nil }
@@ -1088,14 +978,11 @@ struct TextCompare {
     var canRedo: Bool { !redoStack.isEmpty }
     func lastEditSide() -> CompareSide? { undoStack.last?.0 }
 
-    // undo the last edit (of `side` when given and it has one, else the last)
     @discardableResult
     mutating func undo(_ side: CompareSide? = nil) -> TextEdit? {
         var idx = undoStack.count - 1
         if let side, let i = undoStack.lastIndex(where: { $0.0 == side }) { idx = i }
         guard idx >= 0 else { return nil }
-        // only the newest edit of a side can be taken back safely: later
-        // edits of the OTHER side don't move this side's lines
         let (s, e) = undoStack.remove(at: idx)
         if s == .left { left.apply(e, reverse: true) } else { right.apply(e, reverse: true) }
         applied(s, e, reverse: true)
@@ -1125,7 +1012,6 @@ struct TextCompare {
         recompute()
     }
 
-    // a side's text replaced wholesale (reload, paste, open a file)
     mutating func setSide(_ s: CompareSide, _ t: TextSide) {
         if s == .left { left = t } else { right = t }
         anchors = []
@@ -1135,17 +1021,13 @@ struct TextCompare {
     }
 }
 
-// MARK: - binary compare
-
 enum BinaryCompare {
-    // nil = identical; else the first byte offset that differs
     static func firstDifference(_ a: Data, _ b: Data) -> Int? {
         let n = min(a.count, b.count)
         return a.withUnsafeBytes { pa in
             b.withUnsafeBytes { pb in
                 let x = pa.bindMemory(to: UInt8.self), y = pb.bindMemory(to: UInt8.self)
                 var i = 0
-                // 8 bytes at a time, then the tail
                 while i + 8 <= n {
                     if pa.loadUnaligned(fromByteOffset: i, as: UInt64.self) != pb.loadUnaligned(fromByteOffset: i, as: UInt64.self) { break }
                     i += 8
@@ -1160,18 +1042,14 @@ enum BinaryCompare {
     }
 }
 
-// MARK: - CharDiff (word-level marks; also the AI view's diff)
-
 enum CharDiff {
     enum Kind { case same, del, ins }
     struct Op { var kind: Kind; var text: String }
 
-    // words (letters / digits, inner ' and ’ kept: they're), runs of
-    // whitespace, and every other character on its own
     static func tokens(_ s: String) -> [String] {
         var out: [String] = []
         var cur = ""
-        var curKind = 0     // 1 word, 2 space
+        var curKind = 0
         let chars = Array(s)
         func flush() { if !cur.isEmpty { out.append(cur); cur = "" }; curKind = 0 }
         for (i, ch) in chars.enumerated() {
@@ -1186,7 +1064,6 @@ enum CharDiff {
         return out
     }
 
-    // lines incl. their newline (the fallback for very long texts)
     static func lines(_ s: String) -> [String] {
         var out: [String] = []
         var cur = ""
@@ -1195,8 +1072,6 @@ enum CharDiff {
         return out
     }
 
-    // token ops in order (no grouping): LCS over tokens (lines when the
-    // table would be huge), common prefix / suffix first
     static func rawOps(_ a: String, _ b: String) -> [Op] {
         var x = tokens(a), y = tokens(b)
         if x.count * y.count > 6_000_000 { x = lines(a); y = lines(b) }
@@ -1209,7 +1084,6 @@ enum CharDiff {
         var raw: [Op] = x[..<pre].map { Op(kind: .same, text: $0) }
         let r = xs.count, c = ys.count
         if r > 0 || c > 0 {
-            // L[i][j] = LCS of xs[i...] and ys[j...]
             let w = c + 1
             var L = [Int32](repeating: 0, count: (r + 1) * w)
             if r > 0 && c > 0 {
@@ -1235,15 +1109,10 @@ enum CharDiff {
         return raw
     }
 
-    // the AI view's diff: each run of changes = its deletions, then its
-    // insertions; spacing-only changes are not marked
     static func diff(_ a: String, _ b: String) -> [Op] {
         group(rawOps(a, b))
     }
 
-    // a lone space between two changes joins them ("their going" ->
-    // "They're gone" reads as one replacement, not two), then each change
-    // run = its deletions, then its insertions
     private static func group(_ raw: [Op]) -> [Op] {
         var ops = raw
         var k = 1
@@ -1259,7 +1128,6 @@ enum CharDiff {
         var del = "", ins = ""
         func flush() {
             if del.allSatisfy(\.isWhitespace) && ins.allSatisfy(\.isWhitespace) {
-                // spacing only (a table re-padded): not a change worth marking
                 if !ins.isEmpty {
                     if let last = out.last, last.kind == .same { out[out.count - 1].text += ins }
                     else { out.append(Op(kind: .same, text: ins)) }
@@ -1284,7 +1152,6 @@ enum CharDiff {
         return out
     }
 
-    // how many separate changes (a replacement counts once)
     static func changes(_ ops: [Op]) -> Int {
         var n = 0
         var inChange = false
@@ -1294,15 +1161,11 @@ enum CharDiff {
         return n
     }
 
-    // a marked span of one line (UTF-16 offsets, for drawing)
     struct Mark: Equatable {
         var range: NSRange
         var important: Bool
     }
 
-    // the changed spans of a line pair: each run of changed tokens, marked
-    // unimportant when both sides' runs are equal under `imp` (spacing,
-    // case)
     static func marks(_ a: String, _ b: String, _ imp: Importance) -> (left: [Mark], right: [Mark]) {
         var left: [Mark] = [], right: [Mark] = []
         var pa = 0, pb = 0

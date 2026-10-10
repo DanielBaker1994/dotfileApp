@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# ws — THE kitchen-sink entry point.
-#
-#   ./ws                     interactive menu (no args, on a terminal)
-#   ./ws <command> [flags]   one command (see ./ws help)
-#
-# The old names (bin/make-dmg.sh, bin/fix-permissions.sh,
-# bin/fake-*.sh) still work as thin shims around the same functions in
-# bin/lib.sh. The app / aerospace / install.conf keep invoking their fixed-path
-# scripts (bin/kitchen_sink.sh, bin/setup-home.sh, …) directly.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-# shellcheck source=bin/lib.sh
 . "$DIR/bin/lib.sh"
 
 ws_usage() {

@@ -1,36 +1,15 @@
 import AppKit
 import Foundation
 
-// ============================================================================
-// Install modes + the Setup & Health Check window.
-//
-// Two kinds of install (paths: `assetDir` / `userDir` / `homeDir` in
-// kitchen_sink.swift):
-//   repo build   ./INSTALL.sh — everything lives in the git checkout
-//   app install  the DMG — code in Contents/Resources, the user's files in
-//                ~/.config/kitchen-sink, set up by bin/setup-home.sh
-//
-// `AppInstall.ensureHome()` runs first thing in main.swift (app installs
-// only; a marker check, no process, when nothing changed). The window shows
-// what bin/preflight.sh --json reports — the SAME checks INSTALL.sh prints —
-// with a Fix button per row, "Move to Applications", and the opt-in
-// "Hotkeys & Borders" step (Homebrew packages + config links).
-//
-// Config: commands.toml [setup] (title, intro, width, height).
-// Open: first run / new version / a required check fails, menu bar ▸
-// "Setup & Health Check…", CLI / socket `setup`.
-// ============================================================================
-
 enum AppInstall {
     enum State: Equatable {
-        case repo              // repo build: INSTALL.sh owns the home
-        case ready(fresh: Bool) // app install, home set up (fresh = first run / new version)
-        case checkout          // app install, but the home is a developer checkout
-        case notInstalled      // running from the disk image / translocated
+        case repo
+        case ready(fresh: Bool)
+        case checkout
+        case notInstalled
         case failed(String)
     }
     static var state: State = .repo
-    // `kitchen-sink setup` with no daemon running: open it at launch
     static var requested = false
     static let keepCheckoutKey = "setupKeepCheckout"
 
@@ -39,13 +18,11 @@ enum AppInstall {
     }
     static var markerPath: String { homeDir + "/.install" }
 
-    // translocated (quarantined app opened in place) or still on the image
     static var runsFromImage: Bool {
         guard let b = appBundlePath else { return false }
         return b.contains("/AppTranslocation/") || b.hasPrefix("/Volumes/")
     }
 
-    // bash <assetDir>/bin/NAME ARGS, synchronously (setup-home.sh is quick)
     @discardableResult
     static func runSync(_ script: String, _ args: [String]) -> (code: Int32, out: String) {
         do {
@@ -56,7 +33,6 @@ enum AppInstall {
         }
     }
 
-    // `key=value` lines of the marker
     static func marker() -> [String: String] {
         guard let text = try? String(contentsOfFile: markerPath, encoding: .utf8) else { return [:] }
         var d: [String: String] = [:]
@@ -67,8 +43,6 @@ enum AppInstall {
         return d
     }
 
-    // Called before any config is read. App installs only: make sure the
-    // home exists and points at THIS app. Unchanged install = two file reads.
     static func ensureHome(switchFromCheckout: Bool = false) {
         guard !isRepoBuild, let bundle = appBundlePath else { state = .repo; return }
         if runsFromImage { state = .notInstalled; return }
@@ -90,7 +64,6 @@ enum AppInstall {
         }
     }
 
-    // should the Setup window open by itself at launch?
     static var wantsSetupWindow: Bool {
         switch state {
         case .repo: return false
@@ -107,7 +80,6 @@ struct SetupCheck {
     var required: Bool { level == "required" }
 }
 
-// flipped so rows lay out top-down
 private final class SetupFlippedView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -167,7 +139,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         window.backgroundColor = c.base
         window.appearance = NSAppearance(named: c.isLight ? .aqua : .darkAqua)
         window.minSize = NSSize(width: 520, height: 440)
-        // above the popup windows (they float at .popUpMenu)
         window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
         window.delegate = self
 
@@ -194,7 +165,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         scroll.documentView = rows
         content.addSubview(scroll)
 
-        // what a Fix / the stack set-up printed (read-only; Cmd+C / Cmd+A work)
         logScroll.frame = NSRect(x: 20, y: 64, width: w - 40, height: logH)
         logScroll.autoresizingMask = [.width, .maxYMargin]
         logScroll.hasVerticalScroller = true
@@ -211,7 +181,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         logView.autoresizingMask = [.width]
         logView.frame = NSRect(x: 0, y: 0, width: logScroll.contentSize.width, height: logH)
         logScroll.documentView = logView
-        logScroll.isHidden = true     // appears with the first output
+        logScroll.isHidden = true
         content.addSubview(logScroll)
 
         status.font = .systemFont(ofSize: 11)
@@ -243,8 +213,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         updateIntro()
     }
 
-    // MARK: text
-
     private func updateIntro() {
         let fallback: String
         switch AppInstall.state {
@@ -268,7 +236,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
 
     private static let logHeight: CGFloat = 130
 
-    // the log takes the bottom of the list's space once there is output
     private func showLog() {
         guard logScroll.isHidden else { return }
         logScroll.isHidden = false
@@ -289,8 +256,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         logView.scrollToEndOfDocument(nil)
     }
 
-    // MARK: checks
-
     private func runChecks() {
         guard !busy else { return }
         busy = true
@@ -302,7 +267,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.busy = false
-                // stderr shares the pipe: the JSON object is the last line
                 let line = r.out.split(separator: "\n").last(where: { $0.hasPrefix("{") }).map(String.init) ?? ""
                 guard let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
                       let list = obj["checks"] as? [[String: Any]] else {
@@ -352,8 +316,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         rows.subviews.forEach { $0.removeFromSuperview() }
         let c = colors
         let width = scroll.contentSize.width
-        // sized BEFORE the rows go in: growing it afterwards would
-        // autoresize them (buttons pushed out of view)
         rows.frame = NSRect(x: 0, y: 0, width: width, height: rows.frame.height)
         var y: CGFloat = 8
         var group = ""
@@ -428,8 +390,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         return "Fix"
     }
 
-    // MARK: actions
-
     @objc private func recheckClicked(_ sender: Any?) { runChecks() }
     @objc private func doneClicked(_ sender: Any?) { close() }
 
@@ -480,7 +440,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // the opt-in step: brew packages, config links, services
     @objc private func stackClicked(_ sender: Any?) {
         guard !busy else { return }
         guard let b = brewPath else { noBrew(); return }
@@ -503,8 +462,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // run the steps one after another, output streamed into the log; stops
-    // at the first failure, then re-checks
     private func runSteps(_ steps: [(String, String, [String])]) {
         guard let (title, exe, args) = steps.first else {
             busy = false
@@ -521,9 +478,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         env["NONINTERACTIVE"] = "1"
-        // brew's tap trust list lives under $XDG_CONFIG_HOME when the user's
-        // shell sets it; launched from Finder we don't inherit that, and brew
-        // then refuses the borders / aerospace taps
         let home = NSHomeDirectory(), fm = FileManager.default
         if env["XDG_CONFIG_HOME"] == nil, fm.fileExists(atPath: home + "/.config/homebrew/trust.json"),
            !fm.fileExists(atPath: home + "/.homebrew/trust.json") {
@@ -561,7 +515,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // the home is a git checkout: keep it (nothing changes) or hand over
     private func chooseHome() {
         ask(title: "~/.config/kitchen-sink is a developer checkout",
             text: "Keep Using the Checkout: nothing changes — the app reads the checkout's commands.toml.\n\n"
@@ -576,7 +529,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                 AppInstall.ensureHome(switchFromCheckout: true)
                 if case .ready = AppInstall.state {
                     UserDefaults.standard.removeObject(forKey: AppInstall.keepCheckoutKey)
-                    // userDir was the checkout when this process started
                     self.relaunch(appBundlePath ?? "")
                 } else {
                     self.updateIntro()
@@ -586,8 +538,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // copy the bundle into /Applications (the old copy goes to the Trash)
-    // and start it from there
     private func moveToApplications() {
         guard let src = appBundlePath else { return }
         let fm = FileManager.default
@@ -614,13 +564,11 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         guard !bundle.isEmpty else { return }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        // wait for this process to go (one bundle id = one daemon), then open
         p.arguments = ["-c", "while kill -0 \(getpid()) 2>/dev/null; do sleep 0.1; done; /usr/bin/open -n \"$0\" --args setup", bundle]
         try? p.run()
         NSApp.terminate(nil)
     }
 
-    // sheets, never app-modal alerts (those open hidden behind the popups)
     private func ask(title: String, text: String, buttons: [String], then: @escaping (Int) -> Void) {
         let a = NSAlert()
         a.messageText = title
@@ -631,9 +579,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: keys + window
-
-    // accessory app, no Edit menu: route the edit shortcuts by hand (rule 1)
     private func installKeys() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self, self.window.isKeyWindow, self.window.attachedSheet == nil else { return e }
@@ -643,10 +588,10 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             guard cmd || ctrl else { return e }
             let ed = (self.window.firstResponder as? NSText) ?? self.logView
             switch e.keyCode {
-            case 8: ed.copy(nil)                          // Cmd+C / Ctrl+C
-            case 0 where cmd: ed.selectAll(nil)           // Cmd+A
-            case 13 where cmd: if !self.busy { self.close() }   // Cmd+W
-            case 15 where cmd: self.runChecks()           // Cmd+R
+            case 8: ed.copy(nil)
+            case 0 where cmd: ed.selectAll(nil)
+            case 13 where cmd: if !self.busy { self.close() }
+            case 15 where cmd: self.runChecks()
             default: return e
             }
             return nil
@@ -666,8 +611,6 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         if let m = monitor { NSEvent.removeMonitor(m) }
         monitor = nil
         Self.live = nil
-        // first run: the window just closed is the only thing on screen —
-        // show the app itself
         if case .ready(let fresh) = AppInstall.state, fresh {
             AppInstall.state = .ready(fresh: false)
             controller?.showCommand("files")

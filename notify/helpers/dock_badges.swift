@@ -1,9 +1,3 @@
-// dock_badges: print the badge the Dock shows on each app icon, one line per
-// Dock item: "<bundle id>\t<badge>" (badge empty = none). Read through the
-// Dock's accessibility tree (AXStatusLabel), i.e. exactly what you see — this
-// covers badges `lsappinfo` misses (UserNotifications badges, e.g. Messages).
-// Needs Accessibility for the process that runs it (the kitchen-sink app).
-// Built on demand by notify/notify_poll.py into ~/.cache/kitchen-sink/helpers/.
 import AppKit
 import ApplicationServices
 

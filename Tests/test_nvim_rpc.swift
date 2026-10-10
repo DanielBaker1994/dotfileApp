@@ -1,9 +1,4 @@
 // sources: NvimRPC.swift
-// The notes pane's nvim client (NvimRPC.swift) against a REAL headless nvim:
-// msgpack round trips, `--remote-expr` parity (the answers the pane's code
-// compares against), input, big answers, errors, a restarted nvim, speed.
-// Usage: bin/run-tests.sh nvim
-
 import Foundation
 
 @main
@@ -39,7 +34,6 @@ struct NvimRPCTests {
         return p
     }
 
-    // what `nvim --server SOCK --remote-expr EXPR` prints (nil = it failed)
     static func cli(_ nvim: String, _ sock: String, _ expr: String) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: nvim)
@@ -62,7 +56,6 @@ struct NvimRPCTests {
     }
 
     static func main() {
-        // --- msgpack, no nvim needed ---
         for n: Int64 in [0, 1, 127, 128, 255, 256, 65535, 65536, 4_294_967_296, -1, -32, -33, -128, -129, -32768, -32769, Int64.min] {
             check(roundTrip(.int(n))?.int64 == n, "int \(n) round trip")
         }
@@ -89,42 +82,35 @@ struct NvimRPCTests {
         defer { p.terminate(); try? FileManager.default.removeItem(atPath: dir) }
         let rpc = NvimRPC(path: sock)
 
-        // --- parity with --remote-expr: what the pane's code compares against ---
         for e in ["mode()", "1+1", "0-3", "0-200", "0-70000", "v:true", "v:false", "v:null",
                   "luaeval('nil')", "1.5", "execute('echo 1')", "'héllo ✓'", "[1,'a']", "{'a':1}"] {
             let mine = rpc.eval(e)
             var want = cli(nvim, sock, e)
-            // the CLI prints a table's address (table: 0x…): only the kind matters
             if want?.hasPrefix("table: ") == true { want = "table" }
             check(mine == want, "eval \(e): rpc \(mine.debugDescription) vs cli \(want.debugDescription)")
         }
         check(rpc.eval("nonexistent_fn()") == nil, "an nvim error is nil (the CLI exits non-zero)")
         check(rpc.eval("1+1") == "2", "the connection survives an error")
 
-        // a big answer arrives in several reads
         check(rpc.eval("repeat('x', 200000)")?.count == 200_000, "200 KB answer")
 
-        // input (--remote-send), then read it back
         check(rpc.input("ihello<Esc>"), "input delivered")
         usleep(50_000)
         check(rpc.eval("getline(1)") == "hello", "typed text landed")
         check(rpc.eval("mode()") == "n", "back in Normal mode")
 
-        // speed: what used to be one process spawn per call
         let t0 = Date()
         for _ in 0..<200 { _ = rpc.eval("mode()") }
         let ms = Date().timeIntervalSince(t0) * 1000 / 200
         print(String(format: "  %.3f ms per call (200 calls)", ms))
         check(ms < 5, "a call is a few ms at most")
 
-        // nvim restarted on the same socket: the next call reconnects
         p.terminate()
         p.waitUntilExit()
         try? FileManager.default.removeItem(atPath: sock)
         p = startNvim(nvim, sock)
         check(rpc.eval("1+2") == "3", "first call after an nvim restart reconnects")
 
-        // nobody listening: nil, fast
         let gone = NvimRPC(path: dir + "/none.sock")
         let t1 = Date()
         check(gone.eval("1") == nil, "no socket = nil")

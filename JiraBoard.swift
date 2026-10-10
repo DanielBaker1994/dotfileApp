@@ -1,26 +1,16 @@
 import AppKit
 import WebKit
 
-// The Jira board view (a board in the jira sidebar's BOARDS): the board's own
-// columns, read from Jira, with a card per issue — like Jira's board. Above
-// the search box: `JiraBoardBar` = board name · Sprint ▾ · Columns | Table ·
-// Pin (the result as its own sidebar row). The cards are HTML over the list
-// area (`PopupWindow.setListOverlay`); the search box, quick filters and the
-// sprint narrow them like they narrow the table. A card click = the issue
-// page (as Return on a row). ListSession (kitchen_sink.swift) owns the data.
-
 struct JiraBoardCard: Encodable {
     let key, title, type, priority, assignee, status: String
-    let cat: Int            // 0 to do / 1 in progress / 2 done
+    let cat: Int
 }
 
 struct JiraBoardColumn: Encodable {
     let name: String
     let cards: [JiraBoardCard]
-    let more: Int           // cards left out (a long Done column)
+    let more: Int
 }
-
-// MARK: - the bar
 
 final class JiraBoardBar: NSView, PopupThemeable {
     struct SprintChoice { let id: String; let title: String; let header: Bool }
@@ -88,8 +78,6 @@ final class JiraBoardBar: NSView, PopupThemeable {
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
     }
 
-    // name, the sprint choices (empty = a board without sprints: no picker),
-    // the picked one, columns / table, pinned?, the dim summary on the right
     func show(board: String, choices: [SprintChoice], picked: String, mode m: String, pinned: Bool, summary s: String) {
         title.stringValue = board
         self.choices = choices
@@ -122,8 +110,6 @@ final class JiraBoardBar: NSView, PopupThemeable {
     @objc private func pinClicked() { onPin?() }
 }
 
-// MARK: - the columns
-
 final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDelegate, PageZoomable {
     var pageZoom: CGFloat { get { web.pageZoom } set { web.pageZoom = newValue } }
     let web: WKWebView
@@ -145,7 +131,6 @@ final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDe
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    // the columns on screen (a theme change reloads the page)
     func show(_ cols: [JiraBoardColumn], colors: PopupColors) {
         let data = (try? JSONEncoder().encode(cols)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         let key = [colors.background, colors.text, colors.dim, colors.accent, colors.highlight].map(ProseRender.css).joined()
@@ -170,7 +155,6 @@ final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDe
         }
     }
 
-    // links never navigate the board away
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         decisionHandler(action.navigationType == .other ? .allow : .cancel)

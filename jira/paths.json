@@ -1,0 +1,28 @@
+{
+  "_comment": "Where the Jira poller (python) and the app (Swift JiraPoll) keep their files. ONE source for both: jira_paths.py and JiraPoll.paths read this. Env overrides: JIRA_CONFIG_JSON, JIRA_TEAM_JSON, JIRA_CONFIG_FILE, JIRA_CACHE_DIR.",
+  "configJson": "~/.config/jira/config.json",
+  "teamJson": "~/.config/jira/team.json",
+  "legacyConfig": "~/.config/jira/config",
+  "cacheDir": "~/.cache/jira",
+  "outDir": "~/.cache/kitchen-sink/jira_json",
+  "cache": {
+    "issues": "jiras.json",
+    "status": "status.json",
+    "directory": "directory.json",
+    "curlLog": "curl.log",
+    "boards": "boards.json",
+    "boardCatalog": "board_catalog.json",
+    "sprints": "sprints.json"
+  },
+  "tabs": {
+    "liveSearch": "search.json",
+    "favorites": "favorites.json",
+    "blacklistRelease": "blacklist_release.json"
+  },
+  "sideDirs": {
+    "releases": "jira_releases",
+    "labels": "jira_labels",
+    "boards": "jira_boards",
+    "myWork": "jira_mywork"
+  }
+}

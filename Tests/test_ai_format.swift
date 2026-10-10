@@ -1,11 +1,6 @@
 // sources: AIFormat.swift ProcessRun.swift
-// The AI view's text helpers (AIFormat.swift): rule files and their chain,
-// comma rows -> tables, the keep-words check. No model needed.
-// Usage: bin/run-tests.sh ai      (the model itself: bin/run-tests.sh ai-live)
-
 import Foundation
 
-// the two [ai] settings AIFormat.swift reads (AIWindow.swift in the app)
 func aiSetting(_ key: String, _ fallback: String) -> String { fallback }
 func aiNumber(_ key: String, _ fallback: CGFloat) -> CGFloat { fallback }
 
@@ -24,7 +19,6 @@ func check(_ condition: Bool, _ message: String, line: Int = #line) {
 @main
 struct Main {
     static func main() {
-        // --- comma rows -> tables
         let t = CSVTables.convert("example,example1,example2\n---\n1,2,3")
         check(t == "| example | example1 | example2 |\n| --- | --- | --- |\n| 1 | 2 | 3 |", "header, ---, row: \(t)")
         check(CSVTables.convert("name, status\nweb01, up\nweb02, down").hasPrefix("| name | status |\n| --- | --- |\n| web01 | up |"),
@@ -40,7 +34,6 @@ struct Main {
         check(mixed == "Status below\n\n| host | state |\n| --- | --- |\n| web01 | up |\n\nMore soon.", "blank lines around: \(mixed)")
         check(CSVTables.convert("a,b\n---\n1,2,3") == "a,b\n---\n1,2,3", "ragged rows are not a table")
 
-        // --- keep-words
         let steps = "We need to do three things: first update the changelog, second run the tests."
         check(WordGuard.check(steps, "We need to do three things:\n\n1. update the changelog\n2. run the tests").ok,
               "a list may drop first/second")
@@ -53,7 +46,6 @@ struct Main {
               "a table's header row may be new")
         check(WordGuard.check("run [[CODE1]] then **stop**", "- run [[CODE1]]\n- then **stop**").ok, "markup is not words")
 
-        // --- rule files + the chain
         let dir = NSTemporaryDirectory() + "ai-rules-test-\(getpid())"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -77,7 +69,6 @@ struct Main {
         write("c.md", "---\nthen: nope.md\n---\nx")
         check(AIRule.chain(AIRule.load(dir + "/c.md"))[0].warnings.contains { $0.contains("nope.md") }, "a missing then is a warning")
 
-        // --- the shipped rules
         let rules = (#filePath as NSString).deletingLastPathComponent + "/../rules"
         let g = AIRule.chain(AIRule.load(rules + "/grammar-check.md"))
         check(g.map(\.file) == ["grammar-check.md", "markdown-format.md"], "Grammar Check runs Markdown Format after")
@@ -88,7 +79,6 @@ struct Main {
         let ask = AIRule.load(rules + "/ask.md")
         check(ask.warnings.isEmpty && !ask.diff && ask.prompt.isEmpty, "Ask: plain, free-form")
 
-        // --- GitHub alerts: pandoc gfm's divs get inline styles (classes don't survive a paste)
         if RichText.available, let h = RichText.html("> [!WARNING]\n> Mind the gap\n", for: .outlook) {
             check(!h.contains("class=\"warning\"") && h.contains("border-left:3px solid #9a6700"),
                   "warning alert styled inline: \(h)")

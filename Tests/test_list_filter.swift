@@ -1,13 +1,4 @@
 // sources: ListFilter.swift
-// The list / table filter box (ListFilter.swift): FuzzyIndex gives the same
-// rows in the same order as the old per-keystroke [Character] matcher (kept
-// below as OldFuzzy, the reference), incremental narrowing never drops a
-// match, SortRank orders like the old localizedStandardCompare sort — and a
-// keystroke over 20k Jira-sized rows stays inside one frame.
-// Usage: bin/run-tests.sh filter
-//   WS_FILTER_JSON=FILE  use a tab file (bin/fake-jira-tab.sh writes one)
-//   WS_FILTER_ROWS=N     synthetic row count (default 20000)
-
 import Foundation
 
 var passed = 0
@@ -28,15 +19,12 @@ func ms(_ f: () -> Void) -> Double {
     return Double(DispatchTime.now().uptimeNanoseconds - t) / 1e6
 }
 
-// the app's searchText: the [jira] filter fields + filterable columns, each
-// capped at 150 characters, joined with spaces (loadListItems)
 let searchFields = ["key", "title", "status", "assignee", "reporter", "description", "labels",
                     "priority", "releaseLabel", "project"]
 func searchText(_ d: [String: String]) -> String {
     searchFields.compactMap { d[$0].map { String($0.prefix(150)) } }.joined(separator: " ")
 }
 
-// deterministic rows shaped like jira/fake_jira_tab.py's
 struct LCG {
     var s: UInt64
     mutating func next(_ n: Int) -> Int {
@@ -75,7 +63,6 @@ func loadRows() -> [[String: String]] {
     return syntheticRows(Int(ProcessInfo.processInfo.environment["WS_FILTER_ROWS"] ?? "") ?? 20000)
 }
 
-// the old filteredRows sort (stable, blanks last)
 func oldSort(_ rows: [Int], _ vals: [String], ascending: Bool) -> [Int] {
     rows.enumerated().sorted { a, b in
         let x = vals[a.element], y = vals[b.element]
@@ -117,7 +104,6 @@ func testBigList() {
     let build = ms { index = FuzzyIndex(texts) }
     print(String(format: "%d rows, index built in %.1f ms", n, build))
 
-    // typed letter by letter, then a few backspaces and a second word
     let typed = "payment"
     var queries = (1...typed.count).map { String(typed.prefix($0)) }
     queries += ["paymen", "payme", "paym", "paym r", "paym re", "paym ret", "p", "", "e", "es", "est"]
@@ -136,7 +122,6 @@ func testBigList() {
                  oldMax, oldTotal, newMax, newTotal))
     check(newMax < 16, String(format: "a keystroke over %d rows fits a frame (%.1f ms)", n, newMax))
 
-    // header sort: one rank pass, then integer sorts per keystroke
     let vals = rows.map { $0["updated"] ?? "" }
     var ranks: [Int] = []
     let rankBuild = ms { ranks = SortRank.ranks(vals, ascending: false) }
@@ -161,20 +146,11 @@ struct ListFilterTests {
     }
 }
 
-// MARK: - the matcher before ListFilter.swift (reference + baseline timing)
-
 enum OldFuzzy {
-    // --- scoring constants (from fzf's algo.go, default scheme) ---
     private static let scoreMatch: Int16 = 16
     private static let bonusBoundary: Int16 = scoreMatch / 2
     private static let bonusBoundaryWhite: Int16 = bonusBoundary + 2
 
-    // One token's match against the text (all tokens must match; sum of
-    // scores = overall score, total matched length for tiebreaking).
-    // LESS PERMISSIVE: a token must appear as a CONTIGUOUS substring
-    // (case-insensitive) — a typed word like "magazine" only matches rows
-    // that actually contain "magazine", never letters scattered mid-word.
-    // Matches at word boundaries are preferred, then earlier matches.
     private static func matchToken(_ token: [Character], _ text: [Character])
         -> (score: Int, length: Int, positions: [Int])? {
         let len = token.count
@@ -209,7 +185,6 @@ enum OldFuzzy {
             .map(String.init)
     }
 
-    // Total score of the query against the text; nil = not a match.
     static func score(_ query: String, against text: String) -> Double? {
         let ts = tokens(of: query)
         guard !ts.isEmpty else { return 0 }
@@ -222,9 +197,6 @@ enum OldFuzzy {
         return Double(total)
     }
 
-    // Filter rows by fzf score against their searchable text, best first
-    // (score desc, then shorter total match, then input order — fzf's
-    // default tiebreaks). Empty query returns everything unchanged.
     static func filter<T>(_ rows: [T], query: String,
                                  search: (T) -> String) -> [T] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -250,8 +222,6 @@ enum OldFuzzy {
             .map { $0.0 }
     }
 
-    // Character ranges of the query's matched characters within `text`
-    // (adjacent matches merged). nil = no match.
     static func matchRanges(_ query: String, against text: String) -> [NSRange]? {
         let ts = tokens(of: query)
         guard !ts.isEmpty else { return [] }
@@ -263,7 +233,6 @@ enum OldFuzzy {
                 hits.append(NSRange(location: p, length: 1))
             }
         }
-        // merge adjacent single-character matches into runs
         var merged: [NSRange] = []
         for r in hits.sorted(by: { $0.location < $1.location }) {
             if let last = merged.last, NSMaxRange(last) == r.location {

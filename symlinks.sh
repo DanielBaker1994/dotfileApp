@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# symlinks.sh — the per-file links from ~/.config/<name> (aerospace,
-# borders) into THE config copies, + the stable home link.
-#
-# Where the copies live ($LINK_ROOT/config/<name>):
-#   repo install  the repo itself (ROOT); ~/.config/kitchen-sink is
-#                 then the repo, or a link to it
-#   app install   WS_LINK_ROOT = ~/.config/kitchen-sink, a real
-#                 directory holding the user's own copies (bin/setup-home.sh
-#                 seeds them from the bundle) — never a link into the app
 _sl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="${ROOT:-$_sl_self}"
-[ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"   # CONFIG_DIRS
+[ -f "$ROOT/install.conf" ] && . "$ROOT/install.conf"
 LINK_ROOT="${WS_LINK_ROOT:-$ROOT}"
 WS_HOME_DEFAULT="${WS_HOME_DEFAULT:-$HOME/.config/kitchen-sink}"
 
@@ -44,7 +35,6 @@ _ws_build_manifest() {
             MAN_SOURCE+=("$f")
         done < <(find "$LINK_ROOT/config/$d" -type f ! -name '*.new' ! -name '.DS_Store' 2>/dev/null | sort)
     done
-    # repo install only: the stable home IS (a link to) the repo
     if [ -z "${WS_LINK_ROOT:-}" ]; then
         MAN_TARGET+=("${WS_HOME:-$WS_HOME_DEFAULT}")
         MAN_SOURCE+=("$ROOT")
@@ -54,8 +44,6 @@ _ws_build_manifest() {
 _sl_state() {
     local t="$1" s="$2" rt rs
     [ -e "$s" ] || { printf 'BROKEN'; return; }
-    # the same file on disk, however it is reached (a linked parent
-    # directory counts): nothing to do
     rt="$(realpath "$t" 2>/dev/null)"
     rs="$(realpath "$s" 2>/dev/null)"
     [ -n "$rt" ] && [ "$rt" = "$rs" ] && { printf 'OK'; return; }
@@ -73,12 +61,9 @@ _ws_parent_links() {
     for d in $CONFIG_DIRS; do
         [ -L "$HOME/.config/$d" ] && printf '%s\n' "$HOME/.config/$d"
     done
-    return 0   # callers capture stdout via $(…) under `set -e`: a false
-               # last `[ -L ]` must not fail the command substitution
+    return 0
 }
 
-# only links are ever replaced: a real file / directory in the way (a git
-# checkout included) is never moved or deleted — it is reported and left alone
 _sl_repair() {
     local -a idx=("$@")
     local i t s d rc=0

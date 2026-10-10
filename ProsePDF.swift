@@ -1,34 +1,23 @@
 import Foundation
 
-// Prose ▸ Export PDF: the note through the owner's dotfiles recipe —
-// `pandoc -s -f gfm -t html5 --syntax-highlighting=tango
-// --include-in-header=CSS` → `weasyprint` — into `[notes] pdf-path`
-// (default ~/Downloads) as NOTE-STEM.pdf (a re-export overwrites it).
-// Foundation only (`bin/run-tests.sh prose`); the caller copies the path
-// and shows the toast (`ProseView.exportPDF`).
 enum ProsePDF {
     struct Config {
         var pandoc = "/opt/homebrew/bin/pandoc"
-        var engine = "/opt/homebrew/bin/weasyprint"   // [notes] pdf-engine-bin
-        var css = ""                                   // [notes] pdf-css: a <style> header snippet; "" = built in
-        var outDir = "~/Downloads"                     // [notes] pdf-path
-        var highlight = "tango"                        // [notes] pdf-highlight
-        var filter = ""                                // [notes] pdf-filter: Lua filters, comma list; "" = diagrams.lua beside pdf-css; "none" = off
-        var themeCSS = ""                              // dark theme layer (ProseRender.themeCSS)
+        var engine = "/opt/homebrew/bin/weasyprint"
+        var css = ""
+        var outDir = "~/Downloads"
+        var highlight = "tango"
+        var filter = ""
+        var themeCSS = ""
         var cacheDir = NSHomeDirectory() + "/.cache/kitchen-sink/prose"
     }
 
     static func expand(_ p: String) -> String { (p as NSString).expandingTildeInPath }
 
-    // A unique scratch file under cacheDir: concurrent renders (the in-editor
-    // view + floating windows, in one process or across processes) must never
-    // share one path, or they swap each other's HTML.
     private static func scratchFile(_ c: Config, _ prefix: String) -> String {
         (c.cacheDir as NSString).appendingPathComponent("\(prefix)-\(UUID().uuidString).html")
     }
 
-    // Remove a scratch file — but never the path the user configured:
-    // headerFile returns `[notes] pdf-css` itself when there is no theme layer.
     private static func removeScratch(_ path: String, _ c: Config) {
         guard path.hasPrefix(c.cacheDir) else { return }
         try? FileManager.default.removeItem(atPath: path)
@@ -39,8 +28,6 @@ enum ProsePDF {
         return (expand(c.outDir) as NSString).appendingPathComponent((stem.isEmpty ? "note" : stem) + ".pdf")
     }
 
-    // the pandoc Lua filters: `[notes] pdf-filter` (comma list), else diagrams.lua
-    // in the folder of `pdf-css` (```dot / ```d2 → inline SVG); only files that exist
     static func filterPaths(_ c: Config) -> [String] {
         let want = c.filter.trimmingCharacters(in: .whitespaces)
         if want.lowercased() == "none" { return [] }
@@ -58,21 +45,9 @@ enum ProsePDF {
         return ["-s", "-f", sourcepos ? "gfm+sourcepos" : "gfm", "-t", "html5", "--syntax-highlighting=\(c.highlight.isEmpty ? "tango" : c.highlight)",
                 "-V", "lang=en", "--metadata", "pagetitle=\(stem)", "--resource-path=\(dir)",
                 "--include-in-header=\(css)",
-                // the header file holds the app theme's --p-* palette: diagrams.lua colors a
-                // document with no style marker from it
                 "--metadata=ws-header=\(css)"] + filters.map { "--lua-filter=\($0)" } + ["-o", html, note]
     }
 
-    // gfm+sourcepos (the reading view, for the nvim position sync) wraps
-    // things so the HTML no longer matches what plain gfm (Export PDF) makes;
-    // this filter undoes it (`bin/run-tests.sh prose` renders every markdown
-    // snippet both ways and compares the browser DOMs):
-    // - a `- [ ] todo` item is split into Plain{☐} + a wrapper Div holding the
-    //   text, so the writer misses the task item (a literal ☐, the text on its
-    //   own line) → the box goes back in front of the text;
-    // - every inline raw HTML tag gets its own position <span>, so
-    //   `<kbd>Cmd</kbd>` / `<span class="badge ok">…</span>` close at once in
-    //   the browser (an empty pill, plain text after it) → those spans go.
     static let sourceposFilter = """
     function Span(el)
       if el.attributes.wrapper == "1" and #el.content > 0 then
@@ -104,7 +79,6 @@ enum ProsePDF {
     end
     """
 
-    // the filter as a file in cacheDir (rewritten only when its text changed)
     static func sourceposFilterPath(_ c: Config) -> String {
         let path = (c.cacheDir as NSString).appendingPathComponent("sourcepos-fix.lua")
         let data = Data(sourceposFilter.utf8)
@@ -117,13 +91,9 @@ enum ProsePDF {
 
     static func engineArgs(note: String, html: String, out: String) -> [String] {
         let base = URL(fileURLWithPath: (note as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
-        // --pdf-tags: a tagged PDF (structure tree: headings, paragraphs, lists,
-        // tables) so readers / Word / Acrobat can reflow and copy by paragraph
         return ["--pdf-tags", "-u", base, html, out]
     }
 
-    // the header CSS file: the configured one, else the built-in style, with
-    // the dark theme layer appended when set
     static func headerFile(_ c: Config) throws -> String {
         let own = expand(c.css)
         let ownExists = !c.css.isEmpty && FileManager.default.fileExists(atPath: own)
@@ -135,8 +105,6 @@ enum ProsePDF {
         return f
     }
 
-    // the header CSS text: the configured file, else the built-in style, with
-    // the dark theme layer appended when set
     static func cssContent(_ c: Config) -> String {
         let own = expand(c.css)
         var text = (!c.css.isEmpty ? (try? String(contentsOfFile: own, encoding: .utf8)) : nil) ?? builtinCSS
@@ -144,10 +112,6 @@ enum ProsePDF {
         return text
     }
 
-    // The SAME pandoc → HTML5 document the PDF export feeds to weasyprint,
-    // returned for the reading view so what you read is what you export.
-    // nil = pandoc missing / failed (the caller falls back to the built-in
-    // renderer).
     static func screenHTML(note: String, _ c: Config) -> String? {
         let fm = FileManager.default
         guard fm.isExecutableFile(atPath: expand(c.pandoc)), fm.fileExists(atPath: note) else { return nil }
@@ -162,7 +126,6 @@ enum ProsePDF {
         } catch { return nil }
     }
 
-    // runs synchronously (call it off main): the PDF's path, or why not
     static func export(note: String, _ c: Config) -> Result<String, ExportError> {
         let fm = FileManager.default
         guard fm.isExecutableFile(atPath: expand(c.pandoc)) else {
@@ -201,7 +164,6 @@ enum ProsePDF {
             .map(String.init) ?? "exit status"
     }
 
-    // a light document style for when [notes] pdf-css is unset
     static let builtinCSS = """
     <style>
     @page { size: A4; margin: 18mm 16mm; }

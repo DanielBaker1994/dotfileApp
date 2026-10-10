@@ -1,31 +1,10 @@
 import Foundation
 
-// ListFilter.swift — the list / table filter box's matching (AppKit-free, so
-// Tests/test_list_filter.swift compiles it alone).
-//   PopupFuzzy  — String API (palette, highlight ranges)
-//   FuzzyIndex  — the same matching over pre-lowered UTF-8 keys built ONCE
-//                 per item list, narrowing incrementally while typing forward
-//                 (the Jira table: 20k rows must filter within a frame)
-//   SortRank    — a header sort as one Int rank per row, computed once, so a
-//                 keystroke never re-runs localizedStandardCompare
-
-// Port of fzf's FuzzyMatchV2 (default scoring scheme, case-insensitive):
-// Smith-Waterman-style DP over the pattern and text with word-boundary /
-// camelCase / delimiter bonus points, so exact phrases and acronyms rank
-// above lucky sparse matches. The query is split on whitespace into tokens
-// (fzf semantics); every token must match, best combined score wins.
 public enum PopupFuzzy {
-    // --- scoring constants (from fzf's algo.go, default scheme) ---
     private static let scoreMatch: Int16 = 16
     private static let bonusBoundary: Int16 = scoreMatch / 2
     private static let bonusBoundaryWhite: Int16 = bonusBoundary + 2
 
-    // One token's match against the text (all tokens must match; sum of
-    // scores = overall score, total matched length for tiebreaking).
-    // LESS PERMISSIVE: a token must appear as a CONTIGUOUS substring
-    // (case-insensitive) — a typed word like "magazine" only matches rows
-    // that actually contain "magazine", never letters scattered mid-word.
-    // Matches at word boundaries are preferred, then earlier matches.
     private static func matchToken(_ token: [Character], _ text: [Character])
         -> (score: Int, length: Int, positions: [Int])? {
         let len = token.count
@@ -60,7 +39,6 @@ public enum PopupFuzzy {
             .map(String.init)
     }
 
-    // Total score of the query against the text; nil = not a match.
     public static func score(_ query: String, against text: String) -> Double? {
         let ts = tokens(of: query)
         guard !ts.isEmpty else { return 0 }
@@ -73,9 +51,6 @@ public enum PopupFuzzy {
         return Double(total)
     }
 
-    // Filter rows by fzf score against their searchable text, best first
-    // (score desc, then input order — fzf's
-    // default tiebreaks). Empty query returns everything unchanged.
     public static func filter<T>(_ rows: [T], query: String,
                                  search: (T) -> String) -> [T] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -83,8 +58,6 @@ public enum PopupFuzzy {
         return FuzzyIndex(rows.map(search)).ranked(q).map { rows[$0] }
     }
 
-    // Character ranges of the query's matched characters within `text`
-    // (adjacent matches merged). nil = no match.
     public static func matchRanges(_ query: String, against text: String) -> [NSRange]? {
         let ts = tokens(of: query)
         guard !ts.isEmpty else { return [] }
@@ -96,7 +69,6 @@ public enum PopupFuzzy {
                 hits.append(NSRange(location: p, length: 1))
             }
         }
-        // merge adjacent single-character matches into runs
         var merged: [NSRange] = []
         for r in hits.sorted(by: { $0.location < $1.location }) {
             if let last = merged.last, NSMaxRange(last) == r.location {
@@ -110,18 +82,10 @@ public enum PopupFuzzy {
     }
 }
 
-// MARK: - FuzzyIndex (byte keys, incremental)
-
-// PopupFuzzy.filter's matching over the rows' searchText, lowercased to UTF-8
-// ONCE (not a [Character] per row per keystroke). Same rules: every query
-// token must appear as a contiguous substring; a match at a word start
-// scores +10, later matches lose position/8; ranked by total score, then input
-// order.
-// Typing forward ("pa" → "pay") only re-scans the previous matches.
 public final class FuzzyIndex {
     private let keys: [[UInt8]]
     private var lastTokens: [[UInt8]] = []
-    private var lastMatches: [Int] = []          // ascending row indices
+    private var lastMatches: [Int] = []
 
     public var count: Int { keys.count }
 
@@ -135,8 +99,6 @@ public final class FuzzyIndex {
             .map { Array($0.utf8) }
     }
 
-    // row indices that match `query`, best first; empty query = every row
-    // in input order
     public func ranked(_ query: String) -> [Int] {
         let ts = Self.tokens(of: query)
         guard !ts.isEmpty else {
@@ -144,14 +106,12 @@ public final class FuzzyIndex {
             lastMatches = []
             return Array(keys.indices)
         }
-        // every old token inside some new token → new matches ⊆ old matches
         let narrowing = !lastTokens.isEmpty && lastTokens.allSatisfy { old in
             ts.contains { Self.contains($0, old) }
         }
         let candidates = narrowing ? lastMatches : Array(keys.indices)
         var scores = [Int](repeating: 0, count: candidates.count)
         var hit = [Bool](repeating: false, count: candidates.count)
-        // a full scan of a big list fans out over the cores
         let chunks = candidates.count >= 4000 ? 8 : 1
         let per = (candidates.count + chunks - 1) / max(1, chunks)
         scores.withUnsafeMutableBufferPointer { sp in
@@ -186,9 +146,6 @@ public final class FuzzyIndex {
         return total
     }
 
-    // best score of one token in the text (nil = absent): word start +10,
-    // minus position/8 (in characters, as PopupFuzzy counts them); 16 per
-    // matched byte like PopupFuzzy
     static func matchToken(_ tok: [UInt8], _ text: [UInt8]) -> Int? {
         let len = tok.count, n = text.count
         guard len > 0, len <= n else { return nil }
@@ -199,8 +156,6 @@ public final class FuzzyIndex {
                 let bytes = tb.bindMemory(to: UInt8.self)
                 let first = Int32(tok[0])
                 var i = 0
-                // character index of byte `at`: counted forward from the
-                // last position (UTF-8 continuation bytes don't count)
                 var cAt = 0, cIdx = 0
                 while i + len <= n {
                     guard let p = memchr(base + i, first, n - len + 1 - i) else { break }
@@ -209,7 +164,6 @@ public final class FuzzyIndex {
                         if bytes[cAt] & 0xC0 != 0x80 { cIdx += 1 }
                         cAt += 1
                     }
-                    // no later match can beat a word start here, or this score
                     if 10 - cIdx / 8 <= best { break }
                     if memcmp(base + j, key, len) == 0 {
                         let ws = j == 0 || isBoundary(text, before: j)
@@ -224,7 +178,6 @@ public final class FuzzyIndex {
         return best == Int.min ? nil : best + 16 * len
     }
 
-    // the character before byte `j` is neither a letter nor a digit
     private static func isBoundary(_ t: [UInt8], before j: Int) -> Bool {
         let b = t[j - 1]
         if b < 0x80 {
@@ -247,11 +200,6 @@ public final class FuzzyIndex {
     }
 }
 
-// MARK: - SortRank
-
-// A header sort as one rank per row: blanks last, the rest by
-// localizedStandardCompare (equal values share a rank). Sorting matches by
-// (rank, current position) gives the same order as a stable string sort.
 public enum SortRank {
     public static func ranks(_ values: [String], ascending: Bool) -> [Int] {
         var ranks = [Int](repeating: Int.max, count: values.count)
@@ -265,8 +213,6 @@ public enum SortRank {
         return ranks
     }
 
-    // `rows` (indices into the ranked list) reordered by rank, ties keep
-    // their current order
     public static func order(_ rows: [Int], by ranks: [Int]) -> [Int] {
         rows.enumerated()
             .sorted { a, b in

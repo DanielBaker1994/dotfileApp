@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
-# lib.sh — the helper functions behind the ./ws entry point.
-#
-# Sourced by ./ws and by the deprecated wrapper scripts (bin/make-dmg.sh,
-# bin/fix-permissions.sh, bin/fake-*.sh) so the old names keep working. The fixed-path scripts the app / aerospace / install.conf invoke
-# (kitchen_sink.sh, setup-home.sh, preflight.sh, build-app.sh, …) do NOT source
-# this: they are the internal contract and stay independent.
 set -uo pipefail
 
 _ws_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 WS_ROOT="$(cd "$_ws_lib_dir/.." && pwd -P)"
-# shellcheck source=../install.conf
 . "$WS_ROOT/install.conf"
-# hotkey tools / stripped environments run with a minimal PATH
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# ------------------------------------------------------------------ output
 ws_ok()   { printf '\033[32m  \342\234\224 %s\033[0m\n' "$*"; }
 ws_fail() { printf '\033[31m  \342\234\230 %s\033[0m\n' "$*"; }
 ws_warn() { printf '\033[33m  ! %s\033[0m\n' "$*"; }
@@ -22,13 +13,7 @@ ws_step() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 ws_info() { printf '\033[2m    %s\033[0m\n' "$*"; }
 ws_die()  { printf '\033[31mws: %s\033[0m\n' "$*" >&2; exit 1; }
 
-# =============================================================== build
-# compile + relaunch (was build.sh). The launcher only builds on a cold start
-# (hotkeys never pay for the stale check), so build here: build-app.sh kills the
-# old daemon after a new binary, kitchen_sink.sh then starts the fresh one.
 ws_cmd_build() {
-    # Ensure the stable signing identity exists, is trusted, and codesign can
-    # use it — before any compilation. No ad-hoc fallback.
     ws_ensure_signing_identity
     if [ "${1:-}" = "--force" ]; then
         "$WS_ROOT/bin/build-app.sh" --force || exit 1
@@ -39,17 +24,10 @@ ws_cmd_build() {
     if [ "${1:-}" = "--build-only" ]; then
         export WS_BUILD_ONLY=1
     fi
-    # After a successful build, ensure permissions are valid for this
-    # binary. A fresh codesign resets TCC grants when the signature changes;
-    # ws_permissions_ensure() checks the TCC db against the current binary
-    # and re-grants only when needed.
     ws_permissions_ensure
     exec "$WS_ROOT/bin/kitchen_sink.sh" window
 }
 
-# Ensure the stable signing identity exists, is trusted, and can be used by
-# codesign. Creates the self-signed cert if missing, trusts it, and unlocks
-# the keychain. Exits with a clear error if nothing works.
 ws_ensure_signing_identity() {
     local KC="$HOME/Library/Keychains/login.keychain-db"
     _ws_valid() { security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_ID\""; }
@@ -60,7 +38,6 @@ ws_ensure_signing_identity() {
         r=$?; rm -f "$ff"; return $r
     }
 
-    # Create the cert if it doesn't exist
     if ! _ws_valid; then
         local T
         T="$(mktemp -d)"
@@ -74,13 +51,10 @@ ws_ensure_signing_identity() {
         _ws_valid || ws_die "'$SIGN_ID' still not valid — Keychain Access ▸ it ▸ Trust ▸ Code Signing: Always Trust"
     fi
 
-    # Make sure codesign can actually use the key (unlocks keychain if needed)
     if ! _ws_can_sign; then
-        # Non-interactive (piped/CI): can't prompt for password
         if ! [ -t 0 ]; then
             ws_die "codesign can't access '$SIGN_ID' — run 'ws build' in a terminal to unlock the keychain"
         fi
-        # Interactive: ask for the login password once to unlock
         local PW rc
         read -rs -p "  Login password (to unlock keychain for codesign): " PW; echo
         { security unlock-keychain -p "$PW" "$KC" \
@@ -90,8 +64,6 @@ ws_ensure_signing_identity() {
     fi
 }
 
-# =============================================================== dmg
-# the distributable disk image (was bin/make-dmg.sh)
 ws_cmd_dmg() {
     local notarize=1
     [ "${1:-}" = "--no-notarize" ] && notarize=0
@@ -143,7 +115,6 @@ ws_cmd_dmg() {
     fi
 }
 
-# =============================================================== permissions
 ws_cmd_permissions() {
     case "${1:-grant}" in
         grant|"") exec "$WS_ROOT/bin/grant-permissions.sh" ;;
@@ -152,14 +123,13 @@ ws_cmd_permissions() {
     esac
 }
 
-# was bin/fix-permissions.sh
 ws_permissions_fix() {
     local APP="$WS_ROOT/$APP_NAME.app"
     local KC="$HOME/Library/Keychains/login.keychain-db"
     local T rc PW ff r
 
     _ws_valid() { security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_ID\""; }
-    _ws_can_sign() {   # a real signing test: the only check that catches key-access problems
+    _ws_can_sign() {
         ff="$(mktemp)"; cp /bin/echo "$ff"
         perl -e 'alarm 20; exec @ARGV' codesign --force --sign "$SIGN_ID" "$ff" >/dev/null 2>&1
         r=$?
@@ -170,7 +140,6 @@ ws_permissions_fix() {
     if ! _ws_valid; then
         T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
         printf '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=%s\n[ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n' "$SIGN_ID" > "$T/c.cnf"
-        # /usr/bin/openssl (LibreSSL): its .p12 imports cleanly, brew's v3 needs -legacy
         /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$T/c.cnf" -keyout "$T/k.pem" -out "$T/c.pem" 2>/dev/null \
           && /usr/bin/openssl pkcs12 -export -inkey "$T/k.pem" -in "$T/c.pem" -out "$T/c.p12" -passout pass:ws \
           && security import "$T/c.p12" -k "$KC" -P ws -T /usr/bin/codesign >/dev/null \
@@ -204,13 +173,10 @@ ws_permissions_fix() {
     echo; echo "\342\234\224 done — press Hyper+X and click Allow once (quit + reopen the app if it still complains)."
 }
 
-# After a build, verify that TCC grants match the current binary and
-# re-grant only when needed. Quiet when everything is already valid.
 ws_permissions_ensure() {
     local APP="$WS_ROOT/$APP_NAME.app"
-    [ -d "$APP" ] || return 0   # no bundle yet — nothing to check
+    [ -d "$APP" ] || return 0
 
-    # sudo-safe TCC.db path (same logic as grant-permissions.sh)
     if [ -n "${SUDO_USER:-}" ]; then
         local REAL_HOME
         REAL_HOME="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
@@ -219,11 +185,9 @@ ws_permissions_ensure() {
         local TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
     fi
 
-    # Can't check without the DB or sqlite3 — skip silently; the app will prompt
     [ -f "$TCC_DB" ] && command -v sqlite3 >/dev/null 2>&1 || return 0
-    [ -r "$TCC_DB" ] && [ -w "$TCC_DB" ] || return 0   # no FDA — skip
+    [ -r "$TCC_DB" ] && [ -w "$TCC_DB" ] || return 0
 
-    # What services should be granted for this bundle ID
     local -a SERVICES=(
         kTCCServiceMicrophone
         kTCCServiceSpeechRecognition
@@ -232,24 +196,19 @@ ws_permissions_ensure() {
         kTCCServiceSystemPolicyDocumentsFolder
     )
 
-    # Read the current code requirement from the binary (or detect ad-hoc)
     local REQ IS_ADHOC=0
     REQ="$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => //p')"
     if [ -z "$REQ" ] || printf '%s' "$REQ" | grep -q 'cdhash'; then
-        IS_ADHOC=1   # ad-hoc: csreq is NULL in TCC.db
+        IS_ADHOC=1
     fi
 
-    # Check if every service has a valid grant for this bundle ID with the
-    # right csreq (NULL for ad-hoc, the binary blob for a real cert).
     local need_grant=0
     for svc in "${SERVICES[@]}"; do
         if [ "$IS_ADHOC" = 1 ]; then
-            # ad-hoc grants use NULL csreq; client_type 0 = bundle ID
             local has
             has="$(sqlite3 "$TCC_DB" "SELECT count(*) FROM access WHERE service='$svc' AND client='$BUNDLE_ID' AND client_type=0 AND csreq IS NULL AND auth_value=2;" 2>/dev/null)"
             [ "${has:-0}" -lt 1 ] && need_grant=1 && break
         else
-            # real cert: build the expected csreq blob and compare
             local TMP CSREQ_HEX
             TMP="$(mktemp)"
             if printf '%s' "$REQ" | csreq -r- -b "$TMP" 2>/dev/null; then
@@ -258,7 +217,6 @@ ws_permissions_ensure() {
                 has="$(sqlite3 "$TCC_DB" "SELECT count(*) FROM access WHERE service='$svc' AND client='$BUNDLE_ID' AND client_type=0 AND hex(csreq)='$CSREQ_HEX' AND auth_value=2;" 2>/dev/null)"
                 [ "${has:-0}" -lt 1 ] && need_grant=1
             else
-                # csreq conversion failed — fall back to ad-hoc style
                 local has
                 has="$(sqlite3 "$TCC_DB" "SELECT count(*) FROM access WHERE service='$svc' AND client='$BUNDLE_ID' AND client_type=0 AND csreq IS NULL AND auth_value=2;" 2>/dev/null)"
                 [ "${has:-0}" -lt 1 ] && need_grant=1
@@ -268,14 +226,11 @@ ws_permissions_ensure() {
         fi
     done
 
-    [ "$need_grant" = 0 ] && return 0   # all grants are valid
+    [ "$need_grant" = 0 ] && return 0
 
-    # Re-grant — delegate to grant-permissions.sh (it writes the correct
-    # csreq for the current signature, or NULL for ad-hoc).
     "$WS_ROOT/bin/grant-permissions.sh" >/dev/null 2>&1 || true
 }
 
-# =============================================================== fake fixtures
 ws_cmd_fake() {
     case "${1:-}" in
         confluence)         shift; ws_fake_confluence "$@" ;;
@@ -285,9 +240,6 @@ ws_cmd_fake() {
     esac
 }
 
-# a fake Jira SERVER (projects, kanban + scrum boards, sprints; jira/fake_jira.py).
-# Only runs it: point a throwaway config at it (site http://127.0.0.1:PORT,
-# auth bearer, token fake-token) - the real config.json is never touched.
 ws_fake_jira_site() {
     local PORT="${FAKE_JIRA_PORT:-8766}" RUN_DIR="$HOME/.cache/jira"
     local PID_FILE="$RUN_DIR/fake-site.pid"
@@ -305,7 +257,6 @@ ws_fake_jira_site() {
     esac
 }
 
-# was bin/fake-confluence.sh
 ws_fake_confluence() {
     local ROOT="$WS_ROOT"
     local PORT="${FAKE_CONF_PORT:-8765}"
@@ -315,7 +266,7 @@ ws_fake_confluence() {
     local FAKE_CFG="$HOME/.config/confluence/fake.json"
 
     _fc_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
-    _fc_set_conf() {  # VALUE|"" -> [confluence] config
+    _fc_set_conf() {
         python3 - "$1" <<PY
 import sys
 sys.path.insert(0, "$ROOT/confluence")
@@ -378,13 +329,12 @@ PY
     esac
 }
 
-# was bin/fake-jira-tab.sh
 ws_fake_jira() {
     local ROOT="$WS_ROOT"
     local FAKE_DIR="$HOME/.cache/kitchen-sink/jira_fake"
     local ORIG="$FAKE_DIR/sources.orig"
 
-    _fj_conf() {  # get | set VALUE|"" -> [jira] sources
+    _fj_conf() {
         python3 - "$@" <<PY
 import sys
 sys.path.insert(0, "$ROOT/confluence")
@@ -401,7 +351,6 @@ PY
         local n="${2:-20000}" cur
         mkdir -p "$FAKE_DIR"
         cur="$(_fj_conf get)"
-        # remember the real value once (a second start keeps the first one)
         [ -f "$ORIG" ] || [ "$cur" = "~/.cache/kitchen-sink/jira_fake" ] || printf '%s' "$cur" >"$ORIG"
         rm -f "$FAKE_DIR"/bench-*.json
         python3 "$ROOT/jira/fake_jira_tab.py" "$FAKE_DIR/bench-$n.json" --count "$n" \
@@ -428,7 +377,6 @@ PY
     esac
 }
 
-# =============================================================== passthrough
 ws_cmd_install()   { exec "$WS_ROOT/INSTALL.sh" "$@"; }
 ws_cmd_uninstall() { exec "$WS_ROOT/UNINSTALL.sh" "$@"; }
 ws_cmd_check()     { exec "$WS_ROOT/bin/preflight.sh" "$@"; }

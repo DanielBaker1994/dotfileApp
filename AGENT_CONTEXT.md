@@ -1122,6 +1122,16 @@ unchanged and can still be called directly.
   [--mask]` prints instead of running; failures print a `$JIRA_TOKEN` repro
   line and poll status stores `lastCurl` (shown in the Jira Config window);
   setup window: "Copy curl".
+- File locations: `jira/paths.json` = the ONE list (config.json, team.json,
+  cache dir + file names, tab files, side dirs) — python `jira_paths.py`,
+  Swift `JiraPaths` / `JiraPoll.paths`; both honor `JIRA_CONFIG_JSON`,
+  `JIRA_TEAM_JSON`, `JIRA_CONFIG_FILE`, `JIRA_CACHE_DIR`. Never hardcode a
+  jira path or file name in either language. `--verbose` dumps go to
+  `<cache>/api_dump.txt` / `api_trace.txt`.
+- Status / priority looks: `[jira] status-{cancelled,done,blocked,active,
+  waiting,new}-words` + `priority-urgent-words` (comma lists of lowercased
+  substrings; `JiraWords`, cached until `reloadConfig()`): table cells
+  (`jiraCellStyle`) and the ticket page's lifecycle fallback.
 - Python: `jira/jira_config.py` (config.json, legacy env-config migration,
   `api_fields()` = [jira] columns + field keys), `jira_api.py` (curl via
   subprocess → `~/.cache/jira/curl.log`), `jira_poll.py` (flock

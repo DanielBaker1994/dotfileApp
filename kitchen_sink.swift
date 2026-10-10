@@ -4,9 +4,6 @@ import Darwin
 import AVFoundation
 import Speech
 
-// A menu item whose action is a Swift closure. It is its own target, so the
-// menu holding the item keeps the closure alive — nothing to retain on the
-// side, nothing that outlives the menu.
 final class ClosureMenuItem: NSMenuItem {
     private let handler: () -> Void
     init(_ title: String, _ handler: @escaping () -> Void) {
@@ -26,34 +23,15 @@ func menuItem(_ title: String, state: Bool? = nil, enabled: Bool = true,
     return item
 }
 
-// The same for a button: the owner keeps the target (a control's target is weak).
 final class ClosureTarget: NSObject {
     private let action: () -> Void
     init(action: @escaping () -> Void) { self.action = action }
     @objc func run() { action() }
 }
 
-// ============================================================================
-// Kitchen sink — host app built on the PopupWindow framework.
-// This file only contains app-specific logic: workspace/command data, the
-// aerospace socket IPC, app icons, the persistent shell, and behavior hooks.
-// ============================================================================
-
-// MARK: - Paths & identities
-
-// Derived from the binary location; everything else environment-specific
-// lives in `app` (AppSettings) below and is overridable from commands.toml.
-//
-// Two kinds of install (see AGENT_CONTEXT.md "Install modes"):
-//   repo build  the bundle sits in the git checkout, its assets NEXT TO it
-//   app install (DMG, /Applications): assets inside Contents/Resources, the
-//               user's files in ~/.config/kitchen-sink
 private let bundleParentDir: String = {
     let u = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL.resolvingSymlinksInPath()
     let p = u.path
-    // .app bundle: the binary lives at <dir>/<name>.app/Contents/MacOS/<bin>.
-    // TCC grants key by the bundle id (stable across rebuilds) — the bundle
-    // is what keeps mic/speech permissions working.
     if let r = p.range(of: "/Contents/MacOS/") {
         var d = String(p[..<r.lowerBound])
         if d.hasSuffix(".app") { d = (d as NSString).deletingLastPathComponent }
@@ -61,73 +39,43 @@ private let bundleParentDir: String = {
     }
     return u.deletingLastPathComponent().path
 }()
-// the bundle itself (…/kitchen-sink.app); nil when run as a bare binary
 let appBundlePath: String? = {
     let p = URL(fileURLWithPath: CommandLine.arguments[0]).absoluteURL.resolvingSymlinksInPath().path
     guard let r = p.range(of: "/Contents/MacOS/") else { return nil }
     return String(p[..<r.lowerBound])
 }()
-// a repo build: the checkout's files sit beside the bundle
 let isRepoBuild: Bool = {
     let fm = FileManager.default
     return fm.fileExists(atPath: bundleParentDir + "/commands.toml")
         && fm.fileExists(atPath: bundleParentDir + "/bin/build-app.sh")
 }()
-// the stable location every external config points at (aerospace.toml,
-// the launchd agent): the repo, a link to it, or — for an app
-// install — a real directory set up by bin/setup-home.sh. $WS_HOME overrides
-// it (tests).
 let homeDir: String = {
     if let h = ProcessInfo.processInfo.environment["WS_HOME"], !h.isEmpty { return h }
     return NSHomeDirectory() + "/.config/kitchen-sink"
 }()
-// read-only code + resources: jira/, confluence/, vim/, bin/, icons
 let assetDir: String = {
     if isRepoBuild { return bundleParentDir }
     if let b = appBundlePath { return b + "/Contents/Resources" }
     return bundleParentDir
 }()
-// the user's own files: commands.toml, rules/
 let userDir: String = isRepoBuild ? bundleParentDir : homeDir
 
-// The config file name is a constant (it must be findable before any config
-// is read); every OTHER string — shell, paths, sockets, icon names — is
-// configurable via the [app] section of this file.
 let commandsConfName = "commands.toml"
 
-// MARK: - App settings (commands.toml [app] section)
-
-// Single source of truth for every machine-owned string: shell, CLI paths,
-// socket/focus filenames, icon assets, search dirs, and launchd service wiring.
-// Defaults live here so the app works with no config; parseAppConfig() applies
-// the [app] section overrides when commands.toml is loaded at startup.
 struct AppSettings {
-    // notes + jira (and jira's details / releases / Config) share ONE window
-    // whose view is swapped in place (SharedWindow.swift); false = separate
-    // windows like before
     var sharedWindow = true
-    // build every shared-window view right after launch (hidden), so the
-    // first switch to one is as quick as the next; false = on first use
     var preload = true
     var sharedWidth: CGFloat = 1100
     var sharedHeight: CGFloat = 640
-    // floating windows keep AeroSpace's outer gaps top / bottom (AeroSpace only
-    // applies [gaps] to tiles): points inside the screen's visibleFrame
     var marginTop: CGFloat = 0
     var marginTopBuiltin: CGFloat = 0
     var marginBottom: CGFloat = 0
-    // the Hyper+S card: its width, and the commands listed first (by
-    // section name) in its left pane
     var switcherWidth: CGFloat = 760
     var paletteFirst: [String] = ["filefast", "paths", "prettyprint"]
     var shell = "/opt/homebrew/bin/bash"
-    // args for the embedded terminal's shell: --login -i sources the profile
-    // AND rc files so aliases/functions (zoxide, etc.) work there
     var shellArgs: [String] = ["--login", "-i"]
     var terminalFont = "Hack Nerd Font"
     var terminalFontSize: CGFloat = 13
-    // Font menu "Install font…" catalog: (label, brew cask, type). Type is
-    // one of nerd | mono | sans | serif and picks the submenu group.
     var fontInstallCasks: [(label: String, cask: String, type: String)] = [
         ("JetBrains Mono Nerd Font", "font-jetbrains-mono-nerd-font", "nerd"),
         ("Fira Code Nerd Font", "font-fira-code-nerd-font", "nerd"),
@@ -145,12 +93,8 @@ struct AppSettings {
                    NSHomeDirectory() + "/Applications"]
     var jiraIconName = "jira_icon.png"
     var confluenceIconName = "confluence_icon.png"
-    // the AI view's nav icon ("" = the sparkles glyph)
     var aiIconName = ""
-    // the app's own mark (the kitchen sink): every shared-window view's
-    // top-left icon menu
     var appIconName = "app_icon.png"
-    // the notes view's nav icon (notepad); files: empty = the system folder
     var notesIconName = "notes_icon.png"
     var filesIconName = ""
     var notesSocketName = "ws-notes.sock"
@@ -163,33 +107,13 @@ struct AppSettings {
     var aeroDebugFlag = NSString(string: "~/.cache/aero-debug").expandingTildeInPath
     var aeroLog = NSString(string: "~/.cache/ws-aero.log").expandingTildeInPath
     var voiceLocale = "en-US"
-    // bundle ids of screenshot tools whose capture overlay is an ordinary
-    // window: while one is frontmost our floating windows step down so the
-    // selection rectangle draws ON TOP of them ([app] screenshot-apps)
     var screenshotApps = ["org.flameshot", "pl.maketheweb.cleanshotx",
                           "cc.ffitch.shottr", "com.skitch.skitch"]
-    // global hide behavior: when false, windows only dismiss via Esc (regardless
-    // of per-window sticky); when true (default), non-sticky windows hide on focus loss
     var hideOnFocusLoss = true
-    // [app] focus-loss-delay: seconds focus must stay in another app before
-    // a window hides — a key-window blip (aerospace re-focusing while a view
-    // swaps, an activation hand-off) never counts as leaving
     var focusLossDelay = 0.3
-    // (no [app] float: AeroSpace's on-window-detected rule places every
-    // window of the app, which never tiles / floats itself; popup-only "/"
-    // windows keep their own per-section `float` = window level)
-    // [app] esc-close: rapid Esc presses that hide a window (default 0 =
-    // never; 1 = single Esc, 2 = double-tap). Per view `esc-close` overrides
-    // it — every view's kitchen sink has "Esc Hides Window". The switcher
-    // palette always closes on one Esc.
     var escClose = 0
-    // [app] copy-toast: pill shown after Cmd+K copies a file browser path
-    // ("{}" = the path; empty = no toast)
     var copyToast = "Copied {} to clipboard"
-    // [app] terminal-app: app the file browser's `term` command opens when
-    // the window has no embedded shell drawer (default Ghostty, else Terminal)
     var terminalApp = ""
-    // derived (recomputed whenever the settings change)
     var commandsConfPath: String { userDir + "/" + commandsConfName }
     var focusFilePath: String { popupTmpDir() + focusFileName }
     var jiraIconPath: String { assetDir + "/" + jiraIconName }
@@ -203,27 +127,17 @@ struct AppSettings {
 }
 var settings = AppSettings()
 
-// MARK: - Tunables (named constants for the numeric magic)
-
-// Theme ▸ presets raise a surface to at least this opacity so the palette
-// actually shows over the desktop blur
 let presetMinOpacity: CGFloat = 0.6
-let ipcSocketTimeout = 1.0    // s: aerospace socket reads + launcher ping
-let ipcFallbackTimeout = 1.5  // s: aerospace CLI fallback kill timeout
-let serverRecvTimeout = 2.0   // s: command-server socket recv timeout
-let noteWatchInterval = 1.0   // s: note external-write watcher
-let listWatchInterval = 1.5   // s: list reload watcher
+let ipcSocketTimeout = 1.0
+let ipcFallbackTimeout = 1.5
+let serverRecvTimeout = 2.0
+let noteWatchInterval = 1.0
+let listWatchInterval = 1.5
 let defaultNoteSize = CGSize(width: 640, height: 440)
 let defaultListSize = CGSize(width: 520, height: 520)
 let defaultOutputSize = CGSize(width: 780, height: 560)
 let defaultDetailSize = CGSize(width: 820, height: 640)
 
-// MARK: - Crash reporter
-
-// Writes a backtrace to ~/.cache/ws-crash.log on any fatal signal, then
-// re-raises the signal so the OS still records its normal crash report.
-// Install at launch with installCrashHandler() — the log pinpoints exactly
-// where a crash happened (frame addresses + symbol names).
 private let crashLogFD: Int32 = {
     if let dir = (settings.crashLogPath as NSString).deletingLastPathComponent as String? {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -240,8 +154,6 @@ let crashHandler: @convention(c) (Int32) -> Void = { sig in
     let n = backtrace(&frames, 128)
     backtrace_symbols_fd(&frames, n, fd)
     _ = Darwin.write(fd, "\n", 1)
-    // restore the default disposition and re-raise so the system generates
-    // its own crash report alongside our backtrace
     signal(sig, SIG_DFL)
     raise(sig)
 }
@@ -252,9 +164,6 @@ func installCrashHandler() {
     }
 }
 
-// The Jira window's palette ([jira] per-window colors over [theme]): the
-// Jira Config window, its pickers and the Cmd+F panel wear it too, so the
-// jira family reads as one app whatever preset the Jira window uses.
 func jiraWindowColors() -> PopupColors {
     let v = { (k: String) in hexColor(jiraConfigValue(k)) }
     var c = PopupColors(background: v("background-color").map { ($0.usingColorSpace(.sRGB) ?? $0).withAlphaComponent(1) } ?? BAR,
@@ -266,33 +175,20 @@ func jiraWindowColors() -> PopupColors {
 }
 var jiraHeaderColor: NSColor { hexColor(jiraConfigValue("header-color")) ?? headerBlueSilver }
 
-// Table cells, the "quiet" grid: color only where it means something (hues
-// from the live palette, so a Theme ▸ preset recolors them). Status = a
-// stage square + plain text (hollow = not started, half = moving, filled
-// green = done, filled red = stuck, amber outline = waiting); done rows
-// fade; only urgent priorities are tinted; keys, dates, project dim.
 func jiraCellStyle(_ field: String, _ text: String) -> PopupCellStyle? {
-    let v = text.lowercased()
+    let v = text.lowercased(), w = JiraWords.current
     switch field.lowercased() {
     case "key", "updated", "created", "duedate", "releasedate", "project", "releaselabel", "release":
         return PopupCellStyle(.dim)
     case "status", "statuscategory":
-        if ["cancel", "won't", "wont", "reject", "duplicate"].contains(where: v.contains) {
-            return PopupCellStyle(.dim, mark: .hollow, quietsRow: true)
-        }
-        if ["done", "closed", "resolved", "released", "complete", "fixed", "shipped"].contains(where: v.contains) {
-            return PopupCellStyle(.success, mark: .filled, quietsRow: true)
-        }
-        if ["block", "fail", "impediment"].contains(where: v.contains) { return PopupCellStyle(.danger, mark: .filled) }
-        if ["progress", "review", "test", "qa", "develop", "doing", "verif"].contains(where: v.contains) {
-            return PopupCellStyle(.info, mark: .half)
-        }
-        if ["hold", "wait", "pending", "paused"].contains(where: v.contains) { return PopupCellStyle(.warning, mark: .hollow) }
+        if w.matches(v, w.cancelled) { return PopupCellStyle(.dim, mark: .hollow, quietsRow: true) }
+        if w.matches(v, w.done) { return PopupCellStyle(.success, mark: .filled, quietsRow: true) }
+        if w.matches(v, w.blocked) { return PopupCellStyle(.danger, mark: .filled) }
+        if w.matches(v, w.active) { return PopupCellStyle(.info, mark: .half) }
+        if w.matches(v, w.waiting) { return PopupCellStyle(.warning, mark: .hollow) }
         return PopupCellStyle(.dim, mark: .hollow)
     case "priority":
-        if ["highest", "blocker", "critical", "urgent", "p0", "p1"].contains(where: v.contains) {
-            return PopupCellStyle(.danger, tinted: true, bold: true)
-        }
+        if w.matches(v, w.urgent) { return PopupCellStyle(.danger, tinted: true, bold: true) }
         return PopupCellStyle(.dim)
     case "releasestatus":
         if v.contains("unreleased") { return PopupCellStyle(.warning, mark: .hollow) }
@@ -302,7 +198,41 @@ func jiraCellStyle(_ field: String, _ text: String) -> PopupCellStyle? {
     }
 }
 
-// `palette = accent2, success, warning, danger, info` (5 hex colors)
+struct JiraWords {
+    let cancelled, done, blocked, active, waiting, new, urgent: [String]
+    static let defaults: [String: String] = [
+        "status-cancelled-words": "cancel, won't, wont, reject, duplicate",
+        "status-done-words": "done, closed, resolved, released, complete, fixed, shipped",
+        "status-blocked-words": "block, fail, impediment",
+        "status-active-words": "progress, review, test, qa, develop, doing, verif",
+        "status-waiting-words": "hold, wait, pending, paused",
+        "status-new-words": "backlog, open, to do, todo, new, selected, triage, funnel",
+        "priority-urgent-words": "highest, blocker, critical, urgent, p0, p1",
+    ]
+    private static var cache: JiraWords?
+    private static let lock = NSLock()
+    static var current: JiraWords {
+        lock.lock(); defer { lock.unlock() }
+        if let c = cache { return c }
+        let c = JiraWords { jiraConfigValue($0) }
+        cache = c
+        return c
+    }
+    static func invalidate() { lock.lock(); cache = nil; lock.unlock() }
+
+    init(_ value: (String) -> String?) {
+        func list(_ key: String) -> [String] {
+            (value(key) ?? Self.defaults[key] ?? "").split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+        }
+        cancelled = list("status-cancelled-words"); done = list("status-done-words")
+        blocked = list("status-blocked-words"); active = list("status-active-words")
+        waiting = list("status-waiting-words"); new = list("status-new-words")
+        urgent = list("priority-urgent-words")
+    }
+    func matches(_ lowered: String, _ words: [String]) -> Bool { words.contains(where: lowered.contains) }
+}
+
 func parsePalette(_ v: String?) -> PopupPalette? {
     guard let v, !v.isEmpty else { return nil }
     let cs = v.split(separator: ",").compactMap { hexColor($0.trimmingCharacters(in: .whitespaces)) }
@@ -316,10 +246,6 @@ func paletteString(_ p: PopupPalette) -> String {
     }.joined(separator: ", ")
 }
 
-// [theme] section in commands.toml: friendly hex colors that override the
-// built-in (Catppuccin Macchiato) window colors app-wide. Keys map 1:1 to the popup's
-// color roles (background border text dim highlight accent header panel).
-// The interactive color picker edits this section live.
 func parseTheme() -> [String: NSColor] {
     var out: [String: NSColor] = [:]
     guard let content = readConfigText() else { return out }
@@ -336,20 +262,12 @@ let TEXT = THEME["text"] ?? NSColor(srgbRed: 0xCA/255, green: 0xD3/255, blue: 0x
 let DIM = THEME["dim"] ?? NSColor(srgbRed: 0x93/255, green: 0x9A/255, blue: 0xB7/255, alpha: 1)
 let BORDER = THEME["border"] ?? NSColor(srgbRed: 0xC6/255, green: 0xA0/255, blue: 0xF6/255, alpha: 1)
 let ACCENT = THEME["accent"] ?? NSColor(srgbRed: 85/255, green: 104/255, blue: 130/255, alpha: 1)
-// app-wide default drag-header tint + the two drawer backgrounds ([theme]
-// header / browser / terminal); per-window `header-color` /
-// `browser-background` / `terminal-background` in commands.toml override them
 let THEME_HEADER = THEME["header"]
 let THEME_BROWSER = THEME["browser"]
 let THEME_TERMINAL = THEME["terminal"]
 
-// default drag-header tint for the notes/jira windows (dark bluey silver);
-// a commands.toml `header-color` or [theme] `header` overrides it per scope
 let headerBlueSilver = THEME_HEADER ?? NSColor(srgbRed: 0.27, green: 0.31, blue: 0.36, alpha: 1)
 
-// [theme] accent2 / success / warning / danger / info: the secondary hues
-// (links + match highlights, status colors, the shell's ANSI palette).
-// Unset keys keep the built-in (Catppuccin Macchiato) values.
 let THEME_PALETTE: PopupPalette = {
     let d = PopupPalette()
     return PopupPalette(accent2: THEME["accent2"] ?? d.accent2, success: THEME["success"] ?? d.success,
@@ -357,9 +275,6 @@ let THEME_PALETTE: PopupPalette = {
                         info: THEME["info"] ?? d.info)
 }()
 
-// One palette builder for every window: the [theme] colors, then the
-// section's per-window overrides (Theme ▸ presets write them). A window
-// with its own accent gets an outline in that hue; otherwise [theme] border.
 func windowColors(_ cmd: CommandSpec? = nil) -> PopupColors {
     var c = PopupColors(background: BAR, border: BORDER,
                         text: cmd?.textColor ?? TEXT, dim: cmd?.dimColor ?? DIM,
@@ -373,9 +288,6 @@ func windowColors(_ cmd: CommandSpec? = nil) -> PopupColors {
     return c
 }
 
-// a section's look on its window config: header strip, palette (with the
-// card hue opaque — windowColors) and card opacity = `tint-alpha`, else the
-// background color's alpha (so the picker's opacity slider survives), + font
 func applyWindowTheme(_ cfg: inout PopupConfig, _ cmd: CommandSpec) {
     cfg.headerColor = cmd.headerColor ?? headerBlueSilver
     cfg.colors = windowColors(cmd)
@@ -384,20 +296,12 @@ func applyWindowTheme(_ cfg: inout PopupConfig, _ cmd: CommandSpec) {
     cfg.fontName = cmd.font
 }
 
-// MARK: - Daemon socket, lock + focus file
-
-// Hand `name` (a mode — window / notes / ping / jira-poll-on …) to the
-// RUNNING daemon over its command socket. Returns false when no daemon is
-// listening.
 @discardableResult
 func sendLaunchMessage(_ name: String) -> Bool {
     let path = popupTmpDir() + settings.notesSocketName
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return false }
     defer { close(fd) }
-    // non-blocking connect + 1s select: a daemon whose accept queue is
-    // saturated would otherwise block this ping (and the hotkey script
-    // behind it) for minutes
     let flags = fcntl(fd, F_GETFL, 0)
     _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
     var addr = makeUnixSockAddr(path)
@@ -417,13 +321,12 @@ func sendLaunchMessage(_ name: String) -> Bool {
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
         guard err == 0 else { return false }
     }
-    _ = fcntl(fd, F_SETFL, flags)   // blocking write, tiny payload
+    _ = fcntl(fd, F_SETFL, flags)
     let msg = name + "\n"
     msg.withCString { _ = write(fd, $0, msg.count) }
     return true
 }
 
-// write every byte (a PNG reply is larger than one socket buffer)
 func writeAll(_ fd: Int32, _ data: Data) {
     data.withUnsafeBytes { raw in
         guard var p = raw.baseAddress else { return }
@@ -437,9 +340,6 @@ func writeAll(_ fd: Int32, _ data: Data) {
     }
 }
 
-// a request whose answer comes back on the same connection (screenshot -r
-// / -g: the daemon answers when the user finishes). nil = no daemon or no
-// answer within `timeout` seconds; empty = the request ended without a result.
 func sendRequest(_ msg: String, timeout: Double) -> Data? {
     let path = popupTmpDir() + settings.notesSocketName
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -467,23 +367,17 @@ func sendRequest(_ msg: String, timeout: Double) -> Data? {
     return out
 }
 
-// ONE daemon per socket. The first process holds an exclusive flock beside
-// the socket for its whole life (the kernel drops it however the process
-// ends; O_CLOEXEC so nvim / shells / python never inherit it and outlive
-// us holding it). A second launch — `open -n`, a double hotkey during a cold
-// start, the DMG app next to the repo build — must not steal the socket and
-// open a second set of windows: main.swift hands its request over instead.
 private var daemonLockFD: Int32 = -1
 func acquireDaemonLock(waitUpTo seconds: Double) -> Bool {
     if daemonLockFD >= 0 { return true }
     let fd = open(popupTmpDir() + settings.notesSocketName + ".lock", O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-    guard fd >= 0 else { return true }   // can't even create it: never block a launch on that
+    guard fd >= 0 else { return true }
     let deadline = Date().addingTimeInterval(seconds)
     while flock(fd, LOCK_EX | LOCK_NB) != 0 {
         if Date() >= deadline { close(fd); return false }
         usleep(50_000)
     }
-    daemonLockFD = fd   // held until exit
+    daemonLockFD = fd
     return true
 }
 
@@ -498,8 +392,6 @@ func readFocusFile() -> (String?, pid_t?) {
     }
     return (String(wid), pid)
 }
-
-// MARK: - Aerospace IPC (direct socket; falls back to spawning the CLI)
 
 func writeUInt32(_ fd: Int32, _ v: UInt32) {
     var v = v.littleEndian
@@ -522,10 +414,6 @@ func readUInt32(_ fd: Int32) -> UInt32? {
     return d.withUnsafeBytes { $0.load(as: UInt32.self) }.littleEndian
 }
 
-// AeroSpace's own socket is /tmp/bobko.aerospace-<short user name>.sock. A
-// configured `aerospace-socket` that doesn't exist (a path hard-coded on
-// another Mac / user) falls back to that one: missing it silently turned
-// EVERY aerospace call into a CLI process spawn. nil = AeroSpace isn't up.
 func liveAerospaceSocket() -> String? {
     let fm = FileManager.default
     if fm.fileExists(atPath: settings.aerospaceSocketPath) { return settings.aerospaceSocketPath }
@@ -545,8 +433,6 @@ func aerospaceSocket(_ args: [String], timeout: Double = ipcSocketTimeout) -> St
         }
     }
     guard ok else { return nil }
-    // aerospace IPC can stall (its own main thread is busy) — never let a
-    // blocking read hang OUR main thread: time out and fall back
     var tv = timeval(tv_sec: Int(timeout), tv_usec: Int32((timeout - Double(Int(timeout))) * 1_000_000))
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     writeUInt32(fd, 1)
@@ -572,7 +458,6 @@ func aerospaceFallback(_ args: [String]) -> String {
         p.standardOutput = pipe
         p.standardError = Pipe()
         do { try p.run() } catch { continue }
-        // don't wait forever on a stalled CLI — terminate after the timeout
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
             p.waitUntilExit()
@@ -591,8 +476,6 @@ func aerospaceFallback(_ args: [String]) -> String {
 }
 
 func aerospaceCall(_ args: [String]) -> String {
-    // every IPC call timed into [app] aero-log while [app] debug-flag
-    // (~/.cache/aero-debug) exists
     let t0 = DispatchTime.now().uptimeNanoseconds
     let r = aerospaceSocket(args) ?? aerospaceFallback(args)
     let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
@@ -601,8 +484,6 @@ func aerospaceCall(_ args: [String]) -> String {
     }
     return r
 }
-
-// MARK: - Data model
 
 struct AppInfo {
     let name: String
@@ -636,28 +517,22 @@ func gatherWorkspaces() -> [WorkspaceInfo] {
                                windowTitle: parts[2].isEmpty ? nil : parts[2]))
         dict[parts[3]] = ws
     }
-    // letters (alphabetical) first, then numbers (numeric)
     return order.compactMap { dict[$0] }.sorted { a, b in
         let an = Int(a.id), bn = Int(b.id)
         switch (an, bn) {
         case (nil, nil): return a.id.localizedCaseInsensitiveCompare(b.id) == .orderedAscending
-        case (nil, .some): return true   // letter before number
+        case (nil, .some): return true
         case (.some, nil): return false
         case (.some, .some): return an! < bn!
         }
     }
 }
 
-// MARK: - Command palette (loaded once from commands.toml)
-
-// One `columns` entry of a table-mode list: field:Title:width:align:flags.
-// The SAME string drives jira_poll.py's API fields= param (jira_config.py
-// parse_columns) — keep the two parsers in step.
 struct ListColumn {
     var field: String
     var title: String
-    var width: CGFloat          // % of the usable row width, 0 = share leftover
-    var align: String           // left | right | center
+    var width: CGFloat
+    var align: String
     var sortable: Bool
     var filterable: Bool
 
@@ -678,8 +553,6 @@ struct ListColumn {
         }
     }
 
-    // back to the commands.toml form (after a divider drag). titles: false =
-    // `field::w:align` — jira headers come from the field labels instead
     static func serialize(_ cols: [ListColumn], titles: Bool = true) -> String {
         cols.map { c in
             let w = c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width)
@@ -696,84 +569,75 @@ struct ListColumn {
     }
 }
 
-// Typed command specs. Plain `name = script` lines become .shell commands;
-// INI-style sections configure note/list behavior (see commands.toml).
 struct CommandSpec {
     enum Kind { case shell, note, list, output, files }
 
     var name: String
     var kind: Kind
-    var windowName: String   // PopupConfig.name -> window title / identity
-    var chromeTitle: String  // drag-header label
-    var script: String?           // shell: command to run
-    var paths: [String] = []      // note: files edited in-window (tabs when > 1)
-    var sources: [String] = []    // list: JSON array (or TSV) data files (tabs when > 1)
-    var root: String?             // files: starting directory for the file browser
-    var favorites: [String] = []  // files: static favorite dirs (commands.toml, tilde ok)
-    // files: the pinned "Recent" view (RecentFiles.swift) + where it opens
+    var windowName: String
+    var chromeTitle: String
+    var script: String?
+    var paths: [String] = []
+    var sources: [String] = []
+    var root: String?
+    var favorites: [String] = []
     var recent = true
     var recentDays = 7
     var recentLimit = 200
     var recentExclude: [String] = []
-    var startRecent = true    // files window opens on Recent (`start = recent`)
-    var recentEverywhere = true  // `recent-scope = everywhere | home`
-    var browserBackground: NSColor?  // files: panel background (default silvery blue)
-    var backgroundColor: NSColor?  // note/files: window card fill (the notepad)
-    var tintAlpha: CGFloat?        // note/files: card opacity override (0-1)
-    var primary: String?   // list: field shown as the row title
-    var content: String?   // list: field drawn next to the title (truncated)
-    var detail: String?    // list: field drawn dim on line 2 (left)
-    var trailing: String?  // list: field drawn dim on line 2 (right)
-    var body: String?      // list: field drawn wrapped under line 2 (2 lines max)
-    var filter: [String] = []    // list: fields matched by the query (default: all)
-    var filters: [String] = []   // list: dropdown filter dimensions (field keys)
-    var width: CGFloat = 0       // list/note: popup width override
-    var maxRows = 0              // list: max rows shown
-    var contentCap = 0           // list: max chars of `content` before truncation
-    var bodyLines = 0            // list: max wrapped lines for `body` (0 = framework default)
-    var pageSize = 0             // list: rows per page; 0 = no paging ("load more" row)
-    var copyFields: [String] = []  // list: row fields copied as TSV (empty = no copy UI)
-    // window behavior, all commands.toml-driven so new windows need no code:
-    var checkbox: Bool?       // list: show the copy checkbox column
-                              //       (nil = on when copy-fields is set)
-    var resize = false        // drag edges/corners to resize
-    var drag = true           // drag the window by its header
-    var sticky = true         // stay visible when another app takes focus
-    var float: Bool?          // popup-only "/" windows: stay above other apps' windows (nil = per-window default)
-    var panel = false         // output: a tool panel, not a shared-window view (isToolPanel)
-    var label: String?        // palette text for "/" commands (nil = the section name)
-    var inPalette = true      // `in-palette = false`: not listed in the Hyper+S "/" palette
-    var tabsOpaque: Bool?     // any window: solid (never transparent) tabs strip (nil = on)
-    // files: browser sort (name|modified|created|size|kind) + asc/desc, the
-    // recursive-search cap/excludes and the filter words that open a terminal
+    var startRecent = true
+    var recentEverywhere = true
+    var browserBackground: NSColor?
+    var backgroundColor: NSColor?
+    var tintAlpha: CGFloat?
+    var primary: String?
+    var content: String?
+    var detail: String?
+    var trailing: String?
+    var body: String?
+    var filter: [String] = []
+    var filters: [String] = []
+    var width: CGFloat = 0
+    var maxRows = 0
+    var contentCap = 0
+    var bodyLines = 0
+    var pageSize = 0
+    var copyFields: [String] = []
+    var checkbox: Bool?
+    var resize = false
+    var drag = true
+    var sticky = true
+    var float: Bool?
+    var panel = false
+    var label: String?
+    var aliases: [String] = []
+    var inPalette = true
+    var tabsOpaque: Bool?
     var sort: String?
     var sortDescending: Bool?
     var searchLimit: Int?
     var searchExclude: [String]?
     var terminalWords: [String]?
-    var searchWidth: CGFloat = 0  // list: search bar as a fraction of window width
-    var maxStretch: CGFloat = 0   // list: cap on per-row stretch when resized big
-    var tableRowHeight: CGFloat = 0   // list table mode: row height (0 = default 32)
-    var height: CGFloat = 0       // window height in points
-    var maxHeight: CGFloat = 0    // cap on the window height (0 = 60% of screen)
-    var font: String?             // font family for this window's text
-    var fontSize: CGFloat = 0     // note: editor point size (0 = default 13)
-    var headerColor: NSColor?     // drag-header tint (nil = window background)
-    var voice = false             // note: record + transcribe button in the header
-    // note: dictation appears at the cursor AS YOU SPEAK (true, default);
-    // false = held until stop, then inserted at the cursor in one go
+    var searchWidth: CGFloat = 0
+    var maxStretch: CGFloat = 0
+    var tableRowHeight: CGFloat = 0
+    var height: CGFloat = 0
+    var maxHeight: CGFloat = 0
+    var font: String?
+    var fontSize: CGFloat = 0
+    var headerColor: NSColor?
+    var voice = false
     var voiceLive = true
-    var terminal = false          // note: embedded shell drawer at the bottom
+    var terminal = false
     var terminalHeight: CGFloat = 240
-    var inspectorWidth: CGFloat = 340 // jira: the issue panel on the right (0 = none; Cmd+I)
-    var sidebarWidth: CGFloat = 210   // note: the tabs as a left sidebar (0 = a strip under the header)
-    var proseFont: String?            // note: reading view font stack (CSS)
+    var inspectorWidth: CGFloat = 340
+    var sidebarWidth: CGFloat = 210
+    var proseFont: String?
     var proseFontSize: CGFloat = 0
     var proseWidth: CGFloat = 0
-    var newNoteName = "Untitled"      // note: Cmd+N's empty note NAME-1.md, NAME-2.md… (no spaces)
-    var newDocName = "doc"            // note: Ctrl+N's templated doc NAME-1.md, NAME-2.md…
-    var newDocTemplate = "markdown_doc_catppuccin_latte"  // note: Ctrl+N's body = this vim/snippets/markdown.json snippet
-    // the default notes folder: the first `paths` entry (a folder, or a file's folder)
+    var newNoteName = "Untitled"
+    var newDocName = "doc"
+    var newDocTemplate = "markdown_doc_catppuccin_latte"
     var notesFolder: String? {
         paths.first.map { p -> String in
             let e = (p as NSString).expandingTildeInPath
@@ -782,26 +646,22 @@ struct CommandSpec {
             return isDir.boolValue ? e : (e as NSString).deletingLastPathComponent
         }
     }
-    var terminalDir: String?      // note: starting directory for the embedded shell
-    var terminalBackground: NSColor?  // note: shell drawer background (silvery blue)
-    // per-window text palette (Theme ▸ presets); nil = the [theme] colors
+    var terminalDir: String?
+    var terminalBackground: NSColor?
     var textColor: NSColor?
     var dimColor: NSColor?
     var highlightColor: NSColor?
-    var accentColor: NSColor?           // active tab / chip underline
-    var palette: PopupPalette?          // `palette` = accent2, success, warning, danger, info
-    var terminalForeground: NSColor?    // shell drawer text (nil = textColor)
-    var vimMode = false           // note: edit notes in an embedded nvim pane
-    var vimBin = "nvim"           // note: vim binary path or name
-    var vimInit: String?          // note: init file for the vim pane (nil = bundled)
-    var startDrawer = "none"      // note: drawer open at launch: browser|terminal|none
-    var escClose: Int?            // rapid Esc presses that close the window (nil = [app] esc-close; 0 = never)
-    var imageRows = 10            // note: screen rows an inline image gets in vim
-    var icon: NSImage?            // window header glyph (jira/notes/heart/png)
-    var saveDir = "/tmp/"         // prettyprint: where "save file" writes
-    // list: spreadsheet mode — `table = true` + `columns = field:Title:
-    // width%:align:flags, …` (flags filter / sort, e.g. filter+sort);
-    // table-sort = field:asc|desc remembers the last clicked header
+    var accentColor: NSColor?
+    var palette: PopupPalette?
+    var terminalForeground: NSColor?
+    var vimMode = false
+    var vimBin = "nvim"
+    var vimInit: String?
+    var startDrawer = "none"
+    var escClose: Int?
+    var imageRows = 10
+    var icon: NSImage?
+    var saveDir = "/tmp/"
     var table = false
     var columns: [ListColumn] = []
     var tableSort: String?
@@ -815,8 +675,6 @@ struct CommandSpec {
     }
 }
 
-// [shortcuts] in file order: the "Keyboard Shortcuts…" list (view = all /
-// notes / files / jira)
 struct ShortcutEntry {
     let view: String
     let keys: String
@@ -824,8 +682,6 @@ struct ShortcutEntry {
 }
 var shortcutEntries: [ShortcutEntry] = []
 
-// the [shortcuts] groups every view's Cmd+/ sheet ends with: the pane
-// kinds every view shares ("sidebar: …", "preview: …"), then "all: …"
 func sharedShortcutGroups() -> [ShortcutRows] {
     func items(_ v: String) -> [(keys: String, what: String)] {
         shortcutEntries.filter { $0.view == v }.map { ($0.keys, $0.what) }
@@ -835,7 +691,6 @@ func sharedShortcutGroups() -> [ShortcutRows] {
 }
 
 func loadCommands() -> [CommandSpec] {
-    // app-level settings first — [app] may sit anywhere in the file
     applyAppConfigFromDisk()
     guard let content = readConfigText() else {
         FileHandle.standardError.write(Data("ws: \(commandsConfName) missing — no command palette\n".utf8))
@@ -849,20 +704,17 @@ func loadCommands() -> [CommandSpec] {
         guard let s = section else { return }
         switch s.name {
         case "icons":
-            // icon overrides for the kitchen-sink rows ([icons] section)
             iconRules = parseIconRules(s.vars)
-        case "shortcuts",       // collected line by line below (order matters)
-             "app",             // already applied by applyAppConfigFromDisk()
-             "confluence", "ai", "compare", // their views read it directly (configSectionValue)
-             "notifications",   // Hyper+S unread counts (notify/notify_poll.py)
-             "pane-shot",       // the herdr pane capture (PaneShot.swift)
-             "notes-find",      // the notes pad's Space s f popup (NoteFindWindow.swift)
-             "setup",           // the Setup & Health Check window (SetupWindow.swift)
-             "settings-hub":    // ws-settings (settings_hub/, python)
-            break               // never palette commands
+        case "shortcuts",
+             "app",
+             "confluence", "ai", "compare",
+             "notifications",
+             "pane-shot",
+             "notes-find",
+             "setup",
+             "settings-hub":
+            break
         default:
-            // enabled = true is required: no key, no command. Nothing shows
-            // unless the section says enabled = true explicitly.
             if s.vars["enabled"] == "true" {
                 cmds.append(makeCommand(s.name, s.vars))
             }
@@ -881,7 +733,6 @@ func loadCommands() -> [CommandSpec] {
         }
         guard let (key, val) = configEntry(s) else { continue }
         if section?.name == "shortcuts" {
-            // "view: keys = what it does"
             if let colon = key.firstIndex(of: ":") {
                 let view = key[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
                 let keys = key[key.index(after: colon)...].trimmingCharacters(in: .whitespaces)
@@ -893,49 +744,34 @@ func loadCommands() -> [CommandSpec] {
         if section != nil {
             section?.vars[key] = val
         } else if !key.isEmpty && !val.isEmpty {
-            // plain shell command: name = script
             cmds.append(CommandSpec(name: key, kind: .shell, script: val))
         }
     }
     flushSection()
-    // keep the launchd jira-poll agent in lock-step with commands.toml — it
-    // must never run unless [jira] says enabled (or poll-when-disabled) = true
     syncJiraLaunchAgent()
     return cmds
 }
 
-// [jira] enabled — THE SWITCH for the jira window, the poll agent and the
-// menu-bar "Enable Jira"/"Disable Jira" title. Read straight from commands.toml so
-// every caller sees the same truth (loadCommands drops disabled sections).
 func jiraEnabledInConfig() -> Bool { jiraConfigFlag("enabled") }
 
-// [jira] poll-when-disabled — the "Keep Polling" answer when the user
-// disables jira while the poller runs: the launchd agent stays loaded (and
-// jira_poll.py keeps publishing) with the window + menu entries hidden.
 func jiraBackgroundPollInConfig() -> Bool { jiraConfigFlag("poll-when-disabled") }
 
-// the launchd agent runs whenever either switch says so
 func jiraPollActiveInConfig() -> Bool { jiraEnabledInConfig() || jiraBackgroundPollInConfig() }
 
-// boolean key of the [jira] section, false when absent (disabled by default)
 func jiraConfigFlag(_ key: String) -> Bool { tri(jiraConfigValue(key)) == true }
 
-// raw value of a [jira] key straight from commands.toml (nil when absent)
 func jiraConfigValue(_ key: String) -> String? { configSectionValue("jira", key) }
 
-// raw value of `key` in `[section]` straight from commands.toml (nil when absent)
+func configAliases(_ section: String) -> [String] {
+    (configSectionValue(section, "aliases") ?? "").split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+}
+
 func configSectionValue(_ section: String, _ key: String) -> String? {
     guard let content = readConfigText() else { return nil }
     return configSectionEntries(configLines(content), section).first(where: { $0.key == key })?.value
 }
 
-// launchctl is a GUI-session domain: the agent is bootstrapped (loaded) only
-// when [jira] enabled = true (or poll-when-disabled = true), booted out
-// otherwise. Runs at daemon start and
-// on every config reload (the menu-bar switch), so the poll literally cannot
-// run in the background when jira is disabled. The installed plist is kept
-// in sync with the repo template (jira/com.jira.poll.plist, __WS_CONFIG__
-// substituted); an already-loaded, unchanged agent is left running.
 func syncJiraLaunchAgent() {
     let enabled = jiraPollActiveInConfig()
     let home = NSHomeDirectory()
@@ -975,14 +811,13 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.chromeTitle = vars["title"] ?? s.windowName
     if let l = vars["label"]?.trimmingCharacters(in: .whitespaces), !l.isEmpty { s.label = l }
     s.inPalette = tri(vars["in-palette"]) ?? true
-    // note / files / output
+    s.aliases = csv(vars["aliases"])
     s.paths = csv(vars["paths"] ?? vars["path"])
     s.root = vars["root"]
     s.favorites = csv(vars["favorites"])
     s.panel = tri(vars["panel"]) ?? false
     s.icon = vars["icon"].flatMap(resolveIconName)
     if let v = vars["save-dir"], !v.isEmpty { s.saveDir = v }
-    // list
     s.sources = csv(vars["sources"] ?? vars["source"])
     s.primary = vars["primary"]
     s.content = vars["content"]
@@ -1003,7 +838,6 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.table = tri(vars["table"]) ?? false
     s.columns = ListColumn.parse(vars["columns"])
     s.tableSort = vars["table-sort"]
-    // window size + behavior
     s.width = num(vars["width"])
     s.height = num(vars["height"])
     s.maxHeight = num(vars["max-height"])
@@ -1012,7 +846,6 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.sticky = tri(vars["sticky"]) ?? true
     s.float = tri(vars["float"])
     s.escClose = Int(vars["esc-close"] ?? vars["vim-esc-close"] ?? "")
-    // look
     s.font = vars["font"]
     s.fontSize = num(vars["font-size"])
     s.headerColor = hexColor(vars["header-color"])
@@ -1025,7 +858,6 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     s.accentColor = hexColor(vars["accent-color"])
     s.palette = parsePalette(vars["palette"])
     s.tabsOpaque = tri(vars["tabs-opaque"])
-    // notes: voice, shell drawer, vim pane
     s.voice = tri(vars["voice"]) ?? false
     s.voiceLive = tri(vars["voice-live"]) ?? true
     s.terminal = tri(vars["terminal"]) ?? false
@@ -1046,7 +878,6 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     if let v = vars["vim-init"], !v.isEmpty { s.vimInit = v }
     if let v = vars["start-drawer"], !v.isEmpty { s.startDrawer = v.lowercased() }
     s.imageRows = Int(vars["image-rows"] ?? "") ?? 10
-    // files: browser sort, recursive search, the Recent view
     s.sort = vars["sort"]
     if let o = vars["sort-order"]?.lowercased() { s.sortDescending = o.hasPrefix("desc") }
     s.searchLimit = Int(vars["search-limit"] ?? "")
@@ -1061,9 +892,6 @@ private func makeCommand(_ name: String, _ vars: [String: String]) -> CommandSpe
     return s
 }
 
-// hex color from commands.toml: "7d8fa6", "0x7d8fa6" or "#7d8fa6" (opaque),
-// or 8-digit "aa7d8fa6" / "0xaa7d8fa6" where the leading AA is the ALPHA
-// (0x00-0xFF) — the picker's opacity slider is stored that way
 func hexColor(_ s: String?) -> NSColor? {
     guard let s, !s.isEmpty else { return nil }
     var hex = s
@@ -1074,16 +902,11 @@ func hexColor(_ s: String?) -> NSColor? {
     guard Scanner(string: hex).scanHexInt64(&v) else { return nil }
     let hasAlpha = hex.count == 8
     let a = hasAlpha ? Double((v >> 24) & 0xFF) / 255.0 : 1.0
-    // never let a parsed surface color be fully invisible — floor the
-    // transparency at 8% so a hand-edited "00…" can't blank a window
     return NSColor(srgbRed: Double((v >> 16) & 0xFF) / 255,
                    green: Double((v >> 8) & 0xFF) / 255,
                    blue: Double(v & 0xFF) / 255, alpha: max(a, 0.08))
 }
 
-// Read the [app] section from commands.toml and apply the overrides. Called
-// from loadCommands (and from main.swift before any socket ping) so app
-// settings are in place before anything else — order-independent of [icons].
 func applyAppConfigFromDisk() {
     guard let content = readConfigText() else { return }
     var vars: [String: String] = [:]
@@ -1093,9 +916,6 @@ func applyAppConfigFromDisk() {
     parseAppConfig(vars)
 }
 
-// [app] section -> AppSettings overrides. Every key is optional; absent keys
-// keep the built-in defaults (see AppSettings). Lists are comma-separated,
-// paths may use "~".
 private func parseAppConfig(_ vars: [String: String]) {
     let str = { (k: String) -> String? in vars[k]?.trimmingCharacters(in: .whitespaces) }
     let list = { (k: String) -> [String] in
@@ -1104,7 +924,6 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("shell"), !v.isEmpty { settings.shell = v }
     if let v = str("terminal-font"), !v.isEmpty { settings.terminalFont = v }
     if let v = str("terminal-font-size"), let n = Double(v), n >= 6 { settings.terminalFontSize = CGFloat(n) }
-    // font-install-casks = Label|cask|type, Label|cask|type, …
     let casks = csv(vars["font-install-casks"]).compactMap { entry -> (label: String, cask: String, type: String)? in
         let parts = entry.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
@@ -1157,21 +976,12 @@ private func parseAppConfig(_ vars: [String: String]) {
     if let v = str("terminal-app") { settings.terminalApp = v }
     FilePopup.borderColor = hexColor(str("preview-border")) ?? FilePopup.defaultBorder
     FilePopup.borderWidth = str("preview-border-width").flatMap { Double($0) }.map { CGFloat(max(0, min($0, 8))) } ?? 2
-    // the focused pane's ring (PaneNav): Ctrl+H/J/K/L and clicks move it
     PaneNav.ringColor = hexColor(str("pane-focus-color")) ?? PaneNav.defaultRingColor
     PaneNav.ringWidth = str("pane-focus-width").flatMap { Double($0) }.map { CGFloat(max(0, min($0, 4))) } ?? 1
     VimKeys.enabled = tri(str("vim-keys")) ?? true
     VimKeys.showBadge = tri(str("vim-mode-badge")) ?? true
 }
 
-// MARK: - Theme presets (header icon menu ▸ Theme)
-
-// A coordinated palette for one window. "Whole Window" applies every surface
-// (the blended look: notepad, a slightly deeper explorer + terminal, a raised
-// header); the per-surface items apply just that surface. Transparency is
-// kept per surface — a preset changes hues, never how see-through it is.
-// Every color a Theme preset can touch on one window, captured when the
-// Theme menu opens so a hover preview can be undone exactly.
 struct ThemeSnapshot {
     let roles: [(PopupWindow.ThemeRole, NSColor)]
     let text, dim, highlight, accent, border: NSColor
@@ -1195,20 +1005,16 @@ struct ThemeSnapshot {
     }
 }
 
-// Theme menu delegate: reports the highlighted preset (item tag) and the
-// menu closing, so presets preview live while hovered.
 final class ThemePreviewDelegate: NSObject, NSMenuDelegate {
     private let onHighlight: (Int?) -> Void
     private let onClose: () -> Void
     private var current: Int?
-    // set when a real Theme item was picked: closing must not undo it
     var committed = false
     init(onHighlight: @escaping (Int?) -> Void, onClose: @escaping () -> Void) {
         self.onHighlight = onHighlight
         self.onClose = onClose
     }
     func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
-        // only preset rows carry their index; Custom/Reset rows restore
         let tag = item?.representedObject as? Int
         guard tag != current else { return }
         current = tag
@@ -1220,8 +1026,6 @@ final class ThemePreviewDelegate: NSObject, NSMenuDelegate {
     }
 }
 
-// Header Style ▸ hover preview: the highlighted style shows on every window
-// at once; closing the menu without a pick restores the saved one
 final class HeaderStylePreviewDelegate: NSObject, NSMenuDelegate {
     private let original: HeaderStyle
     var committed = false
@@ -1239,27 +1043,22 @@ final class HeaderStylePreviewDelegate: NSObject, NSMenuDelegate {
 
 struct ThemePreset {
     let name: String
-    let background: NSColor   // notepad / window card (base)
-    let browser: NSColor      // file-explorer panel (mantle)
-    let terminal: NSColor     // shell drawer (crust)
-    let header: NSColor       // drag header — the DEEPEST tone, like a tmux status bar
+    let background: NSColor
+    let browser: NSColor
+    let terminal: NSColor
+    let header: NSColor
     let text: NSColor
     let dim: NSColor
-    let highlight: NSColor    // selection / cursor-row pills
-    let accent: NSColor       // the signature hue: active tab, focus, on-state
-    let palette: PopupPalette // accent2 + status hues (jira cells, ANSI, ✕ hover)
+    let highlight: NSColor
+    let accent: NSColor
+    let palette: PopupPalette
 
     var isLight: Bool { background.relativeLuminance > 0.45 }
-    // Theme menu group: mid-tone cards (slate / dusk: Nord, Frappé,
-    // Everforest…) vs the deep ones vs light
     enum Tone: Int { case mid, dark, light }
     var tone: Tone {
         isLight ? .light : background.relativeLuminance >= 0.017 ? .mid : .dark
     }
 
-    // commands.toml [themes]:
-    //   Name = bg, browser, terminal, header, text, dim, highlight[, accent[,
-    //          accent2, success, warning, danger, info]]
     static func parse(name: String, _ value: String) -> ThemePreset? {
         let c = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         guard !name.isEmpty, [7, 8, 13].contains(c.count) else { return nil }
@@ -1273,19 +1072,14 @@ struct ThemePreset {
                                                        : ThemePreset.defaultPalette(light: colors[0].relativeLuminance > 0.45))
     }
 
-    // a palette for [themes] entries that only give the 7/8 base colors
     static func defaultPalette(light: Bool) -> PopupPalette {
-        light ? PopupPalette(colors("1E66F5, 40A02B, DF8E1D, D20F39, 179299"))!   // Catppuccin Latte
-              : PopupPalette()                                                   // Macchiato
+        light ? PopupPalette(colors("1E66F5, 40A02B, DF8E1D, D20F39, 179299"))!
+              : PopupPalette()
     }
     private static func colors(_ s: String) -> [NSColor] {
         s.split(separator: ",").compactMap { hexColor($0.trimmingCharacters(in: .whitespaces)) }
     }
 
-    // the stock palettes (official hex values where the theme publishes them).
-    // Surfaces are layered like the themes' own tmux/terminal ports:
-    // header = crust (deepest), terminal = crust, explorer = mantle, card = base.
-    //                    base    mantle  crust   header  text    dim     sel     accent  accent2 green   yellow  red     cyan
     static let builtIn: [ThemePreset] = [
         ("Tokyo Night", "1A1B26, 16161E, 13141C, 111219, C0CAF5, 9AA5CE, 283457, 7AA2F7, BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"),
         ("Tokyo Night Storm", "24283B, 1F2335, 1B1E2D, 1A1D2B, C0CAF5, 9AA5CE, 2E3C64, 7AA2F7, BB9AF7, 9ECE6A, E0AF68, F7768E, 7DCFFF"),
@@ -1319,7 +1113,6 @@ struct ThemePreset {
         ("Paper", "F5F5F5, EDEDED, FFFFFF, E3E3E3, 1D1D1F, 6E6E73, D1D1D6, 007AFF, AF52DE, 248A3D, B25000, D70015, 0071A4"),
     ].compactMap { parse(name: $0.0, $0.1) }
 
-    // built-ins + commands.toml [themes] entries (same name = override)
     static func all() -> [ThemePreset] {
         var out = builtIn
         guard let content = readConfigText() else { return out }
@@ -1330,10 +1123,6 @@ struct ThemePreset {
         return out
     }
 
-    // The menu preview: a miniature WINDOW in the theme — deep header strip,
-    // the solid accent tab, a text line, a selected row with its accent edge,
-    // and the palette dots (accent2, green, yellow, red) — so each preset
-    // shows how it themes the parts, not just one background color.
     func swatch() -> NSImage {
         let size = NSSize(width: 58, height: 20)
         return NSImage(size: size, flipped: true) { r in
@@ -1342,24 +1131,20 @@ struct ThemePreset {
             card.fill()
             NSGraphicsContext.current?.saveGraphicsState()
             card.addClip()
-            // header strip (crust) with the accent tab
             self.header.withAlphaComponent(1).setFill()
             NSRect(x: 0, y: 0, width: r.width, height: 7).fill()
             self.accent.setFill()
             NSBezierPath(roundedRect: NSRect(x: 4, y: 1.5, width: 12, height: 4), xRadius: 1.5, yRadius: 1.5).fill()
             self.dim.setFill()
             NSRect(x: 19, y: 3, width: 8, height: 1.2).fill()
-            // terminal/explorer column on the right
             self.terminal.withAlphaComponent(1).setFill()
             NSRect(x: r.width - 14, y: 7, width: 14, height: r.height - 7).fill()
-            // text line + selected row with its accent edge
             self.text.setFill()
             NSRect(x: 4, y: 10, width: 18, height: 1.4).fill()
             self.highlight.setFill()
             NSRect(x: 3, y: 13.5, width: r.width - 20, height: 4.5).fill()
             self.accent.setFill()
             NSRect(x: 3, y: 13.5, width: 1.5, height: 4.5).fill()
-            // palette dots on the terminal column
             for (k, c) in [self.palette.accent2, self.palette.success,
                            self.palette.warning, self.palette.danger].enumerated() {
                 c.setFill()
@@ -1376,7 +1161,6 @@ struct ThemePreset {
 }
 
 extension NSColor {
-    // WCAG relative luminance (0 = black, 1 = white)
     var relativeLuminance: CGFloat {
         let c = usingColorSpace(.sRGB) ?? self
         func lin(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
@@ -1384,33 +1168,17 @@ extension NSColor {
     }
 }
 
-// MARK: - commands.toml store (validated reads + backed-up writes)
-//
-// Every read of commands.toml goes through readConfigText() and every write
-// through writeConfigText(). A file that fails validation (unreadable, empty,
-// binary, a malformed [section] header, mostly-garbage lines) is never used:
-// the last-known-good copy in commands.toml.bak stands in for it. Each valid
-// read refreshes that backup, and an app write that would produce an invalid
-// file is refused, so neither a bad hand edit nor an app write can leave the
-// app without a working config. Value-level problems (a non-hex color, a
-// non-number width) are only warnings: the loader already ignores them and
-// falls back to the built-in default.
-
 struct ConfigIssue {
-    let line: Int          // 1-based; 0 = whole file
+    let line: Int
     let message: String
-    let fatal: Bool        // true = the file is unusable as a whole
+    let fatal: Bool
 }
 
 var configBackupPath: String { settings.commandsConfPath + ".bak" }
-// findings of the latest read (status-bar "Config Issues…" item)
 private(set) var configIssues: [ConfigIssue] = []
-// true while commands.toml is invalid and the backup is being read instead
 private(set) var configUsingBackup = false
-// (mtime+size stamp, text handed out) so repeated reads don't re-validate
 private var configReadCache: (stamp: String, text: String?)?
 
-// the daemon's log line: stderr + debugLogPath (SwitcherController.log)
 func wsLog(_ s: String) {
     let line = "ws: \(s)\n"
     FileHandle.standardError.write(Data(line.utf8))
@@ -1421,13 +1189,12 @@ private let configBoolKeys: Set<String> = [
     "enabled", "resize", "drag", "sticky", "voice", "voice-live", "terminal", "vim-mode", "recent",
     "checkbox", "hide-on-focus-loss", "float", "table", "shared-window", "preload", "in-palette",
     "panel", "vim-keys", "vim-mode-badge",
-    // [screenshot]
     "show-help", "show-side-panel-button", "show-size-badge", "magnifier", "square-magnifier",
     "copy-on-double-click", "save-path-fixed", "save-after-copy", "copy-path-after-save",
     "save-last-region", "reverse-arrow", "counter-outline", "insecure-pixelate",
 ]
 private let configNumberKeys: [String: ClosedRange<Double>] = [
-    "limit": 1...25,   // [paths]: the shelf's hard cap
+    "limit": 1...25,
     "width": 100...8000, "height": 60...8000, "max-height": 60...8000,
     "shared-width": 400...8000, "shared-height": 300...8000, "margin-top": 0...400, "margin-top-builtin": 0...400, "margin-bottom": 0...400, "switcher-width": 240...1200, "preview-border-width": 0...8, "pane-focus-width": 0...4,
     "terminal-height": 40...4000, "sidebar-width": 0...600, "inspector-width": 0...800, "prose-font-size": 8...48, "prose-width": 300...2000, "font-size": 6...96, "terminal-font-size": 6...96,
@@ -1437,11 +1204,10 @@ private let configNumberKeys: [String: ClosedRange<Double>] = [
     "vim-esc-close": 0...20, "esc-close": 0...20, "search-limit": 1...1_000_000,
     "dashboard-width": 600...8000, "dashboard-height": 400...8000, "dashboard-refresh": 2...3600,
     "split": 0.2...0.8, "context-tokens": 512...1_000_000, "focus-loss-delay": 0...5,
-    // [screenshot]
     "contrast-opacity": 0...255, "jpeg-quality": 1...100, "undo-limit": 1...1000,
     "button-size": 0...80, "arrow-style": 0...1, "delay": 0...60_000,
-    // [compare]
     "context-lines": 0...1000, "tab-width": 1...16, "time-tolerance": 0...86_400, "max-lines": 1000...5_000_000,
+    "max-bytes": 1_048_576...2_147_483_648,
 ]
 private let configColorKeys: Set<String> = [
     "header-color", "background-color", "browser-background", "terminal-background",
@@ -1455,8 +1221,6 @@ private let configEnumKeys: [String: Set<String>] = [
     "header-style": Set(HeaderStyle.allCases.map(\.rawValue)),
 ]
 
-// why `value` is invalid for `key` in [section], or nil when it's fine.
-// Empty values are always allowed (they mean "use the default").
 private func configValueProblem(section: String, key: String, value: String) -> String? {
     guard !value.isEmpty else { return nil }
     if section == "theme" || (section == "app" && (key == "pane-focus-color" || key == "preview-border")) {
@@ -1468,7 +1232,6 @@ private func configValueProblem(section: String, key: String, value: String) -> 
             : nil
     }
     if key == "favorites" {
-        // each comma-separated entry must be one folder ("~/a /b" = a missing comma)
         for e in value.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) where !e.isEmpty {
             var d: ObjCBool = false
             if !(FileManager.default.fileExists(atPath: (e as NSString).expandingTildeInPath, isDirectory: &d) && d.boolValue) {
@@ -1494,7 +1257,6 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         case "gutter-arrows":
             return ["hover", "always", "off"].contains(value.lowercased()) ? nil : "'\(value)' is not one of hover | always | off"
         case "recent":
-            // a count here ([files] recent is a switch)
             guard let n = Int(value), (0...500).contains(n) else { return "\(value): 0…500 (recent pairs kept)" }
             return nil
         case "ignore-leading-ws", "ignore-trailing-ws", "ignore-embedded-ws", "ignore-case",
@@ -1546,7 +1308,6 @@ private func configValueProblem(section: String, key: String, value: String) -> 
         return "'\(value)' is not one of \(allowed.sorted().joined(separator: " | "))"
     }
     if key == "columns" {
-        // field:Title:width:align:flags — the widths are % of the row
         for part in value.split(separator: ",") {
             let seg = part.split(separator: ":", omittingEmptySubsequences: false)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -1596,8 +1357,6 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
         let s = raw.trimmingCharacters(in: .whitespaces)
         if s.isEmpty || s.hasPrefix("#") { continue }
         if s.hasPrefix("[") {
-            // a broken header would silently fold the next keys into the
-            // PREVIOUS section (e.g. [notes keys landing in [theme]) — fatal
             let name = s.hasSuffix("]")
                 ? String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces) : ""
             guard !name.isEmpty, !name.contains("["), !name.contains("]") else {
@@ -1623,7 +1382,7 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
             continue
         }
         entries += 1
-        guard let sec = section else { continue }   // top-level `name = command`
+        guard let sec = section else { continue }
         if seenKeys.contains(key) {
             warn(n, "[\(sec)] duplicate key '\(key)' (the last one wins)")
         }
@@ -1640,11 +1399,6 @@ func validateConfig(_ text: String) -> [ConfigIssue] {
     return issues
 }
 
-// ws-settings (settings_hub/): the app's OWN validation, so the python tool
-// never copies ranges / enums. `config-schema` = the tables as JSON (offline
-// hints); `config-check SECTION KEY VALUE` = configValueProblem for one
-// value; `config-check --file PATH` = validateConfig on a whole file. Both
-// run before AppInstall / the daemon lock (main.swift): no side effects.
 func configSchemaJSON() -> String {
     let obj: [String: Any] = [
         "version": 1,
@@ -1684,8 +1438,6 @@ func configCheckCLI(_ args: [String]) -> Int32 {
     return 0
 }
 
-// commands.toml as the app should see it: the file itself when it validates,
-// otherwise the last-known-good backup (nil when neither is usable).
 func readConfigText() -> String? {
     let path = settings.commandsConfPath
     let attrs = try? FileManager.default.attributesOfItem(atPath: path)
@@ -1706,7 +1458,6 @@ func readConfigText() -> String? {
             result = backup
             usingBackup = true
             if attrs == nil {
-                // nothing on disk to lose: put the backup back in place
                 try? backup.write(toFile: path, atomically: true, encoding: .utf8)
                 issues = [ConfigIssue(line: 0, message: "\(commandsConfName) was missing — restored from backup", fatal: false)]
                 usingBackup = false
@@ -1716,8 +1467,6 @@ func readConfigText() -> String? {
                 .joined(separator: "; ")
             wsLog("commands.toml invalid (\(why)) — using \(configBackupPath)")
         }
-        // a rejected file's per-value warnings are mostly fallout of the
-        // fatal error (keys folded into the wrong section) — list only it
         issues = issues.filter(\.fatal) + issues.filter { !$0.fatal && attrs == nil }
     } else if let text, text != backup {
         try? text.write(toFile: configBackupPath, atomically: true, encoding: .utf8)
@@ -1725,16 +1474,12 @@ func readConfigText() -> String? {
     for i in issues where !i.fatal { wsLog("commands.toml:\(i.line): \(i.message)") }
     configIssues = issues
     configUsingBackup = usingBackup
-    // re-stat: restoring a missing file changes the stamp
     let a2 = try? FileManager.default.attributesOfItem(atPath: path)
     let m2 = (a2?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
     configReadCache = ("\(m2)-\((a2?[.size] as? Int) ?? -1)", result)
     return result
 }
 
-// Write commands.toml. Refuses content that would not validate; otherwise the
-// current file is snapshotted first — a valid one becomes the backup, a broken
-// hand edit is parked as commands.toml.broken-<time> so it's never lost.
 @discardableResult
 func writeConfigText(_ text: String) -> Bool {
     let fatal = validateConfig(text).filter(\.fatal)
@@ -1761,35 +1506,25 @@ func writeConfigText(_ text: String) -> Bool {
     }
 }
 
-// Status-bar "Restore Backup": park the broken file, copy the backup over it.
 func restoreConfigFromBackup() -> Bool {
     guard let bak = try? String(contentsOfFile: configBackupPath, encoding: .utf8) else { return false }
     return writeConfigText(bak)
 }
 
-// Persist a config value back to commands.toml: updates the key where it is,
-// else adds it after the section's last entry (or appends the section).
-// Comments, formatting and other sections are left untouched.
 func saveConfigValue(section: String, key: String, value: String) {
     saveConfigValues(section: section, [(key, value)])
 }
 
-// Set (or, for a nil value, remove) several keys of one [section] in a single
-// validated write — a theme preset touches up to 8 keys at once.
 func saveConfigValues(section: String, _ kv: [(String, String?)]) {
     guard let content = readConfigText() else { return }
     writeConfigText(configSetting(configLines(content), section: section, kv)
         .joined(separator: "\n"))
 }
 
-// Remove a config key from commands.toml (for reset-to-default).
 func removeConfigValue(section: String, key: String) {
     saveConfigValues(section: section, [(key, nil)])
 }
 
-// [icons] section -> IconRule list. Line format per app:
-//   app-name = title-match:icon, other-title:icon, *:default-icon
-// icon names: jira, notes, or a png filename (assetDir) / absolute path.
 private func parseIconRules(_ vars: [String: String]) -> [IconRule] {
     var rules: [IconRule] = []
     for (app, spec) in vars {
@@ -1830,7 +1565,6 @@ private func num(_ s: String?) -> CGFloat {
     CGFloat(Double(s ?? "") ?? 0)
 }
 
-// comma-separated config value -> trimmed non-empty list
 private func csv(_ s: String?) -> [String] {
     (s ?? "").split(separator: ",")
         .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -1842,19 +1576,14 @@ private func mtime(of path: String) -> Date? {
     return attrs[.modificationDate] as? Date
 }
 
-// non-editable files opened as notes (PDFs, images, RTF) are shown as a
-// read-only preview instead of markdown — and never saved back to
 private func noteIsPreview(_ path: String) -> Bool {
     let ext = (path as NSString).pathExtension.lowercased()
     if ext == "pdf" || ext == "rtf" { return true }
     return ["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"].contains(ext)
 }
 
-// A plain text-field sheet. NSAlert's accessory NSTextField REFUSES to take
-// first responder, so Cmd+V / Cmd+A / Ctrl+V never reach it — this window is
-// fully ours, so the field is focused and every editing shortcut just works.
 final class TextFieldSheet: NSObject {
-    static var live: [TextFieldSheet] = []   // buttons hold targets weakly — retain
+    static var live: [TextFieldSheet] = []
     private let field: NSTextField
     private let panel: NSWindow
     private let sheet: NSWindow
@@ -1875,8 +1604,6 @@ final class TextFieldSheet: NSObject {
     }
 }
 
-// Present a single-line text prompt sheet. onResult receives the entered text
-// (nil when cancelled).
 func presentPathSheet(on panel: NSWindow,
                       title: String,
                       message: String,
@@ -1922,24 +1649,12 @@ func presentPathSheet(on panel: NSWindow,
     cancel.action = #selector(TextFieldSheet.cancel(_:))
 
     panel.makeKeyAndOrderFront(nil)
-    // async so it's safe when called right as a previous sheet dismisses
-    // (e.g. the "Add a note" chooser -> "New Note" second prompt)
     DispatchQueue.main.async {
         panel.beginSheet(sheet)
         sheet.makeFirstResponder(field)
     }
 }
 
-// Expand note/list path entries: each may be a single file OR a directory.
-// Directories expand to their matching files (sorted, non-hidden), so a
-// `paths`/`sources` value can point at a folder and new files appear
-// automatically without editing commands.toml. `extensions` limits directory
-// listings to those file extensions (lowercased); nil = all files.
-// Dismissed notes: a persistent map of absolute note paths the user closed
-// with the tab ✕. They stay OUT of the note list even when a `paths = ~/notes`
-// directory entry would re-expand them on every launch — without this, a
-// closed note keeps getting resynced back as a tab. Explicitly re-opening a
-// note (via + / Finder "Open in Notes") removes it from the map again.
 enum DismissedNotes {
     private static let store = NSHomeDirectory() + "/.cache/kitchen-sink/dismissed-notes.json"
     private static var map: Set<String> = {
@@ -1977,7 +1692,7 @@ private func expandPaths(_ entries: [String], extensions: [String]? = nil) -> [S
         let p = (raw as NSString).expandingTildeInPath
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir) else {
-            out.append(p)   // caller creates it if missing
+            out.append(p)
             continue
         }
         if isDir.boolValue {
@@ -1995,15 +1710,10 @@ private func expandPaths(_ entries: [String], extensions: [String]? = nil) -> [S
             out.append(p)
         }
     }
-    // dedupe, order-preserving: `paths = ~/notes, ~/notes/norika.md` expands the
-    // dir to every note INCLUDING norika.md, so the explicit entry would show
-    // the same note as two tabs
     var seen = Set<String>()
     return out.filter { seen.insert($0).inserted }
 }
 
-// Runs commands through a persistent bash (spawned once at startup) so
-// executing a command never pays shell startup cost.
 final class CommandRunner {
     private let proc: Process
     private let wFd: Int32
@@ -2059,13 +1769,6 @@ final class CommandRunner {
     }
 }
 
-// MARK: - Icons
-
-// Config-driven app-icon overrides, parsed from the [icons] section of
-// commands.toml. Each rule: app name -> title-substring matches + optional
-// "*" default. iconForApp consults these before falling back to the real
-// macOS app icon — the kitchen-sink app hosts several windows (notes,
-// jira) in ONE process, so its rows need title-based glyphs.
 struct IconRule {
     let app: String
     let defaultIcon: NSImage?
@@ -2075,8 +1778,6 @@ var iconRules: [IconRule] = []
 
 let appIconSize: CGFloat = 22
 
-// Row rendering constants — these are the kitchen sink's own look; the
-// framework knows nothing about them (rows are drawn via popup.onDrawRow).
 let rowPillH: CGFloat = 24
 let rowPillBorder: CGFloat = 2
 let rowIconSize: CGFloat = 22
@@ -2104,11 +1805,7 @@ let missingIcon: NSImage = {
     return img
 }()
 
-// Our own windows (notes / jira) live in the icon-less kitchen-sink
-// app. One factory builds every glyph: app-picker rows get a tinted rounded
-// tile, menu-bar status items get a template silhouette. Each app has its own
-// symbol AND accent tint, so the two are never confusable in the picker.
-let jiraAccent = NSColor(red: 0.36, green: 0.62, blue: 0.95, alpha: 1)   // ticket blue
+let jiraAccent = NSColor(red: 0.36, green: 0.62, blue: 0.95, alpha: 1)
 
 func glyphIcon(_ symbol: String, fallback: String, tint: NSColor,
                size: CGFloat = appIconSize, template: Bool = false,
@@ -2146,10 +1843,6 @@ func glyphIcon(_ symbol: String, fallback: String, tint: NSColor,
     return img
 }
 
-
-// flat colorful notepad: warm paper, teal binding with rings, slate lines and
-// an amber fold — reads in color next to the blue Jira mark in the picker,
-// the window header and the menu bar (lockFocus coords are y-up)
 func notepadIcon(size: CGFloat) -> NSImage {
     let img = NSImage(size: NSSize(width: size, height: size))
     img.lockFocus()
@@ -2189,40 +1882,30 @@ func notepadIcon(size: CGFloat) -> NSImage {
     return img
 }
 
-// icon assets: filenames live in the [app] section (jira-icon/notes-icon),
-// resolved against the binary dir; fall back to drawn glyphs if missing
 let notesAppIcon = fileIconTile(settings.notesIconPath, size: appIconSize)
     ?? notepadIcon(size: appIconSize)
 let jiraAppIcon = fileIconTile(settings.jiraIconPath, size: appIconSize)
     ?? glyphIcon("ticket", fallback: "J", tint: jiraAccent)
-// the app itself (the kitchen sink): the top-left icon menu of every
-// shared-window view — notes / files / jira are the nav icons beside it
 let appIcon = fileIconTile(settings.appIconPath, size: appIconSize)
     ?? notepadIcon(size: appIconSize)
-// shared-window nav icons, full resolution (drawn at ~16pt, crisp on Retina)
 let notesNavIcon: NSImage = NSImage(contentsOfFile: settings.notesIconPath) ?? notepadIcon(size: 32)
 let jiraNavIcon: NSImage = NSImage(contentsOfFile: settings.jiraIconPath) ?? jiraAppIcon
 let confluenceAppIcon = fileIconTile(settings.confluenceIconPath, size: appIconSize)
     ?? glyphIcon("book.pages", fallback: "C", tint: jiraAccent)
 let confluenceNavIcon: NSImage = NSImage(contentsOfFile: settings.confluenceIconPath) ?? confluenceAppIcon
-let aiTint = NSColor(srgbRed: 0.72, green: 0.56, blue: 0.98, alpha: 1)   // model violet
+let aiTint = NSColor(srgbRed: 0.72, green: 0.56, blue: 0.98, alpha: 1)
 let aiAppIcon = (settings.aiIconPath.isEmpty ? nil : fileIconTile(settings.aiIconPath, size: appIconSize))
     ?? glyphIcon("sparkles", fallback: "✦", tint: aiTint)
 let aiNavIcon: NSImage = (settings.aiIconPath.isEmpty ? nil : NSImage(contentsOfFile: settings.aiIconPath))
     ?? glyphIcon("sparkles", fallback: "✦", tint: aiTint, size: 32, tile: false)
 let filesNavIcon: NSImage = (settings.filesIconPath.isEmpty ? nil : NSImage(contentsOfFile: settings.filesIconPath))
     ?? NSImage(named: NSImage.folderName) ?? notepadIcon(size: 32)
-// health checks window glyph: a red heart — plain symbol, no tile (the tile
-// read as a square box around the icon in the 16px header)
 let heartIcon = glyphIcon("heart.fill", fallback: "♥",
                           tint: NSColor.systemRed.withAlphaComponent(0.9),
                           tile: false)
-// voice notes glyph: a red recording mic — reads as "capture voice" at a
-// glance next to the notepad and ticket marks
 let micIcon = glyphIcon("mic.fill", fallback: "🎙",
                         tint: NSColor.systemRed.withAlphaComponent(0.9),
                         tile: false)
-// single utility glyph for the consolidated menu-bar item
 let utilityMenuGlyph: NSImage = {
     let sym = NSImage(systemSymbolName: "wrench.and.screwdriver",
                       accessibilityDescription: nil)?
@@ -2234,7 +1917,6 @@ let utilityMenuGlyph: NSImage = {
     return img
 }()
 
-// rounded tile around a bitmap asset (the PNG's own alpha does the shaping)
 func fileIconTile(_ path: String, size: CGFloat) -> NSImage? {
     guard let src = NSImage(contentsOfFile: path) else { return nil }
     let img = NSImage(size: NSSize(width: size, height: size))
@@ -2245,19 +1927,13 @@ func fileIconTile(_ path: String, size: CGFloat) -> NSImage? {
     return img
 }
 
-
-// JIRA_SITE for the per-row "open in browser" action (config is chmod 600)
-// the Jira site for "open in browser": config.json (python poller) first,
-// then the legacy env-style config. Computed on every use — the setup sheet
-// can change it while the app runs.
 var jiraSite: String {
     if let data = try? Data(contentsOf: URL(fileURLWithPath: JiraPoll.configPath)),
        let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
        let site = d["site"] as? String, !site.isEmpty {
         return site.hasSuffix("/") ? String(site.dropLast()) : site
     }
-    let conf = NSString(string: "~/.config/jira/config").expandingTildeInPath
-    guard let s = try? String(contentsOfFile: conf, encoding: .utf8) else { return "" }
+    guard let s = try? String(contentsOfFile: JiraPoll.paths.legacyConfig, encoding: .utf8) else { return "" }
     for line in s.split(separator: "\n") where line.hasPrefix("JIRA_SITE=") {
         return String(line.dropFirst("JIRA_SITE=".count))
             .trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
@@ -2265,11 +1941,8 @@ var jiraSite: String {
     return ""
 }
 
-// the release view window (one tab per release; see showJiraReleaseView)
 let jiraReleasesWindow = "jira-releases"
 
-// A row of the releases job (releases.json / blacklist_release.json): its
-// key is "PROJECT-NAME", which is NOT an issue key — /browse/<key> 404s.
 func jiraIsReleaseRow(_ r: FieldRow) -> Bool {
     let f = r.fields
     if f["versionId"] != nil { return true }
@@ -2277,20 +1950,14 @@ func jiraIsReleaseRow(_ r: FieldRow) -> Bool {
     return !rel.isEmpty && !proj.isEmpty && f["key"] == "\(proj)-\(rel)" && r.title == rel
 }
 
-// "open in browser" for a jira row: an issue -> /browse/KEY; a release ->
-// its version page (/projects/KEY/versions/ID), or, before the poll has
-// recorded the version id, the issue search of that fix version
 func jiraBrowseURL(_ r: FieldRow, site: String = jiraSite) -> URL? {
     guard !site.isEmpty, let key = r.fields["key"], !key.isEmpty else { return nil }
     guard jiraIsReleaseRow(r) else { return URL(string: site + "/browse/" + key) }
     let proj = r.fields["project"] ?? "", name = r.fields["release"] ?? r.title
-    // the version's numeric id: the row (releases job), else the directory
     let id = (r.fields["versionId"] ?? "").isEmpty
         ? JiraDirectory.load().versions.first { $0.project == proj && $0.name == name }?.id ?? ""
         : r.fields["versionId"] ?? ""
     if !id.isEmpty {
-        // the release page with ALL its issues (Cloud: the issues tab;
-        // Server / DC: the version page lists them)
         let tab = site.contains(".atlassian.net") ? "/tab/release-report-all-issues" : ""
         return URL(string: "\(site)/projects/\(proj)/versions/\(id)\(tab)")
     }
@@ -2300,8 +1967,6 @@ func jiraBrowseURL(_ r: FieldRow, site: String = jiraSite) -> URL? {
 }
 
 func iconForApp(_ app: AppInfo) -> NSImage {
-    // config-driven overrides (commands.toml [icons]): an app's windows get a
-    // custom glyph when their title matches a configured substring
     if let rule = iconRules.first(where: { $0.app == app.name }) {
         let title = app.windowTitle?.lowercased() ?? ""
         for (match, img) in rule.titleMatches where title.contains(match) {
@@ -2324,17 +1989,12 @@ func iconForApp(_ app: AppInfo) -> NSImage {
     return missingIcon
 }
 
-// MARK: - Rows (framework PopupRow adapters)
-
 struct WorkspaceRow: PopupRow {
     let title: String
     let icons: [NSImage]
     let trailing: String?
     let focused: Bool
-    // unread count of the row's apps (Hyper+S status sources), "" = none
     var unread = ""
-    // what the query hit inside the row ("Firefox — AeroSpace guide"):
-    // a match names itself in place instead of adding a second row
     var match: String?
 
     init(ws: WorkspaceInfo, iconCache: inout [String: NSImage]) {
@@ -2342,9 +2002,6 @@ struct WorkspaceRow: PopupRow {
         focused = ws.focused
         var imgs: [NSImage] = []
         for app in ws.apps.prefix(rowMaxIcons) {
-            // include the window title in the key: our own app hosts several
-            // windows (jira/notes) that each need their OWN glyph — keying
-            // by app name alone cached one icon for all of them
             let key = (app.bundleID ?? app.name) + "|" + (app.windowTitle ?? "")
             if let cached = iconCache[key] {
                 imgs.append(cached)
@@ -2366,19 +2023,12 @@ struct CommandRow: PopupRow {
     init(_ c: CommandSpec) { title = "> \(c.label ?? c.name)"; command = c }
 }
 
-// One line of the Hyper+S two-pane view: a command on the left, a workspace
-// on the right (either may be missing when the panes differ in length). The
-// switcher tracks which pane the cursor is in (splitPane).
 struct SplitRow: PopupRow {
     let command: CommandSpec?
     let workspace: WorkspaceRow?
     var title: String { command.map { $0.label ?? $0.name } ?? workspace?.title ?? "" }
 }
 
-// Generic row for list commands (jira etc.): primary field as title with the
-// content field on the same line (truncated), detail (dim, left) and trailing
-// (dim, right) on a second line. `searchText` is the concatenation of the
-// command's `filter` fields, used by onFilter.
 struct FieldRow: PopupRow {
     let title: String
     let content: String?
@@ -2386,24 +2036,15 @@ struct FieldRow: PopupRow {
     let detail: String?
     let body: String?
     let searchText: String
-    let fields: [String: String]   // raw field values (dropdown filter dims)
-    // jira favorites: the ☆ next to the checkbox (nil = not an issue row)
+    let fields: [String: String]
     var starred: Bool? = nil
 
     var loadMore: Bool { fields["__loadmore"] != nil }
-    // a group-by header band (ListSession.filteredRows): title = the group
     var groupHeader: Bool { fields["__group"] != nil }
-    // not an issue: load-more or a group header
     var synthetic: Bool { loadMore || groupHeader }
-    // list/table cells show ISO timestamps trimmed to local minutes; the raw
-    // value (ms + offset) stays in `fields` for sort, filters and the
-    // double-click detail window
     func cellText(_ field: String) -> String? { fields[field].map(compactTimestamp) }
 }
 
-// "2026-09-13T11:54:04.850-0400" -> "2026-09-13 11:54" (local time). Anything
-// that is not an ISO-8601 date-time passes through untouched; the cheap shape
-// check keeps per-cell drawing fast.
 private let isoParsers: [DateFormatter] = [
     "yyyy-MM-dd'T'HH:mm:ss.SSSZ", "yyyy-MM-dd'T'HH:mm:ssZ",
     "yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX", "yyyy-MM-dd'T'HH:mm:ssXXXXX",
@@ -2419,9 +2060,6 @@ private let compactStampFormatter: DateFormatter = {
     f.dateFormat = "yyyy-MM-dd HH:mm"
     return f
 }()
-// Parsed stamps are memoized: DateFormatter parsing is slow (ICU), and a
-// table redraw (every keystroke in the filter box) re-renders every visible
-// date cell.
 private let compactStampCache: NSCache<NSString, NSString> = {
     let c = NSCache<NSString, NSString>()
     c.countLimit = 50_000
@@ -2440,32 +2078,19 @@ func compactTimestamp(_ s: String) -> String {
     return out
 }
 
-// MARK: - Voice notes (record -> Apple speech recognition)
-
-// Pauseable microphone recorder with LIVE transcription: AVAudioEngine feeds
-// SFSpeechAudioBufferRecognitionRequest, partial results stream through
-// onPartial (the host shows a live draft in the note) and each finalized
-// batch lands via onBatch — committed on every pause AND on a ~20s
-// continuous-speech threshold, so text appears as you speak. Requires the
-// mic + speech usage strings in the Info.plist (embedded via -sectcreate).
 final class VoiceRecorder {
     enum State: Int { case idle = 0, recording = 1, paused = 2, transcribing = 3 }
     private(set) var state: State = .idle
     private(set) var elapsed: TimeInterval = 0
     var onStateChange: ((State) -> Void)?
-    var onPartial: ((String) -> Void)?     // live draft (updates as you speak)
-    var onBatch: ((String) -> Void)?       // finalized batch (commit to note)
+    var onPartial: ((String) -> Void)?
+    var onBatch: ((String) -> Void)?
     var onError: ((String) -> Void)?
-    // live normalized mic level 0-1, ~10x/sec while a session is active
     var onLevel: ((Float) -> Void)?
 
     private let engine = AVAudioEngine()
     private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
-    // a batch closed with endAudio() moves here and STAYS alive until its
-    // task callback delivers — deallocating a request while its task is
-    // pending CANCELS the recognition ("Recognition request was canceled")
-    // and the batch text is lost
     private var finalizing: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var ticker: Timer?
@@ -2473,24 +2098,13 @@ final class VoiceRecorder {
     private var teardownTimer: DispatchWorkItem?
     private var lastBatchAt: TimeInterval = 0
     private var lastLevelSample: TimeInterval = 0
-    private let batchInterval: TimeInterval = 300   // safety net only, never fires
-    // during normal dictation. Natural-pause commits come from the on-device
-    // recognizer's own silence detection (~2s), exactly like Apple's Dictate.
-    // A mid-speech endAudio() made the recognizer finalize with TRUNCATED text
-    // (e.g. a lone "H" instead of "Hello") and the following audio was lost —
-    // that was the disappearing-text bug.
-    // max delay between stop() and the mic being released, even if the
-    // recognizer never delivers the final batch (see stop())
+    private let batchInterval: TimeInterval = 300
     private let stopTeardownTimeout: TimeInterval = 3
 
     private func ensureAuthorized() -> Bool {
         let mic = AVCaptureDevice.authorizationStatus(for: .audio)
         let speech = SFSpeechRecognizer.authorizationStatus()
         if mic == .authorized && speech == .authorized { return true }
-        // Bundled app: let macOS show its own prompt. Safe now that we ship a
-        // real .app with the usage strings (the SIGABRT was a BARE-binary TCC
-        // bug); the grant then sticks to the bundle id across rebuilds and
-        // launch contexts — this is what makes a cold start from Hyper+S work.
         if Bundle.main.bundleIdentifier != nil,
            mic == .notDetermined || speech == .notDetermined {
             if mic == .notDetermined {
@@ -2502,11 +2116,6 @@ final class VoiceRecorder {
             onError?("grant the microphone/speech prompt that just appeared, then press record again")
             return false
         }
-        // NEVER call requestAccess/requestAuthorization from the app: for a
-        // bare (non-bundle) binary TCC can abort the whole process with a
-        // "privacy violation" SIGABRT instead of prompting (seen in
-        // ~/.cache/ws-crash.log). The deterministic path is granting the
-        // binary manually in System Settings; pressing record re-checks.
         let denied = mic == .denied || speech == .denied
             || mic == .restricted || speech == .restricted
         onError?(denied
@@ -2546,7 +2155,6 @@ final class VoiceRecorder {
         onStateChange?(state)
     }
 
-    // begin a new recognition batch (recording start / resume / threshold)
     private func startBatch() {
         guard let recognizer else { return }
         let r = SFSpeechAudioBufferRecognitionRequest()
@@ -2555,10 +2163,6 @@ final class VoiceRecorder {
         task = recognizer.recognitionTask(with: r) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                // release THIS request only now: dropping it (or the engine)
-                // while the task is pending CANCELS the recognition and the
-                // batch text is lost. A closed batch parked in `finalizing`
-                // must also survive until its own callback arrives.
                 if let result {
                     let text = result.bestTranscription.formattedString
                     if result.isFinal {
@@ -2568,19 +2172,10 @@ final class VoiceRecorder {
                         if wasCurrent { self.request = nil; self.task = nil }
                         if isOurs { self.onBatch?(text) }
                         if wasCurrent && self.state == .recording {
-                            // The recognizer finalizes a batch ON ITS OWN after
-                            // a short silence (on-device dictation, ~10s of
-                            // speech then a pause). Without an immediate
-                            // restart the request stays nil and EVERYTHING the
-                            // user says until the 20s timer fires is dropped by
-                            // the tap — the live text "randomly disappears" and
-                            // the dictation is never committed. Restart now.
                             self.startBatch()
                             self.lastBatchAt = self.elapsed
                         }
                     } else {
-                        // only stream partials from the CURRENT batch: a stale
-                        // batch's late partial would overwrite the live draft
                         if self.request === r {
                             self.onPartial?(text)
                         }
@@ -2590,20 +2185,12 @@ final class VoiceRecorder {
                     if self.finalizing === r { self.finalizing = nil }
                     if wasCurrent { self.request = nil; self.task = nil }
                     if self.state == .recording {
-                        // a mid-session failure (e.g. a silent 20s chunk
-                        // reporting "no speech detected") must NOT kill the
-                        // session or pollute the note: dictation continues
                         if wasCurrent {
                             self.startBatch()
                             self.lastBatchAt = self.elapsed
                         }
                     } else if self.state == .paused {
-                        // a pause-finalized chunk erroring must not kill the
-                        // paused session either
                     } else {
-                        // stop path: a silent recording reports "no speech
-                        // detected"; treat a silent/canceled final as an empty
-                        // batch (graceful reset) instead of a fatal error
                         let s = (error as NSError).localizedDescription.lowercased()
                         if s.contains("no speech") || s.contains("canceled") {
                             self.onBatch?("")
@@ -2616,9 +2203,6 @@ final class VoiceRecorder {
         }
     }
 
-    // end the current batch: the recognizer finalizes it and onBatch fires.
-    // The request moves to `finalizing` and STAYS alive until its callback
-    // delivers — nil'ing it here deallocates it and cancels the task.
     private func finalizeBatch() {
         if let r = request {
             r.endAudio()
@@ -2629,7 +2213,6 @@ final class VoiceRecorder {
 
     private func appendBuffer(_ buffer: AVAudioPCMBuffer) {
         request?.append(buffer)
-        // live meter from the tap (RMS -> 0-1), throttled to ~10Hz
         let now = ProcessInfo.processInfo.systemUptime
         guard state == .recording, now - lastLevelSample > 0.08 else { return }
         lastLevelSample = now
@@ -2647,8 +2230,6 @@ final class VoiceRecorder {
 
     func pause() {
         guard state == .recording else { return }
-        // the engine stays hot; the batch finalizes and commits, a new batch
-        // starts on resume
         finalizeBatch()
         state = .paused
         onStateChange?(state)
@@ -2669,16 +2250,8 @@ final class VoiceRecorder {
         ticker = nil
         batchTimer?.invalidate()
         batchTimer = nil
-        // KEEP the engine + request alive: the pending task needs the live
-        // audio session to deliver its final result. Stopping the engine /
-        // dropping the request here cancels the task ("Recognition request
-        // was canceled" / "No speech detected") and the whole batch is lost.
         state = .transcribing
         onStateChange?(state)
-        // The host commits the pending final batch via onBatch -> resetSession
-        // (which stops the engine + releases the mic). If the recognizer never
-        // delivers (hang), this timeout guarantees the teardown anyway. The
-        // work item retains self so a late final batch can still commit first.
         teardownTimer?.cancel()
         let item = DispatchWorkItem { [self] in
             self.resetSession()
@@ -2688,8 +2261,6 @@ final class VoiceRecorder {
                                       execute: item)
     }
 
-    // called by the host after the LAST batch commits: stop the engine and
-    // return to idle (the note already holds the full transcription)
     func resetSession() {
         teardownTimer?.cancel()
         teardownTimer = nil
@@ -2715,10 +2286,6 @@ final class VoiceRecorder {
         }
     }
 
-    // Safety net for NON-STOP continuous speech (minutes without a pause):
-    // the on-device recognizer's own silence detection commits at natural
-    // pauses; this only fires if the user never pauses at all. The interval
-    // is so large (5 min) it never truncates a normal dictation.
     private func startBatchTimer() {
         batchTimer?.invalidate()
         batchTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -2731,16 +2298,11 @@ final class VoiceRecorder {
     }
 }
 
-// MARK: - App controller (behavior hooks only; window logic lives in PopupWindow)
-
 final class SwitcherController: NSObject {
     let popup: PopupWindow
     let commandRunner: CommandRunner?
     var workspaces: [WorkspaceInfo] = []
     var commands: [CommandSpec] = []
-    // Hyper+S: the pane the cursor is in (0 commands, 1 workspaces), the
-    // query it belongs to, and the last unread reading (refreshed on every
-    // open; the last one draws at once)
     var splitPane = 0
     var stripSig = ""
     private var stripTimer: Timer?
@@ -2748,20 +2310,16 @@ final class SwitcherController: NSObject {
     var status = SwitcherStatus()
     var savedWID: String?
     var savedPID: pid_t?
-    // /paths: the shelf popup + the clipboard watcher feeding it
     var pathsWindow: PathsWindow?
     var noteFindWindow: NoteFindWindow?
     var noteGrepWindow: NoteFindWindow?
     var sidebarJumpWindow: SidebarJumpWindow?
     var clipboardPaths: ClipboardPaths?
     var pathsSeedObserver: NSObjectProtocol?
-    // /screenshot (Hyper+X): capture + annotate, a tool panel (Screenshot.swift)
     lazy var screenshot: ScreenshotController = {
         let s = ScreenshotController()
         s.log = { [weak self] in self?.log($0) }
         s.onSaved = {
-            // the Recent stream ignores our own writes (IgnoreSelf): report
-            // the file, then the shelf row says "screenshot"
             RecentFiles.shared.ownChange(from: nil, to: $0)
             PathShelf.shared.add([$0], why: .screenshot)
         }
@@ -2769,44 +2327,25 @@ final class SwitcherController: NSObject {
         return s
     }()
     private var iconCache: [String: NSImage] = [:]
-    // All open sub-windows (note editor / jira list). Several can coexist
-    // (notes + jira at the same time); each hides on Esc and removes itself.
     var subWindows: [PopupWindow] = []
-    // the open jira window's "show this tab (freshly loaded)" hook — the live
-    // search panel calls it after a run (see openListWindow)
     var jiraShowTab: ((String) -> Void)?
     var pendingJiraTab: String?
-    // the row the jira detail window shows (it is reused across rows)
     var detailRow: FieldRow?
-    // the release view's tab to select once it opens (a release file name)
     var pendingReleaseTab: String?
-    // When the user clicks another app, aerospace's on-focus-changed can fire
-    // with a lag and write a STALE bridge entry naming one of our windows;
-    // the poller would then yank focus back off the app the user just clicked.
-    // Suppress self-activation right after a click outside our windows.
     private var lastOtherAppClick: Date?
-    // app activations since launch (state `activations`): opening / using a
-    // tool panel must never add one (bin/ui-test-focus.py tools)
     private var appActivations = 0
     private var globalClickMonitor: Any?
-    // debounced auto-format for the /prettyprint window (cancelled/re-armed on
-    // every keystroke so paste + brief pause renders once)
     private var prettyFormatWorkItem: DispatchWorkItem?
-    // interactive color picker state: the shared NSColorPanel previews live while
-    // dragging but only PERSISTS on "Apply". Cancelling (panel "x", Esc, or
-    // the Cancel button) reverts the window to the color it had on open.
     private weak var pickerWindow: PopupWindow?
     private var pickerRole: PopupWindow.ThemeRole?
     private var pickerSection = ""
-    // the picked hue (always opaque — the color wheel never changes
-    // transparency) and the surface's opacity (0-1, from the dedicated slider)
     private var pickerHue: NSColor = .clear
-    private var pickerTransparency: CGFloat = 0.0    // 0 = opaque, 1 = transparent
+    private var pickerTransparency: CGFloat = 0.0
     private var pickerHexLabel: NSTextField?
     private var pickerTransparencyLabel: NSTextField?
-    private var pickerOriginal: NSColor?   // color when the picker opened
-    private var pickerCommitted = false    // "Apply" clicked before closing
-    private var pickerSawVisible = false   // the panel appeared at least once
+    private var pickerOriginal: NSColor?
+    private var pickerCommitted = false
+    private var pickerSawVisible = false
     private var pickerWatchdog: Timer?
     private var pickerPanelObserver: Any?
 
@@ -2815,23 +2354,14 @@ final class SwitcherController: NSObject {
         config.colors = windowColors()
         config.width = settings.switcherWidth
         config.enableResize = true
-        // a click runs the row (a grid row: the cell under the pointer)
         config.clickToSelect = true
-        // shrink/grow the window to fit the current row count while typing
-        // (e.g. "/" with 3 commands gets a compact window, not a tall one)
         config.dynamicHeight = true
-        // the palette acts like a tool panel: it never activates the app.
-        // Activation raised the shared window wherever it was parked
-        // (another workspace) and AeroSpace followed it there, so a "/"
-        // tool opened "somewhere else" instead of where you are
         config.toolPanel = true
         popup = PopupWindow(config: config)
         commandRunner = CommandRunner()
         super.init()
         commands = loadCommands()
-        // Ctrl+B prefix inside the shared window (SharedWindow.prefixKey)
         PopupWindow.keyInterceptor = { [weak self] e, w in self?.slot.prefixKey(e, in: w) ?? false }
-        // Ctrl+H/J/K/L panes + the focus ring: the shared window's current view
         PaneNav.shared.provider = { [weak self] w in
             guard let self, let cur = self.slot.current, let m = self.slotMember(cur),
                   m.slotWindow === w else { return nil }
@@ -2849,16 +2379,10 @@ final class SwitcherController: NSObject {
         }
         popup.onShow = { [weak self] in
             guard let self else { return }
-            // one view: commands + workspaces ("/" still narrows it to
-            // commands)
             self.popup.initialQuery = ""
             self.popup.selection = 0
             self.splitPane = 0
-            // the toggle path goes through popup.show(), not controller
-            // show() — refresh the keypress-time focus target HERE
             (self.savedWID, self.savedPID) = readFocusFile()
-            // refresh workspace/window state WITHOUT blocking the main thread
-            // (aerospace IPC can stall and beachball the toggle otherwise)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let fresh = gatherWorkspaces()
                 DispatchQueue.main.async { [weak self] in
@@ -2900,9 +2424,6 @@ final class SwitcherController: NSObject {
         requestUnreadAccess()
     }
 
-    // The unread counts read the Dock's and Webex's Accessibility trees
-    // (notify/helpers, run as children of this app), so the app needs the
-    // Accessibility grant — macOS asks once; until then the chips stay empty.
     private func requestUnreadAccess() {
         guard !AXIsProcessTrusted(),
               tri(configSectionValue("notifications", "enabled")) ?? false else { return }
@@ -2911,10 +2432,6 @@ final class SwitcherController: NSObject {
         log("unread counts: asked for Accessibility (System Settings ▸ Privacy & Security ▸ Accessibility)")
     }
 
-    // AeroSpace invents a stray workspace ("10") for a newly connected
-    // monitor; bin/no_stray_workspaces.sh undoes it. AeroSpace's own hook
-    // covers workspace changes; display changes and wake come from here
-    // (SENDER tells the script to wait for AeroSpace to settle first).
     private var strayGuardWork: DispatchWorkItem?
     private func startStrayGuard() {
         let run: (String) -> Void = { [weak self] sender in
@@ -2938,13 +2455,6 @@ final class SwitcherController: NSObject {
         ) { _ in run("system_woke") }
     }
 
-    // Our windows float at the pop-up-menu level, above everything. Tools like
-    // Flameshot grab the screen first, then show that frozen image in an
-    // ordinary (level 0) overlay — so the live popup kept covering it and the
-    // selection rectangle looked like it was drawn BEHIND our window. While
-    // such a tool is the active app our visible popups go fully transparent
-    // (the frozen image already contains them, so the shot is unchanged);
-    // they come back as soon as any other app activates.
     private var yieldedWindows: [NSWindow] = []
     private func startScreenshotYield() {
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -2973,23 +2483,11 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // macOS refuses EXTERNAL activation of an accessory app (aerospace's
-    // focus raises our window but the app never becomes active, so keyboard
-    // focus stays in the previous app and alt-j/k looks "stuck"). Two ways
-    // in, both event-driven, neither polls:
-    //  1. in-process: aerospace's focus makes our window KEY while the app
-    //     stays inactive — activate right there (no hook, no file, no wait);
-    //  2. the bridge: aerospace's on-focus-changed hook writes the newly
-    //     focused window id to a file (aerospace.toml); a vnode watch on it
-    //     fires at once (it was a 0.25 s stat() poll) — for the focus
-    //     changes that never make our window key on their own.
     private var bridgeMtime: (Int, Int)?
     var viewSwitcher: ViewSwitcherPanel?
     var terminalPanel: TerminalPanel?
     private var bridgeSource: DispatchSourceFileSystemObject?
     private func startFocusBridge() {
-        // Record clicks in OTHER apps so the bridge never steals focus back
-        // right after the user clicked away (see lastOtherAppClick above).
         if globalClickMonitor == nil,
            let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] event in
             guard let self else { return }
@@ -3006,8 +2504,6 @@ final class SwitcherController: NSObject {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] note in
-            // (never a tool panel: it is key WITHOUT activating the app —
-            // activation would raise every window of ours with it)
             guard let self, !NSApp.isActive, let w = note.object as? NSWindow, w.isVisible,
                   Self.sharedViews.contains(where: { self.slotMember($0)?.slotWindow === w })
                     || self.subWindows.contains(where: { $0.nativeWindow === w && $0.isShown && !$0.config.toolPanel })
@@ -3021,8 +2517,6 @@ final class SwitcherController: NSObject {
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.appActivations += 1 }
         watchFocusBridge()
-        // the header's workspace strip: windows opening / closing raise no
-        // focus event, and the unread counts age
         var tick = 0
         stripTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
             guard let self, self.slot.isVisible else { return }
@@ -3053,7 +2547,6 @@ final class SwitcherController: NSObject {
         src.setEventHandler { [weak self, weak src] in
             guard let self, let src else { return }
             if !src.data.isDisjoint(with: [.delete, .rename]) {
-                // the file was replaced / cleaned up: watch the new one
                 src.cancel()
                 self.bridgeSource = nil
                 DispatchQueue.main.async { [weak self] in
@@ -3071,11 +2564,6 @@ final class SwitcherController: NSObject {
 
     private func focusBridgeChanged(_ path: String) {
         if slot.isVisible { refreshWorkspaceStrip() }
-        // consume EVERY bridge write, even while we're already active: a
-        // write left unconsumed (notes focused while active) used to fire
-        // later — switching workspaces 4 -> 1 deactivated us, the stale
-        // "notes focused" write re-activated the notes window and aerospace
-        // jumped straight back to 4
         var st = stat()
         guard stat(path, &st) == 0 else { return }
         let mt = (Int(st.st_mtimespec.tv_sec), Int(st.st_mtimespec.tv_nsec))
@@ -3086,34 +2574,20 @@ final class SwitcherController: NSObject {
               let w = subWindows.first(where: {
                   $0.isShown && $0.nativeWindow.windowNumber == id && !$0.config.toolPanel
               }) else { return }
-        // only a FRESH write means aerospace just focused us — never act on
-        // one that sat around (e.g. the first event after launch)
         let age = Date().timeIntervalSince1970 - (Double(mt.0) + Double(mt.1) / 1_000_000_000)
         let clickedAway = lastOtherAppClick.map { Date().timeIntervalSince($0) < 1.0 } ?? false
         guard !clickedAway, age < 1.0 else { return }
-        // raise EVEN when already key: aerospace's focus makes our
-        // (non-activating) panel key while the previous app stays in front,
-        // so alt-j/k gave it the keyboard but left it hidden
         NSApp.activate(ignoringOtherApps: true)
         w.nativeWindow.orderFrontRegardless()
         w.nativeWindow.makeKeyAndOrderFront(nil)
         log("aerospace focused our window \(id) — self-activated")
     }
 
-    // MARK: shared window plumbing (SharedWindow.swift)
-
     lazy var slot = SharedWindow(controller: self)
-    // the frame the NEXT slot window opens at (consumed by the openers)
     var pendingSlotFrame: NSRect?
-    // an opener running for prewarmSlot(): build the window, don't show it
     var slotPrewarming = false
     private var prewarmGen = 0
 
-    // [app] preload: build the views that don't exist yet, hidden and with
-    // their header in place, one per main-loop turn (AppKit = main thread
-    // only, so the work is spread out instead of moved off it). The first
-    // switch to a view is then an unpark like any later one — no half-built
-    // first paint.
     func prewarmSlot(after delay: Double = 1.0) {
         guard settings.sharedWindow, settings.preload else { return }
         prewarmGen += 1
@@ -3142,11 +2616,9 @@ final class SwitcherController: NSObject {
         }
         step(views[...], delay)
     }
-    // the output window (type = output) the shared window shows
     var currentOutputName: String?
     private var filesCommand: CommandSpec? { commands.first { $0.kind == .files } }
 
-    // the window behind a view (nil = not open)
     func slotMember(_ v: SlotView) -> SlotMember? {
         switch v {
         case .notes: return noteWindow
@@ -3163,7 +2635,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // the commands.toml section behind a view's settings
     func slotSection(_ v: SlotView) -> String? {
         switch v {
         case .notes: return commands.first { $0.kind == .note }?.name
@@ -3176,10 +2647,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // rapid Esc presses that hide the shared window from view `v` (0 = Esc
-    // never hides it): the view's `esc-close` (alias `vim-esc-close`), else
-    // [app] esc-close (default 0). Read from the file: confluence / ai are
-    // no CommandSpecs, and a hand edit counts at once.
     func escHideCount(_ v: SlotView, lines: [String]? = nil) -> Int {
         guard let sec = slotSection(v),
               let lines = lines ?? readConfigText().map(configLines) else { return settings.escClose }
@@ -3188,16 +2655,12 @@ final class SwitcherController: NSObject {
         return max(0, own.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? settings.escClose)
     }
 
-    // kitchen sink ▸ "Esc Hides Window" (per view): on = one Esc hides the
-    // window from the top of that view (notes' vim: once in Normal mode)
     func setEscHides(_ v: SlotView, _ on: Bool) {
         guard let sec = slotSection(v) else { return }
-        // off falls back to [app] esc-close when that already means never
         let value: String? = on ? "1" : settings.escClose == 0 ? nil : "0"
         saveConfigValues(section: sec, [("esc-close", value), ("vim-esc-close", nil)])
         let n = escHideCount(v)
         if let i = commands.firstIndex(where: { $0.name == sec }) { commands[i].escClose = value.flatMap(Int.init) }
-        // notes counts Esc in its own panes (vim / shell): live
         if v == .notes { noteWindow?.config.escCloseCount = n }
         log("[\(sec)] esc-close = \(value ?? "(default \(settings.escClose))") — Esc \(n > 0 ? "hides" : "never hides") the window")
     }
@@ -3211,7 +2674,6 @@ final class SwitcherController: NSObject {
         return item
     }
 
-    // which view a sub-window is (nil = not a shared-window member)
     func slotView(of w: PopupWindow) -> SlotView? {
         guard settings.sharedWindow else { return nil }
         let n = w.config.name
@@ -3224,7 +2686,6 @@ final class SwitcherController: NSObject {
         return nil
     }
 
-    // open notes / jira if they aren't (shown at `frame`); false = can't
     func ensureSlotMember(_ v: SlotView, frame: NSRect) -> Bool {
         if slotMember(v) != nil { return true }
         switch v {
@@ -3256,8 +2717,6 @@ final class SwitcherController: NSObject {
         return slotMember(v) != nil
     }
 
-    // the files view, landing on Recent when it wasn't already on screen
-    // ([files] start = recent)
     func slotShowFiles(hotkey: Bool = false, userInIt: Bool? = nil) {
         let wasShown = slot.current == .files && slot.isVisible
         if hotkey { slot.hotkey(.files, userInIt: userInIt) } else { slot.open(.files) }
@@ -3267,15 +2726,12 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // an opener about to show a slot window: place it at the shared frame
     func placeSlotWindow(_ w: PopupWindow) {
         guard settings.sharedWindow, slotView(of: w) != nil else { return }
         w.initialFrame = pendingSlotFrame ?? slot.currentFrame()
         pendingSlotFrame = nil
     }
 
-    // a closed shared window hands focus back to what was focused when it
-    // was summoned (the app, then its exact window via aerospace)
     func restoreFocus(wid: String?, pid: pid_t?) {
         if let pid, pid != getpid() {
             NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])
@@ -3287,16 +2743,11 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // tear a slot window down for good (rebuilds): its onHide runs the
-    // normal teardown (unregister, watchers, search panel) even if parked
     func closeSlotWindow(_ w: PopupWindow) {
         if w.isShown { w.hide(restore: false) } else { w.onHide?(false) }
         w.nativeWindow.orderOut(nil)
     }
 
-    // Dedicated notes-only entry point: opens the note window directly with no
-    // switcher popup. Guarded: only ONE note window ever exists — re-invoking
-    // just focuses it (works from any space).
     func showNotes() {
         if popup.isShown {
             popup.hide(restore: false)
@@ -3311,9 +2762,6 @@ final class SwitcherController: NSObject {
             log("notes: no note command configured in \(commandsConfName)")
             return
         }
-        // match by NAME: notes / voice / output are all edit-mode windows and
-        // a generic editMode match would focus the WRONG window when several
-        // are open (e.g. notes hijacking a voice session)
         if let w = subWindows.first(where: { $0.config.name == cmd.windowName }) {
             focusSubWindow(w)
             return
@@ -3321,8 +2769,6 @@ final class SwitcherController: NSObject {
         openNoteWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
     }
 
-    // Finder "Open in Notes" service: focus (or open) the notes window and
-    // make the given file the active tab.
     func openNoteFile(_ path: String) {
         let p = (path as NSString).standardizingPath
         guard FileManager.default.fileExists(atPath: p) else {
@@ -3338,7 +2784,7 @@ final class SwitcherController: NSObject {
             return
         }
         if settings.sharedWindow {
-            slot.open(.notes)          // the shared window switches to notes
+            slot.open(.notes)
         } else if let w = subWindows.first(where: { $0.config.name == cmd.windowName }) {
             focusSubWindow(w)
         } else {
@@ -3349,12 +2795,7 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // Open a command's window directly (no switcher popup) by its
-    // commands.toml section name (CLI / socket `notes`, `jira`, a palette
-    // command). Re-invoking focuses the existing window of that type.
     func showCommand(_ name: String) {
-        // "voice" is no longer its own window: it aliases the merged
-        // notes+voice window (commands.toml [notes] with `voice = true`)
         let name = name == "voice" ? "notes" : name
         if popup.isShown {
             popup.hide(restore: false)
@@ -3378,9 +2819,6 @@ final class SwitcherController: NSObject {
         }
         switch cmd.kind {
         case .note:
-            // match by NAME, not editMode: notes / voice / output windows are
-            // all edit-mode — a generic editMode match would focus notes when
-            // the user asked for voice (and vice versa)
             if let existing = subWindows.first(where: { $0.config.name == cmd.windowName }) {
                 focusSubWindow(existing)
                 return
@@ -3391,10 +2829,7 @@ final class SwitcherController: NSObject {
                 openListWindow(cmd, restoreWID: savedWID, restorePID: savedPID)
             }
         case .files:
-            // single instance, matched by NAME (jira is also editMode=false,
-            // so a generic editMode guard could focus the wrong window)
             if let existing = subWindows.first(where: { $0.config.name == cmd.windowName }) {
-                // every summon lands on Recent (the thing you just downloaded)
                 if cmd.startRecent { existing.fileBrowser?.showRecent() }
                 focusSubWindow(existing)
                 return
@@ -3407,11 +2842,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // Single-instance guard: opening a window that exists focuses it instead
-    // of creating a duplicate — windows have .canJoinAllSpaces so they
-    // appear on every workspace; ordering them forward brings them to the front.
-    // matched by window NAME: the files window is also editMode=false, so an
-    // editMode match focused Files when Jira was asked for
     private func focusExistingOrOpen(named name: String, open: () -> Void) {
         popup.hide(restore: false)
         if let existing = subWindows.first(where: { $0.config.name == name }) {
@@ -3421,14 +2851,8 @@ final class SwitcherController: NSObject {
         open()
     }
 
-    // Bring a sub-window (note/jira) to the front and make it key. Bringing the
-    // window onto the CURRENT workspace is handled by the invoking script
-    // (kitchen_sink.sh notes|jira) via aerospace BEFORE pinging us — so
-    // the daemon never blocks its main thread on aerospace IPC while focusing.
     private func focusSubWindow(_ w: PopupWindow) {
         if !w.isShown {
-            // persistent window hidden by Esc: re-show the SAME instance —
-            // its editor text and embedded terminal session are still alive
             w.showPersistent()
         } else {
             let win = w.nativeWindow
@@ -3438,28 +2862,15 @@ final class SwitcherController: NSObject {
         log("focused existing '\(w.config.name)' window")
     }
 
-    // the messages that show the shared window: "window" = Hyper+N (show the
-    // last view / hide), the named views are CLI only
     static let hotkeyModes: Set<String> = ["window", "notes", "voice", "jira", "files", "confluence", "ai", "compare"]
 
-    // what hotkeyPrep found at the keypress (handed to the main thread)
     struct HotkeyPrep {
         var log = ""
-        var workspace = ""          // the focused workspace
-        var screen: Int?            // its monitor (1-based NSScreen.screens)
-        var cacheCleared = false    // AeroSpace's closed-windows cache (SharedWindow.clearAerospaceCache)
+        var workspace = ""
+        var screen: Int?
+        var cacheCleared = false
     }
 
-    // Runs on the socket thread BEFORE the hotkey reaches the main thread
-    // (the binary is the hotkey, no launcher script): record the window
-    // aerospace has focused at the keypress (the focus file toggleCommand
-    // reads), the focused workspace + its monitor, clear AeroSpace's
-    // closed-windows cache for the show to come (SharedWindow.
-    // clearAerospaceCache), and pull our windows that are still up on
-    // another workspace over to this one. Direct aerospace socket, three
-    // queries at once (AeroSpace answers them one by one, ~10-25 ms each —
-    // the floor), never on the main thread; no sleep — a move is done when
-    // aerospace replies.
     static func hotkeyPrep() -> HotkeyPrep {
         let t0 = DispatchTime.now().uptimeNanoseconds
         var focused = "", rows = "", ws = ""
@@ -3472,8 +2883,6 @@ final class SwitcherController: NSObject {
         DispatchQueue.global(qos: .userInteractive).async(group: g) {
             cleared = aerospaceSocket(["eval", "true"]) != nil
         }
-        // the focused workspace + its monitor ride along in the listing;
-        // an empty focused workspace has no rows: then one more query
         rows = aerospaceCall(["list-windows", "--all", "--format",
                               "%{window-id}|%{app-pid}|%{workspace}|%{workspace-is-focused}|%{monitor-appkit-nsscreen-screens-id}|%{window-title}"])
         let table = rows.split(separator: "\n").map {
@@ -3490,7 +2899,6 @@ final class SwitcherController: NSObject {
         if focused.split(separator: " ").count == 2 {
             try? focused.write(toFile: settings.focusFilePath, atomically: true, encoding: .utf8)
         } else {
-            // nothing focused (empty workspace): not "in our window"
             try? FileManager.default.removeItem(atPath: settings.focusFilePath)
         }
         var prep = HotkeyPrep()
@@ -3502,7 +2910,7 @@ final class SwitcherController: NSObject {
         let me = String(getpid())
         var moved: [String] = []
         for f in table {
-            guard f[1] == me, !cur.isEmpty, f[2] != cur, f[2] != "N", f[5] != settings.switcherWindowName else { continue }  // N = its home (aerospace.toml rule)
+            guard f[1] == me, !cur.isEmpty, f[2] != cur, f[2] != "N", f[5] != settings.switcherWindowName else { continue }
             _ = aerospaceCall(["move-node-to-workspace", "--window-id", f[0], cur])
             moved.append(f[0])
         }
@@ -3512,16 +2920,11 @@ final class SwitcherController: NSObject {
         return prep
     }
 
-    // main thread, before the hotkey runs: the show it triggers lands on the
-    // focused workspace's screen, AeroSpace's cache already cleared
     func applyHotkeyPrep(_ prep: HotkeyPrep) {
         slot.targetScreen = prep.screen
         slot.aerospaceCacheCleared = prep.cacheCleared
     }
 
-    // a shared-window view opened from the palette: same prep as the
-    // hotkeys (our windows follow you to the focused workspace + its
-    // screen, AeroSpace's closed-windows cache cleared), then the show
     func openSlotHere(_ show: @escaping (SwitcherController) -> Void) {
         guard settings.sharedWindow else { show(self); return }
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
@@ -3536,9 +2939,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // `state` / `do:ACTION` over the socket (main thread): JSON the UI tests
-    // poll instead of sleeping + AppleScript. Actions run the same code the
-    // keys / header icons run; the answer is the state afterwards.
     func testQuery(_ q: String) -> String {
         if q.hasPrefix("do:") {
             let a = String(q.dropFirst(3))
@@ -3564,17 +2964,14 @@ final class SwitcherController: NSObject {
                 }
                 slot.open(v)
             case _ where a.hasPrefix("rebuild-card:"):
-                // what a Theme ▸ preset hover does: drop + rebuild a card view
                 guard let v = SlotView(rawValue: String(a.dropFirst(13))),
                       [.confluence, .ai, .compare, .compareText].contains(v) else {
                     return "{\"error\":\"not a card view\"}"
                 }
                 rebuildCard(v)
             case _ where a.hasPrefix("board:"):
-                // board:open:ID | view:B|S|M | sprint:ID | mode:M | pin | list | list-open:ID | list-star:ID — the jira board view
                 (slotMember(.jira) as? PopupWindow)?.onTestAction?(String(a.dropFirst(6)))
             case _ where a.hasPrefix("paths:"):
-                // paths:show | hide | return | select:N — the /paths popup
                 let arg = String(a.dropFirst(6))
                 switch arg {
                 case "show":
@@ -3587,20 +2984,16 @@ final class SwitcherController: NSObject {
                 default: return "{\"error\":\"paths:show|hide|return|select:N\"}"
                 }
             case _ where a.hasPrefix("tool:"):
-                // tool:NAME — open a tool panel exactly as the palette does
                 let n = String(a.dropFirst(5))
                 guard let cmd = commands.first(where: { $0.name == n }), isToolPanel(cmd) else {
                     return "{\"error\":\"not a tool panel: \(n)\"}"
                 }
                 openTool(cmd)
             case _ where a.hasPrefix("compare:"):
-                // compare:open:LEFT|RIGHT | open-sub:LEFT|RIGHT | paste:left|right:TEXT | next | prev |
-                // copy-right | copy-left | filter:NAME | swap | save:left|right | back | close-session | key:SPEC …
                 if let err = compareTestDo(String(a.dropFirst(8))) {
                     return "{\"error\":\"\(err)\"}"
                 }
             case _ where a.hasPrefix("screenshot:"):
-                // screenshot:show | select:X,Y,W,H | tool:NAME | draw:… | key:SPEC | copy | save:PATH | pin | close
                 if let err = screenshot.testDo(String(a.dropFirst(11))) {
                     return "{\"error\":\"\(err)\"}"
                 }
@@ -3610,14 +3003,12 @@ final class SwitcherController: NSObject {
                 if n == "paths" { pathsWindow?.hide() }
                 else { subWindows.first { $0.config.name == n && $0.config.toolPanel }?.hide(restore: false) }
             case _ where a.hasPrefix("esc-hides:"):
-                // esc-hides:VIEW:on|off — the kitchen sink's "Esc Hides Window"
                 let parts = a.split(separator: ":").map(String.init)
                 guard parts.count == 3, let v = SlotView(rawValue: parts[1]), ["on", "off"].contains(parts[2]) else {
                     return "{\"error\":\"esc-hides:VIEW:on|off\"}"
                 }
                 setEscHides(v, parts[2] == "on")
             case _ where a.hasPrefix("pane:"):
-                // pane:h|j|k|l = Ctrl+H/J/K/L in the current view; pane:focus:ID
                 guard let cur = slot.current, let w = slotMember(cur)?.slotWindow else {
                     return "{\"error\":\"no view shown\"}"
                 }
@@ -3632,15 +3023,12 @@ final class SwitcherController: NSObject {
                     return "{\"error\":\"pane:h|j|k|l|focus:ID\"}"
                 }
             case _ where a.hasPrefix("key:"):
-                // key:SPEC (ctrl+h, down, return, cmd+shift+z …): a real key
-                // event into the current view, through its key monitors
                 guard let cur = slot.current, let w = slotMember(cur)?.slotWindow,
                       let e = CompareWindow.keyEvent(String(a.dropFirst(4)), window: w) else {
                     return "{\"error\":\"no view shown / bad key\"}"
                 }
                 NSApp.postEvent(e, atStart: false)
             case _ where a.hasPrefix("header-style:"):
-                // live only (not written to commands.toml)
                 guard let st = HeaderStyle(rawValue: String(a.dropFirst(13))) else {
                     return "{\"error\":\"unknown header style\"}"
                 }
@@ -3668,7 +3056,7 @@ final class SwitcherController: NSObject {
             "palette": popup.isShown, "views": views,
             "hideOnFocusLoss": settings.hideOnFocusLoss,
             "escHides": { () -> [String: Bool] in
-                let lines = readConfigText().map(configLines)   // one read for every view
+                let lines = readConfigText().map(configLines)
                 return Dictionary(uniqueKeysWithValues: SharedWindow.escViews.map { ($0.rawValue, escHideCount($0, lines: lines) > 0) })
             }(),
             "pid": Int(getpid()),
@@ -3680,7 +3068,6 @@ final class SwitcherController: NSObject {
             "paths": pathsWindow?.testState ?? ["shown": false,
                                                 "rows": PathShelf.shared.entries().map { ["path": $0.path, "why": $0.why.rawValue] }],
             "headerStyle": HeaderStyle.current.rawValue,
-            // Ctrl+H/J/K/L: the current view's panes, the focused one, the ring
             "pane": slot.current.flatMap { slotMember($0)?.slotWindow }.map { PaneNav.shared.testState($0) } ?? [:],
             "screenshot": screenshot.testState,
             "compare": { () -> [String: Any] in
@@ -3691,8 +3078,6 @@ final class SwitcherController: NSObject {
             }(),
             "paneShot": screenshot.paneShotLast,
             "activations": appActivations,
-            // NOT `active`: a key non-activating panel (tool panel) reads as
-            // NSApp.isActive while the other app stays frontmost
             "frontmostPid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0),
             "tools": Dictionary(subWindows.filter(\.config.toolPanel).map { w -> (String, Any) in
                 var st = w.testState
@@ -3705,9 +3090,6 @@ final class SwitcherController: NSObject {
         return String(decoding: d, as: UTF8.self)
     }
 
-    // Unix socket for the isolated command launcher: a message naming a
-    // commands.toml section ("notes", "jira", …) opens that window in the
-    // running daemon (no second process needed).
     private func startCommandServer() {
         let socketPath = popupTmpDir() + settings.notesSocketName
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -3715,14 +3097,8 @@ final class SwitcherController: NSObject {
             while true {
                 let cfd = Darwin.accept(fd, nil, nil)
                 guard cfd >= 0 else { continue }
-                // a client that hangs up before its reply (a timed-out test
-                // query) must not SIGPIPE the daemon (per socket: a global
-                // SIG_IGN would be inherited by the drawer's shell + nvim)
                 var noSigPipe: Int32 = 1
                 setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-                // a client that connects and never writes must not wedge the
-                // accept loop (a wedged loop saturates the backlog and then
-                // blocks every future ping in connect())
                 var tv = timeval(tv_sec: Int(serverRecvTimeout), tv_usec: 0)
                 setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv,
                            socklen_t(MemoryLayout<timeval>.size))
@@ -3731,22 +3107,16 @@ final class SwitcherController: NSObject {
                 let query = n > 0 ? (String(bytes: buf[..<n], encoding: .utf8) ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines) : ""
                 if query == "ping" {
-                    // a second launch checking that this daemon is alive
                     close(cfd)
                     continue
                 }
                 if query == "screenshot-permission" {
-                    // bin/preflight.sh (also run by the Setup window): answered
-                    // HERE, never via the main thread
                     let line = (ScreenshotController.permitted ? "granted" : "denied") + "\n"
                     line.withCString { _ = Darwin.write(cfd, $0, strlen($0)) }
                     close(cfd)
                     continue
                 }
                 if query == "screenshot" || query.hasPrefix("screenshot\t") {
-                    // Hyper+X / the CLI: "screenshot<TAB>arg<TAB>arg…" (no
-                    // hotkeyPrep: the tool never asks AeroSpace anything).
-                    // -r / -g keep the connection open until the user is done.
                     let words = query.split(separator: "\t").dropFirst().map(String.init)
                     let wantsReply = (try? ShotArgs.parse(words).get())?.wantsReply ?? false
                     if !wantsReply { close(cfd) }
@@ -3762,8 +3132,6 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query.hasPrefix("compare\t") {
-                    // `kitchen-sink compare [--wait] [--title1 T] [--title2 T] A [B]`:
-                    // --wait keeps the connection until the session closes or the window hides
                     let words = query.split(separator: "\t", omittingEmptySubsequences: false).dropFirst().map(String.init)
                     let wait = words.contains("--wait")
                     if !wait { close(cfd) }
@@ -3782,8 +3150,6 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query == "pane-shot" || query.hasPrefix("pane-shot\t") {
-                    // `kitchen-sink pane-shot [flags]` (PaneShot.swift):
-                    // the CLI waits for ONE reply line (path / copied / error)
                     let words = query.split(separator: "\t").dropFirst().map(String.init)
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { close(cfd); return }
@@ -3797,9 +3163,6 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query == "reload" || query == "restart" {
-                    // ws-settings / `kitchen-sink reload|restart`: re-read
-                    // commands.toml (reload answers with the config's health);
-                    // restart = a fresh daemon for launch-only keys ([theme]…)
                     var reply = "{\"ok\":false,\"error\":\"timeout\"}"
                     let done = DispatchSemaphore(value: 0)
                     DispatchQueue.main.async { [weak self] in
@@ -3827,9 +3190,6 @@ final class SwitcherController: NSObject {
                     continue
                 }
                 if query == "state" || query.hasPrefix("do:") {
-                    // tests: answered on the same connection (bin/ui-test.sh
-                    // ws_query); main thread, bounded wait so a busy main
-                    // loop can't wedge the accept loop
                     var reply = "{\"error\":\"timeout\"}"
                     let done = DispatchSemaphore(value: 0)
                     DispatchQueue.main.async { [weak self] in
@@ -3854,23 +3214,18 @@ final class SwitcherController: NSObject {
                                 let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
                                 self?.log(String(format: "hotkey %@: %@, %.1f ms to shown", name, prep?.log ?? "", ms))
                             }
-                            // the prep's cache clear was for THIS hotkey's show only
                             self?.slot.aerospaceCacheCleared = false
                         }
                         if let prep { self?.applyHotkeyPrep(prep) }
                         if name == "reset-size" {
                             self?.noteWindow?.resetToDefaultSize()
                         } else if name == "toggle-terminal" {
-                            // drawer toggles on the notes window (scripts/tests)
                             guard let w = self?.noteWindow else { return }
                             w.toggleTerminalDrawer()
                         } else if name.hasPrefix("open:") {
-                            // "open:<absolute path>" opens that file as a
-                            // notes tab (same as Finder's "Open in Notes")
                             let path = String(name.dropFirst(5))
                             self?.openNoteFile((path as NSString).expandingTildeInPath)
                         } else if settings.sharedWindow && Self.hotkeyModes.contains(name) {
-                            // Hyper+N (window), or a named view from the CLI
                             self?.toggleCommand(name)
                         } else if name == "notes" {
                             self?.showNotes()
@@ -3887,7 +3242,6 @@ final class SwitcherController: NSObject {
                         } else if name == "ai" {
                             self?.showAI()
                         } else if name.hasPrefix("jira-poll-") || name == "jira-setup" {
-                            // THE jira switch (menu-bar "Enable Jira"/"Disable Jira")
                             guard let self else { return }
                             let on = jiraEnabledInConfig()
                             switch name {
@@ -3906,19 +3260,11 @@ final class SwitcherController: NSObject {
     }
 
     func show() {
-        popup.show()   // onShow refreshes the focus target + dismisses sub-windows
+        popup.show()
     }
 
-    // MARK: Hooks
-
-    // Row rendering — the kitchen sink's own look. Workspace rows: key
-    // chip (accent = the focused workspace) + app icons + what the query hit
-    // (or "+N") + an unread badge; split rows: a command left, a workspace
-    // right. The framework only hands us the row rect; rows stretch vertically when the
-    // window is resized, so center on rect.midY.
     private func drawRow(_ rect: NSRect, _ row: PopupRow, _ selected: Bool) {
         if let r = row as? SplitRow { drawSplitRow(rect, r, selected); return }
-        // scale the row's look with the window (Ctrl/Cmd+± drives config.zoom)
         let z = popup.config.zoom
         let c = popup.config.colors
         let cy = rect.midY
@@ -3927,7 +3273,6 @@ final class SwitcherController: NSObject {
                               width: rect.width - 16 * z, height: rowPillH * z))
         }
         let ws = row as? WorkspaceRow
-        // key chip
         let keyRect = NSRect(x: 14 * z, y: cy - 10 * z, width: 22 * z, height: 20 * z)
         let focused = ws?.focused ?? false
         let chip = NSBezierPath(roundedRect: keyRect, xRadius: 5 * z, yRadius: 5 * z)
@@ -3941,7 +3286,6 @@ final class SwitcherController: NSObject {
         let ks = key.size(withAttributes: keyAttrs)
         key.draw(at: NSPoint(x: keyRect.midX - ks.width / 2, y: keyRect.midY - ks.height / 2),
                  withAttributes: keyAttrs)
-        // right edge: the unread badge
         var right = rect.width - 14 * z
         if let n = ws?.unread, !n.isEmpty {
             right = drawBadge(n, rightEdge: right, cy: cy, z: z) - 6 * z
@@ -3968,8 +3312,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // the shared cursor look (list + file rows): highlight pill, accent
-    // hairline and an accent edge on the left
     private func drawCursor(_ pill: NSRect) {
         let z = popup.config.zoom
         let c = popup.config.colors
@@ -3987,7 +3329,6 @@ final class SwitcherController: NSObject {
         NSGraphicsContext.current?.restoreGraphicsState()
     }
 
-    // a red count capsule ending at rightEdge; returns its left edge
     @discardableResult
     private func drawBadge(_ text: String, rightEdge: CGFloat, cy: CGFloat, z: CGFloat) -> CGFloat {
         let attrs: [NSAttributedString.Key: Any] = [
@@ -4005,13 +3346,11 @@ final class SwitcherController: NSObject {
         return r.minX
     }
 
-    // x where the right (workspaces) pane starts
     private func splitMid(_ width: CGFloat) -> CGFloat { (width * 0.46).rounded() }
 
     private func drawSplitRow(_ rect: NSRect, _ r: SplitRow, _ selected: Bool) {
         let z = popup.config.zoom
         let mid = splitMid(rect.width)
-        // the pane divider
         TEXT.withAlphaComponent(0.1).setFill()
         NSRect(x: mid, y: rect.minY + 4 * z, width: 1, height: rect.height - 8 * z).fill()
         if let cmd = r.command {
@@ -4042,17 +3381,13 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // a palette row for a shared-window view that is not a [section] command
     private static func slotCommand(_ name: String, label: String) -> CommandSpec {
         var c = CommandSpec(name: name)
         c.label = label
+        c.aliases = configAliases(name)
         return c
     }
 
-    // what the Hyper+S command grid lists. [jira-config] only exists while
-    // Jira is enabled; [confluence] and [ai] are config sections whose views
-    // are palette commands. `in-palette = false` keeps a section out of the
-    // list (its window still opens from the hotkeys, header icons, menu bar)
     func paletteCommands() -> [CommandSpec] {
         let jira = jiraEnabledInConfig()
         func listed(_ section: String) -> Bool {
@@ -4068,26 +3403,16 @@ final class SwitcherController: NSObject {
         if compareEnabled(), listed("compare") {
             all.append(Self.slotCommand("compare", label: configSectionValue("compare", "label") ?? "Compare"))
         }
-        // always last: show the shared window on the view you were last on
         if settings.sharedWindow {
             all.append(Self.slotCommand("window", label: "Kitchen Sink"))
         }
-        // [app] palette-first: those commands lead, in that order
         let first = settings.paletteFirst.compactMap { n in all.first { $0.name.lowercased() == n } }
         return first + all.filter { c in !first.contains { $0.name == c.name } }
     }
 
-    // Hyper+S is ONE view in two panes: palette commands on the left (the
-    // `palette-first` ones on top), a row per workspace on the right (its apps
-    // as icons — the only place apps are listed). One
-    // query narrows both; commands match their label AND section name
-    // ("filefast", "paths", "prettyprint"). A query narrows both: a workspace key ("w", "3") puts that
-    // row first, an app / window title hit names itself inside its row, and
-    // commands match fuzzily. A leading "/" shows commands only.
     private func filter(_ query: String) -> [PopupRow] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if q != splitQuery {
-            // a new query: the cursor goes back to the best match
             splitQuery = q
             splitPane = 0
             popup.selection = 0
@@ -4102,8 +3427,6 @@ final class SwitcherController: NSObject {
                 var row = WorkspaceRow(ws: ws, iconCache: &iconCache)
                 row.unread = rowUnread(ws, unread)
                 if t.isEmpty {
-                    // empty workspaces stay out of the map unless focused
-                    // (typing a key still finds one: "3" jumps to 3)
                     if !ws.apps.isEmpty || ws.focused { hits.append(row) }
                     continue
                 }
@@ -4125,22 +3448,17 @@ final class SwitcherController: NSObject {
             wsRows = exact + hits
         }
         let cmds = t.isEmpty ? paletteCommands() : PopupFuzzy.filter(paletteCommands(), query: t) { c in
-            c.label.map { "\($0) \(c.name)" } ?? c.name
+            (c.label.map { "\($0) \(c.name)" } ?? c.name) + " " + c.aliases.joined(separator: " ")
         }
         var out: [PopupRow] = []
         for i in 0..<max(cmds.count, wsRows.count) {
             out.append(SplitRow(command: i < cmds.count ? cmds[i] : nil,
                                 workspace: i < wsRows.count ? wsRows[i] : nil))
         }
-        // the cursor starts in the pane that has something
         if cmds.isEmpty && !wsRows.isEmpty { splitPane = 1 }
         return out
     }
 
-    // The shared window's header strip: Hyper+S's workspace rows, sideways
-    // (occupied workspaces + the focused one). Refreshed when the window is
-    // shown, when AeroSpace reports a focus change and every few seconds while
-    // it is up; the unread counts ride on the last status reading.
     func refreshWorkspaceStrip() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let fresh = gatherWorkspaces()
@@ -4171,7 +3489,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // a workspace row's badge: the unread counts of its apps, summed
     private func rowUnread(_ ws: WorkspaceInfo, _ unread: [String: String]) -> String {
         var total = 0, dot = false
         for id in Set(ws.apps.compactMap(\.bundleID)) {
@@ -4181,7 +3498,6 @@ final class SwitcherController: NSObject {
         return total > 0 ? String(total) : dot ? "•" : ""
     }
 
-    // re-render in place (fresh workspaces / status arrived while shown)
     private func refreshRows() {
         guard popup.isShown else { return }
         let sel = popup.selection
@@ -4189,9 +3505,6 @@ final class SwitcherController: NSObject {
         popup.selection = min(sel, max(0, popup.rows.count - 1))
     }
 
-    // Up/Down/Ctrl+N/P walk the lines of the pane the cursor is in; Tab (and
-    // Left/Right while the query is empty) crosses to the other pane.
-    // Everything else falls through to the popup.
     private func switcherKey(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         guard popup.isShown, mods.intersection([.command, .option]).isEmpty else { return false }
         let ctrl = mods.contains(.control)
@@ -4214,13 +3527,11 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // does line `i` have a cell in `pane`?
     private func hasCell(_ i: Int, _ pane: Int) -> Bool {
         guard popup.rows.indices.contains(i), let r = popup.rows[i] as? SplitRow else { return false }
         return pane == 0 ? r.command != nil : r.workspace != nil
     }
 
-    // move the cursor into `pane`, onto the same line when it has a cell there
     private func switchPane(_ pane: Int) {
         let lines = popup.rows.indices.filter { hasCell($0, pane) }
         guard let last = lines.last else { return }
@@ -4239,8 +3550,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // clickToSelect already moved the selection: run the row (a grid row
-    // runs the cell under the pointer)
     private func clickRow(_ index: Int) {
         let rows = popup.rows
         guard rows.indices.contains(index) else { return }
@@ -4262,13 +3571,6 @@ final class SwitcherController: NSObject {
             return
         }
         if let cr = row as? CommandRow {
-            // tool panels (/filefast, /paths, /prettyprint, /health-checks)
-            // are non-activating: restoring focus to the previous app here
-            // would steal key from them (and re-activating US raised every
-            // window of ours, the shared window too). They hand nothing back
-            // when they close either: the app was never activated, so the
-            // keyboard returns to the frontmost app on its own (a saved
-            // window could be on a workspace you've since left)
             if isToolPanel(cr.command) {
                 popup.hide(restore: false)
                 openTool(cr.command)
@@ -4278,12 +3580,10 @@ final class SwitcherController: NSObject {
             case .shell:
                 let cmd = cr.command
                 popup.hide(restore: true)
-                // /jira-config opens the Jira Config window (in-process too)
                 if cmd.name == "jira-config" {
                     showJiraDashboard()
                     break
                 }
-                // /confluence and /ai open the shared window's views
                 if cmd.name == "confluence" { showConfluence(); break }
                 if cmd.name == "ai" { showAI(); break }
                 if cmd.name == "compare" { openSlotHere { $0.showCompare() }; break }
@@ -4292,9 +3592,6 @@ final class SwitcherController: NSObject {
                     self.log("cmd '\(cmd.name)' -> \(out)")
                 }
             case .note:
-                // selecting a command creates a NEW window: dismiss the
-                // switcher entirely (no breadcrumb) and open a fresh note
-                // editor for the file — unless one already exists
                 let wid = savedWID
                 let pid = savedPID
                 if settings.sharedWindow {
@@ -4306,7 +3603,6 @@ final class SwitcherController: NSObject {
                     openNoteWindow(cr.command, restoreWID: wid, restorePID: pid)
                 }
             case .list:
-                // same for list windows (jira etc.) — single instance
                 let wid = savedWID
                 let pid = savedPID
                 if settings.sharedWindow && cr.command.name == "jira" {
@@ -4346,11 +3642,8 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // MARK: Command actions
-
     func log(_ s: String) { wsLog(s) }
 
-    // one pasteboard write + log line behind every "copy …" affordance
     private func copy(_ text: String, _ what: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -4358,8 +3651,6 @@ final class SwitcherController: NSObject {
         log("copied \(what)")
     }
 
-    // Menu-bar glyphs toggle their window: hide when it is already the key
-    // window, otherwise focus-or-open (same path as the hotkeys).
     func toggleNotes() {
         if let cmd = commands.first(where: { $0.kind == .note }),
            let w = subWindows.first(where: { $0.config.name == cmd.windowName }),
@@ -4371,10 +3662,8 @@ final class SwitcherController: NSObject {
     }
 
     func toggleCommand(_ name: String) {
-        // "voice" aliases the merged notes+voice window (see showCommand)
         let name = name == "voice" ? "notes" : name
         if name == "window" {
-            // Hyper+N: show the view you were last on / hide the window
             guard settings.sharedWindow else { toggleNotes(); return }
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
@@ -4416,8 +3705,6 @@ final class SwitcherController: NSObject {
         }
         let kind = commands.first(where: { $0.name == name })?.kind
         if settings.sharedWindow, name == "jira" || kind == .note || kind == .files {
-            // the launcher recorded the window aerospace had focused at the
-            // keypress: THE answer to "is the user in our window right now?"
             let (wid, pid) = readFocusFile()
             if !slot.isVisible { (savedWID, savedPID) = (wid, pid) }
             let inIt = userInOurWindow(pid, name)
@@ -4436,18 +3723,9 @@ final class SwitcherController: NSObject {
         showCommand(name)
     }
 
-    // "Is the user in our window right now?" for a hotkey toggle — true only
-    // when BOTH agree: aerospace (the focus file) says our window is focused
-    // AND AppKit says we really hold the keyboard. aerospace alone says yes
-    // when it raised our window but macOS refused to activate us (keys still
-    // go to the previous app): pressing the hotkey again to get focus then
-    // HID the window — the "it randomly closed" bug. AppKit alone can say yes
-    // while the user types elsewhere. Disagreement = not in it = show + focus.
     private func userInOurWindow(_ focusPID: pid_t?, _ name: String) -> Bool? {
         let keyed = NSApp.isActive && NSApp.keyWindow?.isVisible == true
         guard let focusPID else { return nil }
-        // a key tool panel is its own "app": the hotkey from it focuses the
-        // shared window instead of hiding it
         if (NSApp.keyWindow?.delegate as? PopupWindow)?.config.toolPanel == true { return false }
         let inIt = focusPID == getpid() && keyed
         if focusPID == getpid() && !keyed {
@@ -4456,31 +3734,19 @@ final class SwitcherController: NSObject {
         return inIt
     }
 
-    // Toggle vim mode for the notes window: updates the command spec, persists
-    // to commands.toml, and relaunches the notes window if one is open so the
-    // change takes effect immediately.
     func toggleVimModeForNotes() {
         guard let idx = commands.firstIndex(where: { $0.name == "notes" }) else { return }
         let cmd = commands[idx]
         let newValue = !cmd.vimMode
         log("vim mode: \(newValue ? "enabled" : "disabled") for notes")
 
-        // Update the command spec in the in-memory array
         commands[idx].vimMode = newValue
 
-        // Persist to commands.toml
         saveConfigValue(section: "notes", key: "vim-mode", value: newValue ? "true" : "false")
 
-        // rebuild the open notes window in the new mode (the note is
-        // flushed first, so nothing typed is lost)
         rebuildNoteWindow()
     }
 
-    // Launch args for the notes vim pane. The bundled vim/init.lua
-    // (chrome-less, autosaving, transparent) is used unless commands.toml
-    // `vim-init` names another file; the bundled init takes ~/.config/nvim off the
-    // runtimepath so personal plugins never load and can never block the pane
-    // with a "Press ENTER" prompt. Theme colors are handed in as g:ws_* variables.
     func vimArgs(for cmd: CommandSpec, socket: String, file: String?) -> [String] {
         var a: [String] = []
         let isNvim = (cmd.vimBin as NSString).lastPathComponent.hasPrefix("nvim")
@@ -4505,11 +3771,8 @@ final class SwitcherController: NSObject {
         a += ["--cmd", "let g:ws_sock='\(popupTmpDir() + settings.notesSocketName)'",
               "--cmd", "let g:ws_img_file='\(imgFile)'",
               "--cmd", "let g:ws_img_rows=\(max(1, cmd.imageRows))"]
-        // cursor-line band (iTerm2-style cursor guide): the selection color
-        // pulled halfway toward the card so it reads fainter than Visual
         let sel = (cmd.highlightColor ?? GROUP_BG).usingColorSpace(.sRGB) ?? GROUP_BG
         let card = (cmd.backgroundColor ?? BAR).withAlphaComponent(1).usingColorSpace(.sRGB) ?? BAR
-        // the whole theme in ONE --cmd: nvim accepts at most 10 of them
         let lets = ["let g:ws_fg='\(rgb(cmd.textColor ?? TEXT))'",
                     "let g:ws_dim='\(rgb(cmd.dimColor ?? DIM))'",
                     "let g:ws_sel='\(rgb(cmd.highlightColor ?? GROUP_BG))'",
@@ -4520,17 +3783,11 @@ final class SwitcherController: NSObject {
         return a
     }
 
-    // Esc/close on a sub-window: drop it from the registry and hand focus back
-    // to whatever window was focused when it opened.
     private func unregisterSubWindow(_ w: PopupWindow, restore: Bool,
                                      restoreWID: String?, restorePID: pid_t?) {
         let view = slotView(of: w)
         subWindows.removeAll { $0 === w }
-        // drop the host hooks so the window + its captured objects (e.g. the
-        // voice recorder's AVAudioEngine, which holds the mic) dealloc — a
-        // leaked engine made the next voice session's record button dead
         w.releaseHooks()
-        // shared-window members: the shared window owns the focus hand-back
         if let view {
             slot.memberGone(view)
             return
@@ -4547,8 +3804,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // Enter / double-click on a list row: a jira release opens the release
-    // view (its issues, one tab per release); anything else the details
     private func openRow(_ row: FieldRow, cmd: CommandSpec, isJira: Bool) {
         if isJira && jiraIsReleaseRow(row) {
             showJiraReleaseView(row)
@@ -4557,7 +3812,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // what the list's issue panel shows for a row (an issue or a release)
     func jiraInspectorContent(_ row: FieldRow) -> PopupInspectorContent {
         func f(_ k: String) -> String { row.fields[k] ?? "" }
         let status = f("status"), priority = f("priority")
@@ -4587,11 +3841,6 @@ final class SwitcherController: NSObject {
             body: f("description"))
     }
 
-    // The release view: a jira table window with one tab per release
-    // (releases.json order; a blacklisted release only when it is the one
-    // opened), each holding that release's issues — same columns, filters,
-    // Cmd+K, ☆ and details as all.json. The tab files come from the issue
-    // cache (jira_poll.py --release-view); reopening rebuilds the window.
     func showJiraReleaseView(_ release: FieldRow) {
         guard var rc = commands.first(where: { $0.name == "jira" }) else { return }
         let key = release.fields["key"] ?? ""
@@ -4619,9 +3868,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // "more details": a minimal read-only floating window that renders ONE
-    // jira blown up — every field, nothing truncated or wrapped to 2 lines.
-    // Esc dismisses. Re-invoking refreshes the single existing detail window.
     private func showDetail(_ row: FieldRow, cmd: CommandSpec) {
         let key = row.fields["key"] ?? row.title
         let text = detailText(for: row, cmd: cmd)
@@ -4631,7 +3877,7 @@ final class SwitcherController: NSObject {
             existing.chromeHeaderTitle = nil
             showTicketPage(row, in: existing, cmd: cmd)
             if settings.sharedWindow {
-                slot.push(.detail)       // in place of the list; Esc = back
+                slot.push(.detail)
             } else {
                 existing.nativeWindow.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
@@ -4648,9 +3894,7 @@ final class SwitcherController: NSObject {
         cfg.copyToast = settings.copyToast
         cfg.width = defaultDetailSize.width
         cfg.height = defaultDetailSize.height
-        // the list's font (monospaced for jira): the release issue table lines up
         cfg.fontName = cmd.font
-        // wears its jira window's theme (same card, header and palette)
         cfg.colors = windowColors(cmd)
         cfg.headerColor = cmd.headerColor ?? headerBlueSilver
         cfg.titlePill = false
@@ -4658,23 +3902,17 @@ final class SwitcherController: NSObject {
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
         w.editorText = text
-        // no title in the header bar: the issue names itself on the page's
-        // first line (detailText)
         w.chromeHeaderTitle = nil
         w.headerIcon = jiraAppIcon
-        // no config button here — the header carries "copy key" + "open in
-        // browser" instead (the row-level browser action now lives here)
         w.copyConfigButtonLabel = ""
         w.copyPathButtonLabel = "copy key"
         w.headerButtons = [("open in browser", 10)]
         w.onChromeHeaderClick = { [weak self] in
-            // the row shown NOW (the window is reused across rows)
             let k = self?.detailRow?.fields["key"] ?? key
             self?.copy(k, "jira key: \(k)")
         }
         w.onHeaderButton = { [weak self] id in
             guard id == 10, let self else { return }
-            // the row shown NOW (a reused detail window swaps rows)
             if let url = jiraBrowseURL(self.detailRow ?? row) {
                 NSWorkspace.shared.open(url)
                 self.log("detail: opened \(url.absoluteString) in browser")
@@ -4698,9 +3936,6 @@ final class SwitcherController: NSObject {
         log("detail window opened for \(key)")
     }
 
-    // an issue (it has a status) reads as the ticket page (JiraTicket.swift):
-    // header card + workflow steps + tabs; anything else stays plain text.
-    // The page carries Copy key / Copy link / Open, so the header's go.
     private var ticketView: JiraTicketView?
     private func showTicketPage(_ row: FieldRow, in w: PopupWindow, cmd: CommandSpec) {
         guard cmd.name == "jira" || cmd.name == jiraReleasesWindow, row.fields["status"] != nil,
@@ -4733,9 +3968,8 @@ final class SwitcherController: NSObject {
             }
         }
         w.copyPathButtonLabel = ""
-        // only the view's own button goes: the shared window's back / home stay
         w.headerButtons = w.headerButtons.filter { $0.1 != 10 }
-        w.textZoomKey = "textZoom.jira"       // Cmd+± zooms the ticket page like the list
+        w.textZoomKey = "textZoom.jira"
         w.setPageOverlay(v)
         let key = row.fields["key"] ?? ""
         let cms = JiraTicketPage.cachedComments(key) { [weak self, weak v] in
@@ -4747,18 +3981,14 @@ final class SwitcherController: NSObject {
                background: w.config.colors.base)
     }
 
-    // headline fields in commands.toml order, then every remaining raw field
     private func detailText(for row: FieldRow, cmd: CommandSpec) -> String {
         let shown = [cmd.primary, cmd.content, cmd.detail, cmd.trailing, cmd.body]
             .compactMap { $0 }
         var out: [String] = []
-        // the page's own title line (the header bar carries none)
         let key = row.fields["key"] ?? ""
         let name = row.fields["summary"] ?? row.fields["title"] ?? row.title
         let head = [key, name].filter { !$0.isEmpty }.joined(separator: " — ")
         if !head.isEmpty { out.append(head); out.append("") }
-        // an issue reads as a card: its state on one line, its people on the
-        // next, the description under a heading, everything else last
         var used = Set<String>()
         if row.fields["status"] != nil {
             used.formUnion(["key", "title", "summary"])
@@ -4796,18 +4026,10 @@ final class SwitcherController: NSObject {
         return out.joined(separator: "\n")
     }
 
-    // MARK: Tool panels
-
-    // The "/" tools that act like their own apps (PopupConfig.toolPanel):
-    // /filefast, /paths, /prettyprint, and output commands with `panel =
-    // true` (/health-checks). They never activate the app — every shown
-    // popup raises itself on activation, so the shared window came along —
-    // and they are never shared-window views.
     func isToolPanel(_ cmd: CommandSpec) -> Bool {
         ["filefast", "paths", "prettyprint", "screenshot", "terminal"].contains(cmd.name) || (cmd.kind == .output && cmd.panel)
     }
 
-    // ONE way to open a tool panel (the palette, `do:tool:NAME`)
     func openTool(_ cmd: CommandSpec) {
         switch cmd.name {
         case "filefast": openFileFastWindow(cmd)
@@ -4819,8 +4041,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // Ctrl+B W inside the shared window (SharedWindow.prefixKey): the
-    // views the header icons click through, each with where it is
     func showViewSwitcher() {
         if viewSwitcher == nil {
             let v = ViewSwitcherPanel(colors: windowColors())
@@ -4836,7 +4056,7 @@ final class SwitcherController: NSObject {
         let names: [Int: String] = [SharedWindow.navFiles: "Files", SharedWindow.navNotes: "Notes",
                                     SharedWindow.navJira: "Jira", SharedWindow.navConfluence: "Confluence",
                                     SharedWindow.navCompare: "Compare", SharedWindow.navAI: "AI"]
-        let views = SharedWindow.navIcons.map { icon -> (id: Int, name: String, icon: NSImage, location: String) in
+        let views = SharedWindow.navIcons.map { icon -> (id: Int, name: String, icon: NSImage, location: String, aliases: [String]) in
             let loc: String
             switch icon.id {
             case SharedWindow.navFiles: loc = filesWin?.fileBrowser?.whereText ?? ""
@@ -4847,15 +4067,16 @@ final class SwitcherController: NSObject {
             case SharedWindow.navAI: loc = AIWindow.current?.whereText ?? ""
             default: loc = ""
             }
-            return (icon.id, names[icon.id] ?? icon.tip, icon.image, loc)
+            let section: [Int: String] = [SharedWindow.navFiles: "files", SharedWindow.navNotes: "notes",
+                                          SharedWindow.navJira: "jira", SharedWindow.navConfluence: "confluence",
+                                          SharedWindow.navCompare: "compare", SharedWindow.navAI: "ai"]
+            return (icon.id, names[icon.id] ?? icon.tip, icon.image, loc, section[icon.id].map(configAliases) ?? [])
         }
         let cur = slot.current.flatMap { SharedWindow.navOn($0) }
         viewSwitcher?.show(views, current: cur, preselect: slot.previousNav ?? cur,
                            over: slot.current.flatMap { slotMember($0)?.slotWindow })
     }
 
-    // Ctrl+B T / palette /terminal / `kitchen-sink term`: the
-    // dedicated terminal panel (TerminalPanel.swift), built once and kept
     func toggleTerminalPanel() {
         if terminalPanel == nil {
             let t = TerminalPanel(colors: windowColors(commands.first { $0.name == "terminal" }),
@@ -4867,15 +4088,10 @@ final class SwitcherController: NSObject {
         terminalPanel?.toggle()
     }
 
-    // /screenshot from the palette: capture once the palette has left the
-    // screen (it must not be in the frozen image)
     func showScreenshot() {
         screenshot.trigger(ShotArgs(), extraDelay: 0.15)
     }
 
-    // a tool panel already up (you clicked away to copy something): take the
-    // keyboard back WITHOUT activating the app — activation raises our other
-    // windows and hands key to the app's last key window (notes / jira)
     private func raiseToolPanel(_ w: PopupWindow) {
         let win = w.nativeWindow
         win.orderFrontRegardless()
@@ -4883,9 +4099,6 @@ final class SwitcherController: NSObject {
         log("tool '\(w.config.name)' refocused")
     }
 
-    // opened from another app: hiding the switcher can hand key to one of
-    // OUR other windows (notes / jira) a beat later — take it back, but
-    // never from another app the user clicked into
     private func reclaimToolKey(_ w: PopupWindow, then focus: (() -> Void)? = nil) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak w] in
             guard let w, w.isShown, !w.nativeWindow.isKeyWindow,
@@ -4896,15 +4109,9 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // type = output: run a shell command and show its output in a read-only
-    // window (the /health-checks palette entry). Re-invoking re-runs into the
-    // same window; Esc dismisses. `panel = true`: a tool panel (its own
-    // window, isToolPanel); else a shared-window view.
     private func openOutputWindow(_ cmd: CommandSpec) {
         let shared = settings.sharedWindow && !cmd.panel
         if shared {
-            // one output view at a time in the shared window: another
-            // command's output window goes away
             if let old = currentOutputName, old != cmd.windowName,
                let ow = subWindows.first(where: { $0.config.name == old }) {
                 closeSlotWindow(ow)
@@ -4933,23 +4140,18 @@ final class SwitcherController: NSObject {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.toolPanel = cmd.panel
-        // tool panels float by default (they follow you, Raycast-style)
         cfg.floating = cmd.float ?? cmd.panel
         cfg.escCloseCount = shared ? 1 : max(0, cmd.escClose ?? (cmd.panel ? 1 : settings.escClose))
         cfg.copyToast = settings.copyToast
         cfg.width = cmd.width > 0 ? cmd.width : defaultOutputSize.width
         cfg.height = cmd.height > 0 ? cmd.height : defaultOutputSize.height
-        // same header styling as the jira window: slim bluey-silver bar, no
-        // title pill, jira glyph at the far left
         cfg.headerHeight = 30
         cfg.titlePill = false
         applyWindowTheme(&cfg, cmd)
         let w = PopupWindow(config: cfg)
         w.editorReadOnly = true
         w.editorText = "running \(cmd.name)…"
-        // empty `title` in commands.toml = no header label (icon still shows)
         w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
-        // per-command header glyph (commands.toml `icon`); jira by default
         w.headerIcon = cmd.icon ?? jiraAppIcon
         w.copyConfigButtonLabel = "copy config path"
         w.copyPathButtonLabel = "copy output"
@@ -4978,10 +4180,6 @@ final class SwitcherController: NSObject {
         runScript(cmd.script ?? "", label: cmd.name, into: w)
     }
 
-    // /prettyprint: a tiny paste-and-format window. Paste raw JSON/XML into
-    // the editor and it re-renders itself formatted (debounced as you paste);
-    // the "copy contents" header button copies the contents, "save file" writes
-    // it out (to the command's `save-dir`) and copies the absolute path.
     private func openPrettyPrintWindow(_ cmd: CommandSpec) {
         let windowName = "prettyprint"
         if let existing = subWindows.first(where: { $0.config.name == windowName }) {
@@ -5007,7 +4205,6 @@ final class SwitcherController: NSObject {
         w.chromeHeaderTitle = nil
         w.headerIcon = notesAppIcon
         w.itemCount = "paste JSON or XML below — auto-formats"
-        // hide the framework's copy config; keep our own two buttons
         w.copyConfigButtonLabel = ""
         w.copyPathButtonLabel = ""
         w.headerButtons = [("save file", 11), ("copy contents", 10)]
@@ -5017,16 +4214,11 @@ final class SwitcherController: NSObject {
             let work = DispatchWorkItem { [weak self, weak w] in
                 guard let self, let w else { return }
                 let raw = w.currentEditorText
-                // formatting shells out to jq/xmllint — keep it off the main
-                // thread so a big document never stalls the UI
                 DispatchQueue.global(qos: .userInitiated).async { [weak self, weak w] in
                     let result = self?.prettyFormat(raw)
                     DispatchQueue.main.async { [weak w] in
                         guard let result, let w else { return }
                         if let formatted = result.formatted {
-                            // render the formatted text with JSON/XML token
-                            // colors (idempotent — re-applied even when the
-                            // text is unchanged so colors never go stale)
                             w.setEditorSyntaxHighlighted(formatted)
                             w.setStatus(nil, isError: false)
                         } else if let err = result.error {
@@ -5043,12 +4235,10 @@ final class SwitcherController: NSObject {
         w.onHeaderButton = { [weak self, weak w] id in
             guard let self, let w else { return }
             if id == 10 {
-                // copy contents
                 let contents = w.currentEditorText
                 guard !contents.isEmpty else { return }
                 self.copy(contents, "prettyprint contents")
             } else if id == 11 {
-                // save to a file + copy the absolute path
                 self.savePrettyPrint(w, dir: cmd.saveDir)
             }
         }
@@ -5064,12 +4254,6 @@ final class SwitcherController: NSObject {
         log("prettyprint window opened")
     }
 
-
-    // /filefast: a thin two-cell bar, same size/look as the Hyper+S switcher —
-    // left cell = file name, right cell = paste area. Return (in either cell)
-    // saves the paste to <save-dir>/YYYY_MM_DD/<name> through the command's
-    // bash `script` (env FF_DIR / FF_NAME, content on stdin; the script
-    // pbcopies the path and prints it). Tab swaps cells, Shift+Return = newline.
     private func openFileFastWindow(_ cmd: CommandSpec) {
         let windowName = "filefast"
         if let existing = subWindows.first(where: { $0.config.name == windowName }) {
@@ -5081,10 +4265,6 @@ final class SwitcherController: NSObject {
         cfg.enableToggle = false
         cfg.enableDrag = false
         cfg.dynamicHeight = true
-        // sticky (default): clicking another app leaves the bar open, so you
-        // can paste the content, go copy the file name, and come back (click
-        // it or run /filefast again). Floating (default): it stays above the
-        // app you went to. Esc closes it; a save closes it.
         cfg.sticky = cmd.sticky
         cfg.toolPanel = true
         cfg.floating = cmd.float ?? true
@@ -5150,7 +4330,6 @@ final class SwitcherController: NSObject {
                 DispatchQueue.main.async { [weak self, weak w] in
                     self?.log("filefast \(ok ? "saved" : "failed"): \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
                     guard ok, let w else { NSSound.beep(); return }
-                    // same confirmation pill as the jira copy, centered on the thin bar
                     let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
                         .split(separator: "\n").last.map(String.init) ?? name
                     if path.hasPrefix("/") { PathShelf.shared.add([path], why: .filefast) }
@@ -5162,30 +4341,27 @@ final class SwitcherController: NSObject {
         w.onKeyPreview = { [weak w, weak paste] code, mods in
             guard let w, let paste else { return false }
             let inPaste = w.nativeWindow.firstResponder === paste
-            // Cmd shortcuts: the framework routes them to the name field only,
-            // so the paste cell handles its own. Cmd+V from the name field
-            // (once a name is typed) pastes straight into the paste cell.
             if mods.contains(.command) {
                 let nameTyped = !w.currentSearchText.isEmpty
                 switch code {
-                case 9 where inPaste || nameTyped:                // V
+                case 9 where inPaste || nameTyped:
                     w.nativeWindow.makeFirstResponder(paste)
                     paste.paste(nil); return true
-                case 0 where inPaste: paste.selectAll(nil); return true     // A
-                case 8 where inPaste: paste.copy(nil); return true          // C
-                case 7 where inPaste: paste.cut(nil); return true           // X
-                case 6 where inPaste: paste.undoManager?.undo(); return true // Z
-                case 1:                                           // S: save
+                case 0 where inPaste: paste.selectAll(nil); return true
+                case 8 where inPaste: paste.copy(nil); return true
+                case 7 where inPaste: paste.cut(nil); return true
+                case 6 where inPaste: paste.undoManager?.undo(); return true
+                case 1:
                     save(); return true
                 default: break
                 }
             }
             switch code {
-            case 53:                                              // Esc: just close, nothing saved
+            case 53:
                 w.hide(restore: true); return true
-            case 36 where !(mods.contains(.shift) && inPaste):   // Return
+            case 36 where !(mods.contains(.shift) && inPaste):
                 save(); return true
-            case 48 where !mods.contains(.control):               // Tab
+            case 48 where !mods.contains(.control):
                 if inPaste { w.focusSearchField() } else { w.nativeWindow.makeFirstResponder(paste) }
                 return true
             default: return false
@@ -5197,12 +4373,10 @@ final class SwitcherController: NSObject {
         }
         subWindows.append(w)
         w.show()
-        // the paste cell: right of the name field, same row, same height
         if let backdrop = w.nativeWindow.contentView {
             let f = w.searchFieldFrame
             let x = f.maxX + 8
             scroll.frame = NSRect(x: x, y: f.minY, width: backdrop.bounds.width - x - f.minX, height: f.height)
-            // the text view needs a real frame or it never takes the paste
             paste.frame = NSRect(origin: .zero, size: scroll.contentSize)
             paste.minSize = NSSize(width: 0, height: scroll.contentSize.height)
             paste.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -5214,18 +4388,12 @@ final class SwitcherController: NSObject {
         log("filefast window opened")
     }
 
-    // Timestamp for prettyprint filenames: prettyprint-20260918-173045.json
     private let prettySaveStamp: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
         return f
     }()
 
-    // "save file": write the current editor contents to a timestamped file in the
-    // command's configured save directory (default /tmp/; commands.toml `save-dir`
-    // overrides), then copy the ABSOLUTE path to the clipboard (pbcopy equivalent).
-    // Feedback lands in the status strip — the saved path on success, a red error
-    // on failure.
     private func savePrettyPrint(_ w: PopupWindow, dir: String) {
         let contents = w.currentEditorText
         guard !contents.isEmpty else { return }
@@ -5238,7 +4406,6 @@ final class SwitcherController: NSObject {
         } else {
             ext = "txt"
         }
-        // expand any `~`/relative path into an absolute directory
         let absDir = (dir as NSString).expandingTildeInPath
         let path = (absDir as NSString)
             .appendingPathComponent("prettyprint-\(prettySaveStamp.string(from: Date())).\(ext)")
@@ -5256,11 +4423,6 @@ final class SwitcherController: NSObject {
         log("prettyprint saved to \(path)")
     }
 
-    // Sniff + reformat JSON/XML via the real formatter bins (jq / xmllint — the
-    // same tools the shell `prettyprint` util uses), so the output AND the parse
-    // errors match exactly. `.formatted` = pretty text (content was JSON/XML);
-    // `.error` = the formatter's stderr (content LOOKED like JSON/XML but didn't
-    // parse); nil/nil = plain text (nothing to do).
     private struct FormatResult {
         let formatted: String?
         let error: String?
@@ -5290,9 +4452,6 @@ final class SwitcherController: NSObject {
         return FormatResult(formatted: nil, error: nil)
     }
 
-    // Run a formatter tool with `input` on stdin; returns (stdout, stderr).
-    // Falls back to PATH lookup (/usr/bin/env) when none of the absolute paths
-    // exist, so the tool is found however the daemon was launched.
     private func runFormatter(tool: String, paths: [String], args: [String],
                               input: String) -> (String, String) {
         let exe = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
@@ -5309,7 +4468,6 @@ final class SwitcherController: NSObject {
         return t.isEmpty ? nil : t
     }
 
-    // run any shell line into an output window
     private func runScript(_ script: String, label: String, into w: PopupWindow) {
         let shell = settings.shell
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak w] in
@@ -5320,7 +4478,6 @@ final class SwitcherController: NSObject {
                 DispatchQueue.main.async { w?.setEditorText("failed to run: \(error)") }
                 return
             }
-            // render ANSI colors (doctor's PASS/FAIL/WARN) in the editor
             let shown = r.out + (r.err.isEmpty ? "" : "\n-- stderr --\n" + r.err) + "\n(exit \(r.code))"
             DispatchQueue.main.async { [weak self] in
                 guard let w else { return }
@@ -5330,9 +4487,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // note: edit the file(s) in-window (no external editor). Files are created
-    // if missing, saved on Cmd+S and whenever the window closes. With multiple
-    // `paths`, each note pad is a tab.
     private func openNoteWindow(_ cmd: CommandSpec,
                                 restoreWID: String?, restorePID: pid_t?) {
         log("openNoteWindow: '\(cmd.name)' terminal=\(cmd.terminal) paths=\(cmd.paths.count)")
@@ -5341,29 +4495,19 @@ final class SwitcherController: NSObject {
             return
         }
         let paths = notePaths(cmd)
-        // vim mode: an embedded nvim pane replaces the text view (tabs,
-        // drawers and chrome stay). One long-lived editor; tab switches go
-        // over its --listen socket, so nothing quits or relaunches.
         let vimSocket = NSHomeDirectory()
             + "/.cache/kitchen-sink/nvim-\(cmd.name)-\(getpid()).sock"
         let cfg = noteWindowConfig(cmd, firstNote: paths[0], vimSocket: vimSocket)
         let w = PopupWindow(config: cfg)
-        // the tab list, the note on screen and every window hook; the hooks
-        // keep the session alive as long as the window lives
         let session = NoteSession(host: self, cmd: cmd, window: w, paths: paths, vimSocket: vimSocket)
         session.install()
-        // embedded file browser drawer (header "▤" toggles it): starts in the
-        // note directory, favorites shared with the floating "files" window
         let fb = makeFileBrowser(cfg, startDir: noteDir(session.currentPath), in: w,
                                  tag: "note '\(cmd.name)'", opened: "browser opened")
         w.installFileBrowser(fb, drawer: true)
-        // mirror the post-install drawer state onto the header buttons
-        // (browser is the default pane, so it's on and the terminal is off)
         w.setHeaderButtonOn(10, w.terminalShown)
         w.setHeaderButtonOn(20, w.fileBrowserShown)
         subWindows.append(w)
         if settings.sharedWindow {
-            // Esc (when esc-close says so, see noteWindowConfig) / Cmd+W
             w.onEscape = { [weak self] in self?.slot.hide("Esc / Cmd+W (notes)") }
             placeSlotWindow(w)
         }
@@ -5371,13 +4515,6 @@ final class SwitcherController: NSObject {
         w.show()
     }
 
-    // The notes a [section]'s paths= opens as tabs: ~ expanded, directory
-    // entries expanded to their files (sorted). A `paths`/`sources` value may
-    // be a single file OR a directory — pointing at a folder means new files
-    // show up automatically without editing commands.toml. Deleted notes are
-    // NOT resurrected: a listed file that no longer exists is dropped (and
-    // removed from commands.toml) instead of being recreated empty. Never
-    // empty: with every note gone, a fresh default.md scratch note.
     private func notePaths(_ cmd: CommandSpec) -> [String] {
         var paths: [String] = []
         for p in expandPaths(cmd.paths, extensions: ["md"]) {
@@ -5385,15 +4522,12 @@ final class SwitcherController: NSObject {
                 log("note '\(cmd.name)': \(p) deleted — dropping it and removing from config")
                 removeNotePathFromConfig(p, section: cmd.name)
             } else if DismissedNotes.contains(p) {
-                // closed with the tab ✕ — keep it out even if a directory entry
-                // (e.g. paths = ~/notes) would otherwise re-expand it here
                 log("note '\(cmd.name)': \(p) dismissed — skipping")
             } else {
                 paths.append(p)
             }
         }
         if paths.isEmpty {
-            // every listed note is gone — open a fresh default.md scratch note
             let first = (cmd.paths[0] as NSString).expandingTildeInPath
             let fallback = ensureDefaultNote(in: noteDir(first))
             paths = [fallback]
@@ -5403,8 +4537,6 @@ final class SwitcherController: NSObject {
         return paths
     }
 
-    // the notes window's PopupConfig from its [section] (`firstNote` = the
-    // tab shown first: a preview file starts vim without a file)
     private func noteWindowConfig(_ cmd: CommandSpec, firstNote: String,
                                   vimSocket: String) -> PopupConfig {
         var cfg = PopupConfig(name: cmd.windowName)
@@ -5413,10 +4545,7 @@ final class SwitcherController: NSObject {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = false   // normal level; AeroSpace places it (aerospace.toml)
-        // Esc belongs to vim / the shell unless the kitchen sink's "Esc Hides
-        // Window" is on (`esc-close`, default 0): then the Nth rapid Esc
-        // hides (vim: only once it is in Normal mode)
+        cfg.floating = false
         cfg.escCloseCount = max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.tabs = true
@@ -5424,8 +4553,6 @@ final class SwitcherController: NSObject {
         cfg.tabsSidebarWidth = cmd.sidebarWidth
         cfg.opaqueTabs = cmd.tabsOpaque ?? true
         cfg.width = cmd.width > 0 ? cmd.width : defaultNoteSize.width
-        // `start-drawer` (browser | terminal | none) picks the pane open on
-        // launch; the initial height folds in whichever drawer opens
         cfg.fileBrowserDefault = cmd.startDrawer == "browser"
         cfg.terminalStartsOpen = cmd.startDrawer == "terminal"
         cfg.height = (cmd.height > 0 ? cmd.height : defaultNoteSize.height)
@@ -5445,13 +4572,8 @@ final class SwitcherController: NSObject {
         if cmd.fontSize > 0 { cfg.editorFontSize = cmd.fontSize }
         cfg.terminalBackground = cmd.terminalBackground
             ?? THEME_TERMINAL ?? cfg.terminalBackground
-        // slim header (same height as the jira detail window): no title pill,
-        // bluey-silver strip, app glyph far left with the last-write line
         cfg.headerHeight = 30
         cfg.titlePill = false
-        // the header buttons fill the whole top strip (right rounded edge back
-        // to the app glyph / last-write line) instead of a compact right cluster
-        // shared window: the notes | jira switch stays a compact pill pair
         cfg.stretchHeaderButtons = !settings.sharedWindow
         applyWindowTheme(&cfg, cmd)
         cfg.terminalForeground = cmd.terminalForeground
@@ -5460,7 +4582,6 @@ final class SwitcherController: NSObject {
             let exe = resolveBinary(cmd.vimBin) ?? cmd.vimBin
             cfg.vimEditorExecutable = exe
             cfg.vimEditorSocket = vimSocket
-            // inline-image placements the editor writes (vim/init.lua)
             cfg.vimImageFile = (vimSocket as NSString).deletingPathExtension + ".images.json"
             cfg.vimEditorArgs = vimArgs(for: cmd, socket: vimSocket,
                                         file: noteIsPreview(firstNote) ? nil : firstNote)
@@ -5481,9 +4602,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // editing commands.toml as a note: surface validation problems in the
-    // window's status strip as you save (the running app keeps its config;
-    // an invalid file is replaced by the backup at the next launch)
     private func reportConfigEdit(_ text: String) {
         let issues = validateConfig(text)
         if let f = issues.first(where: \.fatal) {
@@ -5498,8 +4616,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // commands.toml as editable lines + `path` in its ~ form (how paths= lists
-    // notes under $HOME); nil (logged) when the file can't be read
     private func notePathConfig(_ path: String) -> (lines: [String], display: String)? {
         guard let content = readConfigText() else {
             log("commands.toml: cannot read \(settings.commandsConfPath)")
@@ -5512,14 +4628,11 @@ final class SwitcherController: NSObject {
         return (configLines(content), display)
     }
 
-    // the paths= / path= entries of [section] — the note lists
     private func notePathEntries(_ lines: [String], _ section: String)
         -> [(index: Int, key: String, value: String)] {
         configSectionEntries(lines, section).filter { $0.key == "paths" || $0.key == "path" }
     }
 
-    // keep commands.toml in sync: append a newly created note to the [notes]
-    // section's paths= line, using the tilde form for paths under $HOME
     private func addNotePathToConfig(_ path: String, section: String) {
         guard let (read, display) = notePathConfig(path) else { return }
         var lines = read
@@ -5527,10 +4640,6 @@ final class SwitcherController: NSObject {
             log("commands.toml: no [\(section)] section to update")
             return
         }
-        // is this note already listed? (e.g. + re-created with an existing name)
-        // — compare EXPANDED forms so ~/notes/x.md == /Users/me/notes/x.md.
-        // A .md straight inside a listed FOLDER (paths = ~/notes) is listed too:
-        // the folder entry already opens it
         let parent = (path as NSString).deletingLastPathComponent
         let isListed = e.value.split(separator: ",").contains { entry in
             let s = (entry.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
@@ -5545,8 +4654,6 @@ final class SwitcherController: NSObject {
         log("commands.toml: added note \(display)")
     }
 
-    // drop a deleted note from commands.toml so it never gets listed again
-    // (paths= entries that no longer exist on disk are removed)
     private func removeNotePathFromConfig(_ path: String, section: String) {
         guard let (read, display) = notePathConfig(path) else { return }
         var lines = read
@@ -5569,16 +4676,12 @@ final class SwitcherController: NSObject {
         log("commands.toml: no [\(section)] section to update")
     }
 
-    // MARK: Theme presets + transparency (header icon menu)
-
     enum ThemeScope {
         case window, notepad, terminal, browser
     }
-    // the open Theme menu's hover-preview delegate (NSMenu holds it weakly)
     private var themePreviewDelegate: ThemePreviewDelegate?
     private var headerStylePreviewDelegate: HeaderStylePreviewDelegate?
 
-    // surfaces this window can style: notes = all four, files = the explorer
     private func themeScopes(for w: PopupWindow) -> [(ThemeScope, String)] {
         var out: [(ThemeScope, String)] = [(.window, "Whole Window")]
         if w.config.editMode { out.append((.notepad, "Notepad Only")) }
@@ -5587,8 +4690,6 @@ final class SwitcherController: NSObject {
         return out
     }
 
-    // Theme ▸ (presets, each with a Whole Window / per-surface submenu),
-    // Transparency ▸, Custom Color…, Reset. Added to both header icon menus.
     func addThemeMenus(to menu: NSMenu, window w: PopupWindow, section: String) {
         let scopes = themeScopes(for: w)
         let themeMenu = NSMenu(title: "Theme")
@@ -5596,8 +4697,6 @@ final class SwitcherController: NSObject {
         let currentBrowser = hexString(w.themeColor(.browser).withAlphaComponent(1))
         let windowTextIsLight = w.config.colors.text.relativeLuminance > 0.45
         let presets = ThemePreset.all()
-        // hovering a preset previews it live on this window; closing the
-        // menu without picking one puts the current look back
         let snapshot = ThemeSnapshot(w)
         let preview = ThemePreviewDelegate(
             onHighlight: { [weak self, weak w] tag in
@@ -5613,7 +4712,6 @@ final class SwitcherController: NSObject {
             onClose: { [weak w] in if let w { snapshot.restore(w) } })
         themeMenu.delegate = preview
         themePreviewDelegate = preview
-        // grouped Mid Tones / Dark / Light, brightest first inside a group
         let order = presets.indices.sorted {
             let a = presets[$0], b = presets[$1]
             if a.tone != b.tone { return a.tone.rawValue < b.tone.rawValue }
@@ -5628,8 +4726,6 @@ final class SwitcherController: NSObject {
                 themeMenu.addItem(.sectionHeader(title: toneTitles[p.tone] ?? ""))
                 lastTone = p.tone
             }
-            // one surface (Whole Window only): the row itself applies the
-            // preset; several: a Whole Window / per-surface submenu
             let item: NSMenuItem
             if scopes.count == 1 {
                 item = menuItem(p.name) { [weak self, weak w] in
@@ -5642,16 +4738,14 @@ final class SwitcherController: NSObject {
                 item = NSMenuItem(title: p.name, action: nil, keyEquivalent: "")
             }
             item.tag = i
-            item.representedObject = i   // a preset row (hover previews it)
+            item.representedObject = i
             item.image = p.swatch()
             let matches = w.config.editMode ? currentBg == hexString(p.background)
                                             : currentBrowser == hexString(p.background)
             item.state = matches ? .on : .off
             let sub = NSMenu(title: p.name)
-            sub.autoenablesItems = false   // keep unreadable combos greyed
+            sub.autoenablesItems = false
             for (scope, label) in scopes {
-                // explorer-only keeps the window's text color, so it only
-                // offers presets that stay readable under it
                 let readable = scope != .browser || p.isLight != windowTextIsLight
                 let si = menuItem(label, enabled: readable) { [weak self, weak w] in
                     guard let self, let w else { return }
@@ -5686,7 +4780,6 @@ final class SwitcherController: NSObject {
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
 
-        // Transparency ▸ <surface> ▸ level
         let levels: [(String, CGFloat)] = [
             ("Opaque", 0), ("Frosted — 10%", 0.10), ("Soft — 22% (default)", 0.22),
             ("Glass — 35%", 0.35), ("Clear — 50%", 0.50), ("Ghost — 70%", 0.70),
@@ -5712,8 +4805,6 @@ final class SwitcherController: NSObject {
         menu.addItem(tItem)
     }
 
-    // Header Style ▸ (app-wide [app] header-style): hovering a style previews
-    // it on every open window, closing without a pick puts it back
     func headerStyleMenuItem() -> NSMenuItem {
         let sub = NSMenu(title: "Header Style")
         let original = HeaderStyle.current
@@ -5745,7 +4836,6 @@ final class SwitcherController: NSObject {
             var r: [PopupWindow.ThemeRole] = [.notepad, .header]
             if w.hasFileBrowser { r.append(.browser) }
             if w.hasTerminalDrawer { r.append(.terminal) }
-            // the files window IS its explorer: lead with it (menu checkmarks)
             return w.config.editMode ? r : [.browser, .header, .notepad]
         case .notepad: return [.notepad, .header]
         case .terminal: return [.terminal]
@@ -5762,8 +4852,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // keep the in-memory spec in step with commands.toml so a window rebuild
-    // (vim toggle, Start With…) keeps the look
     private func updateSpecColors(section: String, _ kv: [(String, NSColor?)]) {
         guard let i = commands.firstIndex(where: { $0.name == section }) else { return }
         for (key, c) in kv {
@@ -5783,7 +4871,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // live-apply + persist color keys for a window (nil = remove the key)
     private func commitColors(_ w: PopupWindow, section: String, _ kv: [(String, NSColor?)]) {
         updateSpecColors(section: section, kv)
         saveConfigValues(section: section, kv.map { ($0.0, $0.1.map(hexString)) })
@@ -5793,9 +4880,6 @@ final class SwitcherController: NSObject {
     func applyThemePreset(_ p: ThemePreset, scope: ThemeScope,
                           to w: PopupWindow, section: String, persist: Bool = true) {
         var kv: [(String, NSColor?)] = []
-        // swap the hue, keep the surface's current transparency — but never
-        // below presetMinOpacity: a near-invisible surface (e.g. a terminal at
-        // 8%) showed only the desktop blur, so every preset looked the same
         func paint(_ role: PopupWindow.ThemeRole, _ c: NSColor) {
             let cur = w.themeColor(role).usingColorSpace(.sRGB) ?? w.themeColor(role)
             let alpha = max(cur.alphaComponent, presetMinOpacity)
@@ -5851,8 +4935,6 @@ final class SwitcherController: NSObject {
         commitColors(w, section: section, kv)
     }
 
-    // drop every per-window color key and live-restore the [theme] defaults
-    // (text colors included)
     func resetWindowTheme(_ w: PopupWindow, section: String) {
         removeColorKeysFromConfig(section: section)
         updateSpecColors(section: section, [
@@ -5873,10 +4955,6 @@ final class SwitcherController: NSObject {
         log("theme reset for [\(section)] — back to system defaults")
     }
 
-    // Theme ▸ for the card views (Confluence, AI, Compare): the presets write
-    // the section's color keys, then the card is rebuilt in place (its colors
-    // are read at build time). Compare's sessions ride through persistNow /
-    // restoreSessions.
     func addCardThemeMenu(to menu: NSMenu, view: SlotView) {
         let section: String
         switch view {
@@ -5888,8 +4966,6 @@ final class SwitcherController: NSObject {
         let themeMenu = NSMenu(title: "Theme")
         let presets = ThemePreset.all()
         let toneTitles: [ThemePreset.Tone: String] = [.mid: "Mid Tones", .dark: "Dark", .light: "Light"]
-        // hovering a preset previews it (the card is rebuilt in that look);
-        // closing the menu without a pick puts the saved look back
         let preview = ThemePreviewDelegate(
             onHighlight: { [weak self] tag in
                 guard let self else { return }
@@ -5924,7 +5000,7 @@ final class SwitcherController: NSObject {
                 self?.applyCardTheme(p, section: section, view: view)
             }
             item.tag = i
-            item.representedObject = i   // a preset row (hover previews it)
+            item.representedObject = i
             item.image = p.swatch()
             themeMenu.addItem(item)
         }
@@ -5956,7 +5032,6 @@ final class SwitcherController: NSObject {
         rebuildCard(view)
     }
 
-    // drop a card view and build it again (same frame, still current)
     func rebuildCard(_ view: SlotView) {
         let v: SlotView = view == .compareText ? .compare : view
         let wasCurrent = slot.current == view || slot.current == v
@@ -5978,15 +5053,6 @@ final class SwitcherController: NSObject {
         if wasCurrent, ensureSlotMember(v, frame: f) { slot.present(v) }
     }
 
-    // "Global Window Options ▸" — the FIRST item of every view's icon menu
-    // (notes, files, jira, confluence, ai) and of the menu-bar menu; it
-    // changes every view of the shared window at once:
-    //   Hide When Focus Is Lost   [app] hide-on-focus-loss
-    //   Header Style ▸            [app] header-style
-    // Float vs tile is NOT an app setting: AeroSpace's on-window-detected
-    // rule places every window of the app (config/aerospace/aerospace.toml).
-    // The window level is always normal — the focused window is in front;
-    // alt-hjkl or a click on another app puts that app in front of it.
     func addGlobalWindowItems(to parent: NSMenu) {
         let menu = NSMenu(title: "Global Window Options")
         menu.autoenablesItems = false
@@ -6001,8 +5067,6 @@ final class SwitcherController: NSObject {
         menu.addItem(headerStyleMenuItem())
     }
 
-    // global switch: every shared-window app follows it, so their per-window
-    // `sticky` is dropped (it would silently override the switch)
     func setGlobalHideOnFocusLoss(_ on: Bool) {
         settings.hideOnFocusLoss = on
         saveConfigValue(section: "app", key: "hide-on-focus-loss", value: on ? "true" : "false")
@@ -6017,13 +5081,8 @@ final class SwitcherController: NSObject {
         log("[app] hide-on-focus-loss = \(on)")
     }
 
-    // the apps the global switches own. NOT the Hyper+S popup or the "/"
-    // palette's popup-only windows (filefast, output, prettyprint, jira
-    // config): those keep their own `sticky` / `float`.
     static let sharedViews: [SlotView] = [.notes, .files, .jira, .detail, .releases, .confluence, .ai, .compare]
 
-    // "Keyboard Shortcuts…" (every view's kitchen sink menu; Cmd+/ too):
-    // commands.toml [shortcuts] — this view's first, then "Everywhere"
     func shortcutsMenuItem(for w: PopupWindow, view: String) -> NSMenuItem {
         let item = menuItem("Keyboard Shortcuts…") { [weak self, weak w] in
             guard let self, let w else { return }
@@ -6050,12 +5109,6 @@ final class SwitcherController: NSObject {
         w.showShortcuts(groups)
     }
 
-    // MARK: Interactive color picker (header paint-brush button)
-
-    // The paint-brush header button: a SHORT menu of the window's background
-    // roles; picking one opens the shared NSColorPanel for that role. Dragging
-    // PREVIEWS live in this window only; nothing is written until "Apply".
-    // Pressing the panel's close "x" (or Esc) reverts to the original color.
     private func presentThemeRoleMenu(for w: PopupWindow,
                                       roles: [PopupWindow.ThemeRole],
                                       section: String) {
@@ -6074,7 +5127,6 @@ final class SwitcherController: NSObject {
             if enabled {
                 item = NSMenuItem(title: role.label, action: #selector(pickThemeRole(_:)), keyEquivalent: "")
             } else {
-                // dim the label so it reads as disabled
                 let attr = NSAttributedString(
                     string: role.label,
                     attributes: [
@@ -6098,7 +5150,6 @@ final class SwitcherController: NSObject {
         menu.addItem(reset)
         pickerWindow = w
         pickerSection = section
-        // pop under the paint-brush button (fall back to the mouse position)
         if let cv = w.nativeWindow.contentView, let r = w.headerButtonRect(60) {
             menu.popUp(positioning: nil, at: NSPoint(x: r.midX, y: r.minY), in: cv)
         } else if let cv = w.nativeWindow.contentView {
@@ -6112,9 +5163,6 @@ final class SwitcherController: NSObject {
         startColorPicker(for: w, role: role)
     }
 
-    // "Reset to system defaults": drop every color override this window
-    // carries in commands.toml and live-restore the app-wide ([theme])
-    // defaults — browser, terminal, notepad and header all go back.
     @objc private func resetThemeColors(_ sender: Any?) {
         guard let w = pickerWindow else { return }
         resetWindowTheme(w, section: pickerSection)
@@ -6127,7 +5175,6 @@ final class SwitcherController: NSObject {
         pickerCommitted = false
         pickerSawVisible = false
         let seed = (pickerOriginal ?? .clear).usingColorSpace(.sRGB) ?? .clear
-        // seed the picker from the ACTUAL current surface: hue + transparency
         pickerHue = seed.withAlphaComponent(1)
         pickerTransparency = 1.0 - seed.alphaComponent
         let panel = NSColorPanel.shared
@@ -6137,7 +5184,6 @@ final class SwitcherController: NSObject {
         panel.isContinuous = true
         panel.setTarget(self)
         panel.setAction(#selector(panelColorChanged(_:)))
-        // accessory: hex readout, transparency slider, Apply / Cancel
         let acc = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 120))
         let hexLabel = NSTextField(labelWithString: "")
         hexLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
@@ -6217,9 +5263,6 @@ final class SwitcherController: NSObject {
         applyPickerPreview()
     }
 
-    // preview hue @ transparency on the window (nothing is written until
-    // Apply). The 0.08 floor keeps a surface from ever becoming fully
-    // invisible.
     private func applyPickerPreview() {
         guard let w = pickerWindow, let role = pickerRole else { return }
         let alpha = max(1.0 - pickerTransparency, 0.08)
@@ -6254,8 +5297,6 @@ final class SwitcherController: NSObject {
         log("color picker cancelled for [\(pickerSection)] — reverted")
     }
 
-    // The color panel must never linger once the window it edits is hidden —
-    // close it and revert any un-committed preview.
     private func dismissPickerIfOpen(for w: PopupWindow) {
         guard pickerWindow === w else { return }
         pickerWatchdog?.invalidate()
@@ -6280,7 +5321,6 @@ final class SwitcherController: NSObject {
         let color = pickerHue.withAlphaComponent(alpha)
         let hex = hexString(color)
         guard !hex.isEmpty, !pickerSection.isEmpty else { return }
-        // per-window override keys — the pick only affects THIS window
         let key: String
         switch pickerRole! {
         case .browser: key = "browser-background"
@@ -6299,15 +5339,11 @@ final class SwitcherController: NSObject {
         let g = Int(round(cc.greenComponent * 255))
         let b = Int(round(cc.blueComponent * 255))
         let a = Int(round(cc.alphaComponent * 255))
-        // an explicit non-opaque alpha is stored as AARRGGBB so the opacity
-        // slider's pick survives a restart
         return a < 255
             ? String(format: "%02X%02X%02X%02X", a, r, g, b)
             : String(format: "%02X%02X%02X", r, g, b)
     }
 
-    // drop every color-override key from a [section] so the [theme] defaults
-    // apply again ("Reset to system defaults" in the picker menu)
     private func removeColorKeysFromConfig(section: String) {
         let confPath = settings.commandsConfPath
         guard let content = readConfigText() else {
@@ -6336,22 +5372,14 @@ final class SwitcherController: NSObject {
             log("list '\(cmd.name)': no source configured")
             return
         }
-        // each source: { path, rows }
-        // a source may be a single file OR a directory — a directory expands
-        // to all matching files (sorted), so adding a file to a folder needs
-        // no commands.toml edit
         let tabs: [(path: String, items: [FieldRow])] =
             expandPaths(cmd.sources, extensions: ["json", "tsv"]).map { path in
                 return (path, loadListItems(path, cmd: cmd, columns: ListSession.tabColumns(cmd, path)))
             }
-        // table mode (`table = true` + `columns`): spreadsheet rows under a
-        // sticky, sortable, resizable header; absent columns = preview rows
         let columns = ListSession.tabColumns(cmd, tabs.first?.path)
         let cfg = listWindowConfig(cmd, tabCount: tabs.count, columns: columns)
         let w = PopupWindow(config: cfg)
-        if ListSession.isJira(cmd) { w.textZoomKey = "textZoom.jira" }   // Cmd+± zooms the rows / board
-        // the tabs, filters, sort and every window hook; the hooks keep the
-        // session alive as long as the window lives
+        if ListSession.isJira(cmd) { w.textZoomKey = "textZoom.jira" }
         let session = ListSession(host: self, cmd: cmd, window: w, tabs: tabs, columns: columns,
                                   restoreWID: restoreWID, restorePID: restorePID)
         session.install()
@@ -6370,9 +5398,6 @@ final class SwitcherController: NSObject {
             return "list.bullet.rectangle"
         }
         if ListSession.isJira(cmd) {
-            // SYNCED rows carry the job's name, not its file ("KAN", "Starred
-            // issues"); the file name stays in the hover tip. Green badges go
-            // quiet: an age + dot only shows once a list is behind.
             w.tabRowTitle = { [weak w] i in
                 guard let w, w.tabTitles.indices.contains(i) else { return nil }
                 return JiraPoll.listTitle(file: w.tabTitles[i])
@@ -6385,7 +5410,6 @@ final class SwitcherController: NSObject {
         session.didShow()
     }
 
-    // a list window's PopupConfig from its [section]
     private func listWindowConfig(_ cmd: CommandSpec, tabCount: Int,
                                   columns: [ListColumn]) -> PopupConfig {
         let isJira = ListSession.isJira(cmd)
@@ -6395,16 +5419,12 @@ final class SwitcherController: NSObject {
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
         cfg.floating = isJira ? false : (cmd.float ?? false)
-        // shared window: ONE Esc = back (clearing a search first); at the
-        // jira list it hides the window only when jira's "Esc Hides Window"
-        // is on (SharedWindow.escapeAtTop)
         cfg.escCloseCount = ListSession.inSlot(cmd) ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
         cfg.wrapContent = true
         cfg.showSearchBar = true
         cfg.dragHeader = true
         cfg.tabs = tabCount > 1
-        // jira: its sources as a sidebar (drag its edge; `sidebar-width`)
         if isJira {
             cfg.tabsSidebarWidth = cmd.sidebarWidth
             cfg.tabsSidebarTitle = "Synced"
@@ -6418,16 +5438,11 @@ final class SwitcherController: NSObject {
         cfg.highlightMatches = true
         cfg.filters = !cmd.filters.isEmpty
         cfg.selectableRows = cmd.checkbox ?? !cmd.copyFields.isEmpty
-        // jira: a ☆ beside the checkbox pins an issue to favorites.json
         cfg.rowStars = isJira
-        // jira: rows are acted on through Cmd+K (copy / open in browser),
-        // so the header's "copy selected" button goes
         cfg.copyRowsButton = !isJira
         cfg.bodyMaxLines = cmd.bodyLines > 0 ? cmd.bodyLines : 5
         cfg.height = cmd.height > 0 ? cmd.height : defaultListSize.height
         cfg.width = cmd.width > 0 ? cmd.width : defaultListSize.width
-        // slim header (same height as the jira detail window): no title pill,
-        // bluey-silver strip, app glyph far left with the meta line beside it
         cfg.headerHeight = 30
         cfg.titlePill = false
         applyWindowTheme(&cfg, cmd)
@@ -6441,8 +5456,6 @@ final class SwitcherController: NSObject {
         return cfg
     }
 
-    // [files] browser settings onto a window config (both the notes drawer
-    // and the standalone files window read the [files] section)
     private func applyBrowserSettings(_ cfg: inout PopupConfig) {
         guard let cmd = commands.first(where: { $0.kind == .files }) else { return }
         if let v = cmd.sort { cfg.browserSort = v }
@@ -6451,8 +5464,6 @@ final class SwitcherController: NSObject {
         if let v = cmd.searchExclude { cfg.browserSearchExcludes = v }
         if let v = cmd.terminalWords, !v.isEmpty { cfg.browserTerminalWords = v }
     }
-    // sort picked in either browser -> [files] sort / sort-order (and the
-    // in-memory spec, so the next browser built opens with it)
     private func saveBrowserSort(_ key: String, _ desc: Bool) {
         let section = commands.first(where: { $0.kind == .files })?.name ?? "files"
         if let i = commands.firstIndex(where: { $0.kind == .files }) {
@@ -6461,8 +5472,6 @@ final class SwitcherController: NSObject {
         }
         saveConfigValues(section: section, [("sort", key), ("sort-order", desc ? "desc" : "asc")])
     }
-    // `term` in a browser without a shell drawer: [app] terminal-app (default
-    // Ghostty when installed, else Terminal) opened on the folder
     private func openInTerminalApp(_ dir: String) {
         var app = settings.terminalApp
         if app.isEmpty {
@@ -6476,14 +5485,10 @@ final class SwitcherController: NSObject {
         log("opened \(app) in \(dir)")
     }
 
-    // [files] favorites: the folder pills of both browsers (plus the ones
-    // starred in the browser itself)
     private func fileBrowserFavorites() -> [String] {
         commands.first(where: { $0.kind == .files })?.favorites ?? []
     }
 
-    // the pinned "Recent" pill of a browser: RecentFiles' newest files,
-    // refreshed live while it's open
     private var recentObservers: [NSObjectProtocol] = []
     func attachRecent(_ fb: PopupFileBrowser) {
         guard RecentFiles.shared.enabled else { return }
@@ -6504,9 +5509,6 @@ final class SwitcherController: NSObject {
         recentObservers.append(o)
     }
 
-    // the browser the notes drawer and the files window both embed: [files]
-    // settings, shared favorites, open / copy / sort / status / Recent wiring.
-    // `tag` prefixes its log lines ("<tag>: <opened> PATH" on open).
     private func makeFileBrowser(_ cfg: PopupConfig, startDir: String, in w: PopupWindow,
                                  tag: String, opened: String) -> PopupFileBrowser {
         var browserCfg = cfg
@@ -6526,7 +5528,6 @@ final class SwitcherController: NSObject {
         fb.onStatus = { [weak self] s in
             if !s.isEmpty { self?.log("\(tag): \(s)") }
         }
-        // file-browser right-click "Open in Notes": open the row as a note tab
         w.onFileBrowserOpenInNotes = { [weak self] p in
             self?.openNoteFile(p)
         }
@@ -6534,11 +5535,9 @@ final class SwitcherController: NSObject {
         return fb
     }
 
-    // [files] recent / recent-days / recent-limit / recent-exclude
     func configureRecentFiles() {
         let cmd = commands.first(where: { $0.kind == .files })
         FileDrag.onFileOp = { RecentFiles.shared.ownChange(from: $0, to: $1) }
-        // the file lists' "Select for Compare" / "Compare to …" (the Compare view)
         FileListPane.onCompare = compareEnabled() ? { [weak self] a, b in self?.showCompare([a, b]) } : nil
         RecentFiles.shared.configure(enabled: cmd?.recent ?? true, days: cmd?.recentDays ?? 7,
                                      limit: cmd?.recentLimit ?? 200, excludes: cmd?.recentExclude ?? [],
@@ -6546,13 +5545,8 @@ final class SwitcherController: NSObject {
         configurePathShelf()
     }
 
-    // MARK: /paths (PathShelf.swift + PathsWindow.swift)
-
     var pathsCommand: CommandSpec? { commands.first { $0.name == "paths" } }
 
-    // [paths] on: the shelf rides on RecentFiles' stream, the clipboard is
-    // watched, filefast saves / Files-view copies + drags land on it. Off:
-    // every feed unhooked (the stored list stays for next time).
     func configurePathShelf() {
         guard pathsCommand != nil else {
             RecentFiles.shared.onKept = nil
@@ -6571,7 +5565,6 @@ final class SwitcherController: NSObject {
         RecentFiles.shared.onKept = { shelf.observe($0, created: $1, origin: $2) }
         RecentFiles.shared.onRenamed = { shelf.renamed(from: $0, to: $1) }
         FileDrag.onDragOut = { shelf.add($0, why: .copied) }
-        // first run: start from the newest of what RecentFiles already knows
         if shelf.isEmpty, pathsSeedObserver == nil {
             pathsSeedObserver = NotificationCenter.default.addObserver(
                 forName: RecentFiles.changed, object: nil, queue: .main) { [weak self] _ in
@@ -6594,8 +5587,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // notes pad Space s f (socket `notes-find`) and Space s g (`notes-grep`):
-    // built once, kept. Only from the notes view; the same key closes it.
     func showNoteFind(grep: Bool = false) {
         let mine = grep ? noteGrepWindow : noteFindWindow
         if mine?.isShown == true { mine?.hide(); return }
@@ -6606,7 +5597,6 @@ final class SwitcherController: NSObject {
             n.onOpen = { [weak self] path, line in
                 self?.openNoteFile(path)
                 if let line {
-                    // the tab switch swaps the buffer first, then jump
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                         self?.noteWindow?.vimCommand("normal! \(line)Gzz")
                     }
@@ -6622,8 +5612,6 @@ final class SwitcherController: NSObject {
         reclaimToolKey(f.window) { [weak f] in f?.window.focusSearchField() }
     }
 
-    // Jira Space s f (socket `jira-jump`): jump to a sidebar row. Built once,
-    // kept; Space s f again closes it.
     func showSidebarJump(_ w: PopupWindow) {
         if sidebarJumpWindow?.isShown == true { sidebarJumpWindow?.hide(); return }
         let f = sidebarJumpWindow ?? {
@@ -6637,7 +5625,6 @@ final class SwitcherController: NSObject {
         reclaimToolKey(f.window) { [weak f] in f?.window.focusSearchField() }
     }
 
-    // Hyper+S → /paths: built once, kept; a reopen orders it back in
     func showPaths(_ cmd: CommandSpec) {
         let ret = (configSectionValue("paths", "return") ?? "file").trimmingCharacters(in: .whitespaces).lowercased()
         if pathsWindow == nil {
@@ -6656,10 +5643,6 @@ final class SwitcherController: NSObject {
         log("paths window opened")
     }
 
-    // Read-only file browser ("files" commands): a keyboard-driven directory
-    // listing in the searchable list window. Type to fuzzy-filter the current
-    // directory; Enter on a file opens it with its default app; Enter on a
-    // directory (or the ".." row) navigates into it. No rename/delete/create.
     private func openFilesWindow(_ cmd: CommandSpec,
                                  restoreWID: String?, restorePID: pid_t?) {
         let root = ((cmd.root ?? "~") as NSString).expandingTildeInPath
@@ -6673,13 +5656,11 @@ final class SwitcherController: NSObject {
         cfg.enableResize = cmd.resize
         cfg.enableDrag = cmd.drag
         cfg.sticky = cmd.sticky
-        cfg.floating = false   // normal level; AeroSpace places it (aerospace.toml)
-        // shared window: Esc hides it only when "Esc Hides Window" is on
-        // (`esc-close`, default 0 — onEscape asks SharedWindow.escapeAtTop)
+        cfg.floating = false
         cfg.escCloseCount = settings.sharedWindow ? 1 : max(0, cmd.escClose ?? settings.escClose)
         cfg.copyToast = settings.copyToast
-        cfg.enableNavigation = false   // the browser owns up/down/return
-        cfg.enableSearch = false       // the browser has its own search field
+        cfg.enableNavigation = false
+        cfg.enableSearch = false
         cfg.showSearchBar = false
         cfg.dragHeader = true
         cfg.scrollableRows = true
@@ -6693,15 +5674,10 @@ final class SwitcherController: NSObject {
         applyWindowTheme(&cfg, cmd)
         cfg.terminalForeground = cmd.terminalForeground
         let w = PopupWindow(config: cfg)
-        // a clean header: the icon menu (+ the shared window's view
-        // switcher), no path title, no copy buttons (right-click a row for
-        // its path; Cmd+K copies it)
         w.headerIcon = settings.sharedWindow ? appIcon : filesNavIcon
         w.chromeHeaderTitle = nil
         w.copyPathButtonLabel = ""
         w.copyConfigButtonLabel = ""
-        // Top-left icon opens a dropdown menu (color picker, reset, config)
-        // — no scattered header buttons.
         w.onChromeIconClick = { [weak self, weak w] in
             guard let self, let w else { return }
             let menu = NSMenu()
@@ -6714,7 +5690,6 @@ final class SwitcherController: NSObject {
             }
             self.addWindowSettingsItems(to: menu, window: w, section: cmd.name)
             menu.addItem(.separator())
-            // open config in the notes window
             menu.addItem(self.openConfigMenuItem { [weak self] in self?.openNoteFile($0) })
             menu.addItem(self.shortcutsMenuItem(for: w, view: "files"))
 
@@ -6728,14 +5703,11 @@ final class SwitcherController: NSObject {
         let fb = makeFileBrowser(cfg, startDir: root, in: w,
                                  tag: "files '\(cmd.name)'", opened: "opened")
         w.installFileBrowser(fb, drawer: false)
-        w.textZoomKey = "textZoom.files"       // Cmd+± zooms the file names
-        // the places + pinned folders down the left (drag its edge; `sidebar-width`)
+        w.textZoomKey = "textZoom.files"
         fb.useSidebar(width: cmd.sidebarWidth)
         fb.onSidebarWidthChange = { width in
             saveConfigValue(section: cmd.name, key: "sidebar-width", value: String(Int(width)))
         }
-        // files opens on Recent (the latest download / screenshot);
-        // [files] start = root keeps the old folder start
         if cmd.startRecent { fb.showRecent() }
 
         w.onEscape = { [weak self] in
@@ -6751,16 +5723,11 @@ final class SwitcherController: NSObject {
         placeSlotWindow(w)
         w.quietShow = slotPrewarming
         w.show()
-        // give the browser's list keyboard focus (the window's own hidden
-        // search field would otherwise take it)
         DispatchQueue.main.async { [weak w, weak fb] in
             if let w, let fb { w.nativeWindow.makeFirstResponder(fb.listView) }
         }
     }
 
-    // Read one list data file. JSON array of objects preferred (fields looked up
-    // by name); TSV lines (key<TAB>title<TAB>status) as fallback when the file
-    // has no JSON.
     private func loadListItems(_ path: String, cmd: CommandSpec,
                                columns: [ListColumn]? = nil) -> [FieldRow] {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -6771,7 +5738,6 @@ final class SwitcherController: NSObject {
         var fields = cmd.filter.isEmpty
             ? [cmd.primary, cmd.content, cmd.trailing].compactMap { $0 }
             : cmd.filter
-        // table mode: every `filter`-flagged column is searchable too
         if cmd.table {
             for c in (columns ?? cmd.columns) where c.filterable && !fields.contains(c.field) {
                 fields.append(c.field)
@@ -6783,15 +5749,11 @@ final class SwitcherController: NSObject {
                     k.flatMap { d[$0] as? String }
                 }
                 guard let title = str(cmd.primary) else { return nil }
-                // search/fuzzy only ever needs a prefix of long fields: cap so
-                // 500+ rows with huge descriptions stay fast to filter
                 let search = fields.compactMap { capped(str($0), 150) }.joined(separator: " ")
                 var raw: [String: String] = [:]
                 for (k, v) in d {
                     if let s = v as? String { raw[k] = s }
                 }
-                // detail may name several fields (comma-separated), joined
-                // with " · " on the preview meta line, e.g. assignee,reporter
                 let detail = cmd.detail.map { spec -> String? in
                     let vals = spec.split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -6799,7 +5761,6 @@ final class SwitcherController: NSObject {
                         .filter { !$0.isEmpty }
                     return vals.isEmpty ? nil : vals.joined(separator: " · ")
                 }
-                // trailing follows the same rule (e.g. status,priority)
                 let trailing = cmd.trailing.map { spec -> String? in
                     let vals = spec.split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -6833,8 +5794,6 @@ final class SwitcherController: NSObject {
         }
     }
 
-    // hard cap for the content field so long titles never push the detail/
-    // trailing fields out of the preview line (0 = no cap)
     private func capped(_ s: String?, _ cap: Int) -> String? {
         guard let s, cap > 0, s.count > cap else { return s }
         return String(s.prefix(cap)) + "…"
@@ -6842,7 +5801,6 @@ final class SwitcherController: NSObject {
 
     private func handleEscape() {
         if !popup.currentQuery.isEmpty {
-            // a query is narrowing the view: Esc clears it first
             popup.clearInput()
             popup.setRows(filter(""))
             popup.selection = 0
@@ -6857,8 +5815,6 @@ final class SwitcherController: NSObject {
                 options: [.activateAllWindows])
         }
         if restore, let wid = savedWID {
-            // never block the main thread on aerospace IPC during a close —
-            // focus restore is best-effort and runs in the background
             DispatchQueue.global(qos: .userInitiated).async {
                 _ = aerospaceCall(["focus", "--window-id", wid])
             }
@@ -6870,12 +5826,6 @@ final class SwitcherController: NSObject {
 
 let authDebugPath = NSString(string: "~/.cache/ws-auth-debug").expandingTildeInPath
 
-// MARK: - App
-
-// Finder services (right-click a file -> Quick Actions): "Copy Path" copies
-// the absolute path(s) to the clipboard; "Open in Notes" opens the file in
-// the notes window. Registered as NSApp.servicesProvider; the NSServices in
-// Info.plist make Finder's context menu offer them for any file.
 final class ServicesHandler: NSObject {
     private weak var controller: SwitcherController?
     init(_ controller: SwitcherController) {
@@ -6887,7 +5837,6 @@ final class ServicesHandler: NSObject {
             let paths = urls.map { $0.path }
             if !paths.isEmpty { return paths }
         }
-        // fallback: the legacy Finder pasteboard type is a list of path strings
         if let files = pboard.propertyList(
             forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String] {
             return files
@@ -6923,18 +5872,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // a regular app: it owns the menu bar while active (an accessory
-        // app can't — revealing the auto-hidden menu bar activated the last
-        // regular app and AeroSpace followed it to its workspace)
         NSApp.setActivationPolicy(.regular)
-        // shared-window views are shown by the shared window (in its host),
-        // never by their own show()
         PopupWindow.builtForHost = { [weak self] w in self?.controller?.slotView(of: w) != nil }
         installMainMenu()
         installTextKeys()
         installCrashHandler()
-        // diag: log the TCC state the process actually sees + how it was
-        // launched (touch ~/.cache/ws-auth-debug to enable)
         if FileManager.default.fileExists(atPath: authDebugPath) {
             let mic = AVCaptureDevice.authorizationStatus(for: .audio).rawValue
             let speech = SFSpeechRecognizer.authorizationStatus().rawValue
@@ -6944,14 +5886,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = SwitcherController()
         controller = c
         c.start()
-        // Finder right-click services ("Copy Path" / "Open in Notes")
         let sh = ServicesHandler(c)
         servicesHandler = sh
         NSApp.servicesProvider = sh
         NSUpdateDynamicServices()
         MenuTarget.controller = c
         installStatusMenus(c)
-        // the file browsers' "Recent" view tracks new files from launch on
         c.configureRecentFiles()
         if showOnLaunch {
             c.show()
@@ -6970,34 +5910,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         c.prewarmSlot()
-        // /screenshot: the overlay panels + ScreenCaptureKit's display list, ready for Hyper+X
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak c] in c?.screenshot.prewarm() }
         if AppInstall.requested || AppInstall.wantsSetupWindow {
-            // first run / new version / not installed yet (an app install)
             SetupWindow.show(controller: c)
         } else if !isRepoBuild, !showOnLaunch, openCommand == nil {
-            // an installed app opened from Finder: show something
             c.showCommand("files")
         }
     }
 
-    // a Dock click / second double-click in Finder while the daemon runs:
-    // open the window
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { controller?.showCommand("files") }
         return false
     }
 
-    // One unified menu bar icon with a comprehensive dropdown — replaces the
-    // old per-window glyphs. All toggles, resets, and window opens live here.
     private func installStatusMenus(_ c: SwitcherController) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = utilityMenuGlyph
         item.button?.toolTip = "kitchen-sink"
         let menu = NSMenu()
-        menu.delegate = MenuTarget.shared  // for checkmark updates
-        menu.autoenablesItems = false      // the tiled-greyed focus-loss item
-        // shown only while commands.toml has validation findings
+        menu.delegate = MenuTarget.shared
+        menu.autoenablesItems = false
         let issues = NSMenuItem(title: "Config Issues…",
                                 action: #selector(MenuTarget.showConfigIssues(_:)),
                                 keyEquivalent: "")
@@ -7005,63 +5937,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         issues.tag = MenuTarget.configIssuesTag
         issues.isHidden = configIssues.isEmpty
         menu.addItem(issues)
-        // the global window switches (float / tile, hide on focus loss,
-        // header style) — the same group that leads every view's icon menu,
-        // rebuilt on every open by menuNeedsUpdate (MenuTarget.globalGroupTag)
         let globalEnd = NSMenuItem.separator()
         globalEnd.tag = MenuTarget.globalGroupTag
         menu.addItem(globalEnd)
 
-        // File-like section: resets and close
         addMenuItem(menu, "Reset Default Size", #selector(MenuTarget.resetWindowSize(_:)), key: "0", modifiers: .command)
         addMenuItem(menu, "Reset Default Colors", #selector(MenuTarget.resetWindowColors(_:)), key: "")
         menu.addItem(.separator())
         addMenuItem(menu, "Close Window", #selector(MenuTarget.closeWindow(_:)), key: "w", modifiers: .command)
         addMenuItem(menu, "Quit", #selector(MenuTarget.quitApp(_:)), key: "q", modifiers: .command)
         menu.addItem(.separator())
-        // what this Mac needs + the optional hotkeys / menu bar set-up
         addMenuItem(menu, "Setup & Health Check…", #selector(MenuTarget.openSetup(_:)), key: "")
         menu.addItem(.separator())
 
-        // Drawer toggles (affect the key/focused window)
         addMenuItem(menu, "Toggle Terminal", #selector(MenuTarget.toggleTerminal(_:)), key: "t", modifiers: [.command, .option])
         menu.addItem(.separator())
 
-        // Window toggles
         addMenuItem(menu, "Toggle Notes", #selector(MenuTarget.toggleNotes(_:)), key: "n", modifiers: .command)
         addMenuItem(menu, "Toggle Health Checks", #selector(MenuTarget.toggleHealthChecks(_:)), key: "h", modifiers: .command)
         menu.addItem(.separator())
 
-        // Jira: THE SWITCH ([jira] enabled — window + launchd agent; titled
-        // "Enable Jira" / "Disable Jira" by menuNeedsUpdate), the window
-        // toggle (hidden while disabled, so enabling brings it back without a
-        // relaunch), and ONE entry for everything else: the Jira Config window
-        // (poll jobs, schedules, JQL, curls, columns, connection)
         addMenuItem(menu, "Enable Jira", #selector(MenuTarget.toggleJiraPoll(_:)), key: "")
         addMenuItem(menu, "Toggle Jira Window", #selector(MenuTarget.toggleJira(_:)), key: "j", modifiers: .command)
         addMenuItem(menu, "Open Jira Config Window", #selector(MenuTarget.openJiraDashboard(_:)), key: "")
         menu.addItem(.separator())
 
-        // Confluence search ([confluence] enabled; hidden while off)
         addMenuItem(menu, "Confluence Search", #selector(MenuTarget.openConfluence(_:)), key: "")
         addMenuItem(menu, "Confluence Setup…", #selector(MenuTarget.openConfluenceSetup(_:)), key: "")
-        // the AI view (fm) — [ai] enabled; hidden while off
         addMenuItem(menu, "AI (Grammar Check…)", #selector(MenuTarget.openAI(_:)), key: "")
-        // the Compare view — [compare] enabled; hidden while off
         addMenuItem(menu, "Compare…", #selector(MenuTarget.openCompare(_:)), key: "")
         menu.addItem(.separator())
 
-        // Settings submenu with toggleable config options
         let settingsMenu = NSMenu(title: "Settings")
         let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
         settingsItem.submenu = settingsMenu
         menu.addItem(settingsItem)
 
-        // Vim Mode toggle — only when a note command is configured
         if c.commands.contains(where: { $0.kind == .note }) {
             addMenuItem(settingsMenu, "Vim Mode (Notes)", #selector(MenuTarget.toggleVimMode(_:)), key: "")
-            // Font ▸ / Notes ▸ rebuild on every open (current checkmarks,
-            // freshly installed fonts)
             for (title, build) in [
                 ("Font", { [weak c] (m: NSMenu) in c?.buildFontMenu(into: m) }),
                 ("Notes", { [weak c] (m: NSMenu) in c?.buildNotesSettingsMenu(into: m) }),
@@ -7096,20 +6009,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wsLog("app terminating (front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"))")
     }
 
-    // Ctrl+W (delete the previous word) in every text field: one app-wide
-    // monitor; TextEditKeys holds the routing and the vim / terminal exclusions
     private func installTextKeys() {
         textKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             TextEditKeys.route(e) ? nil : e
         }
     }
 
-    // Build a real macOS app menu (top-left click) so the user has obvious
-    // window commands: reset size, close, quit. The accessory policy still
-    // hides the menu bar until the app icon is clicked.
     private func installMainMenu() {
         let mainMenu = NSMenu()
-        // App menu (appears under "kitchen-sink" when clicked)
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About kitchen-sink", action: nil, keyEquivalent: "")
@@ -7122,7 +6029,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
 
-        // File menu
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -7134,7 +6040,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileItem.submenu = fileMenu
         mainMenu.addItem(fileItem)
 
-        // Edit menu (standard shortcuts)
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
@@ -7147,7 +6052,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 
-        // Window menu
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         let resetWinItem = NSMenuItem(title: "Reset Window Size", action: #selector(MenuTarget.resetWindowSize(_:)), keyEquivalent: "0")
@@ -7162,29 +6066,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// Shared target for app menu / status menu actions. Holds a weak reference to
-// the running controller so every menu item can reach the app's windows and
-// toggle logic. Also serves as NSMenuDelegate to update checkmarks before the
-// menu opens (terminal / file browser state of the key window).
 final class MenuTarget: NSObject, NSMenuDelegate {
     static let shared = MenuTarget()
     static weak var controller: SwitcherController?
 
-    // MARK: NSMenuDelegate — update checkmarks before the menu opens
     static let configIssuesTag = 7401
     static let globalGroupTag = 7402
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         if let item = menu.item(withTag: MenuTarget.configIssuesTag) {
-            _ = readConfigText()   // re-validates only when the file changed
+            _ = readConfigText()
             item.isHidden = configIssues.isEmpty
             item.title = configUsingBackup
                 ? "⚠ Config Invalid — Using Backup…"
                 : "⚠ Config Warnings (\(configIssues.count))…"
         }
         guard let controller = MenuTarget.controller else { return }
-        // the global group sits right above its tagged separator: drop the
-        // old copy, insert a fresh one (current checkmarks + greying)
         if let end = menu.items.firstIndex(where: { $0.tag == MenuTarget.globalGroupTag }) {
             var start = end
             while start > 0, menu.items[start - 1].tag == MenuTarget.globalGroupTag + 1 { start -= 1 }
@@ -7197,13 +6094,11 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 menu.insertItem(it, at: start + k)
             }
         }
-        // Find the key PopupWindow (the one currently focused)
         let keyWindow = NSApp.keyWindow
         var keyPopup: PopupWindow?
         if let pw = keyWindow?.delegate as? PopupWindow {
             keyPopup = pw
         } else {
-            // Fallback: find the first visible PopupWindow
             keyPopup = controller.subWindows.first(where: { $0.isShown })
         }
 
@@ -7232,7 +6127,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
                 break
             }
         }
-        // Also update submenu items (Settings submenu)
         for item in menu.items {
             if let submenu = item.submenu {
                 for subItem in submenu.items {
@@ -7247,15 +6141,12 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         }
     }
 
-    // Returns .on if a named window is currently shown, .off otherwise
     private func windowState(for name: String, controller: SwitcherController) -> NSControl.StateValue {
         if let w = controller.subWindows.first(where: { $0.config.name == name }) {
             return w.isShown ? .on : .off
         }
         return .off
     }
-
-    // MARK: File actions
 
     @objc func resetWindowSize(_ sender: Any?) {
         NSApp.windows.forEach { w in
@@ -7283,18 +6174,12 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         NSApp.terminate(sender)
     }
 
-    // MARK: Drawer toggles (affect the key/focused window)
-
     @objc func toggleTerminal(_ sender: Any?) {
         if let pw = keyPopupWindow() {
             pw.toggleTerminalDrawer()
-            // Update the header button state to match
-            // (header button id 10 = terminal toggle)
             pw.setHeaderButtonOn(10, pw.terminalShown)
         }
     }
-
-    // MARK: Window toggles
 
     @objc func toggleNotes(_ sender: Any?) {
         MenuTarget.controller?.toggleNotes()
@@ -7336,22 +6221,17 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         MenuTarget.controller?.toggleCommand("health-checks")
     }
 
-    // Helper: find the key PopupWindow (the one currently focused)
     private func keyPopupWindow() -> PopupWindow? {
         if let pw = NSApp.keyWindow?.delegate as? PopupWindow {
             return pw
         }
-        // Fallback: find the first shown PopupWindow
         return MenuTarget.controller?.subWindows.first(where: { $0.isShown })
     }
 
-    // Whether vim mode is enabled for the notes command
     private var vimModeEnabled: Bool {
         guard let controller = MenuTarget.controller else { return false }
         return controller.commands.first(where: { $0.name == "notes" })?.vimMode ?? false
     }
-
-    // MARK: Config validation
 
     @objc func showConfigIssues(_ sender: Any?) {
         _ = readConfigText()
@@ -7383,17 +6263,14 @@ final class MenuTarget: NSObject, NSMenuDelegate {
         }
     }
 
-    // MARK: Settings toggles
-
     @objc func toggleVimMode(_ sender: Any?) {
         MenuTarget.controller?.toggleVimModeForNotes()
     }
 
     @objc func resetSettings(_ sender: Any?) {
-        // Reset to defaults: remove custom values from commands.toml
         settings.hideOnFocusLoss = true
         removeConfigValue(section: "app", key: "hide-on-focus-loss")
-        removeConfigValue(section: "app", key: "float")   // retired: AeroSpace places the app
+        removeConfigValue(section: "app", key: "float")
         HeaderStyle.current = .flat
         removeConfigValue(section: "app", key: "header-style")
         removeConfigValue(section: "notes", key: "vim-mode")
@@ -7401,10 +6278,6 @@ final class MenuTarget: NSObject, NSMenuDelegate {
     }
 }
 
-// MARK: - Font + notes settings menus
-
-// Rebuilds its menu every time it opens (status-bar Settings submenus), so
-// checkmarks and newly installed fonts are always current.
 final class DynamicMenuDelegate: NSObject, NSMenuDelegate {
     private let build: (NSMenu) -> Void
     init(_ build: @escaping (NSMenu) -> Void) { self.build = build }
@@ -7415,27 +6288,19 @@ final class DynamicMenuDelegate: NSObject, NSMenuDelegate {
 }
 var dynamicMenuDelegates: [DynamicMenuDelegate] = []
 
-// installed font families by type (nerd / mono / sans / serif / display),
-// computed once and refreshed after a font install
 private var fontFamilyCache: [String: [String]]?
-// brew casks currently installing (menu shows "Installing…")
 private var fontInstallsRunning: Set<String> = []
 
 enum FontTarget { case editor, terminal }
 
 extension SwitcherController {
-    // index of the notes (type = note) command
     var noteCommandIndex: Int? { commands.firstIndex(where: { $0.kind == .note }) }
 
-    // the live notes window, if one exists
     var noteWindow: PopupWindow? {
         guard let i = noteCommandIndex else { return nil }
         return subWindows.first(where: { $0.config.name == commands[i].windowName })
     }
 
-    // the window-settings block of every view's icon menu: theme presets,
-    // transparency, reset size / colors (the global float / focus-loss /
-    // header-style switches lead the menu: addGlobalWindowItems)
     func addWindowSettingsItems(to menu: NSMenu, window w: PopupWindow, section: String) {
         addThemeMenus(to: menu, window: w, section: section)
         menu.addItem(.separator())
@@ -7445,8 +6310,6 @@ extension SwitcherController {
         })
     }
 
-    // "Open Config": the home's commands.toml (what every external config
-    // points at), else the one this build reads; `open` gets the path
     func openConfigMenuItem(_ open: @escaping (String) -> Void) -> NSMenuItem {
         menuItem("Open Config") {
             let fm = FileManager.default
@@ -7456,14 +6319,11 @@ extension SwitcherController {
         }
     }
 
-    // a disabled section label inside a menu
     private func menuHeader(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
     }
-
-    // MARK: Font classification
 
     static let fontTypeOrder: [(key: String, label: String)] = [
         ("nerd", "Nerd Fonts"), ("mono", "Monospace"), ("sans", "Sans Serif"),
@@ -7480,7 +6340,6 @@ extension SwitcherController {
                                                 weight: 5, size: 13) else { return nil }
         let traits = f.fontDescriptor.symbolicTraits
         if traits.contains(.monoSpace) || f.isFixedPitch { return "mono" }
-        // NSFontFamilyClass lives in the top 4 bits of the symbolic traits
         switch (traits.rawValue >> 28) & 0xF {
         case 1...7: return "serif"
         case 8: return "sans"
@@ -7501,8 +6360,6 @@ extension SwitcherController {
         return out
     }
 
-    // MARK: Applying fonts
-
     func currentFont(_ target: FontTarget) -> String {
         switch target {
         case .editor: return noteCommandIndex.flatMap { commands[$0].font } ?? "SF Mono"
@@ -7519,7 +6376,6 @@ extension SwitcherController {
         }
     }
 
-    // persist to commands.toml + apply live to every open window
     func applyFont(_ family: String, target: FontTarget) {
         switch target {
         case .editor:
@@ -7552,23 +6408,17 @@ extension SwitcherController {
         log("font size: \(target == .editor ? "editor" : "terminal") -> \(v)")
     }
 
-    // Cmd+Opt+= / Cmd+Opt+- in the notes window: step both sizes together
     func stepFontSizes(_ delta: Int) {
         applyFontSize(currentFontSize(.editor) + CGFloat(delta), target: .editor)
         applyFontSize(currentFontSize(.terminal) + CGFloat(delta), target: .terminal)
     }
 
-    // MARK: Font menu
-
-    // Font ▸ Editor Font ▸ <type> ▸ families, Terminal Font ▸ …, Size ▸ …,
-    // Install Font ▸ <type> ▸ casks, Other… (system font panel)
     func buildFontMenu(into menu: NSMenu) {
         let byType = SwitcherController.installedFontsByType()
         for (target, title) in [(FontTarget.editor, "Editor Font"),
                                 (FontTarget.terminal, "Terminal Font")] {
             let current = currentFont(target)
             let sub = NSMenu(title: title)
-            // the terminal (and the vim pane) need a fixed-pitch grid
             let types = target == .terminal
                 ? SwitcherController.fontTypeOrder.filter { ["nerd", "mono"].contains($0.key) }
                 : SwitcherController.fontTypeOrder
@@ -7610,8 +6460,6 @@ extension SwitcherController {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        // Install Font ▸ grouped by type (curated brew casks, commands.toml
-        // `font-install-casks`)
         let install = NSMenu(title: "Install Font")
         for (key, label) in SwitcherController.fontTypeOrder {
             let entries = settings.fontInstallCasks.filter { $0.type == key }
@@ -7636,15 +6484,12 @@ extension SwitcherController {
         })
     }
 
-    // loose match: "JetBrains Mono Nerd Font" vs family "JetBrainsMono Nerd Font"
     static func isFontInstalled(_ label: String) -> Bool {
         let norm = { (s: String) in s.lowercased().filter { $0.isLetter || $0.isNumber } }
         let want = norm(label)
         return NSFontManager.shared.availableFontFamilies.contains { norm($0) == want }
     }
 
-    // brew install --cask <cask> in the background; on success offer to use
-    // the new font right away
     func installFontCask(_ label: String, cask: String) {
         guard !fontInstallsRunning.contains(cask) else { return }
         guard let brew = resolveBinary("brew")
@@ -7686,9 +6531,6 @@ extension SwitcherController {
         }
     }
 
-    // the system registers new font files a moment after they land in
-    // ~/Library/Fonts — poll briefly for the new family, then ask where to
-    // use it
     private func offerNewFont(label: String, before: Set<String>, tries: Int) {
         let now = Set(NSFontManager.shared.availableFontFamilies)
         let added = now.subtracting(before).sorted()
@@ -7724,8 +6566,6 @@ extension SwitcherController {
         }
     }
 
-    // the system Font Panel for anything not in the lists; picks apply to
-    // the editor font
     func showSystemFontPanel() {
         let fm = NSFontManager.shared
         fm.target = FontPanelReceiver.shared
@@ -7740,15 +6580,12 @@ extension SwitcherController {
         fm.orderFrontFontPanel(nil)
     }
 
-    // MARK: Notes settings menu
-
     func buildNotesSettingsMenu(into menu: NSMenu) {
         guard let i = noteCommandIndex else { return }
         let cmd = commands[i]
         menu.addItem(menuItem("Vim Mode", state: cmd.vimMode) { [weak self] in
             self?.toggleVimModeForNotes()
         })
-        // editor binary: only the ones actually installed
         let vimMenu = NSMenu(title: "Vim Binary")
         let curBin = (cmd.vimBin as NSString).lastPathComponent
         for name in ["nvim", "vim"] {
@@ -7765,7 +6602,6 @@ extension SwitcherController {
         let vimItem = NSMenuItem(title: "Vim Binary: \(curBin)", action: nil, keyEquivalent: "")
         vimItem.submenu = vimMenu
         menu.addItem(vimItem)
-        // drawer open at launch
         let startMenu = NSMenu(title: "Start With")
         for (value, label) in [("browser", "File Browser"), ("terminal", "Terminal"),
                                ("none", "Nothing (editor only)")] {
@@ -7800,8 +6636,6 @@ extension SwitcherController {
         })
     }
 
-    // persist one [notes] key, update the in-memory spec, and (optionally)
-    // rebuild the open notes window so it takes effect now
     func updateNoteSetting(_ key: String, _ value: String, rebuild: Bool,
                            _ mutate: (inout CommandSpec) -> Void) {
         guard let i = noteCommandIndex else { return }
@@ -7811,8 +6645,6 @@ extension SwitcherController {
         if rebuild { rebuildNoteWindow() }
     }
 
-    // tear down + reopen the notes window with the current spec (the note is
-    // flushed first: vim :wall, native saveNote via onEditorClose)
     func rebuildNoteWindow() {
         guard let i = noteCommandIndex else { return }
         guard let w = noteWindow else { return }
@@ -7834,10 +6666,6 @@ extension SwitcherController {
         }
     }
 
-    // re-read commands.toml and rebuild the notes window from it
-    // a fresh daemon (launch-only settings: [theme], [app] socket names…):
-    // a shell waits for this process to go, then LaunchServices opens the
-    // bundle again in the background (one bundle id = one daemon)
     func restartDaemon() {
         let bundle = Bundle.main.bundlePath
         log("restart requested: relaunching \(bundle)")
@@ -7852,17 +6680,15 @@ extension SwitcherController {
         commands = loadCommands()
         configureRecentFiles()
         fontFamilyCache = nil
+        JiraWords.invalidate()
         log("config reloaded (\(commands.count) commands)")
         rebuildNoteWindow()
         prewarmSlot()
     }
 }
 
-// the folder a note lives in (its images go to ./assets, its default.md sits there)
 private func noteDir(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
 
-// `dir`/default.md, created (folder too) when missing: where a deleted or
-// closed note's tab (and its on-screen text) goes — a note is never recreated
 private func ensureDefaultNote(in dir: String) -> String {
     let fallback = dir + "/default.md"
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -7872,16 +6698,8 @@ private func ensureDefaultNote(in dir: String) -> String {
     return fallback
 }
 
-// MARK: - Notes window session
-
 extension SwitcherController {
-    // One notes window's live state — the tabs (`paths` / `titles`), the note
-    // on screen and its external-write sync marks — and every hook the window
-    // calls. openNoteWindow builds it and calls install(); the window's hooks
-    // hold it (and it holds the window) for as long as the window lives: the
-    // notes window is a long-lived singleton, rebuilt by rebuildNoteWindow.
     final class NoteSession {
-        // the app's controller: a process-lifetime singleton
         unowned let host: SwitcherController
         let cmd: CommandSpec
         let w: PopupWindow
@@ -7889,8 +6707,6 @@ extension SwitcherController {
         var paths: [String]
         var titles: [String]
         var currentPath: String
-        // external-write watch state: reload the current note when its file
-        // changes on disk, unless the editor holds unsaved local edits
         var lastSynced: String
         var lastMtime: Date?
 
@@ -7907,13 +6723,8 @@ extension SwitcherController {
             lastMtime = mtime(of: currentPath)
         }
 
-        // show the first note and wire every window hook
         func install() {
-            // All window actions live in the top-left icon dropdown menu — no
-            // scattered header buttons. The menu shows toggle state via
-            // checkmarks (terminal, browser, mic) and groups actions logically.
 
-            // image saving for pasted/dropped photos
             w.imageBaseDir = noteDir(currentPath)
             if noteIsPreview(currentPath) {
                 w.setEditorFilePreview(currentPath)
@@ -7926,24 +6737,18 @@ extension SwitcherController {
             w.imageSaver = { [self] img in saveImage(img) }
 
             w.headerIcon = cmd.icon ?? notesAppIcon
-            // empty `title` in commands.toml = no header label (icon still shows)
             w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
-            w.copyPathButtonLabel = ""          // copy path moved to right-click (tab/editor)
-            w.copyConfigButtonLabel = ""        // config is opened via the icon click
+            w.copyPathButtonLabel = ""
+            w.copyConfigButtonLabel = ""
             w.tabTitles = titles
             w.tabPathTip = { [weak self] i in
                 guard let self, self.paths.indices.contains(i) else { return nil }
                 return (self.paths[i] as NSString).abbreviatingWithTildeInPath
             }
             w.tabFooterText = ""
-            // generic label in the drag header — the tab strip already shows the
-            // individual note names; clicking the header still copies the path
             w.chromeHeaderTitle = cmd.chromeTitle
             w.onTabChange = { [self] index in loadTab(index) }
-            // "✕" on a tab pill closes that note (removes it from the list)
             w.onCloseTab = { [self] index in closeNote(index) }
-            // Top-left icon opens a dropdown menu with all window actions —
-            // replaces the scattered header buttons (terminal, browser, mic, color).
             w.onChromeIconClick = { [self] in showIconMenu() }
             w.onShowShortcuts = { [host, weak w] in
                 guard let w else { return }
@@ -7951,8 +6756,6 @@ extension SwitcherController {
             }
             w.onAddTab = { [self] in addTab() }
             w.onNewNote = { [self] template in newNote(template: template) }
-            // prose mode: the current note as a reading page (⌘⇧P / the
-            // Prose | Edit switch); previews (rtf, docx, images) have none
             if let f = cmd.proseFont { w.proseFont = f }
             if cmd.proseFontSize > 0 { w.proseFontSize = cmd.proseFontSize }
             if cmd.proseWidth > 0 { w.proseWidth = cmd.proseWidth }
@@ -7964,30 +6767,23 @@ extension SwitcherController {
             w.onSidebarWidthChange = { [cmd] width in
                 saveConfigValue(section: cmd.name, key: "sidebar-width", value: String(Int(width)))
             }
-            // clicking the ACTIVE note tab copies that note's absolute path
             w.onTabClick = { [self] index in
                 guard index == w.selectedTab, index < paths.count else { return }
                 host.copy(paths[index], "note path: \(paths[index])")
             }
-            // right-click a note TAB -> copy that note's absolute path
             w.onTabCopyPath = { [self] index in
                 guard index < paths.count else { return }
                 host.copy(paths[index], "note path: \(paths[index])")
             }
-            // right-click the editor -> "Copy File Path" copies the open note
             w.onCopyFilePath = { [self] in
                 host.copy(currentPath, "note path: \(currentPath)")
             }
             w.onOpenExternalPath = { [self] path in openExternal(path) }
             w.openNotePaths = { [self] in paths }
             w.onOpenPathPrompt = { [self] in promptOpenPath() }
-            // terminal drawer right-click "Open in Notes": the selected text is a
-            // path — open it as a note tab (openNoteFile checks it exists)
             w.onTerminalOpenInNotes = { [host] path in
                 host.openNoteFile(path)
             }
-            // terminal right-click "Open in Default App" / "Reveal in Finder":
-            // act on the selected path (existence-checked before acting)
             w.onTerminalOpenDefault = { path in
                 guard FileManager.default.fileExists(atPath: path) else { return }
                 NSWorkspace.shared.open(URL(fileURLWithPath: path))
@@ -8003,18 +6799,9 @@ extension SwitcherController {
             w.onEditorCommit = { [self] text in commitSave(text) }
             w.onEditorClose = { [self] text in commitSave(text) }
             w.onHide = { [self] restore in
-                // if the color panel is open on this window, don't leave it
-                // floating once the notes window hides
                 host.dismissPickerIfOpen(for: w)
-                // Persistent singleton note window: keep the PopupWindow (and its
-                // embedded terminal session) alive — just hide the panel. The next
-                // Hyper+N re-shows the SAME instance instead of spawning a fresh
-                // terminal. Focus is still handed back to the window we came from.
-                // The note watcher keeps running; it self-guards on w.isShown
-                // while hidden, so nothing needs restarting on re-show.
                 host.restoreFocus(restore)
             }
-            // poll EVERY tab's note for external writes and deletions (watchTick)
             let t = Timer(timeInterval: noteWatchInterval, repeats: true) { [weak self] _ in
                 guard let self, self.w.isShown else { return }
                 self.watchTick()
@@ -8022,8 +6809,6 @@ extension SwitcherController {
             RunLoop.main.add(t, forMode: .common)
         }
 
-        // vim pane: text notes edit in vim; PDF/image tabs keep the native
-        // preview. A relaunched editor (after `:q`) reopens the current note.
         private func installVimPane() {
             w.setVimPaneActive(!noteIsPreview(currentPath))
             w.vimLaunchArgs = { [self] in
@@ -8033,7 +6818,6 @@ extension SwitcherController {
             w.onVimExit = { [self] in
                 host.log("note '\(cmd.name)': vim exited — relaunching on \(currentPath)")
             }
-            // right-click in the vim pane: the obvious actions (rule 2)
             let vm = NSMenu(title: "Vim")
             vm.autoenablesItems = false
             vm.addItem(menuItem("Copy") { [weak w] in w?.vimCopy() })
@@ -8052,8 +6836,6 @@ extension SwitcherController {
             w.vimMenu = vm
         }
 
-        // a pasted / dropped image → the note's assets/ folder; the relative
-        // path the Markdown link uses (nil = not saved)
         private func saveImage(_ img: NSImage) -> String? {
             let dir = noteDir(currentPath) + "/assets"
             try? FileManager.default.createDirectory(atPath: dir,
@@ -8072,18 +6854,9 @@ extension SwitcherController {
             }
         }
 
-        // switching tabs: save the current note, load the new one. A tab whose
-        // note was deleted on disk becomes default.md instead (never recreate)
         func loadTab(_ index: Int) {
             guard index < paths.count else { return }
             let outgoing = currentPath
-            // save the outgoing note BEFORE the editor is swapped to the new
-            // tab — after setEditorMarkdown, currentEditorText would already
-            // hold the NEW note's content and overwrite (wipe) the outgoing
-            // file. Never resurrect a deleted file: a missing outgoing is
-            // skipped (its text was already parked by the watcher/commit).
-            // Vim mode: the editor owns the file — flush it, never write the
-            // (hidden, stale) text view over it.
             if cmd.vimMode {
                 w.vimFlush()
             } else if FileManager.default.fileExists(atPath: outgoing), !noteIsPreview(outgoing) {
@@ -8103,14 +6876,11 @@ extension SwitcherController {
             currentPath = target
             w.imageBaseDir = noteDir(currentPath)
             if cmd.vimMode {
-                // vim pane follows the tab; previews fall back to the native
-                // read-only view
                 let preview = noteIsPreview(currentPath)
                 if preview { w.setEditorFilePreview(currentPath) } else { w.vimOpen(currentPath) }
                 w.setVimPaneActive(!preview)
                 lastSynced = ""
             } else if noteIsPreview(currentPath) {
-                // PDF / image: read-only preview, never editable text
                 w.setEditorFilePreview(currentPath)
                 lastSynced = ""
             } else {
@@ -8121,23 +6891,16 @@ extension SwitcherController {
             }
             lastMtime = mtime(of: currentPath)
             w.tabFooterText = ""
-            w.copyPathButtonLabel = ""          // path lives on the right-click
+            w.copyPathButtonLabel = ""
             w.onChromeHeaderClick = { [self] in
                 host.copy(currentPath, "note path: \(currentPath)")
             }
         }
 
-        // tab "✕": close the note at `index`. It is dropped from the tab list
-        // and from commands.toml so it never shows up as a note again — the
-        // file itself stays on disk untouched. Closing the last note opens a
-        // fresh default.md scratch pad next to it.
         func closeNote(_ index: Int) {
             guard paths.indices.contains(index) else { return }
             let closing = paths[index]
             let wasCurrent = index == w.selectedTab
-            // only save when closing the ACTIVE tab — otherwise the editor
-            // holds a different note's text and must not touch this file
-            // (preview files like PDFs are never written back)
             if cmd.vimMode {
                 w.vimFlush()
             } else if wasCurrent, FileManager.default.fileExists(atPath: closing),
@@ -8157,27 +6920,23 @@ extension SwitcherController {
             }
             w.tabTitles = titles
             if wasCurrent {
-                // switch to the tab that slid into this slot (or the last one)
                 let next = min(index, paths.count - 1)
                 if w.selectedTab == next {
-                    loadTab(next)          // same slot value — reload manually
+                    loadTab(next)
                 } else {
-                    w.selectedTab = next   // fires onTabChange -> loadTab
+                    w.selectedTab = next
                 }
             } else if index < w.selectedTab {
-                // the closed tab was before the selection — it slid down one
-                w.selectedTab -= 1         // fires onTabChange (same note)
+                w.selectedTab -= 1
             }
         }
 
-        // the kitchen-sink menu of the header icon
         private func showIconMenu() {
             let menu = NSMenu()
             menu.autoenablesItems = false
             host.addGlobalWindowItems(to: menu)
             menu.addItem(.separator())
 
-            // — toggles (checkmark shows state) —
             func toggleItem(_ title: String, _ state: Bool, _ action: @escaping () -> Void) {
                 menu.addItem(menuItem(title, state: state, action))
             }
@@ -8194,10 +6953,6 @@ extension SwitcherController {
                     w.meterEnabled = shown
                 }
             }
-            // (no jira items: this menu is the notes view's own — Jira Config
-            // lives on the jira view's menu, Enable Jira in the menu bar)
-            // Vim mode toggle — reads the LIVE spec (cmd is this window's
-            // launch snapshot)
             if cmd.kind == .note {
                 let vimOn = host.noteCommandIndex.map { host.commands[$0].vimMode } ?? cmd.vimMode
                 toggleItem("Vim Mode", vimOn) { [host] in
@@ -8206,13 +6961,11 @@ extension SwitcherController {
                 if settings.sharedWindow { menu.addItem(host.escHidesMenuItem(.notes)) }
             }
             menu.addItem(.separator())
-            // Font ▸ (editor / terminal family by type, size, install)
             let fontMenu = NSMenu(title: "Font")
             host.buildFontMenu(into: fontMenu)
             let fontItem = NSMenuItem(title: "Font", action: nil, keyEquivalent: "")
             fontItem.submenu = fontMenu
             menu.addItem(fontItem)
-            // Notes Settings ▸ (vim binary, start drawer, voice, sticky, …)
             let notesMenu = NSMenu(title: "Notes Settings")
             host.buildNotesSettingsMenu(into: notesMenu)
             let notesItem = NSMenuItem(title: "Notes Settings", action: nil, keyEquivalent: "")
@@ -8228,10 +6981,6 @@ extension SwitcherController {
             w.showHeaderMenu(menu)
         }
 
-        // "+" pill: choose to open an EXISTING file as a tab (open panel) or
-        // create a NEW note in the default dir (next to the first note). Both
-        // are presented as SHEETs on the note window so they always appear in
-        // front.
         private func addTab() {
             let panel = w.nativeWindow
             panel.makeKeyAndOrderFront(nil)
@@ -8244,11 +6993,6 @@ extension SwitcherController {
             chooser.beginSheetModal(for: panel) { [self] response in
                 switch response {
                 case .alertFirstButtonReturn:
-                    // "Open Existing…": no Finder picker — the integrated file
-                    // browser below is the picker. Ask for a path; strip any
-                    // extension the user typed so a mistaken ".txt" still finds
-                    // the ".md" note ("~/notes/todo.txt" -> "~/notes/todo.md").
-                    // Fall back to the exact path when the ".md" one is absent.
                     presentPathSheet(on: panel,
                                      title: "Open note",
                                      message: "Path to open as a note:",
@@ -8268,7 +7012,6 @@ extension SwitcherController {
                         }
                     }
                 case .alertSecondButtonReturn:
-                    // "New Note": prompt for a name, create in the default dir
                     presentPathSheet(on: panel,
                                      title: "New note",
                                      message: "Name for the new note:",
@@ -8281,8 +7024,6 @@ extension SwitcherController {
                         }
                         if !name.hasSuffix(".md") { name += ".md" }
                         let newPath = noteDir(paths[0]) + "/" + name
-                        // already open (in memory)? just switch to that tab — never
-                        // duplicate a note that already exists
                         if let idx = paths.firstIndex(of: newPath) {
                             w.selectedTab = idx
                             return
@@ -8298,9 +7039,6 @@ extension SwitcherController {
             }
         }
 
-        // Cmd+N: an empty note, Ctrl+N: a document from the `new-doc-template`
-        // snippet — at once, no prompt, in the notes folder (`notesFolder`) as
-        // NAME-1.md, NAME-2.md… (the first free number; never a space in the name)
         func newNote(template: Bool) {
             guard let dir = cmd.notesFolder ?? paths.first.map(noteDir) else { return }
             let fm = FileManager.default
@@ -8311,19 +7049,17 @@ extension SwitcherController {
                 path = dir + "/\(base)-\(n).md"
                 n += 1
             } while fm.fileExists(atPath: path) || paths.contains(path)
-            let body = template ? snippetText(cmd.newDocTemplate) : ""
-            if template && body == nil {
+            let body = snippetText(cmd.newDocTemplate)
+            if body == nil {
                 host.log("note '\(cmd.name)': no snippet \(cmd.newDocTemplate) in vim/snippets/markdown.json — empty note")
             }
             guard fm.createFile(atPath: path, contents: Data((body ?? "").utf8)) else {
                 host.log("note '\(cmd.name)': could not create \(path)")
                 return
             }
-            appendTab(path, logged: template ? "created from \(cmd.newDocTemplate)" : "created")
+            appendTab(path, logged: "created from \(cmd.newDocTemplate)")
         }
 
-        // a markdown snippet's text as it lands once expanded: placeholders →
-        // their defaults (${1:x} → x, $1 / ${1} → nothing), \$ → $
         private func snippetText(_ name: String) -> String? {
             let file = assetDir + "/vim/snippets/markdown.json"
             guard let data = FileManager.default.contents(atPath: file),
@@ -8336,20 +7072,16 @@ extension SwitcherController {
             return text.hasSuffix("\n") ? text : text + "\n"
         }
 
-        // a note added as the last tab and shown: listed in commands.toml, and
-        // an explicit (re)open beats an earlier tab ✕
         private func appendTab(_ p: String, logged verb: String) {
             paths.append(p)
             titles.append(URL(fileURLWithPath: p).lastPathComponent)
             w.tabTitles = titles
-            w.selectedTab = paths.count - 1   // fires onTabChange -> loads it
+            w.selectedTab = paths.count - 1
             DismissedNotes.remove(p)
             host.addNotePathToConfig(p, section: cmd.name)
             host.log("note '\(cmd.name)': \(verb) \(p)")
         }
 
-        // Finder "Open in Notes" service: open an arbitrary file as a tab and
-        // switch to it (the file already exists on disk — never create it)
         private func openExternal(_ path: String) {
             let p = (path as NSString).standardizingPath
             if let idx = paths.firstIndex(of: p) {
@@ -8363,8 +7095,6 @@ extension SwitcherController {
             appendTab(p, logged: "opened")
         }
 
-        // editor context menu -> "Open file at path…": prompt for an exact
-        // path and open it as a tab
         private func promptOpenPath() {
             presentPathSheet(on: w.nativeWindow,
                              title: "Open file at path",
@@ -8382,14 +7112,8 @@ extension SwitcherController {
             }
         }
 
-        // save current text — but NEVER resurrect a deleted note: if the file
-        // vanished, park the text in a fresh default.md next to it and swap
-        // the tab (Cmd+S / close / tab-change all go through here)
         func commitSave(_ text: String) {
-            // previews (PDF/image) are read-only — never write text back
             guard !noteIsPreview(currentPath) else { return }
-            // vim mode: the editor owns the file; `text` is the hidden text
-            // view's stale copy — flush the editor instead of writing it
             if cmd.vimMode {
                 w.vimFlush()
                 lastMtime = mtime(of: currentPath)
@@ -8423,28 +7147,18 @@ extension SwitcherController {
             w.tabFooterText = ""
         }
 
-        // the native editor's normal save — dictation inserted mid-note saves
-        // the same way
         func saveEditorText() {
             commitSave(w.currentEditorText)
         }
 
-        // One watcher tick (noteWatchInterval, while shown): EVERY tab's note
-        // is checked for being DELETED, the configured directories for new
-        // notes, and the active note for external writes — reloaded unless
-        // there are unsaved edits. A deleted note is never resurrected: its tab
-        // becomes default.md in the same directory, and the active note's
-        // on-screen text is parked into that default.md so nothing is lost.
         private func watchTick() {
             var dirty = false
             var i = 0
             while i < paths.count {
                 let p = paths[i]
                 if FileManager.default.fileExists(atPath: p) { i += 1; continue }
-                // note deleted on disk
                 let fallback = ensureDefaultNote(in: noteDir(p))
                 if p == currentPath {
-                    // vim mode: the live text is the editor's buffer
                     let vimText = cmd.vimMode && !noteIsPreview(p)
                         ? w.vimEval("join(getline(1, '$'), \"\\n\")") : nil
                     let text = noteIsPreview(p) ? "" : (vimText ?? w.currentEditorText)
@@ -8457,8 +7171,6 @@ extension SwitcherController {
                     w.setEditorMarkdown(text, baseDir: noteDir(fallback))
                     w.imageBaseDir = noteDir(fallback)
                     if cmd.vimMode {
-                        // drop the dead buffer (never rewrite the deleted
-                        // file) and edit the parked copy
                         w.vimCommand("silent! bwipeout! " + p.replacingOccurrences(of: " ", with: "\\ "))
                         w.vimOpen(fallback)
                         w.setVimPaneActive(true)
@@ -8468,7 +7180,6 @@ extension SwitcherController {
                 }
                 host.removeNotePathFromConfig(p, section: cmd.name)
                 if let existing = paths.firstIndex(of: fallback), existing != i {
-                    // default.md already a tab — drop the dead entry instead
                     paths.remove(at: i)
                     titles.remove(at: i)
                 } else {
@@ -8479,9 +7190,6 @@ extension SwitcherController {
                 }
                 dirty = true
             }
-            // NEW notes in a configured directory show up as tabs on their
-            // own — no config edit needed (directory entries cover them).
-            // Dismissed notes (✕) are never re-added by the sync.
             for p in expandPaths(cmd.paths, extensions: ["md"])
             where FileManager.default.fileExists(atPath: p) && !paths.contains(p)
                 && !DismissedNotes.contains(p) {
@@ -8492,15 +7200,11 @@ extension SwitcherController {
             }
             if dirty {
                 w.tabTitles = titles
-                // keep the strip highlight on the active note
                 if let active = paths.firstIndex(of: currentPath), active != w.selectedTab {
                     w.selectedTab = active
                 }
             }
-            // active-note external-write reload (skipped for read-only previews)
             if cmd.vimMode, let mt = mtime(of: currentPath), !noteIsPreview(currentPath) {
-                // vim reloads external writes itself (autoread + checktime);
-                // an unmodified buffer reloads silently
                 if let last = lastMtime, mt != last {
                     w.vimCommand("silent! checktime")
                     w.tabFooterText = ""
@@ -8524,33 +7228,17 @@ extension SwitcherController {
             }
         }
 
-        // voice notes (commands.toml `voice = true`): the window's bottom bar
-        // becomes a record control — big record/stop button, pause/resume and
-        // live level bars; stopping transcribes with Apple's speech
-        // recognizer and inserts the dictation at the cursor. The header
-        // keeps its copy-path / copy-config buttons (notes + voice share
-        // this window).
         private func installVoice() {
             let w = self.w, cmd = self.cmd, host = self.host
             host.log("voice '\(cmd.name)': voice controls enabled (\(cmd.voiceLive ? "live" : "insert on stop"))")
             let voice = VoiceRecorder()
-            // record bar starts OFF (meterEnabled stays false) — the user
-            // toggles it on via the header mic button when they want it.
-            // Dictation lands AT THE CURSOR (vim: after the character under
-            // it in Normal mode). One region per session = finalized batches
-            // + the live draft, rewritten in place:
-            //   voice-live = true  (default) the words appear as you speak
-            //   voice-live = false everything is held (draft in the footer)
-            //                      and inserted at the cursor on stop
-            // vim: the region is tracked by extmarks (vimVoiceBegin/Update),
-            // so typing elsewhere never shifts it; native editor: a range.
             let live = cmd.voiceLive
-            var committedStr = ""     // finalized batches this session
-            var draft = ""            // live partial hypothesis (transient)
+            var committedStr = ""
+            var draft = ""
             var sessionActive = false
             var vimAnchored = false
-            var anchor: NSRange?      // native: region start + current length
-            var pre = "", post = ""   // native: spaces around the region
+            var anchor: NSRange?
+            var pre = "", post = ""
             var liveWrite: Timer?
             var pendingDraw: DispatchWorkItem?
             var lastDraw = Date.distantPast
@@ -8569,7 +7257,6 @@ extension SwitcherController {
                     dbg("record start vim anchored=\(vimAnchored) live=\(live)")
                     return
                 }
-                // after the selection (never replaces selected text)
                 let sel = w.editorSelection
                 let text = w.editorText as NSString
                 let loc = min(sel.location + sel.length, text.length)
@@ -8582,7 +7269,6 @@ extension SwitcherController {
                 anchor = NSRange(location: loc, length: 0)
                 dbg("record start at \(loc) of \(text.length) live=\(live)")
             }
-            // write the region's current text (committed + draft) in place
             func drawRegion() {
                 pendingDraw?.cancel()
                 pendingDraw = nil
@@ -8601,8 +7287,6 @@ extension SwitcherController {
                                           caretBack: body.isEmpty ? 0 : (post as NSString).length)
                 anchor = a
             }
-            // partials arrive several times a second: at most one editor
-            // update per 0.2s (each vim update is an RPC round trip)
             func scheduleDraw() {
                 guard pendingDraw == nil else { return }
                 let item = DispatchWorkItem { drawRegion() }
@@ -8610,8 +7294,6 @@ extension SwitcherController {
                 DispatchQueue.main.asyncAfter(
                     deadline: .now() + max(0, 0.2 - Date().timeIntervalSince(lastDraw)), execute: item)
             }
-            // no RPC (plain vim) / region lost: the old path — append the
-            // text at the end of the note
             func vimAppendFallback(_ text: String) {
                 guard !text.isEmpty else { return }
                 if !w.vimAppend("\n" + text, to: self.currentPath) {
@@ -8626,8 +7308,6 @@ extension SwitcherController {
             func save() {
                 if cmd.vimMode { w.vimFlush() } else { self.saveEditorText() }
             }
-            // the session is over (final batch, stop timeout or error): the
-            // draft counts as said, the region is written once more, saved
             func finishSession() {
                 guard sessionActive else { return }
                 sessionActive = false
@@ -8658,7 +7338,6 @@ extension SwitcherController {
                         }
                     }
                     voice.start()
-                    // start() failing (permissions) reports via onError
                     if voice.state == .idle { finishSession() }
                 case .recording, .paused: voice.stop()
                 case .transcribing: break
@@ -8675,7 +7354,6 @@ extension SwitcherController {
                 guard let w else { return }
                 w.recordingState = voice.state.rawValue
                 w.recordingElapsed = voice.elapsed
-                // the stop timeout (no final batch) ends here too
                 if state == .idle { finishSession() }
             }
             voice.onLevel = { [weak w] level in
@@ -8692,7 +7370,6 @@ extension SwitcherController {
                     w.tabFooterText = "🎙 " + String(regionText().suffix(80))
                 }
             }
-            // finalized batch: it joins the committed text of the region
             voice.onBatch = { text in
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty && sessionActive {
@@ -8719,8 +7396,6 @@ extension SwitcherController {
             voice.onError = { [weak w] err in
                 host.log("voice '\(cmd.name)': \(err)")
                 dbg("error: \(err)")
-                // visible feedback WITHOUT polluting the note: the footer
-                // line shows the problem; the note keeps only dictated text
                 voice.resetSession()
                 w?.tabFooterText = "⚠️ \(err)"
             }
@@ -8733,26 +7408,12 @@ extension SwitcherController {
     }
 }
 
-// MARK: - List window session
-
 extension SwitcherController {
-    // One list window's live state — its tabs (source file + rows), the
-    // table columns, filters, sort and paging — and every hook the window
-    // calls. openListWindow builds it, install() wires it, didShow() runs the
-    // jira follow-ups; the window's hooks hold it (and it holds the window)
-    // until unregisterSubWindow releases them.
     final class ListSession {
-        // the jira window, or its release view (one tab per release, built
-        // from the [jira] section — see showJiraReleaseView)
         static func isJira(_ cmd: CommandSpec) -> Bool {
             cmd.name == "jira" || cmd.name == jiraReleasesWindow
         }
-        // shared window: ONE Esc = back (clearing a search first); at the
-        // jira list it hides the window only when jira's "Esc Hides Window"
-        // is on (SharedWindow.escapeAtTop)
         static func inSlot(_ cmd: CommandSpec) -> Bool { settings.sharedWindow && isJira(cmd) }
-        // jira: each tab (json file) belongs to a poll job or the live search
-        // in config.json with its OWN columns; [jira] columns is the fallback
         static func tabColumns(_ cmd: CommandSpec, _ path: String?) -> [ListColumn] {
             guard cmd.table else { return [] }
             guard isJira(cmd) else { return cmd.columns }
@@ -8761,23 +7422,16 @@ extension SwitcherController {
             }
             return JiraPoll.labeled(cmd.columns)
         }
-        // a filter value for an empty cell
         static let emptyValue = "\u{0}none"
-        // fields whose cells hold "a, b" lists: a row matches any part
         static let multiValued: Set<String> = ["labels", "release", "releaseLabel", "releaseDate", "components",
                                                "fixVersions"]
-        // people fields: a cell value (Server: the username; Cloud: the
-        // display name) -> "Full Name (username)" + detail, from the
-        // directory (users of the projects in scope; loaded once)
         static let personFields: Set<String> = ["assignee", "reporter", "creator"]
 
-        // the app's controller: a process-lifetime singleton
         unowned let host: SwitcherController
         let cmd: CommandSpec
         let w: PopupWindow
         let isJira: Bool
         let isReleaseView: Bool
-        // commands.toml section behind this window (the release view wears [jira])
         let configSection: String
         let inSlot: Bool
         let cap: Int
@@ -8789,40 +7443,22 @@ extension SwitcherController {
         var tabs: [(path: String, items: [FieldRow])] { didSet { invalidateFilter() } }
         var currentTab = 0 { didSet { invalidateFilter() } }
         var columns: [ListColumn]
-        // filter-bar dimensions that exist in the current tab: `filters`
-        // fields that are NOT table columns (e.g. labels) — a column filters
-        // from its own header ▾ instead, so filters live with their columns
         var activeDims: [String] = []
-        // multi-select filters: field -> picked values (OR within a field,
-        // AND across fields); reset on tab change, kept across reloads
         var colFilters: [String: Set<String>] = [:]
         var peopleCache: [String: (title: String, detail: String)]?
         var visibleOffset = 0
         var reloadWatcher: Timer?
-        // header-click sort: (field, ascending); restored from table-sort
         var sortKey: (field: String, ascending: Bool)?
-        // jira favorites (config.json `favorites`): the ☆ of each issue row
         var favKeys: Set<String>
-        // starred releases (config.json `favoriteReleases`, newest first):
-        // the ☆ of release rows + the sidebar's FAVORITE RELEASES section
         var favReleases: [String] = []
-        // labels pinned to the sidebar (config.json `pinnedLabels`): a click
-        // shows the cache's issues with that label in place (like a release)
         var pinnedLabels: [String] = []
         static let labelPinPrefix = "label:"
-        // pinned agile boards (config.json `pinnedBoards`; each = a board-ID
-        // poll job writing jira_boards/) + the MY WORK views (`[jira] my-work`)
         var pinnedBoards: [String] = []
         var boards: [String: JiraPoll.BoardInfo] = [:]
-        // every board in the scope (board_catalog.json: the poll re-reads
-        // projects -> boards -> sprints hourly) and the board views pinned to
-        // the sidebar ("BOARD|SPRINT|MODE", config.json pinnedBoardViews)
         var catalog: [JiraPoll.CatalogBoard] = []
         var catalogStamp: Date?
         var pinnedViews: [String] = []
         static let viewPinPrefix = "view:"
-        // the board on screen (JiraBoard.swift): its sprint ("current", "all"
-        // or an id), the keys Jira returned for that sprint (nil = every row)
         var boardSprint: [String: String] = [:]
         var sprintKeys: Set<String>?
         var sprintKeyCache: [String: (keys: Set<String>, at: Date)] = [:]
@@ -8831,39 +7467,19 @@ extension SwitcherController {
         static let boardPinPrefix = "board:", myWorkPrefix = "mywork:"
         static let myWork = [("mine", "Assigned to me", "person"), ("reported", "Reported by me", "square.and.pencil"),
                              ("today", "Updated today", "clock"), ("watching", "Watching", "eye")]
-        // a favorite release clicked in the sidebar: its issues fill the
-        // table IN PLACE of the current tab (no tab highlighted; any tab
-        // click or Esc returns). `path` = its release-view tab file.
         var pinView: (key: String, path: String, items: [FieldRow])?
-        var pinStamp: Date?        // the pin file's mtime (a board's job rewrote it)
-        // table group-by (jira): a field, `statusCategory` or `boardColumn`;
-        // remembered per window (UserDefaults listGroupBy.NAME); a board pin
-        // groups by its own columns unless changed while on it
+        var pinStamp: Date?
         var groupBy: String?
         var boardGroupBy = "boardColumn"
         var collapsedGroups: Set<String> = []
-        // a board's quick filters (filter-bar pill `__quick`): the picked ids
-        // narrow the rows to the keys Jira returns for board JQL AND theirs
         static let quickDim = "__quick"
         var quickKeys: Set<String>?
-        var statusCats: [String: String]?   // directory statusCategories, read once per window
-        // the searchable multi-select popover open on a header ▾ / bar pill
+        var statusCats: [String: String]?
         var openPicker: JiraMultiPicker?
-        // the pending save of a column drag (debounced)
         var resizeSave: DispatchWorkItem?
-        // reload a tab when its source file changes on disk (e.g. the poll
-        // wrote fresh json) so an open window never shows stale rows
         var tabMtimes: [Date?]
-        // jira: each tab's poll freshness (dot + age) from status.json —
-        // re-read when it changes, and every 30s so the ages stay current
         var badgeStamp: (status: Date?, at: Date) = (nil, .distantPast)
-        // release view: its tab files are rebuilt from the issue cache
-        // whenever a poll changes it (the watcher's mtime check reloads them)
         var cacheStamp: Date?
-        // the filter box's matcher + the header sort's ranks for the tab on
-        // screen (ListFilter.swift): built once per data change (in the
-        // background, right after it), so a keystroke over 20k rows only
-        // scans bytes and sorts Ints
         var filterIndex: FuzzyIndex?
         var sortRanks: (field: String, ascending: Bool, ranks: [Int])?
         var filterGen = 0
@@ -8900,7 +7516,6 @@ extension SwitcherController {
         }
 
         func currentItems() -> [FieldRow] { pinView?.items ?? tabs[currentTab].items }
-        // the file behind the rows on screen (columns, owner, sort)
         var currentPath: String { pinView?.path ?? tabs[currentTab].path }
 
         func cellValues(_ field: String, _ row: FieldRow) -> [String] {
@@ -8920,7 +7535,6 @@ extension SwitcherController {
             let colFields = Set(columns.filter(\.filterable).map(\.field))
             return cmd.filters.filter { f in
                 !colFields.contains(f)
-                    // Release (label) and Fix versions (name) are one filter
                     && !(f == "release" && colFields.contains("releaseLabel"))
                     && !(f == "releaseLabel" && colFields.contains("release"))
             }
@@ -8939,8 +7553,6 @@ extension SwitcherController {
             return people
         }
 
-        // one option per distinct value in the current tab, most common
-        // first; users carry their full name / username from the directory
         func filterOptions(_ field: String) -> [JiraMultiPicker.Option] {
             let emptyValue = ListSession.emptyValue
             var counts: [String: Int] = [:]
@@ -8984,15 +7596,12 @@ extension SwitcherController {
             return "\(picked.count) selected"
         }
 
-        // the ▾ chips on the header + the bar pills' text / on state
         func updateFilterIndicators() {
             w.tableFilterActive = Set(columns.indices.filter { !(colFilters[columns[$0].field] ?? []).isEmpty })
             w.filterSummaries = activeDims.map(filterSummary)
             w.filterActive = Set(activeDims.indices.filter { !(colFilters[activeDims[$0]] ?? []).isEmpty })
         }
 
-        // refresh the bar dimensions for the current tab; dims with no
-        // values in this tab disappear from the bar entirely
         func applyFilterData() {
             let items = currentItems()
             activeDims = barDims().filter { f in items.contains { !($0.fields[f] ?? "").isEmpty } }
@@ -9014,8 +7623,6 @@ extension SwitcherController {
             }
         }
 
-        // after a pin / blacklist edit: a tab file the window doesn't have
-        // yet appears by rebuilding the window (the current tab stays)
         func ensureTab(_ file: String) {
             guard cmd.name == "jira", !tabs.contains(where: { ($0.path as NSString).lastPathComponent == file }),
                   tabs.indices.contains(currentTab) else { return }
@@ -9031,8 +7638,6 @@ extension SwitcherController {
             w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
             let s = keys.count == 1 ? keys[0] : "\(keys.count) issues"
             w.showToast(on ? "Pinned \(s) to favorites" : "Unpinned \(s)", symbol: on ? "star.fill" : "star")
-            // the rows as shown: favorites.json gets them at once even when
-            // the issue cache doesn't hold them (live search results)
             let json = (try? JSONSerialization.data(withJSONObject: rows.map { $0.fields.filter { !$0.key.hasPrefix("__") } }))
                 .map { String(decoding: $0, as: UTF8.self) } ?? "[]"
             JiraPoll.run("jira_poll.py", ["--favorite", on ? "add" : "remove"] + keys, stdin: json) {
@@ -9050,9 +7655,6 @@ extension SwitcherController {
             }
         }
 
-        // the jira window's sidebar: starred releases on top; a click lists
-        // every issue in that release (the release view)
-        // + MY WORK (`mywork:ID`), BOARDS (`board:ID`), LABELS (`label:NAME`)
         enum Pin { case myWork(String), board(String), view(String), label(String), release(String), boardList }
         func pin(_ k: String) -> Pin {
             if k == ListSession.boardListKey { return .boardList }
@@ -9066,19 +7668,14 @@ extension SwitcherController {
             boards[id]?.name ?? JiraDirectory.load().boards.first { $0.id == id }?.name ?? "Board \(id)"
         }
 
-        // the sidebar's BOARDS: ONE "All boards" row (the catalog as a table
-        // in place, where you pin) + only the pinned boards — a work site has
-        // hundreds of boards, listing them all buried the rest of the sidebar
         static let boardListKey = "boards:all"
         var onBoardList: Bool { pinView?.key == ListSession.boardListKey }
         var sidebarBoards: [String] { pinnedBoards }
-        // a board opened from the list: Esc goes back to the list
         var backToBoardList = false
         static let boardListColumns = ListColumn.parse(
             "name:Board:40::sort+filter,project:Project:12::sort+filter,type:Type:16::sort+filter,"
             + "sprint:Current sprint:24::sort+filter,boardId:ID:8:right:sort")
 
-        // one row per catalog board (+ a pinned board the scope lost); the ☆ = pinned
         func boardListRows() -> [FieldRow] {
             let ids = catalog.map(\.id)
             return (ids + pinnedBoards.filter { !ids.contains($0) }).map { id in
@@ -9103,7 +7700,6 @@ extension SwitcherController {
             host.log("list '\(cmd.name)': board list (\(pinView?.items.count ?? 0) boards)")
         }
 
-        // pins / the catalog changed while the list is up: same rows, new ☆
         func refreshBoardList() {
             guard onBoardList else { return }
             pinView?.items = boardListRows()
@@ -9119,8 +7715,6 @@ extension SwitcherController {
 
         func syncReleasePins() {
             guard cmd.name == "jira" else { return }
-            // one PINNED shelf (board views, starred releases, labels), then
-            // the BOARDS to browse
             let ids = (showMyWork ? ListSession.myWork.map { ListSession.myWorkPrefix + $0.0 } : [])
                 + pinnedViews.map { ListSession.viewPinPrefix + $0 }
                 + favReleases
@@ -9223,7 +7817,6 @@ extension SwitcherController {
             refreshBoardList()
         }
 
-        // a rows file in place of the tab, its sidebar pin highlighted
         func showPinFile(_ key: String, _ path: String, what: String) {
             let cols = ListSession.tabColumns(cmd, path)
             pinView = (key, path, host.loadListItems(path, cmd: cmd, columns: cols))
@@ -9234,7 +7827,6 @@ extension SwitcherController {
             host.log("list '\(cmd.name)': \(what) (\(pinView?.items.count ?? 0) issues)")
         }
 
-        // MY WORK: --my-work writes the three views from the cache
         func showMyWorkPin(_ id: String) {
             JiraPoll.run("jira_poll.py", ["--my-work"]) { [weak self] code, out, err in
                 guard let self else { return }
@@ -9249,7 +7841,6 @@ extension SwitcherController {
                     self.showPinFile(ListSession.myWorkPrefix + id, path, what: "my work -> \(id)")
                     return
                 }
-                // Watching = its own poll job (watcher = currentUser()): first fetch now
                 self.w.showToast("Fetching the issues you watch…", symbol: "eye")
                 self.pollJob("mywork-watching") { [weak self] in
                     guard let self, FileManager.default.fileExists(atPath: path) else { return }
@@ -9258,8 +7849,6 @@ extension SwitcherController {
             }
         }
 
-        // a pinned board: its job's file (jira_boards/board-ID.json); not
-        // polled yet -> poll it now, then show it
         func showBoardPin(_ id: String) {
             let path = (JiraPoll.sideDir(JiraPoll.boardDir) as NSString).appendingPathComponent("board-\(id).json")
             if FileManager.default.fileExists(atPath: path) {
@@ -9287,13 +7876,10 @@ extension SwitcherController {
             }
         }
 
-        // MARK: board view (JiraBoard.swift)
-
         func boardMode(_ b: String) -> String {
             UserDefaults.standard.string(forKey: "jiraBoardMode.\(b)") ?? "columns"
         }
         func catalogBoard(_ b: String) -> JiraPoll.CatalogBoard? { catalog.first { $0.id == b } }
-        // a board opens on its current sprint when it has one, else everything
         func defaultSprint(_ b: String) -> String {
             catalogBoard(b)?.sprints.contains { $0.state == "active" } == true ? "current" : "all"
         }
@@ -9318,30 +7904,25 @@ extension SwitcherController {
                 : "\($0.sprints.count) sprints" } ?? ""
             return [c?.project ?? "", kind, sprints].filter { !$0.isEmpty }.joined(separator: " · ")
         }
-        // the spec of the board on screen, as a pinned view would store it
         var currentViewSpec: String? {
             onBoard.map { "\($0)|\(boardSprint[$0] ?? defaultSprint($0))|\(boardMode($0))" }
         }
-        // the sidebar row lit: the pinned view showing, else the board / pin
         var sidebarSelection: String? {
             if let v = currentViewSpec, pinnedViews.contains(v) { return ListSession.viewPinPrefix + v }
             return pinView?.key
         }
 
-        // a board row: its issues (the board's job, made on first use) on
-        // its last sprint choice, in its last mode
         func openBoard(_ b: String, sprint: String? = nil, mode: String? = nil) {
             if let sp = sprint { boardSprint[b] = sp } else if boardSprint[b] == nil { boardSprint[b] = defaultSprint(b) }
             if let m = mode { UserDefaults.standard.set(m, forKey: "jiraBoardMode.\(b)") }
             if !pinnedBoards.contains(b) {
-                // first open: read the board (columns, filter) and fetch it
                 setPinnedBoards([b], on: true) { [weak self] in
                     guard let self, self.pinnedBoards.contains(b) else { return }
                     self.showBoardPin(b)
                 }
                 return
             }
-            if boardSprintOnly(b) { setBoardSprint(b, false) }   // the old "open sprints only" switch: the picker does it now
+            if boardSprintOnly(b) { setBoardSprint(b, false) }
             showBoardPin(b)
         }
 
@@ -9366,8 +7947,6 @@ extension SwitcherController {
             w.showToast(on ? "Pinned \(viewTitle(v))" : "Unpinned", symbol: on ? "pin.fill" : "pin.slash")
         }
 
-        // the board bar + the columns follow what is on screen: shown on a
-        // board, gone anywhere else
         func updateBoardChrome() {
             guard isJira, let b = onBoard else {
                 if boardBar != nil { w.setListBar(nil); boardBar = nil }
@@ -9431,7 +8010,6 @@ extension SwitcherController {
                 w.onRowsChanged = { [weak self] in self?.refreshBoardSummary() }
             }
             w.selectSidebarPin(sidebarSelection ?? ListSession.boardPinPrefix + b)
-            // the sprint's keys: cached for a few minutes, else one search
             if sp != "all" {
                 let ck = "\(b)|\(sp)"
                 if let hit = sprintKeyCache[ck], Date().timeIntervalSince(hit.at) < 300 {
@@ -9468,7 +8046,6 @@ extension SwitcherController {
             }
         }
 
-        // "6 issues · Sep 28 – Oct 12" / "18 issues · ended Sep 28"
         func sprintSummary(_ b: String, _ sp: String, count: Int) -> String {
             var parts = ["\(count) issue\(count == 1 ? "" : "s")"]
             let s = sp == "current" ? catalogBoard(b)?.sprints.first { $0.state == "active" }
@@ -9496,8 +8073,6 @@ extension SwitcherController {
             bar.setSummary(sprintSummary(b, sp, count: n))
         }
 
-        // the cards: every row the filters keep (no paging), in the board's
-        // columns; statuses no column takes go last; a long Done column is cut
         private func renderBoardColumns() {
             guard let b = onBoard, let view = boardCols else { return }
             let rows = filteredItems(query: w.currentQuery)
@@ -9520,7 +8095,6 @@ extension SwitcherController {
                 }
             }
             var out = cols.map { c -> JiraBoardColumn in
-                // a done column holds the board's whole history: its newest 30
                 let doneCol = !c.cards.isEmpty && c.cards.allSatisfy { $0.cat == 2 }
                 let keep = doneCol ? Array(c.cards.prefix(30)) : c.cards
                 return JiraBoardColumn(name: c.name, cards: keep, more: c.cards.count - keep.count)
@@ -9558,7 +8132,6 @@ extension SwitcherController {
             }
         }
 
-        // pin (3 requests per board, once) / unpin; a new pin is polled at once
         func setPinnedBoards(_ ids: [String], on: Bool, then: (() -> Void)? = nil) {
             guard !ids.isEmpty else { then?(); return }
             if on { w.showToast("Reading \(ids.count == 1 ? boardName(ids[0]) : "\(ids.count) boards")…", symbol: "arrow.down.circle") }
@@ -9585,8 +8158,6 @@ extension SwitcherController {
             }
         }
 
-        // the board's quick filters, ANDed like Jira's; each change = one
-        // key-only search (--board-quickfilter), the rows narrow to its keys
         func showQuickFilterPicker(anchor: NSView, rect: NSRect) {
             guard let b = onBoard, let qf = boards[b]?.quickFilters, !qf.isEmpty else { return }
             openPicker?.closePopover()
@@ -9627,7 +8198,6 @@ extension SwitcherController {
             p.togglePopover(nil)
         }
 
-        // the distinct labels of these rows, first seen first
         func issueLabels(_ rows: [FieldRow]) -> [String] {
             var out: [String] = []
             for r in rows {
@@ -9655,8 +8225,6 @@ extension SwitcherController {
             }
         }
 
-        // a pinned label: its issues (from the issue cache, via --label-view)
-        // in the main table, the pin highlighted
         func showLabelPin(_ name: String) {
             let key = ListSession.labelPinPrefix + name
             JiraPoll.run("jira_poll.py", ["--label-view", name]) { [weak self] code, out, err in
@@ -9690,8 +8258,6 @@ extension SwitcherController {
             }
         }
 
-        // a favorite release: its issues (from the issue cache, via
-        // --release-view) in the main table, the pin highlighted
         func showReleasePin(_ key: String) {
             JiraPoll.run("jira_poll.py", ["--release-view", key]) { [weak self] code, out, err in
                 guard let self else { return }
@@ -9713,7 +8279,6 @@ extension SwitcherController {
             }
         }
 
-        // back from a release pin to the tab it replaced
         func leavePinView() {
             guard pinView != nil else { return }
             backToBoardList = false
@@ -9723,7 +8288,6 @@ extension SwitcherController {
             showRows(columns: ListSession.tabColumns(cmd, tabs[currentTab].path))
         }
 
-        // fresh rows on screen: columns (when they differ), sort, filters reset
         func showRows(columns cols: [ListColumn]) {
             invalidateFilter()
             visibleOffset = 0
@@ -9792,8 +8356,6 @@ extension SwitcherController {
             }
         }
 
-        // rows changed (reload, tab switch): drop the matcher / ranks and
-        // rebuild them off the main thread before the next keystroke needs them
         func invalidateFilter() {
             filterIndex = nil
             sortRanks = nil
@@ -9822,10 +8384,6 @@ extension SwitcherController {
             }
         }
 
-        // combined filter: search (fuzzy) + dropdown selections, then the
-        // table's header sort (numeric-aware; blanks always last)
-        // MARK: group by
-
         var onBoard: String? {
             guard let k = pinView?.key, k.hasPrefix(ListSession.boardPinPrefix) else { return nil }
             return String(k.dropFirst(ListSession.boardPinPrefix.count))
@@ -9836,7 +8394,6 @@ extension SwitcherController {
             return groupBy == "boardColumn" ? nil : groupBy
         }
 
-        // (title, value) choices: the jira fields worth grouping by
         func groupChoices() -> [(String, String)] {
             var out: [(String, String)] = [("Status category", "statusCategory"), ("Status", "status"),
                                            ("Assignee", "assignee"), ("Priority", "priority"),
@@ -9892,10 +8449,6 @@ extension SwitcherController {
             w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
         }
 
-        // the shown rows (already filtered + sorted) under one header per
-        // group, in the group's natural order: categories / board columns as
-        // Jira orders them, anything else most rows first, (none) last. A
-        // multi-valued cell (labels) puts the issue under each of its values.
         func groupedRows(_ order: [Int], items: [FieldRow], by g: String) -> [FieldRow] {
             let none = "(none)"
             var fixed: [String] = []
@@ -9960,7 +8513,6 @@ extension SwitcherController {
             return out
         }
 
-        // the rows every filter keeps, sorted, unpaged (the board's columns)
         func filteredItems(query: String) -> [FieldRow] {
             let items = currentItems()
             let index = filterIndex ?? FuzzyIndex(items.map(\.searchText))
@@ -10015,7 +8567,6 @@ extension SwitcherController {
             }
             let t2 = DispatchTime.now().uptimeNanoseconds
             defer {
-                // typing lag shows up here first (work-sized tabs: bin/fake-jira-tab.sh)
                 let total = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
                 if total > 8 {
                     host.log(String(format: "list '%@' filter: %d rows -> %d, q=\"%@\", match %.1f ms, "
@@ -10030,17 +8581,10 @@ extension SwitcherController {
                 return rows
             }
             let shown = order.prefix(cap)
-            // paging: page-size > 0 keeps huge lists snappy while browsing; a
-            // "load more" row at the bottom reveals the next page on Enter or
-            // click. Searching is cheap (capped search text) and rendering a
-            // narrowed result is fine, so an ACTIVE QUERY shows every match —
-            // an item beyond the current page still renders when found.
             var take = shown.count
             if cmd.pageSize > 0, shown.count > cmd.pageSize, query.isEmpty {
                 take = min(shown.count, visibleOffset + cmd.pageSize)
             }
-            // ONE copy of each shown row (20k matches while typing);
-            // jira: issue rows wear the ☆ (filled = pinned to favorites.json)
             var paged = shown.prefix(take).map { i -> FieldRow in
                 var r = items[i]
                 if isJira, let k = r.fields["key"], !k.isEmpty {
@@ -10054,13 +8598,10 @@ extension SwitcherController {
                                       body: nil, searchText: "",
                                       fields: ["__loadmore": "1"]))
             }
-            // live header count: current items in the list (updates with search)
             w.itemCount = paged.count == 1 ? "1 item" : "\(paged.count) items"
             return paged
         }
 
-        // header sort (title click, or the filter popover's Sort buttons);
-        // persisted as table-sort so the window reopens the same way
         func setSort(_ f: String, ascending: Bool) {
             sortKey = (f, ascending)
             syncSortArrow()
@@ -10075,15 +8616,12 @@ extension SwitcherController {
             host.log("list '\(cmd.name)': sort -> \(v)")
         }
 
-        // the searchable multi-select popover for one field, anchored at a
-        // header ▾ or a filter-bar pill
         func showFilterPicker(_ field: String, anchor: NSView, rect: NSRect) {
             openPicker?.closePopover()
             var opts = filterOptions(field)
             let p = JiraMultiPicker(noun: label(field).lowercased())
             p.applyColors(w.config.colors)
             if field == "status" {
-                // under To Do / In Progress / Done, each with its row count
                 let cats = JiraDirectory.load().statusCategories, names = JiraTicketPage.categoryNames
                 var rows: [String: Int] = [:]
                 opts = opts.map { o in
@@ -10095,8 +8633,6 @@ extension SwitcherController {
                 p.groupDetail = rows.mapValues { "\($0) row\($0 == 1 ? "" : "s")" }
             }
             if field == "labels" {
-                // most used first (filterOptions' order): the top ones, the
-                // long tail of a work site behind "Show all N"; search covers all
                 opts = JiraMultiPicker.foldTail(opts)
                 p.foldTitle = { [weak p] n in "Show all \(p?.options.count ?? n) labels" }
                 if cmd.name == "jira" {
@@ -10133,8 +8669,6 @@ extension SwitcherController {
             p.togglePopover(nil)
         }
 
-        // the copy-path / copy-config actions live in the top-left icon menu
-        // (below), not as header buttons — keep the header bar uncluttered
         func refreshPathLabel() {
             w.copyPathButtonLabel = ""
         }
@@ -10150,10 +8684,8 @@ extension SwitcherController {
             w.setSidebarStatus(sum?.text, tone: sum?.tone ?? .success)
         }
 
-        // wire every window hook (before the first show)
         func install() {
             if isJira {
-                // do:board:open:ID | sprint:ID | mode:columns|table | pin (tests)
                 w.onTestAction = { [weak self] a in
                     guard let self else { return }
                     let p = a.split(separator: ":", maxSplits: 1).map(String.init)
@@ -10182,7 +8714,6 @@ extension SwitcherController {
                             "selected": self.sidebarSelection ?? "", "catalog": self.catalog.map(\.id)]
                 }
             }
-            // empty `title` in commands.toml = no header label (icon still shows)
             w.chromeHeaderTitle = cmd.chromeTitle.isEmpty ? nil : cmd.chromeTitle
             w.headerIcon = jiraAppIcon
             if let ts = cmd.tableSort, !columns.isEmpty {
@@ -10192,9 +8723,6 @@ extension SwitcherController {
                 }
             }
             syncSortArrow()
-            // row copy: ticked rows (or every row) serialized as TSV lines of the
-            // configured copy-fields; the framework owns checkboxes + button +
-            // pasteboard, this closure is the only list-specific part
             let copyKeys = copyKeys
             w.onCopyRows = { picked in
                 picked.compactMap { $0 as? FieldRow }
@@ -10214,26 +8742,20 @@ extension SwitcherController {
             w.onCommandK = { [self] in showActions() }
             if cmd.name == "jira" { w.onSidebarJump = { [weak host, weak w] in if let w { host?.showSidebarJump(w) } } }
             if isJira { w.onTableHeaderMenu = { [self] in groupMenuItems() } }
-            // Cmd+F (jira): the live-search panel docked to this window
             if cmd.name == "jira" {
                 w.onCommandF = { [host, weak w] in
                     guard let w else { return }
                     JiraSearchPanel.toggle(on: w, controller: host)
                 }
             }
-            // clicking the drag header copies the active tab's source path
             w.onChromeHeaderClick = { [self] in
                 guard tabs.indices.contains(currentTab) else { return }
                 host.copy(tabs[currentTab].path, "source path: \(tabs[currentTab].path)")
             }
-            // header "config" button: copy the commands.toml path (not on jira:
-            // its config lives in the Jira Config window)
             if isJira { w.copyConfigButtonLabel = "" }
             w.onChromeConfigClick = { [host] in
                 host.copy(settings.commandsConfPath, "config path: \(settings.commandsConfPath)")
             }
-            // top-left app glyph: window menu (copy paths, open config, jira
-            // poll options, window settings) — same idea as the notes window
             w.onChromeIconClick = { [self] in showIconMenu() }
             w.onShowShortcuts = { [self] in
                 host.showShortcuts(on: w, view: cmd.name == "jira" ? "jira" : "")
@@ -10253,7 +8775,6 @@ extension SwitcherController {
                 w.setRows(filteredRows(query: w.currentQuery))
             }
             w.onTabChange = { [self] index in selectTab(index) }
-            // the issue panel follows the highlighted row (Cmd+I hides it)
             if isJira && cmd.inspectorWidth > 0 {
                 w.onSelectionChanged = { [weak w, host] index in
                     guard let w else { return }
@@ -10267,7 +8788,6 @@ extension SwitcherController {
                     host.openRow(row, cmd: cmd, isJira: isJira)
                 }
             }
-            // clicking the ACTIVE tab copies that source's absolute path
             w.onTabClick = { [self] index in
                 guard index == w.selectedTab, index < tabs.count else { return }
                 host.copy(tabs[index].path, "source path: \(tabs[index].path)")
@@ -10283,7 +8803,6 @@ extension SwitcherController {
                     host.log("list '\(cmd.name)': load more -> offset \(visibleOffset)")
                     return
                 }
-                // Enter = the same "more details" window as a double-click
                 guard let row = row as? FieldRow else { return }
                 if let b = row.fields["__board"] { openListedBoard(b); return }
                 host.log("list '\(cmd.name)': details for '\(row.title)'")
@@ -10301,21 +8820,17 @@ extension SwitcherController {
                     host.log("list '\(cmd.name)': load more (click) -> offset \(visibleOffset)")
                 }
             }
-            // double-click a row -> "more details" (no per-row action label)
             w.onRowDoubleClick = { [self] index in
                 guard index >= 0, index < w.rows.count,
                       let row = w.rows[index] as? FieldRow, !row.synthetic else { return }
                 if let b = row.fields["__board"] { openListedBoard(b); return }
                 host.openRow(row, cmd: cmd, isJira: isJira)
             }
-            // table header: click = sort (again = flip), divider drag = resize;
-            // both persist to commands.toml so the window reopens the same way
             w.onTableSort = { [self] i in
                 guard columns.indices.contains(i) else { return }
                 let f = columns[i].field
                 setSort(f, ascending: sortKey?.field == f ? !(sortKey?.ascending ?? true) : true)
             }
-            // header ▾ / filter-bar pill: the field's searchable multi-select
             w.onTableFilter = { [self] i, view, rect in
                 guard columns.indices.contains(i) else { return }
                 showFilterPicker(columns[i].field, anchor: view, rect: rect)
@@ -10326,8 +8841,6 @@ extension SwitcherController {
                 showFilterPicker(activeDims[dim], anchor: view, rect: rect)
             }
             w.onTableColumnsResized = { [self] pcts, final in columnsResized(pcts, final: final) }
-            // a header title dragged to another slot: same order here, the ▾ /
-            // sort marks follow their fields, saved like a divider drag
             w.onTableColumnsReordered = { [self] from, to in
                 guard columns.indices.contains(from), columns.indices.contains(to) else { return }
                 columns.insert(columns.remove(at: from), at: to)
@@ -10348,7 +8861,6 @@ extension SwitcherController {
                 host.slot.back(esc: true)
             }
             if cmd.name == "jira" && inSlot {
-                // the Cmd+F panel hides / returns with the list
                 w.onPark = { [w] in JiraSearchPanel.park(from: w) }
                 w.onUnpark = { [w] in JiraSearchPanel.unpark(to: w) }
             }
@@ -10367,9 +8879,6 @@ extension SwitcherController {
             RunLoop.main.add(watcher, forMode: .common)
             reloadWatcher = watcher
             w.copyConfigButtonLabel = ""
-            // "fit columns" (the table header's corner cell / right-click): every
-            // column as wide as its content, the window widened to hold them
-            // (saved like a divider drag)
             if cmd.table && !columns.isEmpty {
                 w.onTableFit = { [weak w] in
                     guard let w, let pcts = w.fitTableColumns() else { return }
@@ -10380,8 +8889,6 @@ extension SwitcherController {
             refreshPathLabel()
         }
 
-        // after the first show: the release view's pending tab, and for jira
-        // the live-search hand-off (jiraShowTab) + the Cmd+F panel
         func didShow() {
             if isReleaseView, let f = host.pendingReleaseTab {
                 host.pendingReleaseTab = nil
@@ -10390,8 +8897,6 @@ extension SwitcherController {
                 }
             }
             guard cmd.name == "jira" else { return }
-            // live search results: reload that tab from disk and select it (a
-            // tab the window doesn't have yet = rebuild the window, then select)
             host.jiraShowTab = { [weak self] file in self?.showTab(file) }
             if let f = host.pendingJiraTab {
                 host.pendingJiraTab = nil
@@ -10430,15 +8935,12 @@ extension SwitcherController {
             host.log("list '\(cmd.name)': tab -> \(tabs[index].path)")
         }
 
-        // persisted on a short debounce after the LAST live drag update (not
-        // only on mouseUp — the header's mouseUp isn't guaranteed to arrive)
         private func columnsResized(_ pcts: [CGFloat], final: Bool) {
             for i in columns.indices where i < pcts.count { columns[i].width = pcts[i] }
-            guard !onBoardList else { return }   // fixed columns, owned by no job
+            guard !onBoardList else { return }
             resizeSave?.cancel()
             let item = DispatchWorkItem { [self] in
                 let spec = ListColumn.serialize(columns, titles: !isJira)
-                // a jira tab owned by a poll job / search saves into THAT job
                 if isJira, tabs.indices.contains(currentTab),
                    let own = JiraPoll.owner(ofTab: currentPath) {
                     JiraPoll.run("jira_config.py", ["--set-columns", own.kind, own.name, spec]) { [host] code, _, err in
@@ -10457,7 +8959,6 @@ extension SwitcherController {
             DispatchQueue.main.asyncAfter(deadline: .now() + (final ? 0.05 : 0.6), execute: item)
         }
 
-        // Cmd+K on the board list: open, pin / unpin, open in the browser
         private func showBoardActions(_ ids: [String]) {
             guard !ids.isEmpty else { return }
             let what = ids.count == 1 ? boardName(ids[0]) : "\(ids.count) boards"
@@ -10483,8 +8984,6 @@ extension SwitcherController {
             }
         }
 
-        // Cmd+K: act on the ticked rows (else the highlighted one) — copy,
-        // open in the browser, pin to favorites, hide / restore releases
         private func showActions() {
             let rows = w.actionRows.compactMap { $0 as? FieldRow }.filter { !$0.synthetic }
             guard !rows.isEmpty else { return }
@@ -10498,7 +8997,6 @@ extension SwitcherController {
             let urls = keyed.compactMap { r in jiraBrowseURL(r, site: site).map { (r, $0) } }
             let s = urls.count == 1 ? "" : "s"
             let noun = releases.isEmpty ? "issue" : issues.isEmpty ? "release" : "item"
-            // Open in browser FIRST: Cmd+K, Return opens what you're on
             if !site.isEmpty && !urls.isEmpty {
                 items.append(("Open in browser", "opens \(urls.count) \(noun)\(s) · the highlighted row + ticked rows"))
                 items.append(("Copy URL and title", "\(urls.count) \(noun)\(s) · one “URL Title” line each"))
@@ -10512,7 +9010,6 @@ extension SwitcherController {
                 items.append(pinned
                     ? ("Remove from favorites", "unpin \(k) · \(JiraPoll.favoritesFile)")
                     : ("Add to favorites", "pin \(k) → \(JiraPoll.favoritesFile) · re-polled every run"))
-                // their labels not pinned yet → the sidebar's LABELS
                 let labs = issueLabels(issues).filter { !pinnedLabels.contains($0) }
                 if cmd.name == "jira", !labs.isEmpty {
                     items.append(("Pin labels to sidebar", labs.prefix(4).joined(separator: ", ")
@@ -10577,15 +9074,12 @@ extension SwitcherController {
             }
         }
 
-        // the kitchen-sink menu of the header icon
         private func showIconMenu() {
             let menu = NSMenu()
             menu.autoenablesItems = false
             host.addGlobalWindowItems(to: menu)
             menu.addItem(.separator())
             if cmd.name == "jira" {
-                // jira: config, paths, jobs, queries, curls, columns — all
-                // live in the Jira Config window; this menu is window chrome
                 menu.addItem(menuItem("Search Jira…  ⌘F") { [host, weak w] in
                     guard let w else { return }
                     JiraSearchPanel.toggle(on: w, controller: host)
@@ -10623,9 +9117,6 @@ extension SwitcherController {
             w.showHeaderMenu(menu)
         }
 
-        // One watcher tick (listWatchInterval, while shown): jira badges, the
-        // release view's rebuild after a poll, and every tab whose source file
-        // changed on disk reloaded (re-filtered when it is the one on screen)
         private func watchTick() {
             refreshBadges()
             if isReleaseView, mtime(of: JiraPoll.issueCachePath) != cacheStamp {
@@ -10635,12 +9126,11 @@ extension SwitcherController {
             if isJira, mtime(of: JiraPoll.boardCatalogPath) != catalogStamp {
                 catalogStamp = mtime(of: JiraPoll.boardCatalogPath)
                 catalog = JiraPoll.boardCatalog()
-                syncReleasePins()   // refreshes the board list too
+                syncReleasePins()
                 updateBoardChrome()
             }
             if let p = pinView, p.key.hasPrefix(ListSession.boardPinPrefix) || p.key == ListSession.myWorkPrefix + "watching",
                mtime(of: p.path) != pinStamp {
-                // a board's own job rewrote its file
                 pinStamp = mtime(of: p.path)
                 pinView?.items = host.loadListItems(p.path, cmd: cmd, columns: ListSession.tabColumns(cmd, p.path))
                 invalidateFilter()
@@ -10675,7 +9165,6 @@ extension SwitcherController {
                 tabs[i].items = host.loadListItems(tabs[i].path, cmd: cmd, columns: ListSession.tabColumns(cmd, tabs[i].path))
                 host.log("list '\(cmd.name)': reloaded \(tabs[i].path) after external write")
             }
-            // pins edited elsewhere (or by the poll) show on the ☆ too
             if isJira {
                 favKeys = JiraPoll.favorites()
                 favReleases = JiraPoll.favoriteReleases()
@@ -10688,19 +9177,15 @@ extension SwitcherController {
             refreshBadges(force: true)
             w.tabTitles = tabs.map { URL(fileURLWithPath: $0.path).lastPathComponent }
             refreshPathLabel()
-            // only re-filter when the tab on screen is one that changed
             guard pinView == nil, changed.contains(currentTab) else { return }
             applyFilterData()
             visibleOffset = 0
-            // keep the scroll position: a background json refresh must not
-            // yank the list back to the top while the user reads mid-list
             w.setRows(filteredRows(query: w.currentQuery), resetScroll: false)
             w.tabFooterText = ""
         }
     }
 }
 
-// NSFontManager target for the system Font Panel ("Other Font…")
 final class FontPanelReceiver: NSObject {
     static let shared = FontPanelReceiver()
     var onPick: ((String) -> Void)?
@@ -10711,60 +9196,71 @@ final class FontPanelReceiver: NSObject {
     }
 }
 
-// MARK: - Jira poll (menu-bar switch, polling options, setup window)
+// jira/paths.json: the file locations the poller (jira_paths.py) uses too,
+// same env overrides
+struct JiraPaths {
+    let configJson, teamJson, legacyConfig, cacheDir, outDir: String
+    let cache, tabs, sideDirs: [String: String]
 
-// The python poller (jira/jira_poll.py + friends) owns the network, the cache
-// and ~/.cache/jira/status.json; the app only flips THE SWITCH ([jira]
-// enabled), kicks polls, edits schedules through jira_config.py, and SHOWS
-// the state — so the menu, jira-doctor and `cat status.json` always agree.
+    init(file: String, env: [String: String] = ProcessInfo.processInfo.environment) {
+        let d = (try? Data(contentsOf: URL(fileURLWithPath: file)))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        func path(_ envKey: String, _ key: String) -> String {
+            if let e = env[envKey], !e.isEmpty { return e }
+            return ((d[key] as? String ?? "") as NSString).expandingTildeInPath
+        }
+        configJson = path("JIRA_CONFIG_JSON", "configJson")
+        teamJson = path("JIRA_TEAM_JSON", "teamJson")
+        legacyConfig = path("JIRA_CONFIG_FILE", "legacyConfig")
+        cacheDir = path("JIRA_CACHE_DIR", "cacheDir")
+        outDir = ((d["outDir"] as? String ?? "") as NSString).expandingTildeInPath
+        cache = d["cache"] as? [String: String] ?? [:]
+        tabs = d["tabs"] as? [String: String] ?? [:]
+        sideDirs = d["sideDirs"] as? [String: String] ?? [:]
+        if d.isEmpty { wsLog("jira: \(file) missing or unreadable — jira paths unset") }
+    }
+    func cacheFile(_ name: String) -> String {
+        (cacheDir as NSString).appendingPathComponent(cache[name] ?? name)
+    }
+}
+
 enum JiraPoll {
     static var dir: String { assetDir + "/jira" }
-    static let configPath = NSHomeDirectory() + "/.config/jira/config.json"
-    static let statusPath = NSHomeDirectory() + "/.cache/jira/status.json"
-    static let curlLogPath = NSHomeDirectory() + "/.cache/jira/curl.log"
+    static let paths = JiraPaths(file: dir + "/paths.json")
+    static var configPath: String { paths.configJson }
+    static var statusPath: String { paths.cacheFile("status") }
+    static var curlLogPath: String { paths.cacheFile("curlLog") }
     static var pollScript: String { dir + "/jira_poll.py" }
-    // why the last menu-bar enable attempt left jira disabled (submenu line)
     static var lastEnableError: String?
-    // "Poll Now" jobs in flight (endpoint name, or "all")
     static var running: Set<String> = []
-    // schedule choices offered under Poll Interval ▸
     static let intervals = ["5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"]
-    static let directoryPath = NSHomeDirectory() + "/.cache/jira/directory.json"
-    // the live search's tab (jira_config.LIVE_SEARCH_FILE, in outDir)
-    static let liveSearchFile = "search.json"
-    // the pinned issues' tab / the hidden releases' tab (jira_config
-    // FAVORITES_FILE / BLACKLIST_RELEASE_FILE)
-    static let favoritesFile = "favorites.json"
-    static let issueCachePath = NSHomeDirectory() + "/.cache/jira/jiras.json"
-    // the release view's tab files (jira_config.RELEASE_VIEW_DIR, next to outDir)
-    static let releaseViewDir = "jira_releases"
-    // pinned labels / boards / MY WORK views (jira_config LABEL_VIEW_DIR,
-    // BOARD_DIR, MY_WORK_DIR): next to outDir, so none is a tab
-    static let labelViewDir = "jira_labels", boardDir = "jira_boards", myWorkDir = "jira_mywork"
-    static let boardsCachePath = NSHomeDirectory() + "/.cache/jira/boards.json"
+    static var directoryPath: String { paths.cacheFile("directory") }
+    static var liveSearchFile: String { paths.tabs["liveSearch"] ?? "" }
+    static var favoritesFile: String { paths.tabs["favorites"] ?? "" }
+    static var issueCachePath: String { paths.cacheFile("issues") }
+    static var releaseViewDir: String { paths.sideDirs["releases"] ?? "" }
+    static var labelViewDir: String { paths.sideDirs["labels"] ?? "" }
+    static var boardDir: String { paths.sideDirs["boards"] ?? "" }
+    static var myWorkDir: String { paths.sideDirs["myWork"] ?? "" }
+    static var boardsCachePath: String { paths.cacheFile("boards") }
     static var outDir: String {
         let o = readJSON(configPath)?["outDir"] as? String ?? ""
-        return (o.isEmpty ? "~/.cache/kitchen-sink/jira_json" : o as NSString).expandingTildeInPath
+        return o.isEmpty ? paths.outDir : (o as NSString).expandingTildeInPath
     }
     static func sideDir(_ name: String) -> String {
         ((outDir as NSString).deletingLastPathComponent as NSString).appendingPathComponent(name)
     }
-    // config.json pinnedBoards: board ids, in pin order
     static func pinnedBoards() -> [String] {
         readJSON(configPath)?["pinnedBoards"] as? [String] ?? []
     }
-    // boards.json: a pinned board's name, type, columns (status names per
-    // column, board order), quick filters
     struct BoardInfo {
         let name, type: String
         let columns: [(name: String, statuses: [String])]
         var quickFilters: [(id: String, name: String, jql: String)] = []
     }
-    // board_catalog.json (the poll keeps it fresh): every board of the
-    // projects in scope with its sprints (active, future, past newest first)
     struct CatalogSprint { let id, name, state, start, end, complete: String }
     struct CatalogBoard { let id, name, type, project: String; let sprints: [CatalogSprint] }
-    static let boardCatalogPath = NSHomeDirectory() + "/.cache/jira/board_catalog.json"
+    static var boardCatalogPath: String { paths.cacheFile("boardCatalog") }
     static func boardCatalog() -> [CatalogBoard] {
         var out: [CatalogBoard] = []
         for p in readJSON(boardCatalogPath)?["projects"] as? [[String: Any]] ?? [] {
@@ -10783,7 +9279,6 @@ enum JiraPoll {
         }
         return out
     }
-    // the board views pinned to the sidebar: "BOARD|SPRINT|MODE"
     static func pinnedViews() -> [String] {
         readJSON(configPath)?["pinnedBoardViews"] as? [String] ?? []
     }
@@ -10803,22 +9298,18 @@ enum JiraPoll {
         }
         return out
     }
-    static let blacklistFile = "blacklist_release.json"
+    static var blacklistFile: String { paths.tabs["blacklistRelease"] ?? "" }
 
-    // config.json favorites: the issue keys pinned with the ☆
     static func favorites() -> Set<String> {
         Set(readJSON(configPath)?["favorites"] as? [String] ?? [])
     }
-    // config.json favoriteReleases: starred release row keys, newest first
     static func favoriteReleases() -> [String] {
         readJSON(configPath)?["favoriteReleases"] as? [String] ?? []
     }
-    // config.json pinnedLabels: the sidebar's LABELS, in pin order
     static func pinnedLabels() -> [String] {
         readJSON(configPath)?["pinnedLabels"] as? [String] ?? []
     }
 
-    // "10m" / "1h" / "1w" -> seconds (jira_config.parse_window)
     static func windowSeconds(_ w: String?) -> TimeInterval? {
         guard let w, let unit = w.last, let n = Double(w.dropLast()) else { return nil }
         let mult: [Character: Double] = ["s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800]
@@ -10836,7 +9327,6 @@ enum JiraPoll {
         return stampParser.date(from: s)
     }
 
-    // 42s / 12m / 3h / 2d
     static func age(_ secs: TimeInterval) -> String {
         let s = max(0, Int(secs))
         if s < 60 { return "\(s)s" }
@@ -10845,9 +9335,6 @@ enum JiraPoll {
         return "\(s / 86400)d"
     }
 
-    // the SYNCED row's name for a tab file: the job's `title` (config.json),
-    // else its kind, else the job's name ("all" = every project). nil = show
-    // the file name. Cached per config.json mtime: rows ask on every draw.
     private static var titleCache: (stamp: Date?, names: [String: String]) = (nil, [:])
     static func listTitle(file: String) -> String? {
         let stamp = (try? FileManager.default.attributesOfItem(atPath: configPath))?[.modificationDate] as? Date
@@ -10868,7 +9355,6 @@ enum JiraPoll {
         return titleCache.names[file]
     }
 
-    // the sidebar foot: how fresh the polled lists are as a whole
     static func syncSummary(paths: [String], status: [String: Any]?, config: [String: Any]?) -> (text: String, tone: PopupTone)? {
         let eps = config?["endpoints"] as? [[String: Any]] ?? []
         var newest: Date?, behind = 0, polled = 0, failing = false
@@ -10891,11 +9377,6 @@ enum JiraPoll {
         return ("Synced \(ago) ago", .success)
     }
 
-    // A jira tab's poll freshness for the tab strip: green = polled
-    // recently and the last run succeeded, yellow = out of date (or the
-    // last run failed while the data is still fresh), red = out of date AND
-    // the last run failed. Out of date = older than the job's window + half
-    // a window (min 5 min). The live search tab shows its age, no verdict.
     static func tabBadge(path: String, status: [String: Any]?, config: [String: Any]?) -> PopupTabBadge? {
         let file = (path as NSString).lastPathComponent
         let now = Date()
@@ -10935,7 +9416,6 @@ enum JiraPoll {
                              tip: tip.joined(separator: "\n"))
     }
 
-    // a column field's built-in name — mirror of jira_config.BASE_FIELD_LABELS
     static let baseFieldLabels: [String: String] = [
         "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
         "reporter": "Reporter", "priority": "Priority", "labels": "Labels",
@@ -10945,13 +9425,10 @@ enum JiraPoll {
         "components": "Components", "epic": "Epic / parent",
     ]
 
-    // every field's ONE label (Jira Config ▸ Definitions ▸ Fields): team.json
-    // field_labels, else a custom field's own label, else the built-in name
-    // (jira_config.field_label). Column headers everywhere use it.
     static func fieldLabels() -> [String: String] {
         var out = baseFieldLabels
         let teamPath = (readJSON(configPath)?["teamConfig"] as? String).map { ($0 as NSString).expandingTildeInPath }
-            ?? NSHomeDirectory() + "/.config/jira/team.json"
+            ?? paths.teamJson
         guard let team = readJSON(teamPath) else { return out }
         func norm(_ k: String) -> String {
             k.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: #"[\s-]+"#, with: "_",
@@ -10971,8 +9448,6 @@ enum JiraPoll {
         return out
     }
 
-    // column titles = the fields' labels (a spec title only for a field
-    // that has no label, e.g. a raw Jira field id)
     static func labeled(_ cols: [ListColumn]) -> [ListColumn] {
         let labels = fieldLabels()
         return cols.map { c in
@@ -10982,10 +9457,6 @@ enum JiraPoll {
         }
     }
 
-    // Run a jira/*.py script off the main thread; `done` gets (exit code,
-    // stdout, stderr) on the main thread. stdin carries secrets (the token)
-    // so they never show up in `ps`. `folder`: another scripts dir
-    // (confluence/).
     static func run(_ script: String, _ args: [String], stdin: String? = nil, folder: String? = nil,
                     done: ((Int32, String, String) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -11011,8 +9482,6 @@ enum JiraPoll {
     static var status: [String: Any]? { readJSON(statusPath) }
     static var endpoints: [[String: Any]] { readJSON(configPath)?["endpoints"] as? [[String: Any]] ?? [] }
 
-    // the poll job (or the live search) that writes this jira tab (json
-    // file), with its own columns — nil for a file no job owns
     static func owner(ofTab path: String) -> (kind: String, name: String, columns: [ListColumn])? {
         guard let d = readJSON(configPath) else { return nil }
         let file = (path as NSString).lastPathComponent
@@ -11020,8 +9489,6 @@ enum JiraPoll {
             let ls = d["liveSearch"] as? [String: Any] ?? [:]
             return ("live", "search", ListColumn.parse(ls["columns"] as? String))
         }
-        // a release view tab = issue rows: the main issue job's columns
-        // (column edits there save into that job)
         let parent = (path as NSString).deletingLastPathComponent
         if [releaseViewDir, labelViewDir, myWorkDir].contains(where: { parent.hasSuffix("/" + $0) }) {
             let plain = (d["endpoints"] as? [[String: Any]] ?? []).filter {
@@ -11041,7 +9508,6 @@ enum JiraPoll {
         return nil
     }
 
-    // last meaningful stderr line of a failed script ("jira-api: …" prefix off)
     static func errorLine(_ err: String, fallback: String) -> String {
         let line = err.split(separator: "\n").map(String.init)
             .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? fallback
@@ -11051,7 +9517,6 @@ enum JiraPoll {
         return line
     }
 
-    // "2026-09-23 22:19:17" -> "22:19" today, "Sep 22 22:19" otherwise
     static func short(_ ts: String?) -> String {
         guard let ts, ts.count >= 16 else { return ts ?? "never" }
         let today = String(ISO8601DateFormatter.string(from: Date(), timeZone: .current,
@@ -11062,10 +9527,6 @@ enum JiraPoll {
 }
 
 extension SwitcherController {
-    // menu-bar "Enable Jira" / "Disable Jira": on -> off asks whether the
-    // poller should keep running in the background; off -> on checks the
-    // config, tests the login, and only THEN flips (setup window when the
-    // config is missing, an explained failure when the login fails)
     func toggleJiraPoll() {
         if jiraEnabledInConfig() {
             disableJiraAsking()
@@ -11074,8 +9535,6 @@ extension SwitcherController {
         }
     }
 
-    // Disabling while the poller is loaded: offer to keep it polling in the
-    // background (cache stays fresh, window + menu entries hide) or stop it.
     func disableJiraAsking() {
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -11100,20 +9559,15 @@ extension SwitcherController {
     }
 
     func setJiraEnabled(_ on: Bool, keepPolling: Bool = false) {
-        // enabling always clears the background-poll flag (enabled implies
-        // polling); disabling sets it only when the user chose Keep Polling
         saveConfigValues(section: "jira", [
             ("enabled", on ? "true" : "false"),
             ("poll-when-disabled", !on && keepPolling ? "true" : nil),
         ])
-        // reloadConfig -> loadCommands -> syncJiraLaunchAgent: the agent is
-        // bootstrapped (RunAtLoad polls at once) or booted out right here
         reloadConfig()
         log("jira: [jira] enabled = \(on)\(!on && keepPolling ? " (background polling kept)" : "") (menu-bar switch)")
         if on {
             JiraPoll.lastEnableError = nil
             JiraPoll.run("jira_status.py", ["--note-error"])
-            // first run: the one-time setup (Jira Config ▸ Setup) before any tab has data
             JiraPoll.run("jira_config.py", ["--check"]) { [weak self] _, out, _ in
                 let chk = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
                 let setup = chk?["setup"] as? [String: Any]
@@ -11137,7 +9591,6 @@ extension SwitcherController {
                     : problems.joined(separator: "\n"))
                 return
             }
-            // the projects in scope are required: the user types them (never looked up)
             if (chk?["projectKeys"] as? [String] ?? []).isEmpty {
                 self.log("jira: enable -> setup window (no projects in scope)")
                 self.showJiraSetup(reason: "Enter the projects in scope — every Jira query is limited to them.")
@@ -11172,8 +9625,6 @@ extension SwitcherController {
         JiraSetupWindow.show(controller: self, reason: reason)
     }
 
-    // the Confluence search view (Hyper+S /confluence, the menu,
-    // `kitchen-sink confluence`); setup = open its Setup sheet too
     func showConfluence(setup: Bool = false) {
         guard confluenceEnabled() else { return }
         if settings.sharedWindow {
@@ -11186,9 +9637,6 @@ extension SwitcherController {
         if setup { ConfluenceWindow.current?.showSetup() }
     }
 
-    // the Compare view (Hyper+S /compare, the header icon, the menu, the
-    // file browser's "Compare to …", `kitchen-sink compare A B`).
-    // `paths` empty = just the view; files open a Text Compare session.
     func showCompare(_ paths: [String] = [], titles: [CompareSide: String] = [:], git: Bool = false,
                      waiter: (() -> Void)? = nil) {
         guard compareEnabled() else { waiter?(); return }
@@ -11203,7 +9651,6 @@ extension SwitcherController {
         w.openPair(paths[0], paths.count > 1 ? paths[1] : nil, titles: titles, git: git, waiter: waiter)
     }
 
-    // `compare<TAB>[--wait]<TAB>[--title1<TAB>T]…<TAB>LEFT[<TAB>RIGHT]` (main.swift)
     func handleCompareMessage(_ words: [String], reply: (() -> Void)?) {
         var paths: [String] = []
         var titles: [CompareSide: String] = [:]
@@ -11220,12 +9667,10 @@ extension SwitcherController {
         showCompare(paths, titles: titles, git: reply != nil, waiter: reply)
     }
 
-    // do:compare:… (testQuery)
     func compareTestDo(_ a: String) -> String? {
         let parts = a.split(separator: ":", maxSplits: 1).map(String.init)
         switch parts.first ?? "" {
         case "open", "open-sub":
-            // open:LEFT|RIGHT (either may be empty)
             let ps = (parts.count > 1 ? parts[1] : "").split(separator: "|", omittingEmptySubsequences: false)
                 .map { String($0).trimmingCharacters(in: .whitespaces) }
             let l = ps.first.flatMap { $0.isEmpty ? nil : $0 }, r = ps.count > 1 && !ps[1].isEmpty ? ps[1] : nil
@@ -11233,7 +9678,6 @@ extension SwitcherController {
                 showCompare()
                 CompareWindow.current?.openPair(l, r)
             } else {
-                // a text compare pushed on the view (Folder Compare's Return, phase 2)
                 showCompare()
                 let sub = CompareWindow.createSub(controller: self, frame: slot.currentFrame())
                 sub.openPair(l, r)
@@ -11250,7 +9694,6 @@ extension SwitcherController {
         }
     }
 
-    // the AI view (Hyper+S /ai, the menu, `kitchen-sink ai`)
     func showAI() {
         guard aiEnabled() else { return }
         if settings.sharedWindow {
@@ -11267,15 +9710,12 @@ extension SwitcherController {
             JiraDashboardWindow.show(controller: self)
             return
         }
-        // in place of the jira view (Esc / back returns to it)
         if !slot.isVisible { (savedWID, savedPID) = readFocusFile() }
         JiraDashboardWindow.show(controller: self, present: false)
         JiraDashboardWindow.current?.onSlotBack = { [weak self] in self?.slot.back() }
         slot.push(.config)
     }
 
-    // "Poll Now": non-blocking; the poll holds its own lock, the dashboard
-    // shows "running" until it returns. full = --init (full resync).
     func jiraPollNow(_ endpoint: String, full: Bool = false, done: (() -> Void)? = nil) {
         guard !JiraPoll.running.contains(endpoint) else { return }
         JiraPoll.running.insert(endpoint)
@@ -11289,12 +9729,9 @@ extension SwitcherController {
         }
     }
 
-    // rebuild an open jira window so it picks up new / removed tabs and each
-    // tab's current columns (after Jira Config window edits)
     func reloadJiraWindow() {
         guard let w = subWindows.first(where: { $0.config.name == "jira" }) else { return }
         if settings.sharedWindow {
-            // rebuild in place: same frame, still the visible view if it was
             let wasCurrent = slot.current == .jira && w.isShown
             let f = w.nativeWindow.frame
             jiraShowTab = nil
@@ -11313,16 +9750,6 @@ extension SwitcherController {
     }
 }
 
-// Jira credentials window: site, email (Cloud only — blank = Bearer token for
-// Server/Data Center), token (secure), the projects in scope (REQUIRED, one or
-// more keys the user types — never looked up; every query is limited to them,
-// saved as team.json project_keys), max results. "Test
-// Connection" runs jira_api.py --myself against what is typed; "Copy curl"
-// copies that same request as a runnable curl (jira_api.py --curl); "Save & Enable" writes config.json (chmod 600, via jira_config.py
-// --save — the token travels on stdin), re-tests, then flips [jira] enabled.
-// A plain titled NSWindow (not an NSAlert) so every field takes focus, and a
-// local key monitor routes Cmd/Ctrl+V, Cmd+A/C/X/Z to the field editor
-// (rule.md #1 — the accessory app has no reliable Edit key equivalents).
 final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private static var live: JiraSetupWindow?
 
@@ -11339,7 +9766,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private let curlButton = NSButton(title: "Copy curl", target: nil, action: nil)
     private var monitor: Any?
     private weak var controller: SwitcherController?
-    // auth mode the last Test / Save detection found (jira_api.py --detect-auth)
     private var detectedAuth: String?
 
     static func show(controller: SwitcherController, reason: String?) {
@@ -11367,8 +9793,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         super.init()
         window.title = "Jira Setup"
         window.isReleasedWhenClosed = false
-        // above the popup windows (they float at .popUpMenu) — otherwise the
-        // setup window opens hidden behind the jira window
         window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
         window.delegate = self
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
@@ -11435,33 +9859,28 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     private func installEditShortcuts() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self, self.window.isKeyWindow else { return e }
-            // Esc = Cancel even when a field editor swallows the key
-            // equivalent (accessory app: no reliable button key equivalents)
             if e.keyCode == 53 { self.close(); return nil }
             let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let cmd = mods.contains(.command), ctrl = mods.contains(.control)
             guard cmd || ctrl, let ed = self.window.firstResponder as? NSText else { return e }
             switch e.keyCode {
-            case 9: ed.paste(nil)                        // Cmd+V / Ctrl+V
-            case 8: ed.copy(nil)                         // Cmd+C / Ctrl+C
-            case 0 where cmd: ed.selectAll(nil)          // Cmd+A
-            case 7 where cmd: ed.cut(nil)                // Cmd+X
-            case 6 where cmd: ed.undoManager?.undo()     // Cmd+Z
+            case 9: ed.paste(nil)
+            case 8: ed.copy(nil)
+            case 0 where cmd: ed.selectAll(nil)
+            case 7 where cmd: ed.cut(nil)
+            case 6 where cmd: ed.undoManager?.undo()
             default: return e
             }
             return nil
         }
     }
 
-    // current config (token never leaves python — only whether one is set)
     private func prefill() {
         JiraPoll.run("jira_config.py", ["--check"]) { [weak self] _, out, _ in
             guard let self,
                   let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any]
             else { return }
             if self.site.stringValue.isEmpty { self.site.stringValue = d["site"] as? String ?? "" }
-            // a saved Bearer setup never gets an email pre-filled (e.g. from
-            // JIRA_EMAIL) — that would silently switch it to basic auth
             if self.email.stringValue.isEmpty, d["auth"] as? String != "bearer" {
                 self.email.stringValue = d["email"] as? String ?? ""
             }
@@ -11496,8 +9915,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         curlButton.isEnabled = !on
     }
 
-    // typed values -> jira_api.py flags (blank site / token fall back to
-    // config/env; the email is always the typed one); the token travels on stdin
     private func typedArgs() -> (args: [String], stdin: String?) {
         let v = trimmed
         var args: [String] = ["--email", v.email], stdin: String? = nil
@@ -11510,8 +9927,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         mode == "basic" ? "email + API token (Cloud)" : "Bearer token (Server / Data Center)"
     }
 
-    // jira_api.py --detect-auth on the typed values: tries Bearer and email +
-    // token against /myself; done(auth, user) on success, else (nil, error)
     private func detect(done: @escaping (String?, String) -> Void) {
         let t = typedArgs()
         JiraPoll.run("jira_api.py", ["--detect-auth"] + t.args, stdin: t.stdin) { [weak self] code, out, err in
@@ -11549,7 +9964,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         return (t(site), t(email), t(token), t(project), t(maxResults))
     }
 
-    // "SAM1, kan  OPS" -> ["SAM1", "KAN", "OPS"]; nil + message when a key is malformed
     static func parseProjectKeys(_ raw: String) -> (keys: [String], bad: [String]) {
         var keys: [String] = [], bad: [String] = []
         for part in raw.uppercased().split(whereSeparator: { $0 == "," || $0.isWhitespace }) {
@@ -11570,7 +9984,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // detect the auth type on the typed values, save it with them, enable
     @objc private func saveAndEnable(_ sender: Any?) {
         let v = trimmed
         guard !v.site.isEmpty, v.site.hasPrefix("http") else {
@@ -11614,7 +10027,6 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    // the projects in scope -> team.json project_keys (validated by python)
     private func saveScope(_ keys: [String], done: @escaping (Bool) -> Void) {
         let json = String(decoding: (try? JSONSerialization.data(withJSONObject: keys)) ?? Data("[]".utf8),
                           as: UTF8.self)
@@ -11659,16 +10071,11 @@ final class JiraSetupWindow: NSObject, NSWindowDelegate {
     }
 }
 
-
-// /filefast paste cell: one visible line (scrolls), Return is handled by the
-// window's key hook, so Shift+Return inserts the newline
 final class FileFastPasteView: NSTextView {
     weak var hint: NSTextField?
     var placeholder = "paste output"
     var placeholderColor = NSColor.secondaryLabelColor
     var pastedColor = NSColor.systemGreen
-    // the pasted text stays in the view (it is what gets saved) but is drawn
-    // as a mask + size, so a paste is obvious in the one-line cell
     override func didChangeText() {
         super.didChangeText()
         refreshIndicator()

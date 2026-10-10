@@ -1,20 +1,8 @@
 import AppKit
 
-// MARK: - Notes pad: leader + s f ("search files")
-//
-// In the notes vim pane, Space s f (vim/init.lua) sends `notes-find` to the
-// daemon's socket; this popup lists every file under `[notes-find] roots`
-// (default: the folders / files of `[notes] paths`), newest first, and
-// filters them as you type (fuzzy: the letters in order, basename matches
-// first). Return opens the file as a notes tab (`openNoteFile`), Esc closes.
-// A tool panel like /paths: borderless, non-activating, never part of the
-// shared window.
 enum NoteFinder {
     struct Hit { var path: String; var rel: String; var mtime: Double; var tab: Int }
 
-    // fuzzy: every query letter in order. Lower = better; nil = no match.
-    // A match inside the basename beats one in the folders; tight spans and
-    // early starts win; the caller breaks ties by recency.
     static func score(_ hit: Hit, _ q: String) -> Int? {
         if q.isEmpty { return 0 }
         let rel = Array(hit.rel.lowercased())
@@ -36,7 +24,7 @@ final class NoteFindWindow: NSObject {
     enum Mode { case files, grep }
     let mode: Mode
     private var grepGen = 0
-    private var lines: [Int] = []           // grep: the line of each shown row
+    private var lines: [Int] = []
     private var grepNote = ""
     let window: PopupWindow
     private let list: FileListPane
@@ -50,7 +38,7 @@ final class NoteFindWindow: NSObject {
     private static let rowH: CGFloat = 22
 
     var onOpen: ((String, Int?) -> Void)?
-    var openPaths: (() -> [String])?       // the notes' open tabs
+    var openPaths: (() -> [String])?
     var log: ((String) -> Void)?
 
     init(_ cmd: CommandSpec?, mode: Mode = .files) {
@@ -132,7 +120,6 @@ final class NoteFindWindow: NSObject {
         window.hide(restore: true)
     }
 
-    // the notes' OPEN tabs only (tab order = the tie-break order)
     private func rescan() {
         let fm = FileManager.default
         let paths = openPaths?() ?? []
@@ -153,8 +140,6 @@ final class NoteFindWindow: NSObject {
         if mode == .files { reload() } else { runGrep() }
     }
 
-    // ripgrep over the open notes' files, off main, debounced; a newer
-    // query drops the older answer
     private func runGrep() {
         grepGen += 1
         let gen = grepGen
@@ -185,7 +170,6 @@ final class NoteFindWindow: NSObject {
                 hits.append((String(p[0]), n, p[2].trimmingCharacters(in: .whitespaces)))
                 if hits.count >= cap { break }
             }
-            // rg's file order is arbitrary: keep the notes' tab order
             let order = Dictionary(uniqueKeysWithValues: paths.enumerated().map { ($1, $0) })
             hits.sort { (order[$0.0] ?? 0, $0.1) < (order[$1.0] ?? 0, $1.1) }
             DispatchQueue.main.async {
@@ -273,7 +257,6 @@ final class NoteFindWindow: NSObject {
         scrollToSelection()
     }
 
-    // the screen with the mouse, top a fifth down (launcher position)
     private func place() {
         let mouse = NSEvent.mouseLocation
         guard let vis = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame else { return }
@@ -293,12 +276,12 @@ final class NoteFindWindow: NSObject {
         let editor = window.nativeWindow.firstResponder as? NSTextView
         let textSelected = (editor?.selectedRange().length ?? 0) > 0
         switch code {
-        case 53: hide(); return true                                // Esc
-        case 13 where cmd: hide(); return true                      // Cmd+W
-        case 125, 45 where ctrl: move(1); return true               // ↓ / Ctrl+N
-        case 126, 35 where ctrl: move(-1); return true              // ↑ / Ctrl+P
-        case 36, 76: open(list.selection); return true              // Return
-        case 8 where cmd && !textSelected:                          // Cmd+C: the path
+        case 53: hide(); return true
+        case 13 where cmd: hide(); return true
+        case 125, 45 where ctrl: move(1); return true
+        case 126, 35 where ctrl: move(-1); return true
+        case 36, 76: open(list.selection); return true
+        case 8 where cmd && !textSelected:
             copyPath(list.selection); return true
         default: return false
         }

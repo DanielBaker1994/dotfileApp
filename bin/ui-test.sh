@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-#
-# ui-test.sh — end-to-end UI tests for kitchen-sink
-#
-# Uses cliclick (brew install cliclick) to simulate clicks and keystrokes,
-# plus osascript (AppleScript) to inspect window state via Accessibility API.
-#
-# Usage: ui-test.sh [--verbose]
-#
 
 set -o pipefail
 
@@ -24,9 +16,6 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; FAIL=$((FAIL + 1)); }
 skip() { printf 'SKIP: %s\n' "$*"; SKIP=$((SKIP + 1)); }
 vlog() { (( VERBOSE )) && printf '  → %s\n' "$*" >&2; }
 
-# --- helpers ----------------------------------------------------------------
-
-# Wait up to $2 seconds for $1 to become true
 wait_for() {
     local desc="$1" max="${2:-5}" i=0
     while ! eval "$desc" 2>/dev/null; do
@@ -37,17 +26,14 @@ wait_for() {
     return 0
 }
 
-# Count kitchen-sink windows visible
 window_count() {
     osascript -e 'tell application "System Events" to count (windows of (processes where name is "kitchen-sink"))' 2>/dev/null || echo 0
 }
 
-# Get the app pid
 app_pid() {
     pgrep -f "kitchen-sink.app/Contents/MacOS" | head -1
 }
 
-# Get window count for a specific name/title pattern
 windows_named() {
     local pattern="$1"
     osascript -e "
@@ -59,7 +45,6 @@ windows_named() {
     " 2>/dev/null || echo 0
 }
 
-# Get the window frame (x,y,w,h) of a kitchen-sink window
 window_frame() {
     local idx="${1:-1}"
     osascript -e "
@@ -73,7 +58,6 @@ window_frame() {
     " 2>/dev/null | tr -d ' '
 }
 
-# Check if a window with a given title exists
 window_exists() {
     local title="$1"
     osascript -e "
@@ -85,10 +69,7 @@ window_exists() {
     " 2>/dev/null | grep -q 'true'
 }
 
-# Get status item count in the menu bar
 status_item_count() {
-    # Count processes with status items (kitchen-sink is accessory,
-    # so it should only have 1 status item total)
     osascript -e '
         tell application "System Events"
             tell process "kitchen-sink"
@@ -98,18 +79,12 @@ status_item_count() {
     ' 2>/dev/null || echo 0
 }
 
-# --- daemon state over the socket (no AppleScript, no sleeps) ---------------
-# `state` answers one JSON line (SwitcherController.testQuery); `do:ACTION`
-# runs cycle | cycle-back | hide | back | home | toggle | toggle-terminal |
-# reset-size | open:VIEW and answers the state afterwards.
 TMPDIR="${TMPDIR:-/tmp}"
 WS_SOCK="${TMPDIR%/}/$(sed -nE 's/^notes-socket *= *"?([^"]*)"?.*/\1/p' "$(dirname "${BASH_SOURCE[0]}")/../commands.toml" | head -1)"
 [[ "$WS_SOCK" == */ ]] && WS_SOCK="${TMPDIR%/}/ws-notes.sock"
 ws_query() { echo "$1" | nc -U -w 3 "$WS_SOCK" 2>/dev/null; }
-# ws_state JQ — e.g. ws_state .view, ws_state '.views.notes.terminal'
 ws_state() { ws_query state | jq -r "$1" 2>/dev/null; }
 ws_do() { ws_query "do:$1" >/dev/null; }
-# wait_state JQ_BOOL [seconds] — poll every 50 ms until the jq test is true
 wait_state() {
     local expr="$1" max="${2:-3}" end
     end=$(( $(date +%s) + max ))
@@ -121,10 +96,6 @@ wait_state() {
     return 1
 }
 
-# Send a keyboard shortcut, e.g. "cmd+0", "cmd+alt+t", "ctrl+shift+l", "esc",
-# "down", "tab". Modifiers are held with kd:/ku:; NAMED keys must use kp:
-# (cliclick's t: TYPES TEXT, so "t:esc" would type the word "esc" into the
-# focused app); printable keys keep t: so a modifier makes them a shortcut.
 send_shortcut() {
     local keys="$1" key; local -a args=()
     [[ "$keys" == *cmd*   ]] && args+=(kd:cmd)
@@ -156,8 +127,6 @@ send_shortcut() {
     "$CLICLICK" "${args[@]}" 2>/dev/null
 }
 
-# --- setup ------------------------------------------------------------------
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$ROOT/../kitchen-sink.app/Contents/MacOS/kitchen-sink"
 
@@ -167,18 +136,10 @@ echo "  binary:    $BIN"
 echo "  date:      $(date)"
 echo
 
-# This suite types native-editor keystrokes into the ACTIVE note. With
-# [notes] vim-mode = true those keys become vim commands and rewrite the
-# note — so run with vim mode OFF and put the setting back on exit.
-# (The vim pane has its own safe suite: bin/ui-test-vim.sh.)
 CONF_FILE="$ROOT/../commands.toml"
-# Snapshot the WHOLE file and put it back byte-for-byte on any exit (Ctrl+C
-# included) — the suite's menu actions (color reset…) write it too.
 CONF_SNAPSHOT="$(mktemp)" || { echo "mktemp failed" >&2; exit 1; }
 cp "$CONF_FILE" "$CONF_SNAPSHOT" || { echo "cannot snapshot $CONF_FILE" >&2; exit 1; }
 restore_config() {
-    # only ever restore a real (non-empty) snapshot — never clobber the config
-    # with the empty file a failed cp would have left behind
     if [ -s "$CONF_SNAPSHOT" ] && ! cmp -s "$CONF_SNAPSHOT" "$CONF_FILE"; then
         cp "$CONF_SNAPSHOT" "$CONF_FILE"
         pkill -x kitchen-sink 2>/dev/null || true
@@ -194,13 +155,8 @@ if grep -Eq '^vim-mode *= *true' "$CONF_FILE"; then
     echo "  (vim-mode temporarily off for this run)"
 fi
 
-# Kill any existing daemon
 pkill -f "kitchen-sink.app" 2>/dev/null || true
 sleep 0.5
-
-# ============================================================================
-# LAUNCH TESTS
-# ============================================================================
 
 echo "== 1. App launches and shows popup =="
 

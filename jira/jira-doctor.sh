@@ -1,28 +1,12 @@
 #!/usr/bin/env bash
-# jira-doctor.sh — ONE command that heartbeats the whole kitchen-sink
-# stack: borders, aerospace, the
-# kitchen-sink daemon, permissions (mic/speech/dictation) — and, ONLY
-# if jira is enabled in commands.toml, the jira section (config, API, poll
-# agent, schedule, window json). Disabling jira must never disable the
-# heartbeat: every non-jira check runs regardless.
-#
-#   jira-doctor            read-only heartbeat (exit 1 if anything fails)
-#   jira-doctor --fix      also repairs what it can: starts brew services,
-#                          re-grants mic/speech, loads the poll agent, and
-#                          rebuilds a stale switcher binary
-#
-# Every check prints PASS/FAIL/WARN with the value it saw, so the report is
-# the documentation of "what needs to be true".
 set -uo pipefail
 
 FIX=0
 [ "${1:-}" = "--fix" ] && FIX=1
 
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=../install.conf
 . "$WS_ROOT/install.conf" 2>/dev/null \
     || { printf 'jira-doctor: cannot read %s/install.conf\n' "$WS_ROOT" >&2; exit 1; }
-# SwiftTerm checkout lives outside the repo (install.conf SWIFTTERM_DIR)
 SWIFTTERM_SRC="$WS_ROOT/${SWIFTTERM_DIR:-../SwiftTerm}"
 WS_APP="$WS_ROOT/kitchen-sink.app"
 WS_BIN="$WS_APP/Contents/MacOS/kitchen-sink"
@@ -45,13 +29,11 @@ head_() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 
 running() { pgrep -x "$1" >/dev/null 2>&1; }
 
-# ---------------------------------------------------------------- deps
 head_ "== dependencies =="
 for b in curl jq python3 aerospace swiftc brew; do
     if command -v "$b" >/dev/null 2>&1; then ok "$b ($(command -v "$b"))"; else bad "$b missing"; fi
 done
 
-# ---------------------------------------------------------------- borders
 head_ "== borders =="
 if running borders; then
     ok "borders running (pid $(pgrep -x borders | head -1))"
@@ -75,7 +57,6 @@ else
     warn "Hack Nerd Font not found — terminal drawer shows fallback glyphs"
 fi
 
-# ---------------------------------------------------------------- aerospace
 head_ "== aerospace =="
 NW="$(aerospace list-workspaces --all 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$NW" -gt 0 ]; then
@@ -99,7 +80,6 @@ else
     bad "aerospace.toml: on-focus-changed does not write ws-aerospace-focus"
 fi
 
-# ---------------------------------------------------------------- daemon
 head_ "== kitchen-sink daemon =="
 if [ -x "$WS_BIN" ]; then
     STALE=0
@@ -108,9 +88,6 @@ if [ -x "$WS_BIN" ]; then
     done
     if [ "$STALE" = 1 ]; then
         if [ "$FIX" = 1 ]; then
-            # SwiftTerm is fetched at build time (bin/ensure-swiftterm.sh) and
-            # precompiled once (like bin/kitchen_sink.sh does) — build it
-            # here too if a repair is the first build on this machine.
             "$WS_ROOT/bin/ensure-swiftterm.sh" >/dev/null 2>&1 || true
             if [ ! -f "$WS_ROOT/.build/SwiftTerm/libSwiftTerm.a" ]; then
                 mkdir -p "$WS_ROOT/.build/SwiftTerm"
@@ -127,13 +104,9 @@ if [ -x "$WS_BIN" ]; then
             if (mkdir -p "$WS_APP/Contents/MacOS" && cd "$WS_ROOT" && swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
                 -I .build/SwiftTerm -Xlinker .build/SwiftTerm/libSwiftTerm.a \
                 PopupWindow.swift kitchen_sink.swift main.swift -o "$WS_BIN" >/dev/null 2>&1); then
-                # keep the bundle Info.plist (NSServices -> Finder right-click)
-                # in sync with the rebuilt binary
                 cp "$WS_ROOT/Info.plist" "$WS_APP/Contents/Info.plist"
                 codesign --force --sign - --identifier dev.danielbaker.kitchen-sink "$WS_APP" >/dev/null 2>&1
                 ok "binary rebuilt (--fix): $WS_BIN"
-                # a rebuilt daemon loses its TCC grants — re-grant mic + speech
-                # (bundle-id grants persist across rebuilds)
                 if "$WS_ROOT/bin/grant-permissions.sh" >/dev/null 2>&1; then
                     ok "voice permissions re-granted (mic + speech recognition)"
                 else
@@ -183,7 +156,6 @@ else
     warn "aerospace: no kitchen_sink.sh keybinding found"
 fi
 
-# ---------------------------------------------------------------- permissions
 head_ "== permissions (mic + speech) =="
 if [ -r "$TCC_DB" ]; then
     for svc in Microphone SpeechRecognition; do
@@ -212,10 +184,6 @@ else
     printf '    (on-device transcription needs this ON; network dictation still works)\n'
 fi
 
-# ---------------------------------------------------------------- jira (optional)
-# Everything here reads the python poller's own surfaces: jira_config.py
-# --check (config.json) and ~/.cache/jira/status.json (written by EVERY
-# jira_poll.py tick) — so the doctor, the menu bar and `cat` agree.
 head_ "== jira (optional) =="
 JIRA_ENABLED="$(awk '/^\[jira\]/{f=1;next} /^\[/{f=0} f&&/^enabled[[:space:]]*=/{gsub(/"/,"",$3); print $3}' "$WS_ROOT/commands.toml" 2>/dev/null)"
 if [ "$JIRA_ENABLED" = "true" ]; then
@@ -334,13 +302,10 @@ if [ "$JIRA_ENABLED" = "true" ]; then
     fi
 else
     ok "jira disabled in commands.toml ([jira] enabled = false) — jira checks skipped"
-    # the menu-bar switch leaves jira disabled when its login test fails —
-    # say why, so "I clicked enable and nothing happened" is answerable here
     EE="$(jq -r '.enableError | select(. != null) | "\(.at): \(.message)"' "$STATUS" 2>/dev/null)"
     [ -n "$EE" ] && bad "last menu-bar enable attempt failed ($EE) — Jira Poll ▸ Setup…"
 fi
 
-# ---------------------------------------------------------------- summary
 head_ "== summary =="
 printf '  \033[1m%d passed\033[0m, \033[31m%d failed\033[0m, \033[33m%d warnings\033[0m\n' \
     "$PASS" "$FAIL" "$WARN"

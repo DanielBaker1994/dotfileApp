@@ -1,13 +1,5 @@
 import AppKit
 
-// MARK: - Jira sidebar jump: Space s f
-//
-// The notes pad's Space s f for the Jira sidebar: a popup listing every row
-// of the left panel (My work, Pinned, Boards, Synced),
-// filtered as you type (the letters in order; title beats section). Return
-// does what clicking that row does. Esc closes. A tool panel
-// like NoteFindWindow: borderless, non-activating, never part of the shared
-// window. `[notes-find] rows / width` size it too.
 final class SidebarJumpWindow: NSObject {
     let window: PopupWindow
     private let list: FileListPane
@@ -98,8 +90,6 @@ final class SidebarJumpWindow: NSObject {
         window.hide(restore: true)
     }
 
-    // the query's letters in order; a match in the title beats one in the
-    // section. Lower = better; nil = no match.
     private static func score(_ item: PopupWindow.SidebarJumpItem, _ q: String) -> Int? {
         if q.isEmpty { return 0 }
         func span(_ s: String) -> Int? {
@@ -131,8 +121,6 @@ final class SidebarJumpWindow: NSObject {
         layoutList()
     }
 
-    // a tinted chip per section (the header's workspace chips, same idea):
-    // the glyph in the section's color on a faint square of it
     private func tone(_ section: String) -> PopupTone {
         switch section {
         case "My work": return .accent
@@ -188,7 +176,6 @@ final class SidebarJumpWindow: NSObject {
         scrollToSelection()
     }
 
-    // the screen with the mouse, top a fifth down (launcher position)
     private func place() {
         let mouse = NSEvent.mouseLocation
         guard let vis = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame else { return }
@@ -206,11 +193,11 @@ final class SidebarJumpWindow: NSObject {
     private func key(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         let cmd = mods.contains(.command), ctrl = mods.contains(.control)
         switch code {
-        case 53: hide(); return true                                // Esc
-        case 13 where cmd: hide(); return true                      // Cmd+W
-        case 125, 45 where ctrl: move(1); return true               // ↓ / Ctrl+N
-        case 126, 35 where ctrl: move(-1); return true              // ↑ / Ctrl+P
-        case 36, 76: open(list.selection); return true              // Return
+        case 53: hide(); return true
+        case 13 where cmd: hide(); return true
+        case 125, 45 where ctrl: move(1); return true
+        case 126, 35 where ctrl: move(-1); return true
+        case 36, 76: open(list.selection); return true
         default: return false
         }
     }

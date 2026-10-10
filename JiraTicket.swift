@@ -1,23 +1,10 @@
 import AppKit
 import WebKit
 
-// The Jira ticket page (Return / double-click on an issue row): a header
-// card — key, Copy key / Copy link / Open in browser, the summary, the
-// status as a To Do › In Progress › Done bar (`[jira] workflow` = an
-// explicit step list instead), the meta pills — then tabs: Details (description
-// + properties), Comments (N), All fields. Drawn as HTML in the window's
-// theme over the detail window's editor (PopupWindow.setPageOverlay).
-// Buttons post `ws` messages: copy-key, copy-link, open, url:<href>.
-
 enum JiraTicketPage {
     static func esc(_ s: String) -> String { ProseRender.esc(s) }
     static func css(_ c: NSColor) -> String { ProseRender.css(c) }
 
-    // An explicit `[jira] workflow = "To Do, In Progress, …"` is drawn as
-    // given. Otherwise the bar is Jira's three status categories — To Do ›
-    // In Progress › Done — with the issue's own status named in its segment:
-    // a corporate site has dozens of statuses (Backlog, New, Open, Reopened,
-    // Re-opened, …) and listing them all reads as the whole graph.
     static func explicitWorkflow() -> [String]? {
         guard let w = configSectionValue("jira", "workflow"), !w.isEmpty else { return nil }
         let steps = w.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -26,8 +13,6 @@ enum JiraTicketPage {
 
     static let categoryNames = ["To Do", "In Progress", "Done"]
 
-    // 0 To Do / 1 In Progress / 2 Done: the directory's statusCategories
-    // (Jira's own new / indeterminate / done), else the usual lifecycle words
     static func category(of status: String) -> Int {
         category(of: status, in: JiraPoll.readJSON(JiraPoll.directoryPath)?["statusCategories"] as? [String: String] ?? [:])
     }
@@ -38,15 +23,12 @@ enum JiraTicketPage {
         case "done": return 2
         default: break
         }
-        let l = status.lowercased()
-        if ["done", "closed", "resolved", "released", "complete", "cancel", "won't", "rejected"].contains(where: l.contains) { return 2 }
-        if ["backlog", "open", "to do", "todo", "new", "selected", "triage", "funnel"].contains(where: l.contains) { return 0 }
+        let l = status.lowercased(), w = JiraWords.current
+        if w.matches(l, w.done) || w.matches(l, w.cancelled) { return 2 }
+        if w.matches(l, w.new) { return 0 }
         return 1
     }
 
-    // comments are cache-only (jira_config.publish_keys keeps them out of the
-    // tabs): ~/.cache/jira/jiras.json, keyed by issue key. Work caches run to
-    // tens of MB, so it is parsed once per mtime, off the main thread.
     typealias Comment = (author: String, body: String, created: String)
     private static var commentIndex: [String: [Comment]] = [:]
     private static var commentStamp: Date?
@@ -56,8 +38,6 @@ enum JiraTicketPage {
         (try? FileManager.default.attributesOfItem(atPath: JiraPoll.issueCachePath))?[.modificationDate] as? Date
     }
 
-    // the key's comments when the index is current, else nil + a background
-    // (re)load that calls `ready` on the main thread when done
     static func cachedComments(_ key: String, ready: @escaping () -> Void) -> [Comment]? {
         let stamp = cacheStamp()
         if stamp != nil, stamp == commentStamp { return commentIndex[key] ?? [] }
@@ -111,7 +91,6 @@ enum JiraTicketPage {
         }.joined()
     }
 
-    // `comments`: nil = still loading (the page says so; rendered again when ready)
     static func html(_ row: FieldRow, colors c: PopupColors, url: String?, labels: [String: String],
                      comments cms: [Comment]?) -> String {
         let f = row.fields
@@ -125,8 +104,6 @@ enum JiraTicketPage {
                 return "<span class=\"step \(cls)\">\(i < cur ? "✓ " : "")\(esc(s))</span>"
             }.joined(separator: "<span class=\"sep\">›</span>")
         } else if !status.isEmpty {
-            // the current segment carries the real status when it differs
-            // from the category's own name ("In Progress · Code Review")
             let cur = category(of: status)
             stepper = categoryNames.enumerated().map { i, s in
                 let cls = i < cur ? "done" : i == cur ? "now" : ""
@@ -139,8 +116,6 @@ enum JiraTicketPage {
         if !v("priority").isEmpty { pills.append("<span class=\"pill warn\">\(esc(v("priority")))</span>") }
         let rel = v("releaseLabel").isEmpty ? v("release") : v("releaseLabel")
         if !rel.isEmpty { pills.append("<span class=\"pill\">\(esc(rel))</span>") }
-        // a corporate issue can carry dozens of labels: the first few, then +N
-        // (the rest in its tooltip; All fields has every one)
         let labs = v("labels").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let maxLabels = 6
         for l in labs.prefix(maxLabels) { pills.append("<span class=\"pill dim\">\(esc(l))</span>") }
@@ -250,7 +225,6 @@ final class JiraTicketView: NSView, WKScriptMessageHandler, PageZoomable {
         web.loadHTMLString(html, baseURL: nil)
     }
 
-    // fills the Comments tab in place (the user may already be on it)
     func setComments(_ cms: [JiraTicketPage.Comment]) {
         if web.isLoading {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.setComments(cms) }

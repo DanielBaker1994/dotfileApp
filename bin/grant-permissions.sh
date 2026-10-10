@@ -1,30 +1,12 @@
 #!/usr/bin/env bash
-# grant-permissions.sh — pre-grant EVERY privacy permission the app uses, so
-# macOS never interrupts you with "kitchen-sink.app would like to…":
-#   Microphone + Speech Recognition   voice notes
-#   Downloads / Desktop / Documents   the file browsers + their Recent view
-#
-# Rows go straight into the user TCC database (the same way macOS stores an
-# "Allow" click), for the app's bundle id. When the app is signed with the
-# stable "kitchen-sink codesign" certificate, the rows carry its code
-# requirement (bundle id + that certificate) — valid across every rebuild.
-# An ad-hoc build gets NULL (any signature) so it still works, with a warning.
-# Mic + speech also get a row for the binary PATH (the speech recognizer
-# attributes by path on newer macOS).
-#
-# bin/build-app.sh runs this after every build. Run it by hand any time a
-# prompt shows up anyway:
-#   bin/grant-permissions.sh
-# Needs Full Disk Access for the terminal that runs it (writing TCC.db).
 
 set -u
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-. "$WS_ROOT/install.conf"   # BUNDLE_ID, APP_NAME
+. "$WS_ROOT/install.conf"
 BUNDLE_ID="${1:-$BUNDLE_ID}"
 APP_DIR="${2:-$WS_ROOT/$APP_NAME.app}"
 APP_BIN="$APP_DIR/Contents/MacOS/$APP_NAME"
 
-# sudo-safe: under sudo $HOME points at /var/root — use the REAL user's DB
 if [ -n "${SUDO_USER:-}" ]; then
     REAL_HOME="$(/usr/bin/dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
     TCC_DB="${REAL_HOME:-/Users/$SUDO_USER}/Library/Application Support/com.apple.TCC/TCC.db"
@@ -39,8 +21,6 @@ die() { echo "grant-permissions: $*" >&2; exit 1; }
 command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found"
 [ -r "$TCC_DB" ] && [ -w "$TCC_DB" ] || die "cannot write $TCC_DB — give your terminal Full Disk Access (System Settings ▸ Privacy & Security ▸ Full Disk Access)"
 
-# the app's designated requirement -> binary csreq blob (hex). A cdhash
-# requirement (ad-hoc build) changes on every rebuild: use NULL instead.
 CSREQ=NULL
 REQ="$(codesign -d -r- "$APP_DIR" 2>&1 | sed -n 's/^designated => //p')"
 if [ -n "$REQ" ] && ! printf '%s' "$REQ" | grep -q 'cdhash'; then
@@ -53,7 +33,7 @@ else
     echo "grant-permissions: WARNING the app is ad-hoc signed — grants use no code requirement" >&2
 fi
 
-row() {   # service client client_type csreq
+row() {
     printf "  ('%s', '%s', %s, 2, 2, 1, %s, 'UNUSED', 0, strftime('%%s','now'))" "$1" "$2" "$3" "$4"
 }
 VALUES="$(row kTCCServiceMicrophone "$BUNDLE_ID" 0 "$CSREQ"),
@@ -74,7 +54,6 @@ $VALUES;
 COMMIT;
 SQL
 
-# tccd caches grants in memory — restart it so the new rows take effect
 killall tccd 2>/dev/null
 sleep 1
 echo "grant-permissions: granted microphone, speech recognition, Downloads, Desktop, Documents to $BUNDLE_ID"

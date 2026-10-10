@@ -1,13 +1,6 @@
 import AppKit
 import WebKit
 
-// MARK: - AI view (a shared-window view)
-//
-// Apple's on-device model through the `fm` CLI, driven by rule files: every
-// .md in [ai] rules-dir is a pill. Rule format: see rules/grammar-check.md.
-// Config: commands.toml [ai]. Open from the Hyper+S palette (/ai).
-
-// [ai] enabled - the view, its hotkey and its menu entry
 func aiEnabled() -> Bool {
     tri(configSectionValue("ai", "enabled")) == true
 }
@@ -24,12 +17,6 @@ func aiNumber(_ key: String, _ fallback: CGFloat) -> CGFloat {
 private func aiPath(_ key: String, _ fallback: String) -> String {
     (aiSetting(key, fallback) as NSString).expandingTildeInPath
 }
-
-// (rule files: AIRule in AIFormat.swift)
-
-// (the word diff: CharDiff in CompareText.swift)
-
-// MARK: - text view with a placeholder
 
 final class AITextView: NSTextView {
     var placeholder = "" { didSet { needsDisplay = true } }
@@ -51,7 +38,6 @@ final class AITextView: NSTextView {
     }
 }
 
-// the command line under the pills: click copies a runnable version
 final class AICommandLine: NSView, PopupThemeable {
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     var text = "" { didSet { needsDisplay = true } }
@@ -77,8 +63,6 @@ final class AICommandLine: NSView, PopupThemeable {
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
-// the steps of a run (the rule, then each `then:`), one chip each:
-// waiting → running → done / warning / failed
 final class AIPipelineStrip: NSView, PopupThemeable {
     enum State { case waiting, running, done, warn, failed }
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
@@ -97,7 +81,6 @@ final class AIPipelineStrip: NSView, PopupThemeable {
         toolTip = items.compactMap { $0.note.isEmpty ? nil : "\($0.name): \($0.note)" }.joined(separator: "\n")
         needsDisplay = true
     }
-    /// everything before `i` is done, `i` is running, the rest waits
     func running(_ i: Int) {
         for k in items.indices {
             if k < i { if items[k].state == .waiting || items[k].state == .running { items[k].state = .done } }
@@ -138,8 +121,6 @@ final class AIPipelineStrip: NSView, PopupThemeable {
     }
 }
 
-// MARK: - the window
-
 final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDelegate {
     private static var live: AIWindow?
     static var current: AIWindow? { live }
@@ -166,43 +147,38 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private let splitter = PaneSplitter()
     private var split: CGFloat = 0.5
     private var sidebarWide: CGFloat = 0
-    // the icon rail (⌘\\) when collapsed
     private var sidebarW: CGFloat {
         get { pills?.width(expanded: sidebarWide) ?? sidebarWide }
         set { sidebarWide = newValue }
     }
     private var toast: NSView?
 
-    // state
     private var rules: [AIRule] = []
     private var selected = 0
-    // the Ctrl+B W view switcher's "where": the rule shown
     var whereText: String { rules.indices.contains(selected) ? rules[selected].name : "" }
     private var rule: AIRule? { rules.indices.contains(selected) ? rules[selected] : nil }
-    private var answer = ""             // the clean output of the last run (Markdown)
-    private var answerInput = ""        // the input it answered
+    private var answer = ""
+    private var answerInput = ""
     private var answerDiff = false
-    private var mode = PaneMode.diff    // the right pane (what Copy writes follows the last preview)
+    private var mode = PaneMode.diff
     private var modes: [PaneMode] { PaneMode.all(diff: rule?.diff ?? true) }
-    private var target = PasteTarget.outlook    // what Copy writes (the last preview picked)
-    private var rendered: [Int: String] = [:]   // target -> styled HTML of `answer`
+    private var target = PasteTarget.outlook
+    private var rendered: [Int: String] = [:]
     private var renderGen = 0
     private var process: Process?
     private var runGen = 0
     private var started = Date()
-    private var available: Bool?        // `fm available`
+    private var available: Bool?
     private var unavailableWhy = ""
     private var dirWatch: DispatchSourceFileSystemObject?
-    // one run = its parts (long text), run one after another
     private var guardCode: CodeGuard?
     private var parts: [String] = []
     private var partIndex = 0
     private var doneParts: [String] = []
     private var streamData = Data()
-    // a run's rules: the picked one, then each `then:` on the answer before
     private var steps: [AIRule] = []
     private var stepIndex = 0
-    private var stepInput = ""          // what the current step was given
+    private var stepInput = ""
     private var stepNotes: [String] = []
     private var tokenTimer: Timer?
     private var tokenGen = 0
@@ -221,9 +197,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         return (name.isEmpty ? nil : NSFont(name: name, size: fontSize)) ?? .systemFont(ofSize: fontSize)
     }
 
-    // MARK: open
-
-    // a theme rebuild keeps what was typed
     private static var carriedInput: String?
     static func discard() { carriedInput = live?.input.string; live = nil }
 
@@ -232,7 +205,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         live = AIWindow(controller: controller, frame: frame)
     }
 
-    // [app] shared-window = false: an ordinary window
     func showStandalone() {
         NSApp.activate(ignoringOtherApps: true)
         if !window.isVisible { window.center() }
@@ -241,7 +213,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         focusInput()
     }
 
-    // the shared window brought the view back
     override func didShow() {
         reloadRules()
         if window.firstResponder === window || window.firstResponder == nil { focusInput() }
@@ -265,8 +236,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         setMode(mode)
         if let t = Self.carriedInput { input.string = t; Self.carriedInput = nil }
     }
-
-    // MARK: build
 
     private func label(_ f: NSTextField, size: CGFloat = 11, weight: NSFont.Weight = .regular, color: NSColor? = nil) {
         f.font = .systemFont(ofSize: size, weight: weight)
@@ -326,8 +295,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         pills.onSelect = { [weak self] i in self?.select(i) }
         pills.onAddTab = { [weak self] in self?.newRule() }
         pills.menuFor = { [weak self] i in self?.pillMenu(i) }
-        // the rules as a sidebar (`[ai] sidebar-width`, 0 = a strip); its
-        // edge drags to resize, the width is saved on release
         sidebarW = aiNumber("sidebar-width", 210)
         if sidebarW > 0 {
             pills.vertical = true
@@ -372,7 +339,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         output.placeholder = "The answer shows up here."
         rightBox.addSubview(outScroll)
 
-        // the paste preview: the same HTML Copy writes, on a mock surface
         let wc = WKWebViewConfiguration()
         web = QuietWebView(frame: .zero, configuration: wc)
         web.navigationDelegate = self
@@ -406,8 +372,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             guard let self else { return }
             var f = f
             if self.pills.vertical {
-                // the splitter measures across the whole view; the panes
-                // start right of the sidebar
                 let full = root.bounds.width, left = self.sidebarW + 4 + 12
                 let avail = max(1, full - self.sidebarW - 4 - 24 - 10)
                 f = min(0.8, max(0.2, (f * full - left) / avail))
@@ -423,7 +387,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
 
     private func layoutAll(_ full: NSRect) {
         let pad: CGFloat = 12
-        // sidebar: the rules down the left, everything else beside it
         var b = full
         let cmdH: CGFloat = 22
         if pills.vertical {
@@ -436,7 +399,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             cmdLine.frame = NSRect(x: 0, y: pills.frame.maxY, width: b.width, height: cmdH)
         }
         defer {
-            // shift the content right of the sidebar
             if pills.vertical {
                 for v in [strip, leftBox, rightBox, splitter, runButton, spinner, tokens, status] as [NSView] {
                     v.frame.origin.x += sidebarW + 4
@@ -461,7 +423,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             scroll.frame = NSRect(x: 2, y: headH, width: box.bounds.width - 4, height: box.bounds.height - headH - 2)
         }
         web.frame = outScroll.frame
-        // output header, right-aligned: Diff | Outlook | Webex · ⧉ Copy
         copyButton.sizeToFit()
         let cw = copyButton.frame.width + 8
         var x = rightBox.bounds.width - 8 - cw
@@ -469,10 +430,8 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         let sw = modeSeg.intrinsicContentSize.width
         x -= 6 + sw
         modeSeg.frame = NSRect(x: x, y: (headH - JiraTheme.height) / 2, width: sw, height: JiraTheme.height)
-        // squeezed: the title ("Changes") gives way to the buttons, never under them
         let room = x - 8 - rightTitle.frame.minX
         rightTitle.isHidden = room < rightTitle.frame.width
-        // footer: Run · spinner · status ……… tokens
         runButton.sizeToFit()
         let fy = top + bodyH + (footH - 28) / 2
         runButton.frame = NSRect(x: pad, y: fy, width: runButton.frame.width + 16, height: 28)
@@ -483,8 +442,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         let sx = runButton.frame.maxX + (spinner.isHidden ? 10 : 32)
         status.frame = NSRect(x: sx, y: fy + 6, width: max(0, tokens.frame.minX - sx - 10), height: 16)
     }
-
-    // MARK: rules
 
     private func ensureRulesDir() {
         guard !FileManager.default.fileExists(atPath: rulesDir) else { return }
@@ -504,19 +461,15 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         pills.titles = rules.map(\.name)
         pills.selected = selected
         body.needsLayout = true
-        // a different rule than before (first load, the old one deleted):
-        // its own saved text
         applyRule(loadInput: rule?.file != was)
     }
 
-    // the directory changes (a rule added, removed, saved by vim's rename)
     private func watchRulesDir() {
         let fd = open(rulesDir, O_EVTONLY)
         guard fd >= 0 else { return }
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete],
                                                             queue: .main)
         src.setEventHandler { [weak self] in
-            // let an editor's write-then-rename settle
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self?.reloadRules() }
         }
         src.setCancelHandler { close(fd) }
@@ -588,7 +541,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         return s.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
-    // "+" (or Duplicate): name it, write rules/<slug>.md, edit it in notes
     private func newRule(from source: AIRule? = nil) {
         let field = NSTextField(string: source.map { $0.name + " copy" } ?? "")
         field.placeholderString = "Summarize, Rewrite formally, Explain…"
@@ -635,8 +587,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         }
     }
 
-    // MARK: run
-
     private func checkAvailable() {
         let bin = fmBin
         guard FileManager.default.isExecutableFile(atPath: bin) else {
@@ -661,7 +611,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         }
     }
 
-    // run a short command to the end: (exit code, stdout + stderr)
     private static func capture(_ bin: String, _ args: [String], stdin: String?) -> (Int32, String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
@@ -691,7 +640,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
 
     private func run() {
         saveInput()
-        // the file may have been edited since the last look
         if let r = rule { rules[selected] = AIRule.load(r.path); applyRule(loadInput: false) }
         guard let picked = rule else { newRule(); return }
         steps = AIRule.chain(picked)
@@ -706,7 +654,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             return
         }
         cancelRun(quiet: true)
-        // code the model can't touch; long text in parts that fit fm's window
         let g = r.protectCode ? CodeGuard(text) : nil
         guardCode = (g?.codes.isEmpty ?? true) ? nil : g
         stepNotes = []
@@ -726,7 +673,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         startStep(0, text: guardCode?.text ?? text)
     }
 
-    // one rule of the run over `text` (the input, or the step before's answer)
     private func startStep(_ i: Int, text: String) {
         let r = steps[i]
         stepIndex = i
@@ -769,8 +715,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             errDone.leave()
         }
-        // stdout in chunks as fm streams; the finish is posted after the
-        // last chunk (same thread, same order on main)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let h = outPipe.fileHandleForReading
             while true {
@@ -786,15 +730,12 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         }
     }
 
-    // this step's answer so far (code still as tokens)
     private func stepSoFar() -> String {
         let cur = String(decoding: streamData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         let joined = (doneParts + (cur.isEmpty ? [] : [cur])).joined(separator: "\n\n")
-        // a wrapper fence the model added (unless the text itself was one)
         return guardCode != nil || !answerInput.hasPrefix("```") ? AnswerCleanup.unwrapFence(joined) : joined
     }
 
-    // code put back
     private func restored(_ s: String) -> (text: String, missing: Int) { guardCode?.restore(s) ?? (s, 0) }
     private func soFar() -> (text: String, missing: Int) { restored(stepSoFar()) }
 
@@ -822,7 +763,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         var code = code
         var stepText = stepSoFar()
         if code != 0, stepIndex > 0 {
-            // a later step failed: the answer of the one before still stands
             let line = err.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }
                 .last(where: { !$0.isEmpty }) ?? "exit \(code)"
             stepNotes.append("“\(step.name)” failed (\(stripANSI(line)))")
@@ -894,8 +834,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         if available != false { setReady() }
     }
 
-    // MARK: the right pane
-
     private func setMode(_ m: PaneMode) {
         mode = modes.contains(m) ? m : .markdown
         modeSeg.selected = modes.firstIndex(of: mode) ?? 0
@@ -913,7 +851,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         body.needsLayout = true
     }
 
-    // Diff / Markdown in the text view; Outlook / Webex in the web view
     private func renderAnswer() {
         let preview = mode.target != nil
         outScroll.isHidden = preview
@@ -941,7 +878,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
                     .strikethroughStyle: NSUnderlineStyle.single.rawValue,
                     .strikethroughColor: danger,
                     .backgroundColor: danger.withAlphaComponent(0.16)])
-                // a hair of room before the replacement ("their They're")
                 if let last = o.text.utf16.indices.last {
                     let at = o.text.utf16.distance(from: o.text.utf16.startIndex, to: last)
                     d.addAttribute(.kern, value: 4, range: NSRange(location: at, length: 1))
@@ -956,7 +892,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         output.textStorage?.setAttributedString(s)
     }
 
-    // the styled HTML for a target, made off the main thread (pandoc)
     private func withRendered(_ t: PasteTarget, _ done: @escaping (String?) -> Void) {
         if let h = rendered[t.rawValue] { done(h); return }
         let md = answer, gen = renderGen
@@ -1020,7 +955,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         """, baseURL: nil)
     }
 
-    // links in the preview open in the browser
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if action.navigationType == .linkActivated, let u = action.request.url {
@@ -1034,8 +968,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     private func stripANSI(_ s: String) -> String {
         s.replacingOccurrences(of: #"\u001B\[[0-9;]*[A-Za-z]"#, with: "", options: .regularExpression)
     }
-
-    // MARK: tokens (fm's own count, a moment after typing stops)
 
     private func scheduleTokenCount() {
         tokenTimer?.invalidate()
@@ -1062,7 +994,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             DispatchQueue.main.async { [weak self] in
                 guard let self, gen == self.tokenGen else { return }
                 guard code == 0, let n else { self.tokens.stringValue = ""; return }
-                // the answer needs room too: about as long as the input
                 let need = n + (n - TokenBudget.estimate(instr))
                 var s = "\(n) / \(ctx) tokens"
                 if guarded { s += " · \(g!.codes.count) code kept out" }
@@ -1076,8 +1007,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
             }
         }
     }
-
-    // MARK: copy
 
     @objc private func copyAnswer() {
         guard !answer.isEmpty else { showToast("Nothing to copy yet", symbol: "exclamationmark.circle"); return }
@@ -1116,7 +1045,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
                       Int(x.blueComponent * 255), x.alphaComponent)
     }
 
-    // Raycast-style pill, bottom-center (same look as PopupWindow.showToast)
     private func showToast(_ text: String, symbol: String?) {
         guard let root = window.contentView else { return }
         toast?.removeFromSuperview()
@@ -1166,8 +1094,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         status.toolTip = s
     }
 
-    // MARK: keys
-
     private func focusInput() {
         window.makeFirstResponder(input)
     }
@@ -1176,19 +1102,16 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let cmd = mods.contains(.command), ctrl = mods.contains(.control)
         switch e.keyCode {
-        case 53:                                                         // Esc
-            // stop a run; idle: hide when AI's "Esc Hides Window" is on
+        case 53:
             if process != nil { cancelRun() }
             else if onSlotHide != nil { controller?.slot.escapeAtTop(.ai) }
-        case 36 where ctrl || cmd, 76 where ctrl || cmd: run()           // Ctrl/Cmd+Return
-        case 37 where cmd: focusInput()                                  // Cmd+L
-        case 44 where cmd: showShortcuts()                               // Cmd+/
-        default: return webEditKey(e, in: web)                           // the preview
+        case 36 where ctrl || cmd, 76 where ctrl || cmd: run()
+        case 37 where cmd: focusInput()
+        case 44 where cmd: showShortcuts()
+        default: return webEditKey(e, in: web)
         }
         return true
     }
-
-    // MARK: kitchen sink (the header icon)
 
     override func showIconMenu() {
         let menu = iconMenu(view: .ai)
@@ -1211,7 +1134,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         popUpIconMenu(menu)
     }
 
-    // commands.toml [shortcuts] "ai: …" lines, then "all: …"
     private func showShortcuts() {
         func lines(_ v: String) -> [String] {
             shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
@@ -1226,7 +1148,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
         a.beginSheetModal(for: window) { _ in }
     }
 
-    // the file "+" writes for a new rule
     private static let ruleTemplate = """
     ---
     name: {name}
@@ -1243,7 +1164,6 @@ final class AIWindow: CardWindowController, NSTextViewDelegate, WKNavigationDele
     """
 }
 
-// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): rules, your text, the answer
 extension AIWindow: PaneProvider {
     var navPanes: [NavPane] {
         var out: [NavPane] = []

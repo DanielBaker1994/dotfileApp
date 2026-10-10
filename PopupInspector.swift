@@ -1,10 +1,5 @@
 import AppKit
 
-// The list's inspector: a read-only panel on the right that follows the
-// highlighted row (Jira: the issue's key, title, state chips, description and
-// people). Cmd+I shows / hides it, "Open full detail" = Return. The window
-// owns the frame (`PopupWindow.layoutInspector`); the host feeds `content`.
-
 public struct PopupInspectorContent {
     public var key: String
     public var title: String

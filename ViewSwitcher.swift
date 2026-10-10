@@ -1,18 +1,10 @@
 import AppKit
 
-// Ctrl+B W inside the shared window (SharedWindow.prefixKey) — the
-// tmux-style chooser over the window's OWN views, the ones the header's
-// view switcher icons click through (files, notes, jira, confluence,
-// compare, AI). A tool panel over the window: one row per view with where
-// it is (the folder / note / tab / session it shows), the current one
-// marked, the previous one pre-selected (Ctrl+B L's target). Type to
-// filter, Return / click opens it, 1-9 jump while the filter is empty, Esc
-// closes.
-
 struct SwitchViewRow: PopupRow {
     let navID: Int
     let name: String
     let location: String
+    let aliases: [String]
     let number: Int
     let icon: NSImage
     let isCurrent: Bool
@@ -47,15 +39,13 @@ final class ViewSwitcherPanel {
         window.onDrawRow = { [weak self] rect, row, sel in self?.draw(rect, row, sel) }
     }
 
-    // views = (nav id, name, icon, where); `preselect` = the previous view
-    func show(_ views: [(id: Int, name: String, icon: NSImage, location: String)], current: Int?, preselect: Int?,
+    func show(_ views: [(id: Int, name: String, icon: NSImage, location: String, aliases: [String])], current: Int?, preselect: Int?,
               over host: NSWindow?) {
         all = views.enumerated().map { i, v in
-            SwitchViewRow(navID: v.id, name: v.name, location: v.location, number: i < 9 ? i + 1 : 0,
+            SwitchViewRow(navID: v.id, name: v.name, location: v.location, aliases: v.aliases, number: i < 9 ? i + 1 : 0,
                           icon: v.icon, isCurrent: v.id == current)
         }
         window.show()
-        // centered on the shared window (where you are), a bit above the middle
         if let h = host?.frame {
             let f = window.nativeWindow.frame
             window.nativeWindow.setFrameOrigin(NSPoint(x: h.midX - f.width / 2, y: h.midY - f.height / 2 + h.height * 0.12))
@@ -66,7 +56,7 @@ final class ViewSwitcherPanel {
     private func filter(_ q: String) -> [PopupRow] {
         let s = q.trimmingCharacters(in: .whitespaces)
         guard !s.isEmpty else { return all }
-        return PopupFuzzy.filter(all, query: s) { "\($0.name) \($0.location)" }
+        return PopupFuzzy.filter(all, query: s) { "\($0.name) \($0.location) \($0.aliases.joined(separator: " "))" }
     }
 
     private func key(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
@@ -85,7 +75,6 @@ final class ViewSwitcherPanel {
         onPick?(r.navID)
     }
 
-    // tmux choose-window: number · icon · view · where (dim) · current mark
     private func draw(_ rect: NSRect, _ row: PopupRow, _ selected: Bool) {
         guard let r = row as? SwitchViewRow else { return }
         let c = window.config.colors

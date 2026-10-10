@@ -1,23 +1,12 @@
-// AnsiRender.swift — terminal text with SGR colors → a cell grid → one
-// tall image, drawn off screen (Chrome's "full size screenshot" idea: lay it
-// out again at full height, never scroll). /pane-shot feeds it a herdr
-// pane's scrollback (PaneShot.swift).
-// Foundation + CoreText / CoreGraphics only (no AppKit, no app state):
-// Tests/test_ansi_render.swift compiles it on its own
-// (bin/run-tests.sh ansi).
-
 import CoreGraphics
 import CoreText
 import Foundation
-
-// MARK: - Model
 
 struct AnsiRGB: Equatable {
     var r: UInt8, g: UInt8, b: UInt8
 
     init(_ r: UInt8, _ g: UInt8, _ b: UInt8) { self.r = r; self.g = g; self.b = b }
 
-    // "#rrggbb" / "rrggbb"
     init?(hex: String) {
         var s = hex.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("#") { s.removeFirst() }
@@ -27,8 +16,8 @@ struct AnsiRGB: Equatable {
 }
 
 enum AnsiColor: Equatable {
-    case none                    // the theme's foreground / background
-    case index(Int)              // 0-255
+    case none
+    case index(Int)
     case rgb(AnsiRGB)
 }
 
@@ -39,25 +28,17 @@ struct AnsiStyle: Equatable {
 }
 
 struct AnsiCell: Equatable {
-    var text: String             // one grapheme; "" = the right half of a wide one
+    var text: String
     var style: AnsiStyle
     var wide: Bool { width == 2 }
     var width: Int
 }
 
-// MARK: - Parser
-
 struct AnsiGrid {
     var rows: [[AnsiCell]] = []
 
-    // the widest row in cells
     var columns: Int { rows.map(\.count).max() ?? 0 }
 
-    // `text` as a terminal would lay it out: SGR (`ESC[…m`) styles the
-    // cells, CR LF / LF start a row, a lone CR returns to column 0 (later
-    // text overwrites), TAB = next multiple of 8. Every other escape (CSI,
-    // OSC 8 links, charset picks) and control character is dropped. Blank
-    // rows at the end are trimmed.
     static func parse(_ text: String) -> AnsiGrid {
         var g = AnsiGrid()
         var row: [AnsiCell] = []
@@ -91,7 +72,6 @@ struct AnsiGrid {
                 guard i < chars.count else { break }
                 switch chars[i] {
                 case "[":
-                    // CSI: parameters, then one final byte in @…~
                     var params = ""
                     i += 1
                     while i < chars.count, let a = chars[i].asciiValue, !(0x40...0x7E).contains(a) {
@@ -101,7 +81,6 @@ struct AnsiGrid {
                     if i < chars.count, chars[i] == "m" { applySGR(params, &style) }
                     i += 1
                 case "]", "P", "_", "^":
-                    // OSC / DCS / APC / PM: up to BEL or ESC \
                     i += 1
                     while i < chars.count {
                         if chars[i] == "\u{07}" { i += 1; break }
@@ -109,7 +88,7 @@ struct AnsiGrid {
                         i += 1
                     }
                 case "(", ")", "*", "+":
-                    i += 2       // charset designation + its one byte
+                    i += 2
                 default:
                     i += 1
                 }
@@ -134,14 +113,12 @@ struct AnsiGrid {
         return g
     }
 
-    // one `ESC[…m`: ";" or ":" separated, empty = 0
     static func applySGR(_ params: String, _ s: inout AnsiStyle) {
         let p = params.split(omittingEmptySubsequences: false, whereSeparator: { $0 == ";" || $0 == ":" })
             .map { Int($0) ?? 0 }
         let codes = p.isEmpty ? [0] : p
         var i = 0
         func extended() -> AnsiColor? {
-            // 38;5;N  /  38;2;R;G;B (the code itself at i)
             guard i + 1 < codes.count else { return nil }
             if codes[i + 1] == 5, i + 2 < codes.count {
                 defer { i += 2 }
@@ -164,7 +141,7 @@ struct AnsiGrid {
             case 4: s.underline = true
             case 7: s.inverse = true
             case 9: s.strike = true
-            case 21: s.underline = true      // double underline → underline
+            case 21: s.underline = true
             case 22: s.bold = false; s.dim = false
             case 23: s.italic = false
             case 24: s.underline = false
@@ -176,7 +153,7 @@ struct AnsiGrid {
             case 40...47: s.bg = .index(c - 40)
             case 48: if let x = extended() { s.bg = x }
             case 49: s.bg = .none
-            case 58: _ = extended()          // underline color: skipped
+            case 58: _ = extended()
             case 90...97: s.fg = .index(c - 90 + 8)
             case 100...107: s.bg = .index(c - 100 + 8)
             default: break
@@ -185,8 +162,6 @@ struct AnsiGrid {
         }
     }
 
-    // terminal cell width of one grapheme: 2 for East Asian wide / fullwidth
-    // and emoji presentation, else 1 (combining marks ride in the grapheme)
     static func cellWidth(_ c: Character) -> Int {
         guard let first = c.unicodeScalars.first else { return 1 }
         if c.unicodeScalars.contains(where: { $0.value == 0xFE0F }) { return 2 }
@@ -203,8 +178,6 @@ struct AnsiGrid {
     }
 }
 
-// MARK: - Theme
-
 struct AnsiTheme {
     var foreground = AnsiRGB(0xc0, 0xca, 0xf5)
     var background = AnsiRGB(0x1a, 0x1b, 0x26)
@@ -212,9 +185,8 @@ struct AnsiTheme {
     var fontName = "Menlo"
     var fontSize: CGFloat = 13
     var boldIsBright = false
-    var displayP3 = false        // ghostty window-colorspace = display-p3
+    var displayP3 = false
 
-    // xterm's 256 colors: 16 system, 6×6×6 cube, 24 grays
     static func xterm256() -> [AnsiRGB] {
         var p: [AnsiRGB] = [
             AnsiRGB(0x00, 0x00, 0x00), AnsiRGB(0xcd, 0x00, 0x00), AnsiRGB(0x00, 0xcd, 0x00), AnsiRGB(0xcd, 0xcd, 0x00),
@@ -228,8 +200,6 @@ struct AnsiTheme {
         return p
     }
 
-    // `ghostty +show-config` output (the effective config, every palette
-    // entry spelled out): `key = value` lines, palette = `N=#rrggbb`
     static func ghostty(_ text: String) -> AnsiTheme {
         var t = AnsiTheme()
         var fontSet = false
@@ -255,7 +225,6 @@ struct AnsiTheme {
         return t
     }
 
-    // a cell's colors after inverse / bold-is-bright; dim = fg at half alpha
     func colors(_ s: AnsiStyle) -> (fg: AnsiRGB, bg: AnsiRGB?) {
         func res(_ c: AnsiColor, bright: Bool) -> AnsiRGB? {
             switch c {
@@ -275,8 +244,6 @@ struct AnsiTheme {
     }
 }
 
-// MARK: - Renderer
-
 enum AnsiRender {
     struct Metrics: Equatable {
         var cellWidth: CGFloat
@@ -286,14 +253,13 @@ enum AnsiRender {
 
     static func font(_ t: AnsiTheme) -> CTFont {
         let f = CTFontCreateWithName(t.fontName as CFString, t.fontSize, nil)
-        // an unknown name falls back to Helvetica: keep it monospaced
         if CTFontGetSymbolicTraits(f).contains(.traitMonoSpace) || (CTFontCopyFamilyName(f) as String) == t.fontName { return f }
         return CTFontCreateWithName("Menlo" as CFString, t.fontSize, nil)
     }
 
     static func metrics(_ f: CTFont) -> Metrics {
         var g = CGGlyph(0)
-        var ch: UniChar = 0x4D   // "M"
+        var ch: UniChar = 0x4D
         CTFontGetGlyphsForCharacters(f, &ch, &g, 1)
         var adv = CGSize.zero
         CTFontGetAdvancesForGlyphs(f, .horizontal, &g, &adv, 1)
@@ -301,14 +267,11 @@ enum AnsiRender {
         return Metrics(cellWidth: adv.width, lineHeight: lh, descent: ceil(CTFontGetDescent(f)))
     }
 
-    // image size in points for `grid`
     static func size(_ grid: AnsiGrid, _ m: Metrics, padding: CGFloat) -> CGSize {
         CGSize(width: ceil(CGFloat(grid.columns) * m.cellWidth + padding * 2),
                height: CGFloat(grid.rows.count) * m.lineHeight + padding * 2)
     }
 
-    // the scale for `pts`: `scale` unless a side would pass `maxPixels`
-    // (CoreGraphics / PNG viewers choke on huge bitmaps), then 1×
     static func scale(for pts: CGSize, wanted: CGFloat, maxPixels: CGFloat = 32000) -> CGFloat {
         max(pts.width, pts.height) * wanted > maxPixels ? 1 : wanted
     }
@@ -348,7 +311,6 @@ enum AnsiRender {
         for (r, row) in grid.rows.enumerated() {
             let top = pts.height - padding - CGFloat(r + 1) * m.lineHeight
             let baseline = top + m.descent
-            // backgrounds first (a wide glyph may overhang its cell)
             for (c, cell) in row.enumerated() {
                 guard let bg = t.colors(cell.style).bg else { continue }
                 ctx.setFillColor(cg(bg))
@@ -372,15 +334,11 @@ enum AnsiRender {
                 let utf16 = Array(cell.text.utf16)
                 var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
                 if cell.text.unicodeScalars.count == 1, CTFontGetGlyphsForCharacters(f, utf16, &glyphs, utf16.count) {
-                    // the font has it: pin the glyph to its cell
                     ctx.setFillColor(color)
-                    // positions are in text space: a CTLineDraw before
-                    // left the text position moved
                     ctx.textPosition = .zero
                     var pos = CGPoint(x: x, y: baseline)
                     CTFontDrawGlyphs(f, glyphs, &pos, 1, ctx)
                 } else {
-                    // fallback (emoji, CJK, symbols the font lacks): CoreText picks the font
                     let attr = NSAttributedString(string: cell.text, attributes: [
                         kCTFontAttributeName as NSAttributedString.Key: f,
                         kCTForegroundColorAttributeName as NSAttributedString.Key: color,

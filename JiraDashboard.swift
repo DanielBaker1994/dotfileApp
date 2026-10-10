@@ -1,45 +1,5 @@
 import AppKit
 
-// MARK: - Jira Config window (the one place for everything jira-poll)
-//
-// Menu bar "Open Jira Config Window" (also the Jira window's icon menu, and
-// `kitchen-sink jira-poll dashboard`). Master–detail:
-//
-//   sidebar          POLL JOBS  (each endpoint in config.json, + Add Poll Job)
-//                    SETTINGS   (Setup, Live Search, Connection, Definitions)
-//   detail           the selected item's editor
-//
-// Poll job editor: its settings (projects from a picker, page size / max
-// issues), ITS OWN columns (each job writes one tab of the Jira window and
-// owns that tab's table), the full JQL and the full curl of every request
-// (Copy curl), Save / Revert / Delete, and Force Poll (warns when a poll is
-// already running). The `directory` job caches projects + users + statuses
-// for the pickers (weekly; no tab).
-// Setup: the projects in scope (typed by the user, never looked up — every
-// query stays inside them; team.json project_keys), the one-time setup
-// (`jira_poll.py --setup`: each step run + confirmed alone, Run / Retry per
-// step; scheduled polling starts when all are ✓), the shared issue cache
-// (last sync, an interrupted sync's resume point) and Rebuild from scratch.
-// While a poll runs, status.json `progress` is re-read every second: the
-// header and the Setup page show "Issue cache: 1,200 / 10,412 (11%)" or the
-// rate-limit countdown. The full history is ~/.cache/jira/poll.log.
-// Live Search: the Cmd+F search tab's columns + max results.
-// Definitions: everything team.json defines (projects, custom fields, API
-// endpoints, JQL templates, search defaults) — add / edit (double-click) /
-// remove — plus read-only views of the cached users / statuses / columns.
-//
-// Everything shown comes from ONE python call — `jira_poll.py --describe`
-// (+ directory.json) — and every edit goes through jira_config.py
-// (--upsert-endpoint / --delete-endpoint / --set-columns / --set-live-search
-// / --team-set), which validates before writing. Config stays the source of
-// truth; the window is a view + editor over it.
-// Sizes / refresh: [jira] dashboard-width, dashboard-height, dashboard-refresh.
-//
-// Look: the Jira window's own theme (jiraWindowColors) — deep header,
-// mantle sidebar, themed buttons/pop-ups, status text in the palette's
-// success / warning / danger hues.
-
-// the window's palette roles (re-read each time the window opens)
 enum JC {
     static var colors = jiraWindowColors()
     static var text: NSColor { colors.text }
@@ -50,7 +10,6 @@ enum JC {
     static var warn: NSColor { colors.tone(.warning) }
     static var err: NSColor { colors.tone(.danger) }
 
-    // a scroll view as a recessed well (mantle + hairline + rounded)
     static func well(_ sv: NSScrollView) {
         sv.borderType = .noBorder
         sv.wantsLayer = true
@@ -61,8 +20,6 @@ enum JC {
         sv.drawsBackground = true
         sv.backgroundColor = colors.mantle.withAlphaComponent(0.7)
     }
-    // a data table inside a well: clear background, themed stripes/selection
-    // (PopupTableRowView via rowViewForRow)
     static func table(_ t: NSTableView) {
         t.usesAlternatingRowBackgroundColors = false
         t.backgroundColor = .clear
@@ -76,9 +33,6 @@ enum JC {
     }
 }
 
-// A label/control form in an NSAlert sheet (the window floats above the
-// popups: an app-modal alert would open hidden behind it). `then(true)` =
-// the first button.
 func jiraFormSheet(on window: NSWindow, title: String, info: String, rows: [(String, NSView)],
                    ok: String = "Save", first: NSView? = nil, then: @escaping (Bool) -> Void) {
     let g = NSGridView(views: rows.map { r -> [NSView] in
@@ -106,17 +60,15 @@ func jiraFormSheet(on window: NSWindow, title: String, info: String, rows: [(Str
     a.beginSheetModal(for: window) { r in then(r == .alertFirstButtonReturn) }
 }
 
-// One column list editor (a job's or the live search's columns). Rows are
-// read-only; double-click (or Edit…, or Return) opens the column's sheet.
 final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     var cols: [ListColumn] = [] { didSet { table.reloadData() } }
-    var meta: [String: [String: Any]] = [:]      // field -> catalog entry (apiFields, label)
+    var meta: [String: [String: Any]] = [:]
     var catalogFields: [String] = []
     var onChange: (() -> Void)?
     weak var sheetWindow: NSWindow?
     let table = NSTableView()
     let copyFrom = ThemedPopUpButton(frame: .zero, pullsDown: true)
-    var copySources: [(String, String)] = []     // (menu title, columns spec)
+    var copySources: [(String, String)] = []
     private(set) var view = NSView()
 
     private static let spec: [(id: String, title: String, width: CGFloat)] = [
@@ -188,7 +140,6 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     private func changed() { table.reloadData(); onChange?() }
 
-    // the field's ONE label (Definitions ▸ Fields) + the Jira field(s) it fetches
     func fieldName(_ f: String) -> String {
         let m = meta[f] ?? [:]
         return (m["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? JiraPoll.baseFieldLabels[f] ?? f
@@ -198,7 +149,6 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         return api == f ? "" : api
     }
 
-    // MARK: table
     func numberOfRows(in tableView: NSTableView) -> Int { cols.count }
 
     private func cell(_ v: NSView) -> NSView {
@@ -244,8 +194,6 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
         return cell(l)
     }
 
-    // MARK: edit sheet
-
     @objc func editClicked(_ sender: Any?) {
         let r = sender is NSTableView ? table.clickedRow : table.selectedRow
         guard r >= 0, r < cols.count else { return }
@@ -282,7 +230,6 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
                              ("", sort), ("", filter)],
                       first: index == nil ? field : width) { [weak self] ok in
             guard ok, let self else { return }
-            // ':' and ',' are the columns-line separators
             func clean(_ s: String) -> String {
                 s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ":", with: " ")
                     .replacingOccurrences(of: ",", with: " ")
@@ -333,8 +280,6 @@ final class JiraColumnEditor: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 }
 
-// The Jira Config window: a card window (CardWindow.swift) — the popup
-// windows' look, titled for sheets + native resize.
 final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private static var live: JiraDashboardWindow?
 
@@ -345,7 +290,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private var timer: Timer?
     private var describing = false
 
-    // data (jira_poll.py --describe + directory.json)
     private var info: [String: Any] = [:]
     private var eps: [[String: Any]] = []
     private var catalog: [[String: Any]] = []
@@ -354,24 +298,20 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private var current: Item = .connection
     private var didInitialSelect = false
 
-    // header
     private let statusLine = NSTextField(labelWithString: "Loading…")
     private let problemsLine = NSTextField(wrappingLabelWithString: "")
     private let enableButton = ThemedPushButton(title: "Enable Jira", target: nil, action: nil)
     private let stopButton = ThemedPushButton(title: "Stop Poll", target: nil, action: nil)
     private let openMenu = ThemedPopUpButton(frame: .zero, pullsDown: true)
 
-    // layout
     private let sidebar = NSTableView()
     private let detailHost = NSView()
 
-    // job editor state
     private var isNew = false
     private var dirty = false
     private let colEditor = JiraColumnEditor()
     private let nameField = NSTextField()
     private let fileLabel = NSTextField(labelWithString: "")
-    // where the job lives: config.json › endpoints › NAME (+ open it)
     private let sourceLabel = NSTextField(labelWithString: "")
     private let openConfigButton = ThemedPushButton(title: "Open config.json", target: nil, action: nil)
     private lazy var sourceRow: NSStackView = row([sourceLabel, openConfigButton])
@@ -395,7 +335,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private var colsTitle = NSTextField(labelWithString: "")
     private let liveMaxField = NSTextField()
 
-    // setup page: projects in scope, the one-time setup steps, the issue cache
     private let scopeField = NSTextField()
     private let setupSteps = NSStackView()
     private let setupIntro = NSTextField(wrappingLabelWithString: "")
@@ -404,9 +343,8 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private let cacheText = NSTextField(wrappingLabelWithString: "")
     private let runSetupButton = ThemedPushButton(title: "Run Setup", target: nil, action: nil)
     private let rebuildButton = ThemedPushButton(title: "Rebuild Cache from Scratch…", target: nil, action: nil)
-    private var liveHeld = false          // the lock as last seen in status.json (1s timer)
+    private var liveHeld = false
 
-    // connection / definitions
     private let connText = NSTextView()
     private let connResult = NSTextField(wrappingLabelWithString: "")
     private enum DefTab: String, CaseIterable {
@@ -418,7 +356,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private let defSeg = NSSegmentedControl()
     private let defTable = NSTableView()
     private var defRows: [[String]] = []
-    private var defKeys: [String] = []           // row -> team.json key / alias / project key
+    private var defKeys: [String] = []
     private let defHint = NSTextField(wrappingLabelWithString: "")
     private let defMsg = NSTextField(wrappingLabelWithString: "")
     private let defAdd = ThemedPushButton(title: "Add…", target: nil, action: nil)
@@ -426,13 +364,9 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private let defRemove = ThemedPushButton(title: "Remove", target: nil, action: nil)
     private let defFetch = ThemedPushButton(title: "Fetch from Jira now", target: nil, action: nil)
 
-    // the open window (the shared window shows it as its "config" view)
     static var current: JiraDashboardWindow? { live }
-    // shared window: Esc = back (after the unsaved-edits check); nil = a
-    // standalone window (closes)
     var onSlotBack: (() -> Void)?
 
-    // present: false = create / refresh only (the shared window shows it)
     static func show(controller: SwitcherController, present: Bool = true) {
         if let w = live {
             w.refresh()
@@ -441,7 +375,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             w.window.makeKeyAndOrderFront(nil)
             return
         }
-        // the Jira window's current theme (Theme ▸ presets may have changed it)
         JC.colors = jiraWindowColors()
         PopupThemeDefaults.colors = JC.colors
         let w = JiraDashboardWindow(controller: controller)
@@ -454,7 +387,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         w.window.makeKeyAndOrderFront(nil)
     }
 
-    // leave by Esc: back in the shared window, else close
     private func escape() {
         guard let back = onSlotBack else { close(); return }
         guard window.attachedSheet == nil else { return }
@@ -465,8 +397,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // ✕ / Cmd+W: hide the shared window (this view stays, edits and all);
-    // standalone: close (after the unsaved-edits check)
     override func closeOrHide() {
         if let hide = onSlotHide { hide() } else { close() }
     }
@@ -476,18 +406,13 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         let H = CGFloat(Double(jiraConfigValue("dashboard-height") ?? "") ?? 720)
         super.init(controller: controller, frame: NSRect(x: 0, y: 0, width: W, height: H),
                    title: "Jira Config", minSize: NSSize(width: 860, height: 520))
-        // standalone: above the popups like the setup window (the shared
-        // window brings it down to normal: SharedWindow.present)
         window.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
-        // denser than the list windows' card: this window is all form text
         window.contentView = themedRoot(buildContent(), name: "jira-config", colors: JC.colors,
                                         headerColor: jiraHeaderColor, icon: jiraAppIcon,
                                         title: "Jira Config", minTint: 0.92)
         colEditor.onChange = { [weak self] in self?.markDirty() }
         colEditor.sheetWindow = window
     }
-
-    // MARK: layout helpers
 
     @discardableResult
     private func button(_ b: NSButton, _ action: Selector, tip: String? = nil) -> NSButton {
@@ -531,7 +456,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     private func monoTextView(_ tv: NSTextView) -> NSScrollView {
         let sv = NSScrollView()
         sv.hasVerticalScroller = true
-        // a recessed code well (mantle + hairline), like the popup inputs
         JC.well(sv)
         tv.drawsBackground = false
         tv.textColor = JC.text
@@ -543,13 +467,12 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         tv.textContainerInset = NSSize(width: 6, height: 6)
         tv.isVerticallyResizable = true
         tv.autoresizingMask = [.width]
-        tv.textContainer?.widthTracksTextView = true   // wrap: nothing is cut off
+        tv.textContainer?.widthTracksTextView = true
         sv.documentView = tv
         return sv
     }
 
     private func sectionTitle(_ s: String) -> NSTextField {
-        // same voice as the sidebar's group headers: quiet small caps
         let l = NSTextField(labelWithString: s)
         l.attributedStringValue = NSAttributedString(string: s.uppercased(), attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .kern: 0.8,
@@ -591,13 +514,10 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         top.setHuggingPriority(.required, for: .vertical)
         for v in [statusLine, problemsLine] as [NSView] { v.setContentHuggingPriority(.required, for: .vertical) }
 
-        // sidebar: a source list — reads as navigation, not as buttons
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
         col.width = 200
         sidebar.addTableColumn(col)
         sidebar.headerView = nil
-        // an inset list (not .sourceList: its vibrancy + system-blue
-        // selection ignored the theme) on a deeper mantle panel
         sidebar.style = .inset
         sidebar.backgroundColor = .clear
         sidebar.floatsGroupRows = false
@@ -687,18 +607,15 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         button(copyCurlButton, #selector(copyCurl(_:)), tip: "Copy every request as curl (real token)")
     }
 
-    // MARK: keys (rule.md #1: edit shortcuts in every field)
-
     override func handleKey(_ e: NSEvent) -> Bool {
         let cmd = e.modifierFlags.contains(.command)
         let fr = window.firstResponder
-        if e.keyCode == 53 {                       // Esc: end an edit, else close
+        if e.keyCode == 53 {
             if (fr as? NSTextView)?.isEditable == true { window.makeFirstResponder(nil) } else { escape() }
             return true
         }
-        if cmd && e.keyCode == 15 { refresh(); return true }        // Cmd+R
-        if cmd && e.keyCode == 1 { save(nil); return true }         // Cmd+S
-        // Return edits / Delete removes the selected column or definition
+        if cmd && e.keyCode == 15 { refresh(); return true }
+        if cmd && e.keyCode == 1 { save(nil); return true }
         if !cmd, fr === colEditor.table {
             if e.keyCode == 36 { colEditor.editSelected(); return true }
             if e.keyCode == 51 { colEditor.remove(nil); return true }
@@ -710,10 +627,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         return false
     }
 
-    // MARK: data
-
-    // 1s tick: while a poll runs the live progress comes straight from
-    // status.json (no python); the full --describe runs every dashboard-refresh
     private func startTimer() {
         let secs = max(2, Double(jiraConfigValue("dashboard-refresh") ?? "") ?? 5)
         var last = Date()
@@ -732,7 +645,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
               let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         let held = (st["lock"] as? [String: Any])?["held"] as? Bool ?? false
         let text = held ? progressText(st["progress"] as? [String: Any] ?? [:]) : ""
-        if liveHeld && !held { refresh() }         // just finished: rows, counts, errors
+        if liveHeld && !held { refresh() }
         liveHeld = held
         if current == .setup { setupProgress.stringValue = text; setupProgress.isHidden = text.isEmpty }
         if held, !text.isEmpty, setupDone {
@@ -741,7 +654,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // status.json progress -> one line; a rate-limit wait counts down live
     private func progressText(_ p: [String: Any]) -> String {
         let stage = p["stage"] as? String ?? ""
         if let wu = p["waitingUntil"] as? Double, wu > Date().timeIntervalSince1970 {
@@ -783,7 +695,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         sidebar.reloadData()
         if !didInitialSelect {
             didInitialSelect = true
-            // setup not finished (or no projects in scope): that page first
             current = !setupDone ? .setup : .overview
             showItem(current)
         } else if !items.contains(current) {
@@ -809,8 +720,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         let enabled = info["enabled"] as? Bool ?? jiraEnabledInConfig()
         let bg = info["backgroundPoll"] as? Bool ?? false
         let lock = info["lock"] as? [String: Any] ?? [:]
-        // one plain sentence; the plumbing (launchd tick, job count, lock pid)
-        // lives in the tooltip
         let lr = info["lastRun"] as? String ?? ""
         let failed = !(info["lastError"] as? String ?? "").isEmpty
         var line = enabled ? "● Polling on" : bg ? "◐ Polling in the background (Jira window off)" : "○ Polling off"
@@ -863,13 +772,10 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // MARK: sidebar
-
     func numberOfRows(in tableView: NSTableView) -> Int {
         tableView === sidebar ? items.count : defRows.count
     }
 
-    // themed selection (highlight pill + accent edge) in both tables
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         if tableView === sidebar {
             let v = PopupTableRowView()
@@ -889,7 +795,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         guard row < items.count else { return false }
         if case .group = items[row] { return false }
         if items[row] == current || !dirty { return true }
-        // unsaved edits: ask first (a sheet), then select programmatically
         confirmDiscard { [weak self] in
             self?.sidebar.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
@@ -911,7 +816,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         var dot: NSColor?
         switch items[row] {
         case .group(let t):
-            // section headers in the accent, small caps-style
             l.attributedStringValue = NSAttributedString(string: t.uppercased(), attributes: [
                 .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .kern: 0.8,
                 .foregroundColor: JC.dim])
@@ -963,14 +867,10 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         showItem(current)
     }
 
-    // alerts are SHEETS on this window: an app-modal NSAlert opens at the
-    // normal level, i.e. hidden behind this window (it floats above the
-    // popups). `then(true)` = the first button.
     private func ask(_ a: NSAlert, then: @escaping (Bool) -> Void) {
         a.beginSheetModal(for: window) { r in then(r == .alertFirstButtonReturn) }
     }
 
-    // run `then` now, or after the user agrees to drop unsaved edits
     private func confirmDiscard(then: @escaping () -> Void) {
         guard dirty else { then(); return }
         let a = NSAlert()
@@ -985,8 +885,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             then()
         }
     }
-
-    // MARK: detail pages
 
     private func showPage(_ v: NSView) {
         detailHost.subviews.forEach { $0.removeFromSuperview() }
@@ -1006,8 +904,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         case .group: break
         }
     }
-
-    // MARK: overview — is it working? (the page the window opens on)
 
     private var showRequest = false
     private var overviewSig = ""
@@ -1030,7 +926,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     }
 
     private func overviewRow(_ dot: NSColor?, _ name: String, _ value: String, tip: String? = nil) -> NSView {
-        // every row keeps the dot's slot so the names line up
         let d = NSTextField(labelWithString: "●")
         d.textColor = dot ?? .clear
         d.font = .systemFont(ofSize: 9)
@@ -1050,7 +945,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         return r
     }
 
-    // grouped rows in a quiet well (System Settings style)
     private func overviewGroup(_ rows: [NSView]) -> NSView {
         let box = NSStackView(views: rows)
         box.orientation = .vertical
@@ -1118,7 +1012,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         return eps.first { $0["name"] as? String == n }
     }
 
-    // label/control form; controls keep their natural height
     private var gridView: NSGridView?
     private func grid(_ rows: [(String, NSView)]) -> NSGridView {
         let g = NSGridView(views: rows.map { r -> [NSView] in
@@ -1166,7 +1059,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         nameField.isEditable = new
         nameField.isSelectable = true
         nameField.placeholderString = "e.g. team-bugs"
-        // projects: only known keys (directory ∪ team.json project_keys)
         projectsPicker.options = dir.projectOptions(scope: scope)
         if let p = d["projects"] as? [String] { projectsPicker.set(p) } else { projectsPicker.set([], all: true) }
         loadColumns(d["columnsSpec"] as? String, me: d["name"] as? String)
@@ -1205,7 +1097,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         ]
         actionButton.title = "Force Poll"
         actionButton.toolTip = "Poll this job now (warns if a poll is already running)"
-        // a control lives in one grid at a time: detach from the previous page
         for (_, v) in form { v.removeFromSuperview() }
         let g = grid(form)
         gridView = g
@@ -1213,7 +1104,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             v.widthAnchor.constraint(greaterThanOrEqualToConstant: 380).isActive = true
         }
         colsTitle = sectionTitle("COLUMNS — this job's tab in the Jira window (and the fields it fetches)")
-        // the full JQL + curl are for debugging: folded away until asked for
         let reqSV = monoTextView(requestText)
         reqSV.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         reqSV.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
@@ -1267,7 +1157,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             : "\(tilde(configPath)) › endpoints › \"\(name)\""
         let outPath = (liveData?["path"] as? String).map(tilde)
         fileLabel.stringValue = type == "directory"
-            ? "~/.cache/jira/directory.json — projects, users, statuses for the pickers (no tab)"
+            ? "\(tilde(JiraPoll.directoryPath)) — projects, users, statuses for the pickers (no tab)"
             : name.isEmpty ? "(set a name)" : ((!isNew ? outPath : nil) ?? "\(name).json")
                 + (type == "favorites" ? " — the issues pinned with ☆ in the Jira window" : "")
         let issues = type == "issues"
@@ -1285,13 +1175,11 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // status line + request text from the latest describe (never touches the form)
     private func updateLive() {
         switch current {
         case .job, .addJob: break
         case .liveSearch, .group: return
         case .overview:
-            // rebuilt only when what it shows changed (the 1 s status timer)
             let sig = overviewSignature()
             if sig != overviewSig { overviewSig = sig; showOverview() }
             sidebar.reloadData()
@@ -1316,8 +1204,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         let type = d["type"] as? String ?? "issues"
         var st = d["status"] as? String ?? ""
         if JiraPoll.running.contains(name) || JiraPoll.running.contains("*") { st = "running" }
-        // "● 475 items · updated 06:50 · next 07:00" — the status word only
-        // when it isn't plain ok; the fetch window goes to the tooltip
         var parts: [String] = []
         let items = (d["items"] as? Int).map { type == "directory" ? "\($0) users" : "\($0) items" }
         if st == "ok", let items { parts.append("● \(items)") } else {
@@ -1388,8 +1274,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         markDirty()
     }
 
-    // MARK: save / delete / run
-
     private func parseArgs(_ s: String) -> [String: String] {
         var out: [String: String] = [:]
         for part in s.split(separator: ",") {
@@ -1399,7 +1283,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         return out
     }
 
-    // "" -> 0 (= the default); anything else must be a whole number
     private func limit(_ f: NSTextField, _ what: String) -> Int? {
         let s = f.stringValue.trimmingCharacters(in: .whitespaces)
         if s.isEmpty { return 0 }
@@ -1412,7 +1295,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     }
 
     private func draftJSON() -> [String: Any]? {
-        window.makeFirstResponder(nil)   // commit an in-progress edit
+        window.makeFirstResponder(nil)
         guard let ps = limit(pageSizeField, "Page size"), let mt = limit(maxTotalField, "Max issues") else { return nil }
         let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
         let type = selectedType
@@ -1438,7 +1321,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // validate + write via jira_config.py; `then` runs after a successful save
     private func persist(then: ((String) -> Void)?) {
         guard let o = draftJSON(), let data = try? JSONSerialization.data(withJSONObject: o) else { return }
         let name = o["name"] as? String ?? ""
@@ -1498,7 +1380,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                 self.editorMsg.stringValue = "✗ " + (r["problems"] as? [String] ?? ["delete failed"]).joined(separator: "; ")
                 return
             }
-            // the tab file goes with it (otherwise it lingers as a stale tab)
             if let path { try? FileManager.default.removeItem(atPath: path) }
             self.controller?.log("jira: deleted job \(name)")
             self.dirty = false
@@ -1508,7 +1389,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // absolute path of a job's tab file
     private func tabPath(_ d: [String: Any]) -> String? {
         if let p = d["path"] as? String, !p.isEmpty { return p }
         guard let f = d["file"] as? String, !f.isEmpty,
@@ -1518,7 +1398,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
 
     @objc private func primaryAction(_ sender: Any?) {
         if dirty {
-            // Force Poll acts on the SAVED definition: save first
             persist { [weak self] _ in self?.primaryAction(nil) }
             return
         }
@@ -1536,7 +1415,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         ask(a) { [weak self] ok in
             guard ok else { return }
             JiraPoll.run("jira_poll.py", ["--cancel"]) { [weak self] _, _, _ in
-                // give the stopped poll a moment to release the lock
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self?.forcePoll(name) }
             }
         }
@@ -1563,8 +1441,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         editorMsg.textColor = JC.dim
         editorMsg.stringValue = "curl copied (\(reqs.count) request\(reqs.count == 1 ? "" : "s"), includes the token)"
     }
-
-    // MARK: live search settings
 
     private func showLiveSearch() {
         isNew = false
@@ -1623,8 +1499,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // MARK: header actions
-
     @objc private func toggleEnabled(_ sender: Any?) {
         controller?.toggleJiraPoll()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refresh() }
@@ -1650,7 +1524,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         openPath(path)
     }
 
-    // the kitchen sink (header icon menu): the same files as Open…
     override func showIconMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -1669,11 +1542,10 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         let fm = FileManager.default
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-            NSWorkspace.shared.open(URL(fileURLWithPath: path))     // raw/<run>: a folder of files
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
             return
         }
         if !fm.fileExists(atPath: path) {
-            // team.json: start from the shipped example
             let example = JiraPoll.dir + "/team.example.json"
             try? fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
                                     withIntermediateDirectories: true)
@@ -1682,8 +1554,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         controller?.openNoteFile(path)
         refresh()
     }
-
-    // MARK: setup (projects in scope + the one-time setup + the issue cache)
 
     private func showSetup() {
         scopeField.placeholderString = "e.g. SAM1, KAN"
@@ -1730,7 +1600,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             setupMsg,
         ], spacing: 8)
         page.setCustomSpacing(18, after: scopeRow)
-        page.setCustomSpacing(18, after: page.arrangedSubviews[7])   // the Run Setup row
+        page.setCustomSpacing(18, after: page.arrangedSubviews[7])
         for v in [setupIntro, setupSteps, setupProgress, cacheText, setupMsg] as [NSView] {
             v.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
         }
@@ -1798,7 +1668,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         setupProgress.stringValue = p
         setupProgress.isHidden = p.isEmpty
 
-        // the shared issue cache: what it holds, when, and a resume point
         let c = info["issueCache"] as? [String: Any] ?? [:]
         var lines: [String] = []
         let jobs = c["jobs"] as? [String] ?? []
@@ -1938,7 +1807,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         controller?.openNoteFile(path)
     }
 
-    // the newest raw/<run> folder in Finder (else raw/ itself)
     @objc private func openRawDir(_ sender: Any?) {
         let fm = FileManager.default
         let candidates = [info["rawDir"] as? String, info["rawRoot"] as? String].compactMap { $0 }
@@ -1958,8 +1826,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
         controller?.openNoteFile(path)
     }
-
-    // MARK: connection
 
     private func showConnection() {
         let buttons = row([
@@ -2025,8 +1891,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         connResult.textColor = JC.dim
     }
 
-    // MARK: definitions (team.json + the directory cache)
-
     private func setupDefinitions() {
         defSeg.segmentCount = DefTab.allCases.count
         for (i, t) in DefTab.allCases.enumerated() {
@@ -2064,8 +1928,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         sv.hasHorizontalScroller = true
         JC.well(sv)
         sv.setContentHuggingPriority(.defaultLow - 20, for: .vertical)
-        // no intrinsic height: without a floor the stack squeezed the table
-        // down to its header row
         sv.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
         for v in [defSeg, defHint, defMsg, defAdd, defEdit, defRemove, defFetch] as [NSView] { v.removeFromSuperview() }
         let spacer = NSView()
@@ -2087,7 +1949,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         reloadDefinitions(rebuildColumns: true)
     }
 
-    // merged with the defaults (display) / team.json's own values (edits)
     private var team: [String: Any] { info["team"] as? [String: Any] ?? [:] }
     private var teamOwn: [String: Any] { info["teamOwn"] as? [String: Any] ?? [:] }
     private func own(_ key: String) -> [String: Any] { teamOwn[key] as? [String: Any] ?? [:] }
@@ -2240,7 +2101,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         return cell
     }
 
-    // write one team.json key (validated by jira_config.py --team-set)
     private func teamSet(_ key: String, _ value: Any, done: String, then: (() -> Void)? = nil) {
         guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return }
         defMsg.textColor = JC.dim
@@ -2255,7 +2115,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                 return
             }
             self.controller?.log("jira: team.json \(key) — \(done)")
-            // labels are the Jira window's column headers
             if ["field_labels", "custom_fields"].contains(key) { self.controller?.reloadJiraWindow() }
             if let then { then(); return }
             self.refresh {
@@ -2307,7 +2166,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                 self.teamSet("project_keys", (self.team["project_keys"] as? [String] ?? []).filter { !keys.contains($0) },
                              done: "removed \(what)")
             case .fields:
-                // custom fields are removed; a renamed field goes back to its default label
                 var cf = self.own("custom_fields"), fl = self.own("field_labels")
                 let drop = keys.filter { cf[$0] != nil }, reset = keys.filter { fl[$0] != nil }
                 guard !drop.isEmpty || !reset.isEmpty else {
@@ -2324,7 +2182,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
                 }
             default:
                 guard let tk = self.teamKey else { return }
-                // built-in defaults can't be removed (they come back): only team.json's own
                 var d = self.own(tk)
                 let builtIn = keys.filter { d[$0] == nil && tk != "custom_fields" }
                 if !builtIn.isEmpty && builtIn.count == keys.count {
@@ -2369,7 +2226,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // projects in scope: typed keys only — projects are never looked up
     private func addProjects() {
         let have = team["project_keys"] as? [String] ?? []
         let f = NSTextField()
@@ -2440,7 +2296,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             let ds = desc.stringValue.trimmingCharacters(in: .whitespaces)
             if !ds.isEmpty { entry["description"] = ds }
             d[a] = entry
-            // the custom field's own label IS its one label: drop an old rename
             var fl = self.own("field_labels")
             let clear = fl.removeValue(forKey: a) != nil
             self.teamSet("custom_fields", d, done: alias == nil ? "added \(a)" : "updated \(a)",
@@ -2448,7 +2303,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // a built-in / Jira field's one label (team.json field_labels)
     private func editFieldLabel(_ f: String) {
         let c = catalog.first { str($0["field"]) == f } ?? [:]
         let def = str(c["defaultLabel"]).isEmpty ? (JiraPoll.baseFieldLabels[f] ?? f) : str(c["defaultLabel"])
@@ -2469,7 +2323,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
 
     private func editKeyValue(_ key: String?) {
         guard let tk = teamKey else { return }
-        let d = team[tk] as? [String: Any] ?? [:]      // shows built-in values too
+        let d = team[tk] as? [String: Any] ?? [:]
         let k = NSTextField(string: key ?? "")
         k.placeholderString = tk == "api_endpoints" ? "e.g. components" : "e.g. my_bugs"
         k.isEditable = key == nil
@@ -2510,8 +2364,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         }
     }
 
-    // MARK: close
-
     private func close() {
         guard window.attachedSheet == nil else { return }
         confirmDiscard { [weak self] in
@@ -2524,7 +2376,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         guard dirty else { return true }
         confirmDiscard { [weak self] in
             guard let self else { return }
-            // in the shared window's host: leave it (the host never closes)
             if self.window !== self.homeWindow { self.leaveWindow(); self.teardown() } else { self.window.close() }
         }
         return false
@@ -2541,8 +2392,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
 
     func windowWillClose(_ notification: Notification) { teardown() }
 
-    // the shared window's "config" view (SharedWindow.swift): parked = ordered
-    // out with its refresh timer stopped; unsaved edits stay until it returns
     override func slotPark(stopVoice: Bool) {
         timer?.invalidate()
         timer = nil
@@ -2556,7 +2405,6 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     }
 }
 
-// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): the sidebar list, the page
 extension JiraDashboardWindow: PaneProvider {
     var navPanes: [NavPane] {
         [NavPane("sidebar", sidebar.enclosingScrollView ?? sidebar, focus: { [weak self] in

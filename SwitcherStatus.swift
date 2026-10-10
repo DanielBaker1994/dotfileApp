@@ -1,16 +1,11 @@
-// SwitcherStatus.swift — the Hyper+S status row's data: unread counts
-// (notify/notify_poll.py --json), CPU, RAM and battery. What the SketchyBar
-// right-hand group used to show, read only while the switcher is open.
-// gather() blocks (~0.3 s CPU sample + the python call): run it off main.
-
 import Foundation
 import IOKit.ps
 
 struct UnreadChip {
-    let app: String       // bundle id (icon + workspace-row match)
-    let count: String     // "3", "•", "" = none
+    let app: String
+    let count: String
     let mentions: Int
-    let warn: Bool        // the source's API needs attention
+    let warn: Bool
 }
 
 struct SwitcherStatus {
@@ -19,15 +14,12 @@ struct SwitcherStatus {
     var battery: (pct: Int, charging: Bool)?
     var chips: [UnreadChip] = []
 
-    // unread count per bundle id, for the workspace rows' badges
     var unreadByApp: [String: String] {
         var out: [String: String] = [:]
         for c in chips where !c.count.isEmpty { out[c.app] = c.count }
         return out
     }
 
-    // CPU = busy share of all ticks across the gather (a single read is the
-    // average since boot); the unread read fills most of that window
     static func gather(notifyScript: String) -> SwitcherStatus {
         var s = SwitcherStatus()
         let a = cpuTicks(), started = Date()
@@ -51,13 +43,11 @@ struct SwitcherStatus {
             }
         }
         guard r == KERN_SUCCESS else { return nil }
-        let t = info.cpu_ticks   // user, system, idle, nice
+        let t = info.cpu_ticks
         let busy = UInt64(t.0) + UInt64(t.1) + UInt64(t.3)
         return (busy, busy + UInt64(t.2))
     }
 
-    // active + wired + compressed pages over physical memory (what the old
-    // bar's RAM figure counted)
     private static func ramPercent() -> Int? {
         var vm = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.stride / MemoryLayout<integer_t>.stride)
@@ -73,7 +63,6 @@ struct SwitcherStatus {
         return Int(Double(pages * UInt64(vm_kernel_page_size)) / Double(total) * 100)
     }
 
-    // nil on a Mac without a battery
     private static func battery() -> (pct: Int, charging: Bool)? {
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
@@ -91,7 +80,7 @@ struct SwitcherStatus {
         guard FileManager.default.fileExists(atPath: script) else { return [] }
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
-        env["PYTHONDONTWRITEBYTECODE"] = "1"   // an app install's notify/ is inside the signed bundle
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         guard let r = try? runProcess("/usr/bin/env", ["python3", script, "--json"], env: env),
               r.code == 0,
               let obj = try? JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any],

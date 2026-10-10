@@ -1,9 +1,4 @@
 // sources: FileOps.swift
-// The file browser's file operations (FileOps.swift): trash / new /
-// duplicate / copy / move on real files in a temp folder, and that Cmd+Z
-// takes each one back.
-// Usage: bin/run-tests.sh fileops
-
 import Foundation
 
 var passed = 0
@@ -20,7 +15,6 @@ func check(_ condition: Bool, _ message: String, line: Int = #line) {
 
 let fm = FileManager.default
 let root = NSTemporaryDirectory() + "fileops-test-\(getpid())"
-// whatever a test sent to the Trash, removed again at the end
 var trashedByTests: [String] = []
 
 func exists(_ p: String) -> Bool { fm.fileExists(atPath: root + "/" + p) }
@@ -68,7 +62,6 @@ func testMoveAndUndo() {
     let out = FileOps.transfer(urls, into: root + "/m/dst", move: true)
     check(out.changes.count == 2 && out.changes[0].from == root + "/m/src/f.txt", "a move reports where it was")
     check(!exists("m/src/f.txt") && exists("m/dst/f.txt") && exists("m/dst/dir/in.txt"), "moved, folder and all")
-    // already there / into itself
     let same = FileOps.transfer([URL(fileURLWithPath: root + "/m/dst/f.txt")], into: root + "/m/dst", move: true)
     check(same.changes.isEmpty && same.failed == nil, "moving to where it is does nothing")
     let inside = FileOps.transfer([URL(fileURLWithPath: root + "/m/dst/dir")], into: root + "/m/dst/dir", move: true)
@@ -119,14 +112,12 @@ func testCreateDuplicateRename() {
     let d = FileOps.duplicate([root + "/n2/doc.md"])
     check(read("n2/doc copy.md") == "d" && d.changes.first?.from == nil, "duplicate")
 
-    // a rename done by the browser, recorded for undo
     try? fm.moveItem(atPath: root + "/n2/doc.md", toPath: root + "/n2/Doc.md")
     FileOps.recordRename(from: root + "/n2/doc.md", to: root + "/n2/Doc.md")
     let u = FileOps.undo()
     let names = (try? fm.contentsOfDirectory(atPath: root + "/n2")) ?? []
     check(u?.what == "rename of doc.md" && names.contains("doc.md") && !names.contains("Doc.md"),
           "a case-only rename undoes")
-    // the duplicate, then the three created items
     for _ in 0..<4 { trashedByTests += FileOps.undo()?.outcome.paths ?? [] }
     check(!exists("n2/doc copy.md") && !exists("n2/untitled folder") && !exists("n2/untitled.txt"),
           "undo walks back through every op")

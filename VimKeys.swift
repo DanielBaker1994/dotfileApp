@@ -2,47 +2,18 @@ import AppKit
 import SwiftTerm
 import WebKit
 
-// MARK: - vim-style normal / insert mode for every pane of the shared window
-//
-// The keyboard sits in ONE pane (PaneNav: Ctrl+H/J/K/L, the ring). A pane
-// whose keys go into a text input is in INSERT mode (typing goes in); any
-// other pane (a sidebar, a list, a preview, a Compare side) is in NORMAL mode:
-//   j / k            down / up one row (a page or preview: scroll)
-//   gg / G           first / last row (top / bottom)
-//   Ctrl+D / Ctrl+U  half a screen down / up
-//   / and ?          search THIS pane forward / backward, ignoring case, as
-//                    you type; Return keeps the match, Esc goes back
-//   n / N            next / previous match of the last search
-//   i / a            insert: the pane's text input (a list's filter box…)
-// Esc in a pane's input goes back to normal mode (the filter stays); Esc in
-// normal mode keeps its old meaning (clear the query, back, hide). A list
-// whose rows its filter box drives (jira) stays focused on the box in normal
-// mode: plain typing no longer edits the query until `i`.
-// nvim, the terminal and the notes reading page do their own vim: untouched.
-// `[app] vim-keys` (default true) turns this off, `vim-mode-badge` the
-// NORMAL / INSERT chip in the focused pane's corner.
-//
-// The search bar never takes the keyboard: the pane keeps it (its cursor,
-// the ring, a sidebar's row stay put) and the bar draws the query typed into
-// it through `handle`.
-
-// rows a pane's normal mode walks
 protocol VimRows: AnyObject {
     var vimCount: Int { get }
     var vimCursor: Int { get }
-    // rows on one screen (Ctrl+D / U move half of it)
     var vimPage: Int { get }
     func vimText(_ row: Int) -> String
     func vimMove(to row: Int)
-    // the rows on screen for the search highlights: the view drawing them
-    // and each row's rect in it (nil = no highlights in this pane)
     func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])?
 }
 
 extension VimRows {
     func vimShownRows() -> (view: NSView, rows: [(row: Int, rect: NSRect)])? { nil }
 
-    // fixed-height rows from y = 0 in `v`: the ones inside its visible rect
     static func shownRows(in v: NSView, count: Int, rowH: CGFloat, rect: (Int) -> NSRect)
         -> (view: NSView, rows: [(row: Int, rect: NSRect)]) {
         let vis = v.visibleRect
@@ -58,8 +29,6 @@ enum VimTarget {
     case text(NSTextView)
     case web(WKWebView)
 
-    // the first thing under v that normal mode can drive (a pane without its
-    // own `vim`)
     static func find(in v: NSView) -> VimTarget? {
         if v.isHidden { return nil }
         if let r = v as? VimRows { return .rows(r) }
@@ -84,16 +53,11 @@ final class VimKeys {
     private init() {}
 
     private var pendingG: Date?
-    // a window whose filter box is in normal mode (the jira list): that box
     private var normalField: [ObjectIdentifier: (field: NSView, caret: NSColor?)] = [:]
     private var lastQuery = ""
     private var lastBack = false
     private var bar: VimSearchBar?
-    // vim's hlsearch: what the matches of the current / last search are
-    // painted in, until Esc in normal mode, a new pane or an empty query
     var hl: VimHighlight?
-
-    // MARK: modes
 
     private func ownsVim(_ r: NSResponder) -> Bool {
         if r is TerminalView || r is ProseWebView { return true }
@@ -114,7 +78,6 @@ final class VimKeys {
 
     func target(_ pane: NavPane) -> VimTarget? { pane.vim?() ?? VimTarget.find(in: pane.view) }
 
-    // the mode the badge shows for w's focused pane; nil = no chip
     func mode(_ pane: NavPane?, in w: NSWindow) -> VimMode? {
         guard Self.enabled, let pane, let fr = w.firstResponder else { return nil }
         if let b = bar, b.window === w { return b.paneID == pane.id ? .search : nil }
@@ -126,8 +89,6 @@ final class VimKeys {
         return target(pane) != nil ? .normal : nil
     }
 
-    // normal mode on a filter box that keeps the keyboard: no caret, typing
-    // is ours (`i` / `a` give it back)
     func enterFieldNormal(_ field: NSView, in w: NSWindow) {
         let wid = ObjectIdentifier(w)
         guard normalField[wid] == nil else { return }
@@ -147,7 +108,6 @@ final class VimKeys {
 
     func searching(in w: NSWindow) -> Bool { bar?.window === w }
 
-    // the test hooks' view (state `pane.vimSearch`)
     func testState(_ w: NSWindow) -> [String: Any] {
         var out: [String: Any] = ["last": lastQuery, "fieldNormal": normalField[ObjectIdentifier(w)] != nil]
         if let b = bar, b.window === w {
@@ -166,14 +126,12 @@ final class VimKeys {
         return out
     }
 
-    // MARK: keys (SharedWindow.prefixKey asks first; true = used)
-
     func handle(_ e: NSEvent, in w: NSWindow) -> Bool {
         guard Self.enabled, e.type == .keyDown else { return false }
         if let b = bar, b.window === w { return searchKey(e, b, in: w) }
         let wid = ObjectIdentifier(w)
         if let f = normalField[wid], !(w.firstResponder.map { NavPane.inside($0, f.field) } ?? false) {
-            normalField[wid] = nil                       // focus moved on: that box is plain again
+            normalField[wid] = nil
         }
         guard let pane = PaneNav.shared.currentPane(in: w), let fr = w.firstResponder, !ownsVim(fr) else {
             return false
@@ -181,7 +139,6 @@ final class VimKeys {
         let mods = e.modifierFlags.intersection([.command, .control, .option, .shift])
         let fieldNormal = normalField[wid] != nil
         if isTextInput(fr), !fieldNormal {
-            // INSERT: only Esc is ours — back to normal where the pane has one
             guard e.keyCode == 53, mods.isEmpty, let back = pane.normal else { return false }
             pendingG = nil
             back()
@@ -190,12 +147,11 @@ final class VimKeys {
         }
         guard let t = target(pane) else { return false }
         if e.keyCode == 53, mods.isEmpty, let h = hl, h.window === w {
-            // Esc: the search highlights go first (vim's :noh), then Esc as before
             pendingG = nil
             clearHighlight(h)
             return true
         }
-        if mods == .control, e.keyCode == 2 || e.keyCode == 32 {      // Ctrl+D / Ctrl+U
+        if mods == .control, e.keyCode == 2 || e.keyCode == 32 {
             pendingG = nil
             halfPage(t, down: e.keyCode == 2)
             return true
@@ -222,17 +178,14 @@ final class VimKeys {
             leaveFieldNormal(w)
             ins()
         default:
-            // a filter box in normal mode: plain typing never edits the query
             guard fieldNormal, mods.isSubset(of: .shift) else { return false }
-            if e.keyCode == 51 || e.keyCode == 117 { return true }   // Delete
+            if e.keyCode == 51 || e.keyCode == 117 { return true }
             guard let u = ch.unicodeScalars.first, u.value > 0x20, u.value < 0xF700 else { return false }
             return true
         }
         PaneNav.shared.refreshSoon(w)
         return true
     }
-
-    // MARK: motions
 
     private func lineHeight(_ t: NSTextView) -> CGFloat {
         let f = t.font ?? .systemFont(ofSize: 13)
@@ -280,8 +233,6 @@ final class VimKeys {
         }
     }
 
-    // MARK: search
-
     private func openSearch(_ pane: NavPane, _ t: VimTarget, back: Bool, in w: NSWindow) {
         guard let root = w.contentView else { return }
         let b = VimSearchBar(paneID: pane.id, target: t, back: back)
@@ -306,8 +257,6 @@ final class VimKeys {
         PaneNav.shared.refreshSoon(w)
     }
 
-    // close the bar: accept keeps the match (it becomes n / N's), cancel
-    // goes back where the search started
     private func closeSearch(accept: Bool, in w: NSWindow) {
         guard let b = bar else { return }
         bar = nil
@@ -328,7 +277,6 @@ final class VimKeys {
         PaneNav.shared.refreshSoon(w)
     }
 
-    // the pane / window changed under the bar: keep what was found
     func paneChanged(in w: NSWindow, focused: String?) {
         if let h = hl, h.window === w || h.window == nil {
             if h.window == nil || focused != h.paneID || !w.isKeyWindow { clearHighlight(h) } else { paint(h) }
@@ -346,38 +294,38 @@ final class VimKeys {
             incremental(b)
         }
         switch e.keyCode {
-        case 53: closeSearch(accept: false, in: w); return true                  // Esc
-        case 36, 76: closeSearch(accept: true, in: w); return true               // Return
-        case 51 where cmd || mods.contains(.option):                             // Cmd/Opt+Delete: word
+        case 53: closeSearch(accept: false, in: w); return true
+        case 36, 76: closeSearch(accept: true, in: w); return true
+        case 51 where cmd || mods.contains(.option):
             set(VimSearch.dropWord(b.query)); return true
-        case 51:                                                                  // Delete
+        case 51:
             if b.query.isEmpty { closeSearch(accept: false, in: w) } else { set(String(b.query.dropLast())) }
             return true
-        case 125, 126:                                                            // ↓ ↑: next / previous
+        case 125, 126:
             find(b, from: nil, reverse: e.keyCode == 126, step: true); return true
         default: break
         }
         if ctrl && !cmd {
             switch e.keyCode {
-            case 45, 35: find(b, from: nil, reverse: e.keyCode == 35, step: true)  // Ctrl+N / P
-            case 13: set(VimSearch.dropWord(b.query))                                  // Ctrl+W
-            case 32: set("")                                                      // Ctrl+U: clear
-            case 4: set(String(b.query.dropLast()))                               // Ctrl+H
-            case 9: set(b.query + (NSPasteboard.general.string(forType: .string) ?? "").oneLine)  // Ctrl+V
-            case 8: copy(b.query)                                                 // Ctrl+C
+            case 45, 35: find(b, from: nil, reverse: e.keyCode == 35, step: true)
+            case 13: set(VimSearch.dropWord(b.query))
+            case 32: set("")
+            case 4: set(String(b.query.dropLast()))
+            case 9: set(b.query + (NSPasteboard.general.string(forType: .string) ?? "").oneLine)
+            case 8: copy(b.query)
             default: break
             }
             return true
         }
         if cmd {
             switch e.keyCode {
-            case 9: set(b.query + (NSPasteboard.general.string(forType: .string) ?? "").oneLine)  // Cmd+V
-            case 8: copy(b.query)                                                 // Cmd+C
-            case 7: copy(b.query); set("")                                        // Cmd+X
-            case 6:                                                               // Cmd+Z
+            case 9: set(b.query + (NSPasteboard.general.string(forType: .string) ?? "").oneLine)
+            case 8: copy(b.query)
+            case 7: copy(b.query); set("")
+            case 6:
                 if let prev = b.undo.popLast() { b.query = prev; incremental(b) }
-            case 0: break                                                          // Cmd+A: the whole query is the selection
-            default: return false                                                  // Cmd+W, Cmd+/ … as usual
+            case 0: break
+            default: return false
             }
             return true
         }
@@ -393,7 +341,6 @@ final class VimKeys {
         NSPasteboard.general.setString(s, forType: .string)
     }
 
-    // typing: the first match from where the search started
     private func incremental(_ b: VimSearchBar) {
         guard !b.query.isEmpty else {
             b.status = ""
@@ -404,8 +351,6 @@ final class VimKeys {
         find(b, from: b.origin, reverse: b.back, step: false)
     }
 
-    // rows / text: the match after (before) `from` (nil = the cursor),
-    // wrapping; step = skip the match under the cursor
     private func find(_ b: VimSearchBar, from: Int?, reverse: Bool, step: Bool) {
         guard !b.query.isEmpty else { return }
         defer { if let w = b.window { highlight(b.target, query: b.query, pane: b.paneID, in: w) } }
@@ -438,7 +383,6 @@ final class VimKeys {
         tv.showFindIndicator(for: rg)
     }
 
-    // n / N: the last search again in this pane
     private func repeatSearch(_ t: VimTarget, reverse: Bool, pane: String, in w: NSWindow) {
         guard !lastQuery.isEmpty else { return }
         defer { highlight(t, query: lastQuery, pane: pane, in: w) }
@@ -468,14 +412,6 @@ private extension String {
     var oneLine: String { components(separatedBy: .newlines).joined(separator: " ") }
 }
 
-// MARK: - hlsearch: every match painted, the one under the cursor stronger
-//
-// rows: a VimMatchOverlay over the rows on screen (the pane's own drawing
-// untouched; re-read on every PaneNav refresh and scroll, so a list that
-// changes under it stays right); text: the layout manager's temporary
-// background (the selection + find indicator mark the current one); web:
-// the CSS Custom Highlight API (WKWebView.find marks the current one).
-
 final class VimHighlight {
     let paneID: String
     weak var window: NSWindow?
@@ -484,7 +420,7 @@ final class VimHighlight {
     var overlay: VimMatchOverlay?
     var textCount = 0
     var webCount = 0
-    var painted: (query: String, length: Int)?        // text / web: what is painted now
+    var painted: (query: String, length: Int)?
     init(paneID: String, window: NSWindow, target: VimTarget) {
         self.paneID = paneID
         self.window = window
@@ -495,8 +431,6 @@ final class VimHighlight {
 extension VimKeys {
     static var matchColor: NSColor { PopupThemeDefaults.colors.palette.warning }
 
-    // the matches of `query` in pane's target, painted (a new pane / target
-    // replaces the old highlights)
     func highlight(_ t: VimTarget, query: String, pane: String, in w: NSWindow) {
         if let h = hl, h.paneID != pane || h.window !== w || !Self.same(h.target, t) { clearHighlight(h) }
         guard !query.isEmpty else { if let h = hl { clearHighlight(h) }; return }
@@ -514,7 +448,6 @@ extension VimKeys {
         default: return false
         }
     }
-    // the wrappers (PopupListVim…) are made fresh per key: compare what they draw into
     private static func rowsView(_ r: VimRows) -> NSView? { r.vimShownRows()?.view }
 
     func paint(_ h: VimHighlight) {
@@ -568,7 +501,6 @@ extension VimKeys {
         }
     }
 
-    // a pane scrolled by itself (the sidebar's wheel): the overlay follows
     func repaintHighlight() {
         if let h = hl { paint(h) }
     }
@@ -606,7 +538,6 @@ extension VimKeys {
     }
 }
 
-// the row tints, laid over the rows on screen inside the view that draws them
 final class VimMatchOverlay: NSView {
     var marks: [(rect: NSRect, current: Bool)] = [] { didSet { needsDisplay = true } }
     private var scrollObserver: NSObjectProtocol?
@@ -614,7 +545,7 @@ final class VimMatchOverlay: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.zPosition = 100            // above a table's row views, added after us
+        layer?.zPosition = 100
         autoresizingMask = []
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -622,7 +553,6 @@ final class VimMatchOverlay: NSView {
     override var isFlipped: Bool { superview?.isFlipped ?? true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    // a scroll moves the visible rect: repaint for the new rows
     func follow(_ clip: NSClipView?) {
         if let o = scrollObserver { NotificationCenter.default.removeObserver(o) }
         scrollObserver = nil
@@ -647,7 +577,6 @@ final class VimMatchOverlay: NSView {
             let path = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
             color.withAlphaComponent(m.current ? 0.40 : 0.22).setFill()
             path.fill()
-            // a bar on the left edge: the match's place is readable at a glance
             color.withAlphaComponent(m.current ? 1 : 0.7).setFill()
             NSBezierPath(roundedRect: NSRect(x: r.minX, y: r.minY + 3, width: 3, height: max(0, r.height - 6)),
                          xRadius: 1.5, yRadius: 1.5).fill()
@@ -659,8 +588,6 @@ final class VimMatchOverlay: NSView {
         }
     }
 }
-
-// MARK: - the "/" bar: vim's command line at the bottom of the pane
 
 final class VimSearchBar: NSView {
     let paneID: String
@@ -712,8 +639,6 @@ final class VimSearchBar: NSView {
                                 withAttributes: sa)
     }
 }
-
-// MARK: - the mode chip in the focused pane's corner
 
 final class VimModeBadge: NSView {
     var mode: VimMode = .normal { didSet { needsDisplay = true } }

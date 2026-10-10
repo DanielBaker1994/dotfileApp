@@ -1,10 +1,4 @@
 // sources: CompareText.swift
-// The Compare view's text engine (CompareText.swift): byte-exact round
-// trips, importance, rows + sections, copy across + undo, the windowed
-// re-diff, and hunk parity with `git diff --no-index --histogram` on a
-// corpus of real file pairs (KR4) + timings (KR2, engine part).
-// Usage: bin/run-tests.sh compare
-
 import Foundation
 
 var passed = 0
@@ -30,8 +24,6 @@ let tmp: String = {
 
 func ms(_ t0: UInt64) -> Double { Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000 }
 
-// MARK: round trips
-
 func testRoundTrips() {
     func bytes(_ s: String) -> Data { Data(s.utf8) }
     var cases: [(String, Data, TextEncodingKind)] = [
@@ -54,35 +46,28 @@ func testRoundTrips() {
         guard let side = TextSide.decode(data) else { check(false, "\(name): decoded as binary"); continue }
         check(side.encoding == enc, "\(name): encoding \(side.encoding)")
         check(side.encoded() == data, "\(name): decode → encode is byte-exact")
-        // an edit taken back saves the same bytes again
         var t = TextCompare(left: side, right: side)
         if !side.lines.isEmpty {
             t.replace(.left, 0..<1, with: ["changed", "two"])
             t.undo()
             check(t.left.encoded() == data, "\(name): edit + undo is byte-exact")
         }
-        // saved to disk and read back
         let p = tmp + "/rt-\(name.replacingOccurrences(of: " ", with: "-"))"
         try? side.encoded()?.write(to: URL(fileURLWithPath: p))
         check((try? Data(contentsOf: URL(fileURLWithPath: p))) == data, "\(name): save round trip")
     }
     check(TextSide.isBinary(Data([0x50, 0x4B, 0x03, 0x04, 0x00, 0x00])), "NUL bytes = binary")
     check(!TextSide.isBinary(Data([0xFF, 0xFE, 0x41, 0x00])), "UTF-16 with a BOM is text")
-    // a line keeps its file's endings; text appended after a last line
-    // without newline gives it one, the new last line keeps "no newline"
     var s = TextSide.decode(bytes("a\r\nb"))!
     _ = s.replace(2..<2, with: ["c"])
     check(s.encoded() == bytes("a\r\nb\r\nc"), "append after no-newline last line: \(s.text.debugDescription)")
     var s2 = TextSide.decode(bytes("a\r\nb\r\n"))!
     _ = s2.replace(1..<2, with: ["x", "y"])
     check(s2.encoded() == bytes("a\r\nx\r\ny\r\n"), "new lines take the side's CRLF")
-    // Latin-1 can't hold every character: nil = save as UTF-8
     var l1 = TextSide.decode(Data([0x61, 0xE9, 0x0A]))!
     _ = l1.replace(0..<1, with: ["日本"])
     check(l1.encoded() == nil, "Latin-1 refuses characters it can't hold")
 }
-
-// MARK: importance + rows
 
 func side(_ s: String) -> TextSide { TextSide(text: s) }
 
@@ -100,14 +85,12 @@ func testImportance() {
     check(Importance().key("x", .crlf) == Importance().key("x", .lf), "line endings unimportant by default")
     check(Importance.exact.key("x", .crlf) != Importance.exact.key("x", .lf), "exact: line endings count")
 
-    // whitespace-only difference = unimportant (blue), not a red section
     var t = TextCompare(left: side("a\n  b\nc\n"), right: side("a\nb\nc\n"))
     check(t.rows.count == 3 && t.rows[1].kind == .changed && !t.rows[1].important, "indent-only change is unimportant")
     check(t.sections.count == 1 && !t.sections[0].important, "one unimportant section")
     t.setIgnoreUnimportant(true)
     check(t.sections.isEmpty, "Ignore Unimportant: no sections")
 
-    // blank lines
     var bl = Importance()
     bl.blankLines = true
     let tb = TextCompare(left: side("a\n\nb\n"), right: side("a\nb\n"), importance: bl)
@@ -115,13 +98,11 @@ func testImportance() {
     let tb2 = TextCompare(left: side("a\n\nb\n"), right: side("a\nb\n"))
     check(tb2.sections.count == 1 && tb2.sections[0].important, "…and important by default")
 
-    // CRLF vs LF: same text, but the files are not "identical"
     let crlf = TextCompare(left: side("a\r\nb\r\n"), right: side("a\nb\n"))
     check(crlf.identicalText, "CRLF vs LF reads as the same text by default")
     check(crlf.left.encoded() != crlf.right.encoded(), "…while the bytes differ (status says so)")
     let crlfExact = TextCompare(left: side("a\r\nb\r\n"), right: side("a\nb\n"), importance: .exact)
     check(!crlfExact.identicalText, "exact: CRLF vs LF differ")
-    // NFC vs NFD: never "identical"
     let nf = TextCompare(left: side("caf\u{E9}\n"), right: side("cafe\u{301}\n"), importance: .exact)
     check(!nf.identicalText, "NFC vs NFD bytes differ → not identical")
 }
@@ -131,38 +112,31 @@ func testRows() {
     check(t.rows.map(\.kind) == [.same, .changed, .same, .same, .rightOnly], "rows: \(t.rows.map(\.kind))")
     check(t.sections.count == 2, "two sections")
     check(t.nextSection(after: 0) == 0 && t.nextSection(after: 1) == 1 && t.prevSection(before: 4) == 0, "next / prev")
-    // fillers line up a deleted block
     let d = TextCompare(left: side("a\nb\nc\nd\n"), right: side("a\nd\n"))
     check(d.rows.map(\.kind) == [.same, .leftOnly, .leftOnly, .same], "deleted lines get fillers")
-    // similar lines pair up across a count mismatch
     let p = TextCompare(left: side("x\nport = 8080\ny\n"),
                         right: side("x\nnew line here\nport = 9090\ny\n"))
     let ports = p.rows.first { $0.l == 1 }
     check(ports?.r == 2 && ports?.kind == .changed, "port lines paired: \(p.rows)")
-    // context filter
     var big = "", big2 = ""
     for i in 0..<40 { big += "line \(i)\n"; big2 += (i == 20 ? "LINE 20" : "line \(i)") + "\n" }
     let c = TextCompare(left: side(big), right: side(big2))
     check(c.visibleRows(.context, context: 3) == Array(17...23), "context 3 around one change")
     check(c.visibleRows(.diffs, context: 3) == [20], "diffs only")
     check(c.visibleRows(.same, context: 3)?.count == 39, "same only")
-    // char marks
     let m = CharDiff.marks("port = 8080", "port = 9090", Importance())
     check(m.left == [CharDiff.Mark(range: NSRange(location: 7, length: 4), important: true)], "char mark left \(m.left)")
     check(m.right.first?.range == NSRange(location: 7, length: 4), "char mark right")
     let ws = CharDiff.marks("a  b", "a b", Importance())
     check(ws.left.allSatisfy { !$0.important }, "spacing marks are unimportant")
-    // the AI view's word diff (moved here): unchanged behavior
     let ops = CharDiff.diff("their going home", "They're gone home")
     check(CharDiff.changes(ops) == 1, "AI word diff: one replacement")
-    // binary
     check(BinaryCompare.firstDifference(Data([1, 2, 3]), Data([1, 2, 3])) == nil, "binary identical")
     check(BinaryCompare.firstDifference(Data(repeating: 7, count: 100) + Data([1]), Data(repeating: 7, count: 100) + Data([2])) == 100,
           "binary first difference")
     check(BinaryCompare.firstDifference(Data([1, 2]), Data([1, 2, 3])) == 2, "binary length difference")
 }
 
-// rows must spell out both files in order, and same rows hold equal text
 func consistent(_ t: TextCompare) -> Bool {
     var l = 0, r = 0
     for row in t.rows {
@@ -174,8 +148,6 @@ func consistent(_ t: TextCompare) -> Bool {
     }
     return l == t.left.lines.count && r == t.right.lines.count
 }
-
-// MARK: copy across + undo + windowed re-diff
 
 func testEdits() {
     let L = "a\nb\nc\nd\ne\nf\n", R = "a\nB\nc\nd\nx\ny\nf\n"
@@ -195,20 +167,16 @@ func testEdits() {
     t.redo()
     check(t.right.lines[1] == "b", "redo")
     check(consistent(t), "rows consistent after undo / redo")
-    // undo of a side's own newest edit while the other side has newer ones
     var u = TextCompare(left: side("1\n2\n3\n"), right: side("1\n2\n3\n"))
     u.replace(.left, 1..<2, with: ["two"])
     u.replace(.right, 0..<1, with: ["uno", "one"])
     u.undo(.left)
     check(u.left.lines == ["1", "2", "3"] && u.right.lines == ["uno", "one", "2", "3"], "per-side undo")
-    // copy one row (a line) across, a filler row = delete
     var c = TextCompare(left: side("a\nb\nc\n"), right: side("a\nc\n"))
     let fillerRow = c.rows.firstIndex { $0.kind == .leftOnly }!
     c.copyRows(fillerRow..<(fillerRow + 1), from: .right)
     check(c.left.lines == ["a", "c"], "copying a filler deletes the line")
 
-    // fuzz: random edits, the windowed re-diff keeps rows consistent and
-    // (mostly) equal to a full diff
     var rng = SplitMix(seed: 42)
     var base: [String] = []
     for i in 0..<400 { base.append(i % 7 == 0 ? "" : "    let v\(i % 50) = compute(\(i))") }
@@ -237,10 +205,7 @@ func testEdits() {
     print("  windowed re-diff matched a full diff after \(sameAsFull)/\(edits) random edits")
 }
 
-// MARK: phase 3: Align With, trim trailing whitespace, line endings
-
 func testPhase3() {
-    // Align With: force left "x" onto right "y" (the diff would leave them apart)
     var a = TextCompare(left: side("a\nx\nb\nc\n"), right: side("a\nb\nc\ny\n"))
     let before = a.rows.count
     a.align(left: 1, right: 3)
@@ -249,7 +214,6 @@ func testPhase3() {
     check(a.isAnchor(row: row), "align: the row is an anchor")
     check(consistent(a), "align: rows consistent")
     check(a.rows.count >= before, "align: fillers around the anchor")
-    // an edit above the anchor moves it; one on it drops it
     a.replace(.left, 0..<0, with: ["new"])
     check(a.anchors.first.map { $0.l == 2 && $0.r == 3 } == true, "align: the anchor follows an edit above it")
     check(consistent(a), "align: rows consistent after an edit")
@@ -261,7 +225,6 @@ func testPhase3() {
     check(a.anchors.isEmpty, "align: deleting the anchored line drops it")
     a.clearAlignment()
     check(a.anchors.isEmpty && a.rows == TextCompare(left: a.left, right: a.right).rows, "align: cleared = the plain diff")
-    // a crossing anchor is replaced
     var c = TextCompare(left: side("1\n2\n3\n"), right: side("1\n2\n3\n"))
     c.align(left: 0, right: 2)
     c.align(left: 2, right: 0)
@@ -272,7 +235,6 @@ func testPhase3() {
     w.swapSides()
     check(w.anchors.first.map { $0.l == 0 && $0.r == 1 } == true, "align: swap sides flips the anchor")
 
-    // trim trailing whitespace: one undo step, byte-exact undo
     let raw = "a  \r\nb\t\r\nc\r\nd "
     var t = TextCompare(left: TextSide.decode(Data(raw.utf8))!, right: side("a\nb\nc\nd\n"))
     let orig = t.left.encoded()
@@ -281,7 +243,6 @@ func testPhase3() {
     check(t.trimTrailingWhitespace(.left) == 0, "trim twice: nothing")
     t.undo()
     check(t.left.encoded() == orig, "trim undo: byte-exact")
-    // line endings
     check(t.convertLineEndings(.left, to: .lf) == 3, "convert: three endings")
     check(t.left.eols == [.lf, .lf, .lf, .none], "convert keeps a last line without newline")
     check(consistent(t), "convert: rows consistent")
@@ -302,8 +263,6 @@ struct SplitMix {
     mutating func below(_ n: Int) -> Int { n <= 0 ? 0 : Int(next() % UInt64(n)) }
 }
 
-// MARK: git parity (KR4)
-
 func run(_ argv: [String], cwd: String? = nil) -> (Int32, String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: argv[0])
@@ -312,7 +271,6 @@ func run(_ argv: [String], cwd: String? = nil) -> (Int32, String) {
     let out = Pipe()
     p.standardOutput = out
     p.standardError = FileHandle.nullDevice
-    // the user's git config must not change the answer (diff.algorithm…)
     var env = ProcessInfo.processInfo.environment
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -323,7 +281,6 @@ func run(_ argv: [String], cwd: String? = nil) -> (Int32, String) {
     return (p.terminationStatus, String(decoding: data, as: UTF8.self))
 }
 
-// "@@ -a,b +c,d @@" (-U0) → hunks in 0-based starts
 func gitHunks(_ a: String, _ b: String) -> [LineDiff.Hunk]? {
     let (code, out) = run(["/usr/bin/git", "diff", "--no-index", "--histogram", "--indent-heuristic", "-U0",
                            "--no-color", "--no-ext-diff", a, b])
@@ -357,8 +314,6 @@ func ourHunks(_ a: Data, _ b: Data) -> [LineDiff.Hunk] {
     return LineDiff.hunks(key(l), key(r), textA: l.lines, textB: r.lines)
 }
 
-// seeded mutations of a real file: block delete / insert / copy (repeats),
-// edits, moves, re-indents, blank lines — what real edits look like
 func mutate(_ lines: [String], _ rng: inout SplitMix) -> [String] {
     var out = lines
     for _ in 0..<(1 + rng.below(6)) {
@@ -388,7 +343,6 @@ func mutate(_ lines: [String], _ rng: inout SplitMix) -> [String] {
 
 func testParity() {
     var pairs: [(String, Data, Data)] = []
-    // 1. seeded mutations of this repo's own files
     let exts = ["swift", "py", "sh", "md", "toml", "vim"]
     let top: [String] = ((try? fm.contentsOfDirectory(atPath: root)) ?? []).sorted()
         .filter { exts.contains(($0 as NSString).pathExtension) }.map { root + "/" + $0 }
@@ -406,7 +360,6 @@ func testParity() {
         }
         if pairs.count >= 80 { break }
     }
-    // 2. consecutive versions from this repo's history (read-only git)
     let (_, log) = run(["/usr/bin/git", "log", "--format=%H", "-n", "40", "--", "PopupWindow.swift",
                         "kitchen_sink.swift", "SharedWindow.swift", "Confluence.swift", "AIWindow.swift"], cwd: root)
     let commits = log.split(separator: "\n").map(String.init)
@@ -443,7 +396,6 @@ func testParity() {
             print("  parity miss \(name): git \(g.count) hunks, ours \(o.count)"
                   + (g.count == o.count ? "" : "") + " first diff: git \(g.first { !o.contains($0) }.map { "\($0)" } ?? "-") ours \(o.first { !g.contains($0) }.map { "\($0)" } ?? "-")")
         }
-        // never "identical" for files that differ
         if a != b {
             let t = TextCompare(left: TextSide.decode(a)!, right: TextSide.decode(b)!, importance: .exact)
             check(!t.identicalText, "\(name): differing files never read as identical")
@@ -456,8 +408,6 @@ func testParity() {
     check(pairs.count >= 50, "corpus has ≥ 50 pairs (\(pairs.count))")
     check(pct >= 95, "≥ 95 % hunk parity with git (\(pct))")
 }
-
-// MARK: timings (KR2, the engine's share)
 
 func synthetic(_ n: Int, seed: UInt64, change: Int) -> (String, String) {
     var rng = SplitMix(seed: seed)
@@ -486,7 +436,6 @@ func testTimings() {
         let t1 = DispatchTime.now().uptimeNanoseconds
         var t = TextCompare(left: l, right: r)
         let tDiff = ms(t1)
-        // an edit in the middle, re-diffed in its window
         let mid = t.rows.count / 2
         let t2 = DispatchTime.now().uptimeNanoseconds
         let line = t.lineIndex(.left, atRow: mid)

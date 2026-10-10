@@ -1,42 +1,16 @@
 import AppKit
 
-// MARK: - Jira live search (Cmd+F in the Jira window) + the value pickers
-//
-// JiraSearchPanel: a strip INSIDE the Jira window, docked under its header
-// (PopupWindow.setTopAccessory; the list moves down, filter rows scroll past
-// ~40% of the window). It parks / unparks with the window; Esc or Cmd+F from
-// the strip closes it, Cmd+F from the list focuses it. Free text (Jira `text ~`: title,
-// description, comments) + Projects + "+ Filter" rows (assignee / reporter /
-// status / type / priority / release / labels / dates / "… contains"). Every
-// value Jira knows up front (users, releases, labels …) is a PICKER over the
-// directory cache, never typed text. Controls are drawn in the Jira window's
-// theme (JiraInputBox / JiraChoiceButton / ThemeButton). Return runs `jira_poll.py --live-search` (criteria JSON on stdin)
-// which writes <outDir>/search.json — the Jira window's "search.json" tab —
-// and the window jumps to that tab. Nothing is saved as a job; the last
-// criteria are remembered (UserDefaults) so the panel reopens as you left it.
-//
-// JiraMultiPicker: a searchable multi-select over a FIXED list (projects /
-// users / statuses … from ~/.cache/jira/directory.json, the weekly
-// `directory` poll job). Typing only filters — a value that is not in the
-// list cannot be entered, so a search never fails on a typo. Several picked
-// values are ORed (`assignee in (…)`).
-//
-// Config ([jira] in commands.toml): search-date-ranges (default
-// "today, 2d, 7d, 14d, 30d, 90d"), search-max-choices ("25, 50, 100, 250, 500").
-
-// edit shortcuts for the jira windows' own key monitors (rule.md #1: the
-// accessory app has no reliable Edit-menu key equivalents)
 enum JiraEditKeys {
     static func route(_ e: NSEvent, in window: NSWindow) -> Bool {
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let cmd = mods.contains(.command), ctrl = mods.contains(.control)
         guard cmd || ctrl, let ed = window.firstResponder as? NSText else { return false }
         switch e.keyCode {
-        case 9: ed.paste(nil)                                     // Cmd+V / Ctrl+V
-        case 8: ed.copy(nil)                                      // Cmd+C / Ctrl+C
-        case 0 where cmd: ed.selectAll(nil)                       // Cmd+A
-        case 7: ed.cut(nil)                                       // Cmd+X / Ctrl+X (else Cocoa's Ctrl+X prefix eats it)
-        case 6 where cmd:                                         // Cmd+Z / Cmd+Shift+Z
+        case 9: ed.paste(nil)
+        case 8: ed.copy(nil)
+        case 0 where cmd: ed.selectAll(nil)
+        case 7: ed.cut(nil)
+        case 6 where cmd:
             if mods.contains(.shift) { ed.undoManager?.redo() } else { ed.undoManager?.undo() }
         default: return false
         }
@@ -44,7 +18,6 @@ enum JiraEditKeys {
     }
 }
 
-// ~/.cache/jira/directory.json (written by the `directory` poll job)
 struct JiraDirectory {
     struct User { let id, name, username, email: String; let projects: [String] }
     struct Field { let id, name: String; let custom: Bool; let type: String }
@@ -52,13 +25,13 @@ struct JiraDirectory {
     var projects: [(key: String, name: String)] = []
     var users: [User] = []
     var statuses: [String] = []
-    var statusCategories: [String: String] = [:]          // status -> new / indeterminate / done
+    var statusCategories: [String: String] = [:]
     var issueTypes: [String] = []
     var priorities: [String] = []
     var fields: [Field] = []
-    var versions: [Version] = []                          // unarchived releases per project
-    var labels: [(name: String, projects: [String], count: Int)] = []  // labels seen per project
-    var boards: [(id: String, name: String, type: String, projects: [String])] = []  // per scoped project
+    var versions: [Version] = []
+    var labels: [(name: String, projects: [String], count: Int)] = []
+    var boards: [(id: String, name: String, type: String, projects: [String])] = []
     var fetchedAt = ""
     var isEmpty: Bool { fetchedAt.isEmpty }
 
@@ -99,9 +72,6 @@ struct JiraDirectory {
         return d
     }
 
-    // directory projects + configured keys the directory doesn't know (yet)
-    // ONLY the projects in scope (the keys the user typed — team.json
-    // project_keys); the directory just supplies their names
     func projectOptions(scope: [String]) -> [JiraMultiPicker.Option] {
         scope.map { k in
             .init(id: k, title: k, detail: projects.first { $0.key == k }?.name ?? "")
@@ -122,7 +92,6 @@ struct JiraDirectory {
         vals.map { .init(id: $0, title: $0, detail: "") }
     }
 
-    // statuses under their category headers (To Do / In Progress / Done)
     func statusOptions() -> [JiraMultiPicker.Option] {
         statuses.map { s in
             .init(id: s, title: s, detail: "",
@@ -130,14 +99,12 @@ struct JiraDirectory {
         }
     }
 
-    // `in`: the picked projects (nil = all) — only their labels / releases
     private static func matches(_ ps: [String], _ scope: [String]?) -> Bool {
         guard let scope, !scope.isEmpty else { return true }
         return ps.contains(where: scope.contains)
     }
 
     func labelOptions(in scope: [String]?) -> [JiraMultiPicker.Option] {
-        // most used first (directory counts over the sampled issues)
         let opts: [JiraMultiPicker.Option] = labels.filter { Self.matches($0.projects, scope) }
             .sorted { $0.count != $1.count ? $0.count > $1.count
                                            : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -148,8 +115,6 @@ struct JiraDirectory {
         return JiraMultiPicker.foldTail(opts)
     }
 
-    // one option per release NAME (JQL matches fixVersion by name); the
-    // detail lists every project that has it + its date / released state
     func versionOptions(in scope: [String]?) -> [JiraMultiPicker.Option] {
         var order: [String] = [], by: [String: [Version]] = [:]
         for v in versions where Self.matches([v.project], scope) {
@@ -166,21 +131,15 @@ struct JiraDirectory {
     }
 }
 
-// MARK: - theme (the Cmd+F panel follows the Jira window's palette)
-
 enum JiraTheme {
-    // pickers outside a popup window (Jira Config) wear the Jira window's
-    // theme, like everything else in the jira family
     static var system: PopupColors { JC.colors }
     static let height: CGFloat = 26
     static let radius: CGFloat = 6
     static let font = NSFont.systemFont(ofSize: 12)
 
-    // an input's surface: faint fill, hairline; the accent ring when focused
     static func drawInput(_ bounds: NSRect, _ c: PopupColors, hover: Bool, focused: Bool) {
         let r = bounds.insetBy(dx: focused ? 1 : 0.5, dy: focused ? 1 : 0.5)
         let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
-        // a recessed well, same as every popup input
         ButtonStyle.inputFill(c).setFill()
         path.fill()
         if hover {
@@ -197,9 +156,6 @@ enum JiraTheme {
     }
 }
 
-// A themed single-line text input: the field sits borderless inside a
-// drawn surface (padding + a focus ring in the theme's accent — no AppKit
-// bezel / system focus ring).
 final class JiraInputBox: NSView, PopupThemeable {
     let field = NSTextField()
     var colors = JiraTheme.system { didSet { restyle() } }
@@ -252,16 +208,13 @@ final class JiraInputBox: NSView, PopupThemeable {
     }
 }
 
-// A themed pop-up / pull-down: a ButtonStyle surface with the chosen title
-// and a chevron; click opens an NSMenu of `items`. `fixedTitle` = pull-down
-// ("+ Filter"): the title never changes and the menu fires `onPick`.
 final class JiraChoiceButton: NSView, PopupThemeable {
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     var items: [(title: String, value: String)] = [] { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
     var value: String? { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
     var fixedTitle: String?
-    var prefix = ""                       // e.g. "Max " before the value
-    var disabled: Set<String> = []        // menu items shown greyed out
+    var prefix = ""
+    var disabled: Set<String> = []
     var onPick: ((String) -> Void)?
     private var hover = false, down = false
     private var trackingArea: NSTrackingArea?
@@ -326,24 +279,17 @@ final class JiraChoiceButton: NSView, PopupThemeable {
     }
 }
 
-// MARK: - JiraMultiPicker
-
 final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
                              NSSearchFieldDelegate, NSPopoverDelegate, PopupThemeable {
-    // `group`: a section header the option sits under (statuses by
-    // category); `unused`: folded under "Show N unused" in its group
     struct Option {
         let id: String; let title: String; let detail: String
         var group = ""; var unused = false
     }
     private static let allID = "\u{0}all"
     private static let groupPrefix = "\u{0}group:", morePrefix = "\u{0}more:"
-    // group order (headers in this order, unknown groups after)
     var groupOrder: [String] = []
-    var groupDetail: [String: String] = [:]   // a header's right-hand text (else its value count)
-    // the fold row's text for N hidden options
+    var groupDetail: [String: String] = [:]
     var foldTitle: (Int) -> String = { "Show \($0) unused" }
-    // a long list (labels on a work site): the first topN shown, the rest folded
     static let topN = 50
     static func foldTail(_ opts: [Option]) -> [Option] {
         guard opts.count > topN + 5 else { return opts }
@@ -356,19 +302,15 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var options: [Option] = [] { didSet { updateDisplay() } }
     private(set) var selected: [String] = []
     private(set) var isAll = false
-    var allTitle: String?          // non-nil: offers an "All …" state
+    var allTitle: String?
     var noun = "value"
     var onChange: (() -> Void)?
     var placeholder = "Choose…" { didSet { updateDisplay() } }
-    // show the popover off another view (e.g. a table header's ▾) instead of
-    // this control — the picker then needs no place in a view hierarchy
     var anchor: (view: NSView, rect: NSRect)?
-    // extra footer buttons left of Clear (e.g. a column's sort)
     var extraButtons: [(title: String, action: () -> Void)] = []
     private var extraTargets: [ClosureTarget] = []
     var onClose: (() -> Void)?
     var isOpen: Bool { popover != nil }
-    // palette: the Jira window's theme in the Cmd+F panel, else the system's
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     func applyColors(_ c: PopupColors) { colors = c }
 
@@ -397,8 +339,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     override var isFlipped: Bool { true }
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: JiraTheme.height) }
 
-    // set without firing onChange; unknown ids stay (listed as "not in the
-    // directory") so an old value can still be seen and removed
     func set(_ ids: [String], all: Bool = false) {
         selected = all ? [] : ids
         isAll = all && allTitle != nil
@@ -416,8 +356,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         toolTip = isAll ? allTitle : names.isEmpty ? "Choose \(noun)s (type to filter)" : names.joined(separator: ", ")
         needsDisplay = true
     }
-
-    // MARK: drawing — one surface, value pills inside, chevron in its own slot
 
     private var focused: Bool { window?.firstResponder === self || popover != nil }
 
@@ -450,7 +388,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let more = rest > 0 ? width("+\(rest)") + 4 : 0
             var w = min(width(t), 200)
             if x + w + more > limit {
-                // no room: the first pill shrinks to fit, later ones fold into "+N"
                 if i == 0 { w = max(24, limit - x - more) } else {
                     pill("+\(items.count - i)", x: x, w: width("+\(items.count - i)"), h: pillH, attrs: attrs, dim: true)
                     return
@@ -484,7 +421,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     override func mouseEntered(with event: NSEvent) { hover = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hover = false; needsDisplay = true }
 
-    // align with form labels (NSGridView .firstBaseline rows)
     override var firstBaselineOffsetFromTop: CGFloat { JiraTheme.baseline() }
     override var lastBaselineOffsetFromBottom: CGFloat { JiraTheme.height - JiraTheme.baseline() }
 
@@ -493,11 +429,8 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
     override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
     override func keyDown(with event: NSEvent) {
-        // Space / Return / Down on the focused control open the list
         if [49, 36, 125].contains(event.keyCode) { togglePopover(nil) } else { super.keyDown(with: event) }
     }
-
-    // MARK: popover
 
     @objc func togglePopover(_ sender: Any?) {
         if let p = popover { p.close(); return }
@@ -545,7 +478,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let w = max(extraButtons.isEmpty ? 340 : 440, bounds.width)
         expanded = []
         refilter()
-        // list height fits the rows (4 … 14 visible)
         let listH = CGFloat(min(14, max(4, shown.count))) * 24 + 4
         let h = listH + 80
         stack.frame = NSRect(x: 0, y: 0, width: w, height: h)
@@ -553,7 +485,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let vc = NSViewController()
         vc.view = stack
         let p = NSPopover()
-        // the popover's own material follows the theme (light / dark card)
         p.appearance = NSAppearance(named: colors.isLight ? .aqua : .darkAqua)
         p.behavior = .transient
         p.contentViewController = vc
@@ -567,18 +498,13 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         } else {
             p.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
         }
-        // the list takes the keyboard AT ONCE (typing filters, Ctrl+N/P / ↑↓
-        // move, Esc closes): make the popover's window key, not just its
-        // first responder — else every key still went to the window below
-        // (Esc closed the whole jira window). Again after the show animation.
         focusSearch()
         DispatchQueue.main.async { [weak self] in self?.focusSearch() }
-        // rule: Esc closes a transient overlay, never the window under it
         PopupWindow.transientEscape = { [weak self] in self?.closePopover() }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self, let win = self.search.window, win.isKeyWindow else { return e }
             let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if mods == .control, e.keyCode == 45 || e.keyCode == 35 {   // Ctrl+N / Ctrl+P
+            if mods == .control, e.keyCode == 45 || e.keyCode == 35 {
                 self.moveHighlight(e.keyCode == 45 ? 1 : -1)
                 return nil
             }
@@ -610,7 +536,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         onClose?()
     }
 
-    // close the list (e.g. a footer action that is done with it)
     func closePopover() { popover?.close() }
 
     private func refilter() {
@@ -620,7 +545,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
             list = groupedRows()
             if let a = allTitle { list.insert(Option(id: Self.allID, title: a, detail: ""), at: 0) }
         } else if q.isEmpty {
-            // picked first (in pick order), then the rest in list order
             let picked = selected.compactMap { id in options.first { $0.id == id } }
             list = picked + options.filter { !selected.contains($0.id) }
             if let a = allTitle { list.insert(Option(id: Self.allID, title: a, detail: ""), at: 0) }
@@ -636,8 +560,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         updateCount()
     }
 
-    // header per group (its options' ids picked as one), the used options,
-    // the picked unused ones, then "Show N unused" unless expanded
     private func groupedRows() -> [Option] {
         var order = groupOrder.filter { g in options.contains { $0.group == g } }
         for o in options where !order.contains(o.group) { order.append(o.group) }
@@ -686,7 +608,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
             return
         }
         if o.id.hasPrefix(Self.groupPrefix) {
-            // the whole group: all on, or all off when it already was
             let ids = groupIDs(String(o.id.dropFirst(Self.groupPrefix.count)))
             if isOn(o) { selected.removeAll { ids.contains($0) } } else { selected += ids.filter { !selected.contains($0) } }
             if !ids.isEmpty { isAll = false }
@@ -753,8 +674,6 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return c
     }
 
-    // a group header (small caps label + count, its box picks the group) or
-    // the "Show N unused" fold (accent text)
     private func sectionCell(_ o: Option) -> NSView {
         let header = o.id.hasPrefix(Self.groupPrefix)
         let t = NSTextField(labelWithString: header ? o.title.uppercased() : o.title)
@@ -811,16 +730,13 @@ final class JiraMultiPicker: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 }
 
-// MARK: - JiraSearchPanel
-
 final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private static var live: JiraSearchPanel?
-    private static var parkedAt: Date?     // detached by a window rebuild (reattach soon after)
+    private static var parkedAt: Date?
     private static let stateKey = "jiraLiveSearch.state"
 
     static func toggle(on w: PopupWindow, controller: SwitcherController) {
         if let p = live, p.attached, p.host === w {
-            // Cmd+F from the list focuses the search; from the search, closes it
             if w.topAccessoryHasFocus { p.close() } else { p.win?.makeFirstResponder(p.textField) }
             return
         }
@@ -829,16 +745,12 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         p.attach(to: w)
     }
 
-    // the jira window is being rebuilt / torn down: take the strip out
     static func detach(from w: PopupWindow) {
         guard let p = live, p.host === w, p.attached else { return }
         parkedAt = Date()
         p.unhook()
     }
 
-    // the shared window switched away from / back to the jira list: the
-    // strip lives INSIDE the jira window, so it parks with it — only the
-    // theme / lists are refreshed when it comes back
     static func park(from w: PopupWindow) {}
     static func unpark(to w: PopupWindow) {
         guard let p = live, p.host === w, p.attached else { return }
@@ -846,28 +758,23 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         p.reloadLists()
     }
 
-    // the rebuilt jira window: bring a panel parked moments ago back
     static func reattach(to w: PopupWindow) {
         guard let p = live, let t = parkedAt, Date().timeIntervalSince(t) < 3 else { return }
         parkedAt = nil
         p.attach(to: w)
     }
 
-    // criterion kinds for "+ Filter". Everything with a known set of values
-    // is a picker over the directory cache (never free text); only the
-    // "… contains" rows take typed text.
     private enum ValueKind { case users, list, date, text }
     private struct Kind { let key: String; let title: String; let value: ValueKind }
     private final class Row {
         let kind: Kind
         let view: NSStackView
-        let control: NSView      // JiraMultiPicker / JiraChoiceButton / NSTextField
+        let control: NSView
         init(kind: Kind, view: NSStackView, control: NSView) { self.kind = kind; self.view = view; self.control = control }
     }
 
     private weak var controller: SwitcherController?
     fileprivate weak var host: PopupWindow?
-    // the strip docked under the jira window's header (was a floating panel)
     let container = NSView()
     private let hairline = NSView()
     fileprivate var win: NSWindow? { host?.nativeWindow }
@@ -889,8 +796,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private let addFilter = JiraChoiceButton()
     private let searchButton: ThemeButton
     private let rowsStack = NSStackView()
-    // filter rows scroll inside a capped area so the panel stays docked
-    // above the Jira window however many rows there are
     private let rowsScroll = NSScrollView()
     private let rowsDoc = JiraFlippedView()
     private var rowsHeight: NSLayoutConstraint?
@@ -899,9 +804,8 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private let maxChoice = JiraChoiceButton()
     private let fetchButton: ThemeButton
     private let stack = NSStackView()
-    private var labels: [NSTextField] = []    // secondary text (row titles): themed dim
+    private var labels: [NSTextField] = []
 
-    // one font / radius for every button in the panel
     private static var buttonConfig: PopupConfig {
         var c = PopupConfig(name: "jira-search")
         c.buttonFontSize = 12
@@ -947,7 +851,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         fetchButton = Self.themeButton("Fetch from Jira", symbol: "arrow.down.circle",
                                        tip: "Run the weekly directory job now: projects, users, statuses, releases, labels") { fetch?() }
         super.init()
-        // the primary action wears the accent (the "on" chip look)
         searchButton.isOn = true
         run = { [weak self] in self?.run(nil) }
         fetch = { [weak self] in self?.fetchDirectory(nil) }
@@ -955,8 +858,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     }
 
     private func build() {
-        // surface = a mantle well under the jira window's header (the same
-        // layer as its tab strip / table header), a hairline below it
         container.wantsLayer = true
         hairline.wantsLayer = true
         hairline.frame = NSRect(x: 0, y: 0, width: 100, height: 1)
@@ -1048,7 +949,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         return s
     }
 
-    // the Jira window's palette on every surface, control and label
     fileprivate func applyTheme(_ cfg: PopupConfig) {
         colors = cfg.colors
         let light = ButtonStyle.luminance(colors.background) > 0.45
@@ -1064,8 +964,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         for l in labels { l.textColor = colors.dim }
         status.textColor = colors.dim
     }
-
-    // MARK: attach / detach
 
     private func attach(to w: PopupWindow) {
         if let old = host, old !== w { old.setTopAccessory(nil); old.onAccessoryEscape = nil }
@@ -1093,9 +991,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         h?.nativeWindow.makeKeyAndOrderFront(nil)
     }
 
-    // docked under the jira window's header, full width; when the filter
-    // rows outgrow ~40% of the window THEY scroll, so the list always keeps
-    // most of the room
     private func place() {
         guard let w = host else { return }
         rowsScroll.isHidden = rows.isEmpty
@@ -1103,14 +998,13 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         let natural = rows.isEmpty ? 0 : ceil(rowsStack.fittingSize.height)
         rowsHeight?.constant = natural
         stack.layoutSubtreeIfNeeded()
-        let chrome = ceil(stack.fittingSize.height) - natural   // search row + footer + insets
+        let chrome = ceil(stack.fittingSize.height) - natural
         let room = max(min(natural, 34), w.nativeWindow.frame.height * 0.4 - chrome)
         let rowsH = min(natural, room)
         rowsHeight?.constant = rowsH
         w.setTopAccessory(container, height: chrome + rowsH)
     }
 
-    // keep the newest filter row in view when the rows scroll
     private func scrollRowsToBottom() {
         rowsDoc.layoutSubtreeIfNeeded()
         let clip = rowsScroll.contentView
@@ -1121,17 +1015,13 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     private func installKeys() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            // only while the strip holds focus in the key jira window (Esc and
-            // Cmd+F reach it through the window: onAccessoryEscape / toggle)
             guard let self, let w = self.host, w.nativeWindow.isKeyWindow,
                   w.topAccessoryHasFocus else { return e }
             let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if mods.contains(.command) && e.keyCode == 36 { self.run(nil); return nil } // Cmd+Return
+            if mods.contains(.command) && e.keyCode == 36 { self.run(nil); return nil }
             return JiraEditKeys.route(e, in: w.nativeWindow) ? nil : e
         }
     }
-
-    // MARK: data
 
     fileprivate func reloadLists() {
         dir = JiraDirectory.load()
@@ -1149,13 +1039,11 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         }
     }
 
-    // describe: team project keys, the field catalog (labels, + Filter), max results
     private func loadInfo() {
         JiraPoll.run("jira_poll.py", ["--describe"]) { [weak self] _, out, _ in
             guard let self, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] else { return }
             self.info = d
             self.projects.options = self.dir.projectOptions(scope: d["projectKeys"] as? [String] ?? [])
-            // first use: the team's projects (team.json project_keys), else all
             if self.projects.selected.isEmpty && !self.projects.isAll && !self.hasSavedState {
                 let pk = d["projectKeys"] as? [String] ?? []
                 self.projects.set(pk, all: pk.isEmpty)
@@ -1171,7 +1059,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         }
     }
 
-    // a field's one label (Jira Config ▸ Definitions ▸ Fields), else `fallback`
     private func fieldLabel(_ field: String, _ fallback: String) -> String {
         for c in info["catalog"] as? [[String: Any]] ?? [] where c["field"] as? String == field {
             if let l = c["label"] as? String, !l.isEmpty { return l }
@@ -1195,7 +1082,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
             Kind(key: "field:title", title: "\(fieldLabel("title", "Summary")) contains", value: .text),
             Kind(key: "field:description", title: "\(fieldLabel("description", "Description")) contains", value: .text),
         ]
-        // every other known text column (team custom fields, raw ids) as "contains"
         let skip: Set<String> = ["key", "title", "status", "assignee", "release", "releaseLabel",
                                  "releaseDate", "releaseStatus", "priority", "labels", "description",
                                  "reporter", "project", "updated", "comments"]
@@ -1213,7 +1099,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         addFilter.disabled = Set(rows.map(\.kind.key))
     }
 
-    // the catalog arrived after rows were restored: show the fields' labels
     private func relabelRows() {
         let ks = kinds
         for r in rows {
@@ -1222,8 +1107,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
             l.stringValue = t
         }
     }
-
-    // MARK: criterion rows
 
     private func addFilterPicked(_ key: String) {
         guard let k = kinds.first(where: { $0.key == key }), !rows.contains(where: { $0.kind.key == key }) else { return }
@@ -1286,7 +1169,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         return r
     }
 
-    // picked projects scope the label / release lists (nil = all projects)
     private var projectScope: [String]? {
         projects.isAll || projects.selected.isEmpty ? nil : projects.selected
     }
@@ -1325,8 +1207,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ obj: Notification) { saveState() }
-
-    // MARK: criteria / state
 
     private func criteria() -> [String: Any] {
         var c: [String: Any] = [:]
@@ -1380,15 +1260,12 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         projects.set(st["projects"] as? [String] ?? [], all: st["projectsAll"] as? Bool ?? false)
         for o in st["rows"] as? [[String: Any]] ?? [] {
             guard let key = o["key"] as? String else { continue }
-            // a column row needs the catalog (not loaded yet): rebuild its kind;
-            // retired kinds (Raw JQL) are dropped
             let k = kinds.first { $0.key == key }
                 ?? (key.hasPrefix("field:") ? Kind(key: key, title: "\(key.dropFirst(6)) contains", value: .text) : nil)
             guard let k, !rows.contains(where: { $0.kind.key == key }) else { continue }
             let r = addRow(k)
             switch r.control {
             case let p as JiraMultiPicker:
-                // labels / releases used to be typed "a, b" text
                 let old = (o["value"] as? String ?? "").split(separator: ",")
                     .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
                 p.set(o["values"] as? [String] ?? old)
@@ -1400,9 +1277,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         }
     }
 
-    // MARK: actions
-
-    // .secondaryLabelColor / .labelColor map onto the theme's dim / text
     private func setStatus(_ s: String, _ c: NSColor) {
         status.stringValue = s
         status.textColor = c == .secondaryLabelColor ? colors.dim : c == .labelColor ? colors.text
@@ -1480,7 +1354,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
     }
 }
 
-// top-down document view for the search panel's scrolling filter rows
 final class JiraFlippedView: NSView {
     override var isFlipped: Bool { true }
 }

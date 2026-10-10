@@ -1,18 +1,5 @@
-// ConfigText.swift — commands.toml as TEXT: the one-line TOML codec, the
-// section scanner and the pure edits every reader / writer goes through.
-// Foundation only (no app state, no file IO), so Tests/test_config.swift
-// compiles it on its own. Reading / validating / writing the file itself
-// (readConfigText, writeConfigText, validateConfig) stays in
-// kitchen_sink.swift.
-
 import Foundation
 
-// commands.toml is TOML, read line by line: `[section]` headers, then one
-// `key = value` per line. Keys are bare or "quoted"; values are "basic" /
-// 'literal' strings, bare true/false/numbers, or a one-line [array] (read as
-// "a, b"). Every value reaches the app as a String — lists stay comma-
-// separated inside one string. Old unquoted values still read as written.
-// Mirrored in python: jira_config.config_entry / config_line.
 func configEntry(_ line: String) -> (key: String, value: String)? {
     let s = line.trimmingCharacters(in: .whitespaces)
     guard !s.isEmpty, !s.hasPrefix("#"), !s.hasPrefix("[") else { return nil }
@@ -32,19 +19,16 @@ func configEntry(_ line: String) -> (key: String, value: String)? {
     return (key, tomlValue(rest.trimmingCharacters(in: .whitespaces)))
 }
 
-// the name of a `[section]` header line (inner spaces trimmed), else nil
 func configSectionHeader(_ line: String) -> String? {
     let s = line.trimmingCharacters(in: .whitespaces)
     guard s.hasPrefix("[") && s.hasSuffix("]") else { return nil }
     return String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
 }
 
-// commands.toml text as editable lines (empty lines kept, so a join restores it)
 func configLines(_ text: String) -> [String] {
     text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 }
 
-// every `key = value` entry of [section] in file order, with its index in `lines`
 func configSectionEntries(_ lines: [String], _ section: String)
     -> [(index: Int, key: String, value: String)] {
     var out: [(index: Int, key: String, value: String)] = []
@@ -59,7 +43,6 @@ func configSectionEntries(_ lines: [String], _ section: String)
     return out
 }
 
-// `key = value` as a TOML line (strings quoted, bools/numbers bare)
 func configLine(_ key: String, _ value: String) -> String {
     let bare = !key.isEmpty && key.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
     return (bare ? key : tomlQuote(key)) + " = "
@@ -87,7 +70,6 @@ private func tomlQuote(_ v: String) -> String {
     return out + "\""
 }
 
-// a "basic" or 'literal' string at the start of `s` → (text, what follows)
 private func tomlScanString(_ s: Substring) -> (String, Substring)? {
     guard let q = s.first, q == "\"" || q == "'" else { return nil }
     var i = s.index(after: s.startIndex)
@@ -127,8 +109,6 @@ private func tomlScanString(_ s: Substring) -> (String, Substring)? {
     return nil
 }
 
-// the text of a value: strings unquoted, [arrays] joined ", ", bare values
-// as written (a trailing `# comment` dropped only after a TOML scalar)
 private func tomlValue(_ raw: String) -> String {
     func onlyComment(_ rest: Substring) -> Bool {
         let t = rest.trimmingCharacters(in: .whitespaces)
@@ -165,16 +145,11 @@ private func tomlValue(_ raw: String) -> String {
     return raw
 }
 
-// `lines` with several keys of one [section] set (or, for a nil value,
-// removed): a key is updated where it is, else added after the section's
-// last entry (or under a new section at the end). A key listed twice is
-// edited where it takes effect: the last one (validateConfig).
 func configSetting(_ lines: [String], section: String, _ kv: [(String, String?)]) -> [String] {
     var lines = lines
     for (key, value) in kv {
         let entries = configSectionEntries(lines, section)
         let found = entries.last(where: { $0.key == key })?.index
-        // the new line's slot: after the section's last entry, else its header
         let header = lines.indices.last(where: { configSectionHeader(lines[$0]) == section })
         let lastInSection = entries.last.map { max($0.index, header ?? -1) } ?? header
         switch (found, value) {
@@ -192,7 +167,6 @@ func configSetting(_ lines: [String], section: String, _ kv: [(String, String?)]
     return lines
 }
 
-// "true/yes/1/on" | "false/no/0/off" | anything else = nil (unset)
 func tri(_ s: String?) -> Bool? {
     switch s?.lowercased() {
     case "true", "yes", "1", "on": return true
@@ -201,9 +175,6 @@ func tri(_ s: String?) -> Bool? {
     }
 }
 
-// Resolve a binary by name: checks the PATH, returns the absolute path
-// or nil if not found. If the input is already an absolute path, returns
-// it directly if it exists.
 func resolveBinary(_ name: String) -> String? {
     if name.hasPrefix("/") {
         return FileManager.default.isExecutableFile(atPath: name) ? name : nil

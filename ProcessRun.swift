@@ -1,20 +1,11 @@
-// ProcessRun.swift — run a program to completion and collect its output.
-// Foundation only: the AppKit-free files (AIFormat, RecentFiles) and their
-// tests compile it too.
-
 import Foundation
 
 struct ProcessOutput {
     let code: Int32
     let out: String
-    let err: String   // empty with mergeStderr (it went into `out`)
+    let err: String
 }
 
-// Runs `exe args` to completion — blocking, so call it off the main thread
-// for anything slow. `stdin` is fed to the program (none = /dev/null);
-// stdout and stderr are drained concurrently, so a full stderr pipe can
-// never stall the child while stdout is read. `mergeStderr`: one stream,
-// in `out`. Throws when the program can't be started.
 func runProcess(_ exe: String, _ args: [String], stdin: String? = nil,
                 env: [String: String]? = nil, mergeStderr: Bool = false) throws -> ProcessOutput {
     let p = Process()
@@ -40,8 +31,6 @@ func runProcess(_ exe: String, _ args: [String], stdin: String? = nil,
     if !mergeStderr { drain(err) { errData = $0 } }
     if let inp, let stdin {
         let w = inp.fileHandleForWriting
-        // a program that exits without reading its input must not take the
-        // app down with SIGPIPE: the write just fails
         _ = fcntl(w.fileDescriptor, F_SETNOSIGPIPE, 1)
         try? w.write(contentsOf: Data(stdin.utf8))
         try? w.close()

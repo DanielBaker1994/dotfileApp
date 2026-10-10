@@ -59,8 +59,8 @@ Output:
                             project (or just -p PROJECT):
                             [{project,name,released,releaseDate,description}]
   -verbose, --verbose       append the raw curl endpoint reference to
-                            /tmp/jira_api_dump.txt and a timestamped request
-                            trace to /tmp/jira_api_trace.txt
+                            ~/.cache/jira/api_dump.txt and a timestamped request
+                            trace to ~/.cache/jira/api_trace.txt ($JIRA_CACHE_DIR)
   --debug                   print the JQL and request URLs
   --no-auth-check           skip the /myself login verification at startup
 
@@ -89,20 +89,21 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jira_config  # noqa: E402
+import jira_paths  # noqa: E402
 import jira_log  # noqa: E402
 
 LOG = jira_log.LOG
 
 CACHE_DIR = jira_config.CACHE_DIR
-CACHE_FILE = os.path.join(CACHE_DIR, "jiras.json")
+CACHE_FILE = jira_paths.cache_file("issues")
 STATE_FILE = os.path.join(CACHE_DIR, "state")
 VERSIONS_FILE = os.path.join(CACHE_DIR, "versions.json")
-DIRECTORY_FILE = os.path.join(CACHE_DIR, "directory.json")   # the pickers' lists
+DIRECTORY_FILE = jira_paths.cache_file("directory")   # the pickers' lists
 DUMP_DIR = os.path.join(CACHE_DIR, "dumps")
-CURL_LOG = os.path.join(CACHE_DIR, "curl.log")
+CURL_LOG = jira_paths.cache_file("curlLog")
 CURL_LOG_MAX = 5 * 1024 * 1024        # rotate: keep the newest ~2MB past 5MB
-CURL_DUMP = "/tmp/jira_api_dump.txt"
-TRACE_FILE = "/tmp/jira_api_trace.txt"
+CURL_DUMP = os.path.join(CACHE_DIR, "api_dump.txt")     # --verbose: curl per api_endpoints entry
+TRACE_FILE = os.path.join(CACHE_DIR, "api_trace.txt")   # --verbose: timestamped request trace
 
 QUERY_FIELDS = "summary,status,assignee,fixVersions,description,updated,priority,labels"
 
@@ -540,6 +541,7 @@ def log_curl(argv: list, code) -> None:
 
 def trace(msg: str) -> None:
     try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
         with open(TRACE_FILE, "a", encoding="utf-8") as fh:
             fh.write(f"+{time.time():.6f} {msg}\n")
     except OSError:
@@ -562,8 +564,10 @@ def show_curl_ref(c: Client) -> None:
         qs = f"jql={qenc('project = PROJ ORDER BY updated DESC')}&maxResults=25" if name == "search" else ""
         lines += [f"{name}:  GET {path}", "   " + c.curl_cmd(c.url(path, qs), masked=True)]
     lines += ["", ""]
+    os.makedirs(CACHE_DIR, exist_ok=True)
     with open(CURL_DUMP, "a", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
+    os.chmod(CURL_DUMP, 0o600)
     print(f"jira-api: curl reference appended to {CURL_DUMP}", file=sys.stderr)
 
 

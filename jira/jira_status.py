@@ -33,11 +33,13 @@ import sys
 import tempfile
 import time
 
+import jira_paths
+
 HOME = os.path.expanduser("~")
-CACHE_DIR = os.environ.get("JIRA_CACHE_DIR") or os.path.join(HOME, ".cache/jira")
-STATUS_FILE = os.path.join(CACHE_DIR, "status.json")
+CACHE_DIR = jira_paths.CACHE_DIR
+STATUS_FILE = jira_paths.cache_file("status")
 STATUS_LOCK = os.path.join(CACHE_DIR, "status.lock")
-CURL_LOG = os.path.join(CACHE_DIR, "curl.log")
+CURL_LOG = jira_paths.cache_file("curlLog")
 POLL_LOCK = os.path.join(CACHE_DIR, "poll.lock")
 POLL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_poll.py")
 

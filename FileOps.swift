@@ -1,30 +1,21 @@
 import Foundation
 
-// The file browser's file operations (trash / new / duplicate / copy / move)
-// and their undo. Synchronous and AppKit-free: callers run them off the main
-// thread and report `Outcome.changes` to the Recent list themselves
-// (`FileDrag.onFileOp`). Every op that succeeds pushes ONE undo record.
-// Tests: bin/run-tests.sh fileops (Tests/test_file_ops.swift).
 enum FileOps {
-    // what was done: a file that moved (from → to) or appeared (from nil)
     typealias Change = (from: String?, to: String)
 
     struct Outcome {
         var changes: [Change] = []
-        var failed: String?          // the first error, "name: why"
+        var failed: String?
         var paths: [String] { changes.map { $0.to } }
     }
 
     enum Record {
-        case moved([(from: String, to: String)])     // rename / move: move back
-        case created([String])                       // copy / duplicate / new: trash it
-        case trashed([(from: String, to: String)])   // trash: put back
-        indirect case group(String, [Record])        // `place`: undone last step first
+        case moved([(from: String, to: String)])
+        case created([String])
+        case trashed([(from: String, to: String)])
+        indirect case group(String, [Record])
     }
 
-    // an undo history. `shared` = the file browser's (and every caller that
-    // passes none); a Folder Compare session owns its own, so its Cmd+Z never
-    // takes back a file browser op (and the other way round)
     final class UndoStack {
         private let lock = NSLock()
         private var stack: [Record] = []
@@ -50,8 +41,6 @@ enum FileOps {
             stack.removeAll()
         }
 
-        // the records pushed since `count` was `since` become ONE step (a
-        // Synchronize = copies + trash, undone together)
         func collapse(since: Int, _ what: String) {
             lock.lock(); defer { lock.unlock() }
             guard since >= 0, stack.count - since > 1 else { return }
@@ -69,7 +58,6 @@ enum FileOps {
 
     static func forgetUndo() { shared.forget() }
 
-    // "name.ext" -> "name 2.ext", "name 3.ext"… until it's free
     static func freeURL(_ name: String, in dir: URL) -> URL {
         let fm = FileManager.default
         var url = dir.appendingPathComponent(name)
@@ -83,7 +71,6 @@ enum FileOps {
         return url
     }
 
-    // Finder's duplicate name: "name copy.ext", then "name copy 2.ext"…
     static func copyURL(of url: URL) -> URL {
         let name = url.lastPathComponent
         let base = (name as NSString).deletingPathExtension
@@ -97,19 +84,16 @@ enum FileOps {
         if out.failed == nil { out.failed = "\(name): \(error.localizedDescription)" }
     }
 
-    // copy / move `urls` into `dir`; name clashes keep both
     static func transfer(_ urls: [URL], into dir: String, move: Bool, undo: UndoStack = shared) -> Outcome {
         let fm = FileManager.default
         let dest = URL(fileURLWithPath: dir, isDirectory: true)
         var out = Outcome()
         for u in urls {
             let src = u.standardizedFileURL
-            // a folder into itself / its own subfolder
             if dir == src.path || dir.hasPrefix(src.path + "/") {
                 if out.failed == nil { out.failed = "\(u.lastPathComponent): can't go inside itself" }
                 continue
             }
-            // moving to where it already is: nothing to do
             if move, src.deletingLastPathComponent().path == dest.standardizedFileURL.path { continue }
             let target = freeURL(u.lastPathComponent, in: dest)
             do {
@@ -155,14 +139,12 @@ enum FileOps {
         return out
     }
 
-    // move to the Trash; `changes` = (where it was, where it is in the Trash)
     static func trash(_ paths: [String], undo: UndoStack = shared) -> Outcome {
         let out = trashOnly(paths)
         if !out.changes.isEmpty { undo.push(.trashed(out.changes.map { ($0.from ?? "", $0.to) })) }
         return out
     }
 
-    // an empty folder / file named `name` in `dir` (kept free: "untitled folder 2")
     static func create(_ name: String, in dir: String, folder: Bool, undo: UndoStack = shared) -> Outcome {
         let fm = FileManager.default
         let url = freeURL(name, in: URL(fileURLWithPath: dir, isDirectory: true))
@@ -181,7 +163,6 @@ enum FileOps {
         return out
     }
 
-    // a rename the caller did itself
     static func recordRename(from: String, to: String, undo: UndoStack = shared) {
         undo.push(.moved([(from, to)]))
     }
@@ -190,7 +171,6 @@ enum FileOps {
         let fm = FileManager.default
         var out = Outcome()
         for (from, to) in pairs.reversed() {
-            // a case-only rename: the "old" name still exists — as this file
             let sameFile = from.lowercased() == to.lowercased()
             if fm.fileExists(atPath: from), !sameFile {
                 if out.failed == nil {
@@ -210,10 +190,6 @@ enum FileOps {
 
     enum Clash { case replace, keepBoth, skip }
 
-    // copy / move each `src` to EXACTLY `dst` (Folder Compare: the same path
-    // on the other side). Missing parent folders are made; a clash is handled
-    // per `clash` (replace = the old target goes to the Trash first). ONE undo
-    // step for the whole batch.
     static func place(_ items: [(src: String, dst: String)], move: Bool, clash: Clash, undo: UndoStack = shared) -> Outcome {
         let fm = FileManager.default
         var out = Outcome()
@@ -243,7 +219,6 @@ enum FileOps {
                     trashed += t.changes.map { ($0.from ?? "", $0.to) }
                 }
             }
-            // the first missing ancestor = what undo has to remove
             var parent = (dst as NSString).deletingLastPathComponent
             var firstNew: String?
             while parent != "/", !parent.isEmpty, !fm.fileExists(atPath: parent) {
@@ -260,11 +235,9 @@ enum FileOps {
                 note(&out, (src as NSString).lastPathComponent, error)
             }
         }
-        // a folder made for the batch already covers what was put inside it
         let top = Set(made).filter { m in !made.contains { $0 != m && m.hasPrefix($0 + "/") } }
         let madeTop = made.filter { top.contains($0) }
         if !trashed.isEmpty { group.append(.trashed(trashed)) }
-        // undone last first: moved back, then the folders made for it go
         if !madeTop.isEmpty { group.append(.created(Array(NSOrderedSet(array: madeTop)) as? [String] ?? madeTop)) }
         if !moved.isEmpty { group.append(.moved(moved)) }
         if !group.isEmpty {
@@ -274,7 +247,6 @@ enum FileOps {
         return out
     }
 
-    // undo the last op; nil = nothing to undo. `what` reads "undid <what>".
     static func undo(_ stack: UndoStack = shared) -> (what: String, outcome: Outcome)? {
         guard let r = stack.pop() else { return nil }
         return undo(r)

@@ -1,26 +1,9 @@
 #!/usr/bin/env bash
-# fzf-free kitchen sink: native AppKit popup (Swift), themed from
-# commands.toml [theme]. If the daemon is running (Unix-socket ping succeeds), send a
-# toggle message; otherwise build-if-stale and launch it in the background.
-#
-# Usage:
-#   kitchen_sink.sh            toggle the main popup
-#   kitchen_sink.sh window     show the shared window on its last view / hide it
-#   kitchen_sink.sh notes      open ONLY the notes window (no popup)
-#   kitchen_sink.sh jira       open ONLY the jira window (no popup)
-#   kitchen_sink.sh voice      open ONLY the voice-to-text window
-#   kitchen_sink.sh jira-poll [on|off|toggle|setup]
-#                                    THE jira switch ([jira] enabled + the
-#                                    launchd poll agent) — NOT the window
-#                                    toggle above; needs a running daemon
-# (physical paths: an app install reaches this script through the link
-# ~/.config/kitchen-sink/bin -> <App>/Contents/Resources/bin)
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$DIR/.." && pwd -P)"
 . "$ROOT/install.conf"
 APP="$ROOT/$APP_NAME.app"
-# app install (DMG): this script lives INSIDE the bundle — nothing to build
 BUNDLED=0
 case "$ROOT" in *.app/Contents/Resources) BUNDLED=1; APP="${ROOT%/Contents/Resources}" ;; esac
 BIN="$APP/Contents/MacOS/$APP_NAME"
@@ -28,21 +11,12 @@ TMP="${TMPDIR:-/tmp}"
 FOCUS_FILE="$TMP/kitchen-sink-focus"
 MODE="${1:-}"
 
-# jira-poll: flip the poll feature through the running daemon (same code
-# path as the menu-bar "Enable Jira"/"Disable Jira": config check, login test, setup
-# window). Kept apart from `jira` (window) so the two never get conflated.
 if [ "$MODE" = "jira-poll" ]; then
     exec "$BIN" jira-poll "${2:-toggle}"
 fi
 
-# Hotkey tools run shell commands with a MINIMAL PATH, so `aerospace` is not
-# found unless we add its location (it would silently fail every IPC call).
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# Single-flight: overlapping invocations (rapid keypresses, a rebuild already
-# running) exit immediately — only one script drives the flow at a time, so
-# two daemons / double toggles can never race. (macOS has no flock; mkdir is
-# atomic. A stale lock from a crashed run older than 60s is cleared.)
 LOCK="$TMP/kitchen-sink.lockdir"
 if ! mkdir "$LOCK" 2>/dev/null; then
     if [ -d "$LOCK" ] && [ "$(find "$LOCK" -mmin +1 2>/dev/null)" = "$LOCK" ]; then
@@ -54,9 +28,6 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
-# Record the focused window (wid + app-pid) at keypress time so the switcher
-# can hand focus back when dismissed. ONE aerospace call also gives the
-# focused workspace (used by the window modes below).
 LINE=$(aerospace list-windows --focused --format '%{window-id} %{app-pid} %{workspace}')
 read -r WID APID CUR <<<"$LINE"
 if [ -n "$WID" ]; then

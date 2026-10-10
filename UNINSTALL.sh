@@ -1,23 +1,11 @@
 #!/usr/bin/env bash
-# UNINSTALL.sh — remove the whole kitchen-sink stack.
-#
-#   ./UNINSTALL.sh
-#
-# Stops the services, kills the daemon, removes configs/launchd/TCC/caches.
-# Your personal files (notes, ~/.config/jira) are left alone.
 set -uo pipefail
 
-# Works for both installs: run from the checkout (repo install), or the copy
-# inside the app (app install):
-#   /Applications/kitchen-sink.app/Contents/Resources/UNINSTALL.sh
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 UID_="$(id -u)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-# every name/path removed below lives in install.conf
 . "$ROOT/install.conf"
 WS_HOME="${WS_HOME:-$WS_HOME_DEFAULT}"
-# app install: the configs the links point at live in the home, and the app
-# itself is this script's bundle
 APP_BUNDLE=""
 LINK_ROOT="$ROOT"
 case "$ROOT" in *.app/Contents/Resources)
@@ -49,11 +37,9 @@ launchctl bootout "gui/$UID_" "$PLIST" 2>/dev/null || true
 rm -f "$PLIST"
 ok "poll agent removed"
 
-# only OUR links go; real files / directories are never moved or deleted
 step "removing the config links"
 for d in $CONFIG_DIRS; do
     dst="$HOME/.config/$d"
-    # links into this repo (INSTALL.sh) just go — the repo keeps the files
     if [ -L "$dst" ]; then
         case "$(readlink "$dst")" in "$ROOT"/*|"$LINK_ROOT"/*|"$WS_HOME"/*) rm "$dst"; continue ;; esac
     elif [ -d "$dst" ]; then
@@ -73,20 +59,15 @@ killall tccd 2>/dev/null || true
 ok "permissions removed"
 
 step "removing caches and runtime files"
-# space-separated lists from install.conf: split on purpose
-# sanity: never let a corrupt/empty entry turn into `rm -rf /` or `rm -rf $HOME`
 for d in $CACHE_DIRS; do
     case "$d" in
         ""|/|"$HOME") warn "refusing to remove '$d' (suspicious cache path)" ;;
         *) rm -rf "$d" ;;
     esac
 done
-# shellcheck disable=SC2086
 rm -f $RUNTIME_FILES
 ok "caches removed"
 
-# app install: the app goes to the Trash; the home (your commands.toml,
-# rules, config copies) stays where it is. A checkout is never touched.
 if [ -n "$APP_BUNDLE" ]; then
     step "removing the app"
     [ -d "$WS_HOME" ] && ! [ -L "$WS_HOME" ] && ok "your settings are still in $WS_HOME — delete it if you don't want them"

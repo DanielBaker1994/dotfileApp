@@ -1,8 +1,4 @@
 // sources: AIFormat.swift ProsePDF.swift ProcessRun.swift
-// Prose: highlighted fences (RichText.pandocHTML highlight:) and Export PDF
-// (ProsePDF: pandoc -s → weasyprint). The real run needs both installed.
-// Usage: bin/run-tests.sh prose
-
 import Foundation
 
 func aiSetting(_ key: String, _ fallback: String) -> String { fallback }
@@ -33,7 +29,6 @@ struct Main {
         let pa = ProsePDF.pandocArgs(note: "/n/a.md", css: "/c.html", html: "/t/pdf.html", c)
         check(pa.contains("--syntax-highlighting=tango") && pa.contains("--include-in-header=/c.html")
               && pa.contains("--resource-path=/n") && pa.last == "/n/a.md", "pandoc argv: \(pa)")
-        // diagram filter: beside pdf-css by default, "none" turns it off, a missing file is skipped
         let ftmp = NSTemporaryDirectory() + "ws-filter-test"
         try? FileManager.default.createDirectory(atPath: ftmp, withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: ftmp + "/diagrams.lua", contents: Data("return {}".utf8))
@@ -49,14 +44,12 @@ struct Main {
         check(ProsePDF.engineArgs(note: "/n/a.md", html: "/t/p.html", out: "/o.pdf") == ["--pdf-tags", "-u", "file:///n/", "/t/p.html", "/o.pdf"],
               "weasyprint argv")
 
-        // missing engine → a hint, no crash
         var bad = c
         bad.engine = "/nonexistent/weasyprint"
         if case .failure(let e) = ProsePDF.export(note: "/n/a.md", bad) {
             check(e.description.contains("weasyprint"), "missing engine names it: \(e)")
         } else { check(false, "missing engine must fail") }
 
-        // the real thing
         let tmp = NSTemporaryDirectory() + "prose-pdf-\(getpid())"
         try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
@@ -75,7 +68,6 @@ struct Main {
                 print("  export: \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
             case .failure(let e): check(false, "export failed: \(e)")
             }
-            // reading view (gfm+sourcepos): task items are real checkboxes, text beside the box
             let tasks = tmp + "/tasks.md"
             try? "- [ ] todo\n- [x] done\n  - [ ] nested\n- plain\n".write(toFile: tasks, atomically: true, encoding: .utf8)
             let sh = ProsePDF.screenHTML(note: tasks, real) ?? ""

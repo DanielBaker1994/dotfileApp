@@ -1,11 +1,4 @@
 // sources: ScreenshotAnnotations.swift ScreenshotText.swift
-// /screenshot's pure parts (ScreenshotAnnotations.swift): the button ring's
-// placement at every screen edge + its fallbacks, counter renumbering,
-// undo / redo limits, Shift snapping, secure pixelate (no hidden pixel
-// survives), the filename pattern + clash suffix, the output size, the CLI,
-// Copy Text (ScreenshotText.swift): reading order + real Vision OCR.
-// Usage: bin/run-tests.sh screenshot
-
 import Foundation
 import CoreGraphics
 import CoreText
@@ -40,8 +33,6 @@ struct ScreenshotTests {
         exit(failed == 0 ? 0 : 1)
     }
 
-    // MARK: ring
-
     static func noOverlap(_ fs: [CGRect]) -> Bool {
         for i in fs.indices { for j in fs.indices where j > i && fs[i].insetBy(dx: 0.5, dy: 0.5).intersects(fs[j]) { return false } }
         return true
@@ -59,23 +50,19 @@ struct ScreenshotTests {
         check(ShotTool.ring("copy, nonsense, copy, exit", badge: false) == [.copy, .exit], "unknown + duplicate names dropped")
 
         let B: CGFloat = 34
-        // centered
         let sel = CGRect(x: 500, y: 300, width: 400, height: 250)
         let l = ButtonRing.layout(selection: sel, screen: screen, count: ring.count, button: B)
         check(l.frames.count == ring.count && !l.inside, "centered: every button placed, outside")
         check(l.frames.allSatisfy { screen.contains($0) }, "centered: all on screen")
         check(l.frames.allSatisfy { !$0.intersects(sel) }, "centered: none covers the selection")
         check(noOverlap(l.frames), "centered: no two buttons overlap")
-        // bottom row first: below the selection, left to right
         let perRow = Int((sel.width + (B / 4).rounded(.down)) / (B + (B / 4).rounded(.down)))
         check(l.frames.prefix(perRow).allSatisfy { $0.minY >= sel.maxY }, "bottom row first")
         check(zip(l.frames.prefix(perRow), l.frames.prefix(perRow).dropFirst()).allSatisfy { $0.minX < $1.minX }, "bottom row runs left to right")
-        // then the right column, bottom up
         let right = l.frames[perRow]
         check(right.minX >= sel.maxX, "then the right column")
         check(l.frames[perRow + 1].minY < right.minY, "right column runs bottom up")
 
-        // a selection touching each edge in turn
         let edges: [(String, CGRect)] = [
             ("left", CGRect(x: 0, y: 300, width: 300, height: 200)),
             ("right", CGRect(x: 1140, y: 300, width: 300, height: 200)),
@@ -91,14 +78,12 @@ struct ScreenshotTests {
             check(noOverlap(e.frames), "\(name): no overlap")
         }
 
-        // full screen: all sides blocked → inside, along the bottom edge
         let full = ButtonRing.layout(selection: screen, screen: screen, count: ring.count, button: B)
         check(full.inside, "full-screen selection puts the buttons inside")
         check(full.frames.allSatisfy { screen.contains($0) && $0.width == B }, "inside: all on screen")
         check(noOverlap(full.frames), "inside: no overlap")
         check(full.frames.first.map { $0.maxY >= screen.maxY - B - 10 } ?? false, "inside: first row at the bottom edge")
 
-        // tiny selections: laid out as if B wide
         let tiny = CGRect(x: 700, y: 400, width: 4, height: 4)
         let t = ButtonRing.layout(selection: tiny, screen: screen, count: ring.count, button: B)
         check(t.frames.allSatisfy { screen.contains($0) && $0.width == B } && noOverlap(t.frames), "tiny selection: placed, no overlap")
@@ -108,8 +93,6 @@ struct ScreenshotTests {
         check(ButtonRing.layout(selection: sel, screen: screen, count: 0, button: B).frames.isEmpty, "no buttons")
         check(ButtonRing.defaultButtonSize(lineHeight: 15.5) == 34, "button size = line height × 2.2")
     }
-
-    // MARK: document
 
     static func counter(_ x: CGFloat) -> ShotObject {
         ShotObject(tool: .counter, points: [CGPoint(x: x, y: 10)], color: .black, size: 1)
@@ -138,7 +121,6 @@ struct ScreenshotTests {
         check(d.objects.map(\.number) == [1, 2, 9], "renumber keeps the jump")
         check(ShotDocument(undoLimit: 5).nextCounterNumber() == 1, "the first bubble is 1")
 
-        // undo limit
         let lim = ShotDocument(undoLimit: 3)
         for i in 0..<5 { lim.add(counter(CGFloat(i * 50))) }
         check(lim.undoDepth == 3, "undo stack capped at undo-limit (\(lim.undoDepth))")
@@ -148,7 +130,6 @@ struct ScreenshotTests {
         lim.add(counter(1))
         check(!lim.canRedo, "a new change clears redo")
 
-        // moves, color + size changes are undoable; wheel notches coalesce
         let m = ShotDocument()
         m.add(ShotObject(tool: .selection, points: [CGPoint(x: 10, y: 10), CGPoint(x: 50, y: 50)], color: .black, size: 3))
         m.update(at: 0) { $0 = $0.moved(by: CGVector(dx: 5, dy: 5)) }
@@ -162,7 +143,6 @@ struct ScreenshotTests {
         m.undo()
         check(m.objects[0].start == CGPoint(x: 10, y: 10), "move undone")
 
-        // hit testing
         let h = ShotDocument()
         h.add(ShotObject(tool: .selection, points: [CGPoint(x: 100, y: 100), CGPoint(x: 200, y: 200)], color: .black, size: 3))
         h.add(ShotObject(tool: .line, points: [CGPoint(x: 0, y: 0), CGPoint(x: 50, y: 0)], color: .black, size: 3))
@@ -172,8 +152,6 @@ struct ScreenshotTests {
         h.reorder(from: 1, to: 0)
         check(h.objects[0].tool == .line, "reorder (Layers)")
     }
-
-    // MARK: snapping
 
     static func snapTests() {
         let o = CGPoint.zero
@@ -195,8 +173,6 @@ struct ScreenshotTests {
         check(ShotSnap.snap(.pencil, from: o, to: CGPoint(x: 3, y: 4)) == CGPoint(x: 3, y: 4), "pencil never snaps")
     }
 
-    // MARK: pixelate
-
     static func pixels(w: Int, h: Int, interior: CGRect, _ inner: (Int, Int) -> [UInt8], _ outer: (Int, Int) -> [UInt8]) -> ShotPixels {
         var data = [UInt8](repeating: 255, count: w * h * 4)
         for y in 0..<h {
@@ -211,7 +187,6 @@ struct ScreenshotTests {
 
     static func pixelateTests() {
         let interior = CGRect(x: 30, y: 30, width: 40, height: 40)
-        // unique interior: pure green; the fringe: grays + reds
         let px = pixels(w: 100, h: 100, interior: interior, { _, _ in [0, 255, 0] },
                         { x, y in [UInt8(120 + x), UInt8(60 + y / 2), UInt8(60)] })
         for size in [1, 2, 5, 20] {
@@ -222,7 +197,6 @@ struct ScreenshotTests {
             let leaked = flat.contains { $0.g > 0.6 && $0.r < 0.3 }
             check(!leaked, "size \(size): no block carries the hidden interior color")
         }
-        // touching the image edge: the missing fringe is skipped, still no leak
         let edge = pixels(w: 60, h: 60, interior: CGRect(x: 0, y: 0, width: 30, height: 30), { _, _ in [0, 255, 0] }, { _, _ in [200, 40, 40] })
         let eb = ShotPixelate.secureBlocks(edge, px: CGRect(x: 0, y: 0, width: 30, height: 30), size: 2).flatMap { $0 }
         check(!eb.contains { $0.g > 0.6 }, "rect at the image corner: no leak")
@@ -232,8 +206,6 @@ struct ScreenshotTests {
         let grid = ShotPixelate.grid(CGRect(x: 0, y: 0, width: 300, height: 120), size: 2)
         check(grid.cols == 50 && grid.rows == 20, "block resolution = rect × 0.5 / (size + 1)")
     }
-
-    // MARK: render
 
     static func image(w: Int, h: Int, _ f: (Int, Int) -> [UInt8]) -> CGImage {
         var data = [UInt8](repeating: 0, count: w * h * 4)
@@ -248,7 +220,6 @@ struct ScreenshotTests {
     }
 
     static func renderTests() {
-        // a 2x "display" 200×100 pt = 400×200 px; left half red, right half blue
         let img = image(w: 400, h: 200) { x, _ in x < 200 ? [255, 0, 0] : [0, 0, 255] }
         let canvas = ShotCanvas(base: img, scale: 2)
         check(canvas.size == CGSize(width: 200, height: 100), "canvas size in points")
@@ -259,7 +230,6 @@ struct ScreenshotTests {
             let c = p.color(5, 5)
             check(c.r > 0.9 && c.b < 0.1, "crop of the left half is red")
         }
-        // top-left origin: a crop at the top of a top/bottom split
         let tb = image(w: 100, h: 100) { _, y in y < 50 ? [0, 255, 0] : [0, 0, 0] }
         let tbc = ShotCanvas(base: tb, scale: 1)
         if let o = ShotRenderer.render(tbc, crop: CGRect(x: 0, y: 0, width: 100, height: 10), objects: []),
@@ -270,7 +240,6 @@ struct ScreenshotTests {
         check(odd?.width == 67 && odd?.height == 34, "fractional rect × scale")
         check(ShotRenderer.render(canvas, crop: CGRect(x: 500, y: 500, width: 10, height: 10), objects: []) == nil, "off-canvas crop = nil")
 
-        // annotations land at native scale; every tool renders
         let all: [ShotObject] = ShotTool.allCases.filter(\.isDrawing).map { t in
             var o = ShotObject(tool: t, points: [CGPoint(x: 20, y: 20), CGPoint(x: 120, y: 80)], color: ShotColor(r: 0, g: 1, b: 0), size: 4)
             if t == .text { o.text = "Hello\nworld"; o.points = [CGPoint(x: 20, y: 20)] }
@@ -279,12 +248,10 @@ struct ScreenshotTests {
         }
         let full = ShotRenderer.render(canvas, crop: CGRect(x: 0, y: 0, width: 200, height: 100), objects: all)
         check(full?.width == 400, "every tool renders")
-        // a filled rectangle's color at native scale
         let rect = ShotObject(tool: .rectangle, points: [CGPoint(x: 10, y: 10), CGPoint(x: 30, y: 30)], color: ShotColor(r: 0, g: 1, b: 0), size: 0)
         if let o = ShotRenderer.render(canvas, crop: CGRect(x: 0, y: 0, width: 50, height: 50), objects: [rect]), let p = ShotPixels(o) {
             check(p.color(40, 40).g > 0.9 && p.color(70, 70).r > 0.9, "rectangle drawn at 2× in the right place")
         }
-        // secure pixelate in the output: the hidden interior is gone
         let secret = image(w: 100, h: 100) { x, y in (30..<70).contains(x) && (30..<70).contains(y) ? [0, 255, 0] : [180, 30, 30] }
         let sc = ShotCanvas(base: secret, scale: 1)
         let pix = ShotObject(tool: .pixelate, points: [CGPoint(x: 30, y: 30), CGPoint(x: 70, y: 70)], color: .black, size: 2)
@@ -293,15 +260,12 @@ struct ScreenshotTests {
             for y in 30..<70 { for x in 30..<70 where p.color(x, y).g > 0.6 { leak = true } }
             check(!leak, "rendered secure pixelate shows no hidden pixel")
         }
-        // the text box grows with the text
         var t = ShotObject(tool: .text, points: [.zero], color: .black, size: 8, text: "a")
         let small = ShotText.boxSize(t)
         t.text = "a much longer line\nand a second"
         let big = ShotText.boxSize(t)
         check(big.width > small.width && big.height > small.height, "text box grows")
     }
-
-    // MARK: files
 
     static func fileTests() {
         var comps = DateComponents()
@@ -319,8 +283,6 @@ struct ScreenshotTests {
         check(ShotFiles.target("/tmp/y/s.png", pattern: "%F", format: "png", date: date, isDir: { _ in false }, exists: { _ in false })
               == "/tmp/y/s.png", "-p FILE.png kept")
     }
-
-    // MARK: args
 
     static func argTests() {
         if case .success(let a) = ShotArgs.parse([]) { check(a == ShotArgs(), "no args = gui") } else { check(false, "no args") }
@@ -343,8 +305,6 @@ struct ScreenshotTests {
         check(ShotArgs.parseRegion("0x200+1+1") == nil, "zero width rejected")
     }
 
-    // MARK: color
-
     static func colorTests() {
         check(ShotColor(hex: "#740096")?.hex == "#740096", "hex round trip")
         check(ShotColor(hex: "#740096")?.isDark == true, "Flameshot purple is dark → white icons")
@@ -355,13 +315,10 @@ struct ScreenshotTests {
         check(ShotColor(h: hsv.h, s: hsv.s, v: hsv.v).hex == "#3366cc", "HSV round trip")
     }
 
-    // MARK: Copy Text
-
     static func line(_ t: String, _ x: CGFloat, _ y: CGFloat, _ w: CGFloat = 100, _ h: CGFloat = 20) -> ShotOCRLine {
         ShotOCRLine(text: t, box: CGRect(x: x, y: y, width: w, height: h))
     }
 
-    // black text on white at 2× (a Retina capture), top-left line origins
     static func textImage(_ lines: [(String, CGFloat, CGFloat)], size: CGSize, font: CGFloat = 15) -> CGImage {
         let k: CGFloat = 2
         let ctx = CGContext(data: nil, width: Int(size.width * k), height: Int(size.height * k), bitsPerComponent: 8,
@@ -381,7 +338,6 @@ struct ScreenshotTests {
     }
 
     static func ocrTests() {
-        // layout (pure)
         check(ShotOCR.join([]) == "", "nothing → empty")
         check(ShotOCR.join([line("second", 0, 30), line("first", 0, 0)]) == "first\nsecond", "rows top → bottom")
         check(ShotOCR.join([line("right", 200, 2), line("left", 0, 0)]) == "left right", "one row, left → right")
@@ -389,12 +345,10 @@ struct ScreenshotTests {
         check(ShotOCR.join([line("  pad  ", 0, 0)]) == "pad", "trimmed")
         check(ShotOCR.summary("one line") == "8 characters" && ShotOCR.summary("a\nb\nc") == "3 lines", "toast summary")
 
-        // real Vision, on device
         let img = textImage([("Copy Text reads the screen", 20, 20), ("Second line here", 20, 48),
                              ("A new paragraph", 20, 120)], size: CGSize(width: 420, height: 170))
         let got = ShotOCR.text(img)
         check(got == "Copy Text reads the screen\nSecond line here\n\nA new paragraph", "OCR + layout, got: \(got.debugDescription)")
-        // a one-line crop (upscaled before Vision)
         let small = textImage([("Invoice 4815162342", 4, 4)], size: CGSize(width: 200, height: 24), font: 12)
         let s2 = ShotOCR.text(small)
         check(s2 == "Invoice 4815162342", "small crop, got: \(s2.debugDescription)")

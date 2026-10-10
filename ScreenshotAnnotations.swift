@@ -3,25 +3,11 @@ import CoreGraphics
 import CoreText
 import CoreImage
 
-// /screenshot's model — no AppKit (bin/run-tests.sh screenshot builds this
-// file alone): the tools, the drawn objects + their undo stack, the button
-// ring's placement (a port of Flameshot's ButtonHandler), Shift snapping,
-// the pixelate algorithms, the renderer shared by the overlay and the
-// output image, the filename pattern and the CLI arguments.
-//
-// Coordinates: points of ONE display, TOP-LEFT origin (the overlay view is
-// flipped, Flameshot's convention, `--region` too). Every draw function
-// expects a context whose user space is that (see `ShotRenderer.render`).
-
-// MARK: - Tools
-
 enum ShotTool: String, CaseIterable {
-    // drawing tools (the bottom row, Flameshot's buttonTypeOrder)
     case pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert
-    // the rest of the ring
-    case badge = "size"            // W / H of the selection (Flameshot's selection indicator)
+    case badge = "size"
     case move, undo, redo, copy, save, accept, exit, pin, recent
-    case copyText = "copy-text"   // OCR the selection → the clipboard (Copy Text mode)
+    case copyText = "copy-text"
     case sizeUp = "size-increase", sizeDown = "size-decrease"
 
     enum Kind { case draw, mode, action, info }
@@ -36,10 +22,8 @@ enum ShotTool: String, CaseIterable {
         }
     }
     var isDrawing: Bool { kind == .draw }
-    // closes the capture when used
     var finishes: Bool { [.copy, .save, .accept, .exit, .pin, .copyText].contains(self) }
 
-    // the single-letter key (capture mode, no modifier)
     var letter: Character? {
         switch self {
         case .pencil: return "p"
@@ -88,7 +72,6 @@ enum ShotTool: String, CaseIterable {
         }
     }
 
-    // Flameshot's descriptions (the button tooltips)
     var tooltip: String {
         switch self {
         case .pencil: return "Set the Pencil as the paint tool (P)"
@@ -118,9 +101,6 @@ enum ShotTool: String, CaseIterable {
         }
     }
 
-    // Flameshot's per-tool size defaults (drawThickness 3, drawFontSize 8,
-    // drawMarkerSize 5, drawPixelateSize 2, drawCircleCounterSize 1,
-    // drawRectangleSize 1 = the filled rectangle's corner radius)
     var defaultSize: Int {
         switch self {
         case .text: return 8
@@ -133,12 +113,8 @@ enum ShotTool: String, CaseIterable {
     }
     var sizeRange: ClosedRange<Int> { self == .rectangle ? 0...100 : 1...100 }
 
-    // the ring's default order on macOS (12.1 observed): uploader / open-app
-    // left out, accept + size buttons hidden
     static let defaultButtons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin, recent"
 
-    // `[screenshot] buttons` → the ring, in order; the size badge goes
-    // right after the last drawing tool unless listed ("size") or hidden
     static func ring(_ spec: String, badge: Bool) -> [ShotTool] {
         var out: [ShotTool] = []
         for part in spec.split(separator: ",") {
@@ -155,15 +131,12 @@ enum ShotTool: String, CaseIterable {
     }
 }
 
-// MARK: - Color
-
 struct ShotColor: Equatable, Codable {
     var r: Double, g: Double, b: Double, a: Double = 1
 
     init(r: Double, g: Double, b: Double, a: Double = 1) {
         self.r = r; self.g = g; self.b = b; self.a = a
     }
-    // #RRGGBB / RRGGBB / #AARRGGBB
     init?(hex: String) {
         var s = hex.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("#") { s.removeFirst() }
@@ -180,16 +153,13 @@ struct ShotColor: Equatable, Codable {
         CGColor(srgbRed: CGFloat(r), green: CGFloat(g), blue: CGFloat(b), alpha: CGFloat(a))
     }
     func with(alpha: Double) -> ShotColor { ShotColor(r: r, g: g, b: b, a: alpha) }
-    // Flameshot's colorIsDark: perceived luminance below one half
     var luminance: Double { 0.299 * r + 0.587 * g + 0.114 * b }
     var isDark: Bool { luminance < 0.5 }
-    // a lighter / darker shade (hover)
     func mixed(with o: ShotColor, _ t: Double) -> ShotColor {
         ShotColor(r: r + (o.r - r) * t, g: g + (o.g - g) * t, b: b + (o.b - b) * t, a: a)
     }
     static let white = ShotColor(r: 1, g: 1, b: 1)
     static let black = ShotColor(r: 0, g: 0, b: 0)
-    // HSV (the side panel's wheel)
     init(h: Double, s: Double, v: Double) {
         let i = Int(floor(h * 6)) % 6, f = h * 6 - floor(h * 6)
         let p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s)
@@ -216,35 +186,30 @@ struct ShotColor: Equatable, Codable {
     }
 }
 
-// MARK: - Objects
-
 struct ShotTextStyle: Equatable, Codable {
-    var family = ""            // "" = the system font
+    var family = ""
     var bold = false, italic = false, underline = false, strike = false
-    var align = 0              // 0 left, 1 center, 2 right
+    var align = 0
 }
 
 struct ShotObject: Equatable {
     var tool: ShotTool
-    // pencil: the polyline; two-point tools: [start, end];
-    // text: [top-left]; counter: [center] or [center, tail tip]
     var points: [CGPoint]
     var color: ShotColor
     var size: Int
     var text = ""
     var style = ShotTextStyle()
-    var numberOffset = 0       // counter: jump over the previous bubble + 1
-    var number = 1             // counter: derived (ShotDocument.renumber)
-    var openArrow = false      // arrow-style 1
-    var reversed = false       // reverse-arrow
-    var outline = true         // counter-outline
-    var secure = true          // pixelate: not insecure-pixelate
+    var numberOffset = 0
+    var number = 1
+    var openArrow = false
+    var reversed = false
+    var outline = true
+    var secure = true
 
     var start: CGPoint { points.first ?? .zero }
     var end: CGPoint { points.last ?? .zero }
     var rect: CGRect { ShotGeom.rect(start, end) }
 
-    // stroke width the tool draws with
     var strokeWidth: CGFloat {
         switch tool {
         case .marker: return CGFloat(size * 2 + 2)
@@ -260,7 +225,6 @@ struct ShotObject: Equatable {
         return o
     }
 
-    // what to draw around a selected object + what clicks hit
     var bbox: CGRect {
         switch tool {
         case .text:
@@ -282,7 +246,6 @@ struct ShotObject: Equatable {
         }
     }
 
-    // a click at `p` hits the drawn pixels (± `slop`), Flameshot-style
     func hit(_ p: CGPoint, slop: CGFloat = 4) -> Bool {
         let w = strokeWidth / 2 + slop
         switch tool {
@@ -299,7 +262,6 @@ struct ShotObject: Equatable {
         case .circle:
             let r = rect
             guard r.width > 0, r.height > 0 else { return ShotGeom.dist(p, r.origin) <= w }
-            // normalized distance from the ellipse outline
             let dx = (p.x - r.midX) / (r.width / 2), dy = (p.y - r.midY) / (r.height / 2)
             let d = sqrt(dx * dx + dy * dy)
             let tol = w / max(1, min(r.width, r.height) / 2)
@@ -313,12 +275,6 @@ struct ShotObject: Equatable {
     }
 }
 
-// MARK: - Document (objects + undo)
-
-// The drawn objects of one capture. Every change goes through `commit`,
-// which snapshots the list first: undo / redo walk whole snapshots
-// (moves, deletes, color and size changes alike). Counters are renumbered
-// after every change.
 final class ShotDocument {
     private(set) var objects: [ShotObject] = []
     var selected: Int?
@@ -333,8 +289,6 @@ final class ShotDocument {
     var canRedo: Bool { !redoStack.isEmpty }
     var undoDepth: Int { undoStack.count }
 
-    // `coalesce`: consecutive commits with the same key (wheel notches on
-    // one object) are one undo step
     func commit(coalesce: String? = nil, _ change: (inout [ShotObject]) -> Void) {
         if coalesce == nil || coalesce != lastCoalesce {
             undoStack.append((objects, coalesce))
@@ -361,7 +315,6 @@ final class ShotDocument {
         guard objects.indices.contains(i) else { return }
         commit(coalesce: coalesce) { f(&$0[i]) }
     }
-    // Layers ↑/↓: `to` is the new index (0 = drawn first = bottom)
     func reorder(from: Int, to: Int) {
         guard objects.indices.contains(from), objects.indices.contains(to), from != to else { return }
         commit { let o = $0.remove(at: from); $0.insert(o, at: to) }
@@ -387,12 +340,10 @@ final class ShotDocument {
         return true
     }
 
-    // a change shown while dragging, without an undo step (mouse-up commits)
     func updateLive(at i: Int, _ f: (inout ShotObject) -> Void) {
         guard objects.indices.contains(i) else { return }
         f(&objects[i])
     }
-    // a fresh start (the selection moved to another display)
     func reset() {
         objects = []
         undoStack = []
@@ -401,19 +352,15 @@ final class ShotDocument {
         lastCoalesce = nil
     }
 
-    // the topmost object under `p`
     func hit(_ p: CGPoint) -> Int? {
         objects.indices.reversed().first { objects[$0].hit(p) }
     }
 
-    // the next bubble's number with `offset` (the wheel while placing)
     func nextCounterNumber(offset: Int = 0) -> Int {
         let last = objects.last { $0.tool == .counter }?.number ?? 0
         return min(999, max(1, last + 1 + offset))
     }
 
-    // 1, 2, 3 … in drawing order (+ each bubble's own jump): deleting or
-    // undoing a bubble renumbers the later ones
     static func renumber(_ objs: inout [ShotObject]) {
         var n = 0
         for i in objs.indices where objs[i].tool == .counter {
@@ -422,8 +369,6 @@ final class ShotDocument {
         }
     }
 }
-
-// MARK: - Geometry + snapping
 
 enum ShotGeom {
     static func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {
@@ -446,8 +391,6 @@ enum ShotGeom {
 }
 
 enum ShotSnap {
-    // Shift on Line / Arrow: the end point snapped to the nearest of the 8
-    // directions (0/45/90°…), keeping the length
     static func angle(from a: CGPoint, to b: CGPoint) -> CGPoint {
         let dx = b.x - a.x, dy = b.y - a.y
         let len = hypot(dx, dy)
@@ -455,12 +398,10 @@ enum ShotSnap {
         let step = CGFloat.pi / 4
         let ang = (atan2(dy, dx) / step).rounded() * step
         var x = a.x + cos(ang) * len, y = a.y + sin(ang) * len
-        // exact on the axes (no 1e-14 drift)
         if abs(x - a.x) < 1e-9 { x = a.x }
         if abs(y - a.y) < 1e-9 { y = a.y }
         return CGPoint(x: x, y: y)
     }
-    // Shift on rectangles / circle / pixelate: a square (diagonal snap)
     static func square(from a: CGPoint, to b: CGPoint) -> CGPoint {
         let dx = b.x - a.x, dy = b.y - a.y
         let s = max(abs(dx), abs(dy))
@@ -475,15 +416,6 @@ enum ShotSnap {
     }
 }
 
-// MARK: - Button ring (Flameshot's ButtonHandler)
-
-// Places `count` round buttons of size `button` around `selection` inside
-// `screen` (both in points, top-left origin): bottom row first (left to
-// right), right column (bottom up), top row (right to left), left column
-// (top down); a side whose buttons would leave the screen is blocked;
-// leftovers grow the base area one pitch and go around again; all sides
-// blocked → rows INSIDE the selection along its bottom edge, then up.
-// Returns each button's frame (top-left) in ring order.
 enum ButtonRing {
     struct Layout {
         var frames: [CGRect]
@@ -533,18 +465,14 @@ enum ButtonRing {
             }
             return out
         }
-        // (Flameshot's ensureSelectionMinimumSize)
         if sel.width < base { sel.origin.x -= ((base - sel.width) / 2).rounded(.down); sel.size.width = base }
         if sel.height < base { sel.origin.y -= ((base - sel.height) / 2).rounded(.down); sel.size.height = base }
-        // (a grown tiny selection in a corner must not hang off the screen:
-        // every side would read as blocked and nothing would fit inside)
         sel.origin.x = max(screen.minX, min(sel.minX, screen.maxX - sel.width))
         sel.origin.y = max(screen.minY, min(sel.minY, screen.maxY - sel.height))
 
         var guardLoops = 0
         while idx < count && guardLoops < 64 {
             guardLoops += 1
-            // blocked sides (updateBlockedSides)
             let e = sep * 2 + base
             func onScreen(_ a: CGPoint, _ b: CGPoint) -> Bool {
                 let s = screen.insetBy(dx: -0.5, dy: -0.5)
@@ -557,7 +485,6 @@ enum ButtonRing {
             let oneHorizontal = bRight != bLeft
             let bothHorizontal = bRight && bLeft
             if bLeft && bothHorizontal && bBottom && bTop {
-                // positionButtonsInside
                 var area = sel.intersection(screen)
                 if Int(area.width / ext) == 0 { area = screen }
                 let perRow = Int(area.width / ext)
@@ -604,7 +531,6 @@ enum ButtonRing {
                 place(vertical(CGPoint(x: sel.minX - ext, y: sel.midY), n, true))
             }
             if idx < count {
-                // expandSelection
                 sel = sel.insetBy(dx: -ext, dy: -ext).intersection(screen)
             }
         }
@@ -612,9 +538,6 @@ enum ButtonRing {
     }
 }
 
-// MARK: - Pixels
-
-// RGBA8 pixels of (part of) an image, for sampling (pixelate, grab color)
 struct ShotPixels {
     let width: Int, height: Int
     var data: [UInt8]
@@ -622,7 +545,6 @@ struct ShotPixels {
     init(width: Int, height: Int, data: [UInt8]) {
         self.width = width; self.height = height; self.data = data
     }
-    // the whole image (top row first)
     init?(_ image: CGImage) {
         let w = image.width, h = image.height
         guard w > 0, h > 0 else { return nil }
@@ -637,7 +559,6 @@ struct ShotPixels {
         guard ok else { return nil }
         self.init(width: w, height: h, data: buf)
     }
-    // back to an image (row 0 = the top)
     var image: CGImage? {
         guard let provider = CGDataProvider(data: Data(data) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
@@ -653,18 +574,11 @@ struct ShotPixels {
 }
 
 enum ShotPixelate {
-    // Flameshot's block resolution: rect × 0.5 / (size + 1) blocks
     static func grid(_ r: CGRect, size: Int) -> (cols: Int, rows: Int) {
         let f = 0.5 / Double(max(1, size + 1))
         return (max(1, Int((Double(r.width) * f).rounded())), max(1, Int((Double(r.height) * f).rounded())))
     }
 
-    // SECURE pixelate: every block is built ONLY from colors sampled on the
-    // rect's outer fringe (a band 1-4 px outside each edge, averaged over the
-    // block's span, smoothed across neighbours) + a little noise,
-    // interpolated across — the hidden pixels never reach the output, so
-    // nothing can be recovered. `px` = the rect in the pixel space of
-    // `pixels`; `scale` = pixels per point (the grid is in points).
     static func secureBlocks(_ pixels: ShotPixels, px: CGRect, size: Int, scale: CGFloat = 1) -> [[ShotColor]] {
         let s = max(1, scale)
         let (cols, rows) = grid(CGRect(x: 0, y: 0, width: px.width / s, height: px.height / s), size: size)
@@ -673,7 +587,6 @@ enum ShotPixelate {
         let band = 1...4
         func inX(_ x: Int) -> Bool { x >= 0 && x < pixels.width }
         func inY(_ y: Int) -> Bool { y >= 0 && y < pixels.height }
-        // the mean of the band pixels (only those on the image, never inside the rect)
         func mean(_ pts: [(Int, Int)]) -> ShotColor? {
             var r = 0.0, g = 0.0, b = 0.0, n = 0.0
             for (x, y) in pts where inX(x) && inY(y) && !(x >= x0 && x < x1 && y >= y0 && y < y1) {
@@ -687,7 +600,6 @@ enum ShotPixelate {
             let hi = a + Int(Double(i + 1) / Double(n) * Double(b - a)) - 1
             return lo...max(lo, hi)
         }
-        // up to 8 samples across each block's span (enough for a mean)
         func stepped(_ r: ClosedRange<Int>) -> [Int] {
             let st = max(1, r.count / 8)
             return Array(stride(from: r.lowerBound, through: r.upperBound, by: st))
@@ -704,7 +616,6 @@ enum ShotPixelate {
             left.append(mean(ys.flatMap { y in band.map { (x0 - $0, y) } }))
             right.append(mean(ys.flatMap { y in band.map { (x1 - 1 + $0, y) } }))
         }
-        // soften: each sample = the mean of itself and its neighbours
         func smooth(_ a: [ShotColor?]) -> [ShotColor?] {
             a.indices.map { k in
                 let near = [k - 1, k, k + 1].filter { a.indices.contains($0) }.compactMap { a[$0] }
@@ -725,7 +636,6 @@ enum ShotPixelate {
         let gray = ShotColor(r: 0.5, g: 0.5, b: 0.5)
         var seed: UInt32 = UInt32(truncatingIfNeeded: x0 &* 73_856_093 ^ y0 &* 19_349_663) | 1
         func noise() -> Double {
-            // xorshift: deterministic per rect, ±0.025
             seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5
             return (Double(seed % 1000) / 1000 - 0.5) * 0.05
         }
@@ -751,12 +661,9 @@ enum ShotPixelate {
     }
 }
 
-// MARK: - Arrow + text geometry
-
 enum ShotArrow {
     static func headLength(_ size: Int) -> CGFloat { CGFloat(3 * size + 10) }
     static func headWidth(_ size: Int) -> CGFloat { CGFloat(2 * size + 6) }
-    // tip, left and right base corners of the head pointing from a to b
     static func head(from a: CGPoint, to b: CGPoint, size: Int) -> (CGPoint, CGPoint, CGPoint, CGPoint) {
         let len = max(1, ShotGeom.dist(a, b))
         let ux = (b.x - a.x) / len, uy = (b.y - a.y) / len
@@ -796,7 +703,6 @@ enum ShotText {
     }
     static func lineWidth(_ l: CTLine) -> CGFloat { CGFloat(CTLineGetTypographicBounds(l, nil, nil, nil)) }
 
-    // the box grows with the text, 5 pt padding all round
     static func boxSize(_ o: ShotObject) -> CGSize {
         let ls = lines(o)
         let m = metrics(o)
@@ -805,14 +711,10 @@ enum ShotText {
     }
 }
 
-// MARK: - Renderer
-
-// The frozen display image + its pixel scale; pixelate block colors are
-// cached per object geometry (drawn on every overlay redraw).
 final class ShotCanvas {
     let base: CGImage
     let scale: CGFloat
-    let size: CGSize               // the display in points
+    let size: CGSize
     private var pixelCache: ShotPixels?
     private var blockCache: [String: [[ShotColor]]] = [:]
     private var imageCache: [String: CGImage] = [:]
@@ -829,7 +731,6 @@ final class ShotCanvas {
     func pxRect(_ r: CGRect) -> CGRect {
         CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale).integral
     }
-    // the color under a point (grab color)
     func color(at p: CGPoint) -> ShotColor? {
         pixels?.color(Int(p.x * scale), Int(p.y * scale))
     }
@@ -842,7 +743,6 @@ final class ShotCanvas {
         blockCache[key] = b
         return b
     }
-    // insecure: the real pixels, downscaled then upscaled (size ≤ 1: blur)
     func insecureImage(_ r: CGRect, size: Int) -> CGImage? {
         let key = "\(r)|\(size)"
         if let i = imageCache[key] { return i }
@@ -869,7 +769,6 @@ final class ShotCanvas {
 }
 
 enum ShotRenderer {
-    // draw an image upright at `r` in a top-left (flipped) context
     static func drawImage(_ img: CGImage, in r: CGRect, _ ctx: CGContext, smooth: Bool = true) {
         ctx.saveGState()
         ctx.interpolationQuality = smooth ? .high : .none
@@ -879,12 +778,10 @@ enum ShotRenderer {
         ctx.restoreGState()
     }
 
-    // the frozen screen's `r` (points)
     static func drawBase(_ canvas: ShotCanvas, _ r: CGRect, _ ctx: CGContext) {
         let r = r.intersection(CGRect(origin: .zero, size: canvas.size))
         guard !r.isNull, r.width > 0, r.height > 0,
               let crop = canvas.base.cropping(to: canvas.pxRect(r)) else { return }
-        // the cropped pixels' own extent (integral) in points
         let px = canvas.pxRect(r)
         let pr = CGRect(x: px.minX / canvas.scale, y: px.minY / canvas.scale,
                         width: CGFloat(crop.width) / canvas.scale, height: CGFloat(crop.height) / canvas.scale)
@@ -976,7 +873,6 @@ enum ShotRenderer {
     private static func stroke(_ pts: [CGPoint], _ ctx: CGContext, width w: CGFloat = 0) {
         guard let f = pts.first else { return }
         if pts.count == 1 {
-            // a click: a dot of the stroke width
             ctx.fillEllipse(in: CGRect(x: f.x - w / 2, y: f.y - w / 2, width: w, height: w))
             return
         }
@@ -1012,7 +908,6 @@ enum ShotRenderer {
         let c = o.start, r = o.counterRadius
         let contrast = o.color.isDark ? ShotColor.white : ShotColor.black
         ctx.setFillColor(o.color.cgColor)
-        // the tail: a tapered wedge from the bubble toward the drag point
         if o.points.count > 1, ShotGeom.dist(c, o.end) > r {
             let d = ShotGeom.dist(c, o.end)
             let ux = (o.end.x - c.x) / d, uy = (o.end.y - c.y) / d
@@ -1043,8 +938,6 @@ enum ShotRenderer {
         CTLineDraw(line, ctx)
     }
 
-    // THE output: the frozen pixels under `crop` (points) at the display's
-    // native scale + every object, clipped to the selection
     static func render(_ canvas: ShotCanvas, crop: CGRect, objects: [ShotObject]) -> CGImage? {
         let crop = crop.intersection(CGRect(origin: .zero, size: canvas.size))
         guard !crop.isNull, crop.width >= 1, crop.height >= 1 else { return nil }
@@ -1052,7 +945,6 @@ enum ShotRenderer {
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        // top-left points over the crop
         ctx.translateBy(x: 0, y: CGFloat(h))
         ctx.scaleBy(x: 1, y: -1)
         ctx.scaleBy(x: canvas.scale, y: canvas.scale)
@@ -1064,10 +956,7 @@ enum ShotRenderer {
     }
 }
 
-// MARK: - Files
-
 enum ShotFiles {
-    // strftime (`%F_%H-%M` → 2026-10-02_14-05); "/" is not allowed in a name
     static func expand(_ pattern: String, date: Date = Date()) -> String {
         var t = time_t(date.timeIntervalSince1970)
         var tmv = tm()
@@ -1077,7 +966,6 @@ enum ShotFiles {
         let s = n > 0 ? String(cString: buf) : "screenshot"
         return s.replacingOccurrences(of: "/", with: "-")
     }
-    // dir/name.ext, else "name 2.ext", "name 3.ext" … (FileDrag's keep-both)
     static func uniquePath(dir: String, name: String, ext: String,
                            exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> String {
         let d = dir.hasSuffix("/") ? String(dir.dropLast()) : dir
@@ -1090,8 +978,6 @@ enum ShotFiles {
         }
         return p
     }
-    // a `-p` / save target: a directory → the pattern inside it; a file
-    // path keeps its name; the extension picks the format
     static func target(_ path: String, pattern: String, format: String, date: Date = Date(),
                        isDir: (String) -> Bool = { p in
                            var d: ObjCBool = false
@@ -1106,11 +992,8 @@ enum ShotFiles {
     }
 }
 
-// MARK: - CLI
-
-// `kitchen-sink screenshot [gui|full|screen] [flags]` (Flameshot's)
 struct ShotArgs: Equatable {
-    enum Mode: String { case gui, text, full, screen }   // text = gui in Copy Text mode
+    enum Mode: String { case gui, text, full, screen }
     var mode = Mode.gui
     var path: String?
     var clipboard = false
@@ -1125,7 +1008,6 @@ struct ShotArgs: Equatable {
 
     var isOverlay: Bool { mode == .gui || mode == .text }
 
-    // the socket reply carries a result (-r / -g)
     var wantsReply: Bool { raw || printGeometry }
 
     struct Problem: Error, Equatable { let message: String }
@@ -1170,7 +1052,6 @@ struct ShotArgs: Equatable {
         return .success(a)
     }
 
-    // WxH+X+Y (global points, top-left origin)
     static func parseRegion(_ s: String) -> CGRect? {
         let scanner = Scanner(string: s)
         guard let w = scanner.scanDouble(), scanner.scanString("x") != nil,
@@ -1187,10 +1068,6 @@ struct ShotArgs: Equatable {
     }
 }
 
-// MARK: - Persistent state
-
-// ~/.cache/kitchen-sink/screenshot-state.json: per-tool sizes, the
-// draw color, text style, the last accepted region (save-last-region)
 struct ShotState: Codable {
     struct Region: Codable, Equatable {
         var display: UInt32

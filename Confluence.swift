@@ -1,53 +1,16 @@
 import AppKit
 import WebKit
 
-// MARK: - Confluence search (a shared-window view)
-//
-// Search Confluence without leaving the app: a search strip (match mode All
-// words / Phrase / Any word, Title only, spaces, type, modified, mine, sort),
-// results on the left (title + excerpt with the matches marked, space ›
-// parent path, author, age, ☆), the page rendered live on the right with
-// every match highlighted and a "3 of 7" hits bar (Cmd+G / Shift+Cmd+G).
-// Nothing is cached on disk: python (confluence/confluence_api.py) answers
-// each search / page with JSON on stdout; the last 20 pages and their
-// images stay in memory only.
-//
-//   Return (search box)   search (Favorites: open the highlighted page)
-//   ↑↓ / Ctrl+N/P         move (preview follows)   Cmd+Return  open in browser
-//   Cmd+C / ⇧Cmd+C        copy link / title + link
-//   Cmd+D                 ☆ favorite
-//   Cmd+L / Cmd+F         search box       Cmd+G / ⇧Cmd+G  next / previous hit
-//   Esc                   an open filter, else clear the query, else hide
-//                         (only with the kitchen sink's "Esc Hides Window")
-//
-// Search and Favorites are separate: Search starts empty; Favorites is the
-// pinned list for one-click opening (typing filters it, the Search button
-// looks inside their text). Contributor = people seen editing the scope's
-// spaces (confluence_api.py --users, cached a day). Rate limits: a long
-// Retry-After pauses EVERY request (python's shared cooldown) with a
-// countdown here, then the pending search / preview resumes by itself.
-//
-// Config: commands.toml [confluence] (enabled, width, height, colors);
-// credentials + spaces + favorites: ~/.config/confluence/config.json (the
-// Setup sheet). Fake site for development: bin/fake-confluence.sh start.
-
-// [confluence] enabled - the view, its hotkey and its menu entries
 func confluenceEnabled() -> Bool {
     tri(configSectionValue("confluence", "enabled")) == true
 }
 
-// a numeric [confluence] key (width / height / split)
 func confluenceSetting(_ key: String, _ fallback: CGFloat) -> CGFloat {
     configSectionValue("confluence", key).flatMap { Double($0) }.map { CGFloat($0) } ?? fallback
 }
 
-// [confluence] colors over the theme (same keys as [jira]); none set = the
-// Jira window's palette, so the Atlassian views read as one family
 func confluenceColors() -> PopupColors { cardColors("confluence") }
 
-// a card view's palette: its own [section] color keys (Theme ▸ presets write
-// them), else the Jira window's
-// a Theme ▸ preset being hovered (not saved): the card builds in its look
 var cardThemeOverride: [String: ThemePreset] = [:]
 
 func cardHeaderColor(_ section: String) -> NSColor {
@@ -73,13 +36,9 @@ func cardColors(_ section: String) -> PopupColors {
     return c
 }
 
-// MARK: - python bridge
-
 enum ConfluenceAPI {
     static var dir: String { assetDir + "/confluence" }
 
-    // confluence_api.py ARGS (stdin = JSON) -> its one JSON object; a crash
-    // or non-JSON output becomes {ok: false, error: <last stderr line>}
     static func run(_ args: [String], stdin: Any? = nil, done: @escaping ([String: Any]) -> Void) {
         var input: String?
         if let s = stdin, let d = try? JSONSerialization.data(withJSONObject: s) {
@@ -97,7 +56,6 @@ enum ConfluenceAPI {
     }
 }
 
-// one search result / favorite
 struct ConfluenceRow {
     var id = "", type = "page", title = "", excerpt = "", space = "", spaceName = "", path = ""
     var container = "", url = "", modified = "", modifiedText = "", author = ""
@@ -120,7 +78,6 @@ struct ConfluenceRow {
         missing = j["missing"] as? Bool ?? false
     }
 
-    // what --favorite add stores
     var json: [String: Any] {
         ["id": id, "title": title, "space": space, "spaceName": spaceName, "type": type, "url": url, "path": path]
     }
@@ -135,9 +92,6 @@ struct ConfluenceRow {
     }
 }
 
-// MARK: - small themed controls
-
-// segmented choice: the chosen segment is an accent pill
 final class ConfSegmented: NSView, PopupThemeable {
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     var items: [String] { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
@@ -166,7 +120,6 @@ final class ConfSegmented: NSView, PopupThemeable {
         let x = 3 + w.prefix(i).reduce(0, +) + CGFloat(i) * 2
         return NSRect(x: x, y: 3, width: w[i], height: bounds.height - 6)
     }
-    // the capsule look (CapsuleStyle): track + a raised chip under the pick
     override func draw(_ dirty: NSRect) {
         CapsuleStyle.track(bounds.insetBy(dx: 0.5, dy: 0.5), colors)
         for (i, t) in items.enumerated() {
@@ -200,7 +153,6 @@ final class ConfSegmented: NSView, PopupThemeable {
     override func mouseExited(with event: NSEvent) { hover = nil; needsDisplay = true }
 }
 
-// on / off button (Title only)
 final class ConfToggle: NSView, PopupThemeable {
     var colors = JiraTheme.system { didSet { needsDisplay = true } }
     let title: String
@@ -221,7 +173,6 @@ final class ConfToggle: NSView, PopupThemeable {
     }
     override func draw(_ dirty: NSRect) {
         let st: ButtonState = isOn ? .on : .idle
-        // a one-chip capsule: track, raised when on
         CapsuleStyle.track(bounds.insetBy(dx: 0.5, dy: 0.5), colors)
         if isOn { CapsuleStyle.chip(bounds.insetBy(dx: 3, dy: 3), colors, on: true, hover: false) }
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: isOn ? colors.text : colors.dim]
@@ -235,7 +186,6 @@ final class ConfToggle: NSView, PopupThemeable {
     }
 }
 
-// a flipped container that lays its children out by hand
 final class ConfPane: NSView {
     var onLayout: ((NSRect) -> Void)?
     var fill: NSColor? { didSet { needsDisplay = true } }
@@ -249,8 +199,6 @@ final class ConfPane: NSView {
     }
 }
 
-// the results table: a click in the star gutter toggles the favorite,
-// right-click selects the row and shows its menu
 final class ConfTableView: NSTableView {
     static let starGutter: CGFloat = 30
     var onStar: ((Int) -> Void)?
@@ -272,7 +220,6 @@ final class ConfTableView: NSTableView {
     }
 }
 
-// one result row, drawn: ☆ · title (matches marked) · meta · 2-line excerpt
 final class ConfResultCell: NSView {
     var row: ConfluenceRow?
     var colors = JiraTheme.system
@@ -294,12 +241,10 @@ final class ConfResultCell: NSView {
         guard let row else { return }
         let x0 = ConfTableView.starGutter
         let w = bounds.width - x0 - 12
-        // ☆ gutter
         let star = row.favorite ? "★" : "☆"
         let starColor = row.favorite ? colors.tone(.warning) : colors.dim.withAlphaComponent(0.55)
         (star as NSString).draw(at: NSPoint(x: 10, y: 7), withAttributes: [
             .font: NSFont.systemFont(ofSize: 14), .foregroundColor: starColor])
-        // title (+ a type tag for non-pages)
         let tFont = NSFont.systemFont(ofSize: 13.5, weight: .semibold)
         let title = NSMutableAttributedString()
         if !row.typeLabel.isEmpty {
@@ -318,7 +263,6 @@ final class ConfResultCell: NSView {
         para.lineBreakMode = .byTruncatingTail
         title.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: title.length))
         title.draw(with: NSRect(x: x0, y: 6, width: w, height: 19), options: one)
-        // meta: SPACE · parent path · author · age
         var meta = [row.spaceName.isEmpty ? row.space : row.spaceName]
         if !row.path.isEmpty { meta.append(row.path) } else if !row.container.isEmpty { meta.append("on " + row.container) }
         if !row.author.isEmpty { meta.append(row.author) }
@@ -326,7 +270,6 @@ final class ConfResultCell: NSView {
         NSAttributedString(string: meta.filter { !$0.isEmpty }.joined(separator: "  ·  "), attributes: [
             .font: NSFont.systemFont(ofSize: 11), .foregroundColor: colors.dim, .paragraphStyle: para,
         ]).draw(with: NSRect(x: x0, y: 26, width: w, height: 16), options: one)
-        // excerpt, two lines
         let wrap = NSMutableParagraphStyle()
         wrap.lineBreakMode = .byWordWrapping
         let ex = marked(row.excerpt, row.hits, font: .systemFont(ofSize: 12),
@@ -337,8 +280,6 @@ final class ConfResultCell: NSView {
     }
 }
 
-// wsconf://fetch/<base64url of the real URL>: page images + attachments,
-// fetched with the Confluence credentials (a WKWebView can't add headers)
 final class ConfluenceImageLoader: NSObject, WKURLSchemeHandler {
     static let scheme = "wsconf"
     var authHeader: String?
@@ -377,7 +318,7 @@ final class ConfluenceImageLoader: NSObject, WKURLSchemeHandler {
         let id = ObjectIdentifier(task)
         let dt = URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
             DispatchQueue.main.async {
-                guard let self, self.tasks.removeValue(forKey: id) != nil else { return }   // stopped
+                guard let self, self.tasks.removeValue(forKey: id) != nil else { return }
                 guard let data, err == nil, (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400 else {
                     task.didFailWithError(err ?? URLError(.badServerResponse))
                     return
@@ -401,8 +342,6 @@ final class ConfluenceImageLoader: NSObject, WKURLSchemeHandler {
     }
 }
 
-// MARK: - the window
-
 final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTableViewDelegate,
                               NSTextFieldDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private static var live: ConfluenceWindow?
@@ -410,7 +349,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
 
     private var colors = confluenceColors()
 
-    // strip
     private let scopeSeg = ConfSegmented(["Search", "★ Favorites"])
     private let textBox = JiraInputBox(placeholder: "Search Confluence   \"exact phrase\"   prefix*",
                                        font: .systemFont(ofSize: 13))
@@ -424,7 +362,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private let sortChoice = JiraChoiceButton()
     private let strip = ConfPane()
 
-    // results
     private let table = ConfTableView()
     private let tableScroll = NSScrollView()
     private let status = NSTextField(labelWithString: "")
@@ -434,18 +371,14 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private let spinner = NSProgressIndicator()
     private let splitter = PaneSplitter()
     private var split: CGFloat = 0.42
-    // Search / Favorites as a left sidebar (`[confluence] sidebar-width`,
-    // 0 = the old segmented control in the strip); its edge drags to resize
     private var sidebar: PopupTabsBar?
     private var sidebarWide: CGFloat = 0
-    // the icon rail (⌘\\) when collapsed
     private var sidebarW: CGFloat {
         get { sidebar?.width(expanded: sidebarWide) ?? sidebarWide }
         set { sidebarWide = newValue }
     }
     private var left: CGFloat { sidebar != nil ? sidebarW + 4 : 0 }
 
-    // preview
     private let preview = ConfPane()
     private let pTitle = NSTextField(labelWithString: "")
     private let pMeta = NSTextField(labelWithString: "")
@@ -461,7 +394,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private var web: WKWebView!
     private let images = ConfluenceImageLoader()
 
-    // state
     private enum Scope { case search, favorites }
     private var scope: Scope = .search
     private var rows: [ConfluenceRow] = []
@@ -480,7 +412,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private var pageOrder: [String] = []
     private var criteriaTimer: Timer?
     private var lastFavRefresh: Date?
-    // rate limit: every request waits for this (python refuses meanwhile)
     private var cooldownUntil: Date?
     private var cooldownTimer: Timer?
     private var pendingSearch: (() -> Void)?
@@ -488,8 +419,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private var coolingDown: Bool { (cooldownUntil?.timeIntervalSinceNow ?? 0) > 0 }
     private static let criteriaKey = "confluenceCriteria"
     private static let splitKey = "confluenceSplit"
-
-    // MARK: open
 
     static func discard() { live = nil }
 
@@ -500,7 +429,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         w.reloadConfig()
     }
 
-    // [app] shared-window = false: an ordinary window
     func showStandalone() {
         NSApp.activate(ignoringOtherApps: true)
         if !window.isVisible { window.center() }
@@ -508,7 +436,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         focusSearch()
     }
 
-    // the shared window brought the view back
     override func didShow() {
         if window.firstResponder === window || window.firstResponder == nil { focusSearch() }
     }
@@ -525,8 +452,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         if frame != nil { window.setFrame(f, display: false) }
         restoreCriteria()
     }
-
-    // MARK: build
 
     private func label(_ f: NSTextField, size: CGFloat = 11, weight: NSFont.Weight = .regular, color: NSColor? = nil) {
         f.font = .systemFont(ofSize: size, weight: weight)
@@ -554,7 +479,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private func buildContent() -> NSView {
         let root = ConfPane()
 
-        // --- strip
         scopeSeg.tips = ["Search Confluence", "Your starred pages — type to filter, Return searches inside them"]
         scopeSeg.onChange = { [weak self] i in self?.setScope(i == 0 ? .search : .favorites) }
         modeSeg.tips = ["Every word somewhere in the page (AND)", "The words together, in this order",
@@ -584,7 +508,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         sortChoice.value = "relevance"
         sortChoice.prefix = "Sort: "
         sortChoice.onPick = { [weak self] _ in self?.criteriaChanged() }
-        // how to search, top-left; the box under it, full width; filters below
         sidebarW = configSectionValue("confluence", "sidebar-width").flatMap { Double($0) }.map { CGFloat($0) } ?? 210
         if sidebarW > 0 {
             var pcfg = PopupConfig(name: "confluence-sidebar")
@@ -606,7 +529,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             root.addSubview(bar)
             sidebar = bar
         }
-        // two rows: the box with how to match and Search; the filters under it
         let top = row((sidebar == nil ? [scopeSeg] : []) + [textBox, modeSeg, titleToggle, searchButton])
         textBox.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let bottom = row([spaces, people, typeChoice, modChoice, sortChoice, NSView()])
@@ -627,7 +549,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         strip.fill = colors.mantle.withAlphaComponent(0.55)
         root.addSubview(strip)
 
-        // --- results
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("row"))
         col.resizingMask = .autoresizingMask
         table.addTableColumn(col)
@@ -663,7 +584,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             guard let self else { return }
             var f = f
             if self.sidebar != nil {
-                // measured across the whole view; the panes start right of the sidebar
                 let full = root.bounds.width
                 f = min(0.8, max(0.2, (f * full - self.left) / max(1, full - self.left)))
             }
@@ -673,14 +593,13 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         }
         root.addSubview(splitter)
 
-        // --- preview
         preview.fill = colors.mantle.withAlphaComponent(0.35)
         label(pTitle, size: 15, weight: .semibold, color: colors.text)
         label(pMeta)
         hook(pStar, #selector(starPreview), tip: "Favorite (Cmd+D)")
         pOpen.capsule = true
         pCopy.capsule = true
-        pStar.chipSymbol = "star"   // the icon chip: same look as the other round glyph buttons
+        pStar.chipSymbol = "star"
         hook(pOpen, #selector(openSelected), tip: "Open the page in your browser (Return)")
         hook(pCopy, #selector(copyLink), tip: "Copy the page link (Cmd+C)")
         hook(hitPrev, #selector(prevHit), tip: "Previous match (Shift+Cmd+G)")
@@ -703,7 +622,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         for v in [pTitle, pMeta, pStar, pOpen, pCopy, hitsBar, web, hint, setupButton] as [NSView] { preview.addSubview(v) }
         root.addSubview(preview)
 
-        // --- layout
         root.onLayout = { [weak self] b in self?.layoutAll(b) }
         showPreviewHint("")
         return root
@@ -713,7 +631,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         sidebar?.frame = NSRect(x: 0, y: 0, width: sidebarW, height: full.height)
         let b = NSRect(x: 0, y: 0, width: max(300, full.width - left), height: full.height)
         defer {
-            // everything else sits right of the sidebar
             if left > 0 {
                 for v in [strip, tableScroll, spinner, curlButton, cqlButton, moreButton, status, splitter, preview] as [NSView] {
                     v.frame.origin.x += left
@@ -728,11 +645,9 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         let footH: CGFloat = 32
         tableScroll.frame = NSRect(x: 0, y: bodyY + 4, width: leftW, height: bodyH - footH - 4)
         table.tableColumns.first?.width = leftW - 4
-        // footer: spinner · status … Load more · Copy CQL · Copy curl
         let fy = b.height - footH + 5
         spinner.frame = NSRect(x: 12, y: fy + 3, width: 16, height: 16)
         var x = leftW - 10
-        // Copy CQL | Copy curl = one joined pair, Load more a capsule beside it
         cqlButton.segment = .first
         curlButton.segment = .last
         for btn in [curlButton, cqlButton, moreButton] {
@@ -746,7 +661,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         let px = leftW + 6
         preview.frame = NSRect(x: px, y: bodyY, width: b.width - px, height: bodyH)
         let pw = preview.bounds.width
-        // header: title / meta | ☆ Open Copy
         var bx = pw - 12
         for btn in [pCopy, pOpen, pStar] {
             let w = btn === pStar ? 22 : max(28, btn.intrinsicContentSize.width)
@@ -766,10 +680,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         setupButton.frame = NSRect(x: (pw - sw) / 2, y: preview.bounds.height / 2 + 8, width: sw, height: 30)
     }
 
-    // MARK: config / setup
-
-    // --check: the site, scope and where config.json is; builds the image
-    // loader's Authorization header from that file (never logged)
     func reloadConfig(then: (() -> Void)? = nil) {
         ConfluenceAPI.run(["--check"]) { [weak self] j in
             guard let self else { return }
@@ -793,7 +703,7 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
                 if self.scope == .favorites {
                     self.loadFavorites(show: true)
                 } else if self.configured && self.hasCriteria {
-                    self.runSearch()             // back with a restored query
+                    self.runSearch()
                 } else {
                     self.showSearchEmpty()
                 }
@@ -817,8 +727,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             : "Bearer " + token
     }
 
-    // Setup: site, email (Cloud), token, spaces in scope. Save = detect the
-    // auth mode that answers /user/current, then store it all
     func showSetup() {
         guard window.attachedSheet == nil else { return }
         if !window.isVisible { controller?.showConfluence() }
@@ -834,7 +742,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             let oldKeys = ((j["spaces"] as? [[String: Any]]) ?? []).compactMap { $0["key"] as? String }
             let spacesF = NSTextField(string: oldKeys.joined(separator: ", "))
             spacesF.placeholderString = "space keys, e.g. ENG, OPS (empty = the whole site)"
-            // the state first (is it working?), then what the fields mean
             let hasSite = !(j["site"] as? String ?? "").isEmpty, hasToken = j["hasToken"] as? Bool ?? false
             let state = !hasSite ? "○ Not set up yet."
                 : !hasToken ? "● Site saved, token missing."
@@ -910,8 +817,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         a.beginSheetModal(for: window) { r in then(r.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue) }
     }
 
-    // MARK: criteria
-
     private var query: String { textBox.field.stringValue.trimmingCharacters(in: .whitespaces) }
 
     private func criteria() -> [String: Any] {
@@ -950,14 +855,11 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         sortChoice.value = c["sort"] as? String ?? "relevance"
     }
 
-    // anything to search for (a query, or a filter that narrows on its own)
     private var hasCriteria: Bool {
         !query.isEmpty || !(modChoice.value ?? "").isEmpty || (!people.isAll && !people.selected.isEmpty)
             || (!spaces.isAll && !spaces.selected.isEmpty)
     }
 
-    // a filter changed: re-run what's on screen - debounced, so clicking
-    // through a few filters sends ONE request (rate limits)
     private func criteriaChanged() {
         saveCriteria()
         criteriaTimer?.invalidate()
@@ -986,8 +888,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         focusSearch()
     }
 
-    // Search with nothing typed: an empty list + how to start (never the
-    // favorites - they live under ★ Favorites)
     private func showSearchEmpty() {
         showingFavorites = false
         lastCQL = ""
@@ -1003,8 +903,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             showPreviewHint("Connect a Confluence site to start searching.", setup: true)
         }
     }
-
-    // MARK: search
 
     @objc private func searchClicked(_ sender: Any?) { runSearch() }
 
@@ -1084,15 +982,11 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         table.scrollRowToVisible(i)
     }
 
-    // MARK: favorites
-
-    // the saved list (refreshed in one request); show = put it on screen
     private func loadFavorites(show: Bool) {
         ConfluenceAPI.run(["--favorites", "--no-refresh"]) { [weak self] j in
             guard let self else { return }
             self.favorites = ((j["results"] as? [[String: Any]]) ?? []).map(ConfluenceRow.init)
             if show { self.showFavorites() }
-            // the live refresh (one request) at most every 10 minutes
             guard self.configured, !self.favorites.isEmpty, !self.coolingDown,
                   (self.lastFavRefresh.map { Date().timeIntervalSince($0) > 600 } ?? true) else { return }
             self.lastFavRefresh = Date()
@@ -1105,13 +999,11 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     }
 
     private var showingFavorites = false
-    // the Ctrl+B W view switcher's "where": favorites, or the search typed
     var whereText: String {
         let q = textBox.field.stringValue.trimmingCharacters(in: .whitespaces)
         return showingFavorites ? "Favorites" : q.isEmpty ? "Search" : "“\(q)”"
     }
 
-    // favorites filtered locally by the search box (title / space / path)
     private func showFavorites(keepSelection: Bool = false) {
         let words = query.lowercased().split(separator: " ").map(String.init)
         let sel = keepSelection && rows.indices.contains(table.selectedRow) ? rows[table.selectedRow].id : nil
@@ -1177,8 +1069,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         }
     }
 
-    // MARK: table
-
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1209,7 +1099,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         previewTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
             self?.loadPreview(i)
         }
-        // near the end: fetch the next page
         if i >= rows.count - 2, !nextLink.isEmpty, !searching, !showingFavorites { loadMore() }
     }
 
@@ -1255,8 +1144,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
 
     @objc private func copyCQL() { if !lastCQL.isEmpty { copy(lastCQL, what: "CQL") } }
     @objc private func copyCurl() { if !lastCurl.isEmpty { copy(lastCurl, what: "curl ($CONFLUENCE_TOKEN)") } }
-
-    // MARK: preview
 
     @objc private func setupClicked() { showSetup() }
 
@@ -1336,7 +1223,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         }
     }
 
-    // the page HTML inside a themed template + the highlighter
     private func render(_ page: [String: Any], _ r: ConfluenceRow) {
         let base = (page["site"] as? String) ?? site
         var body = page["html"] as? String ?? ""
@@ -1356,14 +1242,12 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         web.loadHTMLString(html, baseURL: URL(string: base))
     }
 
-    // a src / href as an absolute URL on the Confluence site
     private func absolute(_ s: String, base: String) -> String {
         if s.hasPrefix("http://") || s.hasPrefix("https://") || s.hasPrefix("data:") { return s }
         guard let b = URL(string: base), let scheme = b.scheme, let host = b.host else { return s }
         let origin = "\(scheme)://\(host)" + (b.port.map { ":\($0)" } ?? "")
         if s.hasPrefix("//") { return scheme + ":" + s }
         if s.hasPrefix("/") {
-            // context-relative on a site with a context path (/wiki/...) or not
             let ctx = b.path
             if !ctx.isEmpty && ctx != "/" && !s.hasPrefix(ctx + "/") && s.hasPrefix("/download/") { return base + s }
             return origin + s
@@ -1371,7 +1255,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         return base + "/" + s
     }
 
-    // images + attachments on the site go through wsconf:// (credentials)
     private func rewrite(_ html: String, base: String) -> String {
         guard let host = URL(string: base)?.host,
               let rx = try? NSRegularExpression(pattern: "(<img\\b[^>]*?\\bsrc\\s*=\\s*)\"([^\"]+)\"",
@@ -1388,7 +1271,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
             last = NSMaxRange(m.range)
         }
         out += ns.substring(from: last)
-        // srcset would bypass the rewrite: drop it
         return out.replacingOccurrences(of: "srcset=", with: "data-srcset=")
     }
 
@@ -1514,7 +1396,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     @objc private func nextHit() { web.evaluateJavaScript("window.wsNext && wsNext()") }
     @objc private func prevHit() { web.evaluateJavaScript("window.wsPrev && wsPrev()") }
 
-    // links in the preview open in the browser
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if action.navigationType == .linkActivated, let u = action.request.url {
@@ -1526,9 +1407,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         decisionHandler(.allow)
     }
 
-    // MARK: status + keys
-
-    // a {rateLimited, retryIn} answer: pause everything, count down, resume
     private func rateLimited(_ j: [String: Any], retry: (() -> Void)?) -> Bool {
         guard j["rateLimited"] as? Bool == true else { return false }
         let secs = max(3, (j["retryIn"] as? Int) ?? 30)
@@ -1561,7 +1439,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         }
     }
 
-    // the Contributor picker: Me + people seen in the scope (cached a day)
     private func loadPeople(refresh: Bool) {
         ConfluenceAPI.run(["--users"] + (refresh ? ["--refresh"] : [])) { [weak self] j in
             guard let self else { return }
@@ -1598,12 +1475,9 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
                                                                length: 0)
     }
 
-    // search box: Return searches (favorites: typing filters, Return searches
-    // inside them), ↑↓ / Ctrl+N/P move the results without leaving the box
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         switch sel {
         case #selector(NSResponder.insertNewline(_:)):
-            // Favorites are for opening: Return opens the highlighted one
             if scope == .favorites && showingFavorites {
                 openSelected()
             } else {
@@ -1621,7 +1495,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         }
     }
 
-    // favorites: typing filters them (back from a search inside them too)
     func controlTextDidChange(_ obj: Notification) {
         if scope == .favorites { showFavorites() }
     }
@@ -1632,21 +1505,18 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         select(i)
     }
 
-    // Esc: popovers own it (the pickers); else clear the query; never closes
     private func escape() {
         if !query.isEmpty {
             textBox.field.stringValue = ""
             if scope == .favorites { showFavorites() } else if !hasCriteria { showSearchEmpty() }
             focusSearch()
         } else if onSlotHide != nil, let c = controller, c.escHideCount(.confluence) > 0 {
-            // nothing to clear: Confluence's "Esc Hides Window" is on
             c.slot.escapeAtTop(.confluence)
         } else if window.firstResponder !== textBox.field.currentEditor() {
             focusSearch()
         }
     }
 
-    // Esc closes an open filter (and only it), wherever the keys are
     override func keyBeforeSheet(_ e: NSEvent) -> Bool {
         guard e.keyCode == 53, let open = [spaces, people].first(where: { $0.isOpen }) else { return false }
         open.closePopover()
@@ -1657,36 +1527,33 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let cmd = mods.contains(.command), shift = mods.contains(.shift), ctrl = mods.contains(.control)
         switch e.keyCode {
-        case 53: escape()                                                // Esc
-        case 37 where cmd, 3 where cmd && !shift: focusSearch()          // Cmd+L / Cmd+F
-        case 5 where cmd: shift ? prevHit() : nextHit()                  // Cmd+G
-        case 2 where cmd:                                                // Cmd+D
+        case 53: escape()
+        case 37 where cmd, 3 where cmd && !shift: focusSearch()
+        case 5 where cmd: shift ? prevHit() : nextHit()
+        case 2 where cmd:
             if rows.indices.contains(table.selectedRow) { toggleFavorite(row: table.selectedRow) }
-        case 15 where cmd: runSearch()                                   // Cmd+R
-        case 44 where cmd: showShortcuts()                               // Cmd+/
-        case 36 where cmd, 76 where cmd: openSelected()                  // Cmd+Return
-        case 45 where ctrl: move(1)                                      // Ctrl+N
-        case 35 where ctrl: move(-1)                                     // Ctrl+P
+        case 15 where cmd: runSearch()
+        case 44 where cmd: showShortcuts()
+        case 36 where cmd, 76 where cmd: openSelected()
+        case 45 where ctrl: move(1)
+        case 35 where ctrl: move(-1)
         default:
             if window.firstResponder === table {
                 if e.keyCode == 36 || e.keyCode == 76 { openSelected(); return true }
-                if cmd && e.keyCode == 8, let r = selectedRow {          // Cmd+C / Shift+Cmd+C
+                if cmd && e.keyCode == 8, let r = selectedRow {
                     shift ? copy("\(r.title)\n\(r.url)", what: "title + link") : copy(r.url, what: "link")
                     return true
                 }
-                // typing goes to the search box (the key itself too)
                 if !cmd && !ctrl, let ch = e.characters, ch.count == 1, ch.first?.isLetter == true
                     || ch.first?.isNumber == true {
                     focusSearch()
                     return false
                 }
             }
-            return webEditKey(e, in: web)                                // the page
+            return webEditKey(e, in: web)
         }
         return true
     }
-
-    // MARK: kitchen sink (the header icon)
 
     override func showIconMenu() {
         let menu = iconMenu(view: .confluence)
@@ -1714,8 +1581,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
         popUpIconMenu(menu)
     }
 
-    // commands.toml [shortcuts] "confluence: …" lines, then "all: …" (the
-    // AI view's card; ws-settings lists and edits the same lines)
     private func showShortcuts() {
         func lines(_ v: String) -> [String] {
             shortcutEntries.filter { $0.view == v }.map { "\($0.keys) — \($0.what)" }
@@ -1728,7 +1593,6 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     }
 }
 
-// WKUserContentController retains its handlers: break the cycle
 final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     weak var target: WKScriptMessageHandler?
     init(_ t: WKScriptMessageHandler) { target = t }
@@ -1737,8 +1601,6 @@ final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
-// MARK: - Ctrl+H/J/K/L panes (PaneNav.swift): sidebar, search box,
-// results, page preview
 extension ConfluenceWindow: PaneProvider {
     var navPanes: [NavPane] {
         var out: [NavPane] = []
@@ -1763,7 +1625,6 @@ extension ConfluenceWindow: PaneProvider {
     }
 }
 
-// vim normal mode on the results (VimKeys.swift)
 final class ConfluenceVim: VimRows {
     private weak var w: ConfluenceWindow?
     init(_ w: ConfluenceWindow) { self.w = w }

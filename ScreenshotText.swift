@@ -3,24 +3,17 @@ import CoreGraphics
 import CoreText
 import Vision
 
-// /screenshot's Copy Text mode (Tab / O in the overlay, ⇧⌘C, the ring's
-// copy-text button): the selection's pixels → Apple Vision's on-device text
-// recognizer → one string for the clipboard. No AppKit: bin/run-tests.sh
-// screenshot renders text and reads it back.
-
 struct ShotOCRConfig {
-    var languages: [String] = []      // empty = Vision detects the language
-    var correction = true             // Vision's language correction
+    var languages: [String] = []
+    var correction = true
 }
 
-// one recognized line, box in image pixels, top-left origin
 struct ShotOCRLine: Equatable {
     var text: String
     var box: CGRect
 }
 
 enum ShotOCR {
-    // Vision misses very small text: crops shorter than this are upscaled 2×
     static let minHeight = 64
 
     static func recognize(_ img: CGImage, _ cfg: ShotOCRConfig = ShotOCRConfig()) -> [ShotOCRLine] {
@@ -35,15 +28,11 @@ enum ShotOCR {
         let w = CGFloat(img.width), h = CGFloat(img.height)
         return (req.results ?? []).compactMap { o -> ShotOCRLine? in
             guard let t = o.topCandidates(1).first?.string, !t.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-            // Vision: normalized, bottom-left origin
             let b = o.boundingBox
             return ShotOCRLine(text: t, box: CGRect(x: b.minX * w, y: (1 - b.maxY) * h, width: b.width * w, height: b.height * h))
         }
     }
 
-    // reading order: rows top → bottom (lines whose vertical centers sit
-    // inside one another's band are one row, left → right, joined by a
-    // space), a blank line where the gap between rows is taller than a line
     static func join(_ lines: [ShotOCRLine]) -> String {
         var rows: [[ShotOCRLine]] = []
         for l in lines.sorted(by: { $0.box.midY < $1.box.midY }) {
@@ -74,9 +63,6 @@ enum ShotOCR {
         join(recognize(img, cfg))
     }
 
-    // The first recognition in a process makes the Neural Engine compile
-    // the model (≈ 50 s seen on the owner's Mac, then ≈ 0.2 s): run it once
-    // on a few rendered words at launch, off main. Returns the ms it took.
     static func warmUp(_ cfg: ShotOCRConfig = ShotOCRConfig()) -> Int {
         let t0 = DispatchTime.now().uptimeNanoseconds
         let w = 240, h = 48
@@ -95,7 +81,6 @@ enum ShotOCR {
         return Int(Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
     }
 
-    // the toast's {}: "3 lines" / "42 characters"
     static func summary(_ s: String) -> String {
         let n = s.split(separator: "\n", omittingEmptySubsequences: true).count
         return n > 1 ? "\(n) lines" : "\(s.count) characters"

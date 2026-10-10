@@ -65,17 +65,19 @@ import shlex
 import sys
 import tempfile
 
+import jira_paths
+
 HOME = os.path.expanduser("~")
 JIRA_DIR = os.path.dirname(os.path.abspath(__file__))
 WS_ROOT = os.path.dirname(JIRA_DIR)
 
-CONFIG_JSON = os.environ.get("JIRA_CONFIG_JSON") or os.path.join(HOME, ".config/jira/config.json")
-TEAM_JSON = os.environ.get("JIRA_TEAM_JSON") or os.path.join(HOME, ".config/jira/team.json")
-LEGACY_CONFIG = os.environ.get("JIRA_CONFIG_FILE") or os.path.join(HOME, ".config/jira/config")
+CONFIG_JSON = jira_paths.CONFIG_JSON      # file locations: jira/paths.json (shared with the app)
+TEAM_JSON = jira_paths.TEAM_JSON
+LEGACY_CONFIG = jira_paths.LEGACY_CONFIG
 COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "commands.toml")
 
-CACHE_DIR = os.environ.get("JIRA_CACHE_DIR") or os.path.join(HOME, ".cache/jira")
-OUT_DIR_DEFAULT = os.path.join(HOME, ".cache/kitchen-sink/jira_json")
+CACHE_DIR = jira_paths.CACHE_DIR
+OUT_DIR_DEFAULT = jira_paths.OUT_DIR_DEFAULT
 
 DEFAULTS = {
     "site": "",
@@ -111,17 +113,17 @@ DEFAULTS = {
     "boardCatalogMinutes": 60,       # how often the poll re-reads scope -> boards -> sprints
 }
 
-LIVE_SEARCH_FILE = "search.json"     # the live search's tab (in outDir)
+LIVE_SEARCH_FILE = jira_paths.TABS["liveSearch"] # the live search's tab (in outDir)
 LIVE_SEARCH_MAX = 100                # default max results of one live search
-FAVORITES_FILE = "favorites.json"    # the pinned issues' tab (the favorites job)
-BLACKLIST_RELEASE_FILE = "blacklist_release.json"   # releases hidden from the releases tab
-RELEASE_VIEW_DIR = "jira_releases"  # next to outDir: one <PROJECT>-<release>.json per release
-LABEL_VIEW_DIR = "jira_labels"      # next to outDir: one <label>.json per pinned label
-BOARD_DIR = "jira_boards"           # next to outDir: pinned boards' job files (no tab each)
-MY_WORK_DIR = "jira_mywork"         # next to outDir: the sidebar's MY WORK views
-SPRINTS_FILE = "sprints.json"       # in the jira cache: pinned sprints' name / state / board
-BOARD_CATALOG_FILE = "board_catalog.json"   # in the jira cache: scope -> boards -> sprints (the browser)
-BOARDS_FILE = "boards.json"         # in the jira cache: pinned boards' columns + quick filters
+FAVORITES_FILE = jira_paths.TABS["favorites"] # the pinned issues' tab (the favorites job)
+BLACKLIST_RELEASE_FILE = jira_paths.TABS["blacklistRelease"] # releases hidden from the releases tab
+RELEASE_VIEW_DIR = jira_paths.SIDE_DIRS["releases"] # next to outDir: one <PROJECT>-<release>.json per release
+LABEL_VIEW_DIR = jira_paths.SIDE_DIRS["labels"] # next to outDir: one <label>.json per pinned label
+BOARD_DIR = jira_paths.SIDE_DIRS["boards"] # next to outDir: pinned boards' job files (no tab each)
+MY_WORK_DIR = jira_paths.SIDE_DIRS["myWork"] # next to outDir: the sidebar's MY WORK views
+SPRINTS_FILE = jira_paths.CACHE["sprints"] # in the jira cache: pinned sprints' name / state / board
+BOARD_CATALOG_FILE = jira_paths.CACHE["boardCatalog"] # in the jira cache: scope -> boards -> sprints (the browser)
+BOARDS_FILE = jira_paths.CACHE["boards"] # in the jira cache: pinned boards' columns + quick filters
 
 # the directory job: projects + assignable users + statuses / types /
 # priorities / fields -> ~/.cache/jira/directory.json (the pickers' source).
@@ -609,7 +611,7 @@ def epic_link_ids() -> list:
     global _EPIC_LINKS
     if _EPIC_LINKS is None:
         try:
-            with open(os.path.join(CACHE_DIR, "directory.json"), encoding="utf-8") as fh:
+            with open(jira_paths.cache_file("directory"), encoding="utf-8") as fh:
                 flds = json.load(fh).get("fields") or []
         except (OSError, ValueError, AttributeError):
             flds = []
@@ -789,7 +791,7 @@ def parse_legacy(path: str) -> dict:
 
 def _cache_projects() -> list:
     try:
-        with open(os.path.join(CACHE_DIR, "jiras.json"), encoding="utf-8") as fh:
+        with open(jira_paths.cache_file("issues"), encoding="utf-8") as fh:
             data = json.load(fh)
         return sorted({v.get("project", "") for v in data.values() if v.get("project")})
     except (OSError, ValueError, AttributeError):
@@ -876,7 +878,7 @@ def migrate_setup(data: dict, notes: list) -> None:
     except ConfigError:
         scope = []
     try:
-        with open(os.path.join(CACHE_DIR, "status.json"), encoding="utf-8") as fh:
+        with open(jira_paths.cache_file("status"), encoding="utf-8") as fh:
             st = json.load(fh)
     except (OSError, ValueError):
         st = {}

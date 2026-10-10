@@ -1,10 +1,4 @@
 // sources: AnsiRender.swift PaneShot.swift ConfigText.swift ProcessRun.swift
-// /pane-shot's pure parts: the SGR parser + cell grid (AnsiRender.swift),
-// the Ghostty theme reader, the image size / scale, the CLI args, the
-// [pane-shot] config and herdr's JSON (PaneShot.swift).
-// WS_ANSI_FILE=x.ansi WS_ANSI_PNG=out.png renders a file for a look.
-// Usage: bin/run-tests.sh ansi
-
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -156,23 +150,19 @@ struct AnsiRenderTests {
         }
         let pts = AnsiRender.size(AnsiGrid.parse("X hi 中😀"), m, padding: 4)
         check(img.width == Int(pts.width * 2) && img.height == Int(pts.height * 2), "pixel size = points × scale")
-        // the red background cell at (padding, padding) in points
         if let px = pixel(img, x: Int((4 + m.cellWidth / 2) * 2), y: Int((4 + 1) * 2)) {
             check(px.r > 150 && px.g < 80, "red bg cell: \(px)")
         }
         if let px = pixel(img, x: 2, y: 2) {
             check(px == (t.background.r, t.background.g, t.background.b) || abs(Int(px.r) - Int(t.background.r)) < 3, "padding = theme background: \(px)")
         }
-        // a fallback glyph (CTLineDraw moves the text position) must not
-        // shift the font-drawn glyphs after it: the red █ fills its own cell
         if let img2 = AnsiRender.image(AnsiGrid.parse("⏺ \(esc)[31m█\n"), theme: t, padding: 0, scale: 1),
            let px = pixel(img2, x: Int(m.cellWidth * 2.5), y: Int(m.lineHeight / 2)) {
             check(px.r > 150 && px.g < 80, "glyph after a fallback stays in its cell: \(px)")
         } else { check(false, "fallback row rendered") }
-        _ = AnsiRender.image(AnsiGrid.parse(""), theme: t)   // empty grid: no crash
+        _ = AnsiRender.image(AnsiGrid.parse(""), theme: t)
     }
 
-    // top-left origin pixel (RGB)
     static func pixel(_ img: CGImage, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8)? {
         var buf = [UInt8](repeating: 0, count: 4)
         guard let ctx = CGContext(data: &buf, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
@@ -215,7 +205,6 @@ struct AnsiRenderTests {
         check(Herdr.lines(viewport: 60, history: 0, all: true) == Herdr.maxLines, "all")
         let env = Herdr.environment(["HERDR_PANE_ID": "a", "HERDR_TAB_ID": "b", "HERDR_SOCKET_PATH": "/s", "HOME": "/h"])
         check(env == ["HERDR_SOCKET_PATH": "/s", "HOME": "/h"], "pane env dropped, socket kept")
-        // herdr's error JSON arrives on stderr with exit 1
         let fake = NSTemporaryDirectory() + "fake-herdr-\(getpid())"
         try? "#!/bin/sh\necho '{\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane x not found\"}}' >&2\nexit 1\n"
             .write(toFile: fake, atomically: true, encoding: .utf8)
@@ -229,7 +218,6 @@ struct AnsiRenderTests {
         } else { check(false, "missing binary fails") }
     }
 
-    // WS_ANSI_FILE + WS_ANSI_PNG: render with the user's Ghostty theme
     static func renderFileForALook() {
         let env = ProcessInfo.processInfo.environment
         guard let file = env["WS_ANSI_FILE"], let out = env["WS_ANSI_PNG"],

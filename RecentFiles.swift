@@ -1,74 +1,39 @@
 import AppKit
 import CoreServices
 
-// MARK: - Recent files (the file browser's pinned "Recent" + "Arrived" views)
-//
-// "Where did that download / AirDrop / scp / screenshot just land?" — with
-// no list of folders to maintain:
-//   live   ONE FSEvents stream on "/" (file-level events; the kernel journal
-//          makes this cheap). System trees are dropped by a prefix check
-//          before any syscall; what's left — your home, /tmp, /Users/Shared,
-//          anywhere else you can write — is recorded with the time it
-//          happened. [files] recent-scope = home watches only ~ and /tmp.
-//   origin a file created / renamed in carrying macOS's quarantine flag came
-//          from OUTSIDE: a browser download, AirDrop, Messages, Mail — the
-//          "Arrived" view lists only those, wherever they were saved, with
-//          the app (and site) they came from. (scp / curl set no flag: those
-//          show in Recent.)
-//   seed   at launch, Spotlight for what changed in ~ in the last
-//          `recent-days`, every downloaded file on the disk (kMDItemWhereFroms)
-//          in that time, and a shallow scan of /tmp (not indexed).
-// Noise is skipped: system trees, hidden paths, ~/Library, app libraries
-// (Photos / Music — touching them triggers privacy prompts), build and
-// dependency trees, in-progress downloads, swap files, our own writes
-// (IgnoreSelf), plus [files] recent-exclude. Stored in
-// ~/.cache/kitchen-sink/recent.json.
 final class RecentFiles {
     static let shared = RecentFiles()
     static let changed = Notification.Name("RecentFilesChanged")
 
     struct Item {
-        var at: Double          // last activity (epoch s)
-        var source: String?     // where it came from ("Safari · github.com", "AirDrop")
+        var at: Double
+        var source: String?
     }
 
     private(set) var enabled = false
     private var limit = 200
     private var days = 7
     private var everywhere = true
-    private var excludes: [String] = []      // user globs (path or name)
+    private var excludes: [String] = []
     private let queue = DispatchQueue(label: "recent-files")
     private var items: [String: Item] = [:]
     private var stream: FSEventStreamRef?
     private var saveWork: DispatchWorkItem?
     private var notifyWork: DispatchWorkItem?
-    // what entries() hands out: rebuilt on `queue` by publish(), read under
-    // a lock — the main thread never waits on `queue` (busy with a burst of
-    // file events or the launch-time Spotlight seed, it stalled every
-    // arrow press in the Recent view)
     private let snapLock = NSLock()
     private var snapshot: [(path: String, at: Date, source: String?)] = []
     private let home: String
     private let store: String
-    // a rename shows up as TWO events — the old path (gone), then the new
-    // one — tied together by the file's inode. What the old path held
-    // (itself at "", what was inside a folder by "/suffix") waits here for
-    // its second half.
     private var departed: [UInt64: (at: Double, items: [String: Item], path: String)] = [:]
-    // the /paths shelf rides on this stream (PathShelf.swift): every FILE
-    // that passes the filters above, and every rename (old → new). Called
-    // on `queue`; keep them cheap.
     var onKept: ((_ path: String, _ created: Bool, _ origin: String?) -> Void)?
     var onRenamed: ((_ from: String, _ to: String) -> Void)?
 
-    // home / store are parameters for Tests/test_recent_files.swift
     init(home: String = NSHomeDirectory(),
          store: String = NSHomeDirectory() + "/.cache/kitchen-sink/recent.json") {
         self.home = home
         self.store = store
     }
 
-    // [files] recent / recent-days / recent-limit / recent-exclude / recent-scope
     func configure(enabled on: Bool, days: Int, limit: Int, excludes: [String], everywhere all: Bool) {
         let rescope = enabled && all != everywhere
         queue.sync {
@@ -79,12 +44,9 @@ final class RecentFiles {
         }
         if rescope { stop() }
         if on && !enabled { start() } else if !on && enabled { stop() }
-        // excludes / limit may have changed what the snapshot holds
         if enabled { queue.async { [self] in publish() } }
     }
 
-    // newest first; only paths that still exist. arrivedOnly: files that
-    // came from outside (quarantine flag)
     func entries(arrivedOnly: Bool = false) -> [(path: String, at: Date, source: String?)] {
         snapLock.lock()
         let all = snapshot
@@ -92,17 +54,11 @@ final class RecentFiles {
         return Array(all.filter { !arrivedOnly || $0.source != nil }.prefix(limit))
     }
 
-    // A rename / move (old → new) or a copy (old nil) made by THIS app: the
-    // stream ignores our own writes (IgnoreSelf), so the browser reports
-    // them (`FileDrag.onFileOp`). The snapshot is patched right here — the
-    // caller reloads its list straight after — and the store follows on
-    // `queue`. A renamed row keeps its place in the list.
     func ownChange(from old: String?, to new: String) {
         guard enabled else { return }
         if let old { onRenamed?(old, new) } else { onKept?(new, true, nil) }
         if let old {
             snapLock.lock()
-            // (moved out of scope — into the Trash — = gone from the list)
             snapshot = snapshot.compactMap { e in
                 guard let p = Self.rekeyed(e.path, from: old, to: new) else { return e }
                 return keep(p) ? (path: p, at: e.at, source: e.source) : nil
@@ -119,32 +75,24 @@ final class RecentFiles {
         }
     }
 
-    // is there a file under EXACTLY this name? "a.txt" still "exists" after
-    // a case-only rename to "A.txt" (case-insensitive volume) — without
-    // this the file was listed twice
     static func present(_ p: String) -> Bool {
         guard FileManager.default.fileExists(atPath: p) else { return false }
         let real = try? URL(fileURLWithPath: p).resourceValues(forKeys: [.nameKey]).name
         return real == nil || real == (p as NSString).lastPathComponent
     }
 
-    // `p` after old was renamed to new: old itself, or anything inside it
     static func rekeyed(_ p: String, from old: String, to new: String) -> String? {
         if p == old { return new }
         if p.hasPrefix(old + "/") { return new + p.dropFirst(old.count) }
         return nil
     }
 
-    // on `queue`: move old (and what's inside it) to new; false = nothing
-    // of it was listed
     private func rekey(from old: String, to new: String) -> Bool {
         let gone = take(old)
         for (suffix, it) in gone { put(new + suffix, it) }
         return !gone.isEmpty
     }
 
-    // on `queue`: drop `p` and everything inside it; returns what was
-    // there, keyed by the path after `p` ("" = p itself)
     private func take(_ p: String) -> [String: Item] {
         var gone: [String: Item] = [:]
         for (k, it) in items where k == p || k.hasPrefix(p + "/") {
@@ -154,27 +102,19 @@ final class RecentFiles {
         return gone
     }
 
-    // on `queue`: the newer activity wins, a known origin is never lost
     private func put(_ p: String, _ it: Item) {
         guard let have = items[p] else { items[p] = it; return }
         items[p] = Item(at: max(have.at, it.at), source: have.source ?? it.source)
     }
 
-    // MARK: lifecycle
-
     private func start() {
         enabled = true
         queue.async { [self] in
-            // ask for the protected folders UP FRONT, at launch: if a grant
-            // is missing, macOS prompts now (nothing on screen to disturb)
-            // instead of mid-use when a row is listed. Normally the build
-            // pre-grants them (bin/grant-permissions.sh) and this is silent.
             for d in ["Downloads", "Desktop", "Documents"] {
                 _ = try? FileManager.default.contentsOfDirectory(atPath: home + "/" + d)
             }
             load()
             seed()
-            // entries stored before origins were tracked: read them once
             for (p, it) in items where it.source == nil {
                 if let o = Self.origin(p) { items[p]?.source = o }
             }
@@ -183,7 +123,6 @@ final class RecentFiles {
         let ctx = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         var context = FSEventStreamContext(version: 0, info: ctx, retain: nil, release: nil,
                                            copyDescription: nil)
-        // ExtendedData: each event is a dictionary, path + the file's inode
         let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes
                            | kFSEventStreamCreateFlagUseExtendedData
                            | kFSEventStreamCreateFlagIgnoreSelf)
@@ -191,13 +130,11 @@ final class RecentFiles {
             guard let info else { return }
             let me = Unmanaged<RecentFiles>.fromOpaque(info).takeUnretainedValue()
             let arr = unsafeBitCast(paths, to: NSArray.self) as? [NSDictionary] ?? []
-            // kFSEventStreamEventExtendedDataPathKey / …ExtendedFileIDKey
             me.handle(arr.map { $0["path"] as? String ?? "" },
                       Array(UnsafeBufferPointer(start: flags, count: count)),
                       arr.map { ($0["fileID"] as? NSNumber)?.uint64Value })
         }
         let roots = queue.sync { everywhere } ? ["/"] : [home, "/private/tmp"]
-        // 1s latency: the kernel batches a busy disk into one callback
         guard let s = FSEventStreamCreate(nil, callback, &context, roots as CFArray,
                                           FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
                                           1.0, FSEventStreamCreateFlags(flags)) else { return }
@@ -216,22 +153,15 @@ final class RecentFiles {
         stream = nil
     }
 
-    // on `queue`. ids = each event's inode (nil = unknown: a rename is then
-    // just "old gone, new appeared")
     func handle(_ paths: [String], _ flags: [FSEventStreamEventFlags], _ ids: [UInt64?] = []) {
         let now = Date().timeIntervalSince1970
         var touched = false
-        // a rename OUT of scope never sends its second half
         departed = departed.filter { now - $0.value.at < 10 }
         for (i, raw) in paths.enumerated() where i < flags.count {
             let p = raw.hasPrefix("/tmp/") ? "/private" + raw : raw
-            // the cheap string check first: a busy disk sends thousands of
-            // system-tree events that must cost nothing
             guard inScope(p) else { continue }
             let f = Int(flags[i])
             let id = i < ids.count ? ids[i] : nil
-            // deleted, or the OLD name of a rename: it leaves the list with
-            // everything inside it — a rename's new name picks that up below
             if f & (kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemRenamed) != 0,
                !Self.present(p) {
                 let gone = take(p)
@@ -244,17 +174,11 @@ final class RecentFiles {
             let created = f & kFSEventStreamEventFlagItemCreated != 0
             let renamed = f & kFSEventStreamEventFlagItemRenamed != 0
             let modified = f & kFSEventStreamEventFlagItemModified != 0
-            // files that appear or change; folders only when they appear
-            // (an unzipped archive, an AirDropped folder)
             guard (isFile && (created || renamed || modified)) || (isDir && (created || renamed)),
                   keep(p), FileManager.default.fileExists(atPath: p) else { continue }
             var item = items[p] ?? Item(at: now, source: nil)
             item.at = now
-            // a download finishes by RENAMING foo.crdownload -> foo: read
-            // the origin when the file appears under its final name
             if created || renamed || item.source == nil { item.source = Self.origin(p) ?? item.source }
-            // the new name of a rename: what the old name held comes along
-            // (a renamed folder keeps the files listed inside it)
             var renamedFrom: String?
             if renamed, let id, let was = departed.removeValue(forKey: id) {
                 item.source = item.source ?? was.items[""]?.source
@@ -269,13 +193,8 @@ final class RecentFiles {
         if touched { trim(); publish() }
     }
 
-    // MARK: origin (quarantine + where-from)
-
-    // "Safari · github.com", "AirDrop", "Messages" — nil when the file carries
-    // no quarantine flag (made here, or copied in by scp / cp / curl)
     static func origin(_ p: String) -> String? {
         guard let q = xattrString(p, "com.apple.quarantine") else { return nil }
-        // flags;hex-time;agent;uuid
         let parts = q.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
         var agent = parts.count > 2 ? parts[2] : ""
         switch agent.lowercased() {
@@ -299,7 +218,6 @@ final class RecentFiles {
         xattrData(p, name).map { String(decoding: $0, as: UTF8.self) }
     }
 
-    // the site a download came from (kMDItemWhereFroms: [url, referrer])
     private static func whereFromHost(_ p: String) -> String? {
         guard let d = xattrData(p, "com.apple.metadata:kMDItemWhereFroms"),
               let arr = try? PropertyListSerialization.propertyList(from: d, format: nil) as? [String],
@@ -307,8 +225,6 @@ final class RecentFiles {
         else { return nil }
         return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
-
-    // MARK: seed (what happened while the app wasn't running)
 
     private func seed() {
         let since = Date().timeIntervalSince1970 - Double(days) * 86400
@@ -318,21 +234,17 @@ final class RecentFiles {
         for p in run("/usr/bin/mdfind", ["-onlyin", home, changed]) where keep(p) {
             if let t = stamp(p), t >= since { found[Self.canonical(p)] = t }
         }
-        // every file DOWNLOADED in that time, wherever it was saved
         if everywhere {
             let downloaded = "kMDItemDateAdded >= $time.now(-\(secs)) && kMDItemWhereFroms == \"*\""
             for p in run("/usr/bin/mdfind", [downloaded]) where inScope(p) && keep(p) {
                 if let t = stamp(p), t >= since { found[Self.canonical(p)] = t }
             }
         }
-        // /private/tmp: not Spotlight-indexed — two levels deep
         let fm = FileManager.default
         func scan(_ dir: String, depth: Int) {
             for n in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] {
                 let p = (dir as NSString).appendingPathComponent(n)
                 guard keep(p) else { continue }
-                // a symlink is not a second copy (/tmp/zzlink → /tmp listed
-                // every file twice): its target is listed under its own name
                 var ls = Darwin.stat()
                 guard lstat(p, &ls) == 0, ls.st_mode & S_IFMT != S_IFLNK else { continue }
                 var isDir: ObjCBool = false
@@ -348,9 +260,6 @@ final class RecentFiles {
         trim()
     }
 
-    // ONE name per file: its folder's real path + the name, as FSEvents
-    // reports it (a path through a symlinked folder — /tmp/zzlink/x with
-    // zzlink → /tmp — is /private/tmp/x). The file itself stays as named.
     static func canonical(_ p: String) -> String {
         let dir = (p as NSString).deletingLastPathComponent
         guard let r = realpath(dir, nil) else { return p }
@@ -359,7 +268,6 @@ final class RecentFiles {
         return real == dir ? p : (real as NSString).appendingPathComponent((p as NSString).lastPathComponent)
     }
 
-    // newest of creation / modification
     private func stamp(_ p: String) -> Double? {
         var st = Darwin.stat()
         guard stat(p, &st) == 0 else { return nil }
@@ -370,18 +278,12 @@ final class RecentFiles {
         ((try? runProcess(exe, args))?.out ?? "").split(separator: "\n").map(String.init)
     }
 
-    // MARK: noise filter
-
-    // system trees (and other volumes: network / removable drives prompt
-    // for access) — never user drop zones
     private static let systemRoots = [
         "/System/", "/Library/", "/private/var/", "/private/etc/", "/var/", "/etc/", "/usr/",
         "/bin/", "/sbin/", "/opt/", "/cores/", "/dev/", "/Volumes/", "/Applications/", "/nix/",
         "/private/preboot/", "/private/xarts/", "/.",
     ]
 
-    // where a user file can land: not a system tree, and under /Users only
-    // your home + /Users/Shared
     private func inScope(_ p: String) -> Bool {
         if p.hasPrefix(home + "/") { return !p.hasPrefix(home + "/Library/") }
         if p.hasPrefix("/private/tmp/") { return true }
@@ -395,9 +297,6 @@ final class RecentFiles {
         "node_modules", "DerivedData", "__pycache__", "site-packages", "Pods", "venv",
         "Caches", "CachedData", "logs", "xcuserdata",
     ]
-    // app libraries / bundles are packages whose insides churn constantly
-    // (Photos' database, Music's library) — and touching the Photos or Music
-    // library triggers a privacy prompt. Never look inside one.
     private static let packageExts: Set<String> = [
         "photoslibrary", "photolibrary", "migratedphotolibrary", "aplibrary", "musiclibrary",
         "tvlibrary", "app", "bundle", "framework", "plugin", "kext", "xcarchive", "xcodeproj",
@@ -418,25 +317,21 @@ final class RecentFiles {
             if c.hasPrefix(".") || Self.noiseDirs.contains(c) || Self.packageNames.contains(c) { return false }
             if Self.packageExts.contains((c as NSString).pathExtension.lowercased()) { return false }
         }
-        // ~/Music/Music = the Music app's media library (Media Library prompt)
         if p.hasPrefix(home + "/Music/Music/") { return false }
         let name = comps.last ?? ""
         let ext = (name as NSString).pathExtension.lowercased()
         if Self.noiseExts.contains(ext) || name.hasSuffix("~") || name == "4913" { return false }
-        // /private/tmp: skip system / tool scratch areas
         if p.hasPrefix("/private/tmp/"), !p.hasPrefix(home + "/") {
             let top = comps.count > 3 ? comps[3] : ""
             if top.hasPrefix("com.apple") || top.hasPrefix("claude") || top.hasPrefix("tmp")
                 || top.hasPrefix("ws-") || top.hasPrefix("kitchen-sink")
-                || top.hasPrefix("jira-poll") { return false }   // our own agents' logs
+                || top.hasPrefix("jira-poll") { return false }
         }
         for g in excludes where !g.isEmpty {
             if fnmatch(g, p, 0) == 0 || fnmatch(g, name, 0) == 0 || p.hasPrefix(g) { return false }
         }
         return true
     }
-
-    // MARK: store
 
     private func trim() {
         guard items.count > limit * 2 else { return }
@@ -449,7 +344,6 @@ final class RecentFiles {
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
         let since = Date().timeIntervalSince1970 - Double(days) * 86400
         for d in arr {
-            // (stores from before `canonical` hold the same file twice)
             if let raw = d["path"] as? String, case let p = Self.canonical(raw), let t = d["at"] as? Double,
                t >= since, keep(p), t > (items[p]?.at ?? 0) {
                 items[p] = Item(at: t, source: d["source"] as? String)
@@ -457,8 +351,6 @@ final class RecentFiles {
         }
     }
 
-    // on `queue`: rebuild the snapshot, tell the browsers (debounced) and
-    // save (debounced)
     private func publish() {
         let snap = items.sorted { $0.value.at > $1.value.at }
             .filter { keep($0.key) && FileManager.default.fileExists(atPath: $0.key) }

@@ -1,21 +1,5 @@
 import Foundation
 
-// MARK: - nvim msgpack-RPC over its --listen socket
-//
-// The notes vim pane talks to its nvim through `--listen SOCK`. Every call
-// used to run `nvim --headless --server SOCK --remote-expr …`: a process
-// spawn, waited for ON THE MAIN THREAD — ~10 ms on a quiet Mac, far more
-// where endpoint security scans every exec — on each hide, Esc, tab switch,
-// edit shortcut, autosave reload (the 1 s note watcher) and dictation
-// update. This is one persistent connection speaking nvim's msgpack-RPC
-// (https://neovim.io/doc/user/api.html#rpc): a call is one write + one read.
-//
-// Answers keep `--remote-expr`'s shape: the result as text — strings as is,
-// numbers in decimal, true / false, vim.NIL, "table" for lists / dicts — and
-// nil when nvim is unreachable or the expression fails (the CLI's non-zero
-// exit). A broken connection (nvim restarted) reconnects on the next call.
-// AppKit-free: Tests/test_nvim_rpc.swift drives it against a real nvim.
-
 indirect enum MsgPack {
     case null
     case bool(Bool)
@@ -35,8 +19,6 @@ indirect enum MsgPack {
         default: return nil
         }
     }
-
-    // MARK: encode (what a request needs: arrays, strings, ints, …)
 
     func encode(into out: inout [UInt8]) {
         func be<T: FixedWidthInteger>(_ v: T) {
@@ -98,12 +80,8 @@ indirect enum MsgPack {
         }
     }
 
-    // MARK: decode (every type: nvim answers with whatever the expr gives)
-
     enum DecodeError: Error { case incomplete, invalid(UInt8) }
 
-    // one value from `b` at `i` (advanced past it); `.incomplete` = the
-    // bytes stop mid-value (read more and decode the message again)
     static func decode(_ b: [UInt8], _ i: inout Int) throws -> MsgPack {
         func need(_ n: Int) throws { if i + n > b.count { throw DecodeError.incomplete } }
         func uint(_ n: Int) throws -> UInt64 {
@@ -193,18 +171,15 @@ final class NvimRPC {
     init(path: String) { self.path = path }
     deinit { disconnect() }
 
-    // nvim_eval(expr) as `--remote-expr` prints it; nil = unreachable / failed
     func eval(_ expr: String, timeout: Double = 1.5) -> String? {
         call("nvim_eval", [.str(expr)], timeout: timeout).map(Self.text)
     }
 
-    // nvim_input(keys) — `--remote-send`; false = not delivered
     @discardableResult
     func input(_ keys: String, timeout: Double = 1.5) -> Bool {
         call("nvim_input", [.str(keys)], timeout: timeout) != nil
     }
 
-    // `--remote-expr`'s text for a result (Lua's tostring of it)
     static func text(_ v: MsgPack) -> String {
         switch v {
         case .null: return "vim.NIL"
@@ -220,8 +195,6 @@ final class NvimRPC {
         }
     }
 
-    // one request → its result; nil on a transport error, a timeout or an
-    // nvim error. A dead connection is reopened once (nvim restarted).
     func call(_ method: String, _ params: [MsgPack], timeout: Double) -> MsgPack? {
         lock.lock()
         defer { lock.unlock() }
@@ -237,16 +210,12 @@ final class NvimRPC {
             while !closed {
                 switch nextMessage(deadline: deadline) {
                 case .closed:
-                    // nvim went away (restarted): reconnect + resend once
                     disconnect()
                     closed = true
                 case .timeout:
-                    // the stream may still owe a late answer — never reuse
-                    // it out of step
                     disconnect()
                     return nil
                 case .message(let msg):
-                    // [1, msgid, error, result]; notifications ([2, …]) skipped
                     guard case .array(let a) = msg, a.count == 4, a[0].int64 == 1, a[1].int64 == id else { continue }
                     if case .null = a[2] { return a[3] }
                     return nil
@@ -300,7 +269,6 @@ final class NvimRPC {
         return true
     }
 
-    // the next whole message from the socket
     private func nextMessage(deadline: Date) -> Next {
         while true {
             if !inbox.isEmpty {
@@ -310,9 +278,8 @@ final class NvimRPC {
                     inbox.removeFirst(i)
                     return .message(v)
                 } catch MsgPack.DecodeError.incomplete {
-                    // fall through: read more
                 } catch {
-                    return .timeout   // garbage: drop the connection, no resend
+                    return .timeout
                 }
             }
             let ms = Int32(max(0, deadline.timeIntervalSinceNow * 1000))

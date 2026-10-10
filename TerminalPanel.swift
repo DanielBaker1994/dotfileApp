@@ -1,22 +1,11 @@
 import AppKit
 import SwiftTerm
 
-// The dedicated terminal (Ctrl+B T, palette /terminal, `kitchen-sink
-// term`): the old notes drawer's shell as its own popup. A tool panel —
-// borderless, non-activating, floating, ignored by AeroSpace — so it opens
-// on the screen you're on and never brings the shared window along. The
-// shell session survives hide / show (and restarts itself when it exits).
-// Keys: everything goes to the shell (Esc, Ctrl+C …) except Cmd+C / V / A
-// (copy / paste / select all), Cmd+K (clear), Cmd+= / Cmd+- (font), Cmd+W
-// (hide). Drag the header to move, the corner grip to resize; the frame is
-// remembered.
-
 private final class TerminalNSPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
 
-// the header strip: drags the window, ✕ hides it
 private final class TerminalHeader: NSView {
     var colors: PopupColors
     var title = "Terminal" { didSet { needsDisplay = true } }
@@ -64,7 +53,6 @@ private final class TerminalHeader: NSView {
     }
 }
 
-// bottom-right corner: drag to resize (a borderless panel has no edges)
 private final class TerminalGrip: NSView {
     var colors: PopupColors
     var onResized: (() -> Void)?
@@ -183,8 +171,6 @@ final class TerminalPanel: NSObject, NSWindowDelegate {
         UserDefaults.standard.set(NSStringFromRect(panel.frame), forKey: Self.frameKey)
     }
 
-    // ON the screen the mouse is on (= where you are): the remembered size,
-    // centered there unless the remembered frame already is on that screen
     private func place() {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
@@ -204,7 +190,6 @@ final class TerminalPanel: NSObject, NSWindowDelegate {
         panel.setFrame(f, display: false)
     }
 
-    // hidden → show + keyboard; shown but elsewhere → keyboard; key → hide
     func toggle() {
         if panel.isVisible && panel.isKeyWindow { hide(); return }
         show()
@@ -214,7 +199,7 @@ final class TerminalPanel: NSObject, NSWindowDelegate {
         if !panel.isVisible { place() }
         layout()
         panel.orderFrontRegardless()
-        panel.makeKey()                 // no activation: a tool panel
+        panel.makeKey()
         panel.makeFirstResponder(term)
         installMonitor()
         log?("terminal panel shown")
@@ -246,13 +231,13 @@ final class TerminalPanel: NSObject, NSWindowDelegate {
             case "w": self.hide(); return nil
             case "=", "+": self.setFont(self.fontSize + 1); return nil
             case "-": self.setFont(self.fontSize - 1); return nil
-            default: return nil       // never Cmd+Q the daemon from here
+            default: return nil
             }
         }
     }
 
     private func clear() {
-        term.send(txt: "\u{0C}")      // Ctrl+L: the shell clears + redraws its prompt
+        term.send(txt: "\u{0C}")
     }
 
     private func menu() -> NSMenu {
@@ -269,7 +254,6 @@ final class TerminalPanel: NSObject, NSWindowDelegate {
         return m
     }
 
-    // socket `state`
     func testState() -> [String: Any] {
         ["shown": panel.isVisible, "key": panel.isKeyWindow, "level": panel.level.rawValue,
          "wid": panel.windowNumber,

@@ -366,7 +366,8 @@ against BC's own menus (§10).
   Latin-1. Each side keeps its own encoding + line endings on save. A file
   with NUL bytes in the first 8 KB = binary: shown as "Binary files are
   identical / differ (size, first difference at byte N)". No hex view.
-- **Limits.** Up to 200k lines or 50 MB per side. Past that: a status line
+- **Limits.** Up to `[compare] max-lines` (default 200k) lines or
+  `[compare] max-bytes` (default 50 MB) per side. Past that: a status line
   and a quick byte compare only.
 - **Changed on disk.** A `DispatchSource` per open file. Not edited here →
   reload + re-diff silently. Edited here → banner "Changed on disk:

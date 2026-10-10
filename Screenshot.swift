@@ -1,16 +1,6 @@
 import AppKit
 import ScreenCaptureKit
 
-// /screenshot (Hyper+X): a Flameshot-style capture + annotate tool. A TOOL
-// PANEL (AGENT_CONTEXT "Tool panels"): it never activates the app, never
-// touches the shared window, and AeroSpace never sees its windows.
-//   ScreenshotAnnotations.swift  the model (tested: bin/run-tests.sh screenshot)
-//   ScreenshotOverlay.swift      the capture screen (panels, session, views)
-//   ScreenshotPin.swift          pinned captures
-//   this file                    config, capture, outputs, CLI, test hooks
-
-// MARK: - Config ([screenshot] in commands.toml)
-
 struct ScreenshotConfig {
     var enabled = true
     var uiColor = ShotColor(hex: "#740096")!
@@ -32,7 +22,7 @@ struct ScreenshotConfig {
     var saveFormat = "png"
     var jpegQuality = 75
     var saveAfterCopy = false
-    var history = 20            // recent captures kept for ⌘R / the clock button (0 = off)
+    var history = 20
     var copyPathAfterSave = false
     var preview = true
     var saveLastRegion = false
@@ -48,7 +38,6 @@ struct ScreenshotConfig {
     var permissionToast = "Screen Recording permission needed — opening Settings…"
     var failToast = "Screen capture failed"
     var helpRows: [(String, String)] = []
-    // Copy Text mode
     var startText = false
     var ocr = ShotOCRConfig()
     var textToast = "Copied {} to clipboard"
@@ -161,10 +150,6 @@ extension NSScreen {
     }
 }
 
-// MARK: - Screen toast
-
-// The Raycast pill on its own tiny non-activating panel, bottom-center of a
-// screen (a shared-window toast would show that window).
 enum ScreenToast {
     private static var panel: NSPanel?
 
@@ -199,12 +184,6 @@ enum ScreenToast {
     }
 }
 
-// MARK: - Recent screenshots (history + panel)
-
-// Every capture that leaves the overlay (copy, save, pin) is also kept as a
-// PNG in ~/.cache/kitchen-sink/screenshots — the newest `[screenshot]
-// history` (default 20; 0 = off) — so the clock button / ⌘R can reopen it
-// even when it only ever went to the clipboard.
 enum ShotHistory {
     static var dir: String { NSHomeDirectory() + "/.cache/kitchen-sink/screenshots" }
     private static let queue = DispatchQueue(label: "ws.shot-history", qos: .utility)
@@ -223,7 +202,6 @@ enum ShotHistory {
         }
     }
 
-    // newest first
     static func entries() -> [ShotRecentEntry] {
         let fm = FileManager.default
         let names = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
@@ -250,8 +228,6 @@ struct ShotRecentEntry {
     var at: Date
 }
 
-// the grid of recent captures over the overlay: click = reopen (a pin),
-// right-click = Pin / Copy / Open / Reveal / Delete, Esc closes
 final class ShotRecentPanel: NSPanel {
     let grid: ShotRecentView
     var onEscape: (() -> Void)?
@@ -262,7 +238,7 @@ final class ShotRecentPanel: NSPanel {
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         contentView = grid
         isFloatingPanel = true
-        level = .screenSaver + 1     // above the overlay (AFTER isFloatingPanel)
+        level = .screenSaver + 1
         hidesOnDeactivate = false
         backgroundColor = .clear
         isOpaque = false
@@ -415,11 +391,8 @@ final class ShotRecentView: NSView {
     }
 }
 
-// MARK: - Controller
-
 final class ScreenshotController {
     var log: (String) -> Void = { wsLog($0) }
-    // a file the tool wrote (→ /paths) / the pasteboard write is ours (ClipboardPaths)
     var onSaved: ((String) -> Void)?
     var onOwnPasteboardWrite: (() -> Void)?
 
@@ -433,7 +406,6 @@ final class ScreenshotController {
     private var capturing = false
     private var forcedSavePath: String?
     private var lastOutput: [String: Any] = [:]
-    // /pane-shot's last result (state `paneShot`)
     private(set) var paneShotLast: [String: Any] = [:]
     private var recentPanel: ShotRecentPanel?
     let statePath = NSHomeDirectory() + "/.cache/kitchen-sink/screenshot-state.json"
@@ -447,10 +419,6 @@ final class ScreenshotController {
         }
     }
 
-    // MARK: prewarm
-
-    // one hidden overlay panel per display + the shareable content, so a
-    // hotkey pays only for the capture itself
     func prewarm() {
         let ids = Set(NSScreen.screens.compactMap(\.displayID))
         for id in panels.keys where !ids.contains(id) { panels[id] = nil }
@@ -462,8 +430,6 @@ final class ScreenshotController {
         warmOCR()
     }
 
-    // Copy Text's model, compiled once per process in the background (the
-    // first recognition otherwise stalls for ~50 s)
     private var ocrWarm = false
     private func warmOCR() {
         guard !ocrWarm else { return }
@@ -486,12 +452,8 @@ final class ScreenshotController {
         }
     }
 
-    // MARK: permission
-
     static var permitted: Bool { CGPreflightScreenCaptureAccess() }
 
-    // false (and a toast + the Privacy pane) when Screen Recording is off:
-    // never an overlay of black / wallpaper-only pixels
     private func checkPermission(_ cfg: ScreenshotConfig) -> Bool {
         if Self.permitted { return true }
         if !permissionAsked {
@@ -510,11 +472,6 @@ final class ScreenshotController {
         NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
     }
 
-    // MARK: entry points
-
-    // `screenshot [gui|full|screen] [flags]` from the socket / CLI / palette.
-    // `reply` (when set) gets the result exactly once: PNG (-r), "W H X Y"
-    // (-g), else empty; nil = aborted / failed.
     func handle(_ words: [String], reply: ((Data?) -> Void)? = nil) {
         switch ShotArgs.parse(words) {
         case .failure(let p):
@@ -533,7 +490,6 @@ final class ScreenshotController {
             return
         }
         if session != nil || capturing {
-            // a second hotkey while it's up: the keyboard back to the overlay
             if let d = session?.mouseDisplay { d.panel.orderFrontRegardless(); d.panel.makeKey() }
             reply?(nil)
             return
@@ -568,8 +524,6 @@ final class ScreenshotController {
         }
     }
 
-    // MARK: capture
-
     private func capture(_ screens: [NSScreen], _ done: @escaping ([CGDirectDisplayID: CGImage]) -> Void) {
         fetchContent { [weak self] content in
             guard let content else { done([:]); return }
@@ -594,14 +548,11 @@ final class ScreenshotController {
                 }
             }
             group.notify(queue: .main) {
-                // a display list gone stale (a monitor came / went): refetch next time
                 if out.count < screens.count { self?.content = nil }
                 done(out)
             }
         }
     }
-
-    // MARK: session
 
     private func begin(_ cfg: ScreenshotConfig, _ args: ShotArgs, _ screens: [NSScreen],
                        _ images: [CGDirectDisplayID: CGImage], reply: ((Data?) -> Void)?) {
@@ -632,7 +583,6 @@ final class ScreenshotController {
         key.panel.makeKey()
         key.panel.makeFirstResponder(key.view)
         installKeyMonitor()
-        // a region given up front (--region / --last-region)
         if let r = initialRegion(args, s) { s.testSelect(r.rect, on: r.display) }
         s.redrawAll()
     }
@@ -675,8 +625,6 @@ final class ScreenshotController {
         keyMonitor = nil
     }
 
-    // close every overlay; the keyboard returns to the frontmost app by
-    // itself (it was never taken from it: no activation)
     func close() {
         recentPanel?.close()
         recentPanel = nil
@@ -696,10 +644,8 @@ final class ScreenshotController {
         r?(d)
     }
 
-    // MARK: recent screenshots
-
     private func showRecentScreenshots(_ s: ShotSession) {
-        if let open = recentPanel { open.close(); recentPanel = nil; return }   // the button toggles it
+        if let open = recentPanel { open.close(); recentPanel = nil; return }
         let ui = NSColor(calibratedRed: s.cfg.uiColor.r, green: s.cfg.uiColor.g, blue: s.cfg.uiColor.b, alpha: 1)
         let panel = ShotRecentPanel(recent: ShotHistory.entries(), ui: ui)
         let closePanel = { [weak self] in
@@ -708,8 +654,6 @@ final class ScreenshotController {
             if let s = self?.session, let d = s.mouseDisplay ?? s.displays.first { d.panel.makeKey() }
         }
         panel.onEscape = closePanel
-        // reopen = leave the overlay and pin the capture on screen (⌘C
-        // copies it from there, Esc / ✕ closes it)
         panel.grid.onOpen = { [weak self, weak s] e in
             guard let self, let s else { return }
             guard let img = ShotHistory.thumbnail(e.path, maxPixels: 100_000) else { return }
@@ -745,7 +689,6 @@ final class ScreenshotController {
             })
             return m
         }
-        // centered on the screen under the pointer
         if let md = s.mouseDisplay ?? s.displays.first {
             let f = md.screen.frame
             panel.setFrameOrigin(CGPoint(x: (f.midX - panel.frame.width / 2).rounded(),
@@ -756,15 +699,10 @@ final class ScreenshotController {
         recentPanel = panel
     }
 
-
-    // MARK: outputs
-
     private func finish(_ s: ShotSession, _ o: ShotOutcome) {
-        // Copy Text reads the screen's pixels, never the drawings over them
         let img = s.render(objects: o != .text)
         let screen = s.active?.screen
         let geom = s.globalSelection
-        // the selection's AppKit (bottom-left) frame: where a pin opens
         var globalFrame: CGRect?
         if let d = s.active, let r = s.selection {
             globalFrame = CGRect(x: d.screen.frame.minX + r.minX, y: d.screen.frame.maxY - r.maxY, width: r.width, height: r.height)
@@ -800,14 +738,11 @@ final class ScreenshotController {
         case .pin:
             pin(img, frame: globalFrame, cfg)
         case .accept:
-            // explicit -p / -c (and -r / -g answer below)
             if let p = args.path { save(img, cfg, screen, to: p) }
             if args.clipboard { copy(img, cfg, screen) }
         case .abort, .text: break
         }
         ShotHistory.record(img, limit: cfg.history)
-        // the capture in the quick-look popup too (copy / save untouched);
-        // not for a pin (already on screen) or a scripted -r / -g
         if cfg.preview, action != .pin, !args.raw, !args.printGeometry { preview(img, screen) }
         if args.raw { answer(png(img)) }
         else if args.printGeometry, let g = geom {
@@ -816,7 +751,6 @@ final class ScreenshotController {
         log("screenshot: \(action.rawValue) \(img.width)×\(img.height)")
     }
 
-    // full / screen: no UI
     private func direct(_ cfg: ScreenshotConfig, _ a: ShotArgs, _ screens: [NSScreen],
                         _ images: [CGDirectDisplayID: CGImage], reply: ((Data?) -> Void)?) {
         var img: CGImage?
@@ -841,7 +775,6 @@ final class ScreenshotController {
         reply?(a.raw ? png(img) : Data())
     }
 
-    // every display at its global place, at the largest backing scale
     private func stitch(_ screens: [NSScreen], _ images: [CGDirectDisplayID: CGImage]) -> CGImage? {
         let union = screens.reduce(CGRect.null) { $0.union($1.frame) }
         guard !union.isNull else { return nil }
@@ -852,7 +785,6 @@ final class ScreenshotController {
         ctx.interpolationQuality = .high
         for s in screens {
             guard let id = s.displayID, let img = images[id] else { continue }
-            // AppKit frames are bottom-left like a CGContext: offset from the union
             let r = CGRect(x: (s.frame.minX - union.minX) * scale, y: (s.frame.minY - union.minY) * scale,
                            width: s.frame.width * scale, height: s.frame.height * scale)
             ctx.draw(img, in: r)
@@ -864,7 +796,6 @@ final class ScreenshotController {
         NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])
     }
 
-    // ONE pasteboard item: PNG + TIFF (older apps)
     func copy(_ img: CGImage, _ cfg: ScreenshotConfig, _ screen: NSScreen?) {
         let rep = NSBitmapImageRep(cgImage: img)
         guard let png = rep.representation(using: .png, properties: [:]) else { return }
@@ -879,8 +810,6 @@ final class ScreenshotController {
         ScreenToast.show(cfg.copyToast, on: screen)
     }
 
-    // Copy Text: Vision off the main thread (≈ 100-300 ms; the overlay is
-    // already gone), then ONE string item + the toast. -r answers the text.
     private func deliverText(_ img: CGImage, _ cfg: ScreenshotConfig, _ args: ShotArgs, _ screen: NSScreen?) {
         let r = reply
         reply = nil
@@ -915,7 +844,6 @@ final class ScreenshotController {
         }
     }
 
-    // to `path` (a directory → the pattern inside it), else save-path
     func save(_ img: CGImage, _ cfg: ScreenshotConfig, _ screen: NSScreen?, to path: String?) {
         let dir = ((path ?? cfg.savePath) as NSString).expandingTildeInPath
         if path == nil { try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
@@ -948,7 +876,6 @@ final class ScreenshotController {
         log("screenshot: saved \(path)")
     }
 
-    // the file browser's preview popup (FilePopup), sized in points
     func preview(_ img: CGImage, _ screen: NSScreen?, label: String = "Screenshot") {
         let scale = (screen ?? mouseScreen)?.backingScaleFactor ?? 2
         let ns = NSImage(cgImage: img, size: NSSize(width: CGFloat(img.width) / scale,
@@ -974,8 +901,6 @@ final class ScreenshotController {
         installKeyMonitor()
         p.present()
     }
-
-    // MARK: tests (socket do:screenshot:… / state)
 
     func testDo(_ a: String) -> String? {
         let parts = a.split(separator: ":", maxSplits: 1).map(String.init)
@@ -1018,7 +943,6 @@ final class ScreenshotController {
             forcedSavePath = arg
             session?.finish(.save)
         case "save-ok":
-            // the save card's Return (its field's action)
             guard let f = session?.saveCard?.card.field else { return "no save card" }
             f.sendAction(f.action, to: f.target)
         case "close":
@@ -1033,7 +957,6 @@ final class ScreenshotController {
         return nil
     }
 
-    // "cmd+shift+z", "esc", "return", "left", "p", "space"
     static func keyEvent(_ spec: String, window: NSWindow?) -> NSEvent? {
         var mods: NSEvent.ModifierFlags = []
         var key = ""
@@ -1115,17 +1038,11 @@ final class ScreenshotController {
 }
 
 extension ShotSession {
-    // tests: set (not toggle) the tool
     func forceTool(_ t: ShotTool?) {
         if tool != t { setTool(t) }
     }
 }
 
-
-// MARK: - /pane-shot (PaneShot.swift)
-
-// a herdr pane's scrollback + screen as ONE tall image, delivered like a
-// capture: copy (one PNG + TIFF item) and save (→ /paths), one toast
 extension ScreenshotController {
     struct PaneShotImage {
         let image: CGImage
@@ -1134,8 +1051,6 @@ extension ScreenshotController {
         let pane: String?
     }
 
-    // `pane-shot [flags]` from the socket / CLI. `reply` gets ONE line: the
-    // saved path, "copied", or "error: …".
     func paneShot(_ words: [String], reply: ((String) -> Void)? = nil) {
         let args: PaneShotArgs
         switch PaneShotArgs.parse(words) {
@@ -1150,7 +1065,6 @@ extension ScreenshotController {
         let screen = mouseScreen
         let scale = screen?.backingScaleFactor ?? 2
         let start = Date()
-        // herdr + ghostty + the render (~50-300 ms) stay off the main thread
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Self.paneShotImage(args, cfg, scale: scale)
             DispatchQueue.main.async {
@@ -1174,13 +1088,11 @@ extension ScreenshotController {
         let toast = cfg.toast.replacingOccurrences(of: "{n}", with: String(shot.rows))
             .replacingOccurrences(of: "{pane}", with: shot.title)
         var sc = ScreenshotConfig.load()
-        sc.copyPathAfterSave = false          // the image is the clipboard's
+        sc.copyPathAfterSave = false
         sc.filenamePattern = cfg.filenamePattern
         sc.saveFormat = "png"
         if !cfg.savePath.isEmpty { sc.savePath = cfg.savePath }
         lastOutput["path"] = nil
-        // save FIRST: the clipboard then carries the file too. One toast:
-        // the copy's, else the save's
         if save {
             sc.saveToast = copy ? "" : "Saved {}"
             self.save(shot.image, sc, screen, to: nil)
@@ -1196,10 +1108,6 @@ extension ScreenshotController {
         return path ?? "copied"
     }
 
-    // ONE pasteboard item: the PNG (image editors, Claude Code's Ctrl+V)
-    // + the saved file's URL (chat / mail apps attach the FILE — they
-    // shrink or drop a tall pasted bitmap). TIFF only for small images: a
-    // 1000-row capture's TIFF is ~100 MB.
     private func copyImage(_ img: CGImage, file: String?, toast: String, _ screen: NSScreen?) {
         let rep = NSBitmapImageRep(cgImage: img)
         guard let png = rep.representation(using: .png, properties: [:]) else { return }
@@ -1214,7 +1122,6 @@ extension ScreenshotController {
         ScreenToast.show(toast, on: screen)
     }
 
-    // the pane's text (or --file) → Ghostty's theme → the image
     static func paneShotImage(_ args: PaneShotArgs, _ cfg: PaneShotConfig, scale: CGFloat) -> Result<PaneShotImage, Herdr.Failure> {
         let text: String, title: String, pane: String?
         if let file = args.file {

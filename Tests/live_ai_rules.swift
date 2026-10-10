@@ -1,10 +1,4 @@
 // sources: AIFormat.swift ProcessRun.swift
-// Common-sense checks of the shipped rules (rules/*.md) against fm's
-// on-device model: the same steps the AI view runs (code kept out, comma
-// tables, prompt line, the `then:` chain, keep-words). Slow (~1-2 s a call)
-// and needs Apple Intelligence, so it is NOT part of "all".
-// Usage: bin/run-tests.sh ai-live      (VERBOSE=1 prints every answer)
-
 import Foundation
 
 func aiSetting(_ key: String, _ fallback: String) -> String { fallback }
@@ -40,7 +34,6 @@ func fm(_ args: [String], stdin: String) -> (code: Int32, out: String) {
     return (p.terminationStatus, out.trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-// what the AI view's run does, one step after another
 func run(_ file: String, _ text: String) -> (text: String, notes: [String]) {
     let rules = (#filePath as NSString).deletingLastPathComponent + "/../rules"
     let steps = AIRule.chain(AIRule.load(rules + "/" + file))
@@ -66,7 +59,6 @@ func run(_ file: String, _ text: String) -> (text: String, notes: [String]) {
 }
 
 func has(_ s: String, _ all: String...) -> Bool { all.allSatisfy { s.lowercased().contains($0.lowercased()) } }
-// the same words, whatever the layout and the quote style
 func flat(_ s: String) -> String { WordGuard.words(s).joined(separator: " ") }
 
 @main
@@ -78,7 +70,6 @@ struct Main {
         }
         let G = "grammar-check.md", M = "markdown-format.md"
 
-        // --- Grammar Check (grammar, then Markdown Format)
         var r = run(G, "hi team, i dont think there going to make the deadline this weak. can you here me on the call tomorow? your the best")
         check(has(r.text, "they", "week", "hear", "tomorrow", "the best") && has(flat(r.text), "you re the best"),
               "sound-alikes fixed, nothing dropped: \(r.text)")
@@ -117,7 +108,6 @@ struct Main {
         check(has(r.text, "results", "| example | example1 | example2 |", "| 1 | 2 | 3 |"),
               "comma rows become a table, the sentence is still proofread: \(r.text)")
 
-        // --- Markdown Format on its own: layout only
         let typo = "i dont think there going to make it this weak."
         r = run(M, typo)
         check(flat(r.text) == flat(typo), "Markdown Format never fixes or changes words: \(r.text)")
@@ -132,7 +122,6 @@ struct Main {
         r = run(M, "What time is the meeting tomorrow?")
         check(r.text == "What time is the meeting tomorrow?", "a question is left alone: \(r.text)")
 
-        // --- Ask: free-form
         r = run("ask.md", "What is the capital of France? One word.")
         check(has(r.text, "Paris") && r.text.count < 40, "a direct, short answer: \(r.text)")
         r = run("ask.md", "Summarize in one sentence:\n\nThe deploy on Tuesday failed because the database migration timed out. We rolled back within ten minutes and no data was lost. A fix is planned for Thursday.")

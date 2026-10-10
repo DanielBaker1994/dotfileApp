@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# test_install.sh — the two install kinds and the hand-over between them,
-# against a throwaway $HOME (nothing of yours is touched).
-#
-#   Tests/test_install.sh            needs the dist bundle (.build/dist):
-#                                    bin/build-app.sh --dist  (or make-dmg.sh)
-#
-# Covers bin/setup-home.sh (fresh app install, idempotent re-run, moved app,
-# seeded files: untouched -> updated, edited -> kept + .new, deleted rule
-# stays deleted), symlinks.sh in both modes (a real file in the way is left alone),
-# bin/preflight.sh --json (missing Apple model = a warning, never a failure),
-# app -> repo and repo -> app.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 . "$ROOT/install.conf"
@@ -28,7 +17,7 @@ WSH="$HOME/.config/kitchen-sink"
 SETUP="$APP/Contents/Resources/bin/setup-home.sh"
 
 PASS=0; FAIL=0
-t() {   # description, then a command that must succeed
+t() {
     local d="$1"; shift
     if "$@" >/dev/null 2>&1; then PASS=$((PASS + 1)); printf '  \033[32m✔\033[0m %s\n' "$d"
     else FAIL=$((FAIL + 1)); printf '  \033[31m✘ %s\033[0m\n' "$d"; fi

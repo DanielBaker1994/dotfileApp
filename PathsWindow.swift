@@ -1,26 +1,6 @@
 import AppKit
 import Quartz
 
-// MARK: - /paths: the recent-file shelf popup
-//
-// Hyper+S → /paths ("file paths"). The ≤25 files you most recently made,
-// changed, downloaded or copied (PathShelf.swift), newest first, for
-// SHARING them:
-//   Return        copy the FILE ([paths] return = file): one pasteboard item
-//                 per file carrying the file URL AND its full path as text —
-//                 Cmd+V in Webex / Outlook / Teams / Mail attaches the file,
-//                 a terminal or text field gets the path
-//   Cmd+C         the path(s) as text (a selection in the filter box copies
-//                 that instead)        Cmd+Shift+C  copy the file(s)
-//   drag a row    a real file drag (FileListPane / FileDrag), onto any app
-//   Space / Cmd+Y Quick Look (Space only while the filter box is empty)
-//   Cmd+O open    Cmd+R reveal in Finder    Cmd+Delete forget the row (the
-//   file stays)   ↑↓ / Ctrl+N/P move, Shift extends    typing filters
-//   Esc / Cmd+W   close (one press)
-// The switcher's look (borderless, the filter box on top) with the file
-// browser's row list under it, built once and kept: a reopen is an order-in.
-// Floating + sticky like /filefast: it stays above the app you go to, so a
-// row can be dragged onto it; nothing but Esc / Cmd+W / /paths closes it.
 final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     let window: PopupWindow
     private let list: FileListPane
@@ -33,12 +13,11 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
     private var iconCache: [String: NSImage] = [:]
     private var quickLookPaths: [String] = []
     private var rename: InlineRename?
-    private static let rowH: CGFloat = 22   // FileListPane's row height
+    private static let rowH: CGFloat = 22
 
-    // host hooks (the controller's private helpers)
     var onOpenInNotes: ((String) -> Void)?
     var onOpenTerminal: ((String) -> Void)?
-    var onCopied: (() -> Void)?             // ClipboardPaths.ownWrite
+    var onCopied: (() -> Void)?
     var log: ((String) -> Void)?
 
     init(_ cmd: CommandSpec, returnAction: String) {
@@ -48,7 +27,7 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         cfg.enableToggle = false
         cfg.enableDrag = false
         cfg.dynamicHeight = false
-        cfg.enableNavigation = false     // the list below owns the cursor
+        cfg.enableNavigation = false
         cfg.sticky = cmd.sticky
         cfg.toolPanel = true
         cfg.floating = cmd.float ?? true
@@ -66,8 +45,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         }
         window.onEscape = { [weak self] in self?.hide() }
         window.onCloseWindow = { [weak self] in self?.hide() }
-        // no focus hand-back: a tool panel never activated the app, so the
-        // keyboard goes back to the frontmost app on its own
         window.onHide = { _ in
             if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
                 QLPreviewPanel.shared().orderOut(nil)
@@ -75,7 +52,7 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         }
         window.onKeyPreview = { [weak self] code, mods in self?.key(code, mods) ?? false }
 
-        list.dropDirectory = { nil }        // a shelf, not a folder: no drops
+        list.dropDirectory = { nil }
         list.canPerform = { a in [.quickLook, .copy].contains(a) }
         list.onAction = { [weak self] a in
             switch a {
@@ -96,7 +73,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         }
         list.onSelect = { [weak self] _ in self?.refreshQuickLook() }
         list.onRename = { [weak self] i in self?.beginRename(i) }
-        // a letter typed with the list focused goes to the filter box
         list.onFocusSearch = { [weak self] chars in
             guard let self else { return }
             self.window.focusSearchField()
@@ -120,9 +96,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
 
     var isShown: Bool { window.isShown }
 
-    // show (first time: build) on the screen you're on; already up: take the
-    // keyboard back WITHOUT activating the app (that hands key to the app's
-    // last key window — notes / jira — instead of this panel)
     func show() {
         if window.isShown {
             window.nativeWindow.orderFrontRegardless()
@@ -150,16 +123,12 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         window.hide(restore: true)
     }
 
-    // MARK: rows
-
     private func setQuery(_ q: String) {
         query = q
         guard window.isShown else { return }
         reload(keepSelection: false)
     }
 
-    // the shelf's snapshot, filtered: every space-separated word must occur
-    // in the path (case-insensitive); recency order kept
     func reload(keepSelection: Bool) {
         let selected = list.rows.indices.contains(list.selection) ? list.rows[list.selection].path : nil
         let words = query.lowercased().split(separator: " ").map(String.init)
@@ -189,7 +158,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
 
     private func icon(_ path: String) -> NSImage {
         let ext = (path as NSString).pathExtension.lowercased()
-        // per-extension icons are shared; images / apps get their own
         let key = ["png", "jpg", "jpeg", "heic", "gif", "app"].contains(ext) || ext.isEmpty ? path : ext
         if let i = iconCache[key] { return i }
         let i = NSWorkspace.shared.icon(forFile: path)
@@ -198,7 +166,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         return i
     }
 
-    // "~/Downloads", "…/Projects/site" — where it lives, short
     static func folder(_ path: String) -> String {
         var d = (path as NSString).deletingLastPathComponent
         let home = NSHomeDirectory()
@@ -217,10 +184,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         return "\(Int(s / 86400))d"
     }
 
-    // MARK: layout
-
-    // the list under the filter box, as tall as its rows (≤25), the window
-    // grown / shrunk around it with its TOP edge kept
     private func layoutList() {
         guard let backdrop = window.nativeWindow.contentView else { return }
         let top = window.searchFieldFrame.maxY + 8
@@ -243,8 +206,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         scrollToSelection()
     }
 
-    // centered on the screen with the mouse, its top a fifth of the way down
-    // (where a launcher sits) — every open lands on the screen you're on
     private func place() {
         let mouse = NSEvent.mouseLocation
         guard let vis = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame else { return }
@@ -260,42 +221,40 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         list.scrollToVisible(list.rowRect(list.selection))
     }
 
-    // MARK: keys
-
     private func key(_ code: UInt16, _ mods: NSEvent.ModifierFlags) -> Bool {
         let cmd = mods.contains(.command), ctrl = mods.contains(.control), shift = mods.contains(.shift)
         let editor = window.nativeWindow.firstResponder as? NSTextView
         let textSelected = (editor?.selectedRange().length ?? 0) > 0
         switch code {
-        case 53:                                                    // Esc
+        case 53:
             hide(); return true
-        case 13 where cmd:                                          // Cmd+W
+        case 13 where cmd:
             hide(); return true
-        case 125:                                                   // ↓
+        case 125:
             move(1, extend: shift); return true
-        case 45 where ctrl:                                         // Ctrl+N
+        case 45 where ctrl:
             move(1, extend: shift); return true
-        case 126:                                                   // ↑
+        case 126:
             move(-1, extend: shift); return true
-        case 35 where ctrl:                                         // Ctrl+P
+        case 35 where ctrl:
             move(-1, extend: shift); return true
-        case 36, 76:                                                // Return
+        case 36, 76:
             runDefault(); return true
-        case 8 where cmd && shift:                                  // Cmd+Shift+C: the file(s)
+        case 8 where cmd && shift:
             copyFiles(); return true
-        case 8 where cmd && !textSelected:                          // Cmd+C: path text
+        case 8 where cmd && !textSelected:
             copyPaths(list.selectedRows); return true
-        case 16 where cmd:                                          // Cmd+Y: Quick Look
+        case 16 where cmd:
             toggleQuickLook(); return true
         case 49 where !cmd && !ctrl && (query.isEmpty || window.nativeWindow.firstResponder === list):
-            toggleQuickLook(); return true                          // Space
-        case 31 where cmd:                                          // Cmd+O
+            toggleQuickLook(); return true
+        case 31 where cmd:
             open(list.selectedRows); return true
-        case 15 where cmd && !shift:                                // Cmd+R: rename
+        case 15 where cmd && !shift:
             beginRename(); return true
-        case 15 where cmd && shift:                                 // Cmd+Shift+R: reveal
+        case 15 where cmd && shift:
             reveal(); return true
-        case 51 where cmd:                                          // Cmd+Delete: forget
+        case 51 where cmd:
             forget(); return true
         default:
             return false
@@ -305,7 +264,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
     private func move(_ d: Int, extend: Bool) {
         guard !shown.isEmpty else { return }
         if extend {
-            // Shift+↑↓ grows the selection like the file browser's
             list.extendSelection(to: min(max(0, list.selection + d), shown.count - 1))
         } else {
             list.moveSelection(d)
@@ -318,8 +276,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         list.selectedRows.filter { shown.indices.contains($0) }.map { shown[$0].path }
     }
 
-    // MARK: actions
-
     private func runDefault() {
         switch returnAction {
         case "path": copyPaths(list.selectedRows)
@@ -328,8 +284,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         }
     }
 
-    // the FILE(S): file URL + the full path as text on each item — chat and
-    // mail apps attach it on Cmd+V, a terminal / text field pastes the path
     func copyFiles() {
         let paths = selectedPaths
         guard !paths.isEmpty else { NSSound.beep(); return }
@@ -384,10 +338,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
                          symbol: "minus.circle", centered: true)
     }
 
-    // MARK: rename
-
-    // Finder-style rename in place: F2, Cmd+R, or right-click "Rename…"
-    // overlays a text field on the row's name. Return/Tab commits, Esc cancels.
     var renameEditor: NSText? { rename?.textField?.currentEditor() }
 
     private func beginRename(_ index: Int? = nil) {
@@ -452,8 +402,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         log?("paths: renamed \"\(old)\" to \"\(new)\"")
     }
 
-    // MARK: Quick Look
-
     private var quickLookUp: Bool {
         QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
             && QLPreviewPanel.shared().dataSource === self
@@ -486,7 +434,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         guard quickLookPaths.indices.contains(index) else { return nil }
         return URL(fileURLWithPath: quickLookPaths[index]) as NSURL
     }
-    // the panel holds the keyboard: Space / Esc close it, ↑↓ step the list
     func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
         guard event.type == .keyDown else { return false }
         switch event.keyCode {
@@ -496,8 +443,6 @@ final class PathsWindow: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDeleg
         default: return false
         }
     }
-
-    // MARK: tests (the daemon socket's `state`)
 
     var testState: [String: Any] {
         ["shown": window.isShown, "key": window.nativeWindow.isKeyWindow,

@@ -1,19 +1,6 @@
 import Foundation
 import CoreGraphics
 
-// Ctrl+H / J / K / L pane navigation, the geometry half (no AppKit:
-// `bin/run-tests.sh panes`). PaneNav.swift hands it the visible panes of
-// the current view as top-down rects (y grows downward, the window's
-// top-left = 0,0) and moves focus to whatever `next` answers.
-//
-// The rule, tmux-like (the pane maps' `go()`):
-//   - candidates lie fully past the current pane's center in that direction
-//   - and overlap it on the other axis (a pane only diagonally away is
-//     not "to the left"); among them the smallest gap (within 16 pt =
-//     a tie), then the larger overlap
-//   - the way back retraces where you came from (`came`), when that pane is
-//     still a candidate that overlaps
-//   - nothing that way: nil (no wrapping)
 enum PaneDir: String, CaseIterable {
     case left = "h", down = "j", up = "k", right = "l"
 
@@ -27,7 +14,6 @@ enum PaneDir: String, CaseIterable {
     }
     var vertical: Bool { self == .up || self == .down }
 
-    // the letter keys' virtual key codes (ANSI layout, like the rest of the app)
     init?(keyCode: UInt16) {
         switch keyCode {
         case 4: self = .left
@@ -41,11 +27,10 @@ enum PaneDir: String, CaseIterable {
 
 struct PaneRect {
     let id: String
-    let rect: CGRect   // top-down
+    let rect: CGRect
 }
 
 enum PaneGeometry {
-    // overlap below this many points doesn't count (rounded borders touch)
     static let minOverlap: CGFloat = 2
     static let gapSlack: CGFloat = 16
 
@@ -79,9 +64,6 @@ enum PaneGeometry {
         }
         let hits = cands.filter { $0.overlap > minOverlap }
         if let back = came[id]?[dir], hits.contains(where: { $0.id == back }) { return back }
-        // gaps within one `gapSlack` are padding, not distance: the bigger
-        // overlap wins there (the full-width terminal under sidebar + editor
-        // goes up to the editor, though the sidebar sits 4 pt closer)
         func bucket(_ g: CGFloat) -> Int { Int((g / gapSlack).rounded(.down)) }
         return hits.min { a, b in
             if bucket(a.gap) != bucket(b.gap) { return a.gap < b.gap }
@@ -90,8 +72,6 @@ enum PaneGeometry {
         }?.id
     }
 
-    // after a move from → to in `dir`: going the opposite way from `to`
-    // comes back to `from`
     static func remember(_ came: inout [String: [PaneDir: String]], from: String, to: String, _ dir: PaneDir) {
         came[to, default: [:]][dir.opposite] = from
     }

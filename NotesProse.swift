@@ -1,17 +1,6 @@
 import AppKit
 import WebKit
 
-// Notes prose mode: the current note as a READING page that renders the
-// SAME document the PDF export produces — pandoc `-s -f gfm -t html5` with
-// `[notes] pdf-css` (else the built-in light style) as its header, so what
-// you read is what you export — in a centred column of `prose-width`
-// points. The switch at the editor's bottom right (Prose | Edit), ⌘⇧P or
-// Esc goes back to the editor (nvim / native).
-//
-// pandoc missing → `ProseRender.basic` (headings, lists + task boxes,
-// fences, quotes, rules, paragraphs, inline code / bold / italic / links /
-// images) inside the same header style.
-
 public struct ProseSource {
     public var markdown: String
     public var path: String
@@ -32,7 +21,6 @@ enum ProseRender {
         return String(format: "#%02X%02X%02X", Int(s.redComponent * 255), Int(s.greenComponent * 255), Int(s.blueComponent * 255))
     }
 
-    // inline spans of one line of text (already block-split)
     static func inline(_ raw: String) -> String {
         var s = esc(raw)
         func sub(_ pattern: String, _ tmpl: String) {
@@ -49,11 +37,10 @@ enum ProseRender {
         return s
     }
 
-    // the no-pandoc renderer: enough Markdown for notes
     static func basic(_ md: String) -> String {
         var out: [String] = []
         var para: [String] = []
-        var list: String?          // "ul" / "ol" while inside a list
+        var list: String?
         var fence: [String]?
         var fenceLang = ""
         func pre(_ lines: [String]) -> String {
@@ -107,9 +94,6 @@ enum ProseRender {
         return out.joined(separator: "\n")
     }
 
-    // The dark theme layer over the PDF style: its layout, recolored to the
-    // active theme (the original Prose look) instead of the light print
-    // palette. Applied to BOTH the reading view and the PDF export.
     static func rgba(_ x: NSColor, _ a: CGFloat) -> String {
         let s = ButtonStyle.opaque(x)
         return String(format: "rgba(%d,%d,%d,%.3f)",
@@ -133,24 +117,13 @@ enum ProseRender {
             ("selection", rgba(c.accentOn, 0.28)),
         ]
         let root = ":root { " + vars.map { "--p-\($0.0): \($0.1);" }.joined(separator: " ") + " }"
-        // only the palette: the rules that read it live in the ONE stylesheet ([notes] pdf-css)
         return "<style>\n" + root + "\n</style>"
     }
 
-    // pandoc's built-in `tango` is a LIGHT theme: its keywords/types are dark
-    // ink (#204a87 ≈ 2:1) and its variables are black (#000 ≈ 1.2:1) on the
-    // dark page the theme layer paints, so every language reads as the same
-    // smudge. Pick a highlight theme that reads on the active page — dark
-    // pages get a dark theme (distinct bright tokens), light pages keep tango.
-    // `[notes] pdf-highlight` still wins when the user names a theme.
     static func highlightTheme(_ c: PopupColors) -> String {
         c.isLight ? "tango" : "breezedark"
     }
 
-    // Screen-only copy-to-clipboard buttons (code blocks only — tables have none): the reading view's JS wraps each
-    // <pre> in .codeblock and adds a .copy-btn to its left; this is the flex
-    // layout + hover/copied states. Never reaches the PDF (export() skips the
-    // reading page entirely, and weasyprint runs no JS anyway).
     static func copyButtonCSS(_ c: PopupColors) -> String {
         """
         .codeblock { display: flex; align-items: stretch; }
@@ -167,8 +140,6 @@ enum ProseRender {
         """
     }
 
-    // The copy-button stylesheet: copy_button.css beside `[notes] pdf-css` (the same
-    // file the nvim build includes — one copy), else the built-in one above
     static func copyButtonStyles(_ c: PopupColors, cssPath: String?) -> String {
         if let p = cssPath, !p.isEmpty {
             let f = ((p as NSString).expandingTildeInPath as NSString).deletingLastPathComponent + "/copy_button.css"
@@ -180,11 +151,6 @@ enum ProseRender {
         return copyButtonCSS(c)
     }
 
-    // The reading page: the SAME document the PDF export produces — pandoc
-    // `-s -f gfm -t html5` with `[notes] pdf-css` (else the built-in style)
-    // as its header — so what you read is what you export. The dark theme
-    // layer (themeCSS) recolors it; the screen adds only a <base> for
-    // relative images and the `prose-width` column.
     static func page(_ src: ProseSource, colors c: PopupColors, font: String, size: CGFloat, width: CGFloat) -> String {
         var cfg = ProsePDF.Config()
         cfg.pandoc = RichText.pandocBin
@@ -194,16 +160,13 @@ enum ProseRender {
         if let v = notes("pdf-css") { cfg.css = v }
         if let v = notes("pdf-filter") { cfg.filter = v }
         if let v = notes("pdf-highlight") { cfg.highlight = v }
-        else { cfg.highlight = highlightTheme(c) }   // legible tokens on this theme
+        else { cfg.highlight = highlightTheme(c) }
         cfg.themeCSS = themeCSS(c)
         var html = ProsePDF.screenHTML(note: src.path, cfg) ?? shell(src, cfg)
-        // <base> so relative images resolve + the screen-only column width
         let base = URL(fileURLWithPath: (src.path as NSString).deletingLastPathComponent, isDirectory: true).absoluteString
         var override = "<base href=\"\(esc(base))\">\n<style>\n"
             + "body { max-width: \(Int(width))px !important; }\n"
             + "</style>"
-        // [notes] copy-buttons (default true): the style id is the switch the
-        // reading view's script checks — screen-only, so the PDF never has it
         if tri(notes("copy-buttons")) ?? true {
             override += "\n<style id=\"ws-copy\">\n" + copyButtonStyles(c, cssPath: cfg.css) + "</style>"
         }
@@ -213,7 +176,6 @@ enum ProseRender {
         return html
     }
 
-    // pandoc missing: the built-in renderer inside the same header style
     private static func shell(_ src: ProseSource, _ c: ProsePDF.Config) -> String {
         """
         <!doctype html><html><head><meta charset="utf-8">
@@ -223,15 +185,10 @@ enum ProseRender {
     }
 }
 
-// the reading page itself (a WKWebView painted in the card color)
 final class ProseView: NSView, WKScriptMessageHandler {
     let web: WKWebView
     func scrollBy(_ dy: Int) { web.evaluateJavaScript("window.scrollBy(0, \(dy))") }
 
-    // Position sync with the nvim pane: pandoc's sourcepos tags every block
-    // with data-pos="LINE:COL-…", so a source line maps to an element.
-    // `syncLine` is applied once the next render lands (or at once when the
-    // page is already current).
     var syncLine: Int?
     func scrollToSourceLine(_ n: Int) {
         web.evaluateJavaScript("""
@@ -242,7 +199,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         if(best){window.scrollTo(0,best.getBoundingClientRect().top+window.scrollY-8);}})(\(n))
         """)
     }
-    // the first source line at the top of the viewport
     func topSourceLine(_ done: @escaping (Int?) -> Void) {
         web.evaluateJavaScript("""
         (function(){var r=null;
@@ -261,25 +217,17 @@ final class ProseView: NSView, WKScriptMessageHandler {
         scrollToSourceLine(n)
     }
     var onLinkClick: ((URL) -> Void)?
-    var onJump: ((Int) -> Void)?   // an outline click: the heading's source line
+    var onJump: ((Int) -> Void)?
     var onOpenImage: ((String) -> Void) = { FilePopup.show(path: $0, over: nil) }
     private var lastPath = ""
     private var gen = 0
-    private var themeColors = PopupColors()   // the PDF export's theme layer
-    private var lastKey = ""                   // path+content+size+theme: skip no-op renders
-    private var loadedPath: String?            // the note the web view currently holds
-    private var loadedHeadKey = ""             // path+width+theme: the head CSS the page holds
-    // one scratch file per view: the in-editor view and pop-out windows (and
-    // other processes) must never write each other's page
+    private var themeColors = PopupColors()
+    private var lastKey = ""
+    private var loadedPath: String?
+    private var loadedHeadKey = ""
     private let pageFile = URL(fileURLWithPath: NSHomeDirectory()
         + "/.cache/kitchen-sink/prose/page-\(UUID().uuidString).html")
 
-    // Copy-to-clipboard for code blocks (ported from the dotfiles'
-    // markdown_generator/copy_button.js): wrap each <pre> (and table) in a flex
-    // .codeblock and put a .copy-btn to its left. Screen-only — the PDF path
-    // never loads this (weasyprint runs no JS). The page opts in by emitting
-    // <style id="ws-copy"> ([notes] copy-buttons); the function is re-run after
-    // an in-place body patch, which would otherwise drop the buttons.
     static let copyButtonJS = """
         (function () {
           var COPY = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
@@ -326,13 +274,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         })();
         """
 
-
-    // Outline + stats (screen-only, like the copy buttons): a fixed ≡ button
-    // opens a right-hand outline of the page's headings (click = scroll there
-    // and tell the host the heading's source line, so nvim's cursor follows);
-    // a slim strip at the bottom shows words and reading time. Both live
-    // OUTSIDE <body> so the in-place body patch keeps them; the function
-    // re-runs after a patch to refresh the entries and the counts.
     static let outlineJS = """
         (function () {
           var root = document.documentElement;
@@ -396,14 +337,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         })();
         """
 
-
-    // Vim-style search (screen-only): `/` or Cmd/Ctrl+F opens a bar at the
-    // bottom left, matches are highlighted as you type (always ignorecase; the
-    // text is a regex like vim's, a bad one falls back to literal), Return
-    // keeps the highlights and n / N walk them, Esc clears them (:nohl).
-    // Highlights use the CSS Custom Highlight API — no DOM changes, so the
-    // in-place body patch only has to re-run the search. State goes to the
-    // host (idle | typing | active) so it can route keys and Esc.
     static let findJS = """
         (function () {
           var root = document.documentElement;
@@ -497,9 +430,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         })();
         """
 
-    // Key routing shared by the notes window and the pop-out. nil = not a
-    // search key; true = consumed; false = leave it to the page (the search
-    // field has the keys while typing). Codes: Esc 53, F 3, / 44, N 45.
     var searchState = "idle"
     private var lastG = Date.distantPast
     func searchKey(code: UInt16, mods: NSEvent.ModifierFlags) -> Bool? {
@@ -513,12 +443,10 @@ final class ProseView: NSView, WKScriptMessageHandler {
             return true
         }
         if searchState == "typing" { return false }
-        // Ctrl+D / Ctrl+U = half page down / up, like vim
         if (code == 2 || code == 32), m == .control {
             web.evaluateJavaScript("window.scrollBy({top:\(code == 2 ? "" : "-")window.innerHeight/2})")
             return true
         }
-        // gg = top, G (also GG) = bottom, like vim
         if code == 5, (m.isEmpty || m == .shift) {
             if m == .shift {
                 web.evaluateJavaScript("window.scrollTo(0, document.documentElement.scrollHeight)")
@@ -542,7 +470,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
 
     override init(frame: NSRect) {
         let cfg = WKWebViewConfiguration()
-        // double-click a picture -> its full-size popup (like the nvim view)
         cfg.userContentController.addUserScript(WKUserScript(source: """
             document.addEventListener('dblclick', function (e) {
               var t = e.target;
@@ -570,9 +497,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    // Mac-style zoom: Cmd+= / Cmd+- / Cmd+0, a trackpad pinch, a two-finger
-    // double-tap (back to 100%). The page reflows (WKWebView.pageZoom), no
-    // pandoc run; the last level is kept across launches.
     static let zoomKey = "proseZoom"
     var onZoom: ((CGFloat) -> Void)?
     var zoom: CGFloat {
@@ -602,7 +526,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         onOpenImage(u.path)
     }
 
-    // right-click: the page's own items + Export PDF / Copy Note Path
     private func addMenuItems(_ menu: NSMenu) {
         guard !lastPath.isEmpty else { return }
         menu.addItem(.separator())
@@ -620,8 +543,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         })
     }
 
-    // ⌘P / right-click: the shown note → PDF (ProsePDF), its path on the
-    // clipboard + the toast. The pandoc + weasyprint run is off main.
     private static var exporting = false
     func exportPDF() {
         let note = lastPath
@@ -658,20 +579,13 @@ final class ProseView: NSView, WKScriptMessageHandler {
         }
     }
 
-    // Render off the main thread (pandoc). An unchanged render is dropped; a
-    // same-note update patches the document body IN PLACE (no reload, no
-    // flash, scroll kept); a full reload only for a new note or the first paint.
     func show(_ src: ProseSource, colors: PopupColors, font: String, size: CGFloat, width: CGFloat) {
         themeColors = colors
         layer?.backgroundColor = colors.base.cgColor
         let sig = ProseRender.css(colors.base) + ProseRender.css(colors.text) + ProseRender.css(colors.accentOn)
-        // the copy-button style lives in the <head>: fold its config into both
-        // keys so toggling [notes] copy-buttons reloads the page
         let copy = tri(configSectionValue("notes", "copy-buttons")) ?? true
         let key = "\(src.path)\u{1}\(Int(size))\u{1}\(font)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(copy)\u{1}\(src.markdown)"
-        guard key != lastKey else { applySyncLine(); return }   // nothing changed: keep what is on screen
-        // The <head> (themeCSS, <base>, the column width) is what colors the
-        // page; only patch the body in place when the head is unchanged too.
+        guard key != lastKey else { applySyncLine(); return }
         let headKey = "\(src.path)\u{1}\(Int(width))\u{1}\(sig)\u{1}\(copy)"
         let same = src.path == loadedPath
         let sameHead = same && headKey == loadedHeadKey
@@ -696,7 +610,7 @@ final class ProseView: NSView, WKScriptMessageHandler {
                 if self.syncLine != nil {
                     self.web.loadFileURL(file, allowingReadAccessTo: URL(fileURLWithPath: "/"))
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.applySyncLine() }
-                } else if same {   // re-loading the same note: keep the scroll spot
+                } else if same {
                     self.web.evaluateJavaScript("window.scrollY") { y, _ in
                         let y = (y as? Double) ?? 0
                         self.web.loadFileURL(file, allowingReadAccessTo: URL(fileURLWithPath: "/"))
@@ -711,7 +625,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         }
     }
 
-    // the document's <body> content (nil when absent) — for an in-place update
     private static func bodyInner(_ html: String) -> String? {
         guard let b = html.range(of: "<body", options: .caseInsensitive),
               let gt = html[b.upperBound...].firstIndex(of: ">"),
@@ -721,7 +634,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
         return String(html[start..<e.lowerBound])
     }
 
-    // replace the body in place, keeping the scroll position (no reload)
     private static func patchJS(_ body: String) -> String {
         let lit = (try? JSONSerialization.data(withJSONObject: body, options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
@@ -730,7 +642,6 @@ final class ProseView: NSView, WKScriptMessageHandler {
     }
 }
 
-// the page's web view: lets ProseView add to its right-click menu
 final class ProseWebView: WKWebView {
     var onMenu: ((NSMenu) -> Void)?
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
@@ -739,15 +650,13 @@ final class ProseWebView: WKWebView {
     }
 }
 
-// Prose | Edit — a small capsule switch at the editor's bottom right (the
-// view switcher's look: a track with the current mode on a raised chip)
 final class ProseModeSwitch: NSView {
     var colors: PopupColors { didSet { needsDisplay = true } }
     var prose = false { didSet { needsDisplay = true } }
     var editLabel = "Edit"
     var onChange: ((Bool) -> Void)?
-    var onPopOut: (() -> Void)?          // the ⤢ chip: the page in its own floating window
-    var onStyle: ((NSRect) -> Void)?     // the style chip: the document template menu (rect = the chip, own coords)
+    var onPopOut: (() -> Void)?
+    var onStyle: ((NSRect) -> Void)?
     private var hover: Int?
     private var tracking: NSTrackingArea?
     private let labels: [(String, String)]
@@ -795,16 +704,12 @@ final class ProseModeSwitch: NSView {
     override func draw(_ dirty: NSRect) {
         let c = colors
         let track = bounds.insetBy(dx: 0.5, dy: 0.5)
-        // over the editor: a solid mantle under the capsule's tint so text
-        // behind it never shows through
         c.mantle.setFill()
         NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
         CapsuleStyle.track(track, c)
-        // ◐ document style
         let sr = seg(3)
         CapsuleStyle.chip(sr, c, on: false, hover: hover == 3)
         ButtonStyle.symbol("paintpalette", in: sr, color: hover == 3 ? c.text : c.dim, size: 11)
-        // ⤢ pop out
         let pr = seg(2)
         CapsuleStyle.chip(pr, c, on: false, hover: hover == 2)
         ButtonStyle.symbol("rectangle.portrait.and.arrow.right", in: pr, color: hover == 2 ? c.text : c.dim, size: 11)
@@ -822,21 +727,8 @@ final class ProseModeSwitch: NSView {
     }
 }
 
-// The reading page on its own: a lean floating window (Figma B's "present"
-// idea) — no chrome but a thin draggable title strip, follows the note as
-// it is saved (debounced mtime check; the body is patched in place, no
-// reload), ⌘+ / ⌘− size, Esc / ⌘W close.
-//
-// A plain NSWindow at NORMAL level — deliberately NOT a floating NSPanel.
-// JankyBorders only borders windows the window server tags as documents
-// (`window_suitable` in JankyBorders: document tag, or floating+modal). Any
-// window at a non-normal level, and any NSPanel, is tagged floating and
-// skipped — which is why the focused reading ("PDF") window had no highlight
-// border. A normal document window is also what AeroSpace's on-window-detected
-// tiling rule for this app expects.
 final class ProseWindow: NSWindow {
     private static var open: [ProseWindow] = []
-    // true in the `kitchen-sink prose` process: closing the last window ends it
     static var standalone = false
     private let page = ProseView(frame: .zero)
     private let path: String
@@ -871,13 +763,10 @@ final class ProseWindow: NSWindow {
         titlebarAppearsTransparent = true
         titleVisibility = .hidden
         isMovableByWindowBackground = true
-        // normal level / a document window: see the class comment. JankyBorders
-        // skips floating-level windows and NSPanels, so this must stay normal.
         level = .normal
         isReleasedWhenClosed = false
         backgroundColor = colors.base
         collectionBehavior = [.fullScreenAuxiliary]
-        // lean: the themed ✕ below replaces the traffic lights
         for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { standardWindowButton(b)?.isHidden = true }
         page.frame = contentView?.bounds ?? .zero
         page.autoresizingMask = [.width, .height]
@@ -888,8 +777,6 @@ final class ProseWindow: NSWindow {
         x.autoresizingMask = [.minYMargin]
         contentView?.addSubview(x)
         render()
-        // follow the note: poll its mtime, but coalesce a burst of autosaves
-        // into ONE render a beat after the writes stop (no reload per keystroke)
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in self?.poll() }
     }
 
@@ -914,8 +801,6 @@ final class ProseWindow: NSWindow {
         }
     }
     override var canBecomeKey: Bool { true }
-    // double-click the top strip = fill the screen / back (the Apple title bar
-    // gesture; the page covers the transparent title bar, so catch it here)
     private var restoreFrame: NSRect?
     override func sendEvent(_ e: NSEvent) {
         if e.type == .leftMouseDown, e.clickCount == 2, e.locationInWindow.y > frame.height - 28 {
@@ -930,13 +815,11 @@ final class ProseWindow: NSWindow {
             if r { return }
             super.sendEvent(e); return
         }
-        // j / k scroll the page (the web view would swallow them as plain keys)
         if e.type == .keyDown, page.searchState != "typing", e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let c = e.charactersIgnoringModifiers, c == "j" || c == "k" {
             page.scrollBy(c == "j" ? 60 : -60)
             return
         }
-        // the pinch never reaches the page's own view reliably: take it here
         if e.type == .magnify { page.magnify(with: e); return }
         if e.type == .smartMagnify { page.smartMagnify(with: e); return }
         super.sendEvent(e)
@@ -969,7 +852,6 @@ final class ProseWindow: NSWindow {
     }
 }
 
-// The ✕ top-left: the app header's glyph (ghost chip, danger on hover).
 final class ProseCloseButton: NSView {
     private let colors: PopupColors
     private let action: () -> Void
@@ -1013,9 +895,6 @@ final class ProseCloseButton: NSView {
     }
 }
 
-// Pop-out as its OWN PROCESS (`kitchen-sink prose …`): the page has no
-// tie to the app that opened it — move it, keep it when the daemon restarts.
-// Colors travel as hex on the command line; one process per file.
 enum ProseProcess {
     private static var children: [String: Process] = [:]
 
@@ -1047,7 +926,6 @@ enum ProseProcess {
         do { try p.run(); children[path] = p } catch { ProseWindow.show(path: path, colors: c, font: font, size: size, width: width) }
     }
 
-    // the child's entry (main.swift): never returns
     static func run(_ args: [String]) -> Never {
         var colors = PopupColors(), font = "", size: CGFloat = 19, width: CGFloat = 900, path = ""
         var i = 0
@@ -1072,9 +950,6 @@ enum ProseProcess {
             exit(2)
         }
         let app = NSApplication.shared
-        // a REGULAR app, like the daemon (15015cf): it owns the menu bar while
-        // active. An accessory app can't — revealing the auto-hidden menu bar
-        // activated the last regular app and took the page's focus with it.
         app.setActivationPolicy(.regular)
         let menu = NSMenu()
         let item = NSMenuItem()

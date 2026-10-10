@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-#
-# ui-test-vim.sh — end-to-end tests for the notes window's embedded vim pane.
-#
-# Drives the REAL window like a user (System Events keystrokes, cliclick
-# clicks) and checks the result through nvim's RPC socket + the files on disk.
-# Works on scratch notes under /tmp/ws-vim-test; commands.toml and the
-# dismissed-notes list are backed up first and restored on exit.
-#
-# Every keystroke is guarded: it is only sent while kitchen-sink is the
-# frontmost app, so keys can never leak into another window.
-#
-# Usage: bin/ui-test-vim.sh [--keep]   (--keep: leave scratch notes + app up)
 
 set -o pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -23,17 +11,14 @@ KEEP=0; [[ "${1:-}" == "--keep" ]] && KEEP=1
 
 command -v cliclick >/dev/null || { echo "cliclick not found — brew install cliclick"; exit 1; }
 command -v nvim >/dev/null || { echo "nvim not found"; exit 1; }
-# backup dir AFTER the early exits, so a missing tool never leaves it behind
 BK="$(mktemp -d /tmp/ws-vim-bk.XXXXXX)" || { echo "mktemp failed"; exit 1; }
 
 PASS=0 FAIL=0
 pass() { printf 'PASS: %s\n' "$*"; PASS=$((PASS + 1)); }
 fail() { printf 'FAIL: %s\n' "$*" >&2; FAIL=$((FAIL + 1)); }
-check() { # check "desc" "actual" "expected"
+check() {
     if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1 — got [$2] want [$3]"; fi
 }
-
-# --- helpers ------------------------------------------------------------------
 
 WSPID() { pgrep -x kitchen-sink | head -1; }
 SOCK() { echo "$HOME/.cache/kitchen-sink/nvim-notes-$(WSPID).sock"; }
@@ -42,8 +27,6 @@ ws_send() { printf '%s' "$1" | nc -U -w 1 "$NOTESOCK"; }
 vx() { timeout 4 nvim --headless --clean --server "$(SOCK)" --remote-expr "$1" 2>/dev/null; }
 front() { lsappinfo info -only name "$(lsappinfo front)" | sed -E 's/.*="(.*)"/\1/'; }
 guard() { [[ "$(front)" == "kitchen-sink" ]] || { echo "ABORT: frontmost is '$(front)'" >&2; return 1; }; }
-# all keys go through System Events: cliclick's kp:/t: events can carry stale
-# fn/numpad flags (the terminal then drops them) and drop characters
 typ() {
     guard || return 1
     local esc=${1//\\/\\\\}; esc=${esc//\"/\\\"}
@@ -71,7 +54,6 @@ wcount() { osascript -e 'tell application "System Events" to count (windows of p
 vim_pid() { pgrep -f "nvim --embed.*--listen $(SOCK)" | head -1; }
 disk() { tr '\n' '|' < "$1"; }
 buf() { vx "join(getline(1,'\$'),'|')"; }
-# click inside the vim pane (upper third of the window)
 click_pane() {
     local f; f="$(wframe)"
     [[ -n "$f" ]] || { fail "click_pane: no kitchen-sink window frame"; return 1; }

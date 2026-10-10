@@ -1,27 +1,11 @@
 import AppKit
 
-// MARK: - Path shelf (the /paths popup's data)
-//
-// The ≤25 files you most recently created, changed, downloaded or copied,
-// newest first — for sharing them (PathsWindow.swift). Inclusive intake,
-// discerning rejection, the way git / ripgrep decide what is junk:
-//   activity   the ONE FSEvents stream RecentFiles already runs (its own
-//              noise filters first: system trees, ~/Library, hidden paths,
-//              node_modules, swap files, half-done downloads), files only,
-//              then IgnoreRules — your repo's .gitignore / .ignore /
-//              .rgignore, the global git excludes and config/paths.ignore
-//   clipboard  a file copied in Finder, or 1-5 lines of text that are each
-//              an existing path (ClipboardPaths; password managers skipped)
-//   explicit   filefast saves, the Files view's Copy Path / drag-out
-// Clipboard + explicit paths skip the ignore rules (you asked for that
-// file). Stored in ~/.cache/kitchen-sink/paths.json.
 final class PathShelf {
     static let shared = PathShelf()
     static let changed = Notification.Name("PathShelfChanged")
 
     enum Why: String {
         case created, modified, downloaded, clipboard, filefast, copied, screenshot
-        // the trailing word on the popup's row
         var label: String {
             switch self {
             case .created: return "new"
@@ -37,33 +21,29 @@ final class PathShelf {
 
     struct Item: Equatable {
         var path: String
-        var at: Double          // epoch s
+        var at: Double
         var why: Why
     }
 
-    // a hard cap: the shelf is for "the thing I just made / got", not history
     static let maxLimit = 25
     private(set) var limit = maxLimit
     let rules: IgnoreRules
     private let store: String
     private let queue = DispatchQueue(label: "path-shelf")
-    private var items: [Item] = []          // newest first, ≤ limit (on `queue`)
+    private var items: [Item] = []
     private var loaded = false
     private let snapLock = NSLock()
     private var snapshot: [Item] = []
     private var saveWork: DispatchWorkItem?
     private var notifyWork: DispatchWorkItem?
-    // tests: synchronous notification + save
     var immediate = false
 
-    // store / rules are parameters for Tests/test_path_shelf.swift
     init(store: String = NSHomeDirectory() + "/.cache/kitchen-sink/paths.json",
          rules: IgnoreRules = IgnoreRules()) {
         self.store = store
         self.rules = rules
     }
 
-    // [paths] limit (clamped 1...25); loads the store once
     func configure(limit: Int, ignoreFile: String?) {
         queue.sync {
             self.limit = min(max(1, limit), Self.maxLimit)
@@ -74,7 +54,6 @@ final class PathShelf {
         }
     }
 
-    // newest first, only paths that still exist (≤ 25 stats)
     func entries() -> [Item] {
         snapLock.lock()
         let all = snapshot
@@ -84,8 +63,6 @@ final class PathShelf {
 
     var isEmpty: Bool { queue.sync { items.isEmpty } }
 
-    // file activity (RecentFiles' stream, on its queue): regular files
-    // only (no folders, sockets, devices), through the rules
     func observe(_ path: String, created: Bool, origin: String?) {
         queue.async { [self] in
             guard loaded, let c = Self.canonical(path), c.isFile, !rules.ignored(c.path) else { return }
@@ -94,8 +71,6 @@ final class PathShelf {
         }
     }
 
-    // clipboard / explicit: you asked for these — no rules; an existing
-    // file or folder
     func add(_ paths: [String], why: Why) {
         queue.async { [self] in
             guard loaded else { return }
@@ -106,7 +81,6 @@ final class PathShelf {
         }
     }
 
-    // a rename / move (old → new): the row follows, keeps its place
     func renamed(from old: String, to new: String) {
         queue.async { [self] in
             var hit = false
@@ -129,8 +103,6 @@ final class PathShelf {
         }
     }
 
-    // first run (no paths.json yet): the newest of what RecentFiles knows,
-    // through the same rules
     func seed(from recent: [(path: String, at: Date, source: String?)]) {
         queue.async { [self] in
             guard loaded, items.isEmpty else { return }
@@ -144,12 +116,8 @@ final class PathShelf {
         }
     }
 
-    // tests: wait for the queue
     func sync() { queue.sync {} }
 
-    // the ONE path of a file — symlinked folders resolved (/tmp/link/x and
-    // /tmp/x are one row; /tmp is /private/tmp) — and what it is. nil =
-    // gone. Shelf rows are always canonical.
     static func canonical(_ p: String) -> (path: String, isFile: Bool, isDir: Bool)? {
         guard let r = realpath(p, nil) else { return nil }
         defer { free(r) }
@@ -160,8 +128,6 @@ final class PathShelf {
         return (path, fmt == S_IFREG, fmt == S_IFDIR)
     }
 
-    // ~/x, file:///x → /x, standardized; /tmp → /private/tmp (FSEvents'
-    // spelling — standardizingPath strips the /private RecentFiles keeps)
     static func normalize(_ p: String) -> String {
         var s = p
         if s.hasPrefix("file://"), let u = URL(string: s), u.isFileURL { s = u.path }
@@ -170,13 +136,9 @@ final class PathShelf {
         return s
     }
 
-    // MARK: on `queue`
-
     private func bump(_ path: String, _ why: Why) {
         let now = Date().timeIntervalSince1970
         if let i = items.firstIndex(where: { $0.path == path }) {
-            // an edit of a file you copied / downloaded keeps saying why
-            // it is here; a fresh copy or download says so
             var it = items.remove(at: i)
             it.at = now
             if why != .modified { it.why = why }
@@ -218,9 +180,6 @@ final class PathShelf {
     private func load() {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: store)),
               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
-        // stored rows meet today's rules: canonical, still there, and what
-        // came from activity still passes the ignore files (an edit to
-        // paths.ignore cleans the list on the next launch)
         items = arr.compactMap { d in
             guard let p = d["path"] as? String, let t = d["at"] as? Double, let c = Self.canonical(p) else { return nil }
             let why = Why(rawValue: d["why"] as? String ?? "") ?? .modified
@@ -243,53 +202,35 @@ final class PathShelf {
     }
 }
 
-// MARK: - Ignore rules (gitignore syntax, git / ripgrep precedence)
-//
-// Lowest to highest precedence — the LAST matching pattern wins, `!`
-// re-includes, and (like git) nothing under an ignored directory can be
-// re-included:
-//   the global git excludes (core.excludesFile, else ~/.config/git/ignore)
-//   per directory, root → the file's folder: .gitignore (only inside a git
-//     repo), .ignore, .rgignore — deeper folders win
-//   the shelf's own file (config/paths.ignore): your rules always win
-// Patterns: `*` `?` `[…]` within a name, `**` across folders, a leading or
-// middle `/` anchors to the ignore file's folder (else any depth), a
-// trailing `/` = folders only, `\` escapes, `#` comments. In the global and
-// shelf files a pattern may also be an absolute or ~/ path.
-// Everything is cached per folder; ignore files are re-checked (stat) at
-// most every 2 s. Not thread-safe: PathShelf calls it on its queue.
 final class IgnoreRules {
     struct Pattern {
         let regex: NSRegularExpression
         let negate: Bool
         let dirOnly: Bool
     }
-    // one ignore file: its folder + patterns
     struct RuleSet {
-        let base: String        // "/" for the global / shelf files
+        let base: String
         let patterns: [Pattern]
-        var isGit = false       // a .gitignore: only counts inside a git repo
+        var isGit = false
     }
 
     var shelfFile: String? { didSet { if shelfFile != oldValue { fileCache[oldValue ?? ""] = nil } } }
-    var gitExcludes: String?    // nil = from ~/.gitconfig, else ~/.config/git/ignore
+    var gitExcludes: String?
     private let home: String
     private var fileCache: [String: (mtime: Double, checked: Double, set: RuleSet?)] = [:]
     private var dirCache: [String: (checked: Double, repo: Bool, sets: [RuleSet])] = [:]
-    var recheck: Double = 2     // seconds between stats of one ignore file (tests: 0)
+    var recheck: Double = 2
 
     init(home: String = NSHomeDirectory(), shelfFile: String? = nil) {
         self.home = home
         self.shelfFile = shelfFile
     }
 
-    // is `path` (absolute) ignored? `isDir` = the path itself is a folder
     func ignored(_ path: String, isDir: Bool = false) -> Bool {
-        let comps = (path as NSString).pathComponents   // ["/", "Users", …]
+        let comps = (path as NSString).pathComponents
         guard comps.count > 1 else { return false }
         let global = [globalSet()].compactMap { $0 }
         let shelf = [shelfSet()].compactMap { $0 }
-        // per-folder sets from "/" down, gathered as we go
         var sets: [RuleSet] = []
         var dir = "/"
         var inRepo = false
@@ -299,13 +240,11 @@ final class IgnoreRules {
             sets += d.sets.filter { inRepo || !$0.isGit }
             dir = (dir as NSString).appendingPathComponent(comps[i])
             let last = i == comps.count - 1
-            // an ignored folder ignores all below it (git never looks inside)
             if decide(dir, isDir: last ? isDir : true, global + sets + shelf) { return true }
         }
         return false
     }
 
-    // last matching pattern wins
     private func decide(_ path: String, isDir: Bool, _ sets: [RuleSet]) -> Bool {
         var ignored = false
         for s in sets {
@@ -324,14 +263,11 @@ final class IgnoreRules {
         return String(path.dropFirst(base.count + 1))
     }
 
-    // MARK: files
-
     private func folder(_ dir: String) -> (repo: Bool, sets: [RuleSet]) {
         let now = Date().timeIntervalSince1970
         if let c = dirCache[dir], now - c.checked < recheck { return (c.repo, c.sets) }
         let fm = FileManager.default
         let repo = fm.fileExists(atPath: (dir as NSString).appendingPathComponent(".git"))
-        // ripgrep's order inside one folder: .gitignore < .ignore < .rgignore
         var sets: [RuleSet] = []
         for name in [".gitignore", ".ignore", ".rgignore"] {
             let f = (dir as NSString).appendingPathComponent(name)
@@ -374,7 +310,6 @@ final class IgnoreRules {
         return set
     }
 
-    // core.excludesFile from ~/.gitconfig, else $XDG_CONFIG_HOME/git/ignore
     static func gitExcludesFile(home: String) -> String {
         if let text = try? String(contentsOfFile: home + "/.gitconfig", encoding: .utf8) {
             var inCore = false
@@ -394,12 +329,8 @@ final class IgnoreRules {
         return xdg + "/git/ignore"
     }
 
-    // MARK: pattern → regex
-
-    // one gitignore line → a pattern matching paths RELATIVE to its base
     static func compile(_ line: String, global: Bool = false, home: String = NSHomeDirectory()) -> Pattern? {
         var s = Substring(line)
-        // trailing spaces are dropped unless escaped
         while s.hasSuffix(" ") && !s.hasSuffix("\\ ") { s = s.dropLast() }
         guard !s.isEmpty, !s.hasPrefix("#") else { return nil }
         var negate = false
@@ -409,10 +340,7 @@ final class IgnoreRules {
         if s.hasSuffix("/") && !s.hasSuffix("\\/") { dirOnly = true; s = s.dropLast() }
         guard !s.isEmpty else { return nil }
         var pat = String(s)
-        // global / shelf files (base "/"): ~/x is your home, and an absolute
-        // path anchors at "/" like any leading "/"
         if global, pat.hasPrefix("~/") { pat = home + pat.dropFirst(1) }
-        // a leading or middle "/" anchors to the base; else any depth
         let anchored = pat.contains("/")
         if pat.hasPrefix("/") { pat.removeFirst() }
         var rx = anchored ? "^" : "^(?:.*/)?"
@@ -434,17 +362,17 @@ final class IgnoreRules {
                     let atStart = i == 0 || c[i - 1] == "/"
                     let atEnd = i + 2 == c.count
                     let slashAfter = i + 2 < c.count && c[i + 2] == "/"
-                    if atStart && slashAfter {          // "**/" — zero or more folders
+                    if atStart && slashAfter {
                         out += "(?:.*/)?"
                         i += 3
                         continue
                     }
-                    if atStart && atEnd {               // "/**" or "**" — everything inside
+                    if atStart && atEnd {
                         out += ".*"
                         i += 2
                         continue
                     }
-                    out += "[^/]*"                      // "a**b" = two plain stars
+                    out += "[^/]*"
                     i += 2
                     continue
                 }
@@ -452,7 +380,6 @@ final class IgnoreRules {
             case "?":
                 out += "[^/]"
             case "[":
-                // a character class up to the closing "]" (a "]" first is literal)
                 var j = i + 1
                 if j < c.count, c[j] == "!" || c[j] == "^" { j += 1 }
                 if j < c.count, c[j] == "]" { j += 1 }
@@ -479,14 +406,6 @@ final class IgnoreRules {
     }
 }
 
-// MARK: - Clipboard paths
-//
-// Every 0.5 s: the pasteboard's changeCount (one int, nothing parsed unless
-// it changed). A change that carries file URLs, or text that is 1-5 lines
-// each naming an existing path (absolute, ~/, file://, quoted, `\ `
-// escaped), goes to the shelf. Password managers' copies (nspasteboard.org
-// concealed / transient / auto-generated markers) and our own copies
-// (`ownWrite`) are skipped.
 final class ClipboardPaths {
     let pasteboard: NSPasteboard
     var onPaths: (([String]) -> Void)?
@@ -518,7 +437,6 @@ final class ClipboardPaths {
         timer = nil
     }
 
-    // right after we write the pasteboard ourselves
     func ownWrite() { ownCount = pasteboard.changeCount }
 
     func check() {
@@ -542,7 +460,6 @@ final class ClipboardPaths {
         return paths(inText: text)
     }
 
-    // text that is NOTHING but 1-5 existing paths, one per line
     static func paths(inText text: String) -> [String] {
         guard text.count <= 4096 else { return [] }
         let lines = text.split(whereSeparator: \.isNewline)

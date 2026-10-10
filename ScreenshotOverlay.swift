@@ -1,15 +1,6 @@
 import AppKit
 
-// /screenshot's capture screen: one ShotOverlayPanel per display showing
-// that display's frozen image under a veil, and ONE ShotSession (the brain:
-// selection, tools, the drawn objects, keys, the Esc chain). The selection
-// lives on one display (where the drag started); the others stay dimmed.
-// Tool-panel rules (AGENT_CONTEXT "Tool panels"): non-activating panels,
-// never NSApp.activate, no didBecomeActive observer.
-
-enum ShotOutcome: String { case copy, save, pin, accept, abort, text }   // text = OCR → clipboard
-
-// MARK: - Panel
+enum ShotOutcome: String { case copy, save, pin, accept, abort, text }
 
 final class ShotOverlayPanel: NSPanel {
     let overlay: ShotOverlayView
@@ -19,7 +10,7 @@ final class ShotOverlayPanel: NSPanel {
         overlay = ShotOverlayView(frame: NSRect(origin: .zero, size: screen.frame.size))
         super.init(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
-        isFloatingPanel = true            // (sets .floating: the level goes after it)
+        isFloatingPanel = true
         level = .screenSaver
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
@@ -39,15 +30,12 @@ final class ShotOverlayPanel: NSPanel {
     }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
-    // covers the menu bar: never pushed below it
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
-    // Esc runs through the session's key monitor (the Esc chain)
     override func cancelOperation(_ sender: Any?) {}
 
     func fit(_ screen: NSScreen) {
         if frame != screen.frame { setFrame(screen.frame, display: false) }
     }
-    // the frozen image, upright (a plain, unflipped layer host)
     func setImage(_ img: CGImage?, scale: CGFloat) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -67,9 +55,6 @@ final class ShotBackdropView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-// MARK: - Display
-
-// one display of a capture: its screen, frozen canvas and panel
 final class ShotDisplay {
     let screen: NSScreen
     let id: CGDirectDisplayID
@@ -81,14 +66,11 @@ final class ShotDisplay {
     init(screen: NSScreen, id: CGDirectDisplayID, canvas: ShotCanvas, panel: ShotOverlayPanel) {
         self.screen = screen; self.id = id; self.canvas = canvas; self.panel = panel
     }
-    // global top-left points (Flameshot / --region) of a local point
     var globalOrigin: CGPoint {
         let primaryH = NSScreen.screens.first?.frame.maxY ?? screen.frame.maxY
         return CGPoint(x: screen.frame.minX, y: primaryH - screen.frame.maxY)
     }
 }
-
-// MARK: - Session
 
 final class ShotSession {
     let cfg: ScreenshotConfig
@@ -97,26 +79,25 @@ final class ShotSession {
     let statePath: String
     let doc: ShotDocument
     var displays: [ShotDisplay] = []
-    private(set) var active: ShotDisplay?          // owns the selection
-    private(set) var selection: CGRect?            // in the active display's points
+    private(set) var active: ShotDisplay?
+    private(set) var selection: CGRect?
     private(set) var tool: ShotTool?
     private(set) var moveMode = false
-    // Copy Text mode (Tab / O / the mode pill): a drag = OCR → clipboard
     private(set) var textMode = false
     private(set) var color: ShotColor
     private(set) var counterOffset = 0
     var sidePanelOpen: Bool { active.map { $0.view.sidePanel != nil } ?? false }
-    private(set) var grabbing: ShotColor?          // grab color: the color before (Esc restores)
+    private(set) var grabbing: ShotColor?
     private(set) var editing: (view: ShotTextField, index: Int?, display: ShotDisplay)?
     private(set) var wheel: (display: ShotDisplay, center: CGPoint, hot: Int?)?
     private(set) var shortcutsShown = false
     private(set) var saveCard: (card: ShotSaveCard, display: ShotDisplay)?
-    var chosenSavePath: String?                    // the save card's answer
+    var chosenSavePath: String?
     var finished = false
     var onFinish: ((ShotOutcome) -> Void)?
     var onRecent: (() -> Void)?
     var log: (String) -> Void = { _ in }
-    private var ringNew = true                      // the next ring show animates (new selection)
+    private var ringNew = true
     private var lastWheel = Date.distantPast
     private var sizeSaveTimer: Timer?
 
@@ -138,18 +119,14 @@ final class ShotSession {
         state = ShotState.load(statePath)
         doc = ShotDocument(undoLimit: cfg.undoLimit)
         color = state.color.flatMap { ShotColor(hex: $0) } ?? cfg.drawColor
-        // the text tool's font: the side panel's pick, else [screenshot] font
         if state.style.family.isEmpty { state.style.family = cfg.font }
         textMode = args.mode == .text || (args.mode == .gui && cfg.startText)
     }
-
-    // MARK: state
 
     var drawing: ShotObject? { if case .drawing(let o) = drag { return o }; return nil }
     var isDragging: Bool { if case .none = drag { return false }; return true }
     func size(_ t: ShotTool) -> Int { state.size(t) }
     var activeSize: Int? { tool.map { size($0) } }
-    // the selected object's color, else the drawing color
     var currentColor: ShotColor {
         if let i = doc.selected, doc.objects.indices.contains(i) { return doc.objects[i].color }
         return color
@@ -164,12 +141,9 @@ final class ShotSession {
         for d in displays { d.view.needsDisplay = true; d.view.layoutChrome() }
     }
 
-    // MARK: selection
-
     func select(_ r: CGRect?, on d: ShotDisplay?, new: Bool = true) {
         let old = (active, selection)
         if let d, d !== active {
-            // the selection moved to another display: its drawings go
             doc.reset()
             active = d
         }
@@ -182,7 +156,6 @@ final class ShotSession {
         for d in displays { d.view.layoutChrome() }
     }
 
-    // true once per new selection: the ring's emerge animation
     func takeRingNew() -> Bool {
         defer { ringNew = false }
         return ringNew
@@ -193,14 +166,11 @@ final class ShotSession {
         select(d.bounds, on: d)
     }
 
-    // the selection in global top-left points (Flameshot geometry)
     var globalSelection: CGRect? {
         guard let d = active, let s = selection else { return nil }
         let o = d.globalOrigin
         return s.offsetBy(dx: o.x, dy: o.y)
     }
-
-    // MARK: tools + color
 
     func setTool(_ t: ShotTool?) {
         commitText()
@@ -209,7 +179,6 @@ final class ShotSession {
         doc.selected = nil
         redrawAll()
     }
-    // the selection + its drawings stay: switching back shows the ring again
     func toggleTextMode() {
         commitText()
         closeWheel()
@@ -243,7 +212,6 @@ final class ShotSession {
         redrawAll()
     }
 
-    // wheel / Size ± : the selected object's size, else the active tool's
     func changeSize(_ delta: Int) {
         if let i = doc.selected, doc.objects.indices.contains(i) {
             let t = doc.objects[i].tool
@@ -257,7 +225,6 @@ final class ShotSession {
         state.sizes[t.rawValue] = v
         showSize(v)
         if let e = editing { e.view.applyStyle(size: v) }
-        // saved when the indicator fades (about 1 s after the last change)
         sizeSaveTimer?.invalidate()
         sizeSaveTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
             guard let self else { return }
@@ -274,7 +241,6 @@ final class ShotSession {
         (active ?? mouseDisplay)?.view.showSizeIndicator(v)
     }
 
-    // the object a new drawing becomes
     func newObject(_ t: ShotTool, at p: CGPoint) -> ShotObject {
         var o = ShotObject(tool: t, points: [p, p], color: color, size: size(t))
         o.openArrow = cfg.arrowStyle == 1
@@ -289,8 +255,6 @@ final class ShotSession {
         if t == .pencil { o.points = [p] }
         return o
     }
-
-    // MARK: mouse
 
     private func handleAt(_ p: CGPoint) -> Int? {
         guard let s = selection else { return nil }
@@ -322,7 +286,6 @@ final class ShotSession {
             return
         }
         let inActive = d === active
-        // copy on double-click (inside the selection, no tool)
         if e.clickCount == 2, inActive, let s = selection, s.contains(p) {
             if tool == .text || tool == nil, let i = doc.hit(p), doc.objects[i].tool == .text {
                 beginText(d, at: doc.objects[i].start, editing: i)
@@ -359,7 +322,6 @@ final class ShotSession {
             d.view.ringHidden = true
             return
         }
-        // a new selection (on this display)
         drag = .selecting(start: p)
         select(CGRect(origin: p, size: .zero), on: d)
         d.view.ringHidden = true
@@ -399,7 +361,6 @@ final class ShotSession {
         case .movingObject(let i, let from, let start, _):
             let dv = CGVector(dx: p.x - start.x, dy: p.y - start.y)
             let before = doc.objects[i].bbox
-            // live move without an undo step per pixel: one step on mouse-up
             doc.updateLive(at: i) { $0 = from.moved(by: dv) }
             drag = .movingObject(index: i, from: from, start: start, moved: true)
             active?.view.invalidate(before.union(doc.objects[i].bbox))
@@ -421,7 +382,7 @@ final class ShotSession {
             switch o.tool {
             case .pencil, .counter:
                 if o.tool == .counter, o.points.count > 1, ShotGeom.dist(o.start, o.end) < o.counterRadius {
-                    o.points = [o.start]   // a click, no tail
+                    o.points = [o.start]
                 }
                 doc.add(o)
                 if o.tool == .counter { counterOffset = 0 }
@@ -444,8 +405,6 @@ final class ShotSession {
     func mouseMoved(_ d: ShotDisplay, _ p: CGPoint) {
         let old = mouse
         mouse = (d, p)
-        // the keyboard follows the mouse to its display (no activation)
-        // (not while typing: the text tool, the save card, a side-panel field)
         if !d.panel.isKeyWindow, editing == nil, saveCard == nil, !(NSApp.keyWindow?.firstResponder is NSText) {
             d.panel.makeKey()
         }
@@ -467,14 +426,12 @@ final class ShotSession {
 
     func scroll(_ e: NSEvent, _ d: ShotDisplay) {
         if e.hasPreciseScrollingDeltas {
-            // trackpad: one step per 200 ms
             guard Date().timeIntervalSince(lastWheel) >= 0.2, abs(e.scrollingDeltaY) > 0.5 else { return }
         }
         guard e.scrollingDeltaY != 0 else { return }
         lastWheel = Date()
         let step = e.scrollingDeltaY > 0 ? 1 : -1
         if e.modifierFlags.contains(.command), tool == .counter {
-            // the next bubble's number
             counterOffset = max(-doc.nextCounterNumber() + 1, min(998, counterOffset + step))
             showSize(doc.nextCounterNumber(offset: counterOffset))
             return
@@ -482,7 +439,6 @@ final class ShotSession {
         changeSize(step)
     }
 
-    // right-click: the color wheel at the cursor
     func rightDown(_ d: ShotDisplay, _ p: CGPoint) {
         if editing != nil { commitText() }
         wheel = (d, p, nil)
@@ -496,7 +452,6 @@ final class ShotSession {
     func rightUp(_ d: ShotDisplay, _ p: CGPoint) {
         guard let w = wheel else { return }
         if let hot = w.hot { pickWheel(hot); closeWheel() }
-        // released over nothing: stays open for a left click
     }
     private func pickWheel(_ i: Int) {
         let list = cfg.userColors
@@ -507,8 +462,6 @@ final class ShotSession {
         wheel?.display.view.hideWheel()
         wheel = nil
     }
-
-    // MARK: grab color (G)
 
     func startGrab() {
         commitText()
@@ -521,8 +474,6 @@ final class ShotSession {
         for d in displays { d.view.hideLoupe() }
         redrawAll()
     }
-
-    // MARK: text
 
     func beginText(_ d: ShotDisplay, at origin: CGPoint, editing index: Int?) {
         commitText()
@@ -539,7 +490,6 @@ final class ShotSession {
         redrawAll()
     }
 
-    // Esc, Cmd+Return or a click outside: the text becomes an object (empty = dropped)
     func commitText() {
         guard let e = editing else { return }
         editing = nil
@@ -569,8 +519,6 @@ final class ShotSession {
         redrawAll()
     }
 
-    // MARK: side panel / shortcuts
-
     func toggleSidePanel(open: Bool? = nil) {
         guard let d = active ?? mouseDisplay else { return }
         let want = open ?? (d.view.sidePanel == nil)
@@ -588,8 +536,6 @@ final class ShotSession {
         for d in displays { d.view.hideShortcuts() }
     }
 
-    // MARK: keyboard nudges
-
     func nudge(_ dx: CGFloat, _ dy: CGFloat, resize: Bool, symmetric: Bool) {
         guard let a = active, var s = selection else { return }
         if symmetric {
@@ -605,7 +551,6 @@ final class ShotSession {
         select(s, on: a, new: false)
     }
 
-    // the handles: 0 TL, 1 T, 2 TR, 3 R, 4 BR, 5 B, 6 BL, 7 L
     static func resize(_ r: CGRect, handle h: Int, by d: CGVector, mirror: Bool, keepAspect: Bool) -> CGRect {
         var minX = r.minX, minY = r.minY, maxX = r.maxX, maxY = r.maxY
         let left = [0, 6, 7].contains(h), right = [2, 3, 4].contains(h)
@@ -625,9 +570,6 @@ final class ShotSession {
         return ShotGeom.rect(CGPoint(x: minX, y: minY), CGPoint(x: maxX, y: maxY))
     }
 
-    // MARK: keys
-
-    // the keyDown monitor's handler: true = consumed
     func handleKey(_ e: NSEvent) -> Bool {
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let cmd = mods.contains(.command), ctrl = mods.contains(.control)
@@ -637,7 +579,6 @@ final class ShotSession {
         let isEsc = code == 53
         let window = e.window ?? mouseDisplay?.panel
 
-        // text being edited (the text tool, the save card, the side panel's fields)
         if let w = window, w.firstResponder is NSText {
             if isEsc {
                 if saveCard != nil { closeSaveCard() }
@@ -645,38 +586,37 @@ final class ShotSession {
                 else { active?.view.sidePanel?.leaveField(); w.makeFirstResponder(active?.view ?? w.contentView) }
                 return true
             }
-            if editing != nil, cmd, code == 36 { commitText(); return true }   // Cmd+Return
+            if editing != nil, cmd, code == 36 { commitText(); return true }
             if cmd, ch == "q" { finish(.abort); return true }
             if JiraEditKeys.route(e, in: w) { return true }
-            return false                                    // typing goes to the field
+            return false
         }
 
         if isEsc { escape(); return true }
         if shortcutsShown { hideShortcuts(); return true }
         if cmd && ch == "q" { finish(.abort); return true }
         if cmd && ch == "/" { showShortcuts(); return true }
-        if cmd && ch == "r" { pressed(.recent); return true }   // recent captures
-        if code == 48 && !cmd && !ctrl && !opt { toggleTextMode(); return true }   // Tab
+        if cmd && ch == "r" { pressed(.recent); return true }
+        if code == 48 && !cmd && !ctrl && !opt { toggleTextMode(); return true }
         if cmd && shift && ch == "c" { finish(.text); return true }
         if textMode {
             if (cmd || ctrl) && ch == "c" { finish(.text); return true }
             if code == 36 || code == 76 { finish(.text); return true }
-            if cmd && ch == "a" { selectAll(); finish(.text); return true }   // the whole screen's text
+            if cmd && ch == "a" { selectAll(); finish(.text); return true }
             if !cmd && !ctrl && !opt && ch == "o" { toggleTextMode() }
-            return true   // no tools, no drawing keys in this mode
+            return true
         }
         if (cmd || ctrl) && ch == "c" && !shift { finish(.copy); return true }
         if cmd && ch == "s" { requestSave(); return true }
         if cmd && ch == "a" { selectAll(); return true }
         if cmd && ch == "m" { toggleMoveMode(); return true }
         if cmd && ch == "z" { shift ? redo() : undo(); return true }
-        if cmd && code == 36 { commitText(); return true }   // Cmd+Return: commit the current tool
+        if cmd && code == 36 { commitText(); return true }
         if code == 36 || code == 76 { finish(.accept); return true }
-        if code == 51 || code == 117 {                        // Backspace / Delete
+        if code == 51 || code == 117 {
             if let i = doc.selected { doc.remove(at: i); redrawAll() }
             return true
         }
-        // arrows: move 1 pt; Shift resize; Cmd+Shift symmetric
         let arrows: [UInt16: (CGFloat, CGFloat)] = [123: (-1, 0), 124: (1, 0), 125: (0, 1), 126: (0, -1)]
         if let (dx, dy) = arrows[code] {
             if cmd && shift { nudge(dx, dy, resize: true, symmetric: true) }
@@ -690,11 +630,9 @@ final class ShotSession {
             if ch == "o" { toggleTextMode(); return true }
             if let c = ch.first, let t = ShotTool.forLetter(c) { setTool(t); return true }
         }
-        // nothing else reaches the app (Cmd+W, Cmd+H … would act on the daemon)
         return true
     }
 
-    // one layer per Esc (rule 6 + Flameshot's deleteToolWidgetOrClose)
     func escape() {
         if saveCard != nil { closeSaveCard(); return }
         if editing != nil { commitText(); return }
@@ -709,8 +647,6 @@ final class ShotSession {
 
     func undo() { commitText(); if doc.undo() { redrawAll() } }
     func redo() { commitText(); if doc.redo() { redrawAll() } }
-
-    // MARK: buttons
 
     func pressed(_ t: ShotTool) {
         switch t {
@@ -731,12 +667,6 @@ final class ShotSession {
         }
     }
 
-    // MARK: save
-
-    // Cmd+S / the Save button. A save panel can't take the keyboard without
-    // activating the app (which raises the shared window), so the overlay
-    // asks itself: a path field, pre-filled from save-path + the pattern.
-    // save-path-fixed / -p: straight to the file.
     func requestSave() {
         guard selection != nil else { return }
         if cfg.savePathFixed || args.path != nil { finish(.save); return }
@@ -773,20 +703,17 @@ final class ShotSession {
     func finish(_ o: ShotOutcome) {
         guard !finished else { return }
         commitText()
-        if o != .abort && o != .save && selection == nil { return }   // nothing selected yet
+        if o != .abort && o != .save && selection == nil { return }
         if o == .save && selection == nil { return }
         finished = true
         state.save(statePath)
         onFinish?(o)
     }
 
-    // the output image: the selection at native scale + every object
     func render(objects: Bool = true) -> CGImage? {
         guard let d = active, let s = selection else { return nil }
         return ShotRenderer.render(d.canvas, crop: s, objects: objects ? doc.objects : [])
     }
-
-    // MARK: test hooks
 
     func testDraw(_ a: CGPoint, _ b: CGPoint) {
         guard let d = active, let t = tool else { return }
@@ -807,12 +734,10 @@ final class ShotSession {
     }
 }
 
-// MARK: - Overlay view
-
 final class ShotOverlayView: NSView {
     weak var session: ShotSession?
     weak var display: ShotDisplay?
-    var hiddenObject: Int?                 // the text object being edited
+    var hiddenObject: Int?
     var ringHidden = false { didSet { if ringHidden != oldValue { layoutChrome() } } }
     private var buttons: [ShotButton] = []
     private var ringTools: [ShotTool] = []
@@ -848,7 +773,6 @@ final class ShotOverlayView: NSView {
         tracking = t
     }
 
-    // a fresh session on this display (the panels are reused)
     func attach(_ s: ShotSession, _ d: ShotDisplay) {
         session = s
         display = d
@@ -875,8 +799,6 @@ final class ShotOverlayView: NSView {
         setNeedsDisplay(r.insetBy(dx: -pad, dy: -pad))
     }
 
-    // MARK: drawing
-
     static func handlePoints(_ s: CGRect) -> [CGPoint] {
         [CGPoint(x: s.minX, y: s.minY), CGPoint(x: s.midX, y: s.minY), CGPoint(x: s.maxX, y: s.minY),
          CGPoint(x: s.maxX, y: s.midY), CGPoint(x: s.maxX, y: s.maxY), CGPoint(x: s.midX, y: s.maxY),
@@ -887,7 +809,6 @@ final class ShotOverlayView: NSView {
         guard let s = session, let d = display, let ctx = NSGraphicsContext.current?.cgContext else { return }
         let cfg = s.cfg
         let mine = s.active === d ? s.selection : nil
-        // the veil everywhere but the selection
         ctx.saveGState()
         ctx.setFillColor(NSColor.black.withAlphaComponent(CGFloat(cfg.contrastOpacity) / 255).cgColor)
         if let sel = mine {
@@ -898,8 +819,6 @@ final class ShotOverlayView: NSView {
             ctx.fill(dirty)
         }
         ctx.restoreGState()
-        // mode cue: Copy Text is blue, Screenshot keeps the ui color; a tint
-        // + a thick frame around the whole display so the mode reads at a glance
         let modeColor: CGColor = s.textMode ? shotTextBlue.cgColor : cfg.uiColor.cgColor
         ctx.saveGState()
         ctx.setFillColor(modeColor.copy(alpha: 0.14) ?? modeColor)
@@ -910,8 +829,6 @@ final class ShotOverlayView: NSView {
         ctx.restoreGState()
         guard let sel = mine, sel.width > 0, sel.height > 0 else { return }
 
-        // inside: the frozen pixels (drawn here so invert / marker blend
-        // against them) + the objects, clipped like the output
         ctx.saveGState()
         ctx.clip(to: sel.intersection(dirty))
         ShotRenderer.drawBase(d.canvas, sel.intersection(dirty), ctx)
@@ -922,7 +839,6 @@ final class ShotOverlayView: NSView {
         if s.state.grid { drawGrid(ctx, sel, step: CGFloat(s.state.gridSize)) }
         ctx.restoreGState()
 
-        // the selected object: a dashed box
         if let i = s.doc.selected, s.doc.objects.indices.contains(i) {
             ctx.saveGState()
             ctx.setStrokeColor(cfg.uiColor.cgColor)
@@ -931,10 +847,8 @@ final class ShotOverlayView: NSView {
             ctx.stroke(s.doc.objects[i].bbox.insetBy(dx: -4, dy: -4))
             ctx.restoreGState()
         }
-        // the border + 8 round handles (60% of the button size)
         ctx.setStrokeColor(modeColor)
         if s.textMode {
-            // Copy Text: a dashed marquee, no handles (a drag always starts anew)
             ctx.setLineWidth(2)
             ctx.setLineDash(phase: 0, lengths: [6, 4])
             ctx.stroke(sel.insetBy(dx: -1, dy: -1))
@@ -950,7 +864,6 @@ final class ShotOverlayView: NSView {
                 ctx.fillEllipse(in: CGRect(x: p.x - hd / 2, y: p.y - hd / 2, width: hd, height: hd))
             }
         }
-        // mouse preview: a dot of the tool's size + color
         if let m = s.mouse, m.display === d, s.editing == nil, s.grabbing == nil, !s.isDragging,
            let t = s.tool, [.pencil, .marker, .line, .arrow].contains(t), sel.contains(m.point) {
             let probe = ShotObject(tool: t, points: [m.point], color: s.color, size: s.size(t))
@@ -971,13 +884,10 @@ final class ShotOverlayView: NSView {
         ctx.strokePath()
     }
 
-    // MARK: chrome (ring, help card, tab, size badge)
-
     func layoutChrome() {
         guard let s = session, let d = display else { return }
         let cfg = s.cfg
         let mine = s.active === d ? s.selection : nil
-        // help card: centered on the screen under the mouse, no selection anywhere
         let showHelp = cfg.showHelp && s.selection == nil && s.mouseDisplay === d
         if help != nil && helpIsText != s.textMode { help?.removeFromSuperview(); help = nil }
         if showHelp {
@@ -995,9 +905,6 @@ final class ShotOverlayView: NSView {
             help?.removeFromSuperview()
             help = nil
         }
-        // "Tool Settings": the left edge, centered vertically
-        // the mode pill (Screenshot | Copy Text): top-center of the mouse's
-        // display, out of the way while a drag runs
         if s.mouseDisplay === d && !s.isDragging {
             if modePill == nil {
                 let m = ShotModePill(ui: cfg.uiColor) { [weak s] text in
@@ -1011,7 +918,6 @@ final class ShotOverlayView: NSView {
                 m.textMode = s.textMode
                 m.frame.origin = CGPoint(x: ((bounds.width - m.frame.width) / 2).rounded(), y: top + 16)
             }
-            // recent screenshots button: right of the mode pill
             if recentBtn == nil {
                 let r = ShotRecentButton(ui: cfg.uiColor) { [weak s] in s?.pressed(.recent) }
                 addSubview(r)
@@ -1038,7 +944,6 @@ final class ShotOverlayView: NSView {
             tab?.removeFromSuperview()
             tab = nil
         }
-        // the ring
         guard let sel = mine, !ringHidden, !s.textMode else {
             for b in buttons { b.isHidden = true }
             if mine == nil { buttons.forEach { $0.removeFromSuperview() }; buttons = [] }
@@ -1072,8 +977,6 @@ final class ShotOverlayView: NSView {
     }
     var helpShown: Bool { help != nil }
     var modePillFrame: CGRect? { modePill?.frame }
-
-    // MARK: transient views
 
     func showSizeIndicator(_ v: Int) {
         if indicator == nil {
@@ -1136,8 +1039,6 @@ final class ShotOverlayView: NSView {
     }
     func hideShortcuts() { shortcuts?.removeFromSuperview(); shortcuts = nil }
 
-    // MARK: cursor
-
     func updateCursor(at p: CGPoint) {
         guard let s = session else { return }
         let cur: NSCursor
@@ -1160,8 +1061,6 @@ final class ShotOverlayView: NSView {
     override func cursorUpdate(with event: NSEvent) {
         updateCursor(at: convert(event.locationInWindow, from: nil))
     }
-
-    // MARK: events
 
     private func point(_ e: NSEvent) -> CGPoint { convert(e.locationInWindow, from: nil) }
 
@@ -1200,12 +1099,10 @@ final class ShotOverlayView: NSView {
         guard let s = session, let d = display else { return }
         s.rightUp(d, point(e))
     }
-    // keys arrive through the session's monitor; nothing beeps
     override func keyDown(with event: NSEvent) {}
 }
 
 extension ShotSession {
-    // the help card follows the mouse between displays
     func redrawAllChrome() {
         let showing = displays.contains { $0.view.helpShown }
         let want = cfg.showHelp && selection == nil
@@ -1215,8 +1112,6 @@ extension ShotSession {
         }
     }
 }
-
-// MARK: - Ring button
 
 final class ShotButton: NSView {
     let tool: ShotTool
@@ -1263,7 +1158,6 @@ final class ShotButton: NSView {
     }
     override func rightMouseDown(with event: NSEvent) {}
 
-    // grows from 0 to full size in 80 ms, ease in-out (Flameshot's emerge)
     func emerge() {
         guard let l = layer else { return }
         let c = CGPoint(x: bounds.midX, y: bounds.midY)
@@ -1313,8 +1207,6 @@ final class ShotButton: NSView {
                  from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
 }
-
-// MARK: - Help card + Tool Settings tab + size indicator
 
 final class ShotHelpCard: NSView {
     private let rows: [(String, String)]
@@ -1391,8 +1283,6 @@ final class ShotToolTab: NSView {
     }
 }
 
-// "Screenshot | Copy Text": the overlay's mode switch (Tab / O toggle it)
-// Copy Text's color: pill segment, screen frame, marquee, help card
 let shotTextBlue = ShotColor(hex: "#0A84FF")!
 
 final class ShotModePill: NSView {
@@ -1459,8 +1349,6 @@ final class ShotModePill: NSView {
     }
 }
 
-
-// small clock button next to the mode pill (always visible, even in text mode)
 final class ShotRecentButton: NSView {
     private let ui: ShotColor
     private let action: () -> Void
@@ -1486,8 +1374,6 @@ final class ShotRecentButton: NSView {
     override func mouseUp(with event: NSEvent) { action() }
     override func draw(_ dirtyRect: NSRect) {
         let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-        // a template symbol draws black — tint it white, or it vanishes
-        // into its own black disc (the button looked like it wasn't there)
         if let base = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)?.withSymbolConfiguration(cfg) {
             let img = NSImage(size: base.size, flipped: false) { r in
                 base.draw(in: r)
@@ -1538,8 +1424,6 @@ final class ShotSizeIndicator: NSView {
     }
 }
 
-// MARK: - Color wheel (right-click)
-
 final class ShotWheelView: NSView {
     private let colors: [ShotColor?]
     private var hot: Int?
@@ -1558,7 +1442,6 @@ final class ShotWheelView: NSView {
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    // the dot under `p` (overlay points), nil = none
     static func index(at p: CGPoint, center c: CGPoint, count n: Int) -> Int? {
         guard n > 0 else { return nil }
         let r = radius(n)
@@ -1582,11 +1465,9 @@ final class ShotWheelView: NSView {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let c = CGPoint(x: bounds.midX, y: bounds.midY)
         let r = Self.radius(colors.count)
-        // the ring's backing disc
         ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
         ctx.fillEllipse(in: CGRect(x: c.x - r - Self.dot * 0.75, y: c.y - r - Self.dot * 0.75,
                                    width: 2 * (r + Self.dot * 0.75), height: 2 * (r + Self.dot * 0.75)))
-        // the current color in the middle
         ctx.setFillColor(current.cgColor)
         ctx.fillEllipse(in: CGRect(x: c.x - 16, y: c.y - 16, width: 32, height: 32))
         ctx.setStrokeColor(NSColor.white.cgColor)
@@ -1601,7 +1482,6 @@ final class ShotWheelView: NSView {
                 ctx.setFillColor(col.cgColor)
                 ctx.fillEllipse(in: rect)
             } else {
-                // "picker": a hue ring (opens the side panel's color controls)
                 for k in 0..<12 {
                     let a0 = CGFloat(k) / 12 * 2 * .pi, a1 = CGFloat(k + 1) / 12 * 2 * .pi
                     ctx.setFillColor(ShotColor(h: Double(k) / 12, s: 1, v: 1).cgColor)
@@ -1617,8 +1497,6 @@ final class ShotWheelView: NSView {
     }
 }
 
-// MARK: - Loupe (grab color, magnifier)
-
 final class ShotLoupe: NSView {
     private let square: Bool
     private var image: CGImage?
@@ -1626,7 +1504,7 @@ final class ShotLoupe: NSView {
     private var grab = false
     private var ui = ShotColor.black
     static let side: CGFloat = 132
-    static let px = 15                      // pixels across
+    static let px = 15
 
     init(square: Bool) {
         self.square = square
@@ -1643,7 +1521,6 @@ final class ShotLoupe: NSView {
         let half = Self.px / 2
         image = canvas.base.cropping(to: CGRect(x: cx - half, y: cy - half, width: Self.px, height: Self.px))
         hex = canvas.color(at: p)?.hex.uppercased() ?? ""
-        // beside the cursor, flipped away from the edges
         var o = CGPoint(x: p.x + 24, y: p.y + 24)
         if o.x + frame.width > b.maxX { o.x = p.x - 24 - frame.width }
         if o.y + frame.height > b.maxY { o.y = p.y - 24 - frame.height }
@@ -1661,7 +1538,6 @@ final class ShotLoupe: NSView {
         ctx.setFillColor(NSColor.black.cgColor)
         ctx.fill(r)
         if let image { ShotRenderer.drawImage(image, in: r, ctx, smooth: false) }
-        // the center pixel
         let cell = Self.side / CGFloat(Self.px)
         ctx.setStrokeColor(NSColor.white.cgColor)
         ctx.setLineWidth(1)
@@ -1685,14 +1561,10 @@ final class ShotLoupe: NSView {
     }
 }
 
-// MARK: - Text field (the text tool)
-
-// An NSTextView over the click point, styled like the object it becomes
-// (same font, color, 5 pt padding); grows with the text.
 final class ShotTextField: NSTextView {
     var object: ShotObject
     var onChange: (() -> Void)?
-    private let store: NSTextStorage      // the view doesn't own a storage it was handed
+    private let store: NSTextStorage
 
     init(object: ShotObject) {
         self.object = object
@@ -1755,10 +1627,7 @@ final class ShotTextField: NSTextView {
         place()
         onChange?()
     }
-    // the window's monitor routes the edit shortcuts (rule 1)
 }
-
-// MARK: - Shortcuts card (Cmd+/)
 
 final class ShotShortcutsCard: NSView {
     private let rows: [(String, String)]
@@ -1796,11 +1665,6 @@ final class ShotShortcutsCard: NSView {
     }
 }
 
-// MARK: - Side panel (Space / "Tool Settings")
-
-// Flameshot's side panel: tool size, active color, Grab Color, a hue /
-// saturation wheel + brightness, the hex field, the grid, the text tool's
-// style, and the Layers list (newest on top).
 final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private weak var session: ShotSession?
     static let width: CGFloat = 250
@@ -1836,7 +1700,6 @@ final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    // clicks on the panel never reach the overlay (no new selection)
     override func mouseDown(with event: NSEvent) {}
     override func rightMouseDown(with event: NSEvent) {}
     override func scrollWheel(with event: NSEvent) {}
@@ -1935,7 +1798,6 @@ final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         [gridCheck, gridStepper, gridValue].forEach(addSubview)
         y += 32
 
-        // the text tool's style (shown while Text is active / a text is selected)
         textBox.frame = NSRect(x: 0, y: y, width: Self.width, height: 92)
         let tl = NSTextField(labelWithString: "Text:")
         tl.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -1975,7 +1837,6 @@ final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         addSubview(textBox)
         y += 100
 
-        // Layers
         y = label("Layers", y)
         let col = NSTableColumn(identifier: .init("layer"))
         col.width = Self.width - 30
@@ -2006,8 +1867,6 @@ final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, N
             addSubview(b)
         }
     }
-
-    // MARK: sync
 
     func refresh() {
         guard let s = session else { return }
@@ -2048,9 +1907,8 @@ final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     private func applyHex() {
         guard let s = session else { return }
         if let c = ShotColor(hex: hexField.stringValue) { s.setColor(c) }
-        else { hexField.stringValue = s.currentColor.hex.uppercased() }   // invalid reverts
+        else { hexField.stringValue = s.currentColor.hex.uppercased() }
     }
-    // Esc in the hex field: leave it, an invalid value reverts
     func leaveField() {
         if let s = session, ShotColor(hex: hexField.stringValue) == nil {
             hexField.stringValue = s.currentColor.hex.uppercased()
@@ -2069,8 +1927,6 @@ final class ShotSidePanel: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         s.doc.reorder(from: i, to: to)
         s.redrawAll()
     }
-
-    // MARK: table
 
     func numberOfRows(in tableView: NSTableView) -> Int { session?.doc.objects.count ?? 0 }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -2097,7 +1953,6 @@ final class ShotFlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
-// the side panel's hue (angle) × saturation (radius) disc
 final class ShotHSVWheel: NSView {
     var onPick: ((Double, Double) -> Void)?
     var marker: (Double, Double) = (0, 0) { didSet { needsDisplay = true } }
@@ -2112,7 +1967,6 @@ final class ShotHSVWheel: NSView {
         let r = Double(side) / 2
         for y in 0..<side {
             for x in 0..<side {
-                // row 0 = the top; up = +dy
                 let dx = Double(x) + 0.5 - r, dy = r - (Double(y) + 0.5)
                 let d = sqrt(dx * dx + dy * dy) / r
                 guard d <= 1 else { continue }
@@ -2149,8 +2003,6 @@ final class ShotHSVWheel: NSView {
     override func mouseDragged(with event: NSEvent) { pick(event) }
 }
 
-// MARK: - Save card (Cmd+S)
-
 final class ShotSaveCard: NSView, NSTextFieldDelegate {
     let field = NSTextField(string: "")
     private let onSave: (String) -> Void
@@ -2173,7 +2025,6 @@ final class ShotSaveCard: NSView, NSTextFieldDelegate {
         field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         field.frame = NSRect(x: 16, y: 36, width: 488, height: 24)
         field.delegate = self
-        // Return only: leaving the field (Esc closes the card) must not save
         field.cell?.sendsActionOnEndEditing = false
         let t = ClosureTarget { [weak self] in
             guard let self else { return }
@@ -2195,7 +2046,6 @@ final class ShotSaveCard: NSView, NSTextFieldDelegate {
     override func rightMouseDown(with event: NSEvent) {}
     override func cursorUpdate(with event: NSEvent) { NSCursor.arrow.set() }
 
-    // the field focused, the file name's stem selected (type a new name)
     func focus() {
         window?.makeFirstResponder(field)
         guard let ed = field.currentEditor() else { return }

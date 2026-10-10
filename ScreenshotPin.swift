@@ -1,10 +1,5 @@
 import AppKit
 
-// A pinned capture (the ring's Pin, `--pin`): a borderless, non-activating,
-// always-on-top panel holding the image at 1:1 (AeroSpace ignores NSPanels,
-// so it never tiles). Drag moves, wheel / pinch zooms 3% a step, 0…9 =
-// opacity, double-click / Esc / Cmd+W / Cmd+Q close, Cmd+C copies, and a
-// right-click menu. Keys arrive through ScreenshotController's monitor.
 final class PinPanel: NSPanel {
     private(set) var image: CGImage
     var onClose: ((PinPanel) -> Void)?
@@ -12,8 +7,8 @@ final class PinPanel: NSPanel {
     var onSave: ((CGImage) -> Void)?
     private let pinView: PinView
     private var zoom: CGFloat = 1
-    private var base: CGSize             // the image in points at 1:1
-    static let margin: CGFloat = 6       // room for the soft shadow
+    private var base: CGSize
+    static let margin: CGFloat = 6
 
     init(image: CGImage, frame f: CGRect, ui: ShotColor, contrast: ShotColor) {
         self.image = image
@@ -49,11 +44,8 @@ final class PinPanel: NSPanel {
         onClose?(self)
     }
 
-    // MARK: zoom / rotate / opacity
-
     func setZoom(_ z: CGFloat, around p: CGPoint? = nil) {
         let b = base
-        // min 100 px on the short side
         let minZ = 100 / max(1, min(b.width, b.height))
         zoom = max(min(1, minZ), min(8, z))
         let size = CGSize(width: (b.width * zoom).rounded() + Self.margin * 2, height: (b.height * zoom).rounded() + Self.margin * 2)
@@ -73,8 +65,6 @@ final class PinPanel: NSPanel {
 
     func opacity(_ delta: CGFloat) { alphaValue = max(0.1, min(1, alphaValue + delta)) }
 
-    // MARK: input
-
     func handleKey(_ e: NSEvent) -> Bool {
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let cmd = mods.contains(.command)
@@ -82,10 +72,10 @@ final class PinPanel: NSPanel {
         if e.keyCode == 53 || (cmd && (ch == "w" || ch == "q")) { closePin(); return true }
         if cmd && ch == "c" { onCopy?(image); return true }
         if !cmd, let d = Int(ch), (0...9).contains(d) {
-            alphaValue = d == 0 ? 1 : CGFloat(10 - d) / 10   // 0 = 100%, 1 = 90% … 9 = 10%
+            alphaValue = d == 0 ? 1 : CGFloat(10 - d) / 10
             return true
         }
-        return true   // nothing reaches the daemon's menu
+        return true
     }
 
     func menu() -> NSMenu {
@@ -168,7 +158,6 @@ final class PinView: NSView {
         ctx.draw(image, in: r)
     }
 
-    // the image turned by quarterTurns (90° clockwise each)
     func renderedImage() -> CGImage? {
         guard let image else { return nil }
         let q = ((quarterTurns % 4) + 4) % 4

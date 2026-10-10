@@ -1,10 +1,4 @@
 // sources: PathShelf.swift RecentFiles.swift ProcessRun.swift
-// The /paths shelf (PathShelf.swift): IgnoreRules against REAL git
-// (`git check-ignore` on a temp repo) plus ripgrep's .ignore / .rgignore
-// and the shelf's own file; the shelf's cap / order / dedup / rename /
-// persistence; ClipboardPaths parsing on a private pasteboard.
-// Usage: bin/run-tests.sh paths
-
 import AppKit
 
 @main
@@ -45,7 +39,6 @@ struct PathShelfTests {
     }
 
     static func main() {
-        // canonical (realpath: /var → /private/var), like every shelf row
         let tmp = NSTemporaryDirectory() + "pathshelf-\(getpid())"
         try? fm.createDirectory(atPath: tmp, withIntermediateDirectories: true)
         let root = PathShelf.canonical(tmp)?.path ?? tmp
@@ -60,8 +53,6 @@ struct PathShelfTests {
         print("\npath shelf: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }
-
-    // MARK: single patterns
 
     static func patterns() {
         func m(_ pat: String, _ rel: String, dir: Bool = false) -> Bool {
@@ -92,8 +83,6 @@ struct PathShelfTests {
                   "~/ path in the shelf file")
         } else { check(false, "~/ pattern compiles") }
     }
-
-    // MARK: parity with git
 
     static func gitParity(_ root: String) {
         let repo = root + "/repo"
@@ -138,13 +127,10 @@ struct PathShelfTests {
             if mine == theirs { agree += 1 } else { check(false, "git parity: \(r) git=\(theirs) ours=\(mine)") }
         }
         check(agree == rels.count, "git check-ignore parity on \(rels.count) paths (\(gitIgnored.count) ignored)")
-        // a .gitignore OUTSIDE a repo counts for nothing (ripgrep's default)
         write(root + "/norepo/.gitignore", "*.txt\n")
         write(root + "/norepo/a.txt")
         check(!rules.ignored(root + "/norepo/a.txt"), ".gitignore outside a git repo is not honored")
     }
-
-    // MARK: ripgrep's files + the shelf's own
 
     static func ripgrepFiles(_ root: String) {
         let d = root + "/rg"
@@ -166,23 +152,18 @@ struct PathShelfTests {
         check(!rules.ignored(d + "/special.md"), "the shelf file's ! re-includes")
         write(root + "/Private/doc.pdf")
         check(rules.ignored(root + "/Private/doc.pdf"), "~/ folder in the shelf file")
-        // global git excludes
         let global = root + "/global-ignore"
         write(global, "*.bak\n")
         rules.gitExcludes = global
         write(d + "/old.bak")
         check(rules.ignored(d + "/old.bak"), "global git excludes apply")
-        // an edit to an ignore file is picked up (recheck 0 = every call)
         write(shelfFile, "*.md\n")
         usleep(20_000)
         write(shelfFile, "*.md\n# edited\n")
         check(rules.ignored(d + "/special.md"), "ignore-file edits apply without a restart")
-        // the gitconfig reader
         write(root + "/.gitconfig", "[user]\n  name = x\n[core]\n  excludesFile = ~/my-ignore\n")
         check(IgnoreRules.gitExcludesFile(home: root) == root + "/my-ignore", "core.excludesFile from ~/.gitconfig (~ expanded)")
     }
-
-    // MARK: the shelf
 
     static func shelf(_ root: String) {
         let store = root + "/paths.json"
@@ -210,11 +191,9 @@ struct PathShelfTests {
         e = s.entries()
         check(e.first?.path == files[10] && e.first?.why == .filefast, "a re-add moves to the top, says why")
         check(Set(e.map(\.path)).count == e.count, "no duplicates")
-        // edits keep the reason a file is here
         s.observe(files[10], created: false, origin: nil)
         s.sync()
         check(s.entries().first?.why == .filefast, "an edit keeps 'filefast'")
-        // ignored / folders / missing never land
         write(dir + "/junk.pyc")
         try? "*.pyc\n".write(toFile: root + "/shelf.ignore", atomically: true, encoding: .utf8)
         rules.shelfFile = root + "/shelf.ignore"
@@ -229,32 +208,27 @@ struct PathShelfTests {
         s.add([dir + "/junk.pyc"], why: .clipboard)
         s.sync()
         check(s.entries().first?.path == dir + "/junk.pyc", "a COPIED path skips the ignore rules")
-        // downloads say so
         let dl = dir + "/report.pdf"
         write(dl)
         s.observe(dl, created: true, origin: "Safari · example.com")
         s.sync()
         check(s.entries().first?.why == .downloaded, "activity with an origin = downloaded")
-        // rename follows, keeps its place
         let before = s.entries().map(\.path)
         let moved = dir + "/renamed.pdf"
         try? fm.moveItem(atPath: dl, toPath: moved)
         s.renamed(from: dl, to: moved)
         s.sync()
         check(s.entries().map(\.path) == before.map { $0 == dl ? moved : $0 }, "rename re-keys in place")
-        // a deleted file disappears from what the popup reads
         try? fm.removeItem(atPath: files[29])
         check(!s.entries().contains { $0.path == files[29] }, "deleted files drop out")
         s.remove([files[28]])
         s.sync()
         check(!s.entries().contains { $0.path == files[28] }, "remove = forget")
-        // persistence
         let reloaded = PathShelf(store: store, rules: rules)
         reloaded.configure(limit: 25, ignoreFile: root + "/shelf.ignore")
         check(reloaded.entries().map(\.path) == s.entries().map(\.path), "paths.json round trip")
         reloaded.configure(limit: 3, ignoreFile: root + "/shelf.ignore")
         check(reloaded.entries().count == 3, "a smaller limit trims")
-        // seed (first run) goes through the rules and skips folders
         let fresh = PathShelf(store: root + "/fresh.json", rules: rules)
         fresh.immediate = true
         fresh.configure(limit: 25, ignoreFile: root + "/shelf.ignore")
@@ -263,7 +237,6 @@ struct PathShelfTests {
         check(fresh.entries().map(\.path) == [files[1]] && fresh.entries().first?.why == .downloaded,
               "seed: rules + files only (\(fresh.entries().map(\.path)))")
         check(PathShelf.normalize("/tmp/a/../b") == "/private/tmp/b", "/tmp normalized to /private/tmp")
-        // one file through a symlinked folder = one row; sockets never land
         let link = root + "/link"
         try? fm.createSymbolicLink(atPath: link, withDestinationPath: dir)
         s.observe(link + "/f3.txt", created: false, origin: nil)
@@ -286,8 +259,6 @@ struct PathShelfTests {
         close(fd)
         check(PathShelf.normalize("file:///Users/x/a%20b.txt") == "/Users/x/a b.txt", "file:// URL normalized")
     }
-
-    // MARK: clipboard
 
     static func clipboard(_ root: String) {
         let a = root + "/clip/a file.txt", b = root + "/clip/b.txt"
@@ -326,7 +297,6 @@ struct PathShelfTests {
         pb.setString(a, forType: .string)
         check(ClipboardPaths.paths(in: pb).isEmpty, "password-manager (concealed) copies skipped")
 
-        // the watcher: a change is reported once; our own write is not
         let w = ClipboardPaths(pasteboard: pb)
         var got: [[String]] = []
         w.onPaths = { got.append($0) }
