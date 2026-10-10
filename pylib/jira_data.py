@@ -11,29 +11,19 @@ import json
 import os
 import threading
 
-WORDS_DEFAULTS = {
-    "status-cancelled-words": "cancel, won't, wont, reject, duplicate",
-    "status-done-words": "done, closed, resolved, released, complete, fixed, shipped",
-    "status-blocked-words": "block, fail, impediment",
-    "status-active-words": "progress, review, test, qa, develop, doing, verif",
-    "status-waiting-words": "hold, wait, pending, paused",
-    "status-new-words": "backlog, open, to do, todo, new, selected, triage, funnel",
-    "priority-urgent-words": "highest, blocker, critical, urgent, p0, p1",
-}
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
+
+# the word lists, the list->key map and the dim field set live in
+# jira/defaults.json (one home); callers keep the old symbol names
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _JIRA_DEFAULTS = json.load(_fh)
+
+WORDS_DEFAULTS = dict(_JIRA_DEFAULTS["words"])
 
 # list name -> [jira] config key
-_LIST_KEYS = {
-    "cancelled": "status-cancelled-words",
-    "done": "status-done-words",
-    "blocked": "status-blocked-words",
-    "active": "status-active-words",
-    "waiting": "status-waiting-words",
-    "new": "status-new-words",
-    "urgent": "priority-urgent-words",
-}
+_LIST_KEYS = dict(_JIRA_DEFAULTS["words_keys"])
 
-DIM_FIELDS = ["key", "updated", "created", "duedate", "releasedate",
-              "project", "releaselabel", "release"]
+DIM_FIELDS = list(_JIRA_DEFAULTS["dim_fields"])
 
 
 def words(values: dict) -> dict:

@@ -236,5 +236,25 @@
     "boards",
     "search_defaults",
     "jql_templates"
-  ]
+  ],
+  "words": {
+    "status-cancelled-words": "cancel, won't, wont, reject, duplicate",
+    "status-done-words": "done, closed, resolved, released, complete, fixed, shipped",
+    "status-blocked-words": "block, fail, impediment",
+    "status-active-words": "progress, review, test, qa, develop, doing, verif",
+    "status-waiting-words": "hold, wait, pending, paused",
+    "status-new-words": "backlog, open, to do, todo, new, selected, triage, funnel",
+    "priority-urgent-words": "highest, blocker, critical, urgent, p0, p1"
+  },
+  "words_keys": {
+    "cancelled": "status-cancelled-words",
+    "done": "status-done-words",
+    "blocked": "status-blocked-words",
+    "active": "status-active-words",
+    "waiting": "status-waiting-words",
+    "new": "status-new-words",
+    "urgent": "priority-urgent-words"
+  },
+  "dim_fields": ["key", "updated", "created", "duedate", "releasedate",
+                 "project", "releaselabel", "release"]
 }
