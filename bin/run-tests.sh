@@ -57,6 +57,10 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_ignore_rules.py"
         ;;
+    jsonmgr)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_jsonmgr.py"
+        ;;
     screenshot)
         run_test "$TESTS/test_screenshot.swift"
         ;;

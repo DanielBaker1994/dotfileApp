@@ -459,7 +459,7 @@ batch as the plan executes.
 
 | Batch | Commit | Notes |
 | --- | --- | --- |
-| M0 | — | |
+| M0 | done | `pylib/jsonmgr.py` + `Tests/test_jsonmgr.py` + `ws test jsonmgr` case; 28 tests; 3.9 CLI green |
 | … | — | |
 
 ## 7. Validation hooks for this plan
