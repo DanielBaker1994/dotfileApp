@@ -446,7 +446,10 @@ below are DONE with their guards green unless marked otherwise.
 | S1 | `fa8935b` | `MOD_ORDER`/`MOD_SYM`→`mods`; `LAYER_NAME` settled as a DISTINCT short-label table `layer_names` (not `layer_titles`); `label_mods` new key; cli choices derive from new `rebind_layers` key (the rebindable subset is not derivable from `layers` alone — rebind dispatch stays code); `readers._LUA` folded into `data/nvim_lua.json` (trivial, hash-verified); pinning test `Units.test_table_pins` added. |
 | #6a | `60e0e1f` | tri memo never caches a failed call (retries). |
 | #8 | `80101b9` | `pylib/helper/methods.py` guarded imports: a bad module/JSON makes that group answer with a clear HelperError; ping + other groups stay up. Python side only. |
-| X1 | (this commit) | `ws test all` now also runs `test_jira_poll.py`, `test_confluence.py`, `test_notifications.py` (Swift sweep kept) — review #10a. |
+| X1 | `1c6055d` | `ws test all` now also runs `test_jira_poll.py`, `test_confluence.py`, `test_notifications.py` (Swift sweep kept) — review #10a. |
+
+Final verification: all 28 `Tests/test_*.py` suites pass; `./ws test compare`,
+`./ws test settings`, `./bin/build-app.sh` green; `git status` clean.
 
 ### Follow-ups recorded (not done, deliberately)
 
