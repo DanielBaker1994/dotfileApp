@@ -184,17 +184,9 @@ ALWAYS_API_FIELDS = ["updated", "project"]
 BASE_WINDOW_KEYS = ["key", "title", "status", "assignee", "release", "releaseLabel",
                     "releaseDate", "releaseStatus", "priority", "labels",
                     "description", "reporter", "project"]
-# a field's display name (column header, search filter title) unless team.json
-# field_labels renames it - ONE label per field (Jira Config ▸ Definitions ▸
-# Fields). Mirrored in the app: JiraPoll.baseFieldLabels (kitchen_sink.swift).
-BASE_FIELD_LABELS = {
-    "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
-    "reporter": "Reporter", "priority": "Priority", "labels": "Labels",
-    "description": "Description", "project": "Project", "updated": "Updated",
-    "release": "Fix versions", "releaseLabel": "Release", "releaseDate": "Release date",
-    "releaseStatus": "Released", "comments": "Comments",
-    "components": "Components", "epic": "Epic / parent",
-}
+# field labels + the column codec live in pylib/jira_fields.py (shared with
+# the app through the helper); re-exported here so the poller's callers keep
+# working unchanged.
 # [jira] keys whose field names feed the API request
 FIELD_KEYS = ("primary", "content", "detail", "trailing", "body", "filter",
               "filters", "copy-fields")
@@ -494,6 +486,7 @@ def resolve_path(team: dict, name: str, site: str = "", **params) -> str:
 # settings_hub); re-exported here for older callers
 sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 from config_text import config_entry, config_line  # noqa: E402,F401
+from jira_fields import BASE_FIELD_LABELS, parse_columns  # noqa: E402,F401
 
 
 def read_section(name: str, path: str | None = None) -> dict:
@@ -533,36 +526,6 @@ def poll_active(path: str | None = None) -> bool:
     polling in the background after disabling it (`poll-when-disabled`)."""
     sec = read_section("jira", path)
     return truthy(sec.get("enabled", "false")) or truthy(sec.get("poll-when-disabled", "false"))
-
-
-def parse_columns(spec: str) -> list:
-    """`field:Title:width:align:flags, ...` -> [{field,title,width,align,
-    sortable,filterable}]. flags: filter / sort, joined with + (filter+sort)
-    or as extra :segments. Missing parts default (title = field, width 0 =
-    share the leftover width, align left)."""
-    cols = []
-    for part in (spec or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        seg = [s.strip() for s in part.split(":")]
-        field = seg[0]
-        if not field:
-            continue
-        title = seg[1] if len(seg) > 1 and seg[1] else field
-        try:
-            width = float(seg[2]) if len(seg) > 2 and seg[2] else 0.0
-        except ValueError:
-            width = 0.0
-        align = seg[3].lower() if len(seg) > 3 and seg[3] else "left"
-        if align not in ("left", "right", "center"):
-            align = "left"
-        flags = set()
-        for s in seg[4:]:
-            flags.update(f.strip().lower() for f in re.split(r"[+/|]", s) if f.strip())
-        cols.append({"field": field, "title": title, "width": width, "align": align,
-                     "sortable": "sort" in flags, "filterable": "filter" in flags})
-    return cols
 
 
 def window_fields(section: dict | None = None, columns: str | None = None) -> list:

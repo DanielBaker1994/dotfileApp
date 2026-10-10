@@ -591,29 +591,47 @@ struct ListColumn {
     var filterable: Bool
 
     static func parse(_ spec: String?) -> [ListColumn] {
-        (spec ?? "").split(separator: ",").compactMap { part in
-            let seg = part.split(separator: ":", omittingEmptySubsequences: false)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-            guard let field = seg.first, !field.isEmpty else { return nil }
-            let title = seg.count > 1 && !seg[1].isEmpty ? seg[1] : field
-            let width = seg.count > 2 ? CGFloat(Double(seg[2]) ?? 0) : 0
-            var align = seg.count > 3 && !seg[3].isEmpty ? seg[3].lowercased() : "left"
-            if !["left", "right", "center"].contains(align) { align = "left" }
-            let flags = Set(seg.dropFirst(4).flatMap {
-                $0.lowercased().split(whereSeparator: { "+/|".contains($0) }).map(String.init)
-            })
-            return ListColumn(field: field, title: title, width: max(0, width), align: align,
-                              sortable: flags.contains("sort"), filterable: flags.contains("filter"))
+        let key = spec ?? ""
+        parseLock.lock()
+        if let c = parseCache[key] { parseLock.unlock(); return c }
+        parseLock.unlock()
+        var cols: [ListColumn] = []
+        // the codec lives in pylib/jira_fields.py (the poller imports the
+        // same module); specs are memoised per string
+        if case .success(let box) = pythonHelper.callSync("jira.columns_parse", ["spec": key], timeout: 30),
+           let d = box as? [String: Any], let list = d["columns"] as? [[String: Any]] {
+            cols = list.map {
+                ListColumn(field: $0["field"] as? String ?? "",
+                           title: $0["title"] as? String ?? "",
+                           width: CGFloat($0["width"] as? Double ?? 0),
+                           align: $0["align"] as? String ?? "left",
+                           sortable: $0["sortable"] as? Bool ?? false,
+                           filterable: $0["filterable"] as? Bool ?? false)
+            }
+        } else {
+            wsLog("jira: columns parse failed (python helper unavailable)")
         }
+        parseLock.lock()
+        parseCache[key] = cols
+        parseLock.unlock()
+        return cols
     }
 
+    private static let parseLock = NSLock()
+    private static var parseCache: [String: [ListColumn]] = [:]
+
     static func serialize(_ cols: [ListColumn], titles: Bool = true) -> String {
-        cols.map { c in
-            let w = c.width == c.width.rounded() ? String(Int(c.width)) : String(format: "%.1f", c.width)
-            let flags = [c.filterable ? "filter" : nil, c.sortable ? "sort" : nil]
-                .compactMap { $0 }.joined(separator: "+")
-            return "\(c.field):\(titles ? c.title : ""):\(w):\(c.align)" + (flags.isEmpty ? "" : ":\(flags)")
-        }.joined(separator: ", ")
+        let payload: [[String: Any]] = cols.map {
+            ["field": $0.field, "title": $0.title, "width": Double($0.width), "align": $0.align,
+             "sortable": $0.sortable, "filterable": $0.filterable]
+        }
+        if case .success(let box) = pythonHelper.callSync("jira.columns_serialize",
+                ["columns": payload, "titles": titles], timeout: 30),
+           let d = box as? [String: Any], let s = d["spec"] as? String {
+            return s
+        }
+        wsLog("jira: columns serialize failed (python helper unavailable)")
+        return ""
     }
 
     var popup: PopupTableColumn {

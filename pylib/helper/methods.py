@@ -14,6 +14,7 @@ import jira_boards
 import jira_data
 import jira_dashboard
 import jira_directory
+import jira_fields
 import jira_pages
 import jira_search
 import prose_pdf
@@ -768,3 +769,14 @@ def _jira_board_columns(params: dict) -> dict:
 @method("jira.board_page")
 def _jira_board_page(params: dict) -> dict:
     return {"html": jira_boards.board_page(params.get("colors") or {})}
+
+
+@method("jira.columns_parse")
+def _jira_columns_parse(params: dict) -> dict:
+    return {"columns": jira_fields.parse_columns(params.get("spec") or "")}
+
+
+@method("jira.columns_serialize")
+def _jira_columns_serialize(params: dict) -> dict:
+    return {"spec": jira_fields.serialize_columns(params.get("columns") or [],
+                                                  params.get("titles") is not False)}

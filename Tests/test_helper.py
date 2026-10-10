@@ -223,6 +223,19 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"]["line"], "○ Polling off")
 
+    def test_jira_columns_methods(self):
+        reply = dispatch({"id": 1, "method": "jira.columns_parse",
+                          "params": {"spec": "key:Key:80:left:filter+sort"}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["columns"][0],
+                         {"field": "key", "title": "Key", "width": 80.0, "align": "left",
+                          "sortable": True, "filterable": True})
+        reply = dispatch({"id": 2, "method": "jira.columns_serialize", "params": {
+            "columns": [{"field": "a", "title": "T", "width": 120.0, "align": "left",
+                         "sortable": True, "filterable": True}], "titles": False}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["spec"], "a::120:left:filter+sort")
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):
