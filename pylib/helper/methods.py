@@ -1,34 +1,58 @@
 from __future__ import annotations
 
 import base64
+import importlib
 import threading
 
-import ai_format
-import ansi
-import compare_folder
-import confluence_glue
-import confluence_pages
-import compare_text
-import config_text
-import doc_templates
-import file_ops as fileops
-import ignore_rules as ignore
-import jira_boards
-import jira_data
-import jira_dashboard
-import jira_directory
-import jira_fields
-import jira_pages
-import jira_search
-import jira_setup
-import paneshot
-import prose_pdf
-import setup_checks
-import shelf
-import shot_model
-import status as ws_status
-
 from . import HelperError, method, script_bridge
+
+# ONE bad module/JSON must not kill the worker: import every method group
+# through this guard. A failed import becomes an _Unavailable placeholder -
+# its methods answer with a clear HelperError while ping and every other
+# group keep working.
+_MODULES = {
+    "ai_format": "ai_format",
+    "ansi": "ansi",
+    "compare_folder": "compare_folder",
+    "compare_text": "compare_text",
+    "confluence_glue": "confluence_glue",
+    "confluence_pages": "confluence_pages",
+    "config_text": "config_text",
+    "doc_templates": "doc_templates",
+    "file_ops": "fileops",
+    "ignore_rules": "ignore",
+    "jira_boards": "jira_boards",
+    "jira_data": "jira_data",
+    "jira_dashboard": "jira_dashboard",
+    "jira_directory": "jira_directory",
+    "jira_fields": "jira_fields",
+    "jira_pages": "jira_pages",
+    "jira_search": "jira_search",
+    "jira_setup": "jira_setup",
+    "paneshot": "paneshot",
+    "prose_pdf": "prose_pdf",
+    "setup_checks": "setup_checks",
+    "shelf": "shelf",
+    "shot_model": "shot_model",
+    "status": "ws_status",
+}
+
+
+class _Unavailable:
+    def __init__(self, name, error):
+        self._name = name
+        self._error = error
+
+    def __getattr__(self, attr):
+        raise HelperError("helper module %s is unavailable (%s: %s)" %
+                          (self._name, type(self._error).__name__, self._error))
+
+
+for _mod, _alias in _MODULES.items():
+    try:
+        globals()[_alias] = importlib.import_module(_mod)
+    except Exception as _e:  # noqa: BLE001 - deliberately broad: keep the worker alive
+        globals()[_alias] = _Unavailable(_mod, _e)
 
 _IGNORE_RULES = {}
 _IGNORE_NEXT = [1]
