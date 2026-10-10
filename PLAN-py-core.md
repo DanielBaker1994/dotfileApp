@@ -13,8 +13,9 @@ below.
       comments, ticket/board pages, directory, search, dashboard, configs)
       — done so far: paths (pylib/jira_paths.py + paths.json), words/style
       rules, comment index, ticket page + comments HTML, live-search
-      criteria + filter kinds. Remaining: directory options, dashboard
-      logic, board mapping, shared column/label pieces, setup parse,
+      criteria + filter kinds, directory parse (mtime-keyed) + picker
+      options, dashboard job/live drafts. Remaining: dashboard team/field
+      edits, board mapping, shared column/label pieces, setup parse,
       Confluence auth/criteria/preview.
 - [ ] Phase C — test-backed islands (screenshot model pieces, ANSI, pane-shot,
       recent files, path shelf, compare sessions, setup checks)
