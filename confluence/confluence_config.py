@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(WS_ROOT, "jira"))
 import jira_config  # type: ignore  # noqa: E402  (write_json_600, ConfigError)
 sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 import config_text  # type: ignore  # noqa: E402  (the commands.toml codec)
+import jsonmgr  # noqa: E402
 
 HOME = os.path.expanduser("~")
 DEFAULT_CONFIG = os.path.join(HOME, ".config/confluence/config.json")
@@ -45,9 +46,7 @@ COMMANDS_CONF = os.environ.get("WS_COMMANDS_CONF") or os.path.join(WS_ROOT, "com
 # the static tables (content types, search modes, the modified windows and
 # the config defaults) live in confluence/defaults.json and load here;
 # behaviour stays code.
-_DEFAULTS_FILE = os.path.join(CONF_DIR, "defaults.json")
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _D = json.load(_fh)
+_D = jsonmgr.load("confluence/defaults")
 TYPES = tuple(_D["types"])
 MODES = tuple(_D["modes"])
 MODIFIED = _D["modified"]
