@@ -85,7 +85,9 @@ final class PathShelf {
         queue.async { [self] in
             var hit = false
             for i in items.indices {
-                if let p = RecentFiles.rekeyed(items[i].path, from: old, to: new) {
+                if case .success(let box) = PythonHelper.shared.callSync(
+                        "shelf.rekey", ["path": items[i].path, "old": old, "new": new], timeout: 30),
+                   let d = box as? [String: Any], let p = d["path"] as? String {
                     items[i].path = p
                     hit = true
                 }
@@ -119,40 +121,52 @@ final class PathShelf {
     func sync() { queue.sync {} }
 
     static func canonical(_ p: String) -> (path: String, isFile: Bool, isDir: Bool)? {
-        guard let r = realpath(p, nil) else { return nil }
-        defer { free(r) }
-        let path = String(cString: r)
-        var st = stat()
-        guard stat(path, &st) == 0 else { return nil }
-        let fmt = st.st_mode & S_IFMT
-        return (path, fmt == S_IFREG, fmt == S_IFDIR)
+        // full realpath + stat live in pylib/shelf.py
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "shelf.canonical", ["path": p], timeout: 30),
+              let d = box as? [String: Any], let r = d["result"] as? [String: Any],
+              let path = r["path"] as? String else { return nil }
+        return (path, r["isFile"] as? Bool ?? false, r["isDir"] as? Bool ?? false)
     }
 
     static func normalize(_ p: String) -> String {
-        var s = p
-        if s.hasPrefix("file://"), let u = URL(string: s), u.isFileURL { s = u.path }
-        s = ((s as NSString).expandingTildeInPath as NSString).standardizingPath
-        if s == "/tmp" || s.hasPrefix("/tmp/") { s = "/private" + s }
-        return s
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shelf.normalize", ["path": p], timeout: 30),
+           let d = box as? [String: Any], let s = d["path"] as? String {
+            return s
+        }
+        return p
+    }
+
+    private func itemsJSON() -> [[String: Any]] {
+        items.map { ["path": $0.path, "at": $0.at, "why": $0.why.rawValue] }
+    }
+
+    private func setItems(_ arr: [[String: Any]]) {
+        items = arr.compactMap { d in
+            guard let p = d["path"] as? String, let t = d["at"] as? Double,
+                  let why = Why(rawValue: d["why"] as? String ?? "") else { return nil }
+            return Item(path: p, at: t, why: why)
+        }
     }
 
     private func bump(_ path: String, _ why: Why) {
         let now = Date().timeIntervalSince1970
-        if let i = items.firstIndex(where: { $0.path == path }) {
-            var it = items.remove(at: i)
-            it.at = now
-            if why != .modified { it.why = why }
-            items.insert(it, at: 0)
-        } else {
-            items.insert(Item(path: path, at: now, why: why), at: 0)
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shelf.bump", ["items": itemsJSON(), "path": path, "why": why.rawValue,
+                               "at": now, "limit": limit], timeout: 30),
+           let d = box as? [String: Any], let out = d["items"] as? [[String: Any]] {
+            setItems(out)
         }
-        if items.count > limit { items.removeLast(items.count - limit) }
         publish()
     }
 
     private func dedup() {
-        var seen = Set<String>()
-        items = items.filter { seen.insert($0.path).inserted }
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shelf.dedup", ["items": itemsJSON()], timeout: 30),
+           let d = box as? [String: Any], let out = d["items"] as? [[String: Any]] {
+            setItems(out)
+        }
     }
 
     private func publish() {
@@ -179,26 +193,31 @@ final class PathShelf {
 
     private func load() {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: store)),
-              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
-        items = arr.compactMap { d in
-            guard let p = d["path"] as? String, let t = d["at"] as? Double, let c = Self.canonical(p) else { return nil }
-            let why = Why(rawValue: d["why"] as? String ?? "") ?? .modified
-            let activity = [.created, .modified, .downloaded].contains(why)
-            guard activity ? c.isFile && !rules.ignored(c.path) : (c.isFile || c.isDir) else { return nil }
-            return Item(path: c.path, at: t, why: why)
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
+        // candidates (canonical + activity rules) come from pylib/shelf.py;
+        // the app's ignore rules filter between them and finalize
+        var candidates: [[String: Any]] = []
+        if case .success(let box) = PythonHelper.shared.callSync("shelf.load", ["raw": raw], timeout: 60),
+           let d = box as? [String: Any], let out = d["items"] as? [[String: Any]] {
+            candidates = out
         }
-        items.sort { $0.at > $1.at }
-        dedup()
-        items = Array(items.sorted { $0.at > $1.at }.prefix(limit))
+        candidates = candidates.filter {
+            guard let p = $0["path"] as? String else { return false }
+            let why = $0["why"] as? String ?? ""
+            // the ignore rules only gate activity entries; a clipboard /
+            // filefast / screenshot path skips them (same as the old load)
+            if ["created", "modified", "downloaded"].contains(why) { return !rules.ignored(p) }
+            return true
+        }
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shelf.finalize", ["items": candidates, "limit": limit], timeout: 60),
+           let d = box as? [String: Any], let out = d["items"] as? [[String: Any]] {
+            setItems(out)
+        }
     }
 
     private func save() {
-        let arr = items.map { ["path": $0.path, "at": $0.at, "why": $0.why.rawValue] as [String: Any] }
-        try? FileManager.default.createDirectory(atPath: (store as NSString).deletingLastPathComponent,
-                                                 withIntermediateDirectories: true)
-        if let data = try? JSONSerialization.data(withJSONObject: arr) {
-            try? data.write(to: URL(fileURLWithPath: store), options: .atomic)
-        }
+        _ = PythonHelper.shared.callSync("shelf.save", ["path": store, "items": itemsJSON()], timeout: 30)
     }
 }
 

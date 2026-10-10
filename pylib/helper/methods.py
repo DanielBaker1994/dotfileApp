@@ -24,6 +24,7 @@ import jira_setup
 import paneshot
 import prose_pdf
 import setup_checks
+import shelf
 import shot_model
 import status as ws_status
 
@@ -940,3 +941,49 @@ def _setup_parse_checks(params: dict) -> dict:
 @method("setup.summarize")
 def _setup_summarize(params: dict) -> dict:
     return setup_checks.summarize(params.get("checks"))
+
+
+@method("shelf.canonical")
+def _shelf_canonical(params: dict) -> dict:
+    return {"result": shelf.canonical(params.get("path") or "")}
+
+
+@method("shelf.normalize")
+def _shelf_normalize(params: dict) -> dict:
+    return {"path": shelf.normalize(params.get("path") or "")}
+
+
+@method("shelf.bump")
+def _shelf_bump(params: dict) -> dict:
+    return {"items": shelf.bump(params.get("items") or [], params.get("path") or "",
+                                params.get("why") or "modified",
+                                float(params.get("at") or 0),
+                                int(params.get("limit") or shelf.MAX_LIMIT))}
+
+
+@method("shelf.dedup")
+def _shelf_dedup(params: dict) -> dict:
+    return {"items": shelf.dedup(params.get("items") or [])}
+
+
+@method("shelf.load")
+def _shelf_load(params: dict) -> dict:
+    return {"items": shelf.load_candidates(params.get("raw") or [])}
+
+
+@method("shelf.finalize")
+def _shelf_finalize(params: dict) -> dict:
+    return {"items": shelf.finalize(params.get("items") or [],
+                                    int(params.get("limit") or shelf.MAX_LIMIT))}
+
+
+@method("shelf.save")
+def _shelf_save(params: dict) -> dict:
+    shelf.save(params.get("path") or "", params.get("items") or [])
+    return {}
+
+
+@method("shelf.rekey")
+def _shelf_rekey(params: dict) -> dict:
+    return {"path": shelf.rekey(params.get("path") or "", params.get("old") or "",
+                                params.get("new") or "")}

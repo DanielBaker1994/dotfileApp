@@ -25,12 +25,11 @@ struct PathShelfTests {
     static func main() {
         let tmp = NSTemporaryDirectory() + "pathshelf-\(getpid())"
         try? fm.createDirectory(atPath: tmp, withIntermediateDirectories: true)
-        let root = PathShelf.canonical(tmp)?.path ?? tmp
-        defer { try? fm.removeItem(atPath: root) }
-
         PythonHelper.shared.configure(libDir: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("pylib").path)
+        let root = PathShelf.canonical(tmp)?.path ?? tmp
+        defer { try? fm.removeItem(atPath: root) }
         shelf(root)
         clipboard(root)
 
