@@ -459,25 +459,27 @@ batch as the plan executes.
 
 | Batch | Commit | Notes |
 | --- | --- | --- |
-| M0 | done | `pylib/jsonmgr.py` + `Tests/test_jsonmgr.py` + `ws test jsonmgr` case; 28 tests; 3.9 CLI green |
-| M1 | done | pilot `pylib/compare_text.py` via `jsonmgr.load`; `compare` + `helper` green |
-| M2a | done | `shelf`, `doc_templates`, `ai_format`; suites + `helper` green; mutation grep clean |
-| M2b | done | `paneshot`, `ansi`, `prose_pdf`; suites + `helper` green |
-| M2c | done | `shot_model` eager-via-manager (lazy wave keeps it eager-by-decision) |
-| M2d | done | 6 pylib jira-glue modules share one `jira/defaults` parse; all 6 suites + `helper` green |
-| M2e | done | `confluence_glue`, `confluence_pages` share `confluence/defaults`; suites + `helper` green |
-| M3a | done | jira package 4 loaders share one parse; `test_jira_poll.py` + `jira-setup`/`jira-dashboard` + `helper` green |
-| M3b | done | confluence package shares `confluence/defaults`; `test_confluence.py` + 3.9 import green |
-| M3c | done | notify package shares `notify/defaults`; `test_notifications.py` + `status` + 3.9 import green |
-| M3d | done | settings_hub tables/nvim_lua/hub_defaults (soft accessor, retried); `ws test settings` green; all import orders verified |
-| M3e | done | `pylib/jira_paths.py` via jsonmgr; `test_jira_poll` + `test_confluence` + `test_notifications` + `helper` + 3.9 green |
-| M4a | done | lazy: `shelf`, `doc_templates`, `ai_format`, `compare_text`, `prose_pdf`; internal rewrites via `jsonmgr.field`; new helper bad-JSON retry case |
-| M4b | done | lazy: `paneshot`, `ansi` (`_BASE16` projection); suites + `helper` green |
-| M4c | done | `shot_model` eager-by-decision (validation correction; no lazy conversion) |
-| M4d | done | lazy: `jira_data`, `jira_pages`, `jira_boards`, `jira_directory`, `jira_search` (`jira_fields` stays eager); all 5 suites + `helper` green |
-| M4e | done | lazy: `confluence_glue`, `confluence_pages`; suites + `helper` green. End state: 14/17 pylib loaders lazy (eager-by-decision: `shot_model`; eager by plan: `jira_fields`, `jira_paths`) |
-| M5 | done | `jsonmgr` in `_MODULES` + `jsonmgr.report` method (body in `methods.py`, `_jira_paths` pattern); helper test asserts consumers. Follow-up: optional `ws jsons` alias and JsonError→HelperError dispatch polish not taken |
-| … | — | |
+| M0 | d1f8f40 | `pylib/jsonmgr.py` + `Tests/test_jsonmgr.py` + `ws test jsonmgr` case; 28 tests; 3.9 CLI green |
+| M1 | 63c1ee0 | pilot `pylib/compare_text.py` via `jsonmgr.load`; `compare` + `helper` green |
+| M2a | 734bf10 | `shelf`, `doc_templates`, `ai_format`; suites + `helper` green; mutation grep clean |
+| M2b | 8b36fb6 | `paneshot`, `ansi`, `prose_pdf`; suites + `helper` green |
+| M2c | 810959a | `shot_model` eager-via-manager (lazy wave keeps it eager-by-decision) |
+| M2d | 5fb8391 | 6 pylib jira-glue modules share one `jira/defaults` parse; all 6 suites + `helper` green |
+| M2e | 0f639d2 | `confluence_glue`, `confluence_pages` share `confluence/defaults`; suites + `helper` green |
+| M3a | deaf4d9 | jira package 4 loaders share one parse; `test_jira_poll.py` + `jira-setup`/`jira-dashboard` + `helper` green |
+| M3b | f0c7591 | confluence package shares `confluence/defaults`; `test_confluence.py` + 3.9 import green |
+| M3c | 5c779e4 | notify package shares `notify/defaults`; `test_notifications.py` + `status` + 3.9 import green |
+| M3d | fbd5255 | settings_hub tables/nvim_lua/hub_defaults (soft accessor, retried); `ws test settings` green; all import orders verified |
+| M3e | ea49b3d | `pylib/jira_paths.py` via jsonmgr; `test_jira_poll` + `test_confluence` + `test_notifications` + `helper` + 3.9 green |
+| M4a | fab9b4d | lazy: `shelf`, `doc_templates`, `ai_format`, `compare_text`, `prose_pdf`; internal rewrites via `jsonmgr.field`; new helper bad-JSON retry case |
+| M4b | 37281b2 | lazy: `paneshot`, `ansi` (`_BASE16` projection); suites + `helper` green |
+| M4c | b7dfa39 | `shot_model` eager-by-decision (validation correction; no lazy conversion) |
+| M4d | 3f61e09 | lazy: `jira_data`, `jira_pages`, `jira_boards`, `jira_directory`, `jira_search` (`jira_fields` stays eager); all 5 suites + `helper` green |
+| M4e | 6635f92 | lazy: `confluence_glue`, `confluence_pages`; suites + `helper` green. End state: 14/17 pylib loaders lazy (eager-by-decision: `shot_model`; eager by plan: `jira_fields`, `jira_paths`) |
+| M5 | 9b4600d | `jsonmgr` in `_MODULES` + `jsonmgr.report` method (body in `methods.py`, `_jira_paths` pattern); helper test asserts consumers. Follow-up: optional `ws jsons` alias and JsonError→HelperError dispatch polish not taken |
+| M6 | this commit | checkpoint: AGENT_CONTEXT note + full sweep (`ws test all`, settings, compare, 3.9 `--report --check`, build-app) |
+
+Blocked: none. Follow-ups recorded: optional `ws jsons` alias; optional `JsonError`→`HelperError` dispatch branch; `settings_hub/cli.py:342` still names `hub_defaults.json` by hand (cosmetic); lazy coverage 14/17 as recorded in M4e.
 
 ## 7. Validation hooks for this plan
 

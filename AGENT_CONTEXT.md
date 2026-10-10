@@ -145,6 +145,12 @@ unchanged and can still be called directly.
   `helper-client`). Cold-path logic lives in `pylib/`: `doc_templates.py`
   (`bin/run-tests.sh doc-templates`) and `prose_pdf.py` (pandoc -s →
   weasyprint; `bin/run-tests.sh prose-pdf`)
+- `pylib/jsonmgr.py` — the ONE JSON data manager: every shipped JSON home
+  (15: pylib, jira, confluence, notify, settings_hub) loads through it; one
+  parse per process, one error type, an always-on access ledger and a report
+  CLI (`bin/run-tests.sh jsonmgr`). Worker-surface pylib modules are lazy: a
+  bad JSON fails the method call and retries, never the worker (REVIEW
+  #6a/#8); the app-side view is the `jsonmgr.report` helper method
 - `CompareText.swift` + `ComparePane.swift` + `CompareWindow.swift` — the
   Compare view (Text Compare engine in `pylib/compare_text.py`, folder
   classifier in `pylib/compare_folder.py`; see "Compare view" below;
@@ -1191,6 +1197,13 @@ Line numbers drift; grep the symbol names (they're stable).
   running process is `kitchen-sink.app/Contents/MacOS/kitchen-sink`.
 - Python jira tests: `python3 Tests/test_jira_poll.py`. UI suites
   (`bin/ui-test*.sh`) are slow/flaky — run once at most, don't loop them.
+- Shipped JSON homes load through ONE manager: `pylib/jsonmgr.py` (static
+  registry + mtime snapshot + access ledger + `WS_JSON_TRACE=1`).
+  `python3 pylib/jsonmgr.py --report [--json] [--check]` lists every home,
+  its resolved path and which module reads it. Never add a bare `json.load`
+  for a shipped JSON — route it through `jsonmgr.load("<name>")`
+  (`<name>` = repo-relative path minus `.json`); user/runtime data
+  (config/team/caches/state) keeps its own I/O.
 
 ## Where things live
 
