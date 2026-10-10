@@ -18,6 +18,9 @@ import time
 # ---------------------------------------------------------------- tools
 
 _DATA = jsonmgr.load("pylib/shot_model")
+# eager by decision (M4c): the tool table feeds ~12 derived module names and
+# ~10 internal uses - lazy_module there would not pay for itself. The manager
+# still owns the load; a broken shot_model.json fails the import like today.
 # the tool table is data (readable/overridable); the session mechanics stay code
 
 _TOOLS = _DATA["tools"]

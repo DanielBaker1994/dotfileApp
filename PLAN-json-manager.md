@@ -473,6 +473,7 @@ batch as the plan executes.
 | M3e | done | `pylib/jira_paths.py` via jsonmgr; `test_jira_poll` + `test_confluence` + `test_notifications` + `helper` + 3.9 green |
 | M4a | done | lazy: `shelf`, `doc_templates`, `ai_format`, `compare_text`, `prose_pdf`; internal rewrites via `jsonmgr.field`; new helper bad-JSON retry case |
 | M4b | done | lazy: `paneshot`, `ansi` (`_BASE16` projection); suites + `helper` green |
+| M4c | done | `shot_model` eager-by-decision (validation correction; no lazy conversion) |
 | … | — | |
 
 ## 7. Validation hooks for this plan
