@@ -1746,7 +1746,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         setSetupMsg("Running \(what)… (live progress above; details in poll.log)", JC.dim)
         controller?.log("jira: \(what)")
         updateSetup()
-        JiraPoll.run("jira_poll.py", ["--setup", "--quiet"] + extra) { [weak self] code, _, err in
+        JiraPoll.spawn("jira_poll.py", ["--setup", "--quiet"] + extra) { [weak self] code, _, err in
             JiraPoll.running.remove("setup")
             guard let self else { return }
             self.controller?.log("jira: \(what) finished (exit \(code))")
@@ -1781,7 +1781,7 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
             self.setSetupMsg("Rebuilding… (live progress above; details in poll.log)", JC.dim)
             self.controller?.log("jira: rebuild cache from scratch")
             self.updateSetup()
-            JiraPoll.run("jira_poll.py", ["--rebuild", "--quiet"]) { [weak self] code, _, _ in
+            JiraPoll.spawn("jira_poll.py", ["--rebuild", "--quiet"]) { [weak self] code, _, _ in
                 JiraPoll.running.remove("rebuild")
                 guard let self else { return }
                 self.controller?.log("jira: rebuild finished (exit \(code))")

@@ -9458,8 +9458,29 @@ enum JiraPoll {
         }
     }
 
+    /// One-shot asset-script runs go through the persistent worker now: same
+    /// folder/PATH/no-bytecode contract as the old spawn, but no per-call
+    /// process startup and no serialisation against other helper traffic.
     static func run(_ script: String, _ args: [String], stdin: String? = nil, folder: String? = nil,
                     done: ((Int32, String, String) -> Void)? = nil) {
+        var params: [String: Any] = ["folder": folder ?? dir, "script": script, "args": args]
+        if let stdin { params["stdin"] = stdin }
+        pythonHelper.call("script.run", params, timeout: 1800) { result in
+            switch result {
+            case .success(let value):
+                let d = value as? [String: Any]
+                done?(Int32(d?["code"] as? Int ?? -1), d?["stdout"] as? String ?? "",
+                      d?["stderr"] as? String ?? "")
+            case .failure(let e):
+                done?(-1, "", e.description)
+            }
+        }
+    }
+
+    /// Long jobs (setup, rebuild) keep spawning their own process: they run
+    /// for minutes and are cancelled through `jira_poll.py --cancel`.
+    static func spawn(_ script: String, _ args: [String], stdin: String? = nil, folder: String? = nil,
+                      done: ((Int32, String, String) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")

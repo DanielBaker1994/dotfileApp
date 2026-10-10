@@ -6,8 +6,9 @@ below.
 
 ## Progress
 
-- [ ] Phase A — one integration surface: helper gains concurrent dispatch + a
+- [x] Phase A — one integration surface: helper gains concurrent dispatch + a
       script bridge; every JiraPoll/ConfluenceAPI spawn goes through it
+      (long jobs — setup/rebuild — keep spawning, per the decision)
 - [ ] Phase B — Jira/Confluence glue moved to Python (paths, categories,
       comments, ticket/board pages, directory, search, dashboard, configs)
 - [ ] Phase C — test-backed islands (screenshot model pieces, ANSI, pane-shot,
