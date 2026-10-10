@@ -10,6 +10,7 @@ import config_text
 import doc_templates
 import file_ops as fileops
 import ignore_rules as ignore
+import jira_data
 import prose_pdf
 import status as ws_status
 
@@ -660,3 +661,8 @@ def _jira_paths(params: dict) -> dict:
         "tabs": dict(jira_paths.TABS),
         "sideDirs": dict(jira_paths.SIDE_DIRS),
     }
+
+
+@method("jira.style")
+def _jira_style(params: dict) -> dict:
+    return jira_data.style_rules(params.get("values") or {})

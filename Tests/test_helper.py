@@ -128,6 +128,15 @@ class ScriptBridge(unittest.TestCase):
         self.assertIn("status", res["cache"])
         self.assertIn("issues", res["cache"])
 
+    def test_jira_style_method(self):
+        reply = dispatch({"id": 1, "method": "jira.style", "params": {
+            "values": {"status-done-words": "shipped"}}})
+        self.assertTrue(reply["ok"], reply)
+        res = reply["result"]
+        self.assertEqual(res["words"]["done"], ["shipped"])
+        self.assertEqual(res["status"][1]["words"], ["shipped"])
+        self.assertIn("key", res["dimFields"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

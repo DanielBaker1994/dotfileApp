@@ -177,61 +177,114 @@ func jiraWindowColors() -> PopupColors {
 var jiraHeaderColor: NSColor { hexColor(jiraConfigValue("header-color")) ?? headerBlueSilver }
 
 func jiraCellStyle(_ field: String, _ text: String) -> PopupCellStyle? {
-    let v = text.lowercased(), w = JiraWords.current
-    switch field.lowercased() {
-    case "key", "updated", "created", "duedate", "releasedate", "project", "releaselabel", "release":
-        return PopupCellStyle(.dim)
+    let f = field.lowercased(), v = text.lowercased(), s = JiraStyle.current
+    if s.dimFields.contains(f) { return PopupCellStyle(.dim) }
+    switch f {
     case "status", "statuscategory":
-        if w.matches(v, w.cancelled) { return PopupCellStyle(.dim, mark: .hollow, quietsRow: true) }
-        if w.matches(v, w.done) { return PopupCellStyle(.success, mark: .filled, quietsRow: true) }
-        if w.matches(v, w.blocked) { return PopupCellStyle(.danger, mark: .filled) }
-        if w.matches(v, w.active) { return PopupCellStyle(.info, mark: .half) }
-        if w.matches(v, w.waiting) { return PopupCellStyle(.warning, mark: .hollow) }
-        return PopupCellStyle(.dim, mark: .hollow)
+        for r in s.statusRules where s.matches(v, r.words) { return r.style }
+        return s.statusFallback
     case "priority":
-        if w.matches(v, w.urgent) { return PopupCellStyle(.danger, tinted: true, bold: true) }
-        return PopupCellStyle(.dim)
+        for r in s.priorityRules where s.matches(v, r.words) { return r.style }
+        return s.priorityFallback
     case "releasestatus":
-        if v.contains("unreleased") { return PopupCellStyle(.warning, mark: .hollow) }
-        if v.contains("released") { return PopupCellStyle(.success, mark: .filled) }
+        for r in s.releaseRules where !r.needle.isEmpty && v.contains(r.needle) { return r.style }
         return nil
     default: return nil
     }
 }
 
-struct JiraWords {
-    let cancelled, done, blocked, active, waiting, new, urgent: [String]
-    static let defaults: [String: String] = [
-        "status-cancelled-words": "cancel, won't, wont, reject, duplicate",
-        "status-done-words": "done, closed, resolved, released, complete, fixed, shipped",
-        "status-blocked-words": "block, fail, impediment",
-        "status-active-words": "progress, review, test, qa, develop, doing, verif",
-        "status-waiting-words": "hold, wait, pending, paused",
-        "status-new-words": "backlog, open, to do, todo, new, selected, triage, funnel",
-        "priority-urgent-words": "highest, blocker, critical, urgent, p0, p1",
-    ]
-    private static var cache: JiraWords?
+/// Cell-style + status-word rules, resolved by pylib/jira_data.py once per
+/// config generation (`jira.style`). Python owns the word lists and the
+/// classification decisions; this caches them and evaluates locally — the
+/// per-cell render path and the per-keystroke list grouping never cross the
+/// process boundary.
+struct JiraStyle {
+    struct CellRule {
+        let words: [String]
+        let style: PopupCellStyle
+    }
+    let words: [String: [String]]
+    let dimFields: Set<String>
+    let statusRules: [CellRule]
+    let statusFallback: PopupCellStyle
+    let priorityRules: [CellRule]
+    let priorityFallback: PopupCellStyle
+    let releaseRules: [(needle: String, style: PopupCellStyle)]
+
+    private static var cache: JiraStyle?
     private static let lock = NSLock()
-    static var current: JiraWords {
+
+    static var current: JiraStyle {
         lock.lock(); defer { lock.unlock() }
         if let c = cache { return c }
-        let c = JiraWords { jiraConfigValue($0) }
+        let c = fetch()
         cache = c
         return c
     }
+
     static func invalidate() { lock.lock(); cache = nil; lock.unlock() }
 
-    init(_ value: (String) -> String?) {
-        func list(_ key: String) -> [String] {
-            (value(key) ?? Self.defaults[key] ?? "").split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
-        }
-        cancelled = list("status-cancelled-words"); done = list("status-done-words")
-        blocked = list("status-blocked-words"); active = list("status-active-words")
-        waiting = list("status-waiting-words"); new = list("status-new-words")
-        urgent = list("priority-urgent-words")
+    func matches(_ lowered: String, _ list: [String]) -> Bool {
+        list.contains(where: lowered.contains)
     }
-    func matches(_ lowered: String, _ words: [String]) -> Bool { words.contains(where: lowered.contains) }
+
+    private static func fetch() -> JiraStyle {
+        let keys = ["status-cancelled-words", "status-done-words", "status-blocked-words",
+                    "status-active-words", "status-waiting-words", "status-new-words",
+                    "priority-urgent-words"]
+        var values: [String: Any] = [:]
+        for k in keys { if let v = jiraConfigValue(k) { values[k] = v } }
+        var d: [String: Any] = [:]
+        if case .success(let box) = pythonHelper.callSync("jira.style", ["values": values], timeout: 30),
+           let dict = box as? [String: Any] {
+            d = dict
+        } else {
+            wsLog("jira: style rules unresolved (python helper unavailable)")
+        }
+        func tone(_ s: String) -> PopupTone {
+            switch s {
+            case "dim": return .dim
+            case "accent": return .accent
+            case "accent2": return .accent2
+            case "success": return .success
+            case "warning": return .warning
+            case "danger": return .danger
+            case "info": return .info
+            default: return .text
+            }
+        }
+        func mark(_ v: Any?) -> PopupCellStyle.Mark? {
+            switch v as? String {
+            case "hollow": return .hollow
+            case "half": return .half
+            case "filled": return .filled
+            default: return nil
+            }
+        }
+        func style(_ j: [String: Any]?) -> PopupCellStyle {
+            guard let j, let t = j["tone"] as? String else { return PopupCellStyle(.dim) }
+            return PopupCellStyle(tone(t), mark: mark(j["mark"]),
+                                  tinted: j["tinted"] as? Bool ?? false,
+                                  bold: j["bold"] as? Bool ?? false,
+                                  quietsRow: j["quietsRow"] as? Bool ?? false)
+        }
+        func rules(_ raw: Any?) -> [CellRule] {
+            (raw as? [[String: Any]] ?? []).map {
+                CellRule(words: $0["words"] as? [String] ?? [],
+                         style: style($0["style"] as? [String: Any]))
+            }
+        }
+        return JiraStyle(words: d["words"] as? [String: [String]] ?? [:],
+                         dimFields: Set(d["dimFields"] as? [String] ?? []),
+                         statusRules: rules(d["status"]),
+                         statusFallback: style(d["statusFallback"] as? [String: Any]),
+                         priorityRules: rules(d["priority"]),
+                         priorityFallback: style(d["priorityFallback"] as? [String: Any]),
+                         releaseRules: (d["releaseStatus"] as? [[String: Any]] ?? []).map {
+                             (needle: $0["contains"] as? String ?? "",
+                              style: style($0["style"] as? [String: Any]))
+                         })
+    }
 }
 
 func parsePalette(_ v: String?) -> PopupPalette? {
@@ -6682,7 +6735,7 @@ extension SwitcherController {
         commands = loadCommands()
         configureRecentFiles()
         fontFamilyCache = nil
-        JiraWords.invalidate()
+        JiraStyle.invalidate()
         log("config reloaded (\(commands.count) commands)")
         rebuildNoteWindow()
         prewarmSlot()

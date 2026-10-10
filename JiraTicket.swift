@@ -23,9 +23,9 @@ enum JiraTicketPage {
         case "done": return 2
         default: break
         }
-        let l = status.lowercased(), w = JiraWords.current
-        if w.matches(l, w.done) || w.matches(l, w.cancelled) { return 2 }
-        if w.matches(l, w.new) { return 0 }
+        let l = status.lowercased(), s = JiraStyle.current
+        if s.matches(l, s.words["done"] ?? []) || s.matches(l, s.words["cancelled"] ?? []) { return 2 }
+        if s.matches(l, s.words["new"] ?? []) { return 0 }
         return 1
     }
 
