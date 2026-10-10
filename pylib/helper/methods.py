@@ -797,3 +797,8 @@ def _confluence_auth(params: dict) -> dict:
 @method("confluence.rate_limit")
 def _confluence_rate_limit(params: dict) -> dict:
     return confluence_glue.rate_limit(params.get("response") or {})
+
+
+@method("confluence.criteria")
+def _confluence_criteria(params: dict) -> dict:
+    return confluence_glue.criteria(params)

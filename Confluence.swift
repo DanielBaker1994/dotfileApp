@@ -820,15 +820,25 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     private var query: String { textBox.field.stringValue.trimmingCharacters(in: .whitespaces) }
 
     private func criteria() -> [String: Any] {
-        var c: [String: Any] = [
-            "query": query, "mode": ["all", "phrase", "any"][modeSeg.selected], "titleOnly": titleToggle.isOn,
-            "spaces": spaces.isAll ? [] : spaces.selected,
-            "types": (typeChoice.value ?? "page,blogpost").split(separator: ",").map(String.init),
-            "modified": modChoice.value ?? "", "contributors": people.isAll ? [] : people.selected,
+        // the assembly lives in pylib/confluence_glue.py (same criteria the
+        // confluence_api.py --search call consumes)
+        let params: [String: Any] = [
+            "query": textBox.field.stringValue,
+            "modeIndex": modeSeg.selected,
+            "titleOnly": titleToggle.isOn,
+            "spacesAll": spaces.isAll, "spaces": spaces.selected,
+            "types": typeChoice.value ?? "page,blogpost",
+            "modified": modChoice.value ?? "",
+            "contributorsAll": people.isAll, "contributors": people.selected,
             "sort": sortChoice.value ?? "relevance",
+            "favorites": scope == .favorites,
         ]
-        if scope == .favorites { c["favorites"] = true }
-        return c
+        if case .success(let box) = pythonHelper.callSync("confluence.criteria", params, timeout: 30),
+           let c = box as? [String: Any] {
+            return c
+        }
+        wsLog("confluence: criteria failed (python helper unavailable)")
+        return [:]
     }
 
     private func saveCriteria() {

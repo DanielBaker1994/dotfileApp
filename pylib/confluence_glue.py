@@ -31,3 +31,30 @@ def rate_limit(response: dict) -> dict:
     if not isinstance(secs, int) or isinstance(secs, bool):
         secs = 30
     return {"limited": True, "seconds": max(3, secs)}
+
+
+MODES = ["all", "phrase", "any"]
+
+
+def criteria(params: dict) -> dict:
+    """The search panel's live state -> the criteria JSON the
+    confluence_api.py --search call consumes."""
+    idx = params.get("modeIndex")
+    idx = idx if isinstance(idx, int) and 0 <= idx < len(MODES) else 0
+    types_raw = params.get("types")
+    if types_raw is None:
+        types_raw = "page,blogpost"
+    types = [t for t in str(types_raw).split(",") if t]
+    contributors = [c for c in (params.get("contributors") or []) if isinstance(c, str)]
+    spaces = [s for s in (params.get("spaces") or []) if isinstance(s, str)]
+    c = {"query": (params.get("query") or "").strip(),
+         "mode": MODES[idx],
+         "titleOnly": bool(params.get("titleOnly")),
+         "spaces": [] if params.get("spacesAll") else spaces,
+         "types": types,
+         "modified": params.get("modified") or "",
+         "contributors": [] if params.get("contributorsAll") else contributors,
+         "sort": params.get("sort") or "relevance"}
+    if params.get("favorites"):
+        c["favorites"] = True
+    return c

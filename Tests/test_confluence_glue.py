@@ -57,5 +57,49 @@ class RateLimit(unittest.TestCase):
                          {"limited": True, "seconds": 30})
 
 
+class Criteria(unittest.TestCase):
+    def params(self, **over):
+        p = {"query": " retry logic ", "modeIndex": 0, "titleOnly": False,
+             "spacesAll": True, "spaces": [], "types": "page,blogpost",
+             "modified": "", "contributorsAll": True, "contributors": [],
+             "sort": "relevance", "favorites": False}
+        p.update(over)
+        return p
+
+    def test_defaults(self):
+        self.assertEqual(cg.criteria(self.params()), {
+            "query": "retry logic", "mode": "all", "titleOnly": False,
+            "spaces": [], "types": ["page", "blogpost"],
+            "modified": "", "contributors": [], "sort": "relevance"})
+
+    def test_mode_index_maps_and_clamps(self):
+        self.assertEqual(cg.criteria(self.params(modeIndex=1))["mode"], "phrase")
+        self.assertEqual(cg.criteria(self.params(modeIndex=2))["mode"], "any")
+        self.assertEqual(cg.criteria(self.params(modeIndex=9))["mode"], "all")
+
+    def test_all_flags_empty_the_lists(self):
+        out = cg.criteria(self.params(spacesAll=False, spaces=["DEV"],
+                                      contributorsAll=False, contributors=["me"],
+                                      titleOnly=True))
+        self.assertEqual(out["spaces"], ["DEV"])
+        self.assertEqual(out["contributors"], ["me"])
+        self.assertTrue(out["titleOnly"])
+        out = cg.criteria(self.params(spacesAll=True, spaces=["DEV"]))
+        self.assertEqual(out["spaces"], [])
+
+    def test_types_split_drops_empties(self):
+        self.assertEqual(cg.criteria(self.params(types="page,,comment"))["types"],
+                         ["page", "comment"])
+        self.assertEqual(cg.criteria(self.params(types=""))["types"], [])
+
+    def test_favorites_only_when_in_scope(self):
+        self.assertIn("favorites", cg.criteria(self.params(favorites=True)))
+        self.assertNotIn("favorites", cg.criteria(self.params()))
+
+    def test_passthroughs(self):
+        out = cg.criteria(self.params(modified="-2w", sort="modified"))
+        self.assertEqual((out["modified"], out["sort"]), ("-2w", "modified"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
