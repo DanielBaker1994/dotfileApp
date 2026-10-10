@@ -1,0 +1,5 @@
+{
+  "builtin": ["tokyo-night", "paper", "executive", "terminal", "catppuccin-mocha",
+              "catppuccin-latte", "dracula", "nord", "gruvbox-dark", "gruvbox-light",
+              "solarized-dark", "solarized-light", "rose-pine", "rose-pine-dawn"]
+}

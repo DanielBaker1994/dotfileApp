@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 
-BUILTIN = ["tokyo-night", "paper", "executive", "terminal", "catppuccin-mocha",
-           "catppuccin-latte", "dracula", "nord", "gruvbox-dark", "gruvbox-light",
-           "solarized-dark", "solarized-light", "rose-pine", "rose-pine-dawn"]
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "doc_templates.json")
+# the preset list is data; the CSS grammar stays code
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
+
+BUILTIN = list(_DATA["builtin"])
 
 _PALETTE = re.compile(r":root:has\(\.([A-Za-z0-9_-]+)\)\s*\{[^}]*--p-bg")
 _CLASS = re.compile(r'class="([^"]*)"')
