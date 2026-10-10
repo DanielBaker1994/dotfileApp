@@ -39,9 +39,11 @@ LOG = os.path.join(CACHE, "poll.log")
 
 # the [notifications] defaults live in notify/defaults.json and load here
 with open(os.path.join(HERE, "defaults.json"), encoding="utf-8") as _fh:
-    DEFAULTS = json.load(_fh)["defaults"]
+    _ALL = json.load(_fh)
 
-API_SOURCES = {"webex"}
+DEFAULTS = _ALL["defaults"]
+
+API_SOURCES = set(_ALL["api_sources"])
 
 
 def config() -> dict:

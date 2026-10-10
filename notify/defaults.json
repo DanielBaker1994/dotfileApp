@@ -19,5 +19,13 @@
     "imessage-app": "com.apple.MobileSMS",
     "imessage-tag": "MESSAGES",
     "imessage-api": "false"
+  },
+  "api_sources": ["webex"],
+  "webex": {
+    "api": "https://webexapis.com/v1",
+    "scopes": "spark:rooms_read spark:messages_read spark:memberships_read spark:people_read",
+    "port": 8765,
+    "maxRetryWait": 30,
+    "loginHint": "sign in: python3 ~/.config/kitchen-sink/notify/webex_api.py --login"
   }
 }

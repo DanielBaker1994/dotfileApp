@@ -33,11 +33,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-API = "https://webexapis.com/v1"
-SCOPES = "spark:rooms_read spark:messages_read spark:memberships_read spark:people_read"
-DEFAULT_PORT = 8765
-MAX_RETRY_WAIT = 30          # seconds; a longer Retry-After fails this poll
-LOGIN_HINT = "sign in: python3 ~/.config/kitchen-sink/notify/webex_api.py --login"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# the Webex service constants + the copy-paste login hint live in
+# notify/defaults.json (one home with the [notifications] defaults)
+with open(os.path.join(_HERE, "defaults.json"), encoding="utf-8") as _fh:
+    _WEBEX = json.load(_fh)["webex"]
+
+API = _WEBEX["api"]
+SCOPES = _WEBEX["scopes"]
+DEFAULT_PORT = _WEBEX["port"]
+MAX_RETRY_WAIT = _WEBEX["maxRetryWait"]  # seconds; a longer Retry-After fails this poll
+LOGIN_HINT = _WEBEX["loginHint"]
 
 # swapped by tests
 SLEEP = time.sleep
