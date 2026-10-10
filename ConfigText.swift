@@ -90,12 +90,26 @@ func configLines(_ text: String) -> [String] {
     text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 }
 
+private let triLock = NSLock()
+private var triMemo: [String: Any] = [:]
+
 func tri(_ s: String?) -> Bool? {
-    // the grammar lives in pylib/config_text.py (ws test config covers it)
-    guard case .success(let box) = PythonHelper.shared.callSync(
-            "config.tri", ["text": s ?? ""], timeout: 30),
-          let d = box as? [String: Any] else { return nil }
-    return d["value"] as? Bool
+    // the grammar lives in pylib/config_text.py; memoised because config
+    // loaders call this per key and the answer set is tiny
+    let key = (s ?? "").lowercased()
+    triLock.lock()
+    if let hit = triMemo[key] { triLock.unlock(); return hit as? Bool }
+    triLock.unlock()
+    var value: Bool?
+    if case .success(let box) = PythonHelper.shared.callSync(
+            "config.tri", ["text": key], timeout: 30),
+       let d = box as? [String: Any] {
+        value = d["value"] as? Bool
+    }
+    triLock.lock()
+    triMemo[key] = value ?? NSNull()
+    triLock.unlock()
+    return value
 }
 
 func resolveBinary(_ name: String) -> String? {

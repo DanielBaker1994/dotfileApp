@@ -399,17 +399,16 @@ struct TextCompare {
 }
 
 enum BinaryCompare {
+    /// The byte compare lives in pylib/compare_text.py; cold path (the
+    /// binary-files view), so one round trip per pair is fine.
     static func firstDifference(_ a: Data, _ b: Data) -> Int? {
-        let n = min(a.count, b.count)
-        if n > 0 {
-            let x = [UInt8](a), y = [UInt8](b)
-            var i = 0
-            while i < n {
-                if x[i] != y[i] { return i }
-                i += 1
-            }
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "compare.binary_first_difference",
+                ["a": a.base64EncodedString(), "b": b.base64EncodedString()], timeout: 30),
+           let d = box as? [String: Any] {
+            return d["at"] as? Int
         }
-        return a.count == b.count ? nil : n
+        return nil
     }
 }
 

@@ -6,14 +6,8 @@ from __future__ import annotations
 
 import json
 
-
-def tri(s):
-    v = (s or "").lower()
-    if v in ("true", "yes", "1", "on"):
-        return True
-    if v in ("false", "no", "0", "off"):
-        return False
-    return None
+# one tri in python: config_text owns the grammar
+from config_text import tri  # noqa: F401
 
 
 class Problem(Exception):

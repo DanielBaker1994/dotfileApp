@@ -10,8 +10,6 @@ struct PaneShotArgs: Equatable {
 
     struct Problem: Error, Equatable { let message: String }
 
-    static let usage = "pane-shot [--pane ID] [--lines N|all] [--file PATH|-] [--no-save] [--no-copy]"
-
     /// The CLI grammar lives in pylib/paneshot.py (its suite holds the old
     /// Swift cases); this stays the typed mirror.
     static func parse(_ words: [String]) -> Result<PaneShotArgs, Problem> {
