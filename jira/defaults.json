@@ -288,7 +288,28 @@
     "query_fields": "summary,status,assignee,fixVersions,description,updated,priority,labels"
   },
   "logging": {
-    "curl_log_max": 5242880
+    "curl_log_max": 5242880,
+    "poll_log_max": 2097152,
+    "debug_log_max": 10485760,
+    "debug_log_backups": 5
+  },
+  "sprints": {
+    "rank": {"active": 0, "future": 1, "closed": 2}
+  },
+  "my_work": {
+    "views": [["mine", "Assigned to me"], ["reported", "Reported by me"], ["today", "Updated today"]],
+    "watching": {
+      "name": "mywork-watching",
+      "type": "issues",
+      "jql": "watcher = currentUser()",
+      "file": "watching.json",
+      "window": "15m",
+      "projects": "*",
+      "enabled": true
+    }
+  },
+  "poll": {
+    "error_retry": 300
   },
   "search_ui": {
     "skip_fields": ["key", "title", "status", "assignee", "release", "releaseLabel",

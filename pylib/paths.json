@@ -12,7 +12,22 @@
     "curlLog": "curl.log",
     "boards": "boards.json",
     "boardCatalog": "board_catalog.json",
-    "sprints": "sprints.json"
+    "sprints": "sprints.json",
+    "me": "me.json",
+    "fieldsSeen": "fields_seen.json",
+    "pollLog": "poll.log",
+    "legacyPollState": "poll-state",
+    "keysDir": "endpoints",
+    "state": "state",
+    "versions": "versions.json",
+    "dumps": "dumps",
+    "curlDump": "api_dump.txt",
+    "trace": "api_trace.txt",
+    "checkpoints": "checkpoints",
+    "tz": "tz",
+    "pageCap": "search_page_cap.json",
+    "debugLog": "debug.log",
+    "raw": "raw"
   },
   "tabs": {
     "liveSearch": "search.json",

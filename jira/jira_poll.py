@@ -148,13 +148,20 @@ import jira_api  # noqa: E402
 import jira_config  # noqa: E402
 import jira_log  # noqa: E402
 import jira_status  # noqa: E402
+import jira_paths  # noqa: E402
 
-LEGACY_POLL_STATE = os.path.join(jira_config.CACHE_DIR, "poll-state")
-KEYS_DIR = os.path.join(jira_config.CACHE_DIR, "endpoints")
-FIELDS_SEEN = os.path.join(jira_config.CACHE_DIR, "fields_seen.json")
-POLL_LOG = os.path.join(jira_config.CACHE_DIR, "poll.log")
-POLL_LOG_MAX = 2 * 1024 * 1024      # rotate: keep the newest half past 2MB
-ERROR_RETRY = 300       # a failed endpoint is retried (resumed) after min(window, 5m)
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults.json")
+# cache-file names live in pylib/paths.json; the poll limits, sprint rank and
+# MY WORK vocabulary in jira/defaults.json (one home each)
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _DEFAULTS = json.load(_fh)
+
+LEGACY_POLL_STATE = jira_paths.cache_file("legacyPollState")
+KEYS_DIR = jira_paths.cache_file("keysDir")
+FIELDS_SEEN = jira_paths.cache_file("fieldsSeen")
+POLL_LOG = jira_paths.cache_file("pollLog")
+POLL_LOG_MAX = _DEFAULTS["logging"]["poll_log_max"]  # rotate: keep the newest half past 2MB
+ERROR_RETRY = _DEFAULTS["poll"]["error_retry"]  # a failed endpoint is retried (resumed) after min(window, 5m)
 SYNC = "sync"           # the shared issue-cache sync: status entry + checkpoint name
 
 QUIET = False
@@ -1568,7 +1575,7 @@ def board_info(c, bid: str, status_ids: dict) -> dict:
             "filterId": fid, "jql": jql, "columns": cols, "quickFilters": quick}
 
 
-SPRINT_RANK = {"active": 0, "future": 1, "closed": 2}
+SPRINT_RANK = dict(_DEFAULTS["sprints"]["rank"])
 
 
 def sprint_row(s: dict, bid: str) -> dict:
@@ -2098,13 +2105,13 @@ def import_filters() -> int:
     return 0
 
 
-ME_FILE = "me.json"
+ME_FILE = jira_paths.cache_file("me")
 
 
 def me(cfg) -> set:
     """The Jira user's names as the cache writes them (person(): Server
     username / Cloud display name), from /myself once, then cached."""
-    path = os.path.join(jira_api.CACHE_DIR, ME_FILE)
+    path = ME_FILE
     got = jira_api.read_json(path, {})
     if not got:
         got = jira_api.Client.from_config(cfg).get("/rest/api/2/myself") or {}
@@ -2113,8 +2120,9 @@ def me(cfg) -> set:
     return {v for v in (got.get("name"), got.get("displayName")) if v}
 
 
-MY_WORK = [("mine", "Assigned to me"), ("reported", "Reported by me"), ("today", "Updated today")]
-WATCHING_JOB = "mywork-watching"
+MY_WORK = [tuple(v) for v in _DEFAULTS["my_work"]["views"]]
+_WATCHING = _DEFAULTS["my_work"]["watching"]
+WATCHING_JOB = _WATCHING["name"]
 
 
 def ensure_watching_job(cfg) -> bool:
@@ -2123,9 +2131,10 @@ def ensure_watching_job(cfg) -> bool:
     if any(e.get("name") == WATCHING_JOB for e in cfg.endpoints):
         return False
     eps = [dict(e) for e in cfg.endpoints] + [{
-        "name": WATCHING_JOB, "type": "issues", "jql": "watcher = currentUser()", "file": "watching.json",
-        "sideDir": jira_config.MY_WORK_DIR, "window": "15m", "projects": "*", "enabled": True,
-        "columns": main_columns(cfg)}]
+        "name": WATCHING_JOB, "type": _WATCHING["type"], "jql": _WATCHING["jql"],
+        "file": _WATCHING["file"], "sideDir": jira_config.MY_WORK_DIR,
+        "window": _WATCHING["window"], "projects": _WATCHING["projects"],
+        "enabled": _WATCHING["enabled"], "columns": main_columns(cfg)}]
     jira_config.save({"endpoints": eps})
     return True
 

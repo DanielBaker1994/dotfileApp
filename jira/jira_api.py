@@ -103,19 +103,19 @@ LOG = jira_log.LOG
 
 CACHE_DIR = jira_config.CACHE_DIR
 CACHE_FILE = jira_paths.cache_file("issues")
-STATE_FILE = os.path.join(CACHE_DIR, "state")
-VERSIONS_FILE = os.path.join(CACHE_DIR, "versions.json")
+STATE_FILE = jira_paths.cache_file("state")
+VERSIONS_FILE = jira_paths.cache_file("versions")
 DIRECTORY_FILE = jira_paths.cache_file("directory")   # the pickers' lists
-DUMP_DIR = os.path.join(CACHE_DIR, "dumps")
+DUMP_DIR = jira_paths.cache_file("dumps")
 CURL_LOG = jira_paths.cache_file("curlLog")
 CURL_LOG_MAX = _DEFAULTS["logging"]["curl_log_max"]  # rotate: keep the newest ~2MB past 5MB
-CURL_DUMP = os.path.join(CACHE_DIR, "api_dump.txt")     # --verbose: curl per api_endpoints entry
-TRACE_FILE = os.path.join(CACHE_DIR, "api_trace.txt")   # --verbose: timestamped request trace
+CURL_DUMP = jira_paths.cache_file("curlDump")     # --verbose: curl per api_endpoints entry
+TRACE_FILE = jira_paths.cache_file("trace")   # --verbose: timestamped request trace
 
 QUERY_FIELDS = _DEFAULTS["api"]["query_fields"]
 
-CHECKPOINT_DIR = os.path.join(CACHE_DIR, "checkpoints")   # <name>.json: a sync's resume point
-TZ_FILE = os.path.join(CACHE_DIR, "tz")                    # the Jira user's timeZone (/myself)
+CHECKPOINT_DIR = jira_paths.cache_file("checkpoints")   # <name>.json: a sync's resume point
+TZ_FILE = jira_paths.cache_file("tz")                    # the Jira user's timeZone (/myself)
 
 # request-level resilience (Client.get): these answers are waited out and the
 # SAME request is re-sent - a job never restarts from page 1 because of them
@@ -130,7 +130,7 @@ TRANSIENT_CURL = tuple(_DEFAULTS["http"]["transient_curl"])
 SHRINK_CURL = tuple(_DEFAULTS["http"]["shrink_curl"])
 SHRINK_HTTP = tuple(_DEFAULTS["http"]["shrink_http"])
 MIN_PAGE = _DEFAULTS["http"]["min_page"]
-PAGE_CAP_FILE = os.path.join(CACHE_DIR, "search_page_cap.json")
+PAGE_CAP_FILE = jira_paths.cache_file("pageCap")
 PAGE_CAP_DAYS = _DEFAULTS["http"]["page_cap_days"]     # then the configured size is tried again
 MAX_ATTEMPTS = _DEFAULTS["http"]["max_attempts"]       # per request (429 / 5xx / network)
 MAX_401_ATTEMPTS = _DEFAULTS["http"]["max_401_attempts"]  # a 401 AFTER a 2xx in this run is treated as transient

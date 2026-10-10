@@ -37,11 +37,16 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jira_config  # noqa: E402
+import jira_paths  # noqa: E402
 
-DEBUG_LOG = os.path.join(jira_config.CACHE_DIR, "debug.log")
-DEBUG_LOG_MAX = 10 * 1024 * 1024
-DEBUG_LOG_BACKUPS = 5
-RAW_DIR = os.path.join(jira_config.CACHE_DIR, "raw")
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults.json")
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _LOGGING_DEFAULTS = json.load(_fh)["logging"]
+
+DEBUG_LOG = jira_paths.cache_file("debugLog")
+DEBUG_LOG_MAX = _LOGGING_DEFAULTS["debug_log_max"]
+DEBUG_LOG_BACKUPS = _LOGGING_DEFAULTS["debug_log_backups"]
+RAW_DIR = jira_paths.cache_file("raw")
 
 LOG = logging.getLogger("jira")
 LOG.addHandler(logging.NullHandler())   # library use (tests, --describe): silent
