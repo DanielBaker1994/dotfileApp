@@ -1276,42 +1276,31 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
         markDirty()
     }
 
-    private func parseArgs(_ s: String) -> [String: String] {
-        var out: [String: String] = [:]
-        for part in s.split(separator: ",") {
-            let kv = part.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            if kv.count == 2, !kv[0].isEmpty { out[kv[0]] = kv[1] }
+    /// The editor state the python draft builder consumes (jira.draft).
+    private func draftParams(kind: String) -> [String: Any] {
+        var p: [String: Any] = ["kind": kind]
+        switch kind {
+        case "live":
+            p["maxResults"] = liveMaxField.stringValue
+            p["columns"] = ListColumn.serialize(colEditor.cols, titles: false)
+        default:
+            p["name"] = nameField.stringValue
+            p["type"] = selectedType
+            p["pageSize"] = pageSizeField.stringValue
+            p["maxTotal"] = maxTotalField.stringValue
+            p["window"] = everyBox.stringValue
+            p["enabled"] = enabledCheck.state == .on
+            p["projects"] = projectsPicker.selected
+            p["projectsAll"] = projectsPicker.isAll
+            p["queryIndex"] = queryPopup.indexOfSelectedItem
+            p["jql"] = jqlField.stringValue
+            p["jobTitle"] = queryPopup.titleOfSelectedItem ?? ""
+            p["args"] = argsField.stringValue
+            if selectedType != "directory" {
+                p["columns"] = ListColumn.serialize(colEditor.cols, titles: false)
+            }
         }
-        return out
-    }
-
-    private func limit(_ f: NSTextField, _ what: String) -> Int? {
-        let s = f.stringValue.trimmingCharacters(in: .whitespaces)
-        if s.isEmpty { return 0 }
-        guard let n = Int(s), n >= 0 else {
-            editorMsg.textColor = JC.err
-            editorMsg.stringValue = "✗ \(what) must be a whole number (empty = default)"
-            return nil
-        }
-        return n
-    }
-
-    private func draftJSON() -> [String: Any]? {
-        window.makeFirstResponder(nil)
-        guard let ps = limit(pageSizeField, "Page size"), let mt = limit(maxTotalField, "Max issues") else { return nil }
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        let type = selectedType
-        var o: [String: Any] = ["name": name, "type": type, "maxResults": ps, "maxTotal": mt,
-                                "window": everyBox.stringValue.trimmingCharacters(in: .whitespaces),
-                                "enabled": enabledCheck.state == .on]
-        if type != "directory" { o["columns"] = ListColumn.serialize(colEditor.cols, titles: false) }
-        let picked = projectsPicker.selected
-        o["projects"] = projectsPicker.isAll || picked.isEmpty ? "*" as Any : picked as Any
-        let q = type == "issues" ? queryPopup.indexOfSelectedItem : 0
-        o["jql"] = q == 1 ? jqlField.stringValue.trimmingCharacters(in: .whitespaces) : ""
-        o["job"] = q >= 2 ? String((queryPopup.titleOfSelectedItem ?? "").dropFirst("team.json: ".count)) : ""
-        o["args"] = q >= 2 ? parseArgs(argsField.stringValue) : [String: String]()
-        return o
+        return p
     }
 
     @objc private func save(_ sender: Any?) {
@@ -1324,7 +1313,25 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
     }
 
     private func persist(then: ((String) -> Void)?) {
-        guard let o = draftJSON(), let data = try? JSONSerialization.data(withJSONObject: o) else { return }
+        window.makeFirstResponder(nil)
+        pythonHelper.call("jira.draft", draftParams(kind: "job"), timeout: 30) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let box) = result, let d = box as? [String: Any] else {
+                self.editorMsg.textColor = JC.err
+                self.editorMsg.stringValue = "✗ cannot build the job draft"
+                return
+            }
+            guard d["ok"] as? Bool == true, let o = d["draft"] as? [String: Any] else {
+                self.editorMsg.textColor = JC.err
+                self.editorMsg.stringValue = d["message"] as? String ?? "✗ invalid job"
+                return
+            }
+            self.saveJob(o, then: then)
+        }
+    }
+
+    private func saveJob(_ o: [String: Any], then: ((String) -> Void)?) {
+        guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
         let name = o["name"] as? String ?? ""
         editorMsg.textColor = JC.dim
         editorMsg.stringValue = "Saving…"
@@ -1478,25 +1485,35 @@ final class JiraDashboardWindow: CardWindowController, NSTableViewDataSource, NS
 
     private func persistLive() {
         window.makeFirstResponder(nil)
-        guard let m = limit(liveMaxField, "Max results") else { return }
-        var o: [String: Any] = ["columns": ListColumn.serialize(colEditor.cols, titles: false)]
-        o["maxResults"] = m
-        guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
-        JiraPoll.run("jira_config.py", ["--set-live-search"], stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
+        pythonHelper.call("jira.draft", draftParams(kind: "live"), timeout: 30) { [weak self] result in
             guard let self else { return }
-            let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
-            guard code == 0, r["ok"] as? Bool == true else {
-                let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
+            guard case .success(let box) = result, let d = box as? [String: Any] else {
                 self.editorMsg.textColor = JC.err
-                self.editorMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
+                self.editorMsg.stringValue = "✗ cannot build the live-search payload"
                 return
             }
-            self.dirty = false
-            self.updateButtons()
-            self.controller?.reloadJiraWindow()
-            self.refresh {
-                self.editorMsg.textColor = JC.ok
-                self.editorMsg.stringValue = "✓ Saved to config.json"
+            guard d["ok"] as? Bool == true, let o = d["draft"] as? [String: Any] else {
+                self.editorMsg.textColor = JC.err
+                self.editorMsg.stringValue = d["message"] as? String ?? "✗ invalid max results"
+                return
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
+            JiraPoll.run("jira_config.py", ["--set-live-search"], stdin: String(decoding: data, as: UTF8.self)) { [weak self] code, out, err in
+                guard let self else { return }
+                let r = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] ?? [:]
+                guard code == 0, r["ok"] as? Bool == true else {
+                    let probs = r["problems"] as? [String] ?? [JiraPoll.errorLine(err, fallback: "save failed (exit \(code))")]
+                    self.editorMsg.textColor = JC.err
+                    self.editorMsg.stringValue = "✗ " + probs.joined(separator: "\n✗ ")
+                    return
+                }
+                self.dirty = false
+                self.updateButtons()
+                self.controller?.reloadJiraWindow()
+                self.refresh {
+                    self.editorMsg.textColor = JC.ok
+                    self.editorMsg.stringValue = "✓ Saved to config.json"
+                }
             }
         }
     }

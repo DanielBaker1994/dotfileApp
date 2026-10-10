@@ -194,6 +194,17 @@ class ScriptBridge(unittest.TestCase):
         reply = dispatch({"id": 3, "method": "jira.options", "params": {"kind": "nope"}})
         self.assertFalse(reply["ok"])
 
+    def test_jira_draft_method(self):
+        reply = dispatch({"id": 1, "method": "jira.draft", "params": {
+            "kind": "live", "maxResults": "25", "columns": "key"}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["draft"]["maxResults"], 25)
+        reply = dispatch({"id": 2, "method": "jira.draft", "params": {
+            "kind": "job", "pageSize": "x"}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(reply["result"]["ok"])
+        self.assertIn("Page size", reply["result"]["message"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

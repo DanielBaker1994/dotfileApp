@@ -11,6 +11,7 @@ import doc_templates
 import file_ops as fileops
 import ignore_rules as ignore
 import jira_data
+import jira_dashboard
 import jira_directory
 import jira_pages
 import jira_search
@@ -719,3 +720,10 @@ def _jira_options(params: dict) -> dict:
     if kind == "version":
         return {"options": jira_directory.version_options(d, params.get("scope"))}
     raise HelperError("jira.options: unknown kind: %s" % kind)
+
+
+@method("jira.draft")
+def _jira_draft(params: dict) -> dict:
+    if params.get("kind") == "live":
+        return jira_dashboard.live_persist(params)
+    return jira_dashboard.draft(params)
