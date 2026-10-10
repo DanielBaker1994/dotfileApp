@@ -1,0 +1,4 @@
+{
+  "eol_labels": {"0": "none", "1": "LF", "2": "CRLF", "3": "CR"},
+  "encodings": ["utf8", "utf8BOM", "utf16LE", "utf16BE", "latin1"]
+}

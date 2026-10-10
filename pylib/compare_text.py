@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import json
+import os
+
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare_text.json")
+# EOL display labels + supported-encoding names are data; the byte codes and
+# ROWS_*/OP_* wire codes stay code (contracts with stored data / the Swift peer)
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
+
 EOL_BYTES = {0: b"", 1: b"\n", 2: b"\r\n", 3: b"\r"}
-EOL_LABEL = {0: "none", 1: "LF", 2: "CRLF", 3: "CR"}
-ENCODINGS = ("utf8", "utf8BOM", "utf16LE", "utf16BE", "latin1")
+EOL_LABEL = {int(k): v for k, v in _DATA["eol_labels"].items()}
+ENCODINGS = tuple(_DATA["encodings"])
 
 ROWS_SAME, ROWS_CHANGED, ROWS_LEFT_ONLY, ROWS_RIGHT_ONLY = 0, 1, 2, 3
 LEFT, RIGHT = "left", "right"
