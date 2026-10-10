@@ -21,6 +21,7 @@ import jira_pages
 import jira_search
 import jira_setup
 import prose_pdf
+import shot_model
 import status as ws_status
 
 from . import HelperError, method, script_bridge
@@ -813,3 +814,53 @@ def _confluence_criteria(params: dict) -> dict:
 @method("confluence.preview_html")
 def _confluence_preview_html(params: dict) -> dict:
     return {"html": confluence_pages.preview_html(params)}
+
+
+@method("shot.ring")
+def _shot_ring(params: dict) -> dict:
+    return {"names": shot_model.ring(params.get("spec") or "", bool(params.get("badge")))}
+
+
+@method("shot.args")
+def _shot_args(params: dict) -> dict:
+    try:
+        a = shot_model.parse_args(params.get("words") or [])
+    except shot_model.ArgsProblem as e:
+        return {"ok": False, "message": e.message}
+    return {"ok": True, "args": shot_model.args_to_dict(a)}
+
+
+@method("shot.region")
+def _shot_region(params: dict) -> dict:
+    r = shot_model.parse_region(params.get("text") or "")
+    if r is None:
+        return {"rect": None}
+    return {"rect": {"x": r.x, "y": r.y, "w": r.w, "h": r.h}}
+
+
+@method("shot.file_expand")
+def _shot_file_expand(params: dict) -> dict:
+    return {"name": shot_model.expand_pattern(params.get("pattern") or "")}
+
+
+@method("shot.file_unique")
+def _shot_file_unique(params: dict) -> dict:
+    return {"path": shot_model.unique_path(params.get("dir") or "", params.get("name") or "",
+                                           params.get("ext") or "")}
+
+
+@method("shot.file_target")
+def _shot_file_target(params: dict) -> dict:
+    return {"path": shot_model.target(params.get("path") or "", params.get("pattern") or "",
+                                      params.get("format") or "")}
+
+
+@method("shot.state_load")
+def _shot_state_load(params: dict) -> dict:
+    return {"state": shot_model.state_load(params.get("path") or "")}
+
+
+@method("shot.state_save")
+def _shot_state_save(params: dict) -> dict:
+    shot_model.state_save(params.get("path") or "", params.get("state") or {})
+    return {}

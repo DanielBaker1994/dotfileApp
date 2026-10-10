@@ -779,9 +779,29 @@ class State:
             return cls()
 
     def save(self, path: str = DEFAULT_STATE_PATH) -> None:
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(self.json(), fh)
-        except OSError:
-            pass
+        state_save(path, self.json())
+
+
+# ------------------------------------------------- app-facing entry points
+
+def args_to_dict(a: Args) -> dict:
+    return {k: getattr(a, k) for k in Args.__slots__}
+
+
+def state_load(path: str) -> dict:
+    """The raw state.json dict (the app keeps its typed mirror)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def state_save(path: str, state) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(state if isinstance(state, dict) else {}, fh)
+    except OSError:
+        pass

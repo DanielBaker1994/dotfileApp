@@ -1,4 +1,4 @@
-// sources: ScreenshotAnnotations.swift ScreenshotText.swift
+// sources: ScreenshotAnnotations.swift ScreenshotText.swift PythonHelper.swift
 import Foundation
 import CoreGraphics
 import CoreText
@@ -15,18 +15,24 @@ func check(_ condition: Bool, _ message: String, line: Int = #line) {
     }
 }
 
+func wsLog(_ s: String) {
+    if ProcessInfo.processInfo.environment["WS_TEST_LOG"] != nil { print("log: \(s)") }
+}
+
 func near(_ a: CGFloat, _ b: CGFloat, _ eps: CGFloat = 0.01) -> Bool { abs(a - b) <= eps }
 
 @main
 struct ScreenshotTests {
     static func main() {
+        let libDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("pylib").path
+        PythonHelper.shared.configure(libDir: libDir)
         ringTests()
         documentTests()
         snapTests()
         pixelateTests()
         renderTests()
-        fileTests()
-        argTests()
         colorTests()
         ocrTests()
         print("screenshot: \(passed) passed, \(failed) failed")
@@ -40,19 +46,14 @@ struct ScreenshotTests {
 
     static func ringTests() {
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let ring = ShotTool.ring(ShotTool.defaultButtons, badge: true)
-        check(ring.count == 21, "default ring = 20 buttons (copy-text + recent incl.) + the size badge (\(ring.count))")
-        check(ring.firstIndex(of: .badge) == 11, "badge right after the last drawing tool")
-        check(Array(ring.prefix(11)) == [.pencil, .line, .arrow, .selection, .rectangle, .circle, .marker, .text, .counter, .pixelate, .invert],
-              "bottom-row tools in Flameshot's order")
-        check(!ShotTool.ring(ShotTool.defaultButtons, badge: false).contains(.badge), "show-size-badge = false drops it")
-        check(!ring.contains(.accept) && !ring.contains(.sizeUp), "accept + size buttons hidden by default")
-        check(ShotTool.ring("copy, nonsense, copy, exit", badge: false) == [.copy, .exit], "unknown + duplicate names dropped")
+        // the ring composition + the file/args cases moved to the python
+        // suite (ws test shot-model); this suite keeps the layout math
+        let count = 21  // the default ring: 20 buttons + the size badge
 
         let B: CGFloat = 34
         let sel = CGRect(x: 500, y: 300, width: 400, height: 250)
-        let l = ButtonRing.layout(selection: sel, screen: screen, count: ring.count, button: B)
-        check(l.frames.count == ring.count && !l.inside, "centered: every button placed, outside")
+        let l = ButtonRing.layout(selection: sel, screen: screen, count: count, button: B)
+        check(l.frames.count == count && !l.inside, "centered: every button placed, outside")
         check(l.frames.allSatisfy { screen.contains($0) }, "centered: all on screen")
         check(l.frames.allSatisfy { !$0.intersects(sel) }, "centered: none covers the selection")
         check(noOverlap(l.frames), "centered: no two buttons overlap")
@@ -72,23 +73,23 @@ struct ScreenshotTests {
             ("bottom-right corner", CGRect(x: 1240, y: 750, width: 200, height: 150)),
         ]
         for (name, s) in edges {
-            let e = ButtonRing.layout(selection: s, screen: screen, count: ring.count, button: B)
-            check(e.frames.count == ring.count && e.frames.allSatisfy { $0.width == B }, "\(name): every button placed")
+            let e = ButtonRing.layout(selection: s, screen: screen, count: count, button: B)
+            check(e.frames.count == count && e.frames.allSatisfy { $0.width == B }, "\(name): every button placed")
             check(e.frames.allSatisfy { screen.contains($0) }, "\(name): all on screen")
             check(noOverlap(e.frames), "\(name): no overlap")
         }
 
-        let full = ButtonRing.layout(selection: screen, screen: screen, count: ring.count, button: B)
+        let full = ButtonRing.layout(selection: screen, screen: screen, count: count, button: B)
         check(full.inside, "full-screen selection puts the buttons inside")
         check(full.frames.allSatisfy { screen.contains($0) && $0.width == B }, "inside: all on screen")
         check(noOverlap(full.frames), "inside: no overlap")
         check(full.frames.first.map { $0.maxY >= screen.maxY - B - 10 } ?? false, "inside: first row at the bottom edge")
 
         let tiny = CGRect(x: 700, y: 400, width: 4, height: 4)
-        let t = ButtonRing.layout(selection: tiny, screen: screen, count: ring.count, button: B)
+        let t = ButtonRing.layout(selection: tiny, screen: screen, count: count, button: B)
         check(t.frames.allSatisfy { screen.contains($0) && $0.width == B } && noOverlap(t.frames), "tiny selection: placed, no overlap")
         let tinyCorner = CGRect(x: 0, y: 0, width: 6, height: 6)
-        let tc = ButtonRing.layout(selection: tinyCorner, screen: screen, count: ring.count, button: B)
+        let tc = ButtonRing.layout(selection: tinyCorner, screen: screen, count: count, button: B)
         check(tc.frames.allSatisfy { screen.contains($0) && $0.width == B } && noOverlap(tc.frames), "tiny selection in a corner")
         check(ButtonRing.layout(selection: sel, screen: screen, count: 0, button: B).frames.isEmpty, "no buttons")
         check(ButtonRing.defaultButtonSize(lineHeight: 15.5) == 34, "button size = line height × 2.2")
@@ -265,44 +266,6 @@ struct ScreenshotTests {
         t.text = "a much longer line\nand a second"
         let big = ShotText.boxSize(t)
         check(big.width > small.width && big.height > small.height, "text box grows")
-    }
-
-    static func fileTests() {
-        var comps = DateComponents()
-        comps.year = 2026; comps.month = 10; comps.day = 2; comps.hour = 14; comps.minute = 5
-        let date = Calendar.current.date(from: comps)!
-        check(ShotFiles.expand("%F_%H-%M", date: date) == "2026-10-02_14-05", "Flameshot's default pattern")
-        check(ShotFiles.expand("shot %Y/%m", date: date) == "shot 2026-10", "no '/' in a name")
-        let taken: Set<String> = ["/tmp/x/a.png", "/tmp/x/a 2.png"]
-        check(ShotFiles.uniquePath(dir: "/tmp/x", name: "a", ext: "png", exists: { taken.contains($0) }) == "/tmp/x/a 3.png", "clash → ' 3'")
-        check(ShotFiles.uniquePath(dir: "/tmp/x/", name: "b", ext: "png", exists: { taken.contains($0) }) == "/tmp/x/b.png", "free name kept")
-        check(ShotFiles.target("/tmp/x", pattern: "%F", format: "png", date: date, isDir: { _ in true }, exists: { _ in false })
-              == "/tmp/x/2026-10-02.png", "-p DIR → the pattern inside it")
-        check(ShotFiles.target("/tmp/y/shot", pattern: "%F", format: "jpg", date: date, isDir: { _ in false }, exists: { _ in false })
-              == "/tmp/y/shot.jpg", "-p FILE gets the format's extension")
-        check(ShotFiles.target("/tmp/y/s.png", pattern: "%F", format: "png", date: date, isDir: { _ in false }, exists: { _ in false })
-              == "/tmp/y/s.png", "-p FILE.png kept")
-    }
-
-    static func argTests() {
-        if case .success(let a) = ShotArgs.parse([]) { check(a == ShotArgs(), "no args = gui") } else { check(false, "no args") }
-        if case .success(let a) = ShotArgs.parse(["gui", "-p", "/tmp", "-c", "-d", "500", "--region", "300x200+10+20", "-s", "--pin", "-r", "-g"]) {
-            check(a.mode == .gui && a.path == "/tmp" && a.clipboard && a.delayMs == 500 && a.region == "300x200+10+20"
-                  && a.acceptOnSelect && a.pin && a.raw && a.printGeometry && a.wantsReply, "every gui flag")
-        } else { check(false, "gui flags") }
-        if case .success(let a) = ShotArgs.parse(["screen", "-n", "1", "-c"]) {
-            check(a.mode == .screen && a.screenNumber == 1 && a.clipboard && !a.wantsReply, "screen -n")
-        } else { check(false, "screen") }
-        if case .success(let a) = ShotArgs.parse(["full", "--region", "screen0"]) { check(a.mode == .full && a.region == "screen0", "screenN region") }
-        if case .success(let a) = ShotArgs.parse(["text", "-r"]) { check(a.mode == .text && a.isOverlay && a.raw, "text mode") } else { check(false, "text mode") }
-        check(ShotTool.ring(ShotTool.defaultButtons, badge: false).contains(.copyText), "copy-text in the default ring")
-        check(ShotTool.copyText.finishes && ShotTool.copyText.kind == .action, "copy-text is a finishing action")
-        if case .failure = ShotArgs.parse(["-d", "x"]) { check(true, "bad delay") } else { check(false, "bad delay accepted") }
-        if case .failure = ShotArgs.parse(["--bogus"]) { check(true, "unknown flag") } else { check(false, "unknown flag accepted") }
-        if case .failure = ShotArgs.parse(["--region", "12"]) { check(true, "bad region") } else { check(false, "bad region accepted") }
-        check(ShotArgs.parseRegion("300x200+10+20") == CGRect(x: 10, y: 20, width: 300, height: 200), "WxH+X+Y")
-        check(ShotArgs.parseRegion("300x200") == CGRect(x: 0, y: 0, width: 300, height: 200), "WxH")
-        check(ShotArgs.parseRegion("0x200+1+1") == nil, "zero width rejected")
     }
 
     static func colorTests() {

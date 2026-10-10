@@ -256,6 +256,22 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"]["labels"]["key"], "Ticket")
 
+    def test_shot_methods(self):
+        reply = dispatch({"id": 1, "method": "shot.ring",
+                          "params": {"spec": "copy, nonsense, copy, exit", "badge": False}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["names"], ["copy", "exit"])
+        reply = dispatch({"id": 2, "method": "shot.args", "params": {"words": ["gui", "-c", "-d", "500"]}})
+        self.assertTrue(reply["result"]["ok"], reply)
+        self.assertTrue(reply["result"]["args"]["clipboard"])
+        self.assertEqual(reply["result"]["args"]["delayMs"], 500)
+        reply = dispatch({"id": 3, "method": "shot.args", "params": {"words": ["--bogus"]}})
+        self.assertFalse(reply["result"]["ok"])
+        reply = dispatch({"id": 4, "method": "shot.region", "params": {"text": "300x200+10+20"}})
+        self.assertEqual(reply["result"]["rect"], {"x": 10.0, "y": 20.0, "w": 300.0, "h": 200.0})
+        reply = dispatch({"id": 5, "method": "shot.region", "params": {"text": "12"}})
+        self.assertIsNone(reply["result"]["rect"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

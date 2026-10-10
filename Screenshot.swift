@@ -8,7 +8,7 @@ struct ScreenshotConfig {
     var contrastOpacity = 190
     var drawColor = ShotColor(hex: "#ff0000")!
     var userColors: [ShotColor?] = []
-    var buttons: [ShotTool] = ShotTool.ring(ShotTool.defaultButtons, badge: true)
+    var buttons: [ShotTool] = ShotTool.ring("", badge: true)
     var buttonSize: CGFloat = 34
     var showHelp = true
     var showSidePanelButton = true
@@ -91,7 +91,7 @@ struct ScreenshotConfig {
             if v.lowercased() == "picker" { return .some(nil) }
             return ShotColor(hex: v).map { .some($0) }
         }
-        c.buttons = ShotTool.ring(s("buttons", ShotTool.defaultButtons), badge: b("show-size-badge", true))
+        c.buttons = ShotTool.ring(s("buttons", ""), badge: b("show-size-badge", true))
         let bs = i("button-size", 0, 0...80)
         let font = NSFont.systemFont(ofSize: 13)
         c.buttonSize = bs >= 20 ? CGFloat(bs)

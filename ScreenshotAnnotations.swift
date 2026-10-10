@@ -113,21 +113,16 @@ enum ShotTool: String, CaseIterable {
     }
     var sizeRange: ClosedRange<Int> { self == .rectangle ? 0...100 : 1...100 }
 
-    static let defaultButtons = "pencil, line, arrow, selection, rectangle, circle, marker, text, counter, pixelate, invert, move, undo, redo, copy, copy-text, save, exit, pin, recent"
-
+    /// The ring composition + the default buttons live in
+    /// pylib/shot_model.py (empty spec -> the default ring).
     static func ring(_ spec: String, badge: Bool) -> [ShotTool] {
-        var out: [ShotTool] = []
-        for part in spec.split(separator: ",") {
-            let n = part.trimmingCharacters(in: .whitespaces).lowercased()
-            if let t = ShotTool(rawValue: n), !out.contains(t) { out.append(t) }
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shot.ring", ["spec": spec, "badge": badge], timeout: 30),
+           let d = box as? [String: Any], let names = d["names"] as? [String] {
+            return names.compactMap { ShotTool(rawValue: $0) }
         }
-        if out.isEmpty { return ring(defaultButtons, badge: badge) }
-        if !badge { out.removeAll { $0 == .badge } }
-        else if !out.contains(.badge) {
-            let at = (out.lastIndex { $0.isDrawing }).map { $0 + 1 } ?? 0
-            out.insert(.badge, at: at)
-        }
-        return out
+        wsLog("shot: ring unresolved (python helper unavailable)")
+        return []
     }
 }
 
@@ -957,38 +952,31 @@ enum ShotRenderer {
 }
 
 enum ShotFiles {
-    static func expand(_ pattern: String, date: Date = Date()) -> String {
-        var t = time_t(date.timeIntervalSince1970)
-        var tmv = tm()
-        localtime_r(&t, &tmv)
-        var buf = [Int8](repeating: 0, count: 512)
-        let n = strftime(&buf, buf.count, pattern.isEmpty ? "%F_%H-%M" : pattern, &tmv)
-        let s = n > 0 ? String(cString: buf) : "screenshot"
-        return s.replacingOccurrences(of: "/", with: "-")
-    }
-    static func uniquePath(dir: String, name: String, ext: String,
-                           exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> String {
-        let d = dir.hasSuffix("/") ? String(dir.dropLast()) : dir
-        let e = ext.isEmpty ? "" : "." + ext
-        var p = "\(d)/\(name)\(e)"
-        var n = 2
-        while exists(p) && n < 10_000 {
-            p = "\(d)/\(name) \(n)\(e)"
-            n += 1
+    // naming/pattern semantics live in pylib/shot_model.py (the Swift file
+    // cases moved to the python suite); real filesystem both sides
+    static func expand(_ pattern: String) -> String {
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shot.file_expand", ["pattern": pattern], timeout: 30),
+           let d = box as? [String: Any], let s = d["name"] as? String {
+            return s
         }
-        return p
+        return "screenshot"
     }
-    static func target(_ path: String, pattern: String, format: String, date: Date = Date(),
-                       isDir: (String) -> Bool = { p in
-                           var d: ObjCBool = false
-                           return FileManager.default.fileExists(atPath: p, isDirectory: &d) && d.boolValue
-                       },
-                       exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> String {
-        let p = (path as NSString).expandingTildeInPath
-        if isDir(p) || p.hasSuffix("/") {
-            return uniquePath(dir: p, name: expand(pattern, date: date), ext: format, exists: exists)
+    static func uniquePath(dir: String, name: String, ext: String) -> String {
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shot.file_unique", ["dir": dir, "name": name, "ext": ext], timeout: 30),
+           let d = box as? [String: Any], let s = d["path"] as? String {
+            return s
         }
-        return (p as NSString).pathExtension.isEmpty ? p + "." + format : p
+        return dir + "/" + name
+    }
+    static func target(_ path: String, pattern: String, format: String) -> String {
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "shot.file_target", ["path": path, "pattern": pattern, "format": format], timeout: 30),
+           let d = box as? [String: Any], let s = d["path"] as? String {
+            return s
+        }
+        return path
     }
 }
 
@@ -1012,59 +1000,39 @@ struct ShotArgs: Equatable {
 
     struct Problem: Error, Equatable { let message: String }
 
+    /// The CLI grammar lives in pylib/shot_model.py (its suite mirrors the
+    /// old Swift cases); this stays the app's typed mirror.
     static func parse(_ words: [String]) -> Result<ShotArgs, Problem> {
-        var a = ShotArgs()
-        var i = 0
-        func value(_ flag: String) -> String? {
-            guard i + 1 < words.count else { return nil }
-            i += 1
-            return words[i]
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "shot.args", ["words": words], timeout: 30),
+              let d = box as? [String: Any] else {
+            return .failure(Problem(message: "python helper unavailable"))
         }
-        if let f = words.first, let m = Mode(rawValue: f) { a.mode = m; i = 1 }
-        while i < words.count {
-            let w = words[i]
-            switch w {
-            case "-p", "--path":
-                guard let v = value(w) else { return .failure(Problem(message: "\(w) needs a path")) }
-                a.path = v
-            case "-c", "--clipboard": a.clipboard = true
-            case "-d", "--delay":
-                guard let v = value(w), let n = Int(v), n >= 0 else { return .failure(Problem(message: "\(w) needs milliseconds")) }
-                a.delayMs = n
-            case "--region":
-                guard let v = value(w), parseRegion(v) != nil || v.hasPrefix("screen") else {
-                    return .failure(Problem(message: "--region WxH+X+Y | screenN"))
-                }
-                a.region = v
-            case "--last-region": a.lastRegion = true
-            case "-s", "--accept-on-select": a.acceptOnSelect = true
-            case "--pin": a.pin = true
-            case "-r", "--raw": a.raw = true
-            case "-g", "--print-geometry": a.printGeometry = true
-            case "-n", "--number":
-                guard let v = value(w), let n = Int(v), n >= 0 else { return .failure(Problem(message: "-n needs a screen number")) }
-                a.screenNumber = n
-            default:
-                return .failure(Problem(message: "unknown option \(w)"))
-            }
-            i += 1
+        guard d["ok"] as? Bool == true else {
+            return .failure(Problem(message: d["message"] as? String ?? "bad arguments"))
         }
-        return .success(a)
+        let a = d["args"] as? [String: Any] ?? [:]
+        var out = ShotArgs()
+        out.mode = Mode(rawValue: a["mode"] as? String ?? "gui") ?? .gui
+        out.path = a["path"] as? String
+        out.clipboard = a["clipboard"] as? Bool ?? false
+        out.delayMs = a["delayMs"] as? Int ?? 0
+        out.region = a["region"] as? String
+        out.lastRegion = a["lastRegion"] as? Bool ?? false
+        out.acceptOnSelect = a["acceptOnSelect"] as? Bool ?? false
+        out.pin = a["pin"] as? Bool ?? false
+        out.raw = a["raw"] as? Bool ?? false
+        out.printGeometry = a["printGeometry"] as? Bool ?? false
+        out.screenNumber = a["screenNumber"] as? Int
+        return .success(out)
     }
 
     static func parseRegion(_ s: String) -> CGRect? {
-        let scanner = Scanner(string: s)
-        guard let w = scanner.scanDouble(), scanner.scanString("x") != nil,
-              let h = scanner.scanDouble() else { return nil }
-        var x = 0.0, y = 0.0
-        if scanner.scanString("+") != nil {
-            guard let v = scanner.scanDouble() else { return nil }
-            x = v
-            guard scanner.scanString("+") != nil, let v2 = scanner.scanDouble() else { return nil }
-            y = v2
-        }
-        guard scanner.isAtEnd, w > 0, h > 0 else { return nil }
-        return CGRect(x: x, y: y, width: w, height: h)
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "shot.region", ["text": s], timeout: 30),
+              let d = box as? [String: Any], let r = d["rect"] as? [String: Any] else { return nil }
+        return CGRect(x: r["x"] as? Double ?? 0, y: r["y"] as? Double ?? 0,
+                      width: r["w"] as? Double ?? 0, height: r["h"] as? Double ?? 0)
     }
 }
 
@@ -1083,13 +1051,19 @@ struct ShotState: Codable {
     func size(_ t: ShotTool) -> Int { sizes[t.rawValue] ?? t.defaultSize }
 
     static func load(_ path: String) -> ShotState {
-        guard let d = FileManager.default.contents(atPath: path),
-              let s = try? JSONDecoder().decode(ShotState.self, from: d) else { return ShotState() }
+        // file I/O + the format live in pylib/shot_model.py; this is the
+        // typed mirror (JSONDecoder on the returned dict)
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "shot.state_load", ["path": path], timeout: 30),
+              let d = box as? [String: Any], let j = d["state"] as? [String: Any],
+              !j.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: j),
+              let s = try? JSONDecoder().decode(ShotState.self, from: data) else { return ShotState() }
         return s
     }
     func save(_ path: String) {
-        try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent,
-                                                 withIntermediateDirectories: true)
-        if let d = try? JSONEncoder().encode(self) { try? d.write(to: URL(fileURLWithPath: path), options: .atomic) }
+        guard let data = try? JSONEncoder().encode(self),
+              let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        _ = PythonHelper.shared.callSync("shot.state_save", ["path": path, "state": j], timeout: 30)
     }
 }
