@@ -3,6 +3,18 @@ gate's decision (the timer/replay stays in Swift)."""
 from __future__ import annotations
 
 import base64
+import json
+import os
+
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "confluence", "defaults.json")
+
+# modes / default search types / sort + the rate-limit gate numbers live in
+# confluence/defaults.json (the jira_fields.py cross-package pattern)
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _DEFAULTS = json.load(_fh)
+
+MODES = list(_DEFAULTS["modes"])
+_SEARCH = _DEFAULTS["defaults"]["search"]
 
 
 def auth_header(config: dict) -> str:
@@ -23,17 +35,15 @@ def auth_header(config: dict) -> str:
 
 
 def rate_limit(response: dict) -> dict:
-    """An API response -> the cooldown decision: pause for max(3, retryIn)
-    seconds (30 when the answer has no usable number)."""
+    """An API response -> the cooldown decision: pause for max(minSeconds,
+    retryIn) seconds (fallbackSeconds when the answer has no usable number)."""
     if not isinstance(response, dict) or response.get("rateLimited") is not True:
         return {"limited": False}
+    fallback = _DEFAULTS["defaults"]["rateLimitFallbackSeconds"]
     secs = response.get("retryIn")
     if not isinstance(secs, int) or isinstance(secs, bool):
-        secs = 30
-    return {"limited": True, "seconds": max(3, secs)}
-
-
-MODES = ["all", "phrase", "any"]
+        secs = fallback
+    return {"limited": True, "seconds": max(_DEFAULTS["defaults"]["rateLimitMinSeconds"], secs)}
 
 
 def criteria(params: dict) -> dict:
@@ -43,7 +53,7 @@ def criteria(params: dict) -> dict:
     idx = idx if isinstance(idx, int) and 0 <= idx < len(MODES) else 0
     types_raw = params.get("types")
     if types_raw is None:
-        types_raw = "page,blogpost"
+        types_raw = ",".join(_SEARCH["types"])
     types = [t for t in str(types_raw).split(",") if t]
     contributors = [c for c in (params.get("contributors") or []) if isinstance(c, str)]
     spaces = [s for s in (params.get("spaces") or []) if isinstance(s, str)]
@@ -54,7 +64,7 @@ def criteria(params: dict) -> dict:
          "types": types,
          "modified": params.get("modified") or "",
          "contributors": [] if params.get("contributorsAll") else contributors,
-         "sort": params.get("sort") or "relevance"}
+         "sort": params.get("sort") or _SEARCH["sort"]}
     if params.get("favorites"):
         c["favorites"] = True
     return c

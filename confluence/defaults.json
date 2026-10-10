@@ -30,10 +30,13 @@
       "types": [
         "page",
         "blogpost"
-      ]
+      ],
+      "sort": "relevance"
     },
     "timeoutSeconds": 20,
     "rateLimitMaxWaitSeconds": 20,
+    "rateLimitMinSeconds": 3,
+    "rateLimitFallbackSeconds": 30,
     "cooldownSeconds": 60,
     "requestDelayMs": 0,
     "usersMaxAgeHours": 24,
