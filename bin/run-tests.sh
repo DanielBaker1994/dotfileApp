@@ -97,6 +97,10 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_jira_pages.py"
         ;;
+    jira-search)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_jira_search.py"
+        ;;
     helper)
         py=""
         for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do

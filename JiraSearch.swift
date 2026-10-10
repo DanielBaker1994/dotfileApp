@@ -1042,6 +1042,7 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         JiraPoll.run("jira_poll.py", ["--describe"]) { [weak self] _, out, _ in
             guard let self, let d = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any] else { return }
             self.info = d
+            self.kindsCache = nil
             self.projects.options = self.dir.projectOptions(scope: d["projectKeys"] as? [String] ?? [])
             if self.projects.selected.isEmpty && !self.projects.isAll && !self.hasSavedState {
                 let pk = d["projectKeys"] as? [String] ?? []
@@ -1058,38 +1059,29 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
         }
     }
 
-    private func fieldLabel(_ field: String, _ fallback: String) -> String {
-        for c in info["catalog"] as? [[String: Any]] ?? [] where c["field"] as? String == field {
-            if let l = c["label"] as? String, !l.isEmpty { return l }
-        }
-        return fallback
-    }
+    private var kindsCache: [Kind]?
 
+    /// The filter menu model comes from pylib/jira_search.py
+    /// (`jira.filter_kinds`): the base kinds plus the describe catalog with
+    /// its skip list. Fetched once per catalog (tiny payload, helper warm).
     private var kinds: [Kind] {
-        var k: [Kind] = [
-            Kind(key: "assignee", title: fieldLabel("assignee", "Assignee"), value: .users),
-            Kind(key: "reporter", title: fieldLabel("reporter", "Reporter"), value: .users),
-            Kind(key: "status", title: fieldLabel("status", "Status"), value: .list),
-            Kind(key: "statusCategory", title: "Status category", value: .list),
-            Kind(key: "issuetype", title: "Issue type", value: .list),
-            Kind(key: "priority", title: fieldLabel("priority", "Priority"), value: .list),
-            Kind(key: "fixVersion", title: fieldLabel("release", "Release"), value: .list),
-            Kind(key: "labels", title: fieldLabel("labels", "Labels"), value: .list),
-            Kind(key: "updated", title: "\(fieldLabel("updated", "Updated")) within", value: .date),
-            Kind(key: "created", title: "Created within", value: .date),
-            Kind(key: "resolved", title: "Resolved within", value: .date),
-            Kind(key: "field:title", title: "\(fieldLabel("title", "Summary")) contains", value: .text),
-            Kind(key: "field:description", title: "\(fieldLabel("description", "Description")) contains", value: .text),
-        ]
-        let skip: Set<String> = ["key", "title", "status", "assignee", "release", "releaseLabel",
-                                 "releaseDate", "releaseStatus", "priority", "labels", "description",
-                                 "reporter", "project", "updated", "comments"]
-        for c in info["catalog"] as? [[String: Any]] ?? [] {
-            guard let f = c["field"] as? String, !skip.contains(f) else { continue }
-            let label = (c["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? f
-            k.append(Kind(key: "field:\(f)", title: "\(label) contains", value: .text))
+        if let k = kindsCache { return k }
+        let catalog = info["catalog"] as? [[String: Any]] ?? []
+        var ks: [Kind] = []
+        if case .success(let box) = pythonHelper.callSync("jira.filter_kinds", ["catalog": catalog], timeout: 30),
+           let d = box as? [String: Any], let list = d["kinds"] as? [[String: Any]] {
+            ks = list.compactMap { k in
+                guard let key = k["key"] as? String, let title = k["title"] as? String,
+                      let kind = k["kind"] as? String else { return nil }
+                let value: ValueKind = kind == "users" ? .users
+                    : kind == "date" ? .date : kind == "text" ? .text : .list
+                return Kind(key: key, title: title, value: value)
+            }
+        } else {
+            wsLog("jira: filter kinds unresolved (python helper unavailable)")
         }
-        return k
+        kindsCache = ks
+        return ks
     }
 
     private func rebuildFilterMenu() {
@@ -1207,30 +1199,6 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
 
     func controlTextDidEndEditing(_ obj: Notification) { saveState() }
 
-    private func criteria() -> [String: Any] {
-        var c: [String: Any] = [:]
-        let t = textField.stringValue.trimmingCharacters(in: .whitespaces)
-        if !t.isEmpty { c["text"] = t }
-        if !projects.isAll && !projects.selected.isEmpty { c["projects"] = projects.selected }
-        var fields: [String: String] = [:]
-        for r in rows {
-            switch r.control {
-            case let p as JiraMultiPicker where !p.selected.isEmpty:
-                c[r.kind.key] = p.selected
-            case let p as JiraChoiceButton:
-                c[r.kind.key] = p.value ?? ""
-            case let f as NSTextField:
-                let v = f.stringValue.trimmingCharacters(in: .whitespaces)
-                guard !v.isEmpty, r.kind.key.hasPrefix("field:") else { break }
-                fields[String(r.kind.key.dropFirst(6))] = v
-            default: break
-            }
-        }
-        if !fields.isEmpty { c["fields"] = fields }
-        if let m = Int(maxChoice.value ?? ""), m > 0 { c["maxResults"] = m }
-        return c
-    }
-
     private var hasSavedState: Bool { UserDefaults.standard.data(forKey: Self.stateKey) != nil }
 
     private func saveState() {
@@ -1285,8 +1253,37 @@ final class JiraSearchPanel: NSObject, NSTextFieldDelegate {
 
     @objc private func run(_ sender: Any?) {
         guard !searching else { return }
-        let crit = criteria()
         saveState()
+        pythonHelper.call("jira.criteria", searchCriteriaParams(), timeout: 30) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let box) = result, let crit = box as? [String: Any] else {
+                self.setStatus("✗ search criteria failed", .systemRed)
+                return
+            }
+            self.performSearch(crit)
+        }
+    }
+
+    /// The live UI state the criteria builder consumes.
+    private func searchCriteriaParams() -> [String: Any] {
+        var rowParams: [[String: Any]] = []
+        for r in rows {
+            switch r.control {
+            case let p as JiraMultiPicker where !p.selected.isEmpty:
+                rowParams.append(["key": r.kind.key, "selected": p.selected])
+            case let p as JiraChoiceButton:
+                rowParams.append(["key": r.kind.key, "value": p.value ?? ""])
+            case let f as NSTextField:
+                rowParams.append(["key": r.kind.key, "text": f.stringValue])
+            default: break
+            }
+        }
+        return ["text": textField.stringValue, "projects": projects.selected,
+                "projectsAll": projects.isAll, "rows": rowParams,
+                "maxResults": maxChoice.value ?? ""]
+    }
+
+    private func performSearch(_ crit: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: crit) else { return }
         searching = true
         spinner.startAnimation(nil)

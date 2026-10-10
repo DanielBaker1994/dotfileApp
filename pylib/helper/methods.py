@@ -12,6 +12,7 @@ import file_ops as fileops
 import ignore_rules as ignore
 import jira_data
 import jira_pages
+import jira_search
 import prose_pdf
 import status as ws_status
 
@@ -682,3 +683,13 @@ def _jira_ticket_html(params: dict) -> dict:
 @method("jira.comments_html")
 def _jira_comments_html(params: dict) -> dict:
     return {"html": jira_pages.comments_html(params.get("comments") or [])}
+
+
+@method("jira.filter_kinds")
+def _jira_filter_kinds(params: dict) -> dict:
+    return {"kinds": jira_search.filter_kinds(params.get("catalog") or [])}
+
+
+@method("jira.criteria")
+def _jira_criteria(params: dict) -> dict:
+    return jira_search.criteria(params)

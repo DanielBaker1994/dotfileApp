@@ -11,6 +11,11 @@ below.
       (long jobs — setup/rebuild — keep spawning, per the decision)
 - [ ] Phase B — Jira/Confluence glue moved to Python (paths, categories,
       comments, ticket/board pages, directory, search, dashboard, configs)
+      — done so far: paths (pylib/jira_paths.py + paths.json), words/style
+      rules, comment index, ticket page + comments HTML, live-search
+      criteria + filter kinds. Remaining: directory options, dashboard
+      logic, board mapping, shared column/label pieces, setup parse,
+      Confluence auth/criteria/preview.
 - [ ] Phase C — test-backed islands (screenshot model pieces, ANSI, pane-shot,
       recent files, path shelf, compare sessions, setup checks)
 - [ ] Phase D — config validation + typed parsing single-homed in Python

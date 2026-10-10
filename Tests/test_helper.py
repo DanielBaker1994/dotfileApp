@@ -159,6 +159,14 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertIn("No comments.", reply["result"]["html"])
 
+    def test_jira_search_methods(self):
+        reply = dispatch({"id": 1, "method": "jira.filter_kinds", "params": {"catalog": []}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIn("assignee", [k["key"] for k in reply["result"]["kinds"]])
+        reply = dispatch({"id": 2, "method": "jira.criteria", "params": {"text": " x ", "rows": []}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"], {"text": "x"})
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):
