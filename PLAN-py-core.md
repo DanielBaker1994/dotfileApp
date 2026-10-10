@@ -9,17 +9,15 @@ below.
 - [x] Phase A — one integration surface: helper gains concurrent dispatch + a
       script bridge; every JiraPoll/ConfluenceAPI spawn goes through it
       (long jobs — setup/rebuild — keep spawning, per the decision)
-- [ ] Phase B — Jira/Confluence glue moved to Python (paths, categories,
-      comments, ticket/board pages, directory, search, dashboard, configs)
-      — done so far: paths (pylib/jira_paths.py + paths.json), words/style
-      rules, comment index, ticket page + comments HTML, live-search
-      criteria + filter kinds, directory parse + picker options, dashboard
-      drafts + definition edits + status text, board mapping + page,
-      columns codec + label table (pylib/jira_fields.py, jira_config
-      imports it), setup project-key grammar, Confluence auth header +
-      rate-limit decision + criteria. Remaining: Confluence preview
-      assembly (template + URL rewriting + highlight JS) and the phase
-      cleanup.
+- [x] Phase B — all of it: paths (pylib/jira_paths.py + paths.json),
+      words/style rules, comment index, ticket page + comments HTML,
+      live-search criteria + filter kinds, directory parse + picker options,
+      dashboard drafts + definition edits + status text, board mapping +
+      page, columns codec + label table (pylib/jira_fields.py, imported by
+      jira_config so the poller shares it), setup project-key grammar,
+      Confluence auth header + rate-limit decision + criteria + preview
+      page. The generic JiraPoll.run script bridge stays by decision
+      (structured methods can replace it later).
 - [ ] Phase C — test-backed islands (screenshot model pieces, ANSI, pane-shot,
       recent files, path shelf, compare sessions, setup checks)
 - [ ] Phase D — config validation + typed parsing single-homed in Python
