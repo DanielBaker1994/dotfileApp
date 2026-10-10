@@ -241,6 +241,15 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"], {"keys": ["SAM1"], "bad": ["1X"]})
 
+    def test_confluence_preview_method(self):
+        reply = dispatch({"id": 1, "method": "confluence.preview_html", "params": {
+            "page": {"site": "https://x/wiki", "html": "<p>hi</p>", "title": "t"},
+            "terms": [], "colors": {}}})
+        self.assertTrue(reply["ok"], reply)
+        html = reply["result"]["html"]
+        self.assertIn("<p>hi</p>", html)
+        self.assertIn("window.wsNext", html)
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):

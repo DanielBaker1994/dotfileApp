@@ -1234,154 +1234,47 @@ final class ConfluenceWindow: CardWindowController, NSTableViewDataSource, NSTab
     }
 
     private func render(_ page: [String: Any], _ r: ConfluenceRow) {
+        // the template + URL rewriting + highlight script live in
+        // pylib/confluence_pages.py; colors go over as rgba() strings
         let base = (page["site"] as? String) ?? site
-        var body = page["html"] as? String ?? ""
-        let type = page["type"] as? String ?? r.type
-        if type == "attachment" {
-            let mt = page["mediaType"] as? String ?? ""
-            let u = absolute(page["url"] as? String ?? r.url, base: base)
-            body = mt.hasPrefix("image/") ? "<p><img src=\"\(u)\"></p>"
-                : "<p class=dim>Attachment (\(mt.isEmpty ? "file" : mt)) — open it in the browser.</p>"
-        }
-        if body.isEmpty { body = "<p class=dim>(this page has no body)</p>" }
-        let html = template(rewrite(body, base: base), title: page["title"] as? String ?? r.title)
-        hint.isHidden = true
-        web.isHidden = false
-        hitsBar.isHidden = false
-        hitLabel.stringValue = terms.isEmpty ? "" : "Finding matches…"
-        web.loadHTMLString(html, baseURL: URL(string: base))
-    }
-
-    private func absolute(_ s: String, base: String) -> String {
-        if s.hasPrefix("http://") || s.hasPrefix("https://") || s.hasPrefix("data:") { return s }
-        guard let b = URL(string: base), let scheme = b.scheme, let host = b.host else { return s }
-        let origin = "\(scheme)://\(host)" + (b.port.map { ":\($0)" } ?? "")
-        if s.hasPrefix("//") { return scheme + ":" + s }
-        if s.hasPrefix("/") {
-            let ctx = b.path
-            if !ctx.isEmpty && ctx != "/" && !s.hasPrefix(ctx + "/") && s.hasPrefix("/download/") { return base + s }
-            return origin + s
-        }
-        return base + "/" + s
-    }
-
-    private func rewrite(_ html: String, base: String) -> String {
-        guard let host = URL(string: base)?.host,
-              let rx = try? NSRegularExpression(pattern: "(<img\\b[^>]*?\\bsrc\\s*=\\s*)\"([^\"]+)\"",
-                                                options: [.caseInsensitive]) else { return html }
-        let ns = html as NSString
-        var out = ""
-        var last = 0
-        for m in rx.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
-            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
-            let pre = ns.substring(with: m.range(at: 1))
-            let src = absolute(ns.substring(with: m.range(at: 2)).replacingOccurrences(of: "&amp;", with: "&"), base: base)
-            let onSite = URL(string: src)?.host == host
-            out += pre + "\"" + (onSite ? ConfluenceImageLoader.wrap(src) : src) + "\""
-            last = NSMaxRange(m.range)
-        }
-        out += ns.substring(from: last)
-        return out.replacingOccurrences(of: "srcset=", with: "data-srcset=")
-    }
-
-    private func css(_ c: NSColor) -> String {
-        let s = c.usingColorSpace(.sRGB) ?? c
-        return String(format: "rgba(%d,%d,%d,%.3f)", Int(s.redComponent * 255), Int(s.greenComponent * 255),
-                      Int(s.blueComponent * 255), s.alphaComponent)
-    }
-
-    private func template(_ body: String, title: String) -> String {
-        let c = colors
-        let termsJSON = (try? JSONSerialization.data(withJSONObject: terms)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
-        return """
-        <!doctype html><html><head><meta charset="utf-8">
-        <style>
-        :root { color-scheme: \(c.isLight ? "light" : "dark"); }
-        html, body { background: transparent; }
-        body { font: 14px/1.6 -apple-system, "SF Pro Text", sans-serif; color: \(css(c.text));
-               margin: 0; padding: 14px 22px 80px; overflow-wrap: anywhere; }
-        h1, h2, h3, h4 { line-height: 1.3; margin: 1.2em 0 .4em; }
-        h1 { font-size: 1.5em; } h2 { font-size: 1.25em; } h3 { font-size: 1.1em; }
-        a { color: \(css(c.accentOn)); }
-        p, li { color: \(css(c.text.withAlphaComponent(0.92))); }
-        .dim { color: \(css(c.dim)); }
-        code { font: 12.5px ui-monospace, "SF Mono", monospace; background: \(css(c.mantle)); padding: 1px 4px; border-radius: 4px; }
-        pre { font: 12.5px/1.45 ui-monospace, "SF Mono", monospace; background: \(css(c.mantle));
-              padding: 10px 12px; border-radius: 6px; overflow: auto; border: 1px solid \(css(c.hairline)); }
-        table { border-collapse: collapse; margin: .6em 0; }
-        td, th { border: 1px solid \(css(c.hairline)); padding: 5px 9px; vertical-align: top; }
-        th { background: \(css(c.mantle)); text-align: left; }
-        img { max-width: 100%; height: auto; border-radius: 4px; }
-        blockquote { border-left: 3px solid \(css(c.hairline)); margin: .6em 0; padding: 0 12px; color: \(css(c.dim)); }
-        .confluence-information-macro, .panel, .aui-message { border-left: 3px solid \(css(c.accentOn));
-              background: \(css(c.mantle)); padding: 2px 12px; margin: .8em 0; border-radius: 4px; }
-        .confluence-information-macro-warning { border-color: \(css(c.tone(.warning))); }
-        .confluence-information-macro-note { border-color: \(css(c.tone(.info))); }
-        mark.wsh { background: \(css(c.tone(.warning).withAlphaComponent(0.35))); color: inherit; border-radius: 2px; padding: 0 1px; }
-        mark.wsh.on { background: \(css(c.tone(.warning).withAlphaComponent(0.75))); color: #000;
-                      box-shadow: 0 0 0 2px \(css(c.accentOn)); }
-        .ws-title { font-size: 1.6em; font-weight: 650; margin: .2em 0 .6em; }
-        </style></head><body><div class="ws-title">\(escapeHTML(title))</div>\(body)
-        <script>
-        (function () {
-          const terms = \(termsJSON);
-          const esc = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
-          const suf = '(?:s|es|ed|d|ing|ment|ments|er|ers|ly)?';
-          const parts = terms.map(t => {
-            const w = (t.text || '').trim().split(/\\s+/).filter(Boolean).map(x => esc(x) + (t.prefix ? '' : suf));
-            if (!w.length) return null;
-            return '\\\\b' + w.join('\\\\s+') + (t.prefix ? '\\\\w*' : '\\\\b');
-          }).filter(Boolean);
-          let marks = [], cur = -1;
-          if (parts.length) {
-            const rx = new RegExp(parts.join('|'), 'gi');
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-              acceptNode: n => (n.parentNode && /^(SCRIPT|STYLE|MARK)$/.test(n.parentNode.nodeName))
-                ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
-            const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
-            for (const n of nodes) {
-              const s = n.nodeValue; rx.lastIndex = 0; let m, last = 0, frag = null;
-              while ((m = rx.exec(s)) && m[0].length) {
-                frag = frag || document.createDocumentFragment();
-                frag.appendChild(document.createTextNode(s.slice(last, m.index)));
-                const mk = document.createElement('mark'); mk.className = 'wsh'; mk.textContent = m[0];
-                frag.appendChild(mk); last = m.index + m[0].length;
-                // the title is marked but not a stop: hits walk the body
-                if (!(n.parentNode.closest && n.parentNode.closest('.ws-title'))) marks.push(mk);
-              }
-              if (frag) { frag.appendChild(document.createTextNode(s.slice(last))); n.parentNode.replaceChild(frag, n); }
+        let params: [String: Any] = [
+            "page": page,
+            "row": ["type": r.type, "url": r.url, "title": r.title],
+            "site": site,
+            "terms": terms,
+            "colors": Self.pageColors(colors),
+        ]
+        pythonHelper.call("confluence.preview_html", params, timeout: 60) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let box) = result, let d = box as? [String: Any],
+                  let html = d["html"] as? String else {
+                self.hint.stringValue = "✗ preview failed (python helper unavailable)"
+                self.hint.isHidden = false
+                return
             }
-          }
-          function snippet(mk) {
-            let b = mk.parentElement; while (b && getComputedStyle(b).display === 'inline') b = b.parentElement;
-            const t = (b ? b.innerText : mk.textContent).replace(/\\s+/g, ' ');
-            const at = t.toLowerCase().indexOf(mk.textContent.toLowerCase());
-            const a = Math.max(0, at - 70), z = Math.min(t.length, at + mk.textContent.length + 90);
-            return (a > 0 ? '…' : '') + t.slice(a, z) + (z < t.length ? '…' : '');
-          }
-          function go(i) {
-            if (!marks.length) { post(-1); return; }
-            if (cur >= 0) marks[cur].classList.remove('on');
-            cur = (i + marks.length) % marks.length;
-            marks[cur].classList.add('on');
-            marks[cur].scrollIntoView({ block: 'center', behavior: 'smooth' });
-            post(cur);
-          }
-          function post(i) {
-            window.webkit.messageHandlers.ws.postMessage({ i: i, n: marks.length, snippet: i >= 0 ? snippet(marks[i]) : '' });
-          }
-          window.wsNext = () => go(cur + 1);
-          window.wsPrev = () => go(cur - 1);
-          if (marks.length) go(0); else post(-1);
-        })();
-        </script></body></html>
-        """
+            self.hint.isHidden = true
+            self.web.isHidden = false
+            self.hitsBar.isHidden = false
+            self.hitLabel.stringValue = self.terms.isEmpty ? "" : "Finding matches…"
+            self.web.loadHTMLString(html, baseURL: URL(string: base))
+        }
     }
 
-    private func escapeHTML(_ s: String) -> String {
-        s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
+    private static func pageColors(_ c: PopupColors) -> [String: String] {
+        func rgba(_ x: NSColor, _ a: CGFloat = 1) -> String {
+            let s = x.usingColorSpace(.sRGB) ?? x
+            return String(format: "rgba(%d,%d,%d,%.3f)",
+                          Int(s.redComponent * 255), Int(s.greenComponent * 255),
+                          Int(s.blueComponent * 255), s.alphaComponent * a)
+        }
+        return ["light": c.isLight ? "light" : "dark",
+                "text": rgba(c.text), "text92": rgba(c.text, 0.92),
+                "dim": rgba(c.dim), "accent": rgba(c.accentOn),
+                "mantle": rgba(c.mantle), "hairline": rgba(c.hairline),
+                "warn": rgba(c.tone(.warning)), "warn35": rgba(c.tone(.warning), 0.35),
+                "warn75": rgba(c.tone(.warning), 0.75), "info": rgba(c.tone(.info))]
     }
+
 
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let j = message.body as? [String: Any] else { return }

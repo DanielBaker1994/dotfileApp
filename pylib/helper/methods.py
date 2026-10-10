@@ -6,6 +6,7 @@ import threading
 import ai_format
 import compare_folder
 import confluence_glue
+import confluence_pages
 import compare_text
 import config_text
 import doc_templates
@@ -802,3 +803,8 @@ def _confluence_rate_limit(params: dict) -> dict:
 @method("confluence.criteria")
 def _confluence_criteria(params: dict) -> dict:
     return confluence_glue.criteria(params)
+
+
+@method("confluence.preview_html")
+def _confluence_preview_html(params: dict) -> dict:
+    return {"html": confluence_pages.preview_html(params)}
