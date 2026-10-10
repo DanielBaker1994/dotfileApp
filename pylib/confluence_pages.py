@@ -105,10 +105,12 @@ mark.wsh.on { background: @warn75; color: #000;
 </script></body></html>
 """)
 
-_CONFLUENCE_DEFAULTS = jsonmgr.load("confluence/defaults")
-# the preview page's color-key schema lives in confluence/defaults.json
-
-_COLOR_KEYS = list(_CONFLUENCE_DEFAULTS["pages"]["color_keys"])
+# lazy (worker surface): a broken confluence/defaults.json fails at the
+# first method call and is retried on the next one; the preview page's
+# color-key schema lives in confluence/defaults.json
+jsonmgr.lazy_module(__name__, globals(), {
+    "_COLOR_KEYS": ("confluence/defaults", ("pages", "color_keys"), list),
+})
 
 _IMG = re.compile(r'(<img\b[^>]*?\bsrc\s*=\s*)"([^"]+)"', re.IGNORECASE)
 
@@ -180,7 +182,8 @@ def preview_html(params: dict) -> str:
     title = _s(page.get("title")) or _s(row.get("title"))
     colors = params.get("colors") if isinstance(params.get("colors"), dict) else {}
     terms = params.get("terms") if isinstance(params.get("terms"), list) else []
-    subs = {k: _s(colors.get(k)) for k in _COLOR_KEYS}
+    subs = {k: _s(colors.get(k))
+            for k in jsonmgr.field("confluence/defaults", "pages", "color_keys")}
     subs["title"] = _esc_title(title)
     subs["body"] = rewrite(body, base)
     subs["terms"] = json.dumps(terms, ensure_ascii=False, separators=(",", ":"))

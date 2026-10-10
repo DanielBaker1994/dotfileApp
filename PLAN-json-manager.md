@@ -475,6 +475,7 @@ batch as the plan executes.
 | M4b | done | lazy: `paneshot`, `ansi` (`_BASE16` projection); suites + `helper` green |
 | M4c | done | `shot_model` eager-by-decision (validation correction; no lazy conversion) |
 | M4d | done | lazy: `jira_data`, `jira_pages`, `jira_boards`, `jira_directory`, `jira_search` (`jira_fields` stays eager); all 5 suites + `helper` green |
+| M4e | done | lazy: `confluence_glue`, `confluence_pages`; suites + `helper` green. End state: 14/17 pylib loaders lazy (eager-by-decision: `shot_model`; eager by plan: `jira_fields`, `jira_paths`) |
 | … | — | |
 
 ## 7. Validation hooks for this plan

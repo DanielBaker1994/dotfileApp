@@ -6,12 +6,13 @@ import base64
 
 import jsonmgr
 
-# modes / default search types / sort + the rate-limit gate numbers live in
-# confluence/defaults.json (the jira_fields.py cross-package pattern)
-_DEFAULTS = jsonmgr.load("confluence/defaults")
-
-MODES = list(_DEFAULTS["modes"])
-_SEARCH = _DEFAULTS["defaults"]["search"]
+# lazy (worker surface): a broken confluence/defaults.json fails at the
+# first method call and is retried on the next one; internal uses go
+# through jsonmgr.field
+jsonmgr.lazy_module(__name__, globals(), {
+    "MODES": ("confluence/defaults", ("modes",), list),
+    "_SEARCH": ("confluence/defaults", ("defaults", "search")),
+})
 
 
 def auth_header(config: dict) -> str:
@@ -36,32 +37,35 @@ def rate_limit(response: dict) -> dict:
     retryIn) seconds (fallbackSeconds when the answer has no usable number)."""
     if not isinstance(response, dict) or response.get("rateLimited") is not True:
         return {"limited": False}
-    fallback = _DEFAULTS["defaults"]["rateLimitFallbackSeconds"]
+    fallback = jsonmgr.field("confluence/defaults", "defaults", "rateLimitFallbackSeconds")
     secs = response.get("retryIn")
     if not isinstance(secs, int) or isinstance(secs, bool):
         secs = fallback
-    return {"limited": True, "seconds": max(_DEFAULTS["defaults"]["rateLimitMinSeconds"], secs)}
+    return {"limited": True, "seconds": max(
+        jsonmgr.field("confluence/defaults", "defaults", "rateLimitMinSeconds"), secs)}
 
 
 def criteria(params: dict) -> dict:
     """The search panel's live state -> the criteria JSON the
     confluence_api.py --search call consumes."""
+    modes = jsonmgr.field("confluence/defaults", "modes")
+    search = jsonmgr.field("confluence/defaults", "defaults", "search")
     idx = params.get("modeIndex")
-    idx = idx if isinstance(idx, int) and 0 <= idx < len(MODES) else 0
+    idx = idx if isinstance(idx, int) and 0 <= idx < len(modes) else 0
     types_raw = params.get("types")
     if types_raw is None:
-        types_raw = ",".join(_SEARCH["types"])
+        types_raw = ",".join(search["types"])
     types = [t for t in str(types_raw).split(",") if t]
     contributors = [c for c in (params.get("contributors") or []) if isinstance(c, str)]
     spaces = [s for s in (params.get("spaces") or []) if isinstance(s, str)]
     c = {"query": (params.get("query") or "").strip(),
-         "mode": MODES[idx],
+         "mode": modes[idx],
          "titleOnly": bool(params.get("titleOnly")),
          "spaces": [] if params.get("spacesAll") else spaces,
          "types": types,
          "modified": params.get("modified") or "",
          "contributors": [] if params.get("contributorsAll") else contributors,
-         "sort": params.get("sort") or _SEARCH["sort"]}
+         "sort": params.get("sort") or search["sort"]}
     if params.get("favorites"):
         c["favorites"] = True
     return c
