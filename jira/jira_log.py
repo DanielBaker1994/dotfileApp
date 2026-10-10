@@ -38,10 +38,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import jira_config  # noqa: E402
 import jira_paths  # noqa: E402
+import jsonmgr  # noqa: E402
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults.json")
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _LOGGING_DEFAULTS = json.load(_fh)["logging"]
+_LOGGING_DEFAULTS = jsonmgr.load("jira/defaults")["logging"]
 
 DEBUG_LOG = jira_paths.cache_file("debugLog")
 DEBUG_LOG_MAX = _LOGGING_DEFAULTS["debug_log_max"]

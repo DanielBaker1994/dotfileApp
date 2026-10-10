@@ -72,6 +72,7 @@ WS_ROOT = os.path.dirname(JIRA_DIR)
 sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 
 import jira_paths  # noqa: E402
+import jsonmgr  # noqa: E402
 
 CONFIG_JSON = jira_paths.CONFIG_JSON      # file locations: pylib/paths.json (shared with the app)
 TEAM_JSON = jira_paths.TEAM_JSON
@@ -98,9 +99,7 @@ WINDOW_RE = re.compile(r"^(\d+)([smhdw])$")
 # The static tables (config defaults, endpoints, REST paths, search / JQL
 # defaults, field maps, key lists) live in jira/defaults.json and load here;
 # everything that is behaviour stays code.
-_DEFAULTS_FILE = os.path.join(JIRA_DIR, "defaults.json")
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _D = json.load(_fh)
+_D = jsonmgr.load("jira/defaults")
 
 DEFAULTS = dict(_D["defaults"], outDir=OUT_DIR_DEFAULT)   # outDir expands paths.json
 LIVE_SEARCH_MAX = DEFAULTS["liveSearchMax"]               # default max results of one live search

@@ -149,12 +149,11 @@ import jira_config  # noqa: E402
 import jira_log  # noqa: E402
 import jira_status  # noqa: E402
 import jira_paths  # noqa: E402
+import jsonmgr  # noqa: E402
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults.json")
 # cache-file names live in pylib/paths.json; the poll limits, sprint rank and
 # MY WORK vocabulary in jira/defaults.json (one home each)
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _DEFAULTS = json.load(_fh)
+_DEFAULTS = jsonmgr.load("jira/defaults")
 
 LEGACY_POLL_STATE = jira_paths.cache_file("legacyPollState")
 KEYS_DIR = jira_paths.cache_file("keysDir")
