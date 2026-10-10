@@ -162,6 +162,7 @@ FIELDS_SEEN = jira_paths.cache_file("fieldsSeen")
 POLL_LOG = jira_paths.cache_file("pollLog")
 POLL_LOG_MAX = _DEFAULTS["logging"]["poll_log_max"]  # rotate: keep the newest half past 2MB
 ERROR_RETRY = _DEFAULTS["poll"]["error_retry"]  # a failed endpoint is retried (resumed) after min(window, 5m)
+_POLL_DEFAULTS = _DEFAULTS["poll_defaults"]  # ad-hoc endpoint windows + page size
 SYNC = "sync"           # the shared issue-cache sync: status entry + checkpoint name
 
 QUIET = False
@@ -468,7 +469,7 @@ def choose_window(name: str, entry: dict, o: dict, margin: int, needs_full: bool
         base = legacy_last_poll()
     t = jira_status.parse_time(base)
     if t is None:
-        return "10m"
+        return _POLL_DEFAULTS["window"]
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(t - margin * 60))
 
 
@@ -690,7 +691,7 @@ class Ctx:
                 max(caps) if caps and all(caps) else None)
 
     def sync_wsec(self) -> int:
-        ws = [jira_config.parse_window(e.get("window", "10m")) for e in self.plain]
+        ws = [jira_config.parse_window(e.get("window", _POLL_DEFAULTS["window"])) for e in self.plain]
         return min(ws) if ws else 600
 
     def sync_window(self, status: dict) -> str:
@@ -999,7 +1000,7 @@ def describe(cfg, team: dict) -> dict:
         entry = jira_status.endpoint_entry(status, ep["name"])
         typ = ep.get("type", "issues")
         try:
-            wsec = jira_config.parse_window(ep.get("window", "10m"))
+            wsec = jira_config.parse_window(ep.get("window", _POLL_DEFAULTS["window"]))
         except jira_config.ConfigError:
             wsec = 0
         projects = ep.get("projects", "*")
@@ -1058,7 +1059,7 @@ def describe(cfg, team: dict) -> dict:
             notes.append(f"cannot build request: {err}")
         nx = next_run(entry, wsec) if wsec else None
         eps.append({
-            "name": ep["name"], "type": typ, "window": ep.get("window", "10m"),
+            "name": ep["name"], "type": typ, "window": ep.get("window", _POLL_DEFAULTS["window"]),
             "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
             "path": ep_path(ep, os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)),
             "maxResults": ep.get("maxResults") or 0, "maxTotal": ep.get("maxTotal") or 0,
@@ -1304,13 +1305,13 @@ def run_setup_step(ctx: Ctx, name: str) -> tuple:
                extra={"syncedProjects": ctx.sync_projects(), "syncedFields": ctx.sync_fields()})
         for e in ctx.plain:
             record(e["name"], started, "full", "", "", counts.get(e["name"]),
-                   jira_config.parse_window(e.get("window", "10m")))
+                   jira_config.parse_window(e.get("window", _POLL_DEFAULTS["window"])))
         return res["total"], f"{res['total']:,} issue(s) cached" + (" (resumed)" if res["resumed"] else "")
     ep = cfg.endpoint(name)
     if ep is None:
         raise jira_config.ConfigError(f"unknown step '{name}'")
     started = jira_status.now_str()
-    wsec = jira_config.parse_window(ep.get("window", "10m"))
+    wsec = jira_config.parse_window(ep.get("window", _POLL_DEFAULTS["window"]))
     if plain_issue_job(ep):
         n = publish_plain(ctx, only=name).get(name, 0)
         record(name, started, "-", "", "", n, wsec)
@@ -1529,7 +1530,7 @@ def strip_order(jql: str) -> str:
 def board_job(bid: str, jql: str, sprint: bool, columns: str) -> dict:
     q = f"({jql}) AND sprint in openSprints()" if sprint else jql
     return {"name": f"board-{bid}", "type": "issues", "jql": q, "boardJql": jql, "boardId": bid,
-            "sprintOnly": bool(sprint), "file": f"board-{bid}.json", "window": "15m",
+            "sprintOnly": bool(sprint), "file": f"board-{bid}.json", "window": _POLL_DEFAULTS["job_window"],
             "projects": "*", "enabled": True, "columns": columns}
 
 
@@ -1566,7 +1567,8 @@ def board_info(c, bid: str, status_ids: dict) -> dict:
         names = [status_ids.get(str(st.get("id")), "") for st in col.get("statuses") or []]
         cols.append({"name": col.get("name") or "", "statuses": [n for n in names if n]})
     try:
-        qf = c.get(c.path("board_quickfilters", board_id=bid), "maxResults=50") or {}
+        qf = c.get(c.path("board_quickfilters", board_id=bid),
+                   "maxResults=%d" % _POLL_DEFAULTS["page_size"]) or {}
         quick = [{"id": str(q.get("id")), "name": q.get("name") or "", "jql": q.get("jql") or ""}
                  for q in qf.get("values") or [] if isinstance(q, dict)]
     except jira_api.ApiError:
@@ -1658,7 +1660,7 @@ def board_catalog(c, keys: list) -> dict:
         boards, start = [], 0
         try:
             while True:
-                got = c.get(bpath, f"projectKeyOrId={jira_api.qenc(proj)}&startAt={start}&maxResults=50") or {}
+                got = c.get(bpath, f"projectKeyOrId={jira_api.qenc(proj)}&startAt={start}&maxResults={_POLL_DEFAULTS['page_size']}") or {}
                 vals = [b for b in got.get("values") or [] if isinstance(b, dict) and b.get("id") is not None]
                 boards += vals
                 start += len(vals)
@@ -1734,7 +1736,7 @@ def list_sprints(bid: str) -> int:
 def sprint_job(s: dict, columns: str) -> dict:
     return {"name": f"sprint-{s['id']}", "type": "issues", "jql": f"sprint = {s['id']}",
             "boardId": s["board"], "sprintId": s["id"], "file": f"sprint-{s['id']}.json",
-            "window": "15m", "projects": "*", "enabled": True, "columns": columns}
+            "window": _POLL_DEFAULTS["job_window"], "projects": "*", "enabled": True, "columns": columns}
 
 
 def edit_pinned_sprints(op: str, refs: list) -> int:
@@ -2088,7 +2090,7 @@ def import_filters() -> int:
         old = next((e for e in eps if e.get("name") == name), None)
         if old is None:
             eps.append({"name": name, "type": "issues", "jql": jql, "file": f"{title}.json",
-                        "filterId": fid, "window": "30m", "projects": "*", "enabled": True,
+                        "filterId": fid, "window": _POLL_DEFAULTS["filter_window"], "projects": "*", "enabled": True,
                         "columns": main_columns(cfg)})
             added += 1
         elif old.get("jql") != jql:
@@ -2437,7 +2439,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
     for ep in cfg.endpoints:
         wanted = (not names or everything) and ep.get("enabled", True) or ep["name"] in names
         entry = jira_status.endpoint_entry(status, ep["name"])
-        wsec = jira_config.parse_window(ep.get("window", "10m"))
+        wsec = jira_config.parse_window(ep.get("window", _POLL_DEFAULTS["window"]))
         nxt = next_run(entry, wsec)
         due = wanted and (forced or nxt is None or now >= nxt)
         if due:
@@ -2482,7 +2484,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
         d["endpoints"] = [e for e in d.get("endpoints", []) if e.get("name") in known]
         for ep in cfg.endpoints:
             e = jira_status.endpoint_entry(d, ep["name"])
-            wsec = jira_config.parse_window(ep.get("window", "10m"))
+            wsec = jira_config.parse_window(ep.get("window", _POLL_DEFAULTS["window"]))
             e.update({"type": ep.get("type", "issues"), "window": ep.get("window"),
                       "enabled": ep.get("enabled", True), "file": ep.get("file", ""),
                       "path": ep_path(ep, ctx.out_dir)})
@@ -2517,7 +2519,7 @@ def poll(o: dict, cfg, team: dict, base: dict, set_base, lock: Lock) -> int:
                                        "syncedFields": getattr(ctx, "filled", None) or ctx.sync_fields()})
         for ep in ctx.plain:
             record(ep["name"], started, window, err, curl, counts.get(ep["name"]),
-                   jira_config.parse_window(ep.get("window", "10m")))
+                   jira_config.parse_window(ep.get("window", _POLL_DEFAULTS["window"])))
         if err:
             failures.append(f"issue cache: {err}")
     for ep, entry, wsec in others:

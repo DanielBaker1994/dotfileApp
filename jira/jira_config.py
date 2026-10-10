@@ -83,7 +83,6 @@ OUT_DIR_DEFAULT = jira_paths.OUT_DIR_DEFAULT
 
 # path-derived locations (paths.json values, not defaults)
 LIVE_SEARCH_FILE = jira_paths.TABS["liveSearch"]  # the live search's tab (in outDir)
-LIVE_SEARCH_MAX = 100                             # default max results of one live search
 FAVORITES_FILE = jira_paths.TABS["favorites"]     # the pinned issues' tab (the favorites job)
 BLACKLIST_RELEASE_FILE = jira_paths.TABS["blacklistRelease"]
 RELEASE_VIEW_DIR = jira_paths.SIDE_DIRS["releases"]
@@ -104,6 +103,7 @@ with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
     _D = json.load(_fh)
 
 DEFAULTS = dict(_D["defaults"], outDir=OUT_DIR_DEFAULT)   # outDir expands paths.json
+LIVE_SEARCH_MAX = DEFAULTS["liveSearchMax"]               # default max results of one live search
 DEFAULT_ENDPOINTS = _D["endpoints"]
 DIRECTORY_ENDPOINT = next(e for e in DEFAULT_ENDPOINTS if e["type"] == "directory")
 FAVORITES_ENDPOINT = next(e for e in DEFAULT_ENDPOINTS if e["type"] == "favorites")
@@ -652,8 +652,8 @@ def migrate_legacy(legacy: dict) -> dict:
         "email": legacy.get("JIRA_EMAIL", ""),
         "token": legacy.get("JIRA_TOKEN", ""),
         "defaultProject": legacy.get("JIRA_DEFAULT_PROJECT", ""),
-        "defaultMax": num("JIRA_MAX", 25),
-        "pollMarginMinutes": num("JIRA_POLL_MARGIN", 5),
+        "defaultMax": num("JIRA_MAX", DEFAULTS["defaultMax"]),
+        "pollMarginMinutes": num("JIRA_POLL_MARGIN", DEFAULTS["pollMarginMinutes"]),
         "outDir": legacy.get("JIRA_POLL_OUT_DIR") or OUT_DIR_DEFAULT,
     })
     projs_spec = (legacy.get("JIRA_POLL_PROJECTS") or "").strip()

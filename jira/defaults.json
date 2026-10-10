@@ -12,6 +12,7 @@
     "snapshotKeep": 30,
     "endpoints": [],
     "liveSearch": {},
+    "liveSearchMax": 100,
     "rateLimitMaxWaitMinutes": 30,
     "requestDelayMs": 0,
     "checkpointEvery": 500,
@@ -310,6 +311,12 @@
   },
   "poll": {
     "error_retry": 300
+  },
+  "poll_defaults": {
+    "window": "10m",
+    "job_window": "15m",
+    "filter_window": "30m",
+    "page_size": 50
   },
   "search_ui": {
     "skip_fields": ["key", "title", "status", "assignee", "release", "releaseLabel",
