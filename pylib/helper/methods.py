@@ -4,6 +4,7 @@ import base64
 import threading
 
 import ai_format
+import ansi
 import compare_folder
 import confluence_glue
 import confluence_pages
@@ -20,6 +21,7 @@ import jira_fields
 import jira_pages
 import jira_search
 import jira_setup
+import paneshot
 import prose_pdf
 import shot_model
 import status as ws_status
@@ -864,3 +866,56 @@ def _shot_state_load(params: dict) -> dict:
 def _shot_state_save(params: dict) -> dict:
     shot_model.state_save(params.get("path") or "", params.get("state") or {})
     return {}
+
+
+def _ansi_style_dict(s) -> dict:
+    return {"fg": list(s.fg), "bg": list(s.bg),
+            "bold": s.bold, "dim": s.dim, "italic": s.italic,
+            "underline": s.underline, "inverse": s.inverse, "strike": s.strike}
+
+
+@method("ansi.parse")
+def _ansi_parse(params: dict) -> dict:
+    g = ansi.parse(params.get("text") or "")
+    return {"rows": [[{"text": c.text, "width": c.width, "style": _ansi_style_dict(c.style)}
+                      for c in row] for row in g.rows]}
+
+
+@method("paneshot.args")
+def _paneshot_args(params: dict) -> dict:
+    try:
+        a = paneshot.parse_args(params.get("words") or [])
+    except paneshot.Problem as e:
+        return {"ok": False, "message": e.message}
+    return {"ok": True, "args": {k: getattr(a, k) for k in paneshot.Args.__slots__}}
+
+
+@method("paneshot.config")
+def _paneshot_config(params: dict) -> dict:
+    c = paneshot.Config(params.get("entries") or {})
+    return {"config": {"lines": c.lines, "save": c.save, "copy": c.copy, "preview": c.preview,
+                       "herdrBin": c.herdr_bin, "ghosttyBin": c.ghostty_bin, "font": c.font,
+                       "fontSize": c.font_size, "background": c.background, "padding": c.padding,
+                       "savePath": c.save_path, "filenamePattern": c.filename_pattern,
+                       "toast": c.toast}}
+
+
+@method("paneshot.pane_json")
+def _paneshot_pane_json(params: dict) -> dict:
+    try:
+        p = paneshot.pane_from_json(params.get("text") or "")
+    except paneshot.HerdrFailure as e:
+        return {"ok": False, "message": e.message}
+    return {"ok": True, "pane": p}
+
+
+@method("paneshot.lines")
+def _paneshot_lines(params: dict) -> dict:
+    return {"lines": paneshot.lines_for(int(params.get("viewport") or 0),
+                                        int(params.get("history") or 0),
+                                        bool(params.get("all")))}
+
+
+@method("paneshot.environment")
+def _paneshot_environment(params: dict) -> dict:
+    return {"env": paneshot.environment(params.get("env") or {})}

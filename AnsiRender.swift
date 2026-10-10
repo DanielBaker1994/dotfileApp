@@ -38,142 +38,45 @@ struct AnsiGrid {
 
     var columns: Int { rows.map(\.count).max() ?? 0 }
 
+    /// The ANSI parser lives in pylib/ansi.py (its suite's parser cases
+    /// moved there); this decodes the cells into the renderer's mirror.
     static func parse(_ text: String) -> AnsiGrid {
         var g = AnsiGrid()
-        var row: [AnsiCell] = []
-        var col = 0
-        var style = AnsiStyle()
-        let chars = Array(text)
-        var i = 0
-
-        func put(_ s: String, _ w: Int) {
-            while row.count < col { row.append(AnsiCell(text: " ", style: style, width: 1)) }
-            let cell = AnsiCell(text: s, style: style, width: w)
-            if col < row.count { row[col] = cell } else { row.append(cell) }
-            col += 1
-            if w == 2 {
-                let rest = AnsiCell(text: "", style: style, width: 0)
-                if col < row.count { row[col] = rest } else { row.append(rest) }
-                col += 1
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "ansi.parse", ["text": text], timeout: 60),
+              let d = box as? [String: Any], let rows = d["rows"] as? [[[String: Any]]] else {
+            return g
+        }
+        g.rows = rows.map { row in
+            row.map { c in
+                AnsiCell(text: c["text"] as? String ?? "",
+                         style: Self.style(from: c["style"] as? [String: Any] ?? [:]),
+                         width: c["width"] as? Int ?? 1)
             }
-        }
-        func newline() {
-            g.rows.append(row)
-            row = []
-            col = 0
-        }
-
-        while i < chars.count {
-            let c = chars[i]
-            switch c {
-            case "\u{1B}":
-                i += 1
-                guard i < chars.count else { break }
-                switch chars[i] {
-                case "[":
-                    var params = ""
-                    i += 1
-                    while i < chars.count, let a = chars[i].asciiValue, !(0x40...0x7E).contains(a) {
-                        params.append(chars[i])
-                        i += 1
-                    }
-                    if i < chars.count, chars[i] == "m" { applySGR(params, &style) }
-                    i += 1
-                case "]", "P", "_", "^":
-                    i += 1
-                    while i < chars.count {
-                        if chars[i] == "\u{07}" { i += 1; break }
-                        if chars[i] == "\u{1B}", i + 1 < chars.count, chars[i + 1] == "\\" { i += 2; break }
-                        i += 1
-                    }
-                case "(", ")", "*", "+":
-                    i += 2
-                default:
-                    i += 1
-                }
-                continue
-            case "\r\n", "\n":
-                newline()
-            case "\r":
-                col = 0
-            case "\t":
-                let stop = (col / 8 + 1) * 8
-                while col < stop { put(" ", 1) }
-            default:
-                if let a = c.asciiValue, a < 0x20 || a == 0x7F { break }
-                put(String(c), cellWidth(c))
-            }
-            i += 1
-        }
-        if !row.isEmpty { newline() }
-        while let last = g.rows.last, last.allSatisfy({ ($0.text == " " || $0.text.isEmpty) && $0.style.bg == .none && !$0.style.inverse }) {
-            g.rows.removeLast()
         }
         return g
     }
 
-    static func applySGR(_ params: String, _ s: inout AnsiStyle) {
-        let p = params.split(omittingEmptySubsequences: false, whereSeparator: { $0 == ";" || $0 == ":" })
-            .map { Int($0) ?? 0 }
-        let codes = p.isEmpty ? [0] : p
-        var i = 0
-        func extended() -> AnsiColor? {
-            guard i + 1 < codes.count else { return nil }
-            if codes[i + 1] == 5, i + 2 < codes.count {
-                defer { i += 2 }
-                return .index(max(0, min(255, codes[i + 2])))
+    private static func style(from d: [String: Any]) -> AnsiStyle {
+        func color(_ v: Any?) -> AnsiColor {
+            guard let a = v as? [Any], let kind = a.first as? String else { return .none }
+            if kind == "index", a.count > 1, let n = a[1] as? Int { return .index(n) }
+            if kind == "rgb", a.count > 1, let r = a[1] as? [Any], r.count == 3,
+               let r0 = r[0] as? Int, let g0 = r[1] as? Int, let b0 = r[2] as? Int {
+                return .rgb(AnsiRGB(UInt8(clamping: r0), UInt8(clamping: g0), UInt8(clamping: b0)))
             }
-            if codes[i + 1] == 2, i + 4 < codes.count {
-                defer { i += 4 }
-                func c(_ v: Int) -> UInt8 { UInt8(max(0, min(255, v))) }
-                return .rgb(AnsiRGB(c(codes[i + 2]), c(codes[i + 3]), c(codes[i + 4])))
-            }
-            return nil
+            return .none
         }
-        while i < codes.count {
-            let c = codes[i]
-            switch c {
-            case 0: s = AnsiStyle()
-            case 1: s.bold = true
-            case 2: s.dim = true
-            case 3: s.italic = true
-            case 4: s.underline = true
-            case 7: s.inverse = true
-            case 9: s.strike = true
-            case 21: s.underline = true
-            case 22: s.bold = false; s.dim = false
-            case 23: s.italic = false
-            case 24: s.underline = false
-            case 27: s.inverse = false
-            case 29: s.strike = false
-            case 30...37: s.fg = .index(c - 30)
-            case 38: if let x = extended() { s.fg = x }
-            case 39: s.fg = .none
-            case 40...47: s.bg = .index(c - 40)
-            case 48: if let x = extended() { s.bg = x }
-            case 49: s.bg = .none
-            case 58: _ = extended()
-            case 90...97: s.fg = .index(c - 90 + 8)
-            case 100...107: s.bg = .index(c - 100 + 8)
-            default: break
-            }
-            i += 1
-        }
-    }
-
-    static func cellWidth(_ c: Character) -> Int {
-        guard let first = c.unicodeScalars.first else { return 1 }
-        if c.unicodeScalars.contains(where: { $0.value == 0xFE0F }) { return 2 }
-        if first.properties.isEmojiPresentation { return 2 }
-        switch first.value {
-        case 0x1100...0x115F, 0x2E80...0x303E, 0x3041...0x33FF, 0x3400...0x4DBF,
-             0x4E00...0x9FFF, 0xA000...0xA4CF, 0xAC00...0xD7A3, 0xF900...0xFAFF,
-             0xFE30...0xFE4F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,
-             0x20000...0x3FFFD:
-            return 2
-        default:
-            return 1
-        }
+        var s = AnsiStyle()
+        s.fg = color(d["fg"])
+        s.bg = color(d["bg"])
+        s.bold = d["bold"] as? Bool ?? false
+        s.dim = d["dim"] as? Bool ?? false
+        s.italic = d["italic"] as? Bool ?? false
+        s.underline = d["underline"] as? Bool ?? false
+        s.inverse = d["inverse"] as? Bool ?? false
+        s.strike = d["strike"] as? Bool ?? false
+        return s
     }
 }
 

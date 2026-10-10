@@ -12,39 +12,26 @@ struct PaneShotArgs: Equatable {
 
     static let usage = "pane-shot [--pane ID] [--lines N|all] [--file PATH|-] [--no-save] [--no-copy]"
 
+    /// The CLI grammar lives in pylib/paneshot.py (its suite holds the old
+    /// Swift cases); this stays the typed mirror.
     static func parse(_ words: [String]) -> Result<PaneShotArgs, Problem> {
-        var a = PaneShotArgs()
-        var i = 0
-        func value(_ flag: String) -> Result<String, Problem> {
-            i += 1
-            guard i < words.count, !words[i].isEmpty else { return .failure(Problem(message: "\(flag) needs a value")) }
-            return .success(words[i])
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "paneshot.args", ["words": words], timeout: 30),
+              let d = box as? [String: Any] else {
+            return .failure(Problem(message: "python helper unavailable"))
         }
-        while i < words.count {
-            let w = words[i]
-            switch w {
-            case "--pane", "-p":
-                switch value(w) { case .success(let v): a.pane = v; case .failure(let p): return .failure(p) }
-            case "--lines", "-n":
-                switch value(w) {
-                case .success(let v):
-                    if v == "all" { a.all = true }
-                    else if let n = Int(v), n >= 0 { a.lines = n }
-                    else { return .failure(Problem(message: "--lines takes a number or \"all\", not \(v)")) }
-                case .failure(let p): return .failure(p)
-                }
-            case "--file", "-f":
-                switch value(w) { case .success(let v): a.file = v; case .failure(let p): return .failure(p) }
-            case "--save": a.save = true
-            case "--no-save": a.save = false
-            case "--copy": a.copy = true
-            case "--no-copy": a.copy = false
-            case "-h", "--help": return .failure(Problem(message: "usage: kitchen-sink " + usage))
-            default: return .failure(Problem(message: "unknown argument \(w)\nusage: kitchen-sink " + usage))
-            }
-            i += 1
+        guard d["ok"] as? Bool == true else {
+            return .failure(Problem(message: d["message"] as? String ?? "bad arguments"))
         }
-        return .success(a)
+        let a = d["args"] as? [String: Any] ?? [:]
+        var out = PaneShotArgs()
+        out.pane = a["pane"] as? String
+        out.lines = a["lines"] as? Int
+        out.all = a["all"] as? Bool ?? false
+        out.file = a["file"] as? String
+        out.save = a["save"] as? Bool
+        out.copy = a["copy"] as? Bool
+        return .success(out)
     }
 }
 
@@ -65,28 +52,28 @@ struct PaneShotConfig {
 
     init() {}
 
+    /// entries -> clamps live in pylib/paneshot.py; defaults below are the
+    /// same table, used when the worker cannot answer.
     init(_ e: [String: String]) {
-        func s(_ k: String, _ d: String) -> String {
-            guard let v = e[k]?.trimmingCharacters(in: .whitespaces), !v.isEmpty else { return d }
-            return v
+        var d: [String: Any] = [:]
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "paneshot.config", ["entries": e], timeout: 30),
+           let c = box as? [String: Any], let cfg = c["config"] as? [String: Any] {
+            d = cfg
         }
-        func n(_ k: String, _ d: Double, _ r: ClosedRange<Double>) -> Double {
-            guard let v = e[k].flatMap({ Double($0) }) else { return d }
-            return max(r.lowerBound, min(r.upperBound, v))
-        }
-        lines = Int(n("lines", 200, 0...Double(Herdr.maxLines)))
-        save = tri(e["save"]) ?? true
-        copy = tri(e["copy"]) ?? true
-        preview = tri(e["preview"]) ?? true
-        herdrBin = s("herdr-bin", herdrBin)
-        ghosttyBin = s("ghostty-bin", ghosttyBin)
-        font = s("font", "")
-        fontSize = n("font-size", 0, 0...72)
-        background = s("background", "")
-        padding = n("padding", 16, 0...200)
-        savePath = s("save-path", "")
-        filenamePattern = s("filename-pattern", filenamePattern)
-        toast = e["toast"] ?? toast
+        lines = d["lines"] as? Int ?? 200
+        save = d["save"] as? Bool ?? true
+        copy = d["copy"] as? Bool ?? true
+        preview = d["preview"] as? Bool ?? true
+        herdrBin = d["herdrBin"] as? String ?? herdrBin
+        ghosttyBin = d["ghosttyBin"] as? String ?? ghosttyBin
+        font = d["font"] as? String ?? ""
+        fontSize = d["fontSize"] as? Double ?? 0
+        background = d["background"] as? String ?? ""
+        padding = d["padding"] as? Double ?? 16
+        savePath = d["savePath"] as? String ?? ""
+        filenamePattern = d["filenamePattern"] as? String ?? filenamePattern
+        toast = d["toast"] as? String ?? toast
     }
 }
 
@@ -102,27 +89,37 @@ enum Herdr {
     struct Failure: Error, Equatable { let message: String }
 
     static func pane(fromJSON text: String) -> Result<Pane, Failure> {
-        guard let d = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+        // the envelope lives in pylib/paneshot.py
+        guard case .success(let box) = PythonHelper.shared.callSync(
+                "paneshot.pane_json", ["text": text], timeout: 30),
+              let d = box as? [String: Any] else {
             return .failure(Failure(message: "herdr answered no JSON"))
         }
-        if let e = d["error"] as? [String: Any] {
-            return .failure(Failure(message: e["message"] as? String ?? "herdr error"))
+        guard d["ok"] as? Bool == true else {
+            return .failure(Failure(message: d["message"] as? String ?? "herdr error"))
         }
-        guard let p = (d["result"] as? [String: Any])?["pane"] as? [String: Any], let id = p["pane_id"] as? String else {
-            return .failure(Failure(message: "herdr answered without a pane"))
-        }
-        let rows = (p["scroll"] as? [String: Any])?["viewport_rows"] as? Int ?? 0
-        let title = (p["terminal_title_stripped"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            ?? (p["agent"] as? String) ?? id
-        return .success(Pane(id: id, title: title, viewportRows: rows))
+        let p = d["pane"] as? [String: Any] ?? [:]
+        return .success(Pane(id: p["id"] as? String ?? "",
+                             title: p["title"] as? String ?? "",
+                             viewportRows: p["viewportRows"] as? Int ?? 0))
     }
 
     static func lines(viewport: Int, history: Int, all: Bool) -> Int {
-        all ? maxLines : min(maxLines, max(1, viewport + history))
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "paneshot.lines", ["viewport": viewport, "history": history, "all": all], timeout: 30),
+           let d = box as? [String: Any], let n = d["lines"] as? Int {
+            return n
+        }
+        return all ? maxLines : min(maxLines, max(1, viewport + history))
     }
 
     static func environment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
-        env.filter { !["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"].contains($0.key) }
+        if case .success(let box) = PythonHelper.shared.callSync(
+                "paneshot.environment", ["env": env], timeout: 30),
+           let d = box as? [String: Any], let e = d["env"] as? [String: String] {
+            return e
+        }
+        return env.filter { !["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"].contains($0.key) }
     }
 
     static func run(_ bin: String, _ args: [String]) -> Result<String, Failure> {

@@ -64,6 +64,14 @@ case "${1:-all}" in
     ansi)
         run_test "$TESTS/test_ansi_render.swift"
         ;;
+    ansi-parse)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_ansi.py"
+        ;;
+    paneshot)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_paneshot.py"
+        ;;
     prose)
         run_test "$TESTS/test_prose_pdf.swift"
         ;;

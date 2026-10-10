@@ -21,42 +21,19 @@ let esc = "\u{1B}"
 @main
 struct AnsiRenderTests {
     static func main() {
-        sgrTests()
+        let libDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("pylib").path
+        PythonHelper.shared.configure(libDir: libDir)
         gridTests()
-        widthTests()
         themeTests()
         renderTests()
-        argTests()
-        configTests()
         herdrTests()
         renderFileForALook()
         print("ansi: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }
 
-    static func style(_ params: String, from s: AnsiStyle = AnsiStyle()) -> AnsiStyle {
-        var x = s
-        AnsiGrid.applySGR(params, &x)
-        return x
-    }
-
-    static func sgrTests() {
-        check(style("38;5;12").fg == .index(12), "256-color fg")
-        check(style("48;5;8").bg == .index(8), "256-color bg")
-        check(style("38;2;10;20;30").fg == .rgb(AnsiRGB(10, 20, 30)), "truecolor fg")
-        check(style("38:2:10:20:30").fg == .rgb(AnsiRGB(10, 20, 30)), "colon-separated truecolor")
-        check(style("31").fg == .index(1) && style("94").fg == .index(12), "basic + bright fg")
-        check(style("41").bg == .index(1) && style("103").bg == .index(11), "basic + bright bg")
-        let all = style("1;2;3;4;7;9")
-        check(all.bold && all.dim && all.italic && all.underline && all.inverse && all.strike, "attributes on")
-        check(style("0", from: all) == AnsiStyle(), "0 resets")
-        check(style("", from: all) == AnsiStyle(), "empty = reset")
-        let off = style("22;23;24;27;29", from: all)
-        check(!off.bold && !off.dim && !off.italic && !off.underline && !off.inverse && !off.strike, "attributes off")
-        check(style("39", from: style("31")).fg == .none, "39 = default fg")
-        check(style("1;38;5;200;4").fg == .index(200) && style("1;38;5;200;4").underline, "params after an extended color")
-        check(style("38;5").fg == .none, "truncated extended color ignored")
-    }
 
     static func text(_ row: [AnsiCell]) -> String { row.map(\.text).joined() }
 
@@ -83,17 +60,6 @@ struct AnsiRenderTests {
         check(text(csi.rows[0]) == "abcd", "other CSI / charset escapes dropped")
         let ctl = AnsiGrid.parse("a\u{07}b\u{08}c")
         check(text(ctl.rows[0]) == "abc", "control characters dropped")
-    }
-
-    static func widthTests() {
-        check(AnsiGrid.cellWidth("a") == 1 && AnsiGrid.cellWidth("─") == 1, "narrow")
-        check(AnsiGrid.cellWidth("中") == 2 && AnsiGrid.cellWidth("한") == 2, "CJK wide")
-        check(AnsiGrid.cellWidth("😀") == 2, "emoji wide")
-        check(AnsiGrid.cellWidth("❤\u{FE0F}") == 2, "VS16 makes it wide")
-        check(AnsiGrid.cellWidth("\u{F121}") == 1, "nerd font icon (private use) narrow")
-        let g = AnsiGrid.parse("中x")
-        check(g.rows[0].count == 3 && g.rows[0][1].text.isEmpty && g.rows[0][2].text == "x", "wide cell + its right half")
-        check(AnsiGrid.parse("e\u{301}x").rows[0].count == 2, "combining mark rides in its grapheme")
     }
 
     static func themeTests() {
@@ -170,23 +136,6 @@ struct AnsiRenderTests {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.draw(img, in: CGRect(x: -x, y: y - img.height + 1, width: img.width, height: img.height))
         return (buf[0], buf[1], buf[2])
-    }
-
-    static func argTests() {
-        func p(_ s: String) -> PaneShotArgs? { try? PaneShotArgs.parse(s.split(separator: " ").map(String.init)).get() }
-        check(p("") == PaneShotArgs(), "no args")
-        check(p("--pane wB:p1 --lines 50")?.pane == "wB:p1" && p("--lines 50")?.lines == 50, "pane + lines")
-        check(p("-n all")?.all == true, "lines all")
-        check(p("--file - --no-save --no-copy") == PaneShotArgs(file: "-", save: false, copy: false), "file + switches")
-        check(p("--lines x") == nil && p("--lines") == nil && p("--bogus") == nil && p("--lines -3") == nil, "bad args refused")
-    }
-
-    static func configTests() {
-        let d = PaneShotConfig([:])
-        check(d.lines == 200 && d.save && d.copy && d.font.isEmpty && d.fontSize == 0, "defaults")
-        let c = PaneShotConfig(["lines": "5000", "save": "false", "font-size": "14", "padding": "-3", "herdr-bin": "/x/herdr"])
-        check(c.lines == Herdr.maxLines, "lines clamped to herdr's cap")
-        check(!c.save && c.fontSize == 14 && c.padding == 0 && c.herdrBin == "/x/herdr", "values")
     }
 
     static func herdrTests() {

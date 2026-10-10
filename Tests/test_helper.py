@@ -272,6 +272,18 @@ class ScriptBridge(unittest.TestCase):
         reply = dispatch({"id": 5, "method": "shot.region", "params": {"text": "12"}})
         self.assertIsNone(reply["result"]["rect"])
 
+    def test_ansi_and_paneshot_methods(self):
+        reply = dispatch({"id": 1, "method": "ansi.parse", "params": {"text": "a\u001b[31mb"}})
+        self.assertTrue(reply["ok"], reply)
+        rows = reply["result"]["rows"]
+        self.assertEqual(rows[0][0]["style"]["fg"], ["none"])
+        self.assertEqual(rows[0][1]["style"]["fg"], ["index", 1])
+        reply = dispatch({"id": 2, "method": "paneshot.args", "params": {"words": ["-n", "all"]}})
+        self.assertTrue(reply["result"]["ok"])
+        self.assertTrue(reply["result"]["args"]["all"])
+        reply = dispatch({"id": 3, "method": "paneshot.pane_json", "params": {"text": "{}"}})
+        self.assertFalse(reply["result"]["ok"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):
