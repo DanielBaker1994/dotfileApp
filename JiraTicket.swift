@@ -30,35 +30,41 @@ enum JiraTicketPage {
     }
 
     typealias Comment = (author: String, body: String, created: String)
-    private static var commentIndex: [String: [Comment]] = [:]
-    private static var commentStamp: Date?
+    private static var commentsByKey: [String: [Comment]] = [:]
+    private static var commentsStamp: Date?
     private static var commentLoading = false
 
     private static func cacheStamp() -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: JiraPoll.issueCachePath))?[.modificationDate] as? Date
     }
 
+    /// Comments for one issue, parsed by pylib/jira_data.py (one parse per
+    /// cache write; the worker keeps the mtime-keyed index). Same contract as
+    /// before: immediate answer when the mirror is current for this cache
+    /// write, `[]` when there is no cache, `nil` + `ready` while loading.
     static func cachedComments(_ key: String, ready: @escaping () -> Void) -> [Comment]? {
         let stamp = cacheStamp()
-        if stamp != nil, stamp == commentStamp { return commentIndex[key] ?? [] }
+        if stamp != nil, stamp == commentsStamp, let c = commentsByKey[key] { return c }
         if stamp == nil { return [] }
         if !commentLoading {
             commentLoading = true
-            DispatchQueue.global(qos: .userInitiated).async {
-                var idx: [String: [Comment]] = [:]
-                if let data = try? Data(contentsOf: URL(fileURLWithPath: JiraPoll.issueCachePath)),
-                   let all = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                    for (k, v) in all {
-                        guard let arr = (v as? [String: Any])?["comments"] as? [[String: Any]], !arr.isEmpty else { continue }
-                        idx[k] = arr.map { ($0["author"] as? String ?? "", $0["body"] as? String ?? "", $0["created"] as? String ?? "") }
+            pythonHelper.call("jira.comments", ["path": JiraPoll.issueCachePath, "key": key],
+                              timeout: 120) { result in
+                commentLoading = false
+                switch result {
+                case .success(let box):
+                    let d = box as? [String: Any]
+                    commentsStamp = stamp
+                    commentsByKey[key] = ((d?["comments"] as? [[String: Any]]) ?? []).map {
+                        ($0["author"] as? String ?? "", $0["body"] as? String ?? "",
+                         $0["created"] as? String ?? "")
                     }
+                case .failure(let e):
+                    wsLog("jira: comments unresolved: \(e.description)")
+                    commentsStamp = stamp
+                    commentsByKey[key] = []
                 }
-                DispatchQueue.main.async {
-                    commentIndex = idx
-                    commentStamp = stamp
-                    commentLoading = false
-                    ready()
-                }
+                ready()
             }
         }
         return nil

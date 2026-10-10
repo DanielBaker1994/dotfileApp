@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,6 +138,16 @@ class ScriptBridge(unittest.TestCase):
         self.assertEqual(res["words"]["done"], ["shipped"])
         self.assertEqual(res["status"][1]["words"], ["shipped"])
         self.assertIn("key", res["dimFields"])
+
+    def test_jira_comments_method(self):
+        tmp = tempfile.mkdtemp(prefix="jira-comments-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "issues.json")
+        with open(path, "w") as fh:
+            json.dump({"A-1": {"comments": [{"author": "a", "body": "b", "created": "c"}]}}, fh)
+        reply = dispatch({"id": 1, "method": "jira.comments", "params": {"path": path, "key": "A-1"}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["comments"], [{"author": "a", "body": "b", "created": "c"}])
 
 
 class OneShot(unittest.TestCase):

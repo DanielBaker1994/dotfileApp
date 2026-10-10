@@ -666,3 +666,8 @@ def _jira_paths(params: dict) -> dict:
 @method("jira.style")
 def _jira_style(params: dict) -> dict:
     return jira_data.style_rules(params.get("values") or {})
+
+
+@method("jira.comments")
+def _jira_comments(params: dict) -> dict:
+    return jira_data.comments(params.get("path") or "", params.get("key") or "")

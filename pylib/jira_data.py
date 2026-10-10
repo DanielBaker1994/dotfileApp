@@ -1,11 +1,15 @@
 """Jira data glue: the config word lists, status classification, workflow
-steps and the table cell-style rules.
+steps, the table cell-style rules and the ticket-comment index.
 
 The app fetches `style_rules` once per config generation (`jira.style`) and
 evaluates the returned table locally, so per-cell drawing — and the list
 grouping that runs per keystroke — never crosses the process boundary.
 """
 from __future__ import annotations
+
+import json
+import os
+import threading
 
 WORDS_DEFAULTS = {
     "status-cancelled-words": "cancel, won't, wont, reject, duplicate",
@@ -96,3 +100,57 @@ def style_rules(values: dict) -> dict:
             {"contains": "released", "style": {"tone": "success", "mark": "filled"}},
         ],
     }
+
+
+# ------------------------------------------------------- ticket comments
+
+_COMMENTS_LOCK = threading.Lock()
+_COMMENTS_CACHE = {"path": None, "stamp": None, "index": {}}
+
+
+def _str(x) -> str:
+    return x if isinstance(x, str) else ""
+
+
+def _comment_rows(issue):
+    """The issue's comment rows, or None when it has none (mirrors the old
+    Swift cast: the whole list must be objects)."""
+    if not isinstance(issue, dict):
+        return None
+    arr = issue.get("comments")
+    if not isinstance(arr, list) or not arr:
+        return None
+    rows = []
+    for c in arr:
+        if not isinstance(c, dict):
+            return None
+        rows.append({"author": _str(c.get("author")),
+                     "body": _str(c.get("body")),
+                     "created": _str(c.get("created"))})
+    return rows
+
+
+def comments(path: str, key: str) -> dict:
+    """One issue's comments from the poller's issue cache, parsed once per
+    (path, mtime) and cached in the worker. Returns
+    {"stamp": mtime|0, "comments": [{author, body, created}]}."""
+    try:
+        stamp = os.stat(path).st_mtime
+    except OSError:
+        return {"stamp": 0, "comments": []}
+    with _COMMENTS_LOCK:
+        cache = _COMMENTS_CACHE
+        if cache["path"] != path or cache["stamp"] != stamp:
+            index = {}
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    all_issues = json.load(fh)
+            except (OSError, ValueError):
+                all_issues = {}
+            if isinstance(all_issues, dict):
+                for k, issue in all_issues.items():
+                    rows = _comment_rows(issue)
+                    if rows is not None:
+                        index[k] = rows
+            cache.update(path=path, stamp=stamp, index=index)
+        return {"stamp": stamp, "comments": cache["index"].get(key, [])}
