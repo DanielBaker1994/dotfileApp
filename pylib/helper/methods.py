@@ -10,6 +10,7 @@ import config_text
 import doc_templates
 import file_ops as fileops
 import ignore_rules as ignore
+import jira_boards
 import jira_data
 import jira_dashboard
 import jira_directory
@@ -757,3 +758,13 @@ def _jira_progress_text(params: dict) -> dict:
 @method("jira.header_state")
 def _jira_header_state(params: dict) -> dict:
     return jira_dashboard.header_state(params)
+
+
+@method("jira.board_columns")
+def _jira_board_columns(params: dict) -> dict:
+    return jira_boards.board_columns(params)
+
+
+@method("jira.board_page")
+def _jira_board_page(params: dict) -> dict:
+    return {"html": jira_boards.board_page(params.get("colors") or {})}

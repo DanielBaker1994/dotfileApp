@@ -138,11 +138,26 @@ final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDe
             themeKey = key
             loaded = false
             pending = data
-            web.loadHTMLString(Self.page(colors), baseURL: nil)
+            // the page comes from pylib/jira_boards.py; colors go over as
+            // hex/rgba strings (the theme algebra still lives in Swift)
+            pythonHelper.call("jira.board_page", ["colors": Self.pageColors(colors)], timeout: 30) { [weak self] result in
+                guard let self else { return }
+                guard case .success(let box) = result, let d = box as? [String: Any],
+                      let html = d["html"] as? String else { return }
+                self.web.loadHTMLString(html, baseURL: nil)
+            }
             return
         }
         guard loaded else { pending = data; return }
         web.evaluateJavaScript("render(\(data))")
+    }
+
+    private static func pageColors(_ c: PopupColors) -> [String: String] {
+        ["bg": ProseRender.css(c.background), "text": ProseRender.css(c.text),
+         "dim": ProseRender.css(c.dim), "accent": ProseRender.css(c.accent),
+         "done": ProseRender.css(c.palette.success), "hot": ProseRender.css(c.palette.danger),
+         "col": ProseRender.rgba(c.text, 0.045), "card": ProseRender.rgba(c.text, 0.07),
+         "cardHover": ProseRender.rgba(c.text, 0.11), "line": ProseRender.rgba(c.text, 0.10)]
     }
 
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -160,60 +175,4 @@ final class JiraBoardColumnsView: NSView, WKScriptMessageHandler, WKNavigationDe
         decisionHandler(action.navigationType == .other ? .allow : .cancel)
     }
 
-    private static func page(_ c: PopupColors) -> String {
-        let css = ProseRender.css, rgba = ProseRender.rgba
-        return """
-        <!doctype html><html><head><meta charset="utf-8"><style>
-        :root { --bg: \(css(c.background)); --col: \(rgba(c.text, 0.045)); --card: \(rgba(c.text, 0.07));
-          --card-hover: \(rgba(c.text, 0.11)); --line: \(rgba(c.text, 0.10)); --text: \(css(c.text));
-          --dim: \(css(c.dim)); --accent: \(css(c.accent)); --todo: \(css(c.dim));
-          --prog: \(css(c.accent)); --done: \(css(c.palette.success)); --hot: \(css(c.palette.danger)); }
-        * { box-sizing: border-box; }
-        html, body { margin: 0; height: 100%; background: transparent; color: var(--text);
-          font: 12.5px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
-        #board { display: flex; gap: 10px; padding: 12px 14px 14px; height: 100%; overflow-x: auto; }
-        .col { flex: 1 0 210px; max-width: 360px; background: var(--col); border-radius: 10px; display: flex;
-          flex-direction: column; min-height: 0; }
-        .col h4 { margin: 0; padding: 10px 12px 8px; font-weight: 600; font-size: 10.5px; line-height: 1.2;
-          letter-spacing: .08em; text-transform: uppercase; color: var(--dim); display: flex; gap: 8px; }
-        .col h4 .n { margin-left: auto; font-variant-numeric: tabular-nums; }
-        .cards { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 7px; overflow-y: auto; min-height: 0; }
-        .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-          display: grid; gap: 6px; cursor: default; }
-        .card:hover { background: var(--card-hover); }
-        .card .t { color: var(--text); overflow-wrap: anywhere; }
-        .card .f { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11.5px; }
-        .key { font: 11.5px ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent); }
-        .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; border: 1.5px solid var(--todo); }
-        .c1 .dot { border-color: var(--prog); background: linear-gradient(90deg, var(--prog) 50%, transparent 50%); }
-        .c2 .dot { border-color: var(--done); background: var(--done); }
-        .c2 .t { color: var(--dim); }
-        .hot { color: var(--hot); }
-        .av { margin-left: auto; width: 20px; height: 20px; border-radius: 50%; background: var(--line);
-          color: var(--text); font-size: 9.5px; font-weight: 600; display: grid; place-items: center; flex: none; }
-        .more, .empty { color: var(--dim); font-size: 11.5px; padding: 4px 4px 2px; }
-        .none { color: var(--dim); padding: 40px; text-align: center; width: 100%; }
-        </style></head><body><div id="board"></div><script>
-        function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-        function initials(n) { const p = n.trim().split(/\\s+/); return ((p[0]||'')[0]||'') + (p.length > 1 ? p[p.length-1][0] : ''); }
-        function render(cols) {
-          const b = document.getElementById('board');
-          if (!cols.length || cols.every(c => !c.cards.length)) { b.innerHTML = '<div class="none">No issues here</div>'; return; }
-          b.innerHTML = cols.map(c => `<section class="col"><h4>${esc(c.name)}<span class="n">${c.cards.length + c.more}</span></h4>
-            <div class="cards">${c.cards.map(k => `<div class="card c${k.cat}" data-key="${esc(k.key)}" title="${esc(k.status)}">
-              <div class="f"><span class="dot"></span><span class="key">${esc(k.key)}</span><span>${esc(k.type)}</span></div>
-              <div class="t">${esc(k.title)}</div>
-              <div class="f"><span class="${/highest|high|critical|blocker/i.test(k.priority) ? 'hot' : ''}">${esc(k.priority)}</span>
-                ${k.assignee ? `<span class="av" title="${esc(k.assignee)}">${esc(initials(k.assignee).toUpperCase())}</span>` : ''}</div>
-            </div>`).join('')}${c.more ? `<div class="more">+ ${c.more} more — Table shows them all</div>` : ''}
-            ${!c.cards.length && !c.more ? '<div class="empty">Nothing here</div>' : ''}</div></section>`).join('');
-        }
-        document.addEventListener('click', e => {
-          const c = e.target.closest('.card');
-          if (c) window.webkit.messageHandlers.board.postMessage('open:' + c.dataset.key);
-        });
-        window.webkit.messageHandlers.board.postMessage('ready');
-        </script></body></html>
-        """
-    }
 }

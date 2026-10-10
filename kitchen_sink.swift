@@ -8138,35 +8138,39 @@ extension SwitcherController {
             let rows = filteredItems(query: w.currentQuery)
             let cats = statusCats ?? JiraDirectory.load().statusCategories
             statusCats = cats
-            var cols = (boards[b]?.columns ?? []).map { (name: $0.name, statuses: Set($0.statuses), cards: [JiraBoardCard]()) }
-            if cols.isEmpty { cols = JiraTicketPage.categoryNames.map { ($0, [], []) } }
-            var other: [JiraBoardCard] = []
-            for r in rows {
-                func f(_ k: String) -> String { r.fields[k] ?? "" }
-                let st = f("status"), cat = JiraTicketPage.category(of: st, in: cats)
-                let card = JiraBoardCard(key: f("key"), title: f("title").isEmpty ? r.title : f("title"),
-                                         type: f("type"), priority: f("priority"),
-                                         assignee: peopleName(f("assignee")), status: st, cat: cat)
-                if boards[b]?.columns.isEmpty == false {
-                    if let i = cols.firstIndex(where: { $0.statuses.contains(st) }) { cols[i].cards.append(card) }
-                    else { other.append(card) }
-                } else {
-                    cols[cat].cards.append(card)
+            let params: [String: Any] = [
+                "rows": rows.map { r in
+                    func f(_ k: String) -> String { r.fields[k] ?? "" }
+                    return ["key": f("key"), "title": f("title"), "rowTitle": r.title,
+                            "type": f("type"), "priority": f("priority"),
+                            "assignee": f("assignee"), "status": f("status")]
+                },
+                "columns": (boards[b]?.columns ?? []).map { ["name": $0.name, "statuses": $0.statuses] },
+                "categories": cats,
+                "words": JiraStyle.current.words,
+                "people": peopleByValue().mapValues { $0.title },
+                "categoryNames": JiraTicketPage.categoryNames,
+            ]
+            pythonHelper.call("jira.board_columns", params, timeout: 60) { [weak self] result in
+                guard let self, self.onBoard == b, self.boardCols === view else { return }
+                guard case .success(let box) = result, let d = box as? [String: Any],
+                      let list = d["columns"] as? [[String: Any]] else { return }
+                let out = list.map { c in
+                    JiraBoardColumn(name: c["name"] as? String ?? "",
+                                    cards: (c["cards"] as? [[String: Any]] ?? []).map { k in
+                                        JiraBoardCard(key: k["key"] as? String ?? "",
+                                                      title: k["title"] as? String ?? "",
+                                                      type: k["type"] as? String ?? "",
+                                                      priority: k["priority"] as? String ?? "",
+                                                      assignee: k["assignee"] as? String ?? "",
+                                                      status: k["status"] as? String ?? "",
+                                                      cat: k["cat"] as? Int ?? 1)
+                                    },
+                                    more: c["more"] as? Int ?? 0)
                 }
+                view.show(out, colors: self.w.config.colors)
+                self.refreshBoardSummary()
             }
-            var out = cols.map { c -> JiraBoardColumn in
-                let doneCol = !c.cards.isEmpty && c.cards.allSatisfy { $0.cat == 2 }
-                let keep = doneCol ? Array(c.cards.prefix(30)) : c.cards
-                return JiraBoardColumn(name: c.name, cards: keep, more: c.cards.count - keep.count)
-            }
-            if !other.isEmpty { out.append(JiraBoardColumn(name: "Not on the board", cards: other, more: 0)) }
-            view.show(out, colors: w.config.colors)
-            refreshBoardSummary()
-        }
-
-        private func peopleName(_ v: String) -> String {
-            guard !v.isEmpty else { return "" }
-            return peopleByValue()[v]?.title ?? v
         }
 
         private func openIssue(_ key: String) {
