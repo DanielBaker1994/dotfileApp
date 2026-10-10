@@ -270,6 +270,26 @@
   "directory": {
     "top_n": 50
   },
+  "http": {
+    "retry_codes": [429, 502, 503, 504],
+    "transient_curl": [6, 7, 16, 18, 28, 35, 52, 55, 56, 92],
+    "shrink_curl": [16, 18, 28, 52, 56, 92],
+    "shrink_http": [500, 502, 503, 504],
+    "min_page": 10,
+    "page_cap_days": 7,
+    "max_attempts": 8,
+    "max_401_attempts": 5,
+    "auth_401_backoff": 5,
+    "max_401_in_row": 3,
+    "backoff_cap": 60,
+    "page_overlap": 5
+  },
+  "api": {
+    "query_fields": "summary,status,assignee,fixVersions,description,updated,priority,labels"
+  },
+  "logging": {
+    "curl_log_max": 5242880
+  },
   "search_ui": {
     "skip_fields": ["key", "title", "status", "assignee", "release", "releaseLabel",
                     "releaseDate", "releaseStatus", "priority", "labels", "description",

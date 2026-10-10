@@ -93,6 +93,12 @@ import jira_config  # noqa: E402
 import jira_paths  # noqa: E402
 import jira_log  # noqa: E402
 
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "defaults.json")
+# request-resilience knobs, the requested field list and the log rotation size
+# live in jira/defaults.json (one home; a proxied site can tune them there)
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    _DEFAULTS = json.load(_fh)
+
 LOG = jira_log.LOG
 
 CACHE_DIR = jira_config.CACHE_DIR
@@ -102,11 +108,11 @@ VERSIONS_FILE = os.path.join(CACHE_DIR, "versions.json")
 DIRECTORY_FILE = jira_paths.cache_file("directory")   # the pickers' lists
 DUMP_DIR = os.path.join(CACHE_DIR, "dumps")
 CURL_LOG = jira_paths.cache_file("curlLog")
-CURL_LOG_MAX = 5 * 1024 * 1024        # rotate: keep the newest ~2MB past 5MB
+CURL_LOG_MAX = _DEFAULTS["logging"]["curl_log_max"]  # rotate: keep the newest ~2MB past 5MB
 CURL_DUMP = os.path.join(CACHE_DIR, "api_dump.txt")     # --verbose: curl per api_endpoints entry
 TRACE_FILE = os.path.join(CACHE_DIR, "api_trace.txt")   # --verbose: timestamped request trace
 
-QUERY_FIELDS = "summary,status,assignee,fixVersions,description,updated,priority,labels"
+QUERY_FIELDS = _DEFAULTS["api"]["query_fields"]
 
 CHECKPOINT_DIR = os.path.join(CACHE_DIR, "checkpoints")   # <name>.json: a sync's resume point
 TZ_FILE = os.path.join(CACHE_DIR, "tz")                    # the Jira user's timeZone (/myself)
@@ -114,24 +120,24 @@ TZ_FILE = os.path.join(CACHE_DIR, "tz")                    # the Jira user's tim
 # request-level resilience (Client.get): these answers are waited out and the
 # SAME request is re-sent - a job never restarts from page 1 because of them
 SLEEP = time.sleep                     # tests swap this out
-RETRY_CODES = (429, 502, 503, 504)     # rate limited / server busy
-TRANSIENT_CURL = (6, 7, 16, 18, 28, 35, 52, 55, 56, 92)
+RETRY_CODES = tuple(_DEFAULTS["http"]["retry_codes"])     # rate limited / server busy
+TRANSIENT_CURL = tuple(_DEFAULTS["http"]["transient_curl"])
                                        # dns, connect, http2, cut off mid-body, timeout, tls,
                                        # empty reply, send/recv, http2 stream reset
 # a search page that breaks off / times out / 5xx is usually TOO BIG (500
 # issues with descriptions + comments): search_pages halves maxResults and
 # re-reads the same position; the size that worked is remembered per site
-SHRINK_CURL = (16, 18, 28, 52, 56, 92)
-SHRINK_HTTP = (500, 502, 503, 504)
-MIN_PAGE = 10
+SHRINK_CURL = tuple(_DEFAULTS["http"]["shrink_curl"])
+SHRINK_HTTP = tuple(_DEFAULTS["http"]["shrink_http"])
+MIN_PAGE = _DEFAULTS["http"]["min_page"]
 PAGE_CAP_FILE = os.path.join(CACHE_DIR, "search_page_cap.json")
-PAGE_CAP_DAYS = 7                      # then the configured size is tried again
-MAX_ATTEMPTS = 8                       # per request (429 / 5xx / network)
-MAX_401_ATTEMPTS = 5                   # a 401 AFTER a 2xx in this run is treated as transient
-AUTH_401_BACKOFF = 5                   # ... and waited out 5, 10, 20, 40s (a Retry-After: 0 is not a wait)
-MAX_401_IN_ROW = 3                     # requests failing 401 in a row = the token really died
-BACKOFF_CAP = 60                       # seconds: 2, 4, 8, ... 60 (+ jitter) without Retry-After
-PAGE_OVERLAP = 5                       # v2 startAt pages re-read this many rows (see search_pages)
+PAGE_CAP_DAYS = _DEFAULTS["http"]["page_cap_days"]     # then the configured size is tried again
+MAX_ATTEMPTS = _DEFAULTS["http"]["max_attempts"]       # per request (429 / 5xx / network)
+MAX_401_ATTEMPTS = _DEFAULTS["http"]["max_401_attempts"]  # a 401 AFTER a 2xx in this run is treated as transient
+AUTH_401_BACKOFF = _DEFAULTS["http"]["auth_401_backoff"]  # ... and waited out 5, 10, 20, 40s (a Retry-After: 0 is not a wait)
+MAX_401_IN_ROW = _DEFAULTS["http"]["max_401_in_row"]   # requests failing 401 in a row = the token really died
+BACKOFF_CAP = _DEFAULTS["http"]["backoff_cap"]         # seconds: 2, 4, 8, ... 60 (+ jitter) without Retry-After
+PAGE_OVERLAP = _DEFAULTS["http"]["page_overlap"]       # v2 startAt pages re-read this many rows (see search_pages)
 
 
 class ApiError(Exception):
