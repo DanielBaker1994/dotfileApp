@@ -31,6 +31,25 @@
     "pinnedBoardViews": [],
     "boardCatalogMinutes": 60
   },
+  "base_field_labels": {
+    "key": "Key",
+    "title": "Title",
+    "status": "Status",
+    "assignee": "Assignee",
+    "reporter": "Reporter",
+    "priority": "Priority",
+    "labels": "Labels",
+    "description": "Description",
+    "project": "Project",
+    "updated": "Updated",
+    "release": "Fix versions",
+    "releaseLabel": "Release",
+    "releaseDate": "Release date",
+    "releaseStatus": "Released",
+    "comments": "Comments",
+    "components": "Components",
+    "epic": "Epic / parent"
+  },
   "endpoints": [
     {
       "name": "all",

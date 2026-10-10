@@ -5,18 +5,17 @@ ONE implementation: jira/jira_config.py imports these (its old copies are
 gone) and the app asks the helper for parse/serialize/labels."""
 from __future__ import annotations
 
+import json
+import os
 import re
+
+_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "jira", "defaults.json")
 
 # a field's display name (column header, search filter title) unless team.json
 # field_labels renames it - ONE label per field
-BASE_FIELD_LABELS = {
-    "key": "Key", "title": "Title", "status": "Status", "assignee": "Assignee",
-    "reporter": "Reporter", "priority": "Priority", "labels": "Labels",
-    "description": "Description", "project": "Project", "updated": "Updated",
-    "release": "Fix versions", "releaseLabel": "Release", "releaseDate": "Release date",
-    "releaseStatus": "Released", "comments": "Comments",
-    "components": "Components", "epic": "Epic / parent",
-}
+# the built-in table lives in jira/defaults.json (data, not code)
+with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
+    BASE_FIELD_LABELS = json.load(_fh)["base_field_labels"]
 
 
 def parse_columns(spec: str) -> list:
