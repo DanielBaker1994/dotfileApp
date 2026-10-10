@@ -465,6 +465,7 @@ batch as the plan executes.
 | M2b | done | `paneshot`, `ansi`, `prose_pdf`; suites + `helper` green |
 | M2c | done | `shot_model` eager-via-manager (lazy wave keeps it eager-by-decision) |
 | M2d | done | 6 pylib jira-glue modules share one `jira/defaults` parse; all 6 suites + `helper` green |
+| M2e | done | `confluence_glue`, `confluence_pages` share `confluence/defaults`; suites + `helper` green |
 | … | — | |
 
 ## 7. Validation hooks for this plan

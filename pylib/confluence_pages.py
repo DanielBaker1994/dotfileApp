@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 from string import Template
 from urllib.parse import urlsplit
+
+import jsonmgr
 
 SCHEME = "wsconf"
 
@@ -104,10 +105,8 @@ mark.wsh.on { background: @warn75; color: #000;
 </script></body></html>
 """)
 
-_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "confluence", "defaults.json")
+_CONFLUENCE_DEFAULTS = jsonmgr.load("confluence/defaults")
 # the preview page's color-key schema lives in confluence/defaults.json
-with open(_DATA_FILE, encoding="utf-8") as _fh:
-    _CONFLUENCE_DEFAULTS = json.load(_fh)
 
 _COLOR_KEYS = list(_CONFLUENCE_DEFAULTS["pages"]["color_keys"])
 

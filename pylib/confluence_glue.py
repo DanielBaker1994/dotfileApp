@@ -3,15 +3,12 @@ gate's decision (the timer/replay stays in Swift)."""
 from __future__ import annotations
 
 import base64
-import json
-import os
 
-_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "confluence", "defaults.json")
+import jsonmgr
 
 # modes / default search types / sort + the rate-limit gate numbers live in
 # confluence/defaults.json (the jira_fields.py cross-package pattern)
-with open(_DEFAULTS_FILE, encoding="utf-8") as _fh:
-    _DEFAULTS = json.load(_fh)
+_DEFAULTS = jsonmgr.load("confluence/defaults")
 
 MODES = list(_DEFAULTS["modes"])
 _SEARCH = _DEFAULTS["defaults"]["search"]
