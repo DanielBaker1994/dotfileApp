@@ -35,41 +35,60 @@ struct JiraDirectory {
     var fetchedAt = ""
     var isEmpty: Bool { fetchedAt.isEmpty }
 
+    private static var cache: JiraDirectory?
+    private static var cacheStamp: Date?
+    private static let lock = NSLock()
+
+    /// Parsed by pylib/jira_directory.py once per cache write (the worker
+    /// keeps the mtime-keyed copy); the mirror is memoised per stamp too, so
+    /// the repeated callers stop re-reading and re-parsing the file.
     static func load() -> JiraDirectory {
+        let stamp = (try? FileManager.default.attributesOfItem(atPath: JiraPoll.directoryPath))?[.modificationDate] as? Date
+        lock.lock(); defer { lock.unlock() }
+        if let c = cache, stamp != nil, stamp == cacheStamp { return c }
         var d = JiraDirectory()
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: JiraPoll.directoryPath)),
-              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return d }
-        d.fetchedAt = o["fetchedAt"] as? String ?? ""
-        d.projects = (o["projects"] as? [[String: Any]] ?? []).compactMap { p in
+        if case .success(let box) = pythonHelper.callSync("jira.directory", ["path": JiraPoll.directoryPath], timeout: 60),
+           let o = box as? [String: Any] {
+            d.fill(o)
+        } else {
+            wsLog("jira: directory unresolved (python helper unavailable)")
+        }
+        cache = d
+        cacheStamp = stamp
+        return d
+    }
+
+    private mutating func fill(_ o: [String: Any]) {
+        fetchedAt = o["fetchedAt"] as? String ?? ""
+        projects = (o["projects"] as? [[String: Any]] ?? []).compactMap { p in
             (p["key"] as? String).map { ($0, p["name"] as? String ?? "") }
         }
-        d.users = (o["users"] as? [[String: Any]] ?? []).compactMap { u in
+        users = (o["users"] as? [[String: Any]] ?? []).compactMap { u in
             guard let id = u["id"] as? String else { return nil }
             return User(id: id, name: u["name"] as? String ?? id, username: u["username"] as? String ?? "",
                         email: u["email"] as? String ?? "", projects: u["projects"] as? [String] ?? [])
         }
-        d.statuses = o["statuses"] as? [String] ?? []
-        d.statusCategories = o["statusCategories"] as? [String: String] ?? [:]
-        d.issueTypes = o["issueTypes"] as? [String] ?? []
-        d.priorities = o["priorities"] as? [String] ?? []
-        d.fields = (o["fields"] as? [[String: Any]] ?? []).compactMap { f in
+        statuses = o["statuses"] as? [String] ?? []
+        statusCategories = o["statusCategories"] as? [String: String] ?? [:]
+        issueTypes = o["issueTypes"] as? [String] ?? []
+        priorities = o["priorities"] as? [String] ?? []
+        fields = (o["fields"] as? [[String: Any]] ?? []).compactMap { f in
             guard let id = f["id"] as? String else { return nil }
             return Field(id: id, name: f["name"] as? String ?? id, custom: f["custom"] as? Bool ?? false,
                          type: f["type"] as? String ?? "")
         }
-        d.versions = (o["versions"] as? [[String: Any]] ?? []).compactMap { v in
+        versions = (o["versions"] as? [[String: Any]] ?? []).compactMap { v in
             guard let n = v["name"] as? String else { return nil }
             return Version(name: n, project: v["project"] as? String ?? "",
                            releaseDate: v["releaseDate"] as? String ?? "", released: v["released"] as? Bool ?? false,
                            id: v["id"] as? String ?? "")
         }
-        d.boards = (o["boards"] as? [[String: Any]] ?? []).compactMap { b in
+        boards = (o["boards"] as? [[String: Any]] ?? []).compactMap { b in
             (b["id"] as? String).map { ($0, b["name"] as? String ?? $0, b["type"] as? String ?? "", b["projects"] as? [String] ?? []) }
         }
-        d.labels = (o["labels"] as? [[String: Any]] ?? []).compactMap { l in
+        labels = (o["labels"] as? [[String: Any]] ?? []).compactMap { l in
             (l["name"] as? String).map { ($0, l["projects"] as? [String] ?? [], l["count"] as? Int ?? 0) }
         }
-        return d
     }
 
     func projectOptions(scope: [String]) -> [JiraMultiPicker.Option] {

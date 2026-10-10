@@ -11,6 +11,7 @@ import doc_templates
 import file_ops as fileops
 import ignore_rules as ignore
 import jira_data
+import jira_directory
 import jira_pages
 import jira_search
 import prose_pdf
@@ -693,3 +694,8 @@ def _jira_filter_kinds(params: dict) -> dict:
 @method("jira.criteria")
 def _jira_criteria(params: dict) -> dict:
     return jira_search.criteria(params)
+
+
+@method("jira.directory")
+def _jira_directory(params: dict) -> dict:
+    return jira_directory.load(params.get("path") or "")

@@ -167,6 +167,17 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"], {"text": "x"})
 
+    def test_jira_directory_method(self):
+        tmp = tempfile.mkdtemp(prefix="jira-dir-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "directory.json")
+        with open(path, "w") as fh:
+            json.dump({"fetchedAt": "t", "projects": [{"key": "APP"}]}, fh)
+        reply = dispatch({"id": 1, "method": "jira.directory", "params": {"path": path}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["result"]["fetchedAt"], "t")
+        self.assertEqual(reply["result"]["projects"], [{"key": "APP", "name": ""}])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):
