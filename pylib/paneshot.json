@@ -1,0 +1,19 @@
+{
+  "usage": "pane-shot [--pane ID] [--lines N|all] [--file PATH|-] [--no-save] [--no-copy]",
+  "max_lines": 1000,
+  "defaults": {
+    "lines": {"default": 200, "min": 0, "max": 1000},
+    "save": true,
+    "copy": true,
+    "preview": true,
+    "herdr-bin": "~/.local/bin/herdr",
+    "ghostty-bin": "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+    "font": "",
+    "font-size": {"default": 0, "min": 0, "max": 72},
+    "background": "",
+    "padding": {"default": 16, "min": 0, "max": 200},
+    "save-path": "",
+    "filename-pattern": "%F_%H-%M-%S pane",
+    "toast": "Screenshot of {pane} copied ({n} lines)"
+  }
+}

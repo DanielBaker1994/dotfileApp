@@ -5,9 +5,15 @@ Swift suite's arg/config/JSON cases moved here, ws test paneshot)."""
 from __future__ import annotations
 
 import json
+import os
 
 # one tri in python: config_text owns the grammar
 from config_text import tri  # noqa: F401
+
+_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paneshot.json")
+# shipped [pane-shot] defaults + the CLI help line; user config overrides
+with open(_DATA_FILE, encoding="utf-8") as _fh:
+    _DATA = json.load(_fh)
 
 
 class Problem(Exception):
@@ -32,7 +38,7 @@ class Args:
             getattr(self, k) == getattr(o, k) for k in Args.__slots__)
 
 
-USAGE = "pane-shot [--pane ID] [--lines N|all] [--file PATH|-] [--no-save] [--no-copy]"
+USAGE = _DATA["usage"]
 
 
 def parse_args(words) -> Args:
@@ -81,51 +87,41 @@ def parse_args(words) -> Args:
     return a
 
 
-MAX_LINES = 1000
+MAX_LINES = _DATA["max_lines"]
 
 
 class Config:
     def __init__(self, entries=None):
         e = entries if isinstance(entries, dict) else {}
-        self.lines = 200
-        self.save = True
-        self.copy = True
-        self.preview = True
-        self.herdr_bin = "~/.local/bin/herdr"
-        self.ghostty_bin = "/Applications/Ghostty.app/Contents/MacOS/ghostty"
-        self.font = ""
-        self.font_size = 0.0
-        self.background = ""
-        self.padding = 16.0
-        self.save_path = ""
-        self.filename_pattern = "%F_%H-%M-%S pane"
-        self.toast = "Screenshot of {pane} copied ({n} lines)"
+        d = _DATA["defaults"]
 
-        def s(k, d):
+        def s(k, dflt):
             v = (e.get(k) or "").strip()
-            return v if v else d
+            return v if v else dflt
 
-        def n(k, d, lo, hi):
+        def n(k, lo, hi):
             try:
                 v = float(e[k])
             except (KeyError, TypeError, ValueError):
-                return float(d)
+                v = float(d[k]["default"])
             return max(lo, min(hi, v))
 
-        self.lines = int(n("lines", 200, 0, MAX_LINES))
-        self.save = tri(e.get("save")) if tri(e.get("save")) is not None else True
-        self.copy = tri(e.get("copy")) if tri(e.get("copy")) is not None else True
-        self.preview = tri(e.get("preview")) if tri(e.get("preview")) is not None else True
-        self.herdr_bin = s("herdr-bin", self.herdr_bin)
-        self.ghostty_bin = s("ghostty-bin", self.ghostty_bin)
-        self.font = s("font", "")
-        self.font_size = n("font-size", 0, 0, 72)
-        self.background = s("background", "")
-        self.padding = n("padding", 16, 0, 200)
-        self.save_path = s("save-path", "")
-        self.filename_pattern = s("filename-pattern", self.filename_pattern)
+        self.lines = int(n("lines", d["lines"]["min"], d["lines"]["max"]))
+        self.save = tri(e.get("save")) if tri(e.get("save")) is not None else d["save"]
+        self.copy = tri(e.get("copy")) if tri(e.get("copy")) is not None else d["copy"]
+        self.preview = tri(e.get("preview")) if tri(e.get("preview")) is not None else d["preview"]
+        self.herdr_bin = s("herdr-bin", d["herdr-bin"])
+        self.ghostty_bin = s("ghostty-bin", d["ghostty-bin"])
+        self.font = s("font", d["font"])
+        self.font_size = n("font-size", d["font-size"]["min"], d["font-size"]["max"])
+        self.background = s("background", d["background"])
+        self.padding = n("padding", d["padding"]["min"], d["padding"]["max"])
+        self.save_path = s("save-path", d["save-path"])
+        self.filename_pattern = s("filename-pattern", d["filename-pattern"])
         if "toast" in e and isinstance(e.get("toast"), str):
             self.toast = e["toast"]
+        else:
+            self.toast = d["toast"]
 
 
 class HerdrFailure(Exception):
