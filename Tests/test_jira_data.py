@@ -69,6 +69,9 @@ class Category(unittest.TestCase):
         self.assertEqual(jd.category("nailed it", {}, w), 2)
         self.assertEqual(jd.category("shipped", {}, w), 1)  # no longer a done word
 
+    def test_no_words_at_all_defaults_to_in_progress(self):
+        self.assertEqual(jd.category("anything", {}, {}), 1)
+
 
 class Workflow(unittest.TestCase):
     def test_absent_or_empty_is_none(self):

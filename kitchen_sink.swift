@@ -3990,6 +3990,7 @@ final class SwitcherController: NSObject {
     }
 
     private var ticketView: JiraTicketView?
+    private var ticketPageGen = 0
     private func showTicketPage(_ row: FieldRow, in w: PopupWindow, cmd: CommandSpec) {
         guard cmd.name == "jira" || cmd.name == jiraReleasesWindow, row.fields["status"] != nil,
               !jiraIsReleaseRow(row) else {
@@ -4029,9 +4030,13 @@ final class SwitcherController: NSObject {
             guard let self, let v, self.ticketView === v, self.detailRow?.fields["key"] == key else { return }
             v.setComments(JiraTicketPage.cachedComments(key) {} ?? [])
         }
-        v.show(JiraTicketPage.html(row, colors: w.config.colors, url: jiraBrowseURL(row)?.absoluteString,
-                                   labels: JiraPoll.fieldLabels(), comments: cms),
-               background: w.config.colors.base)
+        ticketPageGen += 1
+        let gen = ticketPageGen
+        JiraTicketPage.ticketHTML(row, colors: w.config.colors, url: jiraBrowseURL(row)?.absoluteString,
+                                  labels: JiraPoll.fieldLabels(), comments: cms) { [weak self, weak v] html in
+            guard let self, let v, let html, self.ticketPageGen == gen else { return }
+            v.show(html, background: w.config.colors.base)
+        }
     }
 
     private func detailText(for row: FieldRow, cmd: CommandSpec) -> String {

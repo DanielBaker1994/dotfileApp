@@ -61,9 +61,9 @@ def category(status: str, categories: dict, word_lists: dict) -> int:
     if cat == "done":
         return 2
     lowered = status.lower()
-    if matches(lowered, word_lists["done"]) or matches(lowered, word_lists["cancelled"]):
+    if matches(lowered, word_lists.get("done") or []) or matches(lowered, word_lists.get("cancelled") or []):
         return 2
-    if matches(lowered, word_lists["new"]):
+    if matches(lowered, word_lists.get("new") or []):
         return 0
     return 1
 

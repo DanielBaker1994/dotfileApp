@@ -11,6 +11,7 @@ import doc_templates
 import file_ops as fileops
 import ignore_rules as ignore
 import jira_data
+import jira_pages
 import prose_pdf
 import status as ws_status
 
@@ -671,3 +672,13 @@ def _jira_style(params: dict) -> dict:
 @method("jira.comments")
 def _jira_comments(params: dict) -> dict:
     return jira_data.comments(params.get("path") or "", params.get("key") or "")
+
+
+@method("jira.ticket_html")
+def _jira_ticket_html(params: dict) -> dict:
+    return {"html": jira_pages.ticket_html(params)}
+
+
+@method("jira.comments_html")
+def _jira_comments_html(params: dict) -> dict:
+    return {"html": jira_pages.comments_html(params.get("comments") or [])}

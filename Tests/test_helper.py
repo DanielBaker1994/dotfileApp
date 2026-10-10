@@ -149,6 +149,16 @@ class ScriptBridge(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(reply["result"]["comments"], [{"author": "a", "body": "b", "created": "c"}])
 
+    def test_jira_page_methods(self):
+        reply = dispatch({"id": 1, "method": "jira.ticket_html", "params": {
+            "fields": {"key": "A-1", "status": "Done"},
+            "categories": {"Done": "done"}, "words": {}, "colors": {}, "labels": {}}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIn("A-1", reply["result"]["html"])
+        reply = dispatch({"id": 2, "method": "jira.comments_html", "params": {"comments": []}})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIn("No comments.", reply["result"]["html"])
+
 
 class OneShot(unittest.TestCase):
     def test_call_ping(self):
