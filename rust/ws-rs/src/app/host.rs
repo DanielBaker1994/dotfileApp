@@ -8015,6 +8015,43 @@ mod daemon_ui {
             true
         }
 
+        /// `PopupTextView.menu(for:)`: the plain notes editor's right-click.
+        /// On an image link: Open Full Size and copy image path; then Copy
+        /// File Path and Open file at path….
+        fn notes_editor_menu(&self, idx: usize) {
+            use crate::ui::menu_kit::{popup_context, MenuEntry};
+            let Some((text, note, view)) = self.notes_surface(|s| {
+                s.editor_view().map(|v| (v.string().to_string(), s.selected_path(), v))
+            }).flatten() else {
+                return;
+            };
+            let home = std::env::var("HOME").unwrap_or_default();
+            let image = crate::views::notes::image_link_at(&text, idx)
+                .map(|t| crate::views::notes::resolve_note_link(&t, note.as_deref().unwrap_or(""), &home));
+            let mut e = Vec::new();
+            if let Some(path) = image {
+                e.push(MenuEntry::item("Open Full Size", || crate::ui::toast::not_ported("Notes image Open Full Size")));
+                e.push(MenuEntry::item("copy image path", move || {
+                    copy_text_to_pasteboard(&path);
+                    crate::ui::toast::show(&format!("Copied {}", tilde_path(&path)), "doc.on.clipboard");
+                }));
+                e.push(MenuEntry::Separator);
+            }
+            if let Some(note) = note {
+                e.push(MenuEntry::item("Copy File Path", move || {
+                    copy_text_to_pasteboard(&note);
+                    crate::ui::toast::show(&format!("Copied {}", tilde_path(&note)), "doc.on.clipboard");
+                }));
+            }
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            e.push(MenuEntry::item("Open file at path…", move || {
+                if let Some(ui) = weak.load() {
+                    ui.route_open_path_prompt();
+                }
+            }));
+            popup_context(e, &view);
+        }
+
         /// `openNoteFile(_:)` from a file browser: show notes on `path`.
         fn open_in_notes(&self, path: &str) {
             self.ivars().controller.open(SlotView::Notes);
@@ -8469,6 +8506,12 @@ mod daemon_ui {
                                     surface.set_prose_sink(std::rc::Rc::new(move |m| {
                                         if let Some(ui) = weak.load() {
                                             ui.notes_prose_msg(m);
+                                        }
+                                    }));
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.set_editor_menu(std::rc::Rc::new(move |idx| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_editor_menu(idx);
                                         }
                                     }));
                                     st.notes = Some(surface);

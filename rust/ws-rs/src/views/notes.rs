@@ -1788,6 +1788,43 @@ mod macos {
         }
     }
 
+    pub struct NotesTextViewIvars {
+        /// Right-click → the editor menu, with the clicked character index.
+        on_menu: RefCell<Option<std::rc::Rc<dyn Fn(usize)>>>,
+    }
+
+    define_class!(
+        /// `PopupTextView`: the plain notes editor, whose right-click shows
+        /// the notes menu (`menu(for:)`) instead of the stock text menu.
+        #[unsafe(super(NSTextView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSNotesTextView"]
+        #[ivars = NotesTextViewIvars]
+        pub struct NotesTextView;
+
+        impl NotesTextView {
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                let cb = self.ivars().on_menu.borrow().clone();
+                let Some(cb) = cb else {
+                    let _: () = unsafe { msg_send![super(self), rightMouseDown: e] };
+                    return;
+                };
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                cb(self.characterIndexForInsertionAtPoint(p));
+            }
+        }
+
+        unsafe impl NSObjectProtocol for NotesTextView {}
+    );
+
+    impl NotesTextView {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(NotesTextViewIvars { on_menu: RefCell::new(None) });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))] }
+        }
+    }
+
     /// The "Prose" pop-out control's target. It holds `popOutProse`'s source
     /// path — the note selected when the content view was built — and launches
     /// it via the same `ProseProcess::launch` the prose switch's pop-out uses.
@@ -2119,7 +2156,7 @@ mod macos {
         editor.setHasVerticalScroller(true);
         editor.setDrawsBackground(true);
         editor.setBackgroundColor(&colors.base().to_nscolor());
-        let text = NSTextView::new(mtm);
+        let text: Retained<NSTextView> = Retained::into_super(NotesTextView::new(mtm));
         text.setEditable(true);
         text.setSelectable(true);
         text.setRichText(false);
@@ -2541,6 +2578,14 @@ mod macos {
 
         /// The host's handler for page messages (outline jump, find state,
         /// image double-click). Also receives the top line on close.
+        /// The plain editor's right-click (`PopupTextView.menu(for:)`):
+        /// `cb` gets the clicked character index.
+        pub fn set_editor_menu(&self, cb: std::rc::Rc<dyn Fn(usize)>) {
+            if let Some(tv) = (&*self.editor as &AnyObject).downcast_ref::<NotesTextView>() {
+                *tv.ivars().on_menu.borrow_mut() = Some(cb);
+            }
+        }
+
         pub fn set_prose_sink(&mut self, cb: std::rc::Rc<dyn Fn(crate::views::notes_prose::ProseMsg)>) {
             if let Some(p) = &self.prose {
                 let cb = cb.clone();
@@ -3416,6 +3461,49 @@ pub const FILE_POPUP_IMAGE_EXTS: [&str; 9] = [
     "png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "bmp",
 ];
 
+/// The target of the markdown image link `![alt](target)` that covers the
+/// UTF-16 offset `idx` (an `NSTextView` character index), if any. A
+/// `"title"` after the target and `<…>` brackets are dropped.
+pub fn image_link_at(text: &str, idx: usize) -> Option<String> {
+    let mut start16 = 0usize;
+    for line in text.split_inclusive('\n') {
+        let len16 = line.encode_utf16().count();
+        if idx < start16 + len16 || start16 + len16 == text.encode_utf16().count() {
+            let col = idx.saturating_sub(start16);
+            let mut search = 0;
+            while let Some(rel) = line[search..].find("![") {
+                let open = search + rel;
+                let Some(mid) = line[open..].find("](").map(|m| open + m) else { break };
+                let Some(close) = line[mid..].find(')').map(|c| mid + c) else { break };
+                let (a, b) = (line[..open].encode_utf16().count(), line[..=close].encode_utf16().count());
+                if col >= a && col < b {
+                    let inner = line[mid + 2..close].trim();
+                    let target = inner.split_once(" \"").map(|(t, _)| t).unwrap_or(inner).trim();
+                    let target = target.trim_start_matches('<').trim_end_matches('>');
+                    return (!target.is_empty()).then(|| target.to_string());
+                }
+                search = close + 1;
+            }
+            return None;
+        }
+        start16 += len16;
+    }
+    None
+}
+
+/// Resolve an image link target against the note's folder (`imageBaseDir`):
+/// absolute and `~` paths stay, relative ones join the note's directory.
+pub fn resolve_note_link(target: &str, note_path: &str, home: &str) -> String {
+    if target.starts_with('/') {
+        return target.to_string();
+    }
+    if let Some(rest) = target.strip_prefix("~/") {
+        return format!("{home}/{rest}");
+    }
+    let dir = Path::new(note_path).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("{dir}/{}", target.trim_start_matches("./"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FilePopupRoute {
     Image,
@@ -3623,6 +3711,19 @@ pub fn register(reg: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_link_at_finds_the_link_under_the_cursor() {
+        let t = "intro\nsee ![shot](img/a.png \"t\") and ![](<b c.png>)\nend";
+        let at = |needle: &str| t.encode_utf16().count() - t[t.find(needle).unwrap()..].encode_utf16().count();
+        assert_eq!(image_link_at(t, at("shot")), Some("img/a.png".into()));
+        assert_eq!(image_link_at(t, at("b c")), Some("b c.png".into()));
+        assert_eq!(image_link_at(t, at("and")), None);
+        assert_eq!(image_link_at(t, at("intro")), None);
+        assert_eq!(resolve_note_link("img/a.png", "/n/notes.md", "/h"), "/n/img/a.png");
+        assert_eq!(resolve_note_link("~/x.png", "/n/notes.md", "/h"), "/h/x.png");
+        assert_eq!(resolve_note_link("/abs.png", "/n/notes.md", "/h"), "/abs.png");
+    }
     use serde_json::json;
 
     fn helper_ready() -> bool {
