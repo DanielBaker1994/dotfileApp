@@ -3616,6 +3616,86 @@ impl CompareWindowModel {
         s.refresh(ctx);
     }
 
+    /// `copyLine(from:)`: copy just the cursor row to the other side.
+    pub fn copy_line(&mut self, from: CompareSide) {
+        let ctx = self.config.context_lines();
+        let Some(s) = self.current_mut() else { return };
+        if s.display_count() == 0 {
+            return;
+        }
+        let m = s.model_row(s.cursor);
+        if s.model.copy_rows(m..m + 1, from) {
+            s.status = format!("line copied to the {}", from.other().raw());
+            s.refresh(ctx);
+        }
+    }
+
+    /// `selectSection`: select the whole difference under the cursor.
+    pub fn select_section(&mut self) {
+        let Some(s) = self.current_mut() else { return };
+        if s.display_count() == 0 {
+            return;
+        }
+        let Some(si) = s.model.section_at(s.model_row(s.cursor)) else { return };
+        let r = s.model.sections()[si].rows.clone();
+        s.anchor = Some(s.display_row(r.start));
+        s.cursor = s.display_row(r.end - 1);
+    }
+
+    /// Whether the cursor sits in a difference (`selectSection` enabled).
+    pub fn cursor_in_section(&self) -> bool {
+        self.current()
+            .is_some_and(|s| s.display_count() > 0 && s.model.section_at(s.model_row(s.cursor)).is_some())
+    }
+
+    /// `copyRowsText`: the focused side's text of the selected rows (sets
+    /// the status line).
+    pub fn rows_text(&mut self) -> Option<String> {
+        let s = self.current_mut()?;
+        if s.display_count() == 0 {
+            return None;
+        }
+        let a = s.anchor.unwrap_or(s.cursor);
+        let (lo, hi) = (a.min(s.cursor), a.max(s.cursor));
+        let mut out = Vec::new();
+        for d in lo..=hi {
+            let line = s.model.rows()[s.model_row(d)].line(s.focus);
+            if line >= 0 {
+                out.push(s.model.side(s.focus).lines[line as usize].clone());
+            }
+        }
+        s.status = format!("copied {} line{}", out.len(), if out.len() == 1 { "" } else { "s" });
+        Some(out.join("\n") + if out.len() > 1 { "\n" } else { "" })
+    }
+
+    /// `openFile(_:into:)`: load `path` into one side of the current session.
+    pub fn open_file_into(&mut self, side: CompareSide, path: &str) {
+        if self.selected.is_none() {
+            let (l, r) = if side == CompareSide::Left { (Some(path), None) } else { (None, Some(path)) };
+            self.open_pair(l, r);
+            return;
+        }
+        let ctx = self.config.context_lines();
+        let (ts, bin, too) = self.load_side(Some(path));
+        let data = std::fs::read(path).unwrap_or_default();
+        let Some(s) = self.current_mut() else { return };
+        s.model.set_side(side, ts);
+        s.path.insert(side, path.to_string());
+        match bin {
+            Some(b) => {
+                s.binary.insert(side, b);
+            }
+            None => {
+                s.binary.remove(&side);
+            }
+        }
+        s.too_large.insert(side, too);
+        s.disk.insert(side, data);
+        s.mark_clean(side);
+        s.status = format!("opened {path} on the {}", side.raw());
+        s.refresh(ctx);
+    }
+
     pub fn save(&mut self, side: CompareSide) -> bool {
         let ctx = self.config.context_lines();
         let backend = self.backend.clone();
@@ -4733,7 +4813,13 @@ impl CompareSurface {
 
     /// The chrome's event sink (sidebar / start page / toolbar clicks).
     pub fn set_on_event(&self, cb: Box<dyn Fn(crate::views::compare_view::CompareEvent)>) {
-        self.chrome.set_on_event(cb);
+        use crate::views::compare_view::CompareEvent;
+        let rc: std::rc::Rc<dyn Fn(CompareEvent)> = std::rc::Rc::from(cb);
+        let chrome_sink = rc.clone();
+        self.chrome.set_on_event(Box::new(move |e| chrome_sink(e)));
+        self.pane.set_on_menu(std::rc::Rc::new(move |side, row, x, y| {
+            rc(CompareEvent::PaneMenu { right: side == CompareSide::Right, row, x, y })
+        }));
     }
 
     pub fn chrome(&self) -> objc2::rc::Retained<crate::views::compare_view::CompareView> {
@@ -4955,6 +5041,8 @@ mod macos {
     pub struct ComparePaneViewIvars {
         pub colors: RefCell<PopupColors>,
         pub model: RefCell<PaneModel>,
+        /// Right-click: (side, display row, screen x, screen y).
+        pub on_menu: RefCell<Option<std::rc::Rc<dyn Fn(CompareSide, usize, f64, f64)>>>,
     }
 
     define_class!(
@@ -4979,6 +5067,25 @@ mod macos {
             fn draw_rect(&self, dirty: NSRect) {
                 self.render(dirty);
             }
+
+            /// `ComparePane.rightMouseDown`: the row and side under the
+            /// pointer, then the host's `paneMenu`.
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let b = self.bounds();
+                let layout = PaneLayout::new(b.size.width, b.size.height);
+                let (row, n) = {
+                    let m = self.ivars().model.borrow();
+                    (m.top + layout.row_at(p.y), m.display_count())
+                };
+                let row = if n == 0 { 0 } else { row.min(n - 1) };
+                let cb = self.ivars().on_menu.borrow().clone();
+                if let Some(cb) = cb {
+                    let s = NSEvent::mouseLocation();
+                    cb(layout.side_at(p.x), row, s.x, s.y);
+                }
+            }
         }
 
         unsafe impl NSObjectProtocol for ComparePaneView {}
@@ -4989,6 +5096,7 @@ mod macos {
             let this = Self::alloc(mtm).set_ivars(ComparePaneViewIvars {
                 colors: RefCell::new(PopupColors::default()),
                 model: RefCell::new(PaneModel::empty()),
+                on_menu: RefCell::new(None),
             });
             unsafe {
                 msg_send![
@@ -5001,6 +5109,10 @@ mod macos {
         pub fn set_colors(&self, colors: PopupColors) {
             *self.ivars().colors.borrow_mut() = colors;
             self.setNeedsDisplay(true);
+        }
+
+        pub fn set_on_menu(&self, cb: std::rc::Rc<dyn Fn(CompareSide, usize, f64, f64)>) {
+            *self.ivars().on_menu.borrow_mut() = Some(cb);
         }
 
         pub fn set_model(&self, model: PaneModel) {
@@ -6142,6 +6254,34 @@ mod tests {
         let p = stub.params("compare.align");
         assert_eq!((p["l"].clone(), p["r"].clone()), (json!(1), json!(2)));
         assert_eq!(model.align_pick, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pane_menu_select_section_and_copy_rows_text() {
+        // `selectSection` / `copyRowsText` behind the text pane's menu.
+        let stub = Stub::new();
+        stub.push("compare.new", new_snapshot());
+        let dir = temp_dir("panemenu");
+        let mut model = CompareWindowModel::with_backend(
+            stub.clone(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+        assert_eq!(model.test_do("start-paste"), None);
+        model.move_cursor(0, false);
+        assert!(!model.cursor_in_section());
+        model.move_cursor(1, false);
+        assert!(model.cursor_in_section());
+        model.select_section();
+        assert_eq!(model.current().map(|s| (s.anchor, s.cursor)), Some((Some(1), 1)));
+        model.current_mut().unwrap().focus = CompareSide::Right;
+        assert_eq!(model.rows_text().as_deref(), Some("c"));
+        model.move_cursor(0, false);
+        model.move_cursor(1, true);
+        model.current_mut().unwrap().focus = CompareSide::Left;
+        assert_eq!(model.rows_text().as_deref(), Some("a\nb\n"));
+        assert_eq!(model.current().unwrap().status, "copied 2 lines");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

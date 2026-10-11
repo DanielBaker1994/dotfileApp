@@ -74,6 +74,8 @@ pub enum CompareEvent {
     RecentFilter(String),
     Filter(usize),
     Tool(usize),
+    /// Right-click in the text pane (`ComparePane.rightMouseDown`).
+    PaneMenu { right: bool, row: usize, x: f64, y: f64 },
 }
 
 /// `CompareRecent.age(_:)`.

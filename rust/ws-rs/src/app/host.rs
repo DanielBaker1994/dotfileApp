@@ -5530,7 +5530,197 @@ mod daemon_ui {
                     });
                     let _ = CompareSide::Left;
                 }
+                E::PaneMenu { right, row, x, y } => {
+                    let side = if right { CompareSide::Right } else { CompareSide::Left };
+                    self.compare_pane_menu(side, row, x, y);
+                }
             }
+        }
+
+        /// `CompareWindow.paneMenu(row:side:)`: the text pane's right-click
+        /// menu. The click first moves the cursor and focus there
+        /// (`paneClicked`), like Swift.
+        fn compare_pane_menu(&self, side: crate::views::compare::CompareSide, row: usize, x: f64, y: f64) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            use crate::views::compare::{CompareSide, Eol};
+            struct Info {
+                has_rows: bool,
+                can_copy_across: bool,
+                in_section: bool,
+                line: i64,
+                pick: Option<(CompareSide, i64)>,
+                is_anchor: Option<usize>,
+                anchors: usize,
+                path: Option<String>,
+                dirty: bool,
+            }
+            let info = self.compare_with(|m| {
+                if m.current_is_folder() {
+                    return None;
+                }
+                m.move_cursor(row as i64, false);
+                let pick = m.align_pick;
+                let in_section = m.cursor_in_section();
+                let s = m.current_mut()?;
+                s.focus = side;
+                let n = s.display_count();
+                let mrow = (n > 0).then(|| s.model_row(s.cursor));
+                Some(Info {
+                    has_rows: n > 0,
+                    can_copy_across: s.anchor.is_some() || in_section,
+                    in_section,
+                    line: mrow.map(|r| s.model.rows()[r].line(side) as i64).unwrap_or(-1),
+                    pick,
+                    is_anchor: mrow.filter(|r| s.model.is_anchor(*r)),
+                    anchors: s.model.anchors().len(),
+                    path: s.path.get(&side).cloned(),
+                    dirty: s.dirty(side),
+                })
+            });
+            let Some(Some(info)) = info else { return };
+            let clip = {
+                use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+                NSPasteboard::generalPasteboard()
+                    .stringForType(unsafe { NSPasteboardTypeString })
+                    .map(|s| s.to_string())
+            };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let act = |f: Box<dyn FnOnce(&mut crate::views::compare::CompareWindowModel)>| {
+                let w = weak.clone();
+                move || {
+                    if let Some(ui) = w.load() {
+                        ui.compare_with(f);
+                    }
+                }
+            };
+            let other = if side == CompareSide::Left { "Right" } else { "Left" };
+            let key = if side == CompareSide::Left { "R" } else { "L" };
+            let item = |title: &str, enabled: bool, f: Box<dyn FnOnce()>| {
+                if enabled {
+                    MenuEntry::item(title, f)
+                } else {
+                    MenuEntry::disabled(title)
+                }
+            };
+            let mut e = vec![
+                MenuEntry::item("Copy", act(Box::new(|m| {
+                    if let Some(t) = m.rows_text() {
+                        copy_text_to_pasteboard(&t);
+                    }
+                }))),
+                item(
+                    &format!("Copy to {other}  (⌃{key})"),
+                    info.can_copy_across,
+                    Box::new(act(Box::new(move |m| m.copy_across(side)))),
+                ),
+                item(
+                    &format!("Copy Line to {other}  (⌃⌥{key})"),
+                    info.has_rows,
+                    Box::new(act(Box::new(move |m| m.copy_line(side)))),
+                ),
+            ];
+            let w = weak.clone();
+            e.push(item(
+                "Paste Clipboard Here",
+                clip.is_some(),
+                Box::new(move || {
+                    let Some(t) = clip else { return };
+                    if let Some(ui) = w.load() {
+                        ui.compare_with(|m| match t.strip_prefix("file:") {
+                            Some(p) => m.open_file_into(side, p),
+                            None => m.set_pasted(&t, side),
+                        });
+                    }
+                }),
+            ));
+            e.push(item(
+                "Edit Section  (⏎)",
+                info.has_rows,
+                Box::new(|| crate::ui::toast::not_ported("Compare Edit Section")),
+            ));
+            e.push(item("Select Section", info.in_section, Box::new(act(Box::new(|m| m.select_section())))));
+            e.push(MenuEntry::item("Find…  (⌘F)", || crate::ui::toast::not_ported("Compare Find")));
+            e.push(MenuEntry::Separator);
+            let line = info.line;
+            match info.pick {
+                Some((ps, pl)) if ps != side && line >= 0 => {
+                    let ps_name = if ps == CompareSide::Left { "Left" } else { "Right" };
+                    e.push(MenuEntry::item(
+                        &format!("Align With Picked {ps_name} Line {}", pl + 1),
+                        act(Box::new(move |m| m.align_with(side, line))),
+                    ));
+                    e.push(MenuEntry::item("Cancel Align With", act(Box::new(|m| m.align_pick = None))));
+                }
+                _ => e.push(item(
+                    "Align With…  (pick this line, then one on the other side)",
+                    line >= 0,
+                    Box::new(act(Box::new(move |m| m.align_with(side, line)))),
+                )),
+            }
+            if let Some(r) = info.is_anchor {
+                e.push(MenuEntry::item("Remove This Alignment", act(Box::new(move |m| m.clear_alignment(Some(r))))));
+            }
+            if info.anchors > 0 {
+                e.push(MenuEntry::item(
+                    &format!("Clear All Alignments ({})", info.anchors),
+                    act(Box::new(|m| m.clear_alignment(None))),
+                ));
+            }
+            let mut conv = vec![
+                MenuEntry::item("Trim Trailing Whitespace", act(Box::new(move |m| m.trim(side)))),
+                MenuEntry::Separator,
+            ];
+            for (eol, label) in [(Eol::Lf, "LF"), (Eol::Crlf, "CRLF"), (Eol::Cr, "CR")] {
+                conv.push(MenuEntry::item(
+                    &format!("Line Endings → {label}"),
+                    act(Box::new(move |m| m.convert_eol(side, eol))),
+                ));
+            }
+            e.push(MenuEntry::submenu(&format!("Convert {} Side", if side == CompareSide::Left { "Left" } else { "Right" }), conv));
+            e.push(MenuEntry::Separator);
+            let path = info.path.clone();
+            let has_path = path.is_some();
+            let p = path.clone().unwrap_or_default();
+            let (p1, p2, p3, p4) = (p.clone(), p.clone(), p.clone(), p);
+            e.push(item("Copy Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
+            e.push(item("Reveal in Finder", has_path, Box::new(move || reveal_in_finder(&[p2]))));
+            let w = weak.clone();
+            e.push(item(
+                "Open in Notes",
+                has_path,
+                Box::new(move || {
+                    if let Some(ui) = w.load() {
+                        ui.open_in_notes(&p3);
+                    }
+                }),
+            ));
+            e.push(item("Open in Default App", has_path, Box::new(move || open_path(&p4))));
+            let w = weak.clone();
+            e.push(MenuEntry::item("Open File into This Side…  (⌘O)", move || {
+                let Some(mtm) = MainThreadMarker::new() else { return };
+                let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
+                panel.setCanChooseFiles(true);
+                panel.setCanChooseDirectories(false);
+                panel.setAllowsMultipleSelection(false);
+                if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+                    return;
+                }
+                let Some(p) = panel.URLs().firstObject().and_then(|u| u.path()) else { return };
+                let p = p.to_string();
+                if let Some(ui) = w.load() {
+                    ui.compare_with(|m| m.open_file_into(side, &p));
+                }
+            }));
+            e.push(item(
+                "Save This Side  (⌘S)",
+                info.dirty || !has_path,
+                Box::new(act(Box::new(move |m| {
+                    if !m.save(side) {
+                        crate::ui::toast::not_ported("Compare Save As (side has no file)");
+                    }
+                }))),
+            ));
+            popup(e, None, x, y);
         }
 
         /// Run `f` on the AI state, then push a fresh snapshot.
