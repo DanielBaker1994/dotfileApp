@@ -4188,8 +4188,13 @@ mod daemon_ui {
                 KeyAction::FontStep(sign) => {
                     if current == Some(SlotView::Notes) {
                         self.notes_surface(|s| s.step_font(sign)).is_some()
+                    } else if current == Some(SlotView::Files) {
+                        self.files_text_zoom(sign);
+                        true
+                    } else if current.is_some_and(|v| v.is_jira()) {
+                        crate::ui::toast::not_ported("Jira list text zoom");
+                        true
                     } else {
-                        // List text zoom (`setTextZoom`) is not ported yet.
                         self.route_resize_by(sign)
                     }
                 }
@@ -7324,6 +7329,18 @@ mod daemon_ui {
             NSRect::new(NSPoint::new(x, r.y), NSSize::new((r.width * 0.55 - x).max(120.0), r.height))
         }
 
+        /// `setTextZoom(_:)` for the file browser: 0.6–3, 0.1 a step, kept
+        /// in `UserDefaults textZoom.files`.
+        fn files_text_zoom(&self, sign: i32) {
+            let Some(Some(view)) = self.files_surface(|b| b.view.clone()) else { return };
+            let list = view.list_view();
+            let z = ((list.zoom() + 0.1 * sign as f64) * 100.0).round() / 100.0;
+            let z = z.clamp(0.6, 3.0);
+            list.set_zoom(z);
+            defaults_set_string("textZoom.files", &z.to_string());
+            self.files_surface(|_| ());
+        }
+
         /// `PopupFileBrowser.beginRename()` (Cmd+R / F2).
         fn files_begin_rename(&self) {
             let Some(Some((i, path, is_dir, list))) = self.files_surface(|b| {
@@ -7993,6 +8010,12 @@ mod daemon_ui {
                         } else if v == SlotView::Files {
                             match self.build_files(mtm) {
                                 Some((browser, view)) => {
+                                    if let (Some(fv), Some(z)) = (
+                                        browser.view.as_ref(),
+                                        defaults_string("textZoom.files").and_then(|z| z.parse::<f64>().ok()),
+                                    ) {
+                                        fv.list_view().set_zoom(z.clamp(0.6, 3.0));
+                                    }
                                     st.files = Some(browser);
                                     view
                                 }

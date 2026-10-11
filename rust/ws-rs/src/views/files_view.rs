@@ -328,6 +328,16 @@ mod appkit {
             (22.0 * self.ivars().zoom.get()).round()
         }
 
+        /// `textZoom` (Cmd+± on the list).
+        pub fn set_zoom(&self, z: f64) {
+            self.ivars().zoom.set(z);
+            self.setNeedsDisplay(true);
+        }
+
+        pub fn zoom(&self) -> f64 {
+            self.ivars().zoom.get()
+        }
+
         pub fn set_rows(&self, rows: &[Entry], selection: usize, marked: &BTreeSet<usize>) {
             let same = *self.ivars().rows.borrow() == rows;
             if !same {
