@@ -143,6 +143,8 @@ pub enum UiCommand {
     JiraJump,
     /// `jira-poll on`'s checks finished: (ok, message).
     JiraEnable(bool, String),
+    /// `JiraSetupWindow.show(controller:reason:)`.
+    JiraSetup(Option<String>),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -1210,12 +1212,14 @@ impl SwitcherController {
         }
         let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else { return };
         std::thread::spawn(move || {
-            let result = match jp::enable_check() {
-                EnableCheck::Ok => (true, String::new()),
-                EnableCheck::Setup(reason) => (false, format!("Jira setup needed: {reason}")),
-                EnableCheck::Login(msg) => (false, format!("Jira login failed: {msg}")),
+            // `enableJiraChecked`: a missing / incomplete config opens the
+            // setup window with the reason instead of refusing.
+            let cmd = match jp::enable_check() {
+                EnableCheck::Ok => UiCommand::JiraEnable(true, String::new()),
+                EnableCheck::Setup(reason) => UiCommand::JiraSetup(Some(reason)),
+                EnableCheck::Login(msg) => UiCommand::JiraEnable(false, format!("Jira login failed: {msg}")),
             };
-            queue.lock().unwrap().push(UiCommand::JiraEnable(result.0, result.1));
+            queue.lock().unwrap().push(cmd);
         });
     }
 
@@ -1408,11 +1412,7 @@ impl SwitcherController {
             "jira-dashboard" => self.open(SlotView::Jira),
             "jira-poll-on" | "jira-poll-off" | "jira-poll-toggle" => self.jira_poll(name),
             "jira-setup" => {
-                self.log("jira-setup: the Jira setup window is not ported yet");
-                self.inner.lock().unwrap().ui_push(UiCommand::Toast(
-                    crate::ui::toast::not_ported_text("Jira setup window"),
-                    crate::ui::toast::NOT_PORTED_SYMBOL,
-                ));
+                self.inner.lock().unwrap().ui_push(UiCommand::JiraSetup(None));
             }
             "notes" => {
                 self.hotkey(SlotView::Notes);
@@ -3129,6 +3129,13 @@ mod daemon_ui {
                         UiCommand::NoteFind(grep) => self.show_note_find(grep),
                         UiCommand::JiraJump => self.show_sidebar_jump(),
                         UiCommand::JiraEnable(ok, msg) => self.ivars().controller.jira_enable_result(ok, &msg),
+                        UiCommand::JiraSetup(reason) => {
+                            let ctrl = self.ivars().controller.clone();
+                            crate::ui::jira_setup::show(
+                                reason.as_deref(),
+                                Box::new(move || ctrl.jira_enable_result(true, "")),
+                            );
+                        }
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
                         }

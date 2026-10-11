@@ -56,11 +56,28 @@ fn python() -> String {
 
 /// `JiraPoll.run(script, args)` — blocking; call off the main thread.
 pub fn run(script: &str, args: &[&str]) -> (i32, String, String) {
-    match Command::new(python())
+    run_stdin(script, args, None)
+}
+
+/// `JiraPoll.run(script, args, stdin:)` — blocking; call off the main thread.
+pub fn run_stdin(script: &str, args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let child = Command::new(python())
         .arg(format!("{}/{script}", jira_dir()))
         .args(args)
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .output()
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            if let (Some(text), Some(mut pipe)) = (stdin, c.stdin.take()) {
+                let _ = pipe.write_all(text.as_bytes());
+            }
+            c.wait_with_output()
+        });
+    match child
     {
         Ok(o) => (
             o.status.code().unwrap_or(-1),

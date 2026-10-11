@@ -6,6 +6,7 @@ pub mod card;
 pub mod chrome;
 pub mod field;
 pub mod inline_rename;
+pub mod jira_setup;
 pub mod list_panel;
 pub mod menu_kit;
 pub mod panel_frame;
