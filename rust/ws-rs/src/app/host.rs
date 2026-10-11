@@ -8048,6 +8048,10 @@ mod daemon_ui {
                     front_pid,
                 )
             };
+            // Swift's views each take the keyboard on show (the filter /
+            // search field, the AI input, the diff); keep a pane that already
+            // has it. After this turn's layout (a fresh view has no size yet).
+            on_ui(move |ui| ui.focus_default_pane(v));
             controller.set_member(v, true, true, Some(rect));
             controller.set_member_wid(v, wid);
             controller.set_key_window(title);
@@ -8055,6 +8059,28 @@ mod daemon_ui {
             controller.set_frontmost_pid(front_pid);
             controller.bump_activations();
             controller.set_window_count(visible_window_count(mtm));
+        }
+
+        fn focus_default_pane(&self, v: SlotView) {
+            if self.ivars().controller.current() != Some(v) {
+                return;
+            }
+            if self.focused_pane_id().is_none() {
+                let order: &[&str] = match v {
+                    SlotView::Files => &["files-filter"],
+                    SlotView::Confluence => &["search"],
+                    SlotView::Ai => &["input"],
+                    // A session's diff / tree, else the start page's path box.
+                    SlotView::Compare | SlotView::CompareText => &["diff", "tree", "left-path"],
+                    v if v.is_jira() => &["search"],
+                    _ => &[],
+                };
+                for id in order {
+                    if self.live_pane_focus(id) {
+                        break;
+                    }
+                }
+            }
         }
 
         fn hide(&self) {
