@@ -2451,10 +2451,7 @@ mod macos {
                     copy_image_file_to_pasteboard(&p3);
                 }),
                 MenuEntry::item("Reveal in Finder", move || {
-                    let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&p4));
-                    let arr = objc2_foundation::NSArray::from_retained_slice(&[url]);
-                    objc2_app_kit::NSWorkspace::sharedWorkspace()
-                        .activateFileViewerSelectingURLs(&arr);
+                    crate::app::host::reveal_in_files(&[p4.clone()]);
                 }),
                 MenuEntry::item("Open in Default App", move || {
                     use objc2_foundation::NSURL;
@@ -2761,6 +2758,12 @@ mod macos {
         /// The `g:ws_cell_h` (rounded cell height) last pushed to the embedded
         /// nvim; the real SwiftTerm value is pushed exactly once per change.
         vim_cell_h: Cell<i64>,
+        /// Whether the configured font was re-asserted once after the pane's
+        /// grid came up (guards against a lost pre-window font assignment).
+        vim_font_reapplied: Cell<bool>,
+        /// The point size SwiftTerm reports it is rendering the pane with (for
+        /// the socket `state`; diagnostics).
+        vim_font_size: Cell<f64>,
         /// Throttle for the nvim image-sidecar poll.
         vim_images_at: Cell<f64>,
     }
@@ -3077,6 +3080,8 @@ mod macos {
             vim_images,
             vim_cell: Cell::new(vim_cell),
             vim_cell_h: Cell::new(vim_cell_h),
+            vim_font_reapplied: Cell::new(false),
+            vim_font_size: Cell::new(0.0),
             vim_images_at: Cell::new(0.0),
         })
     }
@@ -3151,6 +3156,8 @@ mod macos {
                 "findBar": self.find_shown,
                 "collapsed": self.model.sidebar.collapsed,
                 "tabs": self.model.tabs.titles(),
+                "vimCellHeight": self.vim_cell.get().1,
+                "vimFontSize": self.vim_font_size.get(),
             })
         }
 
@@ -3474,6 +3481,21 @@ mod macos {
             let Some(pane) = self.vim.as_ref() else { return };
             let Some(view) = pane.view() else { return };
             let Ok(shim) = view.downcast::<swiftterm_shim::WSShim>() else { return };
+            // A font assigned before the terminal is in a window can fail to
+            // stick in SwiftTerm; re-assert the configured font once the grid is
+            // live, then trust what SwiftTerm reports.
+            let actual = swiftterm_shim::font_point_size(&shim);
+            if !self.vim_font_reapplied.get() {
+                if let Some((name, size)) = pane.font() {
+                    if actual > 0.0 && (actual - size).abs() > 0.5 {
+                        swiftterm_shim::set_font(&shim, &name, size);
+                        self.vim_font_reapplied.set(true);
+                        return; // re-read the cell on the next tick
+                    }
+                }
+                self.vim_font_reapplied.set(true);
+            }
+            self.vim_font_size.set(swiftterm_shim::font_point_size(&shim));
             let Some(cell) = swiftterm_shim::cell_size(&shim) else { return };
             self.vim_cell.set(cell);
             if let Some(ov) = &self.vim_images {
@@ -3499,6 +3521,12 @@ mod macos {
 
         /// `setProse(_:)`.
         pub fn set_prose(&mut self, on: bool) {
+            self.set_prose_to(on, None);
+        }
+
+        /// `setProse(_:)` with an explicit source `path` (opening a note while
+        /// the reading view is up); `None` falls back to the selected tab.
+        fn set_prose_to(&mut self, on: bool, path: Option<&str>) {
             self.prose_switch.set_prose(on);
             if !on {
                 if !self.prose_shown {
@@ -3526,7 +3554,8 @@ mod macos {
             } else {
                 self.commit();
             }
-            let Some(path) = self.selected_path().filter(|p| Path::new(p).exists()) else {
+            let target = path.map(str::to_string).or_else(|| self.selected_path());
+            let Some(path) = target.filter(|p| Path::new(p).exists()) else {
                 self.prose_switch.set_prose(false);
                 return;
             };
@@ -3571,6 +3600,15 @@ mod macos {
             if self.prose_shown {
                 self.prose_shown = false;
                 self.set_prose(true);
+            }
+        }
+
+        /// Re-render the reading view for a specific opened `path` (used by
+        /// `open_note`, where the path may not be the selected tab yet).
+        fn refresh_prose_to(&mut self, path: &str) {
+            if self.prose_shown {
+                self.prose_shown = false;
+                self.set_prose_to(true, Some(path));
             }
         }
 
@@ -3962,12 +4000,14 @@ mod macos {
             }
             if self.vim.is_some() {
                 self.vim_open(path);
+                self.refresh_prose_to(path);
                 return;
             }
             if let Ok(text) = std::fs::read_to_string(path) {
                 self.set_note_text(&text, path);
             }
             self.focus_editor();
+            self.refresh_prose_to(path);
         }
 
         /// `vimFlush()` — `silent! wall` before the window hides.

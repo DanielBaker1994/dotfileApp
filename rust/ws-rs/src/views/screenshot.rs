@@ -5400,9 +5400,8 @@ fn open_in_workspace(path: &str) {
 
 #[cfg(target_os = "macos")]
 fn reveal_in_workspace(path: &str) {
-    let url = objc2_foundation::NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(path));
-    let arr = objc2_foundation::NSArray::from_retained_slice(&[url]);
-    objc2_app_kit::NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&arr);
+    // Uniform "reveal": the app's own file browser, never macOS Finder.
+    crate::app::host::reveal_in_files(&[path.to_string()]);
 }
 
 /// The frame of the screen under the mouse (`mouseScreen`).

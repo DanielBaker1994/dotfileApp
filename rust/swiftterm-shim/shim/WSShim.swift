@@ -49,6 +49,11 @@ public final class WSShim: NSView, LocalProcessTerminalViewDelegate {
     @objc public var cellWidth: Double { Double(cellSizePoints().width) }
     @objc public var cellHeight: Double { Double(cellSizePoints().height) }
 
+    /// The point size of the font SwiftTerm is actually rendering with (its
+    /// `font` getter). The notes surface compares this to the configured size
+    /// to detect a font assignment that did not take.
+    @objc public var fontPointSize: Double { Double(terminal.font.pointSize) }
+
     private func cellSizePoints() -> NSSize {
         let dims = terminal.terminalDimensions
         guard dims.cols > 0, dims.rows > 0 else { return .zero }

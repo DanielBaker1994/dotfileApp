@@ -2572,6 +2572,16 @@ pub fn screenshot_saved_to_path_shelf(path: &str) {
     let _ = path;
 }
 
+/// Show `paths` in the app's own file browser (`SlotView::Files`) — the uniform
+/// entry point for every "reveal / show in Finder" action, callable from any
+/// module. Never opens macOS Finder. A no-op off macOS or before the UI is up.
+pub fn reveal_in_files(paths: &[String]) {
+    #[cfg(target_os = "macos")]
+    daemon_ui::reveal_in_files(paths);
+    #[cfg(not(target_os = "macos"))]
+    let _ = paths;
+}
+
 #[cfg(target_os = "macos")]
 mod daemon_ui {
     mod host_vim;
@@ -3838,7 +3848,7 @@ mod daemon_ui {
                                 }
                             }),
                             MenuEntry::item("Open in Default App", move || open_path(&p4)),
-                            MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p5])),
+                            MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p5])),
                             MenuEntry::Separator,
                             MenuEntry::item("Forget", move || {
                                 SHELF.with(|s| {
@@ -4968,7 +4978,7 @@ mod daemon_ui {
                                 ui.files_surface(|b| b.cd(&p1));
                             }
                         }),
-                        MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p2])),
+                        MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p2])),
                         MenuEntry::item("Copy Path", move || copy_text_to_pasteboard(&p3)),
                     ];
                     if pinned {
@@ -5435,7 +5445,7 @@ mod daemon_ui {
                         vec![
                             MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)),
                             MenuEntry::item("Open in Default App", move || open_path(&p2)),
-                            MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p3])),
+                            MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p3])),
                             MenuEntry::Separator,
                             MenuEntry::item("Close", move || {
                                 if let Some(ui) = weak.load() {
@@ -5514,7 +5524,7 @@ mod daemon_ui {
                         let Some(p) = p else { continue };
                         let p2 = p.clone();
                         e.push(MenuEntry::item(&format!("Copy {name} Path"), move || copy_text_to_pasteboard(&p)));
-                        e.push(MenuEntry::item(&format!("Reveal {name} in Finder"), move || reveal_in_finder(&[p2])));
+                        e.push(MenuEntry::item(&format!("Reveal {name} in Finder"), move || reveal_in_files(&[p2])));
                     }
                     popup(e, None, x, y);
                 }
@@ -5656,8 +5666,8 @@ mod daemon_ui {
                                     }
                                 }
                             }),
-                            MenuEntry::item("Reveal Left in Finder", move || reveal_in_finder(&[l2])),
-                            MenuEntry::item("Reveal Right in Finder", move || reveal_in_finder(&[r2])),
+                            MenuEntry::item("Reveal Left in Finder", move || reveal_in_files(&[l2])),
+                            MenuEntry::item("Reveal Right in Finder", move || reveal_in_files(&[r2])),
                             MenuEntry::item("Copy Paths", move || copy_text_to_pasteboard(&format!("{l}\n{r}"))),
                             MenuEntry::Separator,
                             MenuEntry::item("Remove from Recent", move || {
@@ -5851,7 +5861,7 @@ mod daemon_ui {
             })))));
             let p = t.path.clone().unwrap_or_default();
             let (p1, p2, p3) = (p.clone(), p.clone(), p);
-            e.push(item("Reveal in Finder", on_side, Box::new(move || reveal_in_finder(&[p1]))));
+            e.push(item("Reveal in Finder", on_side, Box::new(move || reveal_in_files(&[p1]))));
             if !t.is_folder {
                 let w = weak.clone();
                 e.push(item("Open in Notes", on_side, Box::new(move || {
@@ -6064,7 +6074,7 @@ mod daemon_ui {
             let p = path.clone().unwrap_or_default();
             let (p1, p2, p3, p4) = (p.clone(), p.clone(), p.clone(), p);
             e.push(item("Copy Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
-            e.push(item("Reveal in Finder", has_path, Box::new(move || reveal_in_finder(&[p2]))));
+            e.push(item("Reveal in Finder", has_path, Box::new(move || reveal_in_files(&[p2]))));
             let w = weak.clone();
             e.push(item(
                 "Open in Notes",
@@ -6326,7 +6336,7 @@ mod daemon_ui {
                         }
                     }),
                     MenuEntry::item("Open in Default App", move || open_path(&p2)),
-                    MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p3])),
+                    MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p3])),
                     MenuEntry::item("Copy Path", move || copy_text_to_pasteboard(&p4)),
                     MenuEntry::Separator,
                     MenuEntry::item("Duplicate…", move || {
@@ -7504,7 +7514,7 @@ mod daemon_ui {
                         return true;
                     }
                     let o = FileOps::trash(&paths, FileOps::shared());
-                    done(self, format!("Moved {} item(s) to the Trash · ⌘Z undoes", paths.len()), o.failed);
+                    done(self, format!("Moved {} item(s) to the Trash", paths.len()), o.failed);
                 }
                 2 if cmd && in_list => {
                     let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
@@ -7521,7 +7531,7 @@ mod daemon_ui {
                     let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
                     if copy_files_to_pasteboard(&paths) {
                         FILES_CUT.with(|c| c.set(true));
-                        crate::ui::toast::show(&format!("cut {} · ⌘V moves it here", copied_what(&paths)), "scissors");
+                        crate::ui::toast::show(&format!("Cut {}", copied_what(&paths)), "scissors");
                     }
                 }
                 9 if cmd && in_list => {
@@ -7831,7 +7841,7 @@ mod daemon_ui {
             }
             {
                 let ps = paths.clone();
-                entries.push(MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&ps)));
+                entries.push(MenuEntry::item("Reveal in Finder", move || reveal_in_files(&ps)));
             }
             entries.push(MenuEntry::Separator);
             {
@@ -8094,7 +8104,7 @@ mod daemon_ui {
                         open_path(p);
                     }
                 }
-                PathsKey::Reveal => reveal_in_finder(&paths),
+                PathsKey::Reveal => reveal_in_files(&paths),
                 PathsKey::BeginRename => self.paths_begin_rename(),
                 PathsKey::Forget => {
                     SHELF.with(|s| {
@@ -8215,6 +8225,41 @@ mod daemon_ui {
             self.present(SlotView::Notes);
             let p = path.to_string();
             self.notes_surface(|s| s.open_note(&p));
+        }
+
+        /// Show `paths` in the app's **own** file browser (`SlotView::Files`)
+        /// instead of macOS Finder: a directory becomes the root, a file opens
+        /// its parent with the file selected (all `paths` are marked). This is
+        /// the one entry point every "reveal / show in Finder" action uses.
+        fn open_in_files(&self, paths: &[String]) {
+            let wanted: Vec<String> = paths
+                .iter()
+                .map(|p| crate::views::files::standardize(p))
+                .collect();
+            let Some(first) = wanted.first() else { return };
+            let dir = if std::path::Path::new(first).is_dir() {
+                first.clone()
+            } else {
+                std::path::Path::new(first)
+                    .parent()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| first.clone())
+            };
+            self.ivars().controller.open(SlotView::Files);
+            self.present(SlotView::Files);
+            self.files_surface(|b| {
+                b.cd(&dir);
+                b.list.marked.clear();
+                for (i, e) in b.list.rows.iter().enumerate() {
+                    if wanted.iter().any(|w| w == &e.path) {
+                        b.list.marked.insert(i);
+                    }
+                }
+                if let Some(i) = b.list.rows.iter().position(|e| wanted.iter().any(|w| w == &e.path))
+                {
+                    b.list.selection = i;
+                }
+            });
         }
 
         /// The Recent / Arrived lists follow the engine (Swift
@@ -9241,14 +9286,18 @@ mod daemon_ui {
         }
     }
 
-    /// `activateFileViewerSelecting` — reveal `paths` in Finder.
-    fn reveal_in_finder(paths: &[String]) {
-        use objc2_app_kit::NSWorkspace;
-        use objc2_foundation::NSURL;
-        let urls: Vec<Retained<NSURL>> =
-            paths.iter().map(|p| NSURL::fileURLWithPath(&NSString::from_str(p))).collect();
-        let arr = objc2_foundation::NSArray::from_retained_slice(&urls);
-        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&arr);
+    /// Show `paths` in the app's own file browser (`SlotView::Files`) — the
+    /// uniform replacement for every "Reveal in Finder" action. Looks the live
+    /// UI up through [`UI_WEAK`] (callers are main-thread menu/key handlers
+    /// that hold no `&DaemonUi`).
+    pub(crate) fn reveal_in_files(paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
+        if let Some(ui) = ui {
+            ui.open_in_files(paths);
+        }
     }
 
     fn copy_text_to_pasteboard(text: &str) {
@@ -9307,7 +9356,7 @@ mod daemon_ui {
     fn copy_files_toast(paths: &[String]) -> bool {
         let ok = copy_files_to_pasteboard(paths);
         if ok {
-            crate::ui::toast::show(&format!("copied {} · ⌘V pastes the file, or its path as text", copied_what(paths)), "doc.on.doc");
+            crate::ui::toast::show(&format!("Copied {}", copied_what(paths)), "doc.on.doc");
         }
         ok
     }

@@ -67,6 +67,9 @@ mod present {
             #[unsafe(method(cellHeight))]
             pub fn cell_height(&self) -> f64;
 
+            #[unsafe(method(fontPointSize))]
+            pub fn font_point_size(&self) -> f64;
+
             #[unsafe(method(terminalRunning))]
             pub fn terminal_running(&self) -> bool;
 
@@ -170,6 +173,11 @@ mod present {
         } else {
             None
         }
+    }
+
+    /// The point size SwiftTerm is actually rendering the terminal with.
+    pub fn font_point_size(view: &WSShim) -> f64 {
+        view.font_point_size()
     }
 }
 
