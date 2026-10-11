@@ -3665,6 +3665,11 @@ mod daemon_ui {
                 .registry()
                 .nav_icons()
                 .iter()
+                // Ctrl+B W lists only the in-app views: Files, Notes,
+                // Confluence, Jira (Hyper+S keeps the full palette).
+                .filter(|n| {
+                    n.view.is_jira() || matches!(n.view, SlotView::Files | SlotView::Notes | SlotView::Confluence)
+                })
                 .map(|n| {
                     let (name, section) = match n.view {
                         SlotView::Files => ("Files", "files"),
@@ -3688,14 +3693,7 @@ mod daemon_ui {
                 })
                 .collect();
             panel.set_icons(icons);
-            panel.set_commands(
-                controller
-                    .registry()
-                    .palette_commands()
-                    .iter()
-                    .map(|c| (c.id.clone(), c.title.clone()))
-                    .collect(),
-            );
+            panel.set_commands(Vec::new());
             panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
@@ -4029,11 +4027,52 @@ mod daemon_ui {
             }
         }
 
+        /// `TextEditKeys.killWordBackward` for any editable `NSText` first
+        /// responder (field editors included) in the key window.
+        fn kill_word_in_text_input(&self, event: &NSEvent) -> bool {
+            use crate::engines::text_edit_keys::{route, EditAction, Focus, Modifiers, KEY_W};
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let Some(mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let flags = event.modifierFlags();
+            let mods = Modifiers {
+                ctrl: flags.contains(F::Control),
+                cmd: flags.contains(F::Command),
+                option: flags.contains(F::Option),
+                shift: flags.contains(F::Shift),
+            };
+            if !mods.ctrl || event.keyCode() != KEY_W {
+                return false;
+            }
+            let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else {
+                return false;
+            };
+            let Some(r) = window.firstResponder() else {
+                return false;
+            };
+            let Some(text) = as_any(&*r).downcast_ref::<objc2_app_kit::NSText>() else {
+                return false;
+            };
+            let focus = Focus { is_text: true, is_editable: text.isEditable() };
+            if route(event.keyCode(), mods, focus) != Some(EditAction::KillWordBackward) {
+                return false;
+            }
+            let nil: Option<&AnyObject> = None;
+            let _: () = unsafe { msg_send![text, deleteWordBackward: nil] };
+            true
+        }
+
         /// The local keyDown guard (mirrors `PopupWindow.installMonitors`'
         /// handler, scaled to the shared host): route the ported
         /// [`popup::route_key`] decision, execute Esc-hide and edit keys, and
         /// consume only what is acted on (everything else passes through).
         fn route_key_event(&self, event: &NSEvent) -> bool {
+            // Ctrl+W deletes the previous word in every text input (window
+            // fields, panel search boxes, sheets, inline rename).
+            if self.kill_word_in_text_input(event) {
+                return true;
+            }
             if crate::ui::inline_rename::active() {
                 return false;
             }

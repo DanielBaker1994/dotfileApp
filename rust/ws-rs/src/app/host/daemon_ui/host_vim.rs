@@ -611,6 +611,16 @@ impl DaemonUi {
     /// `<leader>sf`: fuzzy-pick one of the focused pane's rows and activate it
     /// like a mouse click.
     fn vim_open_find(&self, live: &Option<Live>) {
+        // Jira / Confluence: the finder always lists the left sidebar, whatever
+        // pane (list, preview, inspector) has the keyboard.
+        let current = self.ivars().controller.current();
+        let sidebar_live = if current.is_some_and(|v| v.is_jira()) || current == Some(SlotView::Confluence) {
+            self.live_panes()
+                .and_then(|(_, panes)| panes.iter().find(|p| p.id == "sidebar").and_then(|p| self.vim_live(p)))
+        } else {
+            None
+        };
+        let live = if sidebar_live.is_some() { &sidebar_live } else { live };
         let Some(Live::Rows(src, bar)) = live else { return };
         let Some(rows) = self.vim_rows(*src, bar.as_deref()) else { return };
         let items = rows.texts.clone();
