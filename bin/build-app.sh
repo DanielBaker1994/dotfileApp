@@ -168,6 +168,7 @@ bundle_resources() {
         sec == "[screenshot]" && /^contrast-opacity[ \t]*=/ { print "contrast-opacity = 190"; next }
         sec == "[screenshot]" && /^draw-color[ \t]*=/ { print "draw-color = \"#ff0000\""; next }
         sec == "[screenshot]" && /^save-path[ \t]*=/ { print "save-path = \"~/Desktop\""; next }
+        sec == "[screenshot]" && /^start-mode[ \t]*=/ { print "start-mode = \"screenshot\""; next }
         { print }' "$ROOT/commands.toml" > "$res/commands.default.toml"
     printf '%s\n' "$APP_VERSION" > "$res/VERSION"
     # The notify AX helpers (rust/ws-helpers), found by notify_poll.py.

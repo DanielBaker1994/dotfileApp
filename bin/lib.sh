@@ -391,3 +391,68 @@ ws_cmd_test() {
         *)       exec "$WS_ROOT/bin/run-tests.sh" "$@" ;;
     esac
 }
+
+# ---------------------------------------------------------------- clean -----
+# `ws clean` — stop the running app and wipe build objects so the next build
+# is done from scratch. Default wipes the cargo objects (.build/rust-target and
+# rust/target); `--all` also wipes the SwiftTerm build, .build/dist and the
+# repo-root app bundle. The socket/lock files under $TMPDIR are left alone —
+# a stale ws-notes.sock is re-claimed on the next start.
+ws_cmd_clean() {
+    local all=0 a
+    for a in "$@"; do
+        case "$a" in
+            --all) all=1 ;;
+            *)     ws_die "usage: ws clean [--all]" ;;
+        esac
+    done
+
+    ws_step "stopping $APP_NAME"
+    if pgrep -f "$APP_NAME.app/Contents/MacOS" >/dev/null 2>&1; then
+        pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
+        local i
+        for i in $(seq 1 30); do
+            pgrep -f "$APP_NAME.app/Contents/MacOS" >/dev/null 2>&1 || break
+            sleep 0.1
+        done
+        if pgrep -f "$APP_NAME.app/Contents/MacOS" >/dev/null 2>&1; then
+            ws_warn "app ignores SIGTERM — SIGKILL"
+            pkill -9 -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
+        fi
+        echo "  stopped"
+    else
+        echo "  not running"
+    fi
+
+    local paths=(
+        "$WS_ROOT/.build/rust-target"
+        "$WS_ROOT/rust/target"
+    )
+    if [ "$all" = 1 ]; then
+        paths+=(
+            "$WS_ROOT/.build/SwiftTerm"
+            "$WS_ROOT/.build/.termbuilt"
+            "$WS_ROOT/.build/dist"
+            "$WS_ROOT/$APP_NAME.app"
+        )
+    fi
+
+    ws_step "wiping build objects"
+    local p wiped=0 sz
+    for p in "${paths[@]}"; do
+        [ -e "$p" ] || continue
+        sz="$(du -sh "$p" 2>/dev/null | awk '{print $1}')"
+        rm -rf "$p"
+        echo "  removed ${p#"$WS_ROOT"/}${sz:+ ($sz)}"
+        wiped=1
+    done
+    [ "$wiped" = 1 ] || echo "  nothing to wipe"
+
+    echo
+    if [ "$all" = 1 ]; then
+        echo "clean --all done. next: ./ws build  — full cargo + SwiftTerm rebuild."
+    else
+        echo "clean done. next: ./ws build  — full cargo rebuild."
+        echo "  (--all also wipes $APP_NAME.app, .build/SwiftTerm and .build/dist)"
+    fi
+}

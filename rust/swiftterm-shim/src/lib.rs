@@ -61,6 +61,12 @@ mod present {
             #[unsafe(method(terminalView))]
             pub fn terminal_view(&self) -> Retained<NSView>;
 
+            #[unsafe(method(cellWidth))]
+            pub fn cell_width(&self) -> f64;
+
+            #[unsafe(method(cellHeight))]
+            pub fn cell_height(&self) -> f64;
+
             #[unsafe(method(terminalRunning))]
             pub fn terminal_running(&self) -> bool;
 
@@ -151,6 +157,19 @@ mod present {
     pub fn set_font(view: &WSShim, name: &str, size: f64) {
         let n = NSString::from_str(name);
         view.set_font(&n, size);
+    }
+
+    /// The real cell size (points) SwiftTerm laid the grid out with. `None`
+    /// until the grid has been sized (or if SwiftTerm reports 0). The notes
+    /// surface uses the height for the inline-image rows and `g:ws_cell_h`.
+    pub fn cell_size(view: &WSShim) -> Option<(f64, f64)> {
+        let w = view.cell_width();
+        let h = view.cell_height();
+        if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
+            Some((w, h))
+        } else {
+            None
+        }
     }
 }
 

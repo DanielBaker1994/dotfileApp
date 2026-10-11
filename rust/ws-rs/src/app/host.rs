@@ -1079,6 +1079,9 @@ impl SwitcherController {
             "paths" => {
                 let _ = self.do_host_action("paths:show");
             }
+            "screenshot" => {
+                let _ = self.do_host_action("screenshot:show");
+            }
             "terminal" => self.toggle_terminal_panel(),
             "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
             | "compare" | "prettyprint" | "filefast" | "health" | "health-checks" => {
@@ -1326,10 +1329,14 @@ impl SwitcherController {
         let mut inner = self.inner.lock().unwrap();
         let path = inner.settings.commands_conf_path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut shot_cfg: Option<ScreenshotConfig> = None;
         if !text.is_empty() {
             config::apply_app_config_from_settings_text(&mut inner.settings, &text);
             inner.esc_app = inner.settings.esc_close;
             inner.esc_sections = parse_esc_close(&text);
+            let sections = parse_sections(&text);
+            shot_cfg =
+                Some(ScreenshotConfig::from_entries(&sections.get("screenshot").cloned().unwrap_or_default()));
         }
         let commands = count_commands(&text);
         let issues: Vec<Value> = config::validate_config(&text)
@@ -1340,6 +1347,13 @@ impl SwitcherController {
             .collect();
         let using_backup = inner.using_backup;
         inner.logs.push(format!("config reloaded ({commands} commands)"));
+        // Drop the `inner` borrow before locking the screenshot controller
+        // (startup builds it without holding `inner`; inner → controller is the
+        // fallback order).
+        drop(inner);
+        if let (Some(cfg), Some(controller)) = (shot_cfg, self.screenshot_controller.clone()) {
+            controller.lock().unwrap().set_config(cfg);
+        }
         json!({
             "ok": !using_backup,
             "commands": commands,
@@ -2549,6 +2563,15 @@ impl CommandHandler for SwitcherController {
 #[cfg(target_os = "macos")]
 pub use daemon_ui::install_daemon_ui;
 
+/// `PathShelf.add([path], why: .screenshot)` after a successful overlay save.
+/// Called on the main thread from `views::screenshot`'s save path.
+pub fn screenshot_saved_to_path_shelf(path: &str) {
+    #[cfg(target_os = "macos")]
+    daemon_ui::shelf_add(&[path.to_string()], crate::engines::path_shelf::Why::Screenshot);
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
+}
+
 #[cfg(target_os = "macos")]
 mod daemon_ui {
     mod host_vim;
@@ -2849,6 +2872,16 @@ mod daemon_ui {
         SHELF.with(|s| s.borrow().as_ref().map(|sh| sh.borrow().entries()).unwrap_or_default())
     }
 
+    /// `PathShelf.add(_:why:)` on the live shelf (main thread). The screenshot
+    /// save path calls this through [`super::screenshot_saved_to_path_shelf`].
+    pub(crate) fn shelf_add(paths: &[String], why: crate::engines::path_shelf::Why) {
+        SHELF.with(|s| {
+            if let Some(sh) = s.borrow().as_ref() {
+                sh.borrow_mut().add(paths, why);
+            }
+        });
+    }
+
     thread_local! {
         /// Cmd+X in the file list: the next Cmd+V moves instead of copies.
         static FILES_CUT: Cell<bool> = const { Cell::new(false) };
@@ -2991,6 +3024,9 @@ mod daemon_ui {
         if !std::path::Path::new(&bridge_path).exists() {
             let _ = std::fs::write(&bridge_path, "");
         }
+        // Held for the delayed `prewarm()` (the `controller` itself moves into
+        // the UI ivars below).
+        let shot_prewarm = controller.screenshot_controller();
         let this = DaemonUi::alloc(mtm).set_ivars(DaemonUiIvars {
             strip_result: Arc::new(std::sync::Mutex::new(None)),
             strip_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3043,6 +3079,15 @@ mod daemon_ui {
         dispatch2::DispatchQueue::main()
             .after(dispatch2::DispatchTime::NOW.time(2_000_000_000), configure_recent_and_shelf)
             .ok();
+        // `ScreenshotController.prewarm()` ~1.5 s after launch: SCK + OCR warm
+        // so the first capture / first OCR does not pay the cold cost.
+        if let Some(shot) = shot_prewarm {
+            dispatch2::DispatchQueue::main()
+                .after(dispatch2::DispatchTime::NOW.time(1_500_000_000), move || {
+                    shot.lock().unwrap().prewarm();
+                })
+                .ok();
+        }
         // The window's local keyDown guard (mirrors `PopupWindow.installMonitors`):
         // the block holds the UI weakly so AppKit's monitor retains no cycle.
         let weak = Weak::new(&*ui);
@@ -3413,6 +3458,8 @@ mod daemon_ui {
                 }
                 if let Some(surface) = st.notes.as_mut() {
                     let relaunched = surface.vim_poll_exit(mtm);
+                    // The nvim inline-image sidecar (throttled inside).
+                    surface.tick_vim_images();
                     if relaunched {
                         self.ivars().last_vim_relaunch.set(now);
                     }
@@ -5227,8 +5274,43 @@ mod daemon_ui {
                 M::Jump(n) => {
                     self.notes_surface(|s| s.prose_jump(n));
                 }
-                M::Image(path) => open_path(&path),
+                M::Image(path) => self.notes_open_image(path),
             }
+        }
+
+        /// `PopupTextView.onPasteImage` — save the pasted image next to the
+        /// note (`assets/img-<epoch>.png`) and insert it as an inline
+        /// attachment.
+        fn notes_paste_image(&self, img: objc2::rc::Retained<objc2_app_kit::NSImage>) {
+            #[cfg(target_os = "macos")]
+            {
+                self.notes_surface(|s| {
+                    let Some(path) = s.selected_path() else { return };
+                    if let Some(rel) = crate::views::notes_vim::save_image(&path, &img) {
+                        s.insert_image_attachment(&rel, &img);
+                    }
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = img;
+            }
+        }
+
+        /// `FilePopup.show(path, over: panel)` — the floating image popup.
+        fn notes_open_image(&self, path: String) {
+            // Attachment clicks carry the markdown-relative target; resolve it
+            // against the selected note before showing.
+            let resolved = self
+                .notes_surface(|s| s.resolve_image_path(&path))
+                .unwrap_or_else(|| path.clone());
+            let parent: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> = self
+                .ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .map(|st| st.window.clone().into_super());
+            crate::views::file_popup::show(&resolved, parent.as_deref());
         }
 
         /// `docTemplateMenu` — the ◐ document-style menu
@@ -8091,17 +8173,21 @@ mod daemon_ui {
         /// File Path and Open file at path….
         fn notes_editor_menu(&self, idx: usize) {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
-            let Some((text, note, view)) = self.notes_surface(|s| {
-                s.editor_view().map(|v| (v.string().to_string(), s.selected_path(), v))
+            let Some((image, note, view)) = self.notes_surface(|s| {
+                s.editor_view()
+                    .map(|v| (s.image_path_at(idx), s.selected_path(), v))
             }).flatten() else {
                 return;
             };
-            let home = std::env::var("HOME").unwrap_or_default();
-            let image = crate::views::notes::image_link_at(&text, idx)
-                .map(|t| crate::views::notes::resolve_note_link(&t, note.as_deref().unwrap_or(""), &home));
             let mut e = Vec::new();
             if let Some(path) = image {
-                e.push(MenuEntry::item("Open Full Size", || crate::ui::toast::not_ported("Notes image Open Full Size")));
+                let weak = objc2::rc::Weak::from_retained(&self.retain());
+                let p = path.clone();
+                e.push(MenuEntry::item("Open Full Size", move || {
+                    if let Some(ui) = weak.load() {
+                        ui.notes_open_image(p);
+                    }
+                }));
                 e.push(MenuEntry::item("copy image path", move || {
                     copy_text_to_pasteboard(&path);
                     crate::ui::toast::show(&format!("Copied {}", tilde_path(&path)), "doc.on.clipboard");
@@ -8583,6 +8669,24 @@ mod daemon_ui {
                                     surface.set_editor_menu(std::rc::Rc::new(move |idx| {
                                         if let Some(ui) = weak.load() {
                                             ui.notes_editor_menu(idx);
+                                        }
+                                    }));
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.set_editor_paste_image(std::rc::Rc::new(move |img| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_paste_image(img);
+                                        }
+                                    }));
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.set_editor_open_image(std::rc::Rc::new(move |path| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_open_image(path);
+                                        }
+                                    }));
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.set_vim_image_open(std::rc::Rc::new(move |path| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_open_image(path);
                                         }
                                     }));
                                     st.notes = Some(surface);
@@ -9688,6 +9792,20 @@ mod tests {
             .add_palette(PaletteCommand::new("jira-cfg", "Jira Config", "views").hidden());
         let s = c.state_json();
         assert_eq!(s["paletteCommands"], json!(["Notes"]));
+    }
+
+    #[test]
+    fn palette_screenshot_has_a_handler() {
+        // `/screenshot` must dispatch (`screenshot:show`), not hit the
+        // `no Rust handler yet` fallback log.
+        let c = controller();
+        c.run_palette_command("screenshot");
+        assert!(
+            !c.logs().iter().any(|l| l.contains("no Rust handler")),
+            "palette 'screenshot' must dispatch"
+        );
+        c.run_palette_command("definitely-not-a-command");
+        assert!(c.logs().iter().any(|l| l.contains("no Rust handler")));
     }
 
     #[test]

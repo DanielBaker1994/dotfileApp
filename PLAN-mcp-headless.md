@@ -1,12 +1,264 @@
 # PLAN — kitchen-sink MCP server + fully headless interaction
 
-**Status:** proposed, NOT started.
+**Status:** proposed, NOT started. **Re-audited 2026-10-11** against HEAD `7b90dbd` (+45 commits since `608d07d`; Swift app deleted). Read **"UPDATE — 2026-10-11 re-audit"** (below) first: it supersedes several §1–§14 claims (raw socket verbs, isolation recipe, notify helpers, docs list, line anchors). Everything after that section is the original 608d07d snapshot — re-grep every `file:line` before editing.
 **Provenance:** planning session 2026-10-10. Produced from repo research by a fleet of
 DeepSeek V4.1 Flash subagents plus direct source reading. Every code claim below cites
 `file:line` — line numbers drift, so re-grep the named symbol before editing.
 **This session made no code changes.** The only artifact is this file. When it was
 written the working tree was clean at commit `608d07d` with only this file untracked —
 run `git status` before you start, and do not commit unless the owner asks.
+
+---
+
+## UPDATE — 2026-10-11 re-audit (HEAD `7b90dbd`, +45 commits since `608d07d`)
+
+> **Provenance:** added by an orchestrated **read-only** audit — 8 DeepSeek V4.1 Flash research
+> lanes (socket/raw verbs; host `do:` + state; per-view verbs; headless readiness; Python cold
+> path; build/isolation/tests; docs + UI-element inventory; OpenCode/MCP registration) plus
+> direct spot checks. **No code was touched.** This section supersedes the claims it corrects;
+> everything after it is the original 608d07d snapshot. Re-grep every `file:line` before use.
+> At audit time the tree was dirty (owner/parallel work — leave it alone): `bin/build-app.sh`,
+> `commands.toml`, `rust/ws-rs/src/app/host.rs`, `rust/ws-rs/src/views/screenshot.rs` modified;
+> `useability_hyperkey_x.md` untracked.
+
+### U0. Macro-level
+
+- The Swift app was deleted; the app is Rust + AppKit (`rust/`, cargo workspace) only. Every
+  `*.swift` anchor in this plan (`kitchen_sink.swift:*`, `PopupWindow.swift`, `Screenshot.swift`,
+  `CompareWindow.swift`) is dead, and so is `PROMPT-rust-port-phase4b.md`.
+- Build tooling replaced: **`bin/build-rust-app.sh`, `.build/rust-app/`, `WS_RUST_KILL` are gone**;
+  `bin/ui-test.sh` / `bin/ui-test-focus.py` deleted. `bin/rs-parity.py:59-77` is the surviving
+  socket-client variant to copy. Current builder is `bin/build-app.sh` (target `.build/rust-target`,
+  repo-root `kitchen-sink.app`, `--dist` → `.build/dist`; a non-dist build `pkill`s the running app,
+  `build-app.sh:184`).
+- **Nothing from this plan is implemented yet:** no `bin/ks-mcp*`, no `Tests/*ks_mcp*`, no `mcp`
+  block in `opencode.json`, no `headless`/`WS_HEADLESS` in `main.rs` (grep-verified).
+
+### U1. Socket contract (§1) — all raw verbs now reply in Rust
+
+- `RAW_VERBS = reload, restart, screenshot, screenshot-permission, compare, pane-shot`
+  (`socket.rs:31-38`). Dispatch order: `ping` (`socket.rs:259-261`) → `state` (263-266) →
+  `do:` (268-274) → raw verbs (`raw_deferred` `host.rs:2519-2534`; `raw_request`
+  `host.rs:2536-2542`) → launch/hotkey message (`socket.rs:293-295`).
+- The four "Swift only / no reply" rows in §1 are **now false** — replace them:
+  - `screenshot-permission` → `granted`/`denied` (`host.rs:2521-2527`)
+  - `screenshot[\t…]` → `--raw` raw PNG bytes to EOF; `-g` → `"W H X Y"`; interactive defers
+    (`host.rs:1836-1873`; `Reply::send_bytes` `socket.rs:59-62`)
+  - `compare\t…` → `--wait` deferred `done`; else silent (`host.rs:1878-1928`)
+  - `pane-shot[\t…]` → `path` / `copied` / `error: …` (`host.rs:1933-1993`)
+- **Late replies exist now** (§1 modeled raw verbs as synchronous strings only): `Reply` is a
+  dup'd fd answerable later from any thread (`socket.rs:40-69`) — that is what powers
+  `compare --wait` and async screenshot/pane-shot.
+- Read cap is still **2048** bytes per request (`socket.rs:28`); accepted fds are forced blocking
+  with `SO_SNDTIMEO=5s`, so **replies >8 KB are safe** (200 KB `state` test, `socket.rs:200-245`,
+  `:549-558`). Keep MCP requests short; replies unbounded.
+- Unknown `do:` **still returns full state** (`socket.rs:268-274`) — the parity gap stands; the MCP
+  server cannot detect typos. Optionally validate view/verb shape client-side where cheap.
+- No auth beyond filesystem perms; lock file `<sock>.lock` is `flock`ed (`socket.rs:326-357`).
+- **Consequence for §7.2:** implement `ks_screenshot`, `ks_compare`, `ks_pane_shot`,
+  `ks_screenshot_permission` as real tools against the sandbox; delete the
+  "no reply from Rust → isError" mapping. Keep the "daemon down" actionable error.
+
+### U2. Isolation recipe (§2) — corrected, verified against today's tree
+
+```bash
+ROOT=/Users/danielbaker/.config/kitchen-sink
+S=$ROOT/.build/mcp-sandbox
+# Build, live-safe (no pkill; mirrors build-app.sh's cargo invocation):
+( cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/.build/rust-target" \
+    cargo build --release -p ws-rs -p ws-helpers )
+# Launch candidate — today this is still a GUI daemon (headless mode not implemented):
+mkdir -p "$S/tmp" "$S/home"
+[ -f "$S/home/commands.toml" ] || cp "$ROOT/commands.toml" "$S/home/commands.toml"
+TMPDIR="$S/tmp" WS_HOME="$S/home" WS_COMMANDS_CONF="$S/home/commands.toml" \
+WS_RS_ASSET_DIR="$ROOT" WS_SKIP_LAUNCH_AGENT=1 PYTHONDONTWRITEBYTECODE=1 \
+  "$ROOT/.build/rust-target/release/kitchen-sink" show >"$S/daemon.log" 2>&1 &
+echo $! > "$S/pid"
+printf 'state\n' | nc -U -w3 "$S/tmp/ws-notes.sock" | jq .pid
+# Stop only by pid/socket — never pkill:
+kill "$(cat "$S/pid")"    # or: kill "$(lsof -t "$S/tmp/ws-notes.sock")"
+```
+
+- `WS_HOME` / `WS_COMMANDS_CONF` **do** isolate config now (`config.rs:1543-1558`) — the
+  "repo build reads repo `commands.toml` regardless" caveat is stale. `Paths::user_dir()`
+  (AI rules dir, `paths.ignore`) stays repo-bound.
+- `[app] notes-socket` is parsed (`config.rs:470-472`) but **ignored** by the socket path
+  (`paths.rs` hardcodes `NOTES_SOCKET_NAME`) — isolate via `TMPDIR` only.
+- **NEW env `WS_SKIP_LAUNCH_AGENT=1`** (`jira_poll.rs:175`): must be set or an isolated daemon can
+  write the real `~/Library/LaunchAgents/com.jira.poll.plist`.
+- Not isolated by `TMPDIR`/`WS_HOME`: `~/.cache/kitchen-sink`, `~/.cache/jira`,
+  `~/.cache/notifications`, Jira legacy-config migration → also set `JIRA_CONFIG_JSON`,
+  `JIRA_CONFIG_FILE`, `JIRA_TEAM_JSON`, `JIRA_CACHE_DIR`, `NOTIFY_CACHE_DIR`,
+  `WS_SETTINGS_CACHE` where relevant.
+- `WS_PING_ONLY`, `WS_RS_ASSET_DIR`, `WS_PYTHON` still work. `sun_path` hard-fails at ≥104 bytes
+  (`socket.rs:145`); the sandbox path above is 76 — keep `KS_MCP_SANDBOX` shallow.
+- A direct shell spawn runs under the shell's TCC identity (fine headless; use `open -n -g` only
+  when Screen Recording grants matter).
+
+### U3. Headless readiness (§3, §8) — corrected line map
+
+- `ui_queue: Option<UiQueue>` (`host.rs:239`, `None` at `:610`); `ui_push` drops when `None`
+  (`host.rs:299-303`); host test helper `fn controller()` at `:9484`, `no_ui_queue_stays_headless`
+  at **`:9982`** (36 `#[test]`s in host.rs). No `todo!()`/`unimplemented!()` calls remain, and
+  **AGENTS.md no longer has a "Remaining seams" bullet** — drop §12's "fix the stale seams" item.
+- Forwarding is **already correct**: the lock retry loop moved to `app/cli.rs:193-215`; when the
+  lock is held, `open_command` stays `None` → `msg = "ping"` (`cli.rs:199`). Do NOT special-case
+  `headless` there. `main.rs:73` binds the returned `DaemonLock`.
+- `run_daemon` is now **`main.rs:107-151`**. Keep: 108-111 (controller + `register_views` — verified
+  AppKit-free) and 113-119 (`CommandServer::start`). Skip: 121-124 (`MainThreadMarker`/`NSApplication`),
+  127 (`setActivationPolicy`), 128 (`install_main_menu`), 129 (`install_status_item`), 131-137
+  (`UiQueue`/`MainQueue`/`install_ui`/`install_daemon_ui`), 139-147 (launch presentation — never pass
+  `"headless"` to `launch_with_prep`). Replace `app.run()` (`:150`) with
+  `loop { std::thread::park(); }`; keep `_server` and the caller's `_lock` in scope — the accept
+  thread is detached, so a returned `main` exits the process.
+- Mode parsing is `main.rs:24-62` (the new `prose` one-shot at 41-59 builds its own NSApplication;
+  irrelevant here). Add `headless`/`--headless` + `WS_HEADLESS=1` (no argv mode) detection here and
+  thread a bool into `run_daemon`.
+- Headless risk to smoke-test first: `screenshot:*` (`host.rs:1562-1576`) and raw `screenshot`
+  now run inline on the socket thread when there is no main queue (`run_on_main` inline,
+  `host.rs:883-892`); overlay `NSPanel`s are guarded by `MainThreadMarker::new()` but that path is
+  unverified headless. `compare_message` is pure model (safe), `pane-shot` is CG off-main,
+  `screenshot-permission` reads CG state. `ensure_home` (`main.rs:66`) is AppKit-free (may run
+  `setup-home.sh` for non-repo bundles — point `WS_HOME` at the sandbox). SIGTERM shutdown is fine;
+  a stale socket is unlinked on the next bind (`socket.rs:141`).
+- `open:<path>` is drained now when the GUI presents notes (`host.rs:8691-8697`); still undrained
+  headless — keep the §9 route-around.
+
+### U4. `do:` / `state` deltas (§1, §3)
+
+- New/changed host verbs: `hide-on-focus-loss:on|off` (`host.rs:1676-1684`, NEW);
+  `jira-poll-on|off|setup` (`:1786-1789`, NEW); registry stub `notes:state` (`notes.rs:3701-3709`,
+  NEW); `tool:`/`tool-close:` real (ToolKind panels, `host.rs:1685-1726`); `reset-size` pushes
+  `UiCommand::ResetSize` (`:1790-1794`; model no-op headless); `rebuild-card:VIEW` is
+  validation-only (`:1534-1546`); `notes-find`/`notes-grep`/`jira-jump` push real `UiCommand`s
+  (`:1777-1785`, dropped headless); `board:*` still errors `{"error":"unhandled action …"}`
+  (`:1800-1806`); unknown `do:` still echoes state.
+- Registry namespaces actually registered: **`notes:`, `compare:`, `screenshot:` only**
+  (`registry.rs:260-274`; call sites `host.rs:687-711`). Jira registers a palette row only
+  (`jira.rs:3084`). `ai.rs:1532` / `confluence.rs:1077` have `register()` functions that are
+  **never called** → `do:ai:*` / `do:confluence:*` are unreachable dead code (a cheap wiring win
+  if MCP must drive those views; otherwise note out-of-scope).
+- All 22 top-level state keys unchanged. Real rich per-view state only for `views.notes` /
+  `views.files` (`host.rs:8548-8561`); `views.jira.board` stays `{}` placeholder (the real
+  `JiraView::test_state` `jira.rs:3069` is never pushed); confluence/ai model `test_state`s are not
+  wired. GUI-only defaults headless (do not assert): `windows`, `keyWindow`, `active`,
+  `frontmostPid`, `activations`, `viewSwitcher.selection`, compare overlay keys, `tools.*` frames.
+  `state.screenshot` is real and includes `modePill`; the recents grid is not represented.
+
+### U5. UI element → control entry; coverage gaps (feeds §7.2)
+
+Covered today (spot-check): all 11 views via `do:open:VIEW`; terminal/drawers; tool panels
+(`tool:`/`tool-close:`); paths shelf; palette (launch `show`, `state.palette/paletteCommands`);
+view switcher; compare (full text + folder verb set incl.
+`folder-copy|folder-move:SIDE:[:replace|keep|skip]`); screenshot verb set + `mode:` + `key:tab`;
+jira setup (`do:jira-setup`); pins (`screenshot:pin|unpin`).
+
+**GAPS — no programmatic entry today** (headless/MCP cannot drive these; decide scope):
+
+- Right-click menus: files, notes editor, compare (pane/tree/session), jira column header,
+  screenshot pin, recent grid.
+- Find bars: notes native find, prose search, jira live search.
+- Cmd+K action pickers (files/jira/compare/AI); Cmd+/ shortcuts sheets (`ui/shortcuts.rs` exists,
+  no hook).
+- Jira `board:*` (list/sidebar/tick/pin — errors today) and Fit-Columns/column menus.
+- Confluence in-view keys (favorite/copy link/find/refresh); AI run-rule & find; files in-view ops
+  (rename/QuickLook/reveal/hidden — model is reachable via helper `fileops.*`); notes editor ops
+  (partial).
+- Screenshot internals: ring-button clicks, colour wheel, Tool Settings side-panel contents,
+  in-place text editor, save-card field, Cmd+/ card, cursor/grab colour, CLI `full`/`screen`,
+  `-d` delay, `--region`, post-capture preview; pin menu beyond pin/unpin; **recents grid**
+  (`key:tab` only, no state field).
+- pane-shot preview; prose own-window (Cmd+Shift+O); FilePopup; Setup & Health window actions;
+  theme menu extras (only `header-style:STYLE` is reachable).
+
+`do:key:SPEC` remains **record-only** (`host.rs:1611-1614`) ⇒ every key-only surface above has no
+headless entry. `useability_hyperkey_x.md` (untracked) is the current screenshot-parity truth;
+`FEATURES.md`'s "ring buttons have no glyphs" was fixed (`e854b74`).
+
+### U6. Python cold path (§4, §7.3) — mostly unchanged; notify rebuilt
+
+- **Hash-identical to 608d07d** (line refs stay valid): `pylib/helper/*`, `settings_hub/{paths,cli}.py`,
+  `pylib/jira_paths.py`, `jira/jira_{poll,status}.py`, `confluence/confluence_{api,config}.py`.
+- Helper registry = **150 methods + `ping` = 151**, 18 namespaces incl. `jsonmgr` and `script`
+  (plan's "~110" was already an undercount). No new methods since the plan.
+- The app **never calls `script.run`** (Swift-only claim); it direct-spawns the CLIs
+  (`jira_poll.rs:52-84`, `views/jira.rs:2461`, `views/confluence.rs:2206`).
+- **notify changed:** `notify/helpers/*.swift` deleted; helpers are prebuilt Rust bins found via
+  `WS_HELPERS_BIN` (**a directory**) › bundle `Resources/helpers-bin` › `.build/rust-target/release`
+  (`notify_poll.py:80-92`). Delete the "first `--json` may compile Swift helpers (300 s)" note.
+  `notify_poll.py` with no args prints its docstring and exits **2** (`:270-271`).
+- Exit codes: add **130** (jira cancel; settings `KeyboardInterrupt`). `ws-settings` verbs:
+  `keys settings get set undo bind conflicts export parity doctor fav tui open`; `--json` on
+  keys/settings/get/conflicts/parity/doctor; env adds `WS_SETTINGS_FAVORITES`.
+- jira flags are a superset of §4's list (`jira_poll.py:250-339`: add `--window`, `--projects`,
+  `--import-filters`, `--favorite*`, `--pin-*`, `--board-*`, `--cached`, …); confluence adds
+  `--detect-auth`, `--add-space`, `--remove-space`, `--import-saved`.
+- **Discovery mismatch to guard:** helper (`python_helper.rs:231`) and confluence
+  (`views/confluence.rs:2227`) prefer `WS_PYTHON`; jira's direct spawn tries brew pythons first
+  (`jira_poll.rs:52-58`) → `WS_PYTHON` can be ignored for jira spawns on brew machines.
+- New wrappable script: `bin/parity-audit.sh` (writes `.build/parity-audit.md` — not read-only;
+  candidate `ks_parity` tool or leave out of read-only mode).
+
+### U7. MCP / OpenCode registration (§5, §12)
+
+- §12 is un-implemented: `opencode.json` currently has only `$schema` + `permission` — no `mcp`
+  block anywhere (global configs too). The §12 block can be added as written, with one fix:
+  **use an absolute `command[0]`** (`/Users/danielbaker/.config/kitchen-sink/bin/ks-mcp`) —
+  cwd-relative executable resolution is undocumented (unverified in OpenCode v2.0.26).
+- §5.2 claims re-verified against OpenCode v2.0.26 + docs: `mcp.servers` (not names under `mcp`),
+  `disabled` (no `enabled`), `codemode` default true, `protocol` default `legacy`
+  (`legacy|auto|2026-07-28`), `{env:}` substitution, timeouts `{startup 30s, catalog 30s,
+  execution 12h}`, tools exposed as `<server>_<tool>`, Code Mode `tools.<server>.<tool>`.
+  stdout = protocol only; stderr captured separately (binary-verified).
+- Decision to (re)confirm when registering: the live entry is read-write by default; consider
+  `"environment": {"KS_MCP_READ_ONLY": "1"}` on the live server and leave the sandbox read-write.
+  (V2 also accepts a `permissions` array; the v1 object form is still normalized — no change needed.)
+
+### U8. Tests / runner (§11)
+
+- `bin/run-tests.sh` cases today: `config, recent, fileops, status, ai, nvim, filter, paths, ignore,
+  jsonmgr, screenshot, ansi, ansi-parse, paneshot, prose, prose-pdf, snippets, panes, vim-keys,
+  compare, settings, jira-data, jira-pages, jira-search, jira-directory, jira-dashboard, jira-boards,
+  jira-fields, jira-setup, confluence-glue, confluence-pages, setup-checks, shot-model, shelf,
+  helper, helper-client, doc-templates, rust, all|*`. `all` = 4 Python suites + the whole rust
+  workspace (`run-tests.sh:171-180`); `ui|vim|focus` die in `lib.sh`.
+- Adding `mcp` / `mcp-sandbox` / `mcp-data` cases follows the existing idiom unchanged. Note
+  `run-tests.sh` does **not** export `PYTHONDONTWRITEBYTECODE` — new suites must invoke python
+  with `-B` themselves.
+- Two cargo target dirs coexist: `rust/target` (test runner) vs `.build/rust-target` (app build) —
+  don't run both cargo builds concurrently.
+- L0/L2 suites are unblocked; **L1 (real sandbox) is blocked on §8 + §10**.
+
+### U9. Docs list correction (§12)
+
+§12 names `AGENTS.md`; it also needs `README.md` (docs map + `bin/ks-mcp` / `kitchen-sink headless`),
+`HANDOFF-rust-port-next.md` (new control plane + gaps), `BACKLOG.md` (§9 deferrals), and a review of
+`PRODUCT.md`, `FEATURES.md`, `useability_hyperkey_x.md`. Drop the "Remaining seams" fix (no such
+bullet exists).
+
+### U10. Issues to resolve before implementation
+
+1. **Headless mode is the prerequisite** — §8 must land before `bin/ks-mcp-sandbox.sh` can work as
+   specced (today an isolated instance is a full GUI daemon with a hidden window).
+2. **All raw verbs now reply** — refresh §1/§3/§9/§7.2 before coding tools; this is the biggest
+   correctness risk to the MCP server spec.
+3. Smoke-test `screenshot:*` / interactive raw `screenshot` headless (off-main overlay path
+   unverified) and guard if it faults.
+4. `board:*` errors; key-only surfaces (Cmd+K, Cmd+/, find bars) have no entry — document as
+   coverage limits or extend later (§9-style deferral).
+5. `do:ai:*` / `do:confluence:*` are dead code — wire the registers or declare out of scope.
+6. `WS_PYTHON` ordering mismatch for jira spawns — pin/verify in sandbox tests.
+7. Sandbox env checklist: `TMPDIR` (socket isolation), `WS_HOME` + `WS_COMMANDS_CONF` (config),
+   `WS_RS_ASSET_DIR` (assets), `WS_SKIP_LAUNCH_AGENT=1` (Jira LaunchAgent), `sun_path` ≤ 103 bytes.
+8. `opencode.json`: absolute launcher path; validate JSON before saving; owner commits.
+9. Tree is dirty with parallel work — during implementation: no `./ws build` (kills the live app),
+   serialize file writers, never mutate the live socket in tests (§13 unchanged).
+
+**Inline amendments applied (2026-10-11):** §1 (transport prose, raw-verb table rows, dispatch
+note), §2 (recipe + env table + config caveat), §7.2 (the four raw-verb tool rows), §9
+(table + future-work paragraph), §10 (`start` steps 1-3), §14.1 (build/smoke lines). **Still to
+amend at implementation time:** §3/§8 (corrected line map lives in U3; markers added),
+§11.5 (`-B` note), §12 (docs list above). Execution kickoff: `PROMPT-mcp-headless-impl.md`.
 
 ---
 
@@ -39,31 +291,31 @@ tests. Two halves:
 
 ## 1. Ground truth — socket contract
 
-Transport: Unix socket at `$TMPDIR/<notes-socket>` (default `ws-notes.sock`);
-`[app] notes-socket` in `commands.toml:27`; path built by
-`popupTmpDir() + settings.notesSocketName` (`kitchen_sink.swift:355,398,3165`;
-`popupTmpDir()` = `$TMPDIR` + trailing slash, `PopupWindow.swift:302-306`).
-One newline-terminated request per connection; read cap 2048 bytes
-(`rust/ws-rs/src/app/socket.rs:27,181-224`). Dispatch order (`kitchen_sink.swift:3164-3330`,
-Rust `socket.rs:181-224`):
+Transport: Unix socket at `$TMPDIR/ws-notes.sock` (name hardcoded by `paths.rs`;
+`[app] notes-socket` is parsed (`config.rs:470-472`) but **not** consulted by the socket
+path). One newline-terminated request per connection; single `read()` cap 2048 bytes
+(`rust/ws-rs/src/app/socket.rs:28`). Dispatch order (`socket.rs:247-296`):
 
 | Request | Reply |
 |---|---|
 | `ping` | **none** — server closes; treat clean close as success |
-| `screenshot-permission` | `granted\n` \| `denied\n` (Swift only; Rust: no reply) |
-| `screenshot[\t<ShotArgs>]` | `-r/--raw` → raw PNG bytes (read to EOF); `-g/--print-geometry` → `"W H X Y\n"`; else no reply (Swift only; Rust: no reply) |
-| `compare\t[--wait][--title1 T][--title2 T] LEFT [RIGHT]` | `--wait` → `done\n`; else no reply (Swift only; Rust: no reply) |
-| `pane-shot[\t<args>]` | `path\n` \| `copied\n` \| `error: msg\n` (Swift only; Rust: no reply) |
+| `screenshot-permission` | `granted\n` \| `denied\n` (`host.rs:2521-2527`) |
+| `screenshot[\t<ShotArgs>]` | `-r/--raw` → raw PNG bytes (read to EOF); `-g/--print-geometry` → `"W H X Y\n"`; interactive overlays defer the reply; other args close silently (`host.rs:1836-1873`) |
+| `compare\t[--wait][--title1 T][--title2 T] LEFT [RIGHT]` | `--wait` → deferred `done\n`; else silent close (`host.rs:1878-1928`) |
+| `pane-shot[\t<args>]` | `path\n` \| `copied\n` \| `error: msg\n` (`host.rs:1933-1993`) |
 | `reload` | `{"ok","commands","usingBackup","issues":[{line,message,fatal}]}\n` |
 | `restart` | `{"ok":true,"restarting":true}\n` |
 | `state` | full state JSON + `\n` |
 | `do:ACTION` | action error JSON, else the **same full state JSON** + `\n` |
 | anything else | launch/hotkey message; **no reply** |
 
-Rust `raw_request` implements only `reload`/`restart` (`host.rs:1694-1700`) — every
-other raw verb silently returns nothing. Rust unknown `do:` returns full state, Swift
-returns `{"error":"unknown action …"}` (`kitchen_sink.swift:3107`) — parity gap; the MCP
-server cannot detect unknown actions on the Rust daemon (document, don't fix in v1).
+All six raw verbs are implemented in Rust: `RAW_VERBS = reload, restart, screenshot,
+screenshot-permission, compare, pane-shot` (`socket.rs:31-38`); late replies use a
+dup'd-fd `Reply` (`socket.rs:40-69`) — dispatch: `raw_deferred` (`host.rs:2519-2534`)
+then `raw_request` (`host.rs:2536-2542`). Replies are safe beyond 8 KB (accepted fds are
+forced blocking with `SO_SNDTIMEO=5s`, `socket.rs:200-245`; 200 KB state test `:549-558`).
+Unknown `do:` returns the full state with no error — the MCP server cannot detect typos
+on `ks_do`; document, don't fix in v1 (`socket.rs:268-274`).
 
 **Canonical Python socket client** (copy from `bin/rs-parity.py:58-76`):
 
@@ -91,8 +343,8 @@ Variants to reuse: `bin/ui-test.sh:73-85` (`ws_query/ws_state/ws_do/wait_state` 
 every 50 ms), `bin/ui-test-focus.py:77-93`, `Tests/test_settings_hub.py:845-857`.
 Shell smoke: `printf 'state\n' | nc -U -w3 "$TMPDIR/ws-notes.sock"`.
 
-### `do:` action families (dispatch: Swift `kitchen_sink.swift:3013-3108`; Rust
-`host.rs:1172-1381` + `registry.dispatch_test_do` `registry.rs:267-274`)
+### `do:` action families (dispatch: Rust `host.rs:1524-1821` + `registry.dispatch_test_do`
+`registry.rs:267-274`)
 
 - Shared window: `cycle`, `cycle-back`, `hide`, `back`, `home`, `toggle`,
   `open:VIEW` (VIEW ∈ `notes,files,jira,detail,releases,config,output,confluence,ai,compare,compareText`;
@@ -107,7 +359,7 @@ Shell smoke: `printf 'state\n' | nc -U -w3 "$TMPDIR/ws-notes.sock"`.
 - Card rebuild: `rebuild-card:VIEW` (Rust no-op)
 - Sub-verb families (first `Some` wins in Rust):
   - `board:*` — jira: `open:B, list, list-open:B, list-star:B, view:V, sprint:S, mode:M, pin`
-    (Swift `kitchen_sink.swift:8771-8784`; **Rust errors** — jira registers no `test_do`)
+    (**Rust errors** — `host.rs:1800-1806`; jira registers a palette row only, `jira.rs:3084`)
   - `compare:*` — `open:LEFT|RIGHT`, `open-sub:…`, `next`, `prev`, `copy-right`,
     `copy-left`, `swap`, `reload`, `undo`, `redo`, `start`, `start-paste`,
     `edit-begin`, `edit-commit`, `filter:all|diffs|same|context`, `save:left|right`,
@@ -120,18 +372,18 @@ Shell smoke: `printf 'state\n' | nc -U -w3 "$TMPDIR/ws-notes.sock"`.
     `pin`, `save:PATH`, `save-ok`, `close`, `unpin`, `side-panel`
     (`Screenshot.swift:905-957`)
 
-### `state` JSON keys (Swift `testQuery` `kitchen_sink.swift:3110-3162`; Rust
-`state_with_registry` `host.rs:384-477`)
+### `state` JSON keys (Rust `state_with_registry` `host.rs:452-550`, augmented by
+`state_json` `host.rs:2457-2505`)
 
 Top level: `view, visible, active, keyWindow, windows, palette, paletteCommands,
 views, hideOnFocusLoss, escHides, pid, terminalPanel, viewSwitcher, paths,
 headerStyle, pane, screenshot, compare, paneShot, activations, frontmostPid, tools`.
-Per-view `views.<name>` (Swift `PopupWindow.testState` `PopupWindow.swift:10484-10501`):
-`name, shown, key, frame, drawerInset, terminal, browser, findBar, accessory, pane,
-tabs, selectedTab, selection, rowCount, query, board, sidebarCursor, responder, header`
-+ `wid` (added by `testQuery`). Jira `board` extra: `kitchen_sink.swift:8786-8797`.
-Rust emits `shown,key,wid,frame` + notes/files/jira extras; `tools`,
-`terminalPanel`, `viewSwitcher.selection` are shallow placeholders.
+Per-view `views.<name>`: `name, shown, key, frame, drawerInset, terminal, browser,
+findBar, accessory, pane, tabs, selectedTab, selection, rowCount, query, board,
+sidebarCursor, responder, header` + `wid`. The rich extras are injected for
+notes/files only; jira keeps a `board: {}` placeholder; `windows`, `keyWindow`,
+`active`, `frontmostPid`, `activations`, `viewSwitcher.selection` and `tools.*`
+frames are GUI-only and stay default headless.
 
 **GUI-only fields that stay default headless** (do not assert on them in headless tests):
 `windows`, `keyWindow`, `frontmostPid`, `activations`, palette rows,
@@ -141,32 +393,34 @@ Rust emits `shown,key,wid,frame` + notes/files/jira extras; `tools`,
 
 ## 2. Ground truth — isolation recipe (proven in-repo)
 
-From `PROMPT-rust-port-phase4b.md:50-66` (already used by the parity harness):
+Proven in-repo recipe, updated 2026-10-11 (the old `PROMPT-rust-port-phase4b.md` version
+is gone — UPDATE U2 has the full corrected recipe):
 
 ```bash
+( cd rust && CARGO_TARGET_DIR=../.build/rust-target cargo build --release -p ws-rs -p ws-helpers )
 D=$(mktemp -d)
-TMPDIR="$D" WS_RS_ASSET_DIR="$PWD" \
-  .build/rust-app/kitchen-sink.app/Contents/MacOS/kitchen-sink &   # GUI today
+TMPDIR="$D" WS_RS_ASSET_DIR="$PWD" WS_SKIP_LAUNCH_AGENT=1 \
+  .build/rust-target/release/kitchen-sink show &   # until §8 lands this is a GUI daemon
 printf 'state\n' | nc -U "$D/ws-notes.sock" | jq
 ```
 
 | Env var | Effect | Evidence |
 |---|---|---|
-| `TMPDIR=$D` | Socket + `.lock` + focus files live under it → full isolation | `PopupWindow.swift:302-306`, `kitchen_sink.swift:427`, `paths.rs:135,176-190` |
-| `WS_HOME=$D/home` | Config home; honored by non-repo builds | `kitchen_sink.swift:52-55,61`; `paths.rs:99-105,121-125` |
+| `TMPDIR=$D` | Socket + `.lock` + focus files live under it → full isolation | `paths.rs:18-26,184-190` |
+| `WS_HOME=$D/home` | Config home (`WS_COMMANDS_CONF` takes precedence) — **honored even by the repo build now** | `config.rs:1543-1558`; `paths.rs:121-125` |
 | `WS_RS_ASSET_DIR=$PWD` | Points helper at checkout `pylib` (dev bundle has no Resources) | `main.rs:98-104`, `paths.rs:107-119` |
-| `WS_RUST_KILL=0` | `build-rust-app.sh` default; **never** set 1 while the live app is up | `build-rust-app.sh:128` |
+| `WS_SKIP_LAUNCH_AGENT=1` | Keeps an isolated daemon from writing the real Jira LaunchAgent — **add to every sandbox env** | `jira_poll.rs:175` |
 | `WS_PING_ONLY=1 <bin> [mode]` | Liveness probe, exit 0/1 | `main.swift:27-30` |
 | `WS_PYTHON` | Python ≥3.11 override for helper/CLI discovery | `bin/ws-settings:11-20`, `run-tests.sh:157-164` |
 | `PYTHONDONTWRITEBYTECODE=1` / `python -B` | **Always** — `__pycache__` in a signed bundle breaks its signature | `AGENTS.md`, `bin/ws-settings:22-24` |
 
-**Repo-build caveat:** the repo-root `kitchen-sink.app` is a repo build
-(`isRepoBuild` = `commands.toml` + `bin/build-app.sh` beside the binary,
-`kitchen_sink.swift:47-51`), so its `userDir` is the repo regardless of `WS_HOME`
-(`kitchen_sink.swift:61`) — a Swift sandbox instance reads/writes the **repo**
-`commands.toml`. The `.build/rust-app` bundle is NOT a repo build
-(`paths.rs:96-97`), so `WS_HOME` is honored there. This is why the sandbox uses the
-Rust binary.
+**Config caveat (updated 2026-10-11):** config resolution is env-driven —
+`WS_COMMANDS_CONF` › `WS_HOME` › `~/.config/kitchen-sink` (`config.rs:1543-1558`),
+so `WS_HOME`/`WS_COMMANDS_CONF` isolate config even for the repo build. `Paths::user_dir()`
+(AI rules dir, `paths.ignore`) stays repo-bound. `[app] notes-socket` is ignored by the
+socket path, so isolate the socket via `TMPDIR`. Prefer the raw cargo binary
+`.build/rust-target/release/kitchen-sink` for sandbox instances (not a repo bundle ⇒
+`ensure_home` stays a no-op).
 
 Kill an isolated daemon **by pid** (`lsof -U | grep "$D/ws-notes.sock"` or a pidfile) —
 never `pkill -f kitchen-sink`, which can hit the live app.
@@ -174,6 +428,8 @@ never `pkill -f kitchen-sink`, which can hit the live app.
 ---
 
 ## 3. Ground truth — Rust headless readiness
+
+> *(Line anchors in this section are the 608d07d snapshot — use **UPDATE U3** for the corrected map. Intent unchanged.)*
 
 The controller is already headless-capable: `ui_queue: Option<UiQueue>` (`host.rs:201-202`),
 `ui_push` silently drops when `None` (`host.rs:246-250`), and ~40 cargo tests run the
@@ -229,8 +485,8 @@ Protocol (`pylib/helper/__main__.py`, `pylib/helper/__init__.py`):
 - One-shot modes: `--version`, `--call NAME [--params JSON]`, `--once`
   (`__main__.py:20-38`).
 - `script.run` params `{folder, script, args[], stdin, timeout}` →
-  `{"code","stdout","stderr"}` (`pylib/helper/script_bridge.py:15-47`); the app calls it
-  with `timeout: 1800` (`kitchen_sink.swift:9550`).
+  `{"code","stdout","stderr"}` (`pylib/helper/script_bridge.py:15-47`); the app does NOT
+  call it (direct spawns: `jira_poll.rs:52-84`) — it works, but is app-untested.
 - Method registry: `pylib/helper/methods.py` (~110 methods across
   compare/folder/ai/fileops/status/ignore/doc_templates/prose/config/jira/confluence/
   shot/ansi/paneshot/shelf/setup; `ping` in `__init__.py:49-51`).
@@ -385,10 +641,10 @@ tool (keeps `ks_ping`, `ks_state`, `ks_screenshot_permission`).
 | `ks_launch` | `{message: string}` req | launch message | text `"ok"` (no reply expected) | MUT |
 | `ks_reload` | `{}` | `reload` | reload JSON text | MUT |
 | `ks_restart` | `{}` | `restart` | restart JSON text | MUT |
-| `ks_screenshot` | `{args?: string}` | `screenshot[\t<args>]` | `-r` → image content (base64 PNG); `-g` → `"W H X Y"` text; else `"ok"`; **no reply from Rust → `isError` with note** | MUT |
-| `ks_compare` | `{left, right?, wait?, title1?, title2?, timeout_ms?}` | `compare\t…` | `--wait` → `"done"`; else `"ok"` | MUT |
+| `ks_screenshot` | `{args?: string}` | `screenshot[\t<args>]` | `-r` → image content (base64 PNG; read the reply to EOF); `-g` → `"W H X Y"` text; else `"ok"` — interactive forms may defer, so treat a clean close/no reply as `"ok"`; data calls (`-r`/`-g`) return `isError` on missing data | MUT |
+| `ks_compare` | `{left, right?, wait?, title1?, title2?, timeout_ms?}` | `compare\t…` | `--wait` → `"done"` (deferred until the session closes/hides — use the long timeout); else `"ok"` | MUT |
 | `ks_pane_shot` | `{args: string}` | `pane-shot\t<args>` | `path`/`copied`/`error: …` text | MUT |
-| `ks_screenshot_permission` | `{}` | `screenshot-permission` | `granted`/`denied`; Rust no reply → `isError` | RO |
+| `ks_screenshot_permission` | `{}` | `screenshot-permission` | `granted`/`denied` | RO |
 | `ks_helper` | `{method: string, params?: object, timeout_ms?}` | persistent helper worker (§7.3) | helper `result` JSON text; `ok:false` → `isError` (message + traceback excerpt) | MUT |
 | `ks_settings` | `{argv: string[]}` | `python -B -m settings_hub <argv>` (PYTHONPATH=repo) | `{code, stdout, stderr}` JSON text | MUT |
 | `ks_jira` | `{script?: "poll"\|"status", argv: string[]}` | `jira/jira_poll.py` / `jira/jira_status.py` | `{code, stdout, stderr}` | MUT |
@@ -396,9 +652,10 @@ tool (keeps `ks_ping`, `ks_state`, `ks_screenshot_permission`).
 | `ks_notify` | `{argv?: string[]}` (default `["--json"]`) | `notify/notify_poll.py` | `{code, stdout, stderr}` | MUT |
 
 **Implementation notes**
-- `ks_compare`: mirror the exact wire format from `handleCompareMessage`
-  (`kitchen_sink.swift:9758-9771`) — read it first; paths are tab-separated, optional
-  `--wait`/`--title1`/`--title2`. Lock the byte format with an L0 recording test.
+- `ks_compare`: mirror the exact wire format implemented in `compare_message`
+  (`host.rs:1878-1928`) and the `cli.rs` compare client — read them first; paths are
+  tab-separated, optional `--wait`/`--title1`/`--title2`. Lock the byte format with an L0
+  recording test.
 - `ks_screenshot -r`: read the reply **to EOF** (binary), not to newline. Base64 it into
   an image content block. `-g`: read one line.
 - `ks_do`/`ks_reload` replies are one JSON line; `ks_launch` may produce no reply.
@@ -430,6 +687,8 @@ Hides all MUT tools from `tools/list` and rejects them with `-32602` if called a
 
 ## 8. Component spec — Rust headless mode (`rust/ws-rs/src/main.rs` only)
 
+> *(Steps 1-3 anchors are the 608d07d snapshot — UPDATE U3 has the corrected line map; the intent is unchanged. Forwarding (step 2's original concern) is already handled in `cli.rs` — do not special-case it there.)*
+
 1. **Mode parsing** (`main.rs:25-33`): accept `headless` and `--headless`; if
    `WS_HEADLESS=1` is set and no CLI mode was given, treat mode as `headless`.
 2. **Forwarding** (`main.rs:78-88`): when the lock is held and `mode == "headless"`,
@@ -457,15 +716,16 @@ shows a window. Document the no-op list (§3) in the script/docstring.
 
 | Gap | v1 route-around | Evidence |
 |---|---|---|
-| `board:*` errors | `ks_jira` CLI (`--board-*`, `--pin-*`, `--import-filters`, `--my-work`) + `--describe` JSON | `jira.rs:3084`, `host.rs:1370-1376` |
-| `open:<path>` pending | `ks_launch "open:<path>"` only works on Swift; on Rust use `ks_helper` `fileops`/notes data or accept no-op | `host.rs:1119-1123` |
-| `reset-size`, `rebuild-card:*`, `jira-jump`, `notes-find`, `notes-grep` | Avoid on headless; document | `host.rs:1182-1194,1364` |
-| `key:SPEC` records only | Use `do:` verbs instead of key synthesis | `host.rs:1217-1220` |
-| raw `screenshot`/`compare`/`pane-shot`/`screenshot-permission` no reply | Tools detect no-reply and return `isError` with "unsupported by this daemon (Swift-only)" | `host.rs:1694-1700` |
-| unknown `do:` returns state | Cannot detect; document | `socket.rs:202-207` |
+| `board:*` errors | `ks_jira` CLI (`--board-*`, `--pin-*`, `--import-filters`, `--my-work`) + `--describe` JSON | `host.rs:1800-1806`; jira registers a palette row only (`jira.rs:3084`) |
+| `open:<path>` on headless | On the GUI it drains when notes is presented (`host.rs:8691-8697`); headless still undrained — use `ks_helper` `fileops`/notes data or accept no-op | `take_pending_note_open` `host.rs:962` |
+| `reset-size`, `rebuild-card:*`, `jira-jump`, `notes-find`, `notes-grep` | All are wired as `UiCommand`s now, but have no headless surface — avoid headless, document | `host.rs:1534-1546,1777-1794` |
+| `key:SPEC` records only | Use `do:` verbs instead of key synthesis | `host.rs:1611-1614` |
+| `do:ai:*` / `do:confluence:*` unreachable | Their `register()` fns exist but are never called — wire them, or declare out of scope | `ai.rs:1532`, `confluence.rs:1077` (uncalled) |
+| unknown `do:` returns state | Cannot detect; document | `socket.rs:268-274` |
 
 Future work (separate from MCP): register jira `test_do` for `board:*`, drain
-`pending_note_open` headless, `reset-size`. Track in `BACKLOG.md`.
+`pending_note_open` headless, and wire (or delete) the `ai:`/`confluence:` registers.
+Track in `BACKLOG.md`.
 
 ---
 
@@ -475,15 +735,18 @@ Subcommands: `start | stop | status | sock | reset`. Config:
 `SANDBOX="${KS_MCP_SANDBOX:-$ROOT/.build/mcp-sandbox}"` (`.build/` is gitignored).
 
 - `start`:
-  1. If `bin/build-rust-app.sh --stale` exits 0 (needs build), run
-     `WS_RUST_KILL=0 bin/build-rust-app.sh` (never kills the live app;
-     `build-rust-app.sh:128`).
+  1. Build if needed with the current toolchain (live-safe — never run `./ws build`,
+     which `pkill`s the live app):
+     `( cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/.build/rust-target" cargo build --release -p ws-rs -p ws-helpers )`.
   2. `mkdir -p "$SANDBOX/tmp" "$SANDBOX/home"`; if `home/commands.toml` missing, copy
      the repo `commands.toml` (sandbox config edits never touch the repo copy).
-  3. Launch:
+  3. Launch (headless flag per §8 + UPDATE U3; fall back to arg `show` + a warning
+     until the flag exists on the binary):
      ```bash
-     BIN="$ROOT/.build/rust-app/kitchen-sink.app/Contents/MacOS/kitchen-sink"
-     TMPDIR="$SANDBOX/tmp" WS_HOME="$SANDBOX/home" WS_RS_ASSET_DIR="$ROOT" \
+     BIN="$ROOT/.build/rust-target/release/kitchen-sink"
+     TMPDIR="$SANDBOX/tmp" WS_HOME="$SANDBOX/home" \
+     WS_COMMANDS_CONF="$SANDBOX/home/commands.toml" \
+     WS_RS_ASSET_DIR="$ROOT" WS_SKIP_LAUNCH_AGENT=1 \
      WS_HEADLESS=1 PYTHONDONTWRITEBYTECODE=1 \
        nohup "$BIN" headless >"$SANDBOX/daemon.log" 2>&1 &
      echo $! > "$SANDBOX/pid"
@@ -526,8 +789,8 @@ is ~66; fine. `mktemp -d` paths are also fine.
   daemon-down (nonexistent socket) → `isError` with the actionable message, server stays up.
 - `ks_screenshot -r`: fake returns PNG bytes → result contains an `image` content block
   (`mimeType: "image/png"`); `-g`: geometry text.
-- `ks_compare`: recorded wire line matches the `handleCompareMessage` grammar
-  (read `kitchen_sink.swift:9758-9771` and lock it in); `--wait` reads `done`.
+- `ks_compare`: recorded wire line matches the `compare_message` grammar
+  (read `host.rs:1878-1928` and lock it in); `--wait` reads `done`.
 - `ks_ping`: no-reply clean close → `"ok"`.
 - protocol robustness: unknown method → `-32601`; malformed JSON → `-32700`; unknown
   notification → ignored.
@@ -646,7 +909,8 @@ test, `run-tests.sh:176-186`); the new suites run via their own cases.
    unless the owner asks.
 3. **No `./ws build`** (kills/relaunches the live Swift app) and **no UI suites**
    (`./ws test ui|vim|focus|install`). Only Rust builds + the new headless tests.
-4. **`WS_RUST_KILL` must stay 0** for every `build-rust-app.sh` invocation.
+4. **Build live-safe:** raw cargo into `.build/rust-target`; `./ws build` kills and
+   relaunches the running app — only `bin/build-app.sh --dist` skips the pkill.
 5. **`PYTHONDONTWRITEBYTECODE=1` / `-B` for every Python spawn** (signed-bundle
    signature).
 6. **`sun_path` < 104 bytes** — keep sandbox sockets shallow.
@@ -670,9 +934,10 @@ test, `run-tests.sh:176-186`); the new suites run via their own cases.
 
 ```bash
 # 1. Rust headless smoke (no GUI: no window/status item should appear)
-WS_RUST_KILL=0 bin/build-rust-app.sh --stale; [ $? -ne 0 ] || WS_RUST_KILL=0 bin/build-rust-app.sh
+( cd rust && CARGO_TARGET_DIR=../.build/rust-target cargo build --release -p ws-rs -p ws-helpers )
 D=$(mktemp -d)
-TMPDIR="$D" WS_RS_ASSET_DIR="$PWD" .build/rust-app/kitchen-sink.app/Contents/MacOS/kitchen-sink headless &
+TMPDIR="$D" WS_RS_ASSET_DIR="$PWD" WS_SKIP_LAUNCH_AGENT=1 \
+  .build/rust-target/release/kitchen-sink headless &
 P=$!
 printf 'state\n'   | nc -U -w3 "$D/ws-notes.sock" | jq -r .pid
 echo do:toggle-terminal | nc -U -w3 "$D/ws-notes.sock" | jq .views.notes.terminal
@@ -707,6 +972,8 @@ Definition of done:
 ---
 
 ## 15. Execution guide for the next agent
+
+> *(Superseded by `PROMPT-mcp-headless-impl.md` — written after the 2026-10-11 audit; updated lanes, corrected recipes and copy-paste prompts. Keep this section only for the model/variant guidance in §15.1.)*
 
 ### 15.1 Model
 
@@ -754,7 +1021,8 @@ Implementer (Lane A):
 > Repo `/Users/danielbaker/.config/kitchen-sink`. Read `AGENTS.md` and
 > `PLAN-mcp-headless.md` §3 + §8. Implement the Rust `headless` mode exactly as
 > specified in §8 (only `rust/ws-rs/src/main.rs`). Do not touch other files, do not
-> commit, do not run `./ws build` or UI suites, keep `WS_RUST_KILL=0`. Gate: the §14.1
+> commit, do not run `./ws build` or UI suites; build live-safe (raw cargo into
+> `.build/rust-target`). Gate: the §14.1
 > nc smoke commands and `cd rust && cargo test`. Report the diff summary and gate output.
 
 Implementer (Lane B):

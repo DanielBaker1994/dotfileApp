@@ -41,6 +41,23 @@ public final class WSShim: NSView, LocalProcessTerminalViewDelegate {
 
     @objc public var terminalView: NSView { terminal }
 
+    /// The cell size in points SwiftTerm actually laid the grid out with,
+    /// derived from the terminal's current dimensions and the view's bounds.
+    /// The notes surface needs the real height (not the font's nominal
+    /// metrics) to position the inline-image rows over the pane. `(0, 0)`
+    /// until the grid has been sized.
+    @objc public var cellWidth: Double { Double(cellSizePoints().width) }
+    @objc public var cellHeight: Double { Double(cellSizePoints().height) }
+
+    private func cellSizePoints() -> NSSize {
+        let dims = terminal.terminalDimensions
+        guard dims.cols > 0, dims.rows > 0 else { return .zero }
+        let size = terminal.bounds.size
+        guard size.width > 0, size.height > 0 else { return .zero }
+        return NSSize(width: size.width / CGFloat(dims.cols),
+                      height: size.height / CGFloat(dims.rows))
+    }
+
     @objc(startWithExecutable:args:directory:)
     public func start(executable: String, args: [String], directory: String?) {
         // A relaunch reuses this view (Swift's `TerminalAutoRestart` restarts

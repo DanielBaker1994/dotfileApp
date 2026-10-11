@@ -39,6 +39,7 @@ debug-flag = "~/.cache/aero-debug"
 aero-log = "~/.cache/ws-aero.log"
 
 voice-locale = "en-US"
+screenshot-apps = "org.flameshot, pl.maketheweb.cleanshotx, cc.ffitch.shottr, com.skitch.skitch"
 hide-on-focus-loss = false
 
 preview-border = "#dde1e8"
@@ -141,6 +142,7 @@ font = ""
 copy-toast = "Capture saved to clipboard"
 save-toast = "Capture saved as {}"
 permission-toast = "Screen Recording permission needed — opening Settings…"
+fail-toast = "Screen capture failed"
 help-mouse = "Select screenshot area"
 help-save = "Save screenshot to a file"
 help-copy = "Copy selection to clipboard"
@@ -190,6 +192,7 @@ resize = true
 
 vim-mode = true
 vim-bin = "/opt/homebrew/bin/nvim"
+image-rows = 10
 
 start-drawer = "none"
 font-size = 22
@@ -537,7 +540,7 @@ kitchen-sink = "*:app"
 "screenshot: Cmd+Z / Cmd+Shift+Z" = "undo / redo"
 "screenshot: Cmd+C / Ctrl+C / Return" = "copy and close (Return = [screenshot] return)"
 "screenshot: Cmd+S" = "save and close"
-"screenshot: Tab / O" = "Copy Text mode: drag over text → recognized + copied (Tab again = back)"
+"screenshot: Tab / Shift+Tab / O" = "cycle the header pill (Copy Text → Screenshot → Recent); O toggles Copy Text mode (drag over text → OCR + copy)"
 "screenshot: Cmd+Shift+C" = "copy the TEXT in the selection (OCR) and close"
 "screenshot: Cmd+Return" = "finish the text being typed"
 "screenshot: Delete" = "delete the selected object"

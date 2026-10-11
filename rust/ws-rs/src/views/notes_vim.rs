@@ -251,56 +251,55 @@ pub fn image_dir(note_path: &str) -> Option<String> {
     Some(format!("{}/assets", parent.to_string_lossy()))
 }
 
-/// `PopupTextView.image(from:)` + `saveImage`: an image off the general
-/// pasteboard, re-encoded to PNG next to `note_path`, returning the
-/// markdown-relative `assets/<name>` link. `None` when there is no usable image
-/// or the write fails. Never panics.
-///
-/// Source order mirrors Swift: a PNG/TIFF pasteboard *data* first, then a
-/// `NSPasteboardTypeFileURL` whose extension is in [`IMAGE_EXTS`]. Only images
-/// wider than 1pt count (a 1×1 placeholder is ignored).
+/// `PopupTextView.image(from:)` — the pasteboard image, if any (PNG/TIFF
+/// *data* first, then an `NSPasteboardTypeFileURL` whose extension is in
+/// [`IMAGE_EXTS`]). Never panics.
 #[cfg(target_os = "macos")]
-pub fn save_pasteboard_image(note_path: &str) -> Option<String> {
-    use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
+pub fn pasteboard_image(
+    pb: &objc2_app_kit::NSPasteboard,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSImage>> {
     use objc2::AnyThread;
     use objc2_app_kit::{
-        NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
-        NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
+        NSImage, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
     };
-    use objc2_foundation::{NSDictionary, NSString, NSURL};
+    use objc2_foundation::{NSString, NSURL};
 
-    /// The pasteboard image, if any (Swift `PopupTextView.image(from:)`).
-    fn pasteboard_image(pb: &NSPasteboard) -> Option<Retained<NSImage>> {
-        let types = [
-            unsafe { NSPasteboardTypePNG },
-            unsafe { NSPasteboardTypeTIFF },
-        ];
-        for ty in types {
-            if let Some(data) = pb.dataForType(ty) {
-                if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
-                    return Some(img);
-                }
+    let types = [
+        unsafe { NSPasteboardTypePNG },
+        unsafe { NSPasteboardTypeTIFF },
+    ];
+    for ty in types {
+        if let Some(data) = pb.dataForType(ty) {
+            if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
+                return Some(img);
             }
         }
-        let url_str = pb.stringForType(unsafe { NSPasteboardTypeFileURL })?;
-        let url = NSURL::URLWithString(&url_str)?;
-        let path = url.path()?.to_string();
-        let ext = std::path::Path::new(&path)
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())?;
-        if !IMAGE_EXTS.contains(&ext.as_str()) {
-            return None;
-        }
-        NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&path))
     }
+    let url_str = pb.stringForType(unsafe { NSPasteboardTypeFileURL })?;
+    let url = NSURL::URLWithString(&url_str)?;
+    let path = url.path()?.to_string();
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())?;
+    if !IMAGE_EXTS.contains(&ext.as_str()) {
+        return None;
+    }
+    NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&path))
+}
 
-    let pb = NSPasteboard::generalPasteboard();
-    let img = pasteboard_image(&pb)?;
+/// `saveImage`: `img` re-encoded to PNG next to `note_path`, returning the
+/// markdown-relative `assets/<name>` link. `None` when there is no usable
+/// image or the write fails. Never panics.
+#[cfg(target_os = "macos")]
+pub fn save_image(note_path: &str, img: &objc2_app_kit::NSImage) -> Option<String> {
+    use objc2::runtime::AnyObject;
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey};
+    use objc2_foundation::NSDictionary;
+
     if img.size().width <= 1.0 {
         return None;
     }
-
     let dir = image_dir(note_path)?;
     std::fs::create_dir_all(&dir).ok()?;
     let epoch_secs = std::time::SystemTime::now()
@@ -315,6 +314,19 @@ pub fn save_pasteboard_image(note_path: &str) -> Option<String> {
         unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }?;
     std::fs::write(format!("{dir}/{name}"), data.to_vec()).ok()?;
     Some(format!("assets/{name}"))
+}
+
+/// `PopupTextView.image(from:)` + `saveImage`: an image off the general
+/// pasteboard, re-encoded to PNG next to `note_path`, returning the
+/// markdown-relative `assets/<name>` link. `None` when there is no usable image
+/// or the write fails. Never panics.
+#[cfg(target_os = "macos")]
+pub fn save_pasteboard_image(note_path: &str) -> Option<String> {
+    use objc2_app_kit::NSPasteboard;
+
+    let pb = NSPasteboard::generalPasteboard();
+    let img = pasteboard_image(&pb)?;
+    save_image(note_path, &img)
 }
 
 /// No pasteboard off macOS. Never panics.

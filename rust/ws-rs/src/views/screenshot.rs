@@ -43,10 +43,10 @@
 //! `ShotLoupe`, `ShotHelpCard`, `ShotSaveCard`, `ShotSidePanel`,
 //! `ShotRecentButton`, `ShotModePill`, `ShotToolTab`, `ShotSizeIndicator`).
 //!
-//! `todo!()`: the interactive AppKit controls the Swift subviews embed — the
-//! side-panel settings form (sliders/steppers/table) and the editable
-//! save-card field — keep their layout models only; their SF Symbol glyphs and
-//! editable controls are not rebuilt in the Rust overlay.
+//! `todo!()`: the side-panel settings form (sliders/steppers/table) keeps its
+//! layout model only — its AppKit controls are not rebuilt in the Rust overlay.
+//! The save-card field is edited through the key router (no AppKit control) and
+//! the ring buttons' SF Symbols are drawn by `draw_symbol`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -97,6 +97,47 @@ pub fn output_size(crop: Rect, scale: f64) -> (i64, i64) {
         round_half_away(crop.w * scale) as i64,
         round_half_away(crop.h * scale) as i64,
     )
+}
+
+/// Port of Swift `initialRegion` (~590–607): resolve `--region` / `--last-region`
+/// to a `(local rect, display index)`. `screenN` names a display; otherwise a
+/// global `WxH+X+Y` is offset into the first display whose local bounds contain
+/// its top-left; `--last-region` matches the saved region by display id.
+pub fn initial_region(args: &ShotArgs, s: &ShotSession) -> Option<(Rect, usize)> {
+    if let Some(reg) = args.region.as_deref() {
+        if let Some(rest) = reg.strip_prefix("screen") {
+            if let Ok(n) = rest.parse::<usize>() {
+                if n < s.displays.len() {
+                    return Some((s.displays[n].bounds(), n));
+                }
+            }
+        }
+        if let Some(g) = ShotArgs::parse_region(reg) {
+            for (i, d) in s.displays.iter().enumerate() {
+                let o = s.global_origin(d);
+                let local = Rect::new(g.x - o.x, g.y - o.y, g.w, g.h);
+                if d.bounds().contains_point(Point::new(local.x, local.y)) {
+                    return Some((local, i));
+                }
+            }
+        }
+    }
+    if args.last_region {
+        if let Some(l) = s.state.last_region.as_ref() {
+            if let Some(i) = s.displays.iter().position(|d| d.id == l.display) {
+                return Some((Rect::new(l.x, l.y, l.w, l.h), i));
+            }
+        }
+    }
+    None
+}
+
+/// Encode a captured [`CGImage`] as a [`ShotImage`] (macOS only).
+#[cfg(target_os = "macos")]
+fn encode_shot_image(image: &objc2_core_graphics::CGImage) -> Option<ShotImage> {
+    let w = objc2_core_graphics::CGImage::width(Some(image)) as i64;
+    let h = objc2_core_graphics::CGImage::height(Some(image)) as i64;
+    shot_cg::encode_png(image).map(|png| ShotImage::with_png(w, h, png))
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,6 +1289,13 @@ pub struct WheelState {
     pub hot: Option<i64>,
 }
 
+impl WheelState {
+    /// `ShotWheelView.index(at:center:count:)` against this wheel's hub.
+    pub fn hit(&self, p: Point, count: usize) -> Option<i64> {
+        ShotWheel::index_at(p, self.center, count).map(|i| i as i64)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SaveCardState {
     pub display: usize,
@@ -1641,6 +1689,15 @@ impl ShotSession {
         }
     }
 
+    /// Edit the live text draft in place. The painted draft is `object.text`,
+    /// so keep both in sync (the model's `text` is the editable buffer).
+    fn edit_text<F: FnOnce(&mut String)>(&mut self, f: F) {
+        if let Some(e) = self.editing.as_mut() {
+            f(&mut e.text);
+            e.object.text = e.text.clone();
+        }
+    }
+
     pub fn commit_text(&mut self) {
         let Some(e) = self.editing.take() else { return };
         let text = e.text.trim_matches(|c| c == '\n' || c == '\r').to_string();
@@ -1705,6 +1762,55 @@ impl ShotSession {
     }
     pub fn close_wheel(&mut self) {
         self.wheel = None;
+    }
+
+    /// `ShotSession.rightDown`: commit any text draft, then open the colour
+    /// wheel centred at the pointer.
+    pub fn right_down(&mut self, d: usize, p: Point) {
+        if self.editing.is_some() {
+            self.commit_text();
+        }
+        self.wheel = Some(WheelState {
+            display: d,
+            center: p,
+            hot: None,
+        });
+    }
+
+    /// `ShotSession.rightDragged`: track the hot swatch. The wheel lives in its
+    /// own display's point space, so a drag on another display clears `hot`.
+    pub fn right_dragged(&mut self, d: usize, p: Point) {
+        let n = self.cfg.user_colors.len();
+        let Some(w) = self.wheel.as_mut() else { return };
+        w.hot = if d == w.display { w.hit(p, n) } else { None };
+    }
+
+    /// `ShotSession.rightUp`: pick the hot swatch and close the wheel.
+    pub fn right_up(&mut self, d: usize, p: Point) {
+        let Some(w) = self.wheel.as_ref() else { return };
+        let n = self.cfg.user_colors.len();
+        let hot = if d == w.display { w.hit(p, n) } else { w.hot };
+        if let Some(hot) = hot {
+            self.pick_wheel(hot);
+            self.close_wheel();
+        }
+    }
+
+    /// `ShotSession.pickWheel`: apply the swatch, or open the side panel for
+    /// the picker swatch (`None`).
+    pub fn pick_wheel(&mut self, i: i64) {
+        let Some(col) = self
+            .cfg
+            .user_colors
+            .get(i.max(0) as usize)
+            .copied()
+        else {
+            return;
+        };
+        match col {
+            Some(c) => self.set_color(c),
+            None => self.toggle_side_panel(Some(true)),
+        }
     }
 
     // -- nudge / resize ---------------------------------------------------
@@ -1779,6 +1885,36 @@ impl ShotSession {
         selection_handle_at(s, p, self.cfg.button_size)
     }
 
+    /// The `ShotButton` ring disc under `p` on display `d`, if any (`ShotButton`
+    /// subviews take the click before the selection state machine).
+    fn ring_press_at(&self, d: usize, p: Point) -> Option<usize> {
+        if self.text_mode || Some(d) != self.active {
+            return None;
+        }
+        let sel = self.selection?;
+        let disp = self.displays.get(d)?;
+        let layout =
+            ButtonRing::layout(sel, disp.bounds(), self.cfg.buttons.len(), self.cfg.button_size);
+        ring_index_at(&layout.frames, p)
+    }
+
+    /// Whether a ring press on disc `i` is still inside its frame on release.
+    fn ring_release_at(&self, d: usize, p: Point, i: usize) -> bool {
+        if self.text_mode || Some(d) != self.active {
+            return false;
+        }
+        let Some(sel) = self.selection else { return false };
+        let Some(disp) = self.displays.get(d) else {
+            return false;
+        };
+        let layout =
+            ButtonRing::layout(sel, disp.bounds(), self.cfg.buttons.len(), self.cfg.button_size);
+        layout
+            .frames
+            .get(i)
+            .is_some_and(|f| f.contains_point(p))
+    }
+
     // -- key routing ------------------------------------------------------
 
     pub fn handle_key(&mut self, k: &KeyInput) -> bool {
@@ -1803,6 +1939,51 @@ impl ShotSession {
             if k.cmd && ch == Some('q') {
                 self.finish(ShotOutcome::Abort);
                 return true;
+            }
+            // The save card's field is edited here (no AppKit control): the
+            // painted `field` is trimmed/pushed, Return confirms.
+            if self.save_card.is_some() {
+                if code == KEY_DELETE || code == KEY_FORWARD_DELETE {
+                    if let Some(card) = self.save_card.as_mut() {
+                        card.field.pop();
+                    }
+                    return true;
+                }
+                if code == KEY_RETURN || code == KEY_ENTER {
+                    let typed = self.save_card.as_ref().unwrap().field.clone();
+                    self.confirm_save(&typed);
+                    return true;
+                }
+                if !k.cmd && !k.ctrl && !k.opt {
+                    if let Some(c) = k.chars.filter(|c| !c.is_control()) {
+                        if let Some(card) = self.save_card.as_mut() {
+                            card.field.push(c);
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            }
+            // The text draft (`ShotTextField`): printable characters append,
+            // Backspace deletes; a plain Return inserts a line break (the
+            // renderer draws multi-line text), Cmd+Return commits above.
+            if self.editing.is_some() {
+                if code == KEY_DELETE || code == KEY_FORWARD_DELETE {
+                    self.edit_text(|t| {
+                        t.pop();
+                    });
+                    return true;
+                }
+                if code == KEY_RETURN || code == KEY_ENTER {
+                    self.edit_text(|t| t.push('\n'));
+                    return true;
+                }
+                if !k.cmd && !k.ctrl && !k.opt {
+                    if let Some(c) = k.chars.filter(|c| !c.is_control()) {
+                        self.edit_text(|t| t.push(c));
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -2084,6 +2265,15 @@ impl ShotSession {
     /// `mouseMoved(_:_:)`: track the pointer (loupe, cursor, mode pill).
     pub fn mouse_moved(&mut self, d: usize, p: Point) {
         self.mouse = Some((d, p));
+        // `mouseMoved`: a live wheel follows the pointer's nearest swatch.
+        if let Some(w) = self.wheel.as_ref() {
+            if w.display == d {
+                let n = self.cfg.user_colors.len();
+                if let Some(w) = self.wheel.as_mut() {
+                    w.hot = w.hit(p, n);
+                }
+            }
+        }
     }
 
     pub fn mouse_down(&mut self, d: usize, p: Point, click_count: i64, shift: bool, cmd: bool) {
@@ -2113,11 +2303,30 @@ impl ShotSession {
             self.hide_shortcuts();
             return;
         }
+        // `ShotButton` subviews take the click before the session state
+        // machine: a press on a ring disc is remembered and resolved on up.
+        if let Some(i) = self.ring_press_at(d, p) {
+            self.chrome_press = Some(ChromePress::Ring(i));
+            return;
+        }
         if self.wheel.is_some() {
+            let hot = self
+                .wheel
+                .as_ref()
+                .and_then(|w| w.hit(p, self.cfg.user_colors.len()));
+            if let Some(hot) = hot {
+                self.pick_wheel(hot);
+            }
             self.close_wheel();
             return;
         }
         if self.grabbing.is_some() {
+            // `mouseDown` during a grab: sample the frozen capture under the
+            // pointer (the loupe shows it), then apply it as the draw colour.
+            #[cfg(target_os = "macos")]
+            if let Some(c) = self.sample_color_at(d, p) {
+                self.set_color(c);
+            }
             self.grabbing = None;
             return;
         }
@@ -2284,6 +2493,16 @@ impl ShotSession {
     pub fn mouse_up(&mut self, d: usize, p: Point, shift: bool, cmd: bool) {
         let _ = (shift, cmd);
         if let Some(press) = self.chrome_press.take() {
+            // A ring disc fires only if the release is still inside frame `i`
+            // (mirrors the pill/recent resolution below).
+            if let ChromePress::Ring(i) = press {
+                if self.ring_release_at(d, p, i) {
+                    if let Some(t) = self.cfg.buttons.get(i).copied() {
+                        self.pressed(t);
+                    }
+                }
+                return;
+            }
             if let Some(c) = self.chrome_rects.get().filter(|c| c.display == d) {
                 match press {
                     // Left segment = Copy Text, right = Screenshot.
@@ -2355,12 +2574,22 @@ impl ShotSession {
         }
     }
 
+    /// `ShotCanvas.color(at:)` on the active capture: the sampled colour under
+    /// the pointer, or `None` when there is no frozen image / it is out of
+    /// bounds.
+    #[cfg(target_os = "macos")]
+    pub fn sample_color_at(&self, d: usize, p: Point) -> Option<ShotColor> {
+        let base = self.base_images.get(d).and_then(|b| b.as_deref())?;
+        let fw = self.displays.get(d).map(|x| x.frame.w).unwrap_or(0.0);
+        let scale = canvas_scale(objc2_core_graphics::CGImage::width(Some(base)) as i64, fw);
+        shot_cg::sample_color(base, scale, p)
+    }
+
     /// `ShotRenderer.render`: crop the frozen image at the display's backing
     /// scale, then draw every object over it in top-left point space.
     pub fn render(&self) -> Option<ShotImage> {
         self.render_with(true)
     }
-
     /// `ShotRenderer.render(objects:)`. Swift's `finish` renders a text capture
     /// with `objects: false` so OCR reads the raw frozen image rather than the
     /// annotations drawn on top of it.
@@ -2417,6 +2646,13 @@ pub fn selection_handle_at(sel: Rect, p: Point, button_size: f64) -> Option<i64>
         .iter()
         .position(|h| ShotGeom::dist(p, *h) <= r)
         .map(|i| i as i64)
+}
+
+/// The `ShotButton` ring disc under `p`: the index of the first button frame
+/// containing the point (`ButtonRing::layout`'s frames; an unplaced button is
+/// `Rect::ZERO` and contains nothing).
+pub fn ring_index_at(frames: &[Rect], p: Point) -> Option<usize> {
+    frames.iter().position(|f| f.contains_point(p))
 }
 
 // ---------------------------------------------------------------------------
@@ -2500,6 +2736,8 @@ enum ChromePress {
     /// `true` = the second ("Screenshot") segment.
     Pill(bool),
     Recent,
+    /// A `ShotButton` ring disc (its index in `cfg.buttons`).
+    Ring(usize),
     /// A press on the pill's padding or divider: swallowed, does nothing.
     Dead,
 }
@@ -2690,7 +2928,7 @@ mod shot_cg {
         round_half_away, Point, Rect, ShotArrow, ShotColor, ShotGeom, ShotObject, ShotPixelate,
         ShotPixels, ShotText, ShotTextStyle, ShotTool, Size,
     };
-    use super::{integral, output_size, px_rect, ShotImage};
+    use super::{integral, output_size, px_rect, CapturedImage, ScreenRef, ShotImage};
 
     /// Toll-free reinterpret one opaque CF reference as another without naming
     /// the `objc2-core-foundation` type (mirrors `AnsiRender.swift`'s helper).
@@ -2700,6 +2938,49 @@ mod shot_cg {
 
     fn cg_rect(r: Rect) -> NSRect {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h))
+    }
+
+    /// Swift `ScreenshotController.stitch` (~778–793): union every display's
+    /// frame × the max backing scale into one bitmap and draw each capture at
+    /// `(frame.min - union.min) * scale`. The context is bottom-left (default),
+    /// so the raw `draw_image` shows each capture upright (no CTM flip).
+    pub(super) fn stitch(screens: &[ScreenRef], images: &[CapturedImage]) -> Option<ShotImage> {
+        let mut union: Option<Rect> = None;
+        for s in screens {
+            union = Some(match union {
+                Some(u) => u.union(&s.frame),
+                None => s.frame,
+            });
+        }
+        let union = union?;
+        let scale = screens.iter().map(|s| s.scale).fold(0.0_f64, f64::max);
+        let scale = if scale > 0.0 { scale } else { 2.0 };
+        let w = (union.w * scale).round() as i64;
+        let h = (union.h * scale).round() as i64;
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let ctx = bitmap_context(w, h)?;
+        CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::High);
+        for s in screens {
+            let Some(img) = images
+                .iter()
+                .find(|i| i.display == s.id)
+                .and_then(|i| i.image.as_ref())
+            else {
+                continue;
+            };
+            let r = Rect::new(
+                (s.frame.x - union.x) * scale,
+                (s.frame.y - union.y) * scale,
+                s.frame.w * scale,
+                s.frame.h * scale,
+            );
+            CGContext::draw_image(Some(&ctx), cg_rect(r), Some(img));
+        }
+        let out = CGBitmapContextCreateImage(Some(&ctx))?;
+        let png = encode_png(&out)?;
+        Some(ShotImage::with_png(w, h, png))
     }
 
     fn alloc_space() -> Option<Retained<CGColorSpace>> {
@@ -2798,6 +3079,18 @@ mod shot_cg {
             Some(base),
         );
         Some(ShotPixels::new(w, h, buf))
+    }
+
+    /// `ShotCanvas.color(at:)`: the frozen capture's colour at a point-space
+    /// location, scaled to pixels like `draw_loupe` does.
+    pub(super) fn sample_color(base: &CGImage, scale: f64, p: Point) -> Option<ShotColor> {
+        let px = rasterize(base)?;
+        let x = (p.x * scale) as i64;
+        let y = (p.y * scale) as i64;
+        if x < 0 || y < 0 || x >= px.width || y >= px.height {
+            return None;
+        }
+        Some(px.color(x, y))
     }
 
     /// `ShotRenderer.stroke(_:_:width:)`.
@@ -3303,8 +3596,9 @@ mod overlay {
 
     /// The blue the Swift overlay uses for text mode (`shotTextBlue`).
     const SHOT_TEXT_BLUE: ShotColor = ShotColor {
-        r: 0x3a as f64 / 255.0,
-        g: 0xa0 as f64 / 255.0,
+        // `shotTextBlue` = `ShotColor(hex: "#0A84FF")!` in `ScreenshotOverlay.swift`.
+        r: 0x0a as f64 / 255.0,
+        g: 0x84 as f64 / 255.0,
         b: 0xff as f64 / 255.0,
         a: 1.0,
     };
@@ -3334,6 +3628,9 @@ mod overlay {
         Down,
         Dragged,
         Up,
+        RightDown,
+        RightDragged,
+        RightUp,
     }
 
     pub struct ShotOverlayViewIvars {
@@ -3396,6 +3693,21 @@ mod overlay {
             #[unsafe(method(mouseUp:))]
             fn mouse_up(&self, event: &NSEvent) {
                 self.feed(event, MousePhase::Up);
+            }
+
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, event: &NSEvent) {
+                self.feed(event, MousePhase::RightDown);
+            }
+
+            #[unsafe(method(rightMouseDragged:))]
+            fn right_mouse_dragged(&self, event: &NSEvent) {
+                self.feed(event, MousePhase::RightDragged);
+            }
+
+            #[unsafe(method(rightMouseUp:))]
+            fn right_mouse_up(&self, event: &NSEvent) {
+                self.feed(event, MousePhase::RightUp);
             }
 
             #[unsafe(method(scrollWheel:))]
@@ -3472,11 +3784,21 @@ mod overlay {
                         }
                     }
                 }
+                MousePhase::RightDown => session.right_down(d, p),
+                MousePhase::RightDragged => session.right_dragged(d, p),
+                MousePhase::RightUp => session.right_up(d, p),
                 MousePhase::Down => session.mouse_down(d, p, click, shift, cmd),
                 MousePhase::Dragged => session.mouse_dragged(d, p, shift, cmd),
                 MousePhase::Up => session.mouse_up(d, p, shift, cmd),
             }
-            if matches!(phase, MousePhase::Down | MousePhase::Up) {
+            if matches!(
+                phase,
+                MousePhase::Down
+                    | MousePhase::Up
+                    | MousePhase::RightDown
+                    | MousePhase::RightDragged
+                    | MousePhase::RightUp
+            ) {
                 super::pump_after_mouse();
             }
             self.setNeedsDisplay(true);
@@ -3566,23 +3888,63 @@ mod overlay {
                 cfg.ui_color
             };
 
-            // 3. Selection border + the eight resize handles.
+            // 3a. Copy Text mode (`ShotOverlayView.draw`): the whole screen gets
+            //     the mode colour at 14% fill plus an 8pt frame at 0.6 alpha,
+            //     inset 4pt. Swift fills `dirty` then redraws the base inside the
+            //     selection, so the tint covers everything except the selection;
+            //     an even-odd fill (full minus selection) is the same result.
+            if session.text_mode {
+                set_fill(&ctx, mode_color.with_alpha(0.14));
+                match mine.filter(|s| s.w > 0.0 && s.h > 0.0) {
+                    Some(sel) => {
+                        CGContext::save_g_state(Some(&ctx));
+                        CGContext::begin_path(Some(&ctx));
+                        CGContext::add_rect(Some(&ctx), cg_rect(full));
+                        CGContext::add_rect(Some(&ctx), cg_rect(sel));
+                        CGContext::draw_path(Some(&ctx), CGPathDrawingMode::EOFill);
+                        CGContext::restore_g_state(Some(&ctx));
+                    }
+                    None => CGContext::fill_rect(Some(&ctx), cg_rect(full)),
+                }
+                set_stroke(&ctx, mode_color.with_alpha(0.6));
+                CGContext::set_line_width(Some(&ctx), 8.0);
+                CGContext::stroke_rect(
+                    Some(&ctx),
+                    cg_rect(Rect::new(4.0, 4.0, full.w - 8.0, full.h - 8.0)),
+                );
+            }
+
+            // 3. Selection border: text mode is a 2pt dashed border with no
+            //    handles; otherwise the current 1px border + eight handles.
             if let Some(sel) = mine {
                 if sel.w > 0.0 && sel.h > 0.0 {
                     set_stroke(&ctx, mode_color);
-                    CGContext::set_line_width(Some(&ctx), 1.0);
-                    CGContext::stroke_rect(
-                        Some(&ctx),
-                        cg_rect(Rect::new(sel.x - 0.5, sel.y - 0.5, sel.w + 1.0, sel.h + 1.0)),
-                    );
-                    if !session.is_dragging() {
-                        let hd = (cfg.button_size * 0.6 * 0.5).round().max(2.0);
-                        set_fill(&ctx, mode_color);
-                        for p in selection_handles(sel) {
-                            CGContext::fill_ellipse_in_rect(
-                                Some(&ctx),
-                                cg_rect(Rect::new(p.x - hd / 2.0, p.y - hd / 2.0, hd, hd)),
-                            );
+                    if session.text_mode {
+                        CGContext::set_line_width(Some(&ctx), 2.0);
+                        let dashes: [f64; 2] = [6.0, 4.0];
+                        unsafe {
+                            CGContext::set_line_dash(Some(&ctx), 0.0, dashes.as_ptr(), dashes.len())
+                        };
+                        CGContext::stroke_rect(
+                            Some(&ctx),
+                            cg_rect(Rect::new(sel.x - 1.0, sel.y - 1.0, sel.w + 2.0, sel.h + 2.0)),
+                        );
+                        unsafe { CGContext::set_line_dash(Some(&ctx), 0.0, std::ptr::null(), 0) };
+                    } else {
+                        CGContext::set_line_width(Some(&ctx), 1.0);
+                        CGContext::stroke_rect(
+                            Some(&ctx),
+                            cg_rect(Rect::new(sel.x - 0.5, sel.y - 0.5, sel.w + 1.0, sel.h + 1.0)),
+                        );
+                        if !session.is_dragging() {
+                            let hd = (cfg.button_size * 0.6 * 0.5).round().max(2.0);
+                            set_fill(&ctx, mode_color);
+                            for p in selection_handles(sel) {
+                                CGContext::fill_ellipse_in_rect(
+                                    Some(&ctx),
+                                    cg_rect(Rect::new(p.x - hd / 2.0, p.y - hd / 2.0, hd, hd)),
+                                );
+                            }
                         }
                     }
                 }
@@ -3605,8 +3967,8 @@ mod overlay {
         /// `ShotHelpCard` / `ShotButton` ring / `ShotWheelView` / `ShotLoupe` /
         /// `ShotSaveCard`), painted into the same context instead of as AppKit
         /// subviews. Layout comes from the pure models in the parent module;
-        /// the side-panel form and the recent button / mode pill stay
-        /// model-only (they are AppKit controls).
+        /// only the side-panel settings form stays a model (its AppKit controls
+        /// are not rebuilt).
         fn render_chrome(&self, session: &ShotSession, ctx: &CGContext, full: Rect, d: usize) {
             let cfg = &session.cfg;
             let mine = if session.active == Some(d) {
@@ -3647,8 +4009,8 @@ mod overlay {
                 }
             }
 
-            // Save card (the path field is not an editable AppKit field here,
-            // but the card and its value paint).
+            // Save card (the path field is edited through the key router, not
+            // an AppKit field, and the card + value paint here).
             if let Some(card) = &session.save_card {
                 if card.display == d {
                     draw_save_card(ctx, session, full, &card.field);
@@ -3861,8 +4223,8 @@ mod overlay {
             return;
         };
         let layout = ButtonRing::layout(sel, display.bounds(), cfg.buttons.len(), cfg.button_size);
-        // A badged text tool uses dark-on-light; the button glyphs themselves
-        // are SF Symbols in AppKit and are not redrawn here.
+        // The discs are filled here; their SF Symbol glyphs are painted per
+        // frame by `draw_symbol` below (and the size badge by its number).
         for (t, f) in cfg.buttons.iter().zip(layout.frames.iter()) {
             let c = Point::new(f.mid_x(), f.mid_y());
             let r = (f.w / 2.0 - 0.5).max(1.0);
@@ -4191,6 +4553,12 @@ mod pin_window {
         image: RefCell<Option<Retained<CGImage>>>,
         /// Right-click → `PinPanel.menu()` (set by the controller).
         on_menu: RefCell<Option<std::rc::Rc<dyn Fn()>>>,
+        /// Double-click → `PinPanel.closePin` (set by the controller).
+        on_close: RefCell<Option<std::rc::Rc<dyn Fn()>>>,
+        /// Scroll-wheel zoom factor → `PinPanel.wheel` (set by the controller).
+        on_wheel: RefCell<Option<std::rc::Rc<dyn Fn(f64)>>>,
+        /// Magnify pinch factor → `PinPanel.pinch` (set by the controller).
+        on_magnify: RefCell<Option<std::rc::Rc<dyn Fn(f64)>>>,
     }
 
     define_class!(
@@ -4231,6 +4599,49 @@ mod pin_window {
                     cb();
                 }
             }
+
+            /// `PinView.mouseDown`: double-click closes, otherwise drag the
+            /// window (`performDrag(with:)`).
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                if e.clickCount() == 2 {
+                    let cb = self.ivars().on_close.borrow().clone();
+                    if let Some(cb) = cb {
+                        cb();
+                    }
+                    return;
+                }
+                if let Some(w) = self.window() {
+                    w.performWindowDragWithEvent(e);
+                }
+            }
+
+            /// `PinView.scrollWheel`: hand the zoom factor to the controller.
+            #[unsafe(method(scrollWheel:))]
+            fn scroll_wheel(&self, e: &objc2_app_kit::NSEvent) {
+                let dy = if e.hasPreciseScrollingDeltas() {
+                    e.scrollingDeltaY() / 10.0
+                } else {
+                    e.scrollingDeltaY()
+                };
+                if dy == 0.0 {
+                    return;
+                }
+                let factor = if dy > 0.0 { 1.03 } else { 1.0 / 1.03 };
+                let cb = self.ivars().on_wheel.borrow().clone();
+                if let Some(cb) = cb {
+                    cb(factor);
+                }
+            }
+
+            /// `PinView.magnify`: hand the pinch factor to the controller.
+            #[unsafe(method(magnify:))]
+            fn magnify(&self, e: &objc2_app_kit::NSEvent) {
+                let cb = self.ivars().on_magnify.borrow().clone();
+                if let Some(cb) = cb {
+                    cb(1.0 + e.magnification());
+                }
+            }
         }
 
         unsafe impl NSObjectProtocol for WSPinView {}
@@ -4245,6 +4656,9 @@ mod pin_window {
             let this = WSPinView::alloc(mtm).set_ivars(WSPinViewIvars {
                 image: RefCell::new(Some(image)),
                 on_menu: RefCell::new(None),
+                on_close: RefCell::new(None),
+                on_wheel: RefCell::new(None),
+                on_magnify: RefCell::new(None),
             });
             let view: Retained<WSPinView> = unsafe {
                 msg_send![
@@ -4352,6 +4766,36 @@ mod pin_window {
             if let Some(v) = self.ivars().view.borrow().as_ref() {
                 *v.ivars().on_menu.borrow_mut() = Some(cb);
             }
+        }
+
+        /// `PinView.mouseDown` double-click → `PinPanel.closePin`.
+        pub fn set_on_close(&self, cb: std::rc::Rc<dyn Fn()>) {
+            if let Some(v) = self.ivars().view.borrow().as_ref() {
+                *v.ivars().on_close.borrow_mut() = Some(cb);
+            }
+        }
+
+        /// `PinView.scrollWheel` → `PinPanel.wheel` (zoom factor).
+        pub fn set_on_wheel(&self, cb: std::rc::Rc<dyn Fn(f64)>) {
+            if let Some(v) = self.ivars().view.borrow().as_ref() {
+                *v.ivars().on_wheel.borrow_mut() = Some(cb);
+            }
+        }
+
+        /// `PinView.magnify` → `PinPanel.pinch` (zoom factor).
+        pub fn set_on_magnify(&self, cb: std::rc::Rc<dyn Fn(f64)>) {
+            if let Some(v) = self.ivars().view.borrow().as_ref() {
+                *v.ivars().on_magnify.borrow_mut() = Some(cb);
+            }
+        }
+
+        /// `PinPanel.setZoom`: apply a model frame (origin + size, in points).
+        pub fn apply_frame(&self, f: Rect) {
+            let nf = NSRect::new(
+                NSPoint::new(f.x, f.y),
+                NSSize::new(f.w.max(1.0), f.h.max(1.0)),
+            );
+            self.setFrame_display(nf, true);
         }
 
         pub fn png(&self) -> Vec<u8> {
@@ -4835,6 +5279,30 @@ fn monitor_key_down(
     let is_overlay = as_any(&*window)
         .downcast_ref::<overlay::ShotOverlayPanel>()
         .is_some();
+    // The recents grid panel takes key while it is open, so its keys never
+    // reach the overlay target below. Tab / Shift+Tab there wrap the pill
+    // stops (close the grid and move on to Copy Text / Screenshot); the
+    // panel's own `keyDown:` handles only Esc.
+    if c.recent_panel.0.is_some()
+        && as_any(&*window)
+            .downcast_ref::<recent_grid::ShotRecentPanel>()
+            .is_some()
+    {
+        let k = key_input_from_event(event);
+        if k.key_code == KEY_TAB && !k.cmd && !k.ctrl && !k.opt {
+            if let Some(s) = c.session.as_mut() {
+                s.cycle_stop(k.shift);
+            }
+            if c.session.as_ref().is_some_and(|s| s.recent_requested) {
+                if let Some(s) = c.session.as_mut() {
+                    s.recent_requested = false;
+                }
+                c.toggle_recent();
+            }
+            c.redraw_overlays();
+            return std::ptr::null_mut();
+        }
+    }
     let pin_numbers: Vec<i64> = c.pins.iter().map(|p| p.window_number).collect();
     match shot_key_target(is_overlay, window.windowNumber() as i64, &pin_numbers) {
         Some(ShotKeyTarget::Overlay) => {
@@ -4856,6 +5324,8 @@ fn monitor_key_down(
                     s.recent_requested = false;
                 }
                 c.toggle_recent();
+                // Keep the pill's stop highlight in step with the grid.
+                c.redraw_overlays();
                 return std::ptr::null_mut();
             }
             if handled {
@@ -4893,7 +5363,12 @@ fn monitor_key_down(
                         w.set_alpha(pin.alpha);
                     }
                 }
-                PinKeyAction::Copy | PinKeyAction::Ignored => {}
+                PinKeyAction::Copy => {
+                    if let Some(img) = c.pin_image(i) {
+                        c.copy(&img, &ScreenshotConfig::load(), None);
+                    }
+                }
+                PinKeyAction::Ignored => {}
             }
             // `PinPanel.handleKey` always returns true (Swift swallows the key).
             c.drop_key_monitor_if_idle();
@@ -4979,6 +5454,21 @@ fn pin_menu(ctrl: &std::sync::Weak<Mutex<ScreenshotController>>, window_number: 
     popup(entries, None, objc2_app_kit::NSEvent::mouseLocation().x, objc2_app_kit::NSEvent::mouseLocation().y);
 }
 
+/// Run `f` on the live controller for the pin with `window_number` (the
+/// `PinView` callbacks' shared lock-and-dispatch).
+#[cfg(target_os = "macos")]
+fn pin_with(
+    ctrl: &std::sync::Weak<Mutex<ScreenshotController>>,
+    window_number: i64,
+    f: impl FnOnce(&mut ScreenshotController, usize),
+) {
+    let Some(c) = ctrl.upgrade() else { return };
+    let Ok(mut c) = c.lock() else { return };
+    if let Some(i) = c.pins.iter().position(|p| p.window_number == window_number) {
+        f(&mut c, i);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ScreenshotController
 // ---------------------------------------------------------------------------
@@ -4998,6 +5488,9 @@ pub struct ScreenshotController {
     pub prewarmed: bool,
     permission_asked: bool,
     capturing: bool,
+    /// A `-d` / `[screenshot] delay` timer is outstanding (Swift's `capturing`
+    /// stays true across the `asyncAfter`, so a delayed capture is not idle).
+    delay_pending: bool,
     forced_save_path: Option<String>,
     ocr_warm: bool,
     #[cfg(target_os = "macos")]
@@ -5046,6 +5539,7 @@ impl ScreenshotController {
             prewarmed: false,
             permission_asked: false,
             capturing: false,
+            delay_pending: false,
             forced_save_path: None,
             ocr_warm: false,
             #[cfg(target_os = "macos")]
@@ -5233,6 +5727,17 @@ impl ScreenshotController {
             cfg.permission_toast.clone(),
             "exclamationmark.triangle.fill",
         );
+        // `checkPermission`: open Privacy ▸ Screen Recording so the toast's
+        // promise is real.
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_foundation::{NSURL, NSString};
+            if let Some(u) = NSURL::URLWithString(&NSString::from_str(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            )) {
+                objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&u);
+            }
+        }
         self.note("screenshot: no Screen Recording permission");
         false
     }
@@ -5246,31 +5751,83 @@ impl ScreenshotController {
                 self.screens = screens;
             }
             if screen_capture_permitted() {
-                return self.trigger_with(args, &RealCapture);
+                return self.trigger_inner(args, &RealCapture, true);
             }
         }
-        self.trigger_with(args, &UnavailableCapture)
+        self.trigger_inner(args, &UnavailableCapture, true)
     }
 
+    /// `trigger_with` (the public, test-facing entry): a thin wrapper over
+    /// [`Self::trigger_inner`] that honours the `-d` / `[screenshot] delay`.
     pub fn trigger_with(
         &mut self,
         args: &ShotArgs,
         capture: &dyn ScreenCapture,
+    ) -> Result<(), String> {
+        self.trigger_inner(args, capture, true)
+    }
+
+    /// The shared capture body. `allow_delay` is false when re-entered from the
+    /// delay timer, so a delayed trigger cannot schedule a second delay.
+    fn trigger_inner(
+        &mut self,
+        args: &ShotArgs,
+        capture: &dyn ScreenCapture,
+        allow_delay: bool,
     ) -> Result<(), String> {
         let cfg = self.config.clone();
         if !cfg.enabled {
             self.note("screenshot: [screenshot] enabled = false");
             return Ok(());
         }
-        if self.session.is_some() || self.capturing {
+        if self.session.is_some() || self.capturing || self.delay_pending {
             return Ok(());
         }
         if !self.check_permission(&cfg) {
             return Ok(());
         }
+        // Swift: `delay = args.delayMs > 0 ? args.delayMs : cfg.delayMs`, then
+        // `asyncAfter`. A live controller schedules on the main queue and
+        // returns; a bare controller (unit tests) has no weak self to upgrade
+        // and captures straight away.
+        let delay_ms = if args.delay_ms > 0 {
+            args.delay_ms
+        } else {
+            cfg.delay_ms
+        };
+        #[cfg(target_os = "macos")]
+        if allow_delay && delay_ms > 0 {
+            let weak = self.self_ref.clone();
+            if weak.strong_count() > 0 {
+                self.delay_pending = true;
+                let a = args.clone();
+                dispatch2::DispatchQueue::main()
+                    .after(
+                        dispatch2::DispatchTime::NOW.time(delay_ms * 1_000_000),
+                        move || {
+                            if let Some(c) = weak.upgrade() {
+                                if let Ok(mut c) = c.try_lock() {
+                                    c.delay_pending = false;
+                                    let _ = c.trigger_inner(&a, &RealCapture, false);
+                                }
+                            }
+                        },
+                    )
+                    .ok();
+                return Ok(());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (allow_delay, delay_ms);
+
+        // KR1 (PRD §7.3.4): time the capture and the path to the overlay.
+        let t0 = std::time::Instant::now();
         self.capturing = true;
         let _ = capture.shareable_content();
+        let cap_t0 = std::time::Instant::now();
         let res = capture.capture(&self.screens);
+        let capture_ms = cap_t0.elapsed().as_millis() as i64;
+        let path_to_overlay_ms = t0.elapsed().as_millis() as i64;
         self.capturing = false;
         match res {
             Ok(images) if !images.is_empty() => {
@@ -5305,13 +5862,26 @@ impl ScreenshotController {
                         }
                         #[cfg(not(target_os = "macos"))]
                         let _ = &images;
+                        // `--region` / `--last-region`: preselect before the
+                        // panel presents so the ring/selection show on open.
+                        if let Some((rect, idx)) = initial_region(args, &s) {
+                            s.test_select(rect, Some(idx));
+                        }
                         self.session = Some(s);
                         #[cfg(target_os = "macos")]
                         self.present_overlay();
+                        self.note(format!(
+                            "screenshot: capture {} ms, {} ms to overlay",
+                            capture_ms, path_to_overlay_ms
+                        ));
                     }
-                    _ => {
-                        self.last_output = json!({"outcome": args.mode.as_str()});
-                        self.reply = Some(Vec::new());
+                    ShotMode::Full | ShotMode::Screen => {
+                        self.direct(args, &cfg, &images);
+                        self.note(format!(
+                            "screenshot {}: capture {} ms",
+                            args.mode.as_str(),
+                            capture_ms
+                        ));
                     }
                 }
                 Ok(())
@@ -5323,14 +5893,96 @@ impl ScreenshotController {
                     "exclamationmark.triangle.fill",
                 );
                 self.note("screenshot: capture failed");
+                self.reply = Some(Vec::new());
                 Ok(())
             }
         }
     }
 
+    /// Port of Swift `ScreenshotController.direct` + `stitch` (~754–793): the
+    /// non-interactive `full` / `screen -n` delivery (no overlay). `screen`
+    /// picks one display's capture; `full` stitches every display.
+    fn direct(&mut self, args: &ShotArgs, cfg: &ScreenshotConfig, images: &[CapturedImage]) {
+        #[cfg(target_os = "macos")]
+        {
+            let screen: Option<ScreenRef> = if args.mode == ShotMode::Screen {
+                args.screen_number
+                    .and_then(|n| usize::try_from(n).ok())
+                    .and_then(|n| self.screens.get(n).copied())
+                    .or_else(|| self.screen_under_mouse())
+            } else {
+                self.screen_under_mouse()
+            };
+            let img = match args.mode {
+                ShotMode::Screen => screen
+                    .and_then(|s| images.iter().find(|i| i.display == s.id))
+                    .and_then(|i| i.image.as_ref())
+                    .and_then(|img| encode_shot_image(img)),
+                _ => shot_cg::stitch(&self.screens, images),
+            };
+            let Some(img) = img else {
+                self.reply = Some(Vec::new());
+                return;
+            };
+            let (w, h) = (img.width, img.height);
+            self.last_output = json!({"outcome": args.mode.as_str(), "size": [w, h]});
+            if let Some(png) = &img.png {
+                self.history.record_png(png, cfg.history.max(0) as usize);
+            }
+            if let Some(p) = args.path.as_deref() {
+                self.save(&img, cfg, screen, Some(p));
+            }
+            if args.clipboard || (args.path.is_none() && !args.raw && !args.pin) {
+                self.copy(&img, cfg, screen);
+            }
+            if args.pin {
+                if let Some(s) = screen {
+                    let scale = s.scale.max(1.0);
+                    let frame = Rect::new(
+                        s.frame.x,
+                        s.frame.y,
+                        w as f64 / scale,
+                        h as f64 / scale,
+                    );
+                    self.pin(&img, Some(frame), screen);
+                }
+            }
+            // Swift `direct`: `reply?(a.raw ? png(img) : Data())` — no
+            // `--print-geometry` geometry on the direct path (matches `finish`'s
+            // overlay path only).
+            self.reply = if args.raw {
+                img.png.clone()
+            } else {
+                Some(Vec::new())
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (args, cfg, images);
+            self.note("screenshot: full/screen capture needs macOS");
+            self.reply = Some(Vec::new());
+        }
+    }
+
+    /// `NSScreen` under the pointer as a [`ScreenRef`], or the first screen.
+    #[cfg(target_os = "macos")]
+    fn screen_under_mouse(&self) -> Option<ScreenRef> {
+        let m = objc2_app_kit::NSEvent::mouseLocation();
+        self.screens
+            .iter()
+            .find(|s| {
+                m.x >= s.frame.x
+                    && m.x < s.frame.x + s.frame.w
+                    && m.y >= s.frame.y
+                    && m.y < s.frame.y + s.frame.h
+            })
+            .or_else(|| self.screens.first())
+            .copied()
+    }
+
     /// No overlay up and no capture in flight (a session has finished).
     pub fn is_idle(&self) -> bool {
-        self.session.is_none() && !self.capturing
+        self.session.is_none() && !self.capturing && !self.delay_pending
     }
 
     /// `ScreenshotController.handle(words:)`.
@@ -5409,6 +6061,18 @@ impl ScreenshotController {
             return None;
         }
         self.last_output["path"] = json!(target);
+        // Swift `onSaved` → `PathShelf.add([path], why: .screenshot)`.
+        crate::app::host::screenshot_saved_to_path_shelf(&target);
+        // Swift `write`'s `copyPathAfterSave`: put the saved path on the
+        // clipboard after a successful save.
+        if cfg.copy_path_after_save {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = write_text_pasteboard(&target);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = &target;
+        }
         let toast = cfg.save_toast.replace("{}", &abbreviate_tilde(&target));
         ScreenToast::show(&mut self.toast, toast, "checkmark.circle.fill");
         self.note(format!("screenshot: saved {target}"));
@@ -5437,6 +6101,20 @@ impl ScreenshotController {
                 let ctrl = self.self_ref.clone();
                 let wn = panel.window_number;
                 w.set_on_menu(std::rc::Rc::new(move || pin_menu(&ctrl, wn)));
+                // `PinView.mouseDown`/`scrollWheel`/`magnify` all reach back
+                // through the controller (weak), so the panel never owns it.
+                let close = self.self_ref.clone();
+                w.set_on_close(std::rc::Rc::new(move || {
+                    pin_with(&close, wn, |c, i| c.close_pin(i));
+                }));
+                let wheel = self.self_ref.clone();
+                w.set_on_wheel(std::rc::Rc::new(move |f: f64| {
+                    pin_with(&wheel, wn, |c, i| c.pin_zoom(i, f));
+                }));
+                let pinch = self.self_ref.clone();
+                w.set_on_magnify(std::rc::Rc::new(move |f: f64| {
+                    pin_with(&pinch, wn, |c, i| c.pin_zoom(i, f));
+                }));
                 w.present();
                 w
             }),
@@ -5456,6 +6134,7 @@ impl ScreenshotController {
     #[cfg(target_os = "macos")]
     pub fn toggle_recent(&mut self) {
         use objc2::DefinedClass;
+        use objc2::Message;
         use std::rc::Rc;
         if self.close_recent() {
             return;
@@ -5477,6 +6156,7 @@ impl ScreenshotController {
         *panel.ivars().on_escape.borrow_mut() = Some(Rc::new(move || {
             w(Box::new(|c| {
                 c.close_recent();
+                c.redraw_overlays();
             }))
         }));
         let w = with.clone();
@@ -5486,12 +6166,21 @@ impl ScreenshotController {
         let dir = self.history.dir.clone();
         *grid.ivars().on_folder.borrow_mut() = Some(Rc::new(move || open_in_workspace(&dir)));
         let w = with.clone();
+        // "Open in Popup" returns the keyboard to the overlay under the grid.
+        let popup_parent: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> =
+            self.overlay_panels.0.first().map(|p| {
+                let w: &objc2_app_kit::NSWindow = p;
+                w.retain()
+            });
         let weak_grid = objc2::rc::Weak::from_retained(&grid);
         *grid.ivars().on_menu.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
-            let (w1, w2, w3, w4) = (w.clone(), w.clone(), w.clone(), w.clone());
-            let (p1, p2, p3, p4, p5) = (e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone());
+            let (w1, w2, w3, w4, w5) = (w.clone(), w.clone(), w.clone(), w.clone(), w.clone());
+            let (p1, p2, p3, p4, p5, p6) = (
+                e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(),
+            );
             let g = weak_grid.clone();
+            let parent = popup_parent.clone();
             let Some(view) = weak_grid.load() else { return };
             popup_context(
                 vec![
@@ -5502,6 +6191,16 @@ impl ScreenshotController {
                             c.abort_session();
                             c.copy(&img, &ScreenshotConfig::load(), None);
                         }))
+                    }),
+                    MenuEntry::item("Open in Popup", move || {
+                        w5(Box::new(move |c| {
+                            // The grid goes away; the overlay stays live under
+                            // the popup and takes the keyboard back on close.
+                            c.close_recent();
+                            c.redraw_overlays();
+                            let parent_ns = parent.as_ref().map(|w| &**w);
+                            crate::views::file_popup::show(&p6, parent_ns);
+                        }));
                     }),
                     MenuEntry::item("Open in Preview", move || {
                         w3(Box::new(|c| c.abort_session()));
@@ -5532,6 +6231,11 @@ impl ScreenshotController {
         panel.orderFrontRegardless();
         panel.makeKeyWindow();
         self.recent_panel.0 = Some(panel);
+        // `recent_open` is the pill's third stop (`ShotSession::stop`) and what
+        // Tab / Shift+Tab cycles from; keep it in step with the live panel.
+        if let Some(s) = self.session.as_mut() {
+            s.recent_open = true;
+        }
     }
 
     /// Close the recent grid; `true` when one was open.
@@ -5615,6 +6319,17 @@ impl ScreenshotController {
         #[cfg(target_os = "macos")]
         if let Some(Some(w)) = self.pin_windows.0.get(i) {
             w.set_alpha(p.alpha);
+        }
+    }
+
+    /// `PinPanel.setZoom`: scale a live pin by `factor` around its centre and
+    /// apply the model frame to the real window.
+    pub fn pin_zoom(&mut self, i: usize, factor: f64) {
+        let Some(p) = self.pins.get_mut(i) else { return };
+        p.set_zoom(p.zoom * factor, None);
+        #[cfg(target_os = "macos")]
+        if let Some(Some(w)) = self.pin_windows.0.get(i) {
+            w.apply_frame(self.pins[i].frame);
         }
     }
 
@@ -6034,15 +6749,25 @@ impl ScreenshotController {
         st["displays"] = json!(s
             .displays
             .iter()
-            .map(|d| {
+            .enumerate()
+            .map(|(i, d)| {
                 let f = d.frame;
+                #[cfg(target_os = "macos")]
+                let visible = self
+                    .overlay_panels
+                    .0
+                    .get(i)
+                    .map(|p| p.isVisible())
+                    .unwrap_or(false);
+                #[cfg(not(target_os = "macos"))]
+                let visible = true;
                 json!({
                     "id": d.id as i64,
                     "frame": [f.x as i64, f.y as i64, f.w as i64, f.h as i64],
                     "scale": d.scale,
                     "key": d.key,
                     "wid": d.wid,
-                    "visible": true,
+                    "visible": visible,
                     "level": d.level,
                 })
             })
@@ -6083,7 +6808,10 @@ impl ScreenshotController {
         st["textMode"] = json!(s.text_mode);
         st["finished"] = json!(s.finished);
         st["dragging"] = json!(s.is_dragging());
-        st["modePill"] = Value::Null;
+        st["modePill"] = match s.chrome_rects.get() {
+            Some(c) => json!({"x": c.pill.x, "y": c.pill.y, "w": c.pill.w, "h": c.pill.h}),
+            None => Value::Null,
+        };
         st["size"] = match s.active_size() {
             Some(v) => json!(v),
             None => Value::Null,
@@ -6189,6 +6917,27 @@ fn write_image_pasteboard(img: &ShotImage) -> bool {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
     pb.writeObjects(&objects)
+}
+
+/// Put a plain string on the general pasteboard (Swift `write`'s
+/// `copyPathAfterSave`: `pb.setString(path, forType: .string)`). Main-thread
+/// only, like [`write_image_pasteboard`]; returns `false` off the main thread.
+#[cfg(target_os = "macos")]
+fn write_text_pasteboard(text: &str) -> bool {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+
+    if objc2::MainThreadMarker::new().is_none() {
+        return false;
+    }
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    unsafe {
+        pb.setString_forType(
+            &NSString::from_str(text),
+            objc2_app_kit::NSPasteboardTypeString,
+        )
+    }
 }
 
 /// Decode a PNG and re-encode it as TIFF (the `rep.tiffRepresentation` half of
@@ -6644,7 +7393,8 @@ mod tests {
         assert_eq!(s.tool, None);
         assert!(!s.finished);
 
-        // Tab toggles text mode (key code 48).
+        // Tab cycles the pill stops (Screenshot → Recent); it no longer toggles
+        // text mode (the audit's "changed by design"). `O` toggles Copy Text.
         let tab = KeyInput {
             key_code: 48,
             chars: None,
@@ -6655,6 +7405,9 @@ mod tests {
             esc_streak: 0,
         };
         assert!(s.handle_key(&tab));
+        assert!(s.recent_requested, "Tab reaches the recents stop");
+        assert!(!s.text_mode);
+        assert!(s.handle_key(&shot_key_event("o").unwrap()));
         assert!(s.text_mode);
         assert!(s.handle_key(&shot_key_event("o").unwrap()));
         assert!(!s.text_mode, "'o' toggles back");
@@ -7144,5 +7897,202 @@ mod tests {
             "last path component only"
         );
         assert_eq!(ShotSaveCard::focus_range("name"), (0, 4), "no extension");
+    }
+
+    #[test]
+    fn right_click_color_wheel_picks_and_opens_panel() {
+        let mut s = session();
+        s.cfg.user_colors = vec![
+            Some(ShotColor::new(0.0, 1.0, 0.0)),
+            Some(ShotColor::new(0.0, 0.0, 1.0)),
+            None,
+        ];
+        let c = Point::new(400.0, 400.0);
+
+        // rightDown opens the wheel centred at the pointer; the hub hits nothing.
+        s.right_down(0, c);
+        let w = s.wheel.as_ref().unwrap();
+        assert_eq!((w.display, w.center, w.hot), (0, c, None));
+        assert_eq!(w.hit(c, 3), None, "the hub is not a swatch");
+
+        // rightDragged tracks the nearest swatch; rightUp applies its colour.
+        let d0 = ShotWheel::dot_center(c, 0, 3);
+        s.right_dragged(0, d0);
+        assert_eq!(s.wheel.as_ref().unwrap().hot, Some(0));
+        s.right_up(0, d0);
+        assert!(s.wheel.is_none(), "picking closes the wheel");
+        assert_eq!(s.color, ShotColor::new(0.0, 1.0, 0.0));
+
+        // The picker swatch (None) opens the side panel instead.
+        let d2 = ShotWheel::dot_center(c, 2, 3);
+        s.right_down(0, c);
+        s.right_dragged(0, d2);
+        s.right_up(0, d2);
+        assert!(s.wheel.is_none());
+        assert!(s.side_panel_open, "picker swatch opens the side panel");
+
+        // A drag on another display clears `hot` (the wheel's own point space).
+        s.right_down(0, c);
+        s.right_dragged(1, d0);
+        assert_eq!(s.wheel.as_ref().unwrap().hot, None);
+    }
+
+    #[test]
+    fn text_typing_edits_and_commits_the_draft() {
+        let mut s = session();
+        s.test_select(Rect::new(10.0, 10.0, 200.0, 200.0), Some(0));
+        s.begin_text(0, Point::new(50.0, 50.0), None);
+        assert!(s.editing.is_some());
+
+        assert!(s.handle_key(&shot_key_event("a").unwrap()));
+        assert!(s.handle_key(&shot_key_event("b").unwrap()));
+        assert_eq!(s.editing.as_ref().unwrap().text, "ab");
+        // The painted draft (`object.text`) mirrors the editable buffer.
+        assert_eq!(s.editing.as_ref().unwrap().object.text, "ab");
+
+        assert!(s.handle_key(&shot_key_event("delete").unwrap()));
+        assert_eq!(s.editing.as_ref().unwrap().text, "a", "backspace deletes");
+
+        assert!(s.handle_key(&shot_key_event("return").unwrap()));
+        assert_eq!(s.editing.as_ref().unwrap().text, "a\n", "Return = newline");
+
+        assert!(s.handle_key(&shot_key_event("cmd+return").unwrap()));
+        assert!(s.editing.is_none(), "Cmd+Return commits");
+        assert_eq!(s.doc.objects.len(), 1);
+        assert_eq!(s.doc.objects[0].text, "a", "trailing newline trimmed");
+
+        // Empty text is dropped like Swift's `isValid == false`.
+        s.begin_text(0, Point::new(5.0, 5.0), None);
+        s.commit_text();
+        assert_eq!(s.doc.objects.len(), 1, "empty draft adds nothing");
+    }
+
+    #[test]
+    fn save_card_field_is_typed_here() {
+        let mut s = session();
+        s.test_select(Rect::new(0.0, 0.0, 100.0, 100.0), Some(0));
+        s.save_card = Some(SaveCardState {
+            display: 0,
+            field: "/tmp/x.png".to_string(),
+        });
+        assert!(s.handle_key(&shot_key_event("a").unwrap()));
+        assert_eq!(s.save_card.as_ref().unwrap().field, "/tmp/x.pnga");
+        assert!(s.handle_key(&shot_key_event("delete").unwrap()));
+        assert_eq!(s.save_card.as_ref().unwrap().field, "/tmp/x.png");
+        assert!(s.handle_key(&shot_key_event("return").unwrap()));
+        assert!(s.save_card.is_none(), "Return confirms");
+        assert_eq!(s.chosen_save_path.as_deref(), Some("/tmp/x.png"));
+    }
+
+    #[test]
+    fn ring_button_press_fires_on_release() {
+        let frames = vec![Rect::ZERO, Rect::new(10.0, 10.0, 20.0, 20.0)];
+        assert_eq!(ring_index_at(&frames, Point::new(15.0, 15.0)), Some(1));
+        assert_eq!(ring_index_at(&frames, Point::new(0.0, 0.0)), None);
+
+        let mut s = session();
+        s.test_select(Rect::new(300.0, 300.0, 200.0, 200.0), Some(0));
+        let layout = ButtonRing::layout(
+            s.selection.unwrap(),
+            s.displays[0].bounds(),
+            s.cfg.buttons.len(),
+            s.cfg.button_size,
+        );
+        let f = layout.frames[0];
+        let p = Point::new(f.mid_x(), f.mid_y());
+        let first = s.cfg.buttons[0];
+
+        s.mouse_down(0, p, 1, false, false);
+        assert_eq!(s.chrome_press, Some(ChromePress::Ring(0)));
+        assert_eq!(s.tool, None, "no fire before release");
+        s.mouse_up(0, p, false, false);
+        assert_eq!(s.tool, Some(first), "release inside the frame fires");
+
+        // A release outside the frame does nothing (the press is swallowed).
+        s.set_tool(None);
+        s.mouse_down(0, p, 1, false, false);
+        s.mouse_up(0, Point::new(0.0, 0.0), false, false);
+        assert_eq!(s.tool, None, "release outside the frame does not fire");
+    }
+
+    #[test]
+    fn initial_region_maps_screen_rect_and_last_region() {
+        let mut s = session();
+        // A second display to the right of the primary.
+        s.add_display(ShotDisplay::new(
+            2,
+            Rect::new(1440.0, 0.0, 1440.0, 900.0),
+            2.0,
+        ));
+
+        // `screenN` → that display's full bounds.
+        let mut a = ShotArgs::default();
+        a.region = Some("screen1".to_string());
+        let (r, i) = initial_region(&a, &s).expect("screen1 resolves");
+        assert_eq!(i, 1);
+        assert_eq!((r.x, r.y, r.w, r.h), (0.0, 0.0, 1440.0, 900.0));
+
+        // A global `WxH+X+Y` offsets into the display whose local bounds hold
+        // its top-left (display 2's global origin is x=1440).
+        a.region = Some("100x50+1500+10".to_string());
+        let (r, i) = initial_region(&a, &s).expect("global rect resolves");
+        assert_eq!(i, 1);
+        assert_eq!((r.x, r.y, r.w, r.h), (60.0, 10.0, 100.0, 50.0));
+
+        // On the primary the local coords equal the global ones.
+        a.region = Some("100x50+10+20".to_string());
+        let (r, i) = initial_region(&a, &s).expect("primary rect resolves");
+        assert_eq!(i, 0);
+        assert_eq!((r.x, r.y, r.w, r.h), (10.0, 20.0, 100.0, 50.0));
+
+        // An out-of-range `screenN` and a non-rect fall through to `--last-region`.
+        a.region = Some("screen9".to_string());
+        a.last_region = true;
+        s.state.last_region = Some(crate::engines::screenshot_annotations::ShotRegion {
+            display: 2,
+            x: 5.0,
+            y: 6.0,
+            w: 7.0,
+            h: 8.0,
+        });
+        let (r, i) = initial_region(&a, &s).expect("last-region resolves");
+        assert_eq!(i, 1);
+        assert_eq!((r.x, r.y, r.w, r.h), (5.0, 6.0, 7.0, 8.0));
+
+        // No region args → nothing preselected.
+        let none = ShotArgs::default();
+        assert!(initial_region(&none, &s).is_none());
+    }
+
+    #[test]
+    fn delay_pending_blocks_idle_and_duplicate_triggers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingCapture(Arc<AtomicUsize>);
+        impl ScreenCapture for CountingCapture {
+            fn shareable_content(&self) -> Result<(), CaptureError> {
+                Ok(())
+            }
+            fn capture(&self, _screens: &[ScreenRef]) -> Result<Vec<CapturedImage>, CaptureError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+        }
+
+        let mut c = ScreenshotController::new();
+        let n = Arc::new(AtomicUsize::new(0));
+        let cap = CountingCapture(n.clone());
+
+        // An outstanding delay timer keeps the controller busy and blocks a
+        // second trigger (Swift leaves `capturing == true` across `asyncAfter`).
+        c.delay_pending = true;
+        assert!(!c.is_idle(), "a pending delay is not idle");
+        assert!(c.trigger_with(&ShotArgs::default(), &cap).is_ok());
+        assert_eq!(n.load(Ordering::SeqCst), 0, "no capture while a delay is pending");
+        assert!(c.session.is_none());
+
+        // Once the timer fires, the controller is idle again.
+        c.delay_pending = false;
+        assert!(c.is_idle());
     }
 }

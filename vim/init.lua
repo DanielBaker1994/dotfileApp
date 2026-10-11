@@ -68,6 +68,11 @@ vim.keymap.set('n', '<leader>sf', function() ask_app('notes-find') end,
   { desc = 'find among the open notes (popup)', silent = true })
 vim.keymap.set('n', '<leader>sg', function() ask_app('notes-grep') end,
   { desc = 'ripgrep the open notes (popup)', silent = true })
+vim.keymap.set('n', '<leader>yp', function()
+    local path = vim.fn.expand('%:p')
+    path = path:gsub("^oil://", "")
+    vim.fn.setreg('+', path)
+end, { desc = 'Yank file path' })
 o.hidden = true
 o.autoread = true
 o.autowriteall = true

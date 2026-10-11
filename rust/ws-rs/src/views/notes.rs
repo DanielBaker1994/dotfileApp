@@ -38,7 +38,6 @@ pub const NOTE_FIND_DEFAULT_ROWS: usize = 12;
 pub const NOTE_FIND_DEFAULT_GREP_MAX: usize = 200;
 pub const PROSE_MIN_ZOOM: f64 = 0.5;
 pub const PROSE_MAX_ZOOM: f64 = 4.0;
-pub const FILE_POPUP_TEXT_LIMIT: u64 = 512 * 1024;
 
 /// Height of the notes terminal drawer (bottom).
 pub const TERMINAL_DRAWER_HEIGHT: f64 = 200.0;
@@ -1743,19 +1742,22 @@ pub fn build_content(
 mod macos {
     use super::*;
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, NSObject};
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSFont, NSNormalWindowLevel,
-        NSScreen, NSScrollView, NSTextField, NSTextView, NSView, NSWindow, NSWindowButton,
+        NSAutoresizingMaskOptions, NSBackingStoreType, NSDraggingInfo, NSFont, NSImage,
+        NSImageScaling, NSImageView, NSNormalWindowLevel, NSPasteboard, NSScreen, NSScrollView,
+        NSTextAttachment, NSTextField, NSTextView, NSView, NSWindow, NSWindowButton,
         NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
     };
     use objc2_foundation::{
-        ns_string, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+        ns_string, NSAttributedString, NSMutableAttributedString, NSNumber, NSObjectProtocol,
+        NSPoint, NSRange, NSRect, NSSize, NSString,
     };
     use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    use std::rc::Rc;
 
     pub struct NotesFlippedIvars;
 
@@ -1790,12 +1792,19 @@ mod macos {
 
     pub struct NotesTextViewIvars {
         /// Right-click → the editor menu, with the clicked character index.
-        on_menu: RefCell<Option<std::rc::Rc<dyn Fn(usize)>>>,
+        on_menu: RefCell<Option<Rc<dyn Fn(usize)>>>,
+        /// Cmd+V / an image drop → save next to the note and insert
+        /// (`PopupTextView.onPasteImage`; wired by the host).
+        on_paste_image: RefCell<Option<Rc<dyn Fn(Retained<NSImage>)>>>,
+        /// A click on an image attachment → the FilePopup
+        /// (`PopupTextView.onOpenImage`).
+        on_open_image: RefCell<Option<Rc<dyn Fn(String)>>>,
     }
 
     define_class!(
-        /// `PopupTextView`: the plain notes editor, whose right-click shows
-        /// the notes menu (`menu(for:)`) instead of the stock text menu.
+        /// `PopupTextView`: the plain notes editor. Right-click shows the
+        /// notes menu (`menu(for:)`), Cmd+V / drops with an image go through
+        /// `onPasteImage`, a click on an inline image opens the FilePopup.
         #[unsafe(super(NSTextView))]
         #[thread_kind = MainThreadOnly]
         #[name = "WSNotesTextView"]
@@ -1813,6 +1822,69 @@ mod macos {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 cb(self.characterIndexForInsertionAtPoint(p));
             }
+
+            /// `PopupTextView.paste(_:)`: an image on the clipboard wins.
+            #[unsafe(method(paste:))]
+            fn paste(&self, sender: Option<&AnyObject>) {
+                let pb = NSPasteboard::generalPasteboard();
+                if let Some(img) = crate::views::notes_vim::pasteboard_image(&pb) {
+                    if img.size().width > 1.0 {
+                        let cb = self.ivars().on_paste_image.borrow().clone();
+                        if let Some(cb) = cb {
+                            cb(img);
+                            return;
+                        }
+                    }
+                }
+                let _: () = unsafe { msg_send![super(self), paste: sender] };
+            }
+
+            /// `PopupTextView.mouseDown`: a single click on an image
+            /// attachment opens the FilePopup; anything else is normal.
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                if e.clickCount() == 1 {
+                    let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                    if let Some(rel) = self.attachment_rel_at_point(p) {
+                        let cb = self.ivars().on_open_image.borrow().clone();
+                        if let Some(cb) = cb {
+                            cb(rel);
+                            return;
+                        }
+                    }
+                }
+                let _: () = unsafe { msg_send![super(self), mouseDown: e] };
+            }
+
+            /// `PopupTextView.draggingEntered`: an image drop is a copy.
+            #[unsafe(method(draggingEntered:))]
+            fn dragging_entered(
+                &self,
+                sender: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>,
+            ) -> objc2_app_kit::NSDragOperation {
+                let pb = sender.draggingPasteboard();
+                if crate::views::notes_vim::pasteboard_image(&pb).is_some() {
+                    return objc2_app_kit::NSDragOperation::Copy;
+                }
+                unsafe { msg_send![super(self), draggingEntered: sender] }
+            }
+
+            /// `PopupTextView.performDragOperation`: save + insert the image.
+            #[unsafe(method(performDragOperation:))]
+            fn perform_drag_operation(
+                &self,
+                sender: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>,
+            ) -> objc2::runtime::Bool {
+                let pb = sender.draggingPasteboard();
+                if let Some(img) = crate::views::notes_vim::pasteboard_image(&pb) {
+                    let cb = self.ivars().on_paste_image.borrow().clone();
+                    if let Some(cb) = cb {
+                        cb(img);
+                        return true.into();
+                    }
+                }
+                unsafe { msg_send![super(self), performDragOperation: sender] }
+            }
         }
 
         unsafe impl NSObjectProtocol for NotesTextView {}
@@ -1820,9 +1892,619 @@ mod macos {
 
     impl NotesTextView {
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(NotesTextViewIvars { on_menu: RefCell::new(None) });
-            unsafe { msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))] }
+            let this = Self::alloc(mtm).set_ivars(NotesTextViewIvars {
+                on_menu: RefCell::new(None),
+                on_paste_image: RefCell::new(None),
+                on_open_image: RefCell::new(None),
+            });
+            let view: Retained<Self> = unsafe {
+                msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))]
+            };
+            // `PopupTextView` accepted image drops (`draggingEntered:` /
+            // `performDragOperation:`); NSTextView's defaults cover text.
+            let types = unsafe {
+                [
+                    objc2_app_kit::NSPasteboardTypePNG,
+                    objc2_app_kit::NSPasteboardTypeTIFF,
+                    objc2_app_kit::NSPasteboardTypeFileURL,
+                ]
+            };
+            let arr = objc2_foundation::NSArray::from_slice(&types);
+            view.registerForDraggedTypes(&arr);
+            view
         }
+
+        /// The markdown-relative target of the attachment covering `idx`.
+        pub fn attachment_rel_at(&self, idx: usize) -> Option<String> {
+            let Some(storage) = (unsafe { self.textStorage() }) else {
+                return None;
+            };
+            if idx >= storage.length() {
+                return None;
+            }
+            let attrs =
+                unsafe { storage.attributesAtIndex_effectiveRange(idx, std::ptr::null_mut()) };
+            let name = unsafe { objc2_app_kit::NSAttachmentAttributeName };
+            let obj = attrs.objectForKey(name)?;
+            let rel = obj
+                .downcast_ref::<NoteAttachment>()
+                .map(|a| a.ivars().rel.borrow().clone());
+            rel
+        }
+
+        /// `PopupTextView.imagePath(at:)`: the glyph under `point` when it is
+        /// an image attachment.
+        fn attachment_rel_at_point(&self, point: NSPoint) -> Option<String> {
+            let Some(lm) = (unsafe { self.layoutManager() }) else {
+                return None;
+            };
+            let Some(tc) = (unsafe { self.textContainer() }) else {
+                return None;
+            };
+            let o = self.textContainerOrigin();
+            let p = NSPoint::new(point.x - o.x, point.y - o.y);
+            let g = unsafe {
+                lm.glyphIndexForPoint_inTextContainer_fractionOfDistanceThroughGlyph(
+                    p,
+                    &tc,
+                    std::ptr::null_mut(),
+                )
+            };
+            let rect = lm.boundingRectForGlyphRange_inTextContainer(NSRange::new(g, 1), &tc);
+            if !(p.x >= rect.origin.x
+                && p.x <= rect.origin.x + rect.size.width
+                && p.y >= rect.origin.y
+                && p.y <= rect.origin.y + rect.size.height)
+            {
+                return None;
+            }
+            let idx = lm.characterIndexForGlyphAtIndex(g);
+            self.attachment_rel_at(idx)
+        }
+    }
+
+    pub struct NoteAttachmentIvars {
+        /// The markdown link this attachment serializes back to
+        /// (`![](rel)`; Swift's `attachmentPaths` dictionary).
+        rel: RefCell<String>,
+    }
+
+    define_class!(
+        /// `NSTextAttachment` that remembers its markdown target.
+        #[unsafe(super(NSTextAttachment))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSNoteAttachment"]
+        #[ivars = NoteAttachmentIvars]
+        pub struct NoteAttachment;
+
+        impl NoteAttachment {}
+
+        unsafe impl NSObjectProtocol for NoteAttachment {}
+    );
+
+    impl NoteAttachment {
+        fn create(mtm: MainThreadMarker, img: &NSImage, rel: &str, max_w: f64) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(NoteAttachmentIvars {
+                rel: RefCell::new(rel.to_string()),
+            });
+            let att: Retained<Self> = unsafe { msg_send![super(this), init] };
+            att.setImage(Some(img));
+            let mut size = img.size();
+            if max_w > 0.0 && size.width > max_w {
+                size.height = size.height * max_w / size.width;
+                size.width = max_w;
+            }
+            att.setBounds(NSRect::new(NSPoint::new(0.0, 0.0), size));
+            att
+        }
+    }
+
+    /// The `![alt](target)` spans of `s` (the scan `setEditorMarkdown` does
+    /// with an `NSRegularExpression` in Swift): byte range + target.
+    fn image_links(s: &str) -> Vec<(std::ops::Range<usize>, String)> {
+        let b: Vec<char> = s.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == '!' && i + 1 < b.len() && b[i + 1] == '[' {
+                let mut j = i + 2;
+                while j < b.len() && b[j] != ']' {
+                    j += 1;
+                }
+                if j + 1 < b.len() && b[j] == ']' && b[j + 1] == '(' {
+                    let mut k = j + 2;
+                    while k < b.len() && b[k] != ')' {
+                        k += 1;
+                    }
+                    if k < b.len() {
+                        let inner: String = b[j + 2..k].iter().collect();
+                        let target = inner.trim();
+                        let target = target
+                            .split_once(" \"")
+                            .map(|(t, _)| t)
+                            .unwrap_or(target)
+                            .trim();
+                        let target = target.trim_start_matches('<').trim_end_matches('>');
+                        if !target.is_empty() {
+                            let start: usize = b[..i].iter().map(|c| c.len_utf8()).sum();
+                            let end: usize = b[..=k].iter().map(|c| c.len_utf8()).sum();
+                            out.push((start..end, target.to_string()));
+                        }
+                        i = k + 1;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// `editorMarkdown`: attachment runs serialize back to `![](rel)\n`.
+    fn editor_markdown(editor: &NSTextView) -> String {
+        let Some(storage) = (unsafe { editor.textStorage() }) else {
+            return editor.string().to_string();
+        };
+        let len = storage.length();
+        let mut out = String::new();
+        let mut i = 0usize;
+        while i < len {
+            let mut eff = NSRange::new(0, 0);
+            let attrs = unsafe { storage.attributesAtIndex_effectiveRange(i, &mut eff) };
+            let run = if eff.length == 0 { 1 } else { eff.length };
+            let rel = attrs
+                .objectForKey(unsafe { objc2_app_kit::NSAttachmentAttributeName })
+                .and_then(|o| {
+                    o.downcast_ref::<NoteAttachment>()
+                        .map(|a| a.ivars().rel.borrow().clone())
+                });
+            match rel {
+                Some(rel) => out.push_str(&format!("![]({rel})\n")),
+                None => {
+                    let seg = storage.attributedSubstringFromRange(NSRange::new(i, run));
+                    out.push_str(&seg.string().to_string());
+                }
+            }
+            i += run;
+        }
+        out
+    }
+
+    /// The plain-text attributes (`restyleEditor`): the editor font + text
+    /// colour over every run.
+    fn restyle_editor(editor: &NSTextView, colors: PopupColors) {
+        let Some(storage) = (unsafe { editor.textStorage() }) else {
+            return;
+        };
+        let font = editor.font().unwrap_or_else(|| {
+            crate::ui::style::system_font(13.0, crate::ui::style::Weight::Regular)
+        });
+        let attrs = crate::ui::style::attrs(&font, colors.text);
+        let range = NSRange::new(0, storage.length());
+        unsafe {
+            storage.addAttributes_range(&attrs, range);
+            editor.setTypingAttributes(&attrs);
+        }
+    }
+
+    /// `setEditorMarkdown(_:baseDir:)`: load `s` with image attachments —
+    /// every readable `![alt](target)` becomes an inline image followed by a
+    /// newline; unreadable ones stay literal markdown.
+    fn set_editor_markdown(
+        editor: &NSTextView,
+        scroll: &NSScrollView,
+        colors: PopupColors,
+        s: &str,
+        base_dir: &str,
+    ) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(storage) = (unsafe { editor.textStorage() }) else {
+            return;
+        };
+        let font = editor.font().unwrap_or_else(|| {
+            crate::ui::style::system_font(13.0, crate::ui::style::Weight::Regular)
+        });
+        let attrs = crate::ui::style::attrs(&font, colors.text);
+        let max_w = scroll.bounds().size.width;
+        let home = std::env::var("HOME").unwrap_or_default();
+        let out = NSMutableAttributedString::initWithString(
+            NSMutableAttributedString::alloc(),
+            &NSString::from_str(""),
+        );
+        let mut last = 0usize;
+        for (range, target) in image_links(s) {
+            if range.start > last {
+                let a = unsafe {
+                    NSAttributedString::initWithString_attributes(
+                        NSAttributedString::alloc(),
+                        &NSString::from_str(&s[last..range.start]),
+                        Some(&attrs),
+                    )
+                };
+                out.appendAttributedString(&a);
+            }
+            let path = if target.starts_with('/') {
+                target.clone()
+            } else if let Some(rest) = target.strip_prefix("~/") {
+                format!("{home}/{rest}")
+            } else {
+                format!("{base_dir}/{}", target.trim_start_matches("./"))
+            };
+            let img = NSImage::initWithContentsOfFile(
+                NSImage::alloc(),
+                &NSString::from_str(&path),
+            );
+            if let Some(img) = img {
+                if img.size().width > 0.0 && img.size().height > 0.0 {
+                    let att = NoteAttachment::create(mtm, &img, &target, max_w);
+                    let piece = NSMutableAttributedString::initWithString(
+                        NSMutableAttributedString::alloc(),
+                        &NSString::from_str("\u{FFFC}\n"),
+                    );
+                    unsafe {
+                        piece.addAttribute_value_range(
+                            objc2_app_kit::NSAttachmentAttributeName,
+                            as_any(&*att),
+                            NSRange::new(0, 1),
+                        )
+                    };
+                    out.appendAttributedString(&piece);
+                    last = range.end;
+                    continue;
+                }
+            }
+            let a = unsafe {
+                NSAttributedString::initWithString_attributes(
+                    NSAttributedString::alloc(),
+                    &NSString::from_str(&s[range.clone()]),
+                    Some(&attrs),
+                )
+            };
+            out.appendAttributedString(&a);
+            last = range.end;
+        }
+        if last < s.len() {
+            let a = unsafe {
+                NSAttributedString::initWithString_attributes(
+                    NSAttributedString::alloc(),
+                    &NSString::from_str(&s[last..]),
+                    Some(&attrs),
+                )
+            };
+            out.appendAttributedString(&a);
+        }
+        storage.setAttributedString(&out);
+        unsafe { editor.setTypingAttributes(&attrs) };
+        editor.setNeedsDisplay(true);
+    }
+
+    /// `PopupWindow.cellSize(vimFont)`: the vim pane's cell (W advance ×
+    /// ascent+descent+leading), used for `g:ws_cell_h` and the image rows.
+    fn cell_size_for(name: &str, size: f64) -> (f64, f64) {
+        let Some(font) = NSFont::fontWithName_size(&NSString::from_str(name), size) else {
+            return (8.0, 16.0);
+        };
+        let h = (font.ascender() - font.descender() + font.leading()).ceil();
+        let w = crate::ui::style::text_size("W", &font).0.ceil();
+        (w.max(1.0), h.max(1.0))
+    }
+
+    // -- vim pane inline images (`VimImageOverlay`) -------------------------
+
+    /// One `{"path","row","rows"}` entry of the nvim sidecar.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct VimImageItem {
+        pub path: String,
+        pub row: i64,
+        pub rows: i64,
+    }
+
+    pub struct VimImageOverlayIvars {
+        cell: Cell<(f64, f64)>,
+        text_rows: Cell<i64>,
+        items: RefCell<Vec<VimImageItem>>,
+        views: RefCell<Vec<Retained<NSView>>>,
+        hits: RefCell<Vec<(NSRect, String)>>,
+        cache: RefCell<HashMap<String, (f64, Retained<NSImage>)>>,
+        on_open: RefCell<Option<Rc<dyn Fn(String)>>>,
+        /// The sidecar mtime of the last reload.
+        mtime: Cell<Option<std::time::SystemTime>>,
+    }
+
+    define_class!(
+        /// `VimImageOverlay`: draws the images nvim's `init.lua` reserved
+        /// virtual lines for, over the SwiftTerm pane; click opens the
+        /// FilePopup, right-click the image menu. Empty areas are
+        /// click-through (`hitTest:` returns nil).
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSVimImageOverlay"]
+        #[ivars = VimImageOverlayIvars]
+        pub struct VimImageOverlay;
+
+        impl VimImageOverlay {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(hitTest:))]
+            fn hit_test(&self, point: NSPoint) -> *mut NSView {
+                let p = if let Some(sv) = unsafe { self.superview() } {
+                    self.convertPoint_fromView(point, Some(&sv))
+                } else {
+                    point
+                };
+                let hit = self
+                    .ivars()
+                    .hits
+                    .borrow()
+                    .iter()
+                    .any(|(r, _)| rect_contains(*r, p));
+                if hit {
+                    self as *const Self as *mut NSView
+                } else {
+                    std::ptr::null_mut()
+                }
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                if let Some(path) = self.path_at(e) {
+                    let cb = self.ivars().on_open.borrow().clone();
+                    if let Some(cb) = cb {
+                        cb(path);
+                    }
+                }
+            }
+
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                if let Some(path) = self.path_at(e) {
+                    vim_image_menu(&path, self);
+                }
+            }
+
+            /// `VimImageOverlay.setFrameSize`: re-fit the images to the pane.
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.relayout();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for VimImageOverlay {}
+    );
+
+    impl VimImageOverlay {
+        pub fn create(mtm: MainThreadMarker, frame: NSRect, cell: (f64, f64)) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(VimImageOverlayIvars {
+                cell: Cell::new(cell),
+                text_rows: Cell::new(0),
+                items: RefCell::new(Vec::new()),
+                views: RefCell::new(Vec::new()),
+                hits: RefCell::new(Vec::new()),
+                cache: RefCell::new(HashMap::new()),
+                on_open: RefCell::new(None),
+                mtime: Cell::new(None),
+            });
+            let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+            view.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            view.setWantsLayer(true);
+            if let Some(l) = view.layer() {
+                l.setMasksToBounds(true);
+            }
+            view
+        }
+
+        pub fn set_on_open(&self, cb: Rc<dyn Fn(String)>) {
+            *self.ivars().on_open.borrow_mut() = Some(cb);
+        }
+
+        pub fn set_cell(&self, cell: (f64, f64)) {
+            if self.ivars().cell.get() != cell {
+                self.ivars().cell.set(cell);
+                self.relayout();
+            }
+        }
+
+        /// `reloadVimImages`: replace the drawn set (nvim sidecar JSON).
+        pub fn set_state(&self, text_rows: i64, items: Vec<VimImageItem>) {
+            let changed = self.ivars().text_rows.get() != text_rows
+                || *self.ivars().items.borrow() != items;
+            if !changed {
+                return;
+            }
+            self.ivars().text_rows.set(text_rows);
+            *self.ivars().items.borrow_mut() = items;
+            self.relayout();
+        }
+
+        fn path_at(&self, e: &objc2_app_kit::NSEvent) -> Option<String> {
+            let p = self.convertPoint_fromView(e.locationInWindow(), None);
+            self.ivars()
+                .hits
+                .borrow()
+                .iter()
+                .find(|(r, _)| rect_contains(*r, p))
+                .map(|(_, path)| path.clone())
+        }
+
+        fn image(&self, path: &str) -> Option<Retained<NSImage>> {
+            let mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            if let Some((m, img)) = self.ivars().cache.borrow().get(path) {
+                if *m == mtime {
+                    return Some(img.clone());
+                }
+            }
+            let img = NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path))?;
+            self.ivars()
+                .cache
+                .borrow_mut()
+                .insert(path.to_string(), (mtime, img.clone()));
+            Some(img)
+        }
+
+        fn relayout(&self) {
+            let old: Vec<Retained<NSView>> = self.ivars().views.borrow_mut().drain(..).collect();
+            for v in old {
+                v.removeFromSuperview();
+            }
+            self.ivars().hits.borrow_mut().clear();
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let (_, ch) = self.ivars().cell.get();
+            let limit = self.ivars().text_rows.get() as f64 * ch;
+            let bounds_w = self.bounds().size.width;
+            let mut views = Vec::new();
+            let mut hits = Vec::new();
+            for it in self.ivars().items.borrow().iter() {
+                let Some(img) = self.image(&it.path) else { continue };
+                let is = img.size();
+                if is.width <= 0.0 || is.height <= 0.0 {
+                    continue;
+                }
+                let top = it.row as f64 * ch + 2.0;
+                if top >= limit {
+                    continue;
+                }
+                let box_h = it.rows as f64 * ch - 4.0;
+                let box_w = (bounds_w - 16.0).max(40.0);
+                let scale = 1.0f64.min(box_h / is.height).min(box_w / is.width);
+                let size = NSSize::new((is.width * scale).floor(), (is.height * scale).floor());
+                let iv = NSImageView::initWithFrame(
+                    NSImageView::alloc(mtm),
+                    NSRect::new(NSPoint::new(2.0, top), size),
+                );
+                iv.setImage(Some(&img));
+                iv.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+                iv.setWantsLayer(true);
+                if let Some(l) = iv.layer() {
+                    l.setCornerRadius(6.0);
+                    l.setMasksToBounds(true);
+                }
+                if top + size.height > limit {
+                    let visible = limit - top;
+                    if visible <= 4.0 {
+                        continue;
+                    }
+                    let clip = NSView::initWithFrame(
+                        NSView::alloc(mtm),
+                        NSRect::new(NSPoint::new(2.0, top), NSSize::new(size.width, visible)),
+                    );
+                    clip.setWantsLayer(true);
+                    if let Some(l) = clip.layer() {
+                        l.setMasksToBounds(true);
+                    }
+                    iv.setFrameOrigin(NSPoint::new(0.0, 0.0));
+                    clip.addSubview(&iv);
+                    self.addSubview(&clip);
+                    hits.push((clip.frame(), it.path.clone()));
+                    views.push(clip);
+                    continue;
+                }
+                self.addSubview(&iv);
+                hits.push((iv.frame(), it.path.clone()));
+                views.push(iv.into_super().into_super());
+            }
+            *self.ivars().views.borrow_mut() = views;
+            *self.ivars().hits.borrow_mut() = hits;
+        }
+    }
+
+    fn rect_contains(r: NSRect, p: NSPoint) -> bool {
+        p.x >= r.origin.x
+            && p.x <= r.origin.x + r.size.width
+            && p.y >= r.origin.y
+            && p.y <= r.origin.y + r.size.height
+    }
+
+    /// `PopupWindow.imageMenu(_:)` — the vim image's right-click menu.
+    fn vim_image_menu(path: &str, view: &NSView) {
+        use crate::ui::menu_kit::{popup_context, MenuEntry};
+        let home = std::env::var("HOME").unwrap_or_default();
+        let tilde = path.strip_prefix(&home).map(|r| format!("~{r}")).unwrap_or_else(|| path.to_string());
+        let p1 = path.to_string();
+        let p2 = path.to_string();
+        let p3 = path.to_string();
+        let p4 = path.to_string();
+        let p5 = path.to_string();
+        let t = tilde.clone();
+        popup_context(
+            vec![
+                MenuEntry::item("Open Full Size", move || {
+                    crate::views::file_popup::show(&p1, None);
+                }),
+                MenuEntry::Separator,
+                MenuEntry::item("Copy Image Path", move || {
+                    copy_text_to_clipboard(&p2);
+                    crate::ui::toast::show(&format!("Copied {t}"), "doc.on.clipboard");
+                }),
+                MenuEntry::item("Copy Image", move || {
+                    copy_image_file_to_pasteboard(&p3);
+                }),
+                MenuEntry::item("Reveal in Finder", move || {
+                    let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&p4));
+                    let arr = objc2_foundation::NSArray::from_retained_slice(&[url]);
+                    objc2_app_kit::NSWorkspace::sharedWorkspace()
+                        .activateFileViewerSelectingURLs(&arr);
+                }),
+                MenuEntry::item("Open in Default App", move || {
+                    use objc2_foundation::NSURL;
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(&p5));
+                    objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+                }),
+            ],
+            view,
+        );
+    }
+
+    /// `Copy Image` from the vim image menu: PNG + TIFF onto the pasteboard.
+    fn copy_image_file_to_pasteboard(path: &str) {
+        use objc2::runtime::ProtocolObject;
+        use objc2_app_kit::{
+            NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSPasteboard,
+            NSPasteboardItem, NSPasteboardTypePNG, NSPasteboardTypeTIFF, NSPasteboardWriting,
+        };
+        use objc2_foundation::{NSArray, NSDictionary};
+        let Some(img) =
+            NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path))
+        else {
+            return;
+        };
+        let Some(tiff) = img.TIFFRepresentation() else { return };
+        let item = NSPasteboardItem::new();
+        item.setData_forType(&tiff, unsafe { NSPasteboardTypeTIFF });
+        if let Some(rep) = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff) {
+            let props: Retained<NSDictionary<NSBitmapImageRepPropertyKey, AnyObject>> =
+                NSDictionary::new();
+            if let Some(png) =
+                unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
+            {
+                item.setData_forType(&png, unsafe { NSPasteboardTypePNG });
+            }
+        }
+        let writable: Retained<ProtocolObject<dyn NSPasteboardWriting>> =
+            ProtocolObject::from_retained(item);
+        let objects = NSArray::from_retained_slice(&[writable]);
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        let _ = pb.writeObjects(&objects);
+        crate::ui::toast::show("Copied image", "photo");
+    }
+
+    fn copy_text_to_clipboard(text: &str) {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        let _ = unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) };
     }
 
     /// The "Prose" pop-out control's target. It holds `popOutProse`'s source
@@ -2072,6 +2754,15 @@ mod macos {
         prose_shown: bool,
         prose_sink: Option<std::rc::Rc<dyn Fn(crate::views::notes_prose::ProseMsg)>>,
         colors: PopupColors,
+        /// The inline-image overlay above the vim pane (`VimImageOverlay`).
+        vim_images: Option<Retained<VimImageOverlay>>,
+        /// The vim pane's cell size (`PopupWindow.cellSize(vimFont)`).
+        vim_cell: Cell<(f64, f64)>,
+        /// The `g:ws_cell_h` (rounded cell height) last pushed to the embedded
+        /// nvim; the real SwiftTerm value is pushed exactly once per change.
+        vim_cell_h: Cell<i64>,
+        /// Throttle for the nvim image-sidecar poll.
+        vim_images_at: Cell<f64>,
     }
 
     /// The NOTES sidebar rows (`PopupTabsBar` titles + `vIcon` + `vMeta`).
@@ -2159,7 +2850,7 @@ mod macos {
         let text: Retained<NSTextView> = Retained::into_super(NotesTextView::new(mtm));
         text.setEditable(true);
         text.setSelectable(true);
-        text.setRichText(false);
+        text.setRichText(true);
         text.setDrawsBackground(true);
         text.setBackgroundColor(&colors.base().to_nscolor());
         text.setTextColor(Some(&colors.text.to_nscolor()));
@@ -2179,12 +2870,17 @@ mod macos {
         if let Some(container) = unsafe { text.textContainer() } {
             container.setWidthTracksTextView(true);
         }
-        let body = model
-            .tabs
-            .selected_path()
+        let selected = model.tabs.selected_path().map(str::to_string);
+        let body = selected
+            .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default();
-        text.setString(&NSString::from_str(&body));
+        let base_dir = selected
+            .as_deref()
+            .and_then(|p| Path::new(p).parent())
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        set_editor_markdown(&text, &editor, colors, &body, &base_dir);
         text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(editor_w, 600.0)));
         editor.setDocumentView(Some(&text));
         root.addSubview(&editor);
@@ -2205,6 +2901,12 @@ mod macos {
             NSSize::new(editor_w - 16.0, 600.0 - 8.0),
         );
         let mut vim = None;
+        let mut vim_images: Option<Retained<VimImageOverlay>> = None;
+        let mut vim_cell = (8.0, 16.0);
+        // `g:ws_cell_h` value the editor was launched with (the
+        // `cell_size_for` estimate); the first `refresh_vim_cell` corrects it to
+        // SwiftTerm's real cell height and pushes the new value once.
+        let mut vim_cell_h = 0i64;
         if vim_enabled {
             let file = model.tabs.selected_path().map(str::to_string);
             let mut pane =
@@ -2218,6 +2920,15 @@ mod macos {
                 .or_else(|| setting("app", "terminal-font"))
                 .unwrap_or_else(|| "Menlo".to_string());
             pane.set_font(&mono, size);
+            // `refreshVimImageRows`: the cell height the sidecar rows use.
+            vim_cell = cell_size_for(&mono, size);
+            let mut launch = pane.launch().clone();
+            launch.cell_h = vim_cell.1.round() as i64;
+            vim_cell_h = launch.cell_h;
+            if let Some(rows) = setting("notes", "image-rows").and_then(|v| v.parse::<i64>().ok()) {
+                launch.image_rows = rows.max(1);
+            }
+            pane.set_launch(launch);
             if let Some(view) = pane.build(mtm, vim_frame) {
                 if let Ok(shim) = view.clone().downcast::<swiftterm_shim::WSShim>() {
                     let pal: Vec<Retained<objc2_app_kit::NSColor>> =
@@ -2228,6 +2939,13 @@ mod macos {
                         &colors.text.to_nscolor(),
                         &pal,
                     );
+                    // SwiftTerm lays the grid out with the font's real metrics,
+                    // which can differ from `cell_size_for`'s estimate; use the
+                    // actual cell size for the image overlay (and let
+                    // `refresh_vim_cell` push the matching `g:ws_cell_h`).
+                    if let Some(real) = swiftterm_shim::cell_size(&shim) {
+                        vim_cell = real;
+                    }
                 }
                 view.setAutoresizingMask(
                     NSAutoresizingMaskOptions::ViewWidthSizable
@@ -2235,6 +2953,17 @@ mod macos {
                 );
                 text.setHidden(true);
                 root.addSubview(&view);
+                // The inline images nvim's `init.lua` reserved rows for.
+                let overlay = VimImageOverlay::create(mtm, vim_frame, vim_cell);
+                overlay.set_on_open(Rc::new(|path: String| {
+                    crate::views::file_popup::show(&path, None);
+                }));
+                root.addSubview_positioned_relativeTo(
+                    &overlay,
+                    objc2_app_kit::NSWindowOrderingMode::Above,
+                    Some(&view),
+                );
+                vim_images = Some(overlay);
                 vim = Some(pane);
             }
         }
@@ -2345,6 +3074,10 @@ mod macos {
             prose_shown: false,
             prose_sink: None,
             colors,
+            vim_images,
+            vim_cell: Cell::new(vim_cell),
+            vim_cell_h: Cell::new(vim_cell_h),
+            vim_images_at: Cell::new(0.0),
         })
     }
 
@@ -2594,6 +3327,165 @@ mod macos {
             self.prose_sink = Some(cb);
         }
 
+        /// `PopupTextView.onPasteImage` — Cmd+V / a drop with an image; the
+        /// host saves it next to the note and calls
+        /// [`Self::insert_image_attachment`].
+        pub fn set_editor_paste_image(&self, cb: Rc<dyn Fn(Retained<NSImage>)>) {
+            if let Some(tv) = (&*self.editor as &AnyObject).downcast_ref::<NotesTextView>() {
+                *tv.ivars().on_paste_image.borrow_mut() = Some(cb);
+            }
+        }
+
+        /// `PopupTextView.onOpenImage` — a click on an inline image.
+        pub fn set_editor_open_image(&self, cb: Rc<dyn Fn(String)>) {
+            if let Some(tv) = (&*self.editor as &AnyObject).downcast_ref::<NotesTextView>() {
+                *tv.ivars().on_open_image.borrow_mut() = Some(cb);
+            }
+        }
+
+        /// The vim overlay's image click (`VimImageOverlay.onOpen`).
+        pub fn set_vim_image_open(&self, cb: Rc<dyn Fn(String)>) {
+            if let Some(ov) = &self.vim_images {
+                ov.set_on_open(cb);
+            }
+        }
+
+        /// The image target under the clicked character index: an attachment,
+        /// else the `![alt](target)` link text (the `menu(for:)` path).
+        pub fn image_path_at(&self, idx: usize) -> Option<String> {
+            let note = self.selected_path().unwrap_or_default();
+            let home = std::env::var("HOME").unwrap_or_default();
+            if let Some(tv) = (&*self.editor as &AnyObject).downcast_ref::<NotesTextView>() {
+                // `characterIndexForInsertionAtPoint` can land just after the
+                // attachment; try the character before too.
+                if let Some(rel) = tv
+                    .attachment_rel_at(idx)
+                    .or_else(|| idx.checked_sub(1).and_then(|i| tv.attachment_rel_at(i)))
+                {
+                    return Some(resolve_note_link(&rel, &note, &home));
+                }
+            }
+            let text = self.editor.string().to_string();
+            image_link_at(&text, idx).map(|t| resolve_note_link(&t, &note, &home))
+        }
+
+        /// Resolve an image target (`assets/img-x.png`, `~/x.png`, `/x.png`)
+        /// against the selected note's folder.
+        pub fn resolve_image_path(&self, target: &str) -> String {
+            let note = self.selected_path().unwrap_or_default();
+            let home = std::env::var("HOME").unwrap_or_default();
+            resolve_note_link(target, &note, &home)
+        }
+
+        /// `insertImageAttachment(rel:image:)`: the attachment + newline at
+        /// the caret, caret after it.
+        pub fn insert_image_attachment(&mut self, rel: &str, image: &NSImage) {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(storage) = (unsafe { self.editor.textStorage() }) else {
+                return;
+            };
+            let att =
+                NoteAttachment::create(mtm, image, rel, self.editor_scroll.bounds().size.width);
+            let piece = NSMutableAttributedString::initWithString(
+                NSMutableAttributedString::alloc(),
+                &NSString::from_str("\u{FFFC}\n"),
+            );
+            unsafe {
+                piece.addAttribute_value_range(
+                    objc2_app_kit::NSAttachmentAttributeName,
+                    as_any(&*att),
+                    NSRange::new(0, 1),
+                )
+            };
+            let sel = self.editor.selectedRange();
+            storage.replaceCharactersInRange_withAttributedString(sel, &piece);
+            let caret = NSRange::new(sel.location + 2, 0);
+            self.editor.setSelectedRange(caret);
+            self.editor.scrollRangeToVisible(caret);
+            self.editor.setNeedsDisplay(true);
+        }
+
+        /// The editor's markdown (`editorMarkdown`): attachments → `![](rel)`.
+        pub fn editor_markdown(&self) -> String {
+            editor_markdown(&self.editor)
+        }
+
+        /// Load `text` into the plain editor with inline images
+        /// (`setEditorMarkdown`), based at `path`'s folder.
+        fn set_note_text(&mut self, text: &str, path: &str) {
+            let base_dir = Path::new(path)
+                .parent()
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            set_editor_markdown(&self.editor, &self.editor_scroll, self.colors, text, &base_dir);
+        }
+
+        /// The per-drain nvim sidecar poll (`reloadVimImages`, throttled).
+        pub fn tick_vim_images(&mut self) {
+            if self.vim_images.is_none() {
+                return;
+            }
+            let now = now_secs();
+            if now - self.vim_images_at.get() < 0.12 {
+                return;
+            }
+            self.vim_images_at.set(now);
+            let Some(overlay) = self.vim_images.clone() else { return };
+            let Some(pane) = self.vim.as_ref() else { return };
+            let path = pane.launch().image_file.clone();
+            let Ok(meta) = std::fs::metadata(&path) else { return };
+            // The sidecar is written by `init.lua`, so its presence means the
+            // editor is up and `_G.ws_images_refresh` exists — safe to push a
+            // corrected `g:ws_cell_h` (SwiftTerm's real cell height, which can
+            // differ from the launch-time estimate) and re-place the rows.
+            self.refresh_vim_cell();
+            let Ok(mtime) = meta.modified() else { return };
+            if overlay.ivars().mtime.get() == Some(mtime) {
+                return;
+            }
+            overlay.ivars().mtime.set(Some(mtime));
+            let Ok(raw) = std::fs::read_to_string(&path) else { return };
+            let Ok(v) = serde_json::from_str::<Value>(&raw) else { return };
+            let lines = v.get("lines").and_then(Value::as_i64).unwrap_or(0);
+            let items: Vec<VimImageItem> = v
+                .get("images")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| {
+                            Some(VimImageItem {
+                                path: d.get("path")?.as_str()?.to_string(),
+                                row: d.get("row")?.as_i64()?,
+                                rows: d.get("rows")?.as_i64()?,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            overlay.set_state((lines - 1).max(0), items);
+        }
+
+        /// `refreshVimImageRows` + `cellSize`: read SwiftTerm's *actual* cell
+        /// size from the pane's shim, hand it to the image overlay, and push the
+        /// matching `g:ws_cell_h` to the editor (re-placing the reserved rows so
+        /// the sidecar's `rows` match the real cell height). A no-op until the
+        /// shim reports a size; only pushes when the rounded height changes.
+        fn refresh_vim_cell(&self) {
+            let Some(pane) = self.vim.as_ref() else { return };
+            let Some(view) = pane.view() else { return };
+            let Ok(shim) = view.downcast::<swiftterm_shim::WSShim>() else { return };
+            let Some(cell) = swiftterm_shim::cell_size(&shim) else { return };
+            self.vim_cell.set(cell);
+            if let Some(ov) = &self.vim_images {
+                ov.set_cell(cell);
+            }
+            let h = cell.1.round() as i64;
+            if h > 0 && h != self.vim_cell_h.get() {
+                self.vim_cell_h.set(h);
+                pane.command(&format!("let g:ws_cell_h={h} | lua _G.ws_images_refresh()"));
+            }
+        }
+
         /// `toggleProseFromPrefix()` (Ctrl+B T): only from the vim pane or the
         /// reading view; `false` lets the prefix fall back to the terminal.
         pub fn toggle_prose_from_prefix(&mut self) -> bool {
@@ -2717,7 +3609,7 @@ mod macos {
                 vim.eval(&format!("luaeval({}, {})", vim_string(&lua), vim_dq(&arg)));
                 return;
             }
-            let text = self.editor.string().to_string();
+            let text = self.editor_markdown();
             let mut end = 0usize;
             for _ in 0..remove {
                 if end >= text.len() {
@@ -2727,7 +3619,9 @@ mod macos {
             }
             let new_head = if insert.is_empty() { String::new() } else { insert.join("\n") + "\n" };
             let out = format!("{new_head}{}", &text[end..]);
-            self.editor.setString(&NSString::from_str(&out));
+            if let Some(path) = self.selected_path() {
+                self.set_note_text(&out, &path);
+            }
             self.commit();
         }
 
@@ -2738,14 +3632,18 @@ mod macos {
             let d = delta as f64;
             let editor = setting("notes", "font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(14.0);
             let next = (editor + d).clamp(8.0, 40.0);
-            if let Some(vim) = self.vim.as_mut() {
-                if let Some((name, _)) = vim.font() {
+            if let Some((name, _)) = self.vim.as_ref().and_then(|v| v.font()) {
+                if let Some(vim) = self.vim.as_mut() {
                     vim.set_font(&name, next);
                 }
+                // `refreshVimImageRows`: SwiftTerm recomputes its grid from the
+                // new font; re-sync the overlay + `g:ws_cell_h` to the real cell.
+                self.refresh_vim_cell();
             }
             if let Some(f) = self.editor.font() {
                 let nf = NSFont::fontWithName_size(&f.fontName(), next);
                 self.editor.setFont(nf.as_deref());
+                restyle_editor(&self.editor, self.colors);
             }
             crate::app::config::save_config_value("notes", "font-size", &format!("{}", next as i64));
             let term = setting("app", "terminal-font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(12.0);
@@ -2774,6 +3672,7 @@ mod macos {
             self.editor_scroll.setBackgroundColor(&colors.base().to_nscolor());
             self.editor.setBackgroundColor(&colors.base().to_nscolor());
             self.editor.setTextColor(Some(&colors.text.to_nscolor()));
+            restyle_editor(&self.editor, colors);
             let pal: Vec<Retained<objc2_app_kit::NSColor>> =
                 crate::ui::theme::ansi_palette(&colors).into_iter().map(|c| c.to_nscolor()).collect();
             if let Some(view) = self.vim.as_ref().and_then(|p| p.view()) {
@@ -2838,6 +3737,12 @@ mod macos {
                     NSSize::new((editor_w - 16.0).max(0.0), (editor_h - 8.0).max(0.0)),
                 ));
             }
+            if let Some(ov) = &self.vim_images {
+                ov.setFrame(NSRect::new(
+                    NSPoint::new(w + 4.0 + 8.0, 4.0),
+                    NSSize::new((editor_w - 16.0).max(0.0), (editor_h - 8.0).max(0.0)),
+                ));
+            }
             // Drawers above the editor (a relaunched nvim pane is re-added).
             if self.drawers.terminal_shown() {
                 self.root.addSubview_positioned_relativeTo(&self.terminal, objc2_app_kit::NSWindowOrderingMode::Above, None);
@@ -2861,7 +3766,7 @@ mod macos {
             let Some(path) = self.selected_path() else {
                 return false;
             };
-            let text = self.editor.string().to_string();
+            let text = self.editor_markdown();
             std::fs::write(&path, text).is_ok()
         }
 
@@ -3060,7 +3965,7 @@ mod macos {
                 return;
             }
             if let Ok(text) = std::fs::read_to_string(path) {
-                self.editor.setString(&NSString::from_str(&text));
+                self.set_note_text(&text, path);
             }
             self.focus_editor();
         }
@@ -3454,12 +4359,14 @@ impl InlineRenameModel {
 }
 
 // ---------------------------------------------------------------------------
-// File popup model
+// File popup (model shared with `views::file_popup`, the live window)
 // ---------------------------------------------------------------------------
 
-pub const FILE_POPUP_IMAGE_EXTS: [&str; 9] = [
-    "png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "bmp",
-];
+// Re-exported for the tests and the historical `notes::FilePopup` path.
+#[allow(unused_imports)]
+pub use crate::views::file_popup::{
+    FilePopup, FilePopupRoute, FILE_POPUP_IMAGE_EXTS, FILE_POPUP_TEXT_LIMIT,
+};
 
 /// The target of the markdown image link `![alt](target)` that covers the
 /// UTF-16 offset `idx` (an `NSTextView` character index), if any. A
@@ -3502,77 +4409,6 @@ pub fn resolve_note_link(target: &str, note_path: &str, home: &str) -> String {
     }
     let dir = Path::new(note_path).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     format!("{dir}/{}", target.trim_start_matches("./"))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FilePopupRoute {
-    Image,
-    Text(String),
-    System,
-}
-
-pub struct FilePopup;
-
-impl FilePopup {
-    pub fn is_image(path: &str) -> bool {
-        let ext = Path::new(path)
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        FILE_POPUP_IMAGE_EXTS.contains(&ext.as_str())
-    }
-
-    /// `FilePopup.previewText` — up to `limit` bytes, NUL = binary, UTF-8 with
-    /// incremental truncation for a cut multibyte tail.
-    pub fn preview_text(path: &str, limit: u64) -> Option<String> {
-        use std::io::Read;
-        let meta = std::fs::metadata(path).ok()?;
-        if meta.is_dir() {
-            return None;
-        }
-        let f = std::fs::File::open(path).ok()?;
-        let mut data = Vec::new();
-        f.take(limit + 4).read_to_end(&mut data).ok()?;
-        if data.contains(&0) {
-            return None;
-        }
-        let cut = data.len() as u64 > limit;
-        let mut body = if cut {
-            data[..limit as usize].to_vec()
-        } else {
-            data
-        };
-        let mut text = String::from_utf8(body.clone()).ok();
-        let mut trimmed = 0;
-        while text.is_none() && trimmed < 3 && !body.is_empty() {
-            body.pop();
-            trimmed += 1;
-            text = String::from_utf8(body.clone()).ok();
-        }
-        let text = text?;
-        if cut {
-            Some(format!(
-                "{text}\n\n… (preview stops at {} KB)",
-                limit / 1024
-            ))
-        } else {
-            Some(text)
-        }
-    }
-
-    /// `FilePopup.open` routing decision.
-    pub fn route(path: &str) -> FilePopupRoute {
-        if Self::is_image(path) && std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
-            FilePopupRoute::Image
-        } else if !Self::is_image(path) {
-            if let Some(text) = Self::preview_text(path, FILE_POPUP_TEXT_LIMIT) {
-                return FilePopupRoute::Text(text);
-            }
-            FilePopupRoute::System
-        } else {
-            FilePopupRoute::System
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

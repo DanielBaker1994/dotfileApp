@@ -53,6 +53,7 @@ The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
 ./ws build                  # cargo build + sign + relaunch (exit 0 = OK)
 ./ws build --force          # rebuild even if up to date
 ./ws build --build-only     # build, don't relaunch (WS_BUILD_ONLY=1)
+./ws clean [--all]          # stop the app + wipe objects (force a fresh build)
 ./ws dmg [--no-notarize]    # distributable .dmg -> .build/dist
 ./ws test [SUITE|all|rust|ui|vim|focus|install]
 ./ws doctor [--fix]         # full-stack health check (jira/jira-doctor.sh)
@@ -77,7 +78,11 @@ a rewritten `commands.default.toml` and the AX helpers in
 `Resources/helpers-bin` (`HELPER_BINS`). Signed with the self-signed `SIGN_ID`
 ("kitchen-sink codesign") for stable TCC grants. **A non-dist build `pkill`s
 the running daemon before swapping the binary.** `--stale` exits 0 when a
-rebuild is needed (`kitchen_sink.sh` uses it for build-if-stale). Toolchain:
+rebuild is needed (`kitchen_sink.sh` uses it for build-if-stale). `ws clean`
+stops the daemon and removes `.build/rust-target` (plus `rust/target` so the
+next build is a full cargo rebuild); `--all` also wipes `.build/SwiftTerm`,
+`.build/.termbuilt`, `.build/dist` and the repo-root app bundle (a wiped
+bundle is recreated by `mkdir -p` + a full build). Toolchain:
 cargo (brew `rust` or rustup) + Xcode CLT (`swiftc`, for SwiftTerm + the shim).
 Don't export `MACOSX_DEPLOYMENT_TARGET=26.7` (corrupt proc-macro dylibs).
 

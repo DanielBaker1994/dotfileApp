@@ -11,6 +11,9 @@ ws — kitchen-sink entry point
   ws install                        install everything (INSTALL.sh)
   ws uninstall                      remove everything (UNINSTALL.sh)
   ws build [--force|--build-only]   compile + relaunch
+  ws clean [--all]                  stop the app and wipe build objects so the
+                                    next build is from scratch (--all: also
+                                    SwiftTerm, .build/dist and the app bundle)
   ws dmg [--no-notarize]            build the distributable .dmg
   ws test [all|SUITE|install]
                                     unit tests (SUITE = config, compare, …).
@@ -37,32 +40,34 @@ ws_menu() {
         printf '\n\033[1;36mkitchen-sink\033[0m\n'
         printf '   1) install       install everything\n'
         printf '   2) build         compile + relaunch\n'
-        printf '   3) dmg           build the distributable .dmg\n'
-        printf '   4) test          unit tests\n'
-        printf '   5) doctor        health check of the whole stack\n'
-        printf '   6) check         preflight this Mac\n'
-        printf '   7) permissions   grant / fix macOS permissions\n'
-        printf '   8) links         validate / repair config symlinks\n'
-        printf '   9) monitors      which screen owns which workspaces\n'
-        printf '  10) fake          fake Confluence / Jira fixtures\n'
-        printf '  11) home          the ~/.config/kitchen-sink home\n'
-        printf '  12) uninstall     remove everything\n'
+        printf '   3) clean         stop the app + wipe build objects\n'
+        printf '   4) dmg           build the distributable .dmg\n'
+        printf '   5) test          unit tests\n'
+        printf '   6) doctor        health check of the whole stack\n'
+        printf '   7) check         preflight this Mac\n'
+        printf '   8) permissions   grant / fix macOS permissions\n'
+        printf '   9) links         validate / repair config symlinks\n'
+        printf '  10) monitors      which screen owns which workspaces\n'
+        printf '  11) fake          fake Confluence / Jira fixtures\n'
+        printf '  12) home          the ~/.config/kitchen-sink home\n'
+        printf '  13) uninstall     remove everything\n'
         printf '   h) help\n'
         printf '   q) quit\n\n'
         read -r -p 'choice: ' choice || { echo; return 0; }
         case "$choice" in
             1)  ws_cmd_install ;;
             2)  ws_cmd_build ;;
-            3)  ws_cmd_dmg ;;
-            4)  ws_cmd_test ;;
-            5)  ws_cmd_doctor ;;
-            6)  ws_cmd_check ;;
-            7)  read -r -p 'grant or fix? [grant] ' a; ws_cmd_permissions "${a:-grant}" ;;
-            8)  ws_cmd_links ;;
-            9)  read -r -p 'main|inverse|toggle|status [status] ' a; ws_cmd_monitors "${a:-status}" ;;
-            10) read -r -p 'confluence|jira [confluence] ' a; ws_cmd_fake "${a:-confluence}" ;;
-            11) read -r -p 'app|repo|stack|status [status] ' a; ws_cmd_home "${a:-status}" ;;
-            12) ws_cmd_uninstall ;;
+            3)  ws_cmd_clean ;;
+            4)  ws_cmd_dmg ;;
+            5)  ws_cmd_test ;;
+            6)  ws_cmd_doctor ;;
+            7)  ws_cmd_check ;;
+            8)  read -r -p 'grant or fix? [grant] ' a; ws_cmd_permissions "${a:-grant}" ;;
+            9)  ws_cmd_links ;;
+            10) read -r -p 'main|inverse|toggle|status [status] ' a; ws_cmd_monitors "${a:-status}" ;;
+            11) read -r -p 'confluence|jira [confluence] ' a; ws_cmd_fake "${a:-confluence}" ;;
+            12) read -r -p 'app|repo|stack|status [status] ' a; ws_cmd_home "${a:-status}" ;;
+            13) ws_cmd_uninstall ;;
             h|H|help) ws_usage ;;
             q|Q|quit) return 0 ;;
             *)  ws_warn "unknown choice: $choice" ;;
@@ -79,6 +84,7 @@ case "$cmd" in
     install)        ws_cmd_install "$@" ;;
     uninstall)      ws_cmd_uninstall "$@" ;;
     build)          ws_cmd_build "$@" ;;
+    clean)          ws_cmd_clean "$@" ;;
     dmg)            ws_cmd_dmg "$@" ;;
     test)           ws_cmd_test "$@" ;;
     doctor)         ws_cmd_doctor "$@" ;;
