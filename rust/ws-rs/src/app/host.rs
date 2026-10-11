@@ -4023,6 +4023,20 @@ mod daemon_ui {
             if current.is_some_and(|v| v.is_jira()) && self.jira_key(&key) {
                 return true;
             }
+            if matches!(current, Some(SlotView::Compare) | Some(SlotView::CompareText)) {
+                let in_text = self
+                    .ivars()
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|st| st.window.firstResponder())
+                    .is_some_and(|r| as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some());
+                if let Some(m) = self.ivars().controller.compare_model() {
+                    if m.lock().unwrap().handle_key(key, in_text) {
+                        return true;
+                    }
+                }
+            }
             if current == Some(SlotView::Files) && self.files_key(&key) {
                 return true;
             }
@@ -4163,8 +4177,7 @@ mod daemon_ui {
                         true
                     }
                     Some(SlotView::Compare) | Some(SlotView::CompareText) => {
-                        self.ivars().controller.log("Cmd+K: compare action menu not ported yet");
-                        crate::ui::toast::not_ported("Compare Cmd+K actions");
+                        self.compare_actions();
                         true
                     }
                     // Swift wires `onCommandK` only for list windows.
@@ -6937,6 +6950,71 @@ mod daemon_ui {
                 }
                 _ => false,
             }
+        }
+
+        /// `CompareWindow.actionPicker()`: the session's actions (Swift pops
+        /// an `NSMenu`; here the shared Cmd+K card).
+        fn compare_actions(&self) {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(model) = self.ivars().controller.compare_model() else { return };
+            let (has, folder) = {
+                let m = model.lock().unwrap();
+                (m.current().is_some(), m.current().is_some_and(|s| s.folder.is_some()))
+            };
+            let mut items: Vec<(&str, &str, &str)> = vec![("New Comparison", "the start page · ⌘0", "start")];
+            if has && folder {
+                items.extend([
+                    ("Next Difference", "⌃N", "folder-key:ctrl-n"),
+                    ("Previous Difference", "⌃P", "folder-key:ctrl-p"),
+                    ("Open Pair (Text Compare)", "⏎", "folder-open"),
+                    ("Copy to Right", "⌥→", "folder-copy:right"),
+                    ("Copy to Left", "⌥←", "folder-copy:left"),
+                    ("Rescan", "F5", "folder-rescan"),
+                ]);
+            } else if has {
+                items.extend([
+                    ("Next Difference", "⌃N", "next"),
+                    ("Previous Difference", "⌃P", "prev"),
+                    ("Copy to Right", "⌥→ · the section under the cursor", "copy-right"),
+                    ("Copy to Left", "⌥← · the section under the cursor", "copy-left"),
+                    ("Swap Sides", "⌘⌥X", "swap"),
+                    ("Reload Both Sides", "F5", "reload"),
+                    ("Save Left", "⌘S with the left side focused", "save:left"),
+                    ("Save Right", "⌘S with the right side focused", "save:right"),
+                    ("Undo", "⌘Z", "undo"),
+                ]);
+            }
+            let Some(root) = self.ivars().state.borrow().as_ref().and_then(|st| st.window.contentView()) else { return };
+            let acts: Vec<String> = items.iter().map(|i| i.2.to_string()).collect();
+            let ctrl = self.ivars().controller.clone();
+            let picker = crate::ui::action_picker::ActionPicker::show(
+                mtm,
+                &root,
+                "Compare actions",
+                items.iter().map(|i| (i.0.to_string(), i.1.to_string())).collect(),
+                crate::ui::theme::section_colors("compare"),
+                Box::new(move |i| {
+                    let Some(a) = acts.get(i) else { return };
+                    let Some(m) = ctrl.compare_model() else { return };
+                    let mut m = m.lock().unwrap();
+                    let key = |code: u16| popup::KeyInput { key_code: code, chars: None, cmd: false, ctrl: true, opt: false, shift: false, esc_streak: 0 };
+                    match a.as_str() {
+                        "folder-key:ctrl-n" => {
+                            m.handle_key(key(45), false);
+                        }
+                        "folder-key:ctrl-p" => {
+                            m.handle_key(key(35), false);
+                        }
+                        other => {
+                            if let Some(err) = m.test_do(other) {
+                                drop(m);
+                                ctrl.log(&format!("compare action {other}: {err}"));
+                            }
+                        }
+                    }
+                }),
+            );
+            *self.ivars().action_picker.borrow_mut() = picker;
         }
 
         /// `showActions()` for the Jira list: the highlighted row plus every

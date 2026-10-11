@@ -3727,6 +3727,200 @@ impl CompareWindowModel {
     }
 
     /// `CompareWindow.testDo` — the `do:compare:*` hook body. `None` = ok.
+    /// `CompareWindow.handleKey` (+ `CompareFolderView.handleKey` for a
+    /// folder session) for the keys the model can act on. `in_text`: a text
+    /// field / editor has the keyboard (the window's own keys stand down).
+    /// Returns whether the key was used.
+    pub fn handle_key(&mut self, key: crate::ui::popup::KeyInput, in_text: bool) -> bool {
+        let (cmd, ctrl, opt, shift) = (key.cmd, key.ctrl, key.opt, key.shift);
+        let code = key.key_code;
+        if cmd && !shift && code == 29 {
+            self.show_start_page();
+            return true;
+        }
+        if self.current().is_none() || in_text {
+            return false;
+        }
+        if self.current().is_some_and(|s| s.folder.is_some()) {
+            return self.folder_key(key);
+        }
+        let filter = |c: u16| [18u16, 19, 20, 21].iter().position(|d| *d == c);
+        let (cursor, count) = self.current().map(|s| (s.cursor as i64, s.display_count() as i64)).unwrap_or((0, 0));
+        const PAGE: i64 = 20;
+        match code {
+            45 if ctrl && !cmd => self.jump_section(1),
+            35 if ctrl && !cmd => self.jump_section(-1),
+            15 if ctrl && !cmd => self.copy_across(CompareSide::Left),
+            37 if ctrl && opt && !cmd => self.copy_across(CompareSide::Right),
+            124 if opt && !cmd && !ctrl => self.copy_across(CompareSide::Left),
+            123 if opt && !cmd && !ctrl => self.copy_across(CompareSide::Right),
+            6 if cmd => self.undo(shift),
+            1 if cmd && !opt => {
+                if let Some(side) = self.current().map(|s| s.focus) {
+                    self.save(side);
+                }
+            }
+            1 if cmd && opt => {
+                self.save(CompareSide::Left);
+                self.save(CompareSide::Right);
+            }
+            c if cmd && filter(c).is_some() => self.set_filter(CompareFilter::ALL[filter(c).unwrap()]),
+            7 if cmd && opt => self.swap_sides(),
+            96 => self.reload(),
+            0 if cmd => {
+                if let Some(s) = self.current_mut() {
+                    s.anchor = Some(0);
+                    s.cursor = s.display_count().saturating_sub(1);
+                }
+            }
+            48 if !ctrl && !cmd => {
+                if let Some(s) = self.current_mut() {
+                    s.focus = s.focus.other();
+                }
+            }
+            126 if !cmd => self.move_cursor(cursor - 1, shift),
+            125 if !cmd => self.move_cursor(cursor + 1, shift),
+            126 | 115 => self.move_cursor(0, shift),
+            125 | 119 => self.move_cursor(count - 1, shift),
+            116 => self.move_cursor(cursor - PAGE, shift),
+            121 => self.move_cursor(cursor + PAGE, shift),
+            123 if !cmd && !ctrl => {
+                if let Some(s) = self.current_mut() {
+                    s.focus = CompareSide::Left;
+                }
+            }
+            124 if !cmd && !ctrl => {
+                if let Some(s) = self.current_mut() {
+                    s.focus = CompareSide::Right;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// `CompareFolderView.handleKey`.
+    fn folder_key(&mut self, key: crate::ui::popup::KeyInput) -> bool {
+        let (cmd, ctrl, opt, shift) = (key.cmd, key.ctrl, key.opt, key.shift);
+        let code = key.key_code;
+        let filter = |c: u16| [18u16, 19, 20, 21, 23, 22].iter().position(|d| *d == c);
+        let fp = &mut self.folder_page;
+        let Some(s) = fp.session.as_ref() else { return false };
+        let (cursor, n) = (s.cursor as i64, s.rows.len() as i64);
+        const PAGE: i64 = 20;
+        let move_to = |fp: &mut FolderPageState, to: i64, extend: bool| {
+            let Some(s) = fp.session.as_mut() else { return };
+            if s.rows.is_empty() {
+                return;
+            }
+            if extend {
+                if s.anchor.is_none() {
+                    s.anchor = Some(s.cursor);
+                }
+            } else {
+                s.anchor = None;
+            }
+            s.cursor = to.clamp(0, s.rows.len() as i64 - 1) as usize;
+        };
+        // The node under the cursor: (id, is_dir, expanded, parent).
+        let at = |fp: &FolderPageState| -> Option<(usize, bool, bool, Option<usize>)> {
+            let s = fp.session.as_ref()?;
+            let r = s.rows.get(s.cursor)?;
+            let nd = s.tree.as_ref()?.node(r.id)?;
+            Some((nd.id, nd.is_dir() && !nd.kind_mismatch(), nd.expanded, nd.parent))
+        };
+        let set_expanded = |fp: &mut FolderPageState, id: usize, open: bool| {
+            if let Some(s) = fp.session.as_mut() {
+                if let Some(nd) = s.tree.as_mut().and_then(|t| t.node_mut(id)) {
+                    nd.expanded = open;
+                }
+            }
+            fp.rebuild();
+        };
+        match code {
+            45 | 35 if ctrl && !cmd => {
+                // `jumpDiff`: the next / previous row that differs.
+                let dir: i64 = if code == 45 { 1 } else { -1 };
+                let s = fp.session.as_ref().unwrap();
+                let differs = |i: i64| -> bool {
+                    s.rows
+                        .get(i as usize)
+                        .and_then(|r| s.tree.as_ref()?.node(r.id))
+                        .is_some_and(|nd| !matches!(nd.status, FolderStatus::Same))
+                };
+                let mut i = cursor + dir;
+                while i >= 0 && i < n && !differs(i) {
+                    i += dir;
+                }
+                if i >= 0 && i < n {
+                    move_to(fp, i, false);
+                }
+            }
+            15 if ctrl && !cmd => fp.transfer(CompareSide::Left, opt, Clash::Replace),
+            37 if ctrl && opt && !cmd => fp.transfer(CompareSide::Right, true, Clash::Replace),
+            124 if opt && !cmd => fp.transfer(CompareSide::Left, ctrl, Clash::Replace),
+            123 if opt && !cmd => fp.transfer(CompareSide::Right, ctrl, Clash::Replace),
+            6 if cmd && !shift => {
+                fp.test_do("undo", "");
+            }
+            51 if cmd => fp.trash(),
+            c if cmd && filter(c).is_some() => {
+                fp.test_do("filter", FolderFilter::ALL[filter(c).unwrap()].raw());
+            }
+            96 => fp.rescan(),
+            47 if cmd && shift => {
+                fp.test_do("hidden", "");
+            }
+            0 if cmd => {
+                if let Some(s) = fp.session.as_mut() {
+                    s.marked = s.rows.iter().map(|r| r.id).collect();
+                }
+            }
+            48 if !ctrl && !cmd => {
+                if let Some(s) = fp.session.as_mut() {
+                    s.focus = s.focus.other();
+                }
+            }
+            126 if !cmd => move_to(fp, cursor - 1, shift),
+            125 if !cmd => move_to(fp, cursor + 1, shift),
+            126 if cmd => fp.up_one_level(),
+            125 if cmd => {
+                let _ = self.folder_open();
+            }
+            33 if cmd => fp.go_back(),
+            30 if cmd => fp.go_forward(),
+            115 => move_to(fp, 0, shift),
+            119 => move_to(fp, n - 1, shift),
+            116 => move_to(fp, cursor - PAGE, shift),
+            121 => move_to(fp, cursor + PAGE, shift),
+            124 if !cmd && !ctrl => match at(fp) {
+                Some((id, true, false, _)) => set_expanded(fp, id, true),
+                _ if shift => {
+                    fp.test_do("expand", "all");
+                }
+                _ => move_to(fp, cursor + 1, false),
+            },
+            123 if !cmd && !ctrl => match at(fp) {
+                Some((id, true, true, _)) => set_expanded(fp, id, false),
+                _ if shift => {
+                    fp.test_do("expand", "none");
+                }
+                Some((_, _, _, Some(parent))) => {
+                    let i = fp.session.as_ref().and_then(|s| s.rows.iter().position(|r| r.id == parent));
+                    if let Some(i) = i {
+                        move_to(fp, i as i64, false);
+                    }
+                }
+                _ => {}
+            },
+            36 | 76 => {
+                let _ = self.folder_open();
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub fn test_do(&mut self, action: &str) -> Option<String> {
         let parts: Vec<&str> = action.splitn(3, ':').collect();
         let head = parts.first().copied().unwrap_or("");
