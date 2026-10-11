@@ -76,6 +76,8 @@ pub enum CompareEvent {
     Tool(usize),
     /// Right-click in the text pane (`ComparePane.rightMouseDown`).
     PaneMenu { right: bool, row: usize, x: f64, y: f64 },
+    /// Right-click on a folder tree row (node `id`).
+    FolderMenu { id: usize, x: f64, y: f64 },
 }
 
 /// `CompareRecent.age(_:)`.

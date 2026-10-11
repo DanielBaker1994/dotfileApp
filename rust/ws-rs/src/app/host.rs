@@ -1112,6 +1112,11 @@ impl SwitcherController {
         self.inner.lock().unwrap().open(v);
     }
 
+    /// Push a sub-view (`folder-open` on a file pair → compareText).
+    pub fn push_view(&self, v: SlotView) {
+        self.inner.lock().unwrap().push(v);
+    }
+
     pub fn toggle(&self) {
         let in_it = self.user_in_it();
         self.inner.lock().unwrap().toggle(in_it);
@@ -2645,6 +2650,13 @@ mod daemon_ui {
 
     thread_local! {
         static PATH_SHEET_HANDLERS: RefCell<Vec<Retained<PathSheetHandler>>> = const { RefCell::new(Vec::new()) };
+        /// The folder tree's Quick Look panel source (menu ▸ Quick Look).
+        static COMPARE_QUICK_LOOK: RefCell<crate::views::files::QuickLook> = RefCell::new(crate::views::files::QuickLook::new());
+    }
+
+    /// `~`-abbreviated path for prompts and toasts.
+    fn tilde_path(p: &str) -> String {
+        crate::views::notes::tilde_path(p, &std::env::var("HOME").unwrap_or_default())
     }
 
     define_class!(
@@ -5534,7 +5546,193 @@ mod daemon_ui {
                     let side = if right { CompareSide::Right } else { CompareSide::Left };
                     self.compare_pane_menu(side, row, x, y);
                 }
+                E::FolderMenu { id, x, y } => self.compare_folder_menu(id, x, y),
             }
+        }
+
+        /// `CompareFolderView.menu(_:_:)`: the folder tree's right-click menu
+        /// for node `id`, acting on the focused side.
+        fn compare_folder_menu(&self, id: usize, x: f64, y: f64) {
+            use crate::engines::file_ops::Clash;
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            use crate::views::compare::{CompareSide, CompareWindowModel};
+            let Some(Some(t)) = self.compare_with(|m| m.folder_page.menu_target(id)) else { return };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let act = |f: Box<dyn FnOnce(&mut CompareWindowModel)>| {
+                let w = weak.clone();
+                move || {
+                    if let Some(ui) = w.load() {
+                        ui.compare_with(f);
+                    }
+                }
+            };
+            let item = |title: &str, enabled: bool, f: Box<dyn FnOnce()>| {
+                if enabled {
+                    MenuEntry::item(title, f)
+                } else {
+                    MenuEntry::disabled(title)
+                }
+            };
+            let w = weak.clone();
+            let open = move || {
+                let Some(ui) = w.load() else { return };
+                let sub = ui
+                    .compare_with(|m| {
+                        let _ = m.test_do("folder-open");
+                        m.take_sub_pending()
+                    })
+                    .unwrap_or(false);
+                if sub {
+                    ui.ivars().controller.push_view(SlotView::CompareText);
+                }
+            };
+            let mut e = Vec::new();
+            if t.is_folder {
+                e.push(MenuEntry::item(if t.expanded { "Collapse" } else { "Expand" }, open));
+            } else {
+                let title = if t.has_left && t.has_right { "Open (Compare)" } else { "Open in Text Compare" };
+                e.push(MenuEntry::item(title, open));
+            }
+            e.push(MenuEntry::Separator);
+            for (title, from, move_, enabled) in [
+                ("Copy to Right  ⌥→", CompareSide::Left, false, t.has_left),
+                ("Copy to Left  ⌥←", CompareSide::Right, false, t.has_right),
+                ("Move to Right  ⌃⌥R", CompareSide::Left, true, t.has_left),
+                ("Move to Left  ⌃⌥L", CompareSide::Right, true, t.has_right),
+            ] {
+                let w = weak.clone();
+                e.push(item(title, enabled, Box::new(move || {
+                    if let Some(ui) = w.load() {
+                        ui.compare_folder_transfer(from, move_);
+                    }
+                })));
+            }
+            let _ = Clash::Replace;
+            e.push(MenuEntry::Separator);
+            let on_side = t.path.is_some();
+            let name = t.path.as_deref().and_then(|p| std::path::Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            let w = weak.clone();
+            let rename_path = t.path.clone().unwrap_or_default();
+            e.push(item("Rename…  F2", on_side, Box::new(move || {
+                let Some(ui) = w.load() else { return };
+                let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                let w2 = w.clone();
+                crate::ui::sheet::form_sheet(
+                    &window,
+                    "Rename",
+                    &tilde_path(&rename_path),
+                    vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
+                    "Rename",
+                    move |answer| {
+                        let Some(name) = answer.and_then(|v| v.into_iter().next()) else { return };
+                        if let Some(ui) = w2.load() {
+                            ui.compare_with(|m| m.folder_page.rename_target(&name));
+                        }
+                    },
+                );
+            })));
+            let w = weak.clone();
+            e.push(MenuEntry::item("New Folder…  ⌘⇧N", move || {
+                let Some(ui) = w.load() else { return };
+                let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                let base = ui.compare_with(|m| m.folder_page.new_folder_base()).flatten().unwrap_or_default();
+                let w2 = w.clone();
+                crate::ui::sheet::form_sheet(
+                    &window,
+                    "New Folder",
+                    &format!("in {}", tilde_path(&base)),
+                    vec![crate::ui::sheet::FormRow::new("Name", "untitled folder", "")],
+                    "Create",
+                    move |answer| {
+                        let Some(name) = answer.and_then(|v| v.into_iter().next()) else { return };
+                        if let Some(ui) = w2.load() {
+                            ui.compare_with(|m| m.folder_page.new_folder(&name));
+                        }
+                    },
+                );
+            }));
+            e.push(item("Move to Trash  ⌘⌫", on_side, Box::new(act(Box::new(|m| m.folder_page.trash_selection())))));
+            e.push(MenuEntry::Separator);
+            e.push(item("Copy Path", on_side, Box::new(act(Box::new(|m| {
+                let paths = m.folder_page.target_paths();
+                if paths.is_empty() {
+                    return;
+                }
+                copy_text_to_pasteboard(&paths.join("\n"));
+                let msg = if paths.len() == 1 {
+                    format!("Copied {} to clipboard", tilde_path(&paths[0]))
+                } else {
+                    format!("Copied {} paths to clipboard", paths.len())
+                };
+                crate::ui::toast::show(&msg, "doc.on.clipboard");
+            })))));
+            let p = t.path.clone().unwrap_or_default();
+            let (p1, p2, p3) = (p.clone(), p.clone(), p);
+            e.push(item("Reveal in Finder", on_side, Box::new(move || reveal_in_finder(&[p1]))));
+            if !t.is_folder {
+                let w = weak.clone();
+                e.push(item("Open in Notes", on_side, Box::new(move || {
+                    if let Some(ui) = w.load() {
+                        ui.open_in_notes(&p2);
+                    }
+                })));
+            }
+            e.push(item("Open in Default App", on_side, Box::new(move || open_path(&p3))));
+            let w = weak.clone();
+            e.push(item("Quick Look  Space", t.has_left || t.has_right, Box::new(move || {
+                let Some(ui) = w.load() else { return };
+                let paths = ui.compare_with(|m| m.folder_page.target_paths()).unwrap_or_default();
+                if let Some(mtm) = MainThreadMarker::new() {
+                    COMPARE_QUICK_LOOK.with(|q| q.borrow_mut().toggle(mtm, &paths));
+                }
+            })));
+            if t.is_folder {
+                e.push(MenuEntry::Separator);
+                let id = t.id;
+                e.push(item("Set as Base Folder  ⌘↓", t.has_left && t.has_right, Box::new(act(Box::new(move |m| m.folder_page.set_base(id, None))))));
+                e.push(item("Set as Left Base Folder", t.left_dir, Box::new(act(Box::new(move |m| m.folder_page.set_base(id, Some(CompareSide::Left)))))));
+                e.push(item("Set as Right Base Folder", t.right_dir, Box::new(act(Box::new(move |m| m.folder_page.set_base(id, Some(CompareSide::Right)))))));
+            }
+            e.push(MenuEntry::Separator);
+            let ex = t.name.clone();
+            e.push(MenuEntry::item(&format!("Exclude “{}”", t.name), act(Box::new(move |m| m.folder_page.exclude(&ex)))));
+            popup(e, None, x, y);
+        }
+
+        /// `CompareFolderView.transfer(from:move:)`: copy / move the selection
+        /// across, asking first when items already exist on the other side.
+        fn compare_folder_transfer(&self, from: crate::views::compare::CompareSide, move_: bool) {
+            use crate::engines::file_ops::Clash;
+            let clashes = self.compare_with(|m| m.folder_page.clash_count(from)).unwrap_or(0);
+            if clashes == 0 {
+                self.compare_with(|m| m.folder_page.copy_or_move(from, move_, Clash::Replace));
+                return;
+            }
+            let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+            let other = from.other().raw();
+            let title = if clashes == 1 {
+                format!("1 item already exists on the {other} side")
+            } else {
+                format!("{clashes} items already exist on the {other} side")
+            };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            crate::ui::sheet::alert_sheet(
+                &window,
+                &title,
+                "Replace them, keep both (the copy gets a new name), or skip them?",
+                &["Replace", "Keep Both", "Skip", "Cancel"],
+                move |b| {
+                    let clash = match b {
+                        0 => Clash::Replace,
+                        1 => Clash::KeepBoth,
+                        2 => Clash::Skip,
+                        _ => return,
+                    };
+                    if let Some(ui) = weak.load() {
+                        ui.compare_with(|m| m.folder_page.copy_or_move(from, move_, clash));
+                    }
+                },
+            );
         }
 
         /// `CompareWindow.paneMenu(row:side:)`: the text pane's right-click

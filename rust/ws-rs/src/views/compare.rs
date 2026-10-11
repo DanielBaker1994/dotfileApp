@@ -1937,6 +1937,22 @@ pub struct SyncTrash {
     pub rel: String,
 }
 
+/// What the folder tree's right-click menu needs to know about a row.
+#[derive(Clone, Debug)]
+pub struct FolderMenuTarget {
+    pub id: usize,
+    pub name: String,
+    pub is_folder: bool,
+    pub expanded: bool,
+    pub has_left: bool,
+    pub has_right: bool,
+    pub left_dir: bool,
+    pub right_dir: bool,
+    pub side: CompareSide,
+    /// The row's path on `side`, when it exists there.
+    pub path: Option<String>,
+}
+
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct SyncPlan {
     pub copies: Vec<SyncCopy>,
@@ -2719,17 +2735,175 @@ impl FolderPageState {
         self.rescan();
     }
 
-    fn set_base(&mut self, id: usize, side: Option<CompareSide>) {
+    /// `setBase(_:side:)`: re-root on a folder row — both sides (needs a
+    /// folder on each), or just one side's root.
+    pub fn set_base(&mut self, id: usize, side: Option<CompareSide>) {
         let Some(s) = self.session.as_mut() else { return };
         let Some(tree) = s.tree.as_ref() else { return };
-        let has_left = tree.node(id).map(|n| n.left.is_some()).unwrap_or(false);
-        let side = side.unwrap_or(if has_left { CompareSide::Left } else { CompareSide::Right });
-        let path = tree.path(id, side);
+        let Some(n) = tree.node(id) else { return };
+        let is_dir = |i: &Option<FolderSideInfo>| i.as_ref().is_some_and(|i| i.is_dir);
+        let (l, r) = match side {
+            None => {
+                if !(is_dir(&n.left) && is_dir(&n.right)) {
+                    s.status = "Set as Base Folder needs a folder on both sides".to_string();
+                    return;
+                }
+                (tree.path(id, CompareSide::Left), tree.path(id, CompareSide::Right))
+            }
+            Some(CompareSide::Left) if is_dir(&n.left) => (tree.path(id, CompareSide::Left), s.right_root.clone()),
+            Some(CompareSide::Right) if is_dir(&n.right) => (s.left_root.clone(), tree.path(id, CompareSide::Right)),
+            Some(_) => return,
+        };
         s.back.push((s.left_root.clone(), s.right_root.clone()));
         s.forward.clear();
-        s.left_root = path.clone();
-        s.right_root = path;
+        s.left_root = l;
+        s.right_root = r;
         s.tree = None;
+        self.rescan();
+    }
+
+    /// `CompareFolderView.menu(_:_:)` setup: point the cursor at node `id`
+    /// (unless it is part of the marked selection) and describe that row.
+    pub fn menu_target(&mut self, id: usize) -> Option<FolderMenuTarget> {
+        let s = self.session.as_mut()?;
+        let row = s.rows.iter().position(|r| r.id == id)?;
+        if !s.marked.contains(&id) {
+            s.marked.clear();
+            s.cursor = row;
+        }
+        let tree = s.tree.as_ref()?;
+        let n = tree.node(id)?;
+        let side = s.focus;
+        let on_side = match side {
+            CompareSide::Left => n.left.is_some(),
+            CompareSide::Right => n.right.is_some(),
+        };
+        Some(FolderMenuTarget {
+            id,
+            name: n.name.clone(),
+            is_folder: n.is_dir() && !n.kind_mismatch(),
+            expanded: n.expanded,
+            has_left: n.left.is_some(),
+            has_right: n.right.is_some(),
+            left_dir: n.left.as_ref().is_some_and(|i| i.is_dir),
+            right_dir: n.right.as_ref().is_some_and(|i| i.is_dir),
+            side,
+            path: on_side.then(|| tree.path(id, side)),
+        })
+    }
+
+    fn target_ids(&self) -> Vec<usize> {
+        let Some(s) = self.session.as_ref() else { return Vec::new() };
+        if s.marked.is_empty() {
+            s.rows.get(s.cursor).map(|r| vec![r.id]).unwrap_or_default()
+        } else {
+            s.marked.iter().copied().collect()
+        }
+    }
+
+    /// The selected items' paths on the focused side (`copyPaths`).
+    pub fn target_paths(&self) -> Vec<String> {
+        let Some(s) = self.session.as_ref() else { return Vec::new() };
+        let Some(tree) = s.tree.as_ref() else { return Vec::new() };
+        self.target_ids()
+            .into_iter()
+            .filter(|id| {
+                tree.node(*id).is_some_and(|n| match s.focus {
+                    CompareSide::Left => n.left.is_some(),
+                    CompareSide::Right => n.right.is_some(),
+                })
+            })
+            .map(|id| tree.path(id, s.focus))
+            .collect()
+    }
+
+    /// How many of the selected items already exist on the other side of
+    /// `from` (Swift asks before replacing them).
+    pub fn clash_count(&self, from: CompareSide) -> usize {
+        let Some(s) = self.session.as_ref() else { return 0 };
+        let Some(tree) = s.tree.as_ref() else { return 0 };
+        self.target_ids()
+            .into_iter()
+            .filter(|id| {
+                tree.node(*id).is_some_and(|n| match from {
+                    CompareSide::Left => n.left.is_some() && n.right.is_some(),
+                    CompareSide::Right => n.right.is_some() && n.left.is_some(),
+                })
+            })
+            .count()
+    }
+
+    pub fn copy_or_move(&mut self, from: CompareSide, move_: bool, clash: Clash) {
+        self.transfer(from, move_, clash);
+    }
+
+    pub fn trash_selection(&mut self) {
+        self.trash();
+    }
+
+    /// `beginRename` → rename the focused side's item to `name`.
+    pub fn rename_target(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(path) = self.target_paths().into_iter().next() else { return };
+        let Some(dir) = Path::new(&path).parent() else { return };
+        if name.is_empty() || name.contains('/') || Path::new(&path).file_name().is_some_and(|f| f == name) {
+            return;
+        }
+        let to = dir.join(name).to_string_lossy().into_owned();
+        let Some(s) = self.session.as_mut() else { return };
+        if Path::new(&to).exists() {
+            s.status = format!("rename: {name} already exists");
+            return;
+        }
+        match std::fs::rename(&path, &to) {
+            Ok(()) => {
+                FileOps::record_rename(&path, &to, &s.undo);
+                s.status = format!("renamed to {name}");
+                self.rescan();
+            }
+            Err(e) => s.status = format!("rename: {e}"),
+        }
+    }
+
+    /// `newFolder`'s parent: the target folder itself, else its parent,
+    /// else the focused root.
+    pub fn new_folder_base(&self) -> Option<String> {
+        let s = self.session.as_ref()?;
+        let root = match s.focus {
+            CompareSide::Left => s.left_root.clone(),
+            CompareSide::Right => s.right_root.clone(),
+        };
+        let Some(tree) = s.tree.as_ref() else { return Some(root) };
+        let Some(id) = self.target_ids().into_iter().next() else { return Some(root) };
+        let Some(n) = tree.node(id) else { return Some(root) };
+        let info = match s.focus {
+            CompareSide::Left => &n.left,
+            CompareSide::Right => &n.right,
+        };
+        let p = tree.path(id, s.focus);
+        Some(match info {
+            Some(i) if i.is_dir => p,
+            _ => Path::new(&p).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or(root),
+        })
+    }
+
+    pub fn new_folder(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || name.contains('/') {
+            return;
+        }
+        let Some(base) = self.new_folder_base() else { return };
+        let Some(s) = self.session.as_mut() else { return };
+        let _ = FileOps::create(name, &base, true, &s.undo);
+        s.status = format!("created {name}");
+        self.rescan();
+    }
+
+    /// `Exclude "<name>"`: hide that name for this session and rescan.
+    pub fn exclude(&mut self, name: &str) {
+        if let Some(s) = self.session.as_mut() {
+            s.extra_exclude.push(name.to_string());
+        }
         self.rescan();
     }
 
@@ -4817,9 +4991,11 @@ impl CompareSurface {
         let rc: std::rc::Rc<dyn Fn(CompareEvent)> = std::rc::Rc::from(cb);
         let chrome_sink = rc.clone();
         self.chrome.set_on_event(Box::new(move |e| chrome_sink(e)));
+        let pane_sink = rc.clone();
         self.pane.set_on_menu(std::rc::Rc::new(move |side, row, x, y| {
-            rc(CompareEvent::PaneMenu { right: side == CompareSide::Right, row, x, y })
+            pane_sink(CompareEvent::PaneMenu { right: side == CompareSide::Right, row, x, y })
         }));
+        self.tree.set_on_menu(std::rc::Rc::new(move |id, x, y| rc(CompareEvent::FolderMenu { id, x, y })));
     }
 
     pub fn chrome(&self) -> objc2::rc::Retained<crate::views::compare_view::CompareView> {
@@ -5517,6 +5693,8 @@ mod macos {
     pub struct FolderTreeViewIvars {
         pub colors: RefCell<PopupColors>,
         pub model: RefCell<FolderTreeModel>,
+        /// Right-click: (node id, screen x, screen y).
+        pub on_menu: RefCell<Option<std::rc::Rc<dyn Fn(usize, f64, f64)>>>,
     }
 
     define_class!(
@@ -5541,6 +5719,26 @@ mod macos {
             fn draw_rect(&self, dirty: NSRect) {
                 self.render(dirty);
             }
+
+            /// `CompareFolderView.rightMouseDown`: the row under the pointer,
+            /// then the host's folder menu.
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if p.y < FOLDER_HEADER_HEIGHT {
+                    return;
+                }
+                let id = {
+                    let m = self.ivars().model.borrow();
+                    let i = m.top + ((p.y - FOLDER_HEADER_HEIGHT) / FOLDER_ROW_HEIGHT).floor() as usize;
+                    m.rows.get(i).map(|r| r.id)
+                };
+                let cb = self.ivars().on_menu.borrow().clone();
+                if let (Some(id), Some(cb)) = (id, cb) {
+                    let s = NSEvent::mouseLocation();
+                    cb(id, s.x, s.y);
+                }
+            }
         }
 
         unsafe impl NSObjectProtocol for FolderTreeView {}
@@ -5551,6 +5749,7 @@ mod macos {
             let this = Self::alloc(mtm).set_ivars(FolderTreeViewIvars {
                 colors: RefCell::new(PopupColors::default()),
                 model: RefCell::new(FolderTreeModel::default()),
+                on_menu: RefCell::new(None),
             });
             unsafe {
                 msg_send![
@@ -5563,6 +5762,10 @@ mod macos {
         pub fn set_colors(&self, colors: PopupColors) {
             *self.ivars().colors.borrow_mut() = colors;
             self.setNeedsDisplay(true);
+        }
+
+        pub fn set_on_menu(&self, cb: std::rc::Rc<dyn Fn(usize, f64, f64)>) {
+            *self.ivars().on_menu.borrow_mut() = Some(cb);
         }
 
         pub fn set_model(&self, model: FolderTreeModel) {
