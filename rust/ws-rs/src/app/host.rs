@@ -5350,26 +5350,32 @@ mod daemon_ui {
                     }
                 }
                 E::Sidebar(SidebarEvent::MenuRow(i, x, y)) => {
+                    // `pillMenu(_:)`: Close, then each side's path.
                     use crate::ui::menu_kit::{popup, MenuEntry};
+                    let paths = self
+                        .compare_with(|m| {
+                            m.sessions.get(i).map(|s| {
+                                (s.path.get(&CompareSide::Left).cloned(), s.path.get(&CompareSide::Right).cloned())
+                            })
+                        })
+                        .flatten();
+                    let Some((lp, rp)) = paths else { return };
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let w2 = weak.clone();
-                    popup(
-                        vec![
-                            MenuEntry::item("Show", move || {
-                                if let Some(ui) = weak.load() {
-                                    ui.compare_with(|m| m.select(i));
-                                }
-                            }),
-                            MenuEntry::item("Close", move || {
-                                if let Some(ui) = w2.load() {
-                                    ui.compare_with(|m| m.close_session(i));
-                                }
-                            }),
-                        ],
-                        None,
-                        x,
-                        y,
-                    );
+                    let mut e = vec![
+                        MenuEntry::item("Close", move || {
+                            if let Some(ui) = weak.load() {
+                                ui.compare_with(|m| m.close_session(i));
+                            }
+                        }),
+                        MenuEntry::Separator,
+                    ];
+                    for (name, p) in [("Left", lp), ("Right", rp)] {
+                        let Some(p) = p else { continue };
+                        let p2 = p.clone();
+                        e.push(MenuEntry::item(&format!("Copy {name} Path"), move || copy_text_to_pasteboard(&p)));
+                        e.push(MenuEntry::item(&format!("Reveal {name} in Finder"), move || reveal_in_finder(&[p2])));
+                    }
+                    popup(e, None, x, y);
                 }
                 E::Sidebar(_) => {}
                 E::Compare { left, right } => {
@@ -5465,15 +5471,48 @@ mod daemon_ui {
                     };
                     let Some(e) = entry else { return };
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (w1, w2) = (weak.clone(), weak);
+                    let (w1, w2, w3, w4, w5) = (weak.clone(), weak.clone(), weak.clone(), weak.clone(), weak);
                     let (l, r) = (e.entry.left.clone(), e.entry.right.clone());
                     let (l2, r2) = (l.clone(), r.clone());
+                    let (fl, fr) = (l.clone(), r.clone());
                     let ent = e.entry.clone();
+                    let gone = self
+                        .compare_with(|m| {
+                            m.recent
+                                .load()
+                                .iter()
+                                .filter(|e| !std::path::Path::new(&e.left).exists() || !std::path::Path::new(&e.right).exists())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    let mut tail = Vec::new();
+                    if gone > 0 {
+                        tail.push(MenuEntry::item(&format!("Remove All Missing ({gone})"), move || {
+                            if let Some(ui) = w4.load() {
+                                ui.compare_event(E::ClearMissing);
+                            }
+                        }));
+                    }
+                    tail.push(MenuEntry::item("Clear All Recents", move || {
+                        if let Some(ui) = w5.load() {
+                            ui.compare_event(E::ClearAll);
+                        }
+                    }));
                     popup(
                         vec![
                             MenuEntry::item("Open", move || {
                                 if let Some(ui) = w1.load() {
                                     ui.compare_event(E::OpenRecent(row));
+                                }
+                            }),
+                            MenuEntry::item("Fill the Path Fields", move || {
+                                if let Some(ui) = w3.load() {
+                                    if let Some(st) = ui.ivars().state.borrow().as_ref() {
+                                        if let Some(s) = st.compare.as_ref() {
+                                            s.chrome().set_side_text(false, &tilde_path(&fl));
+                                            s.chrome().set_side_text(true, &tilde_path(&fr));
+                                        }
+                                    }
                                 }
                             }),
                             MenuEntry::item("Reveal Left in Finder", move || reveal_in_finder(&[l2])),
@@ -5485,7 +5524,10 @@ mod daemon_ui {
                                     ui.compare_with(|m| m.recent.remove(&ent));
                                 }
                             }),
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(tail)
+                        .collect(),
                         None,
                         x,
                         y,
