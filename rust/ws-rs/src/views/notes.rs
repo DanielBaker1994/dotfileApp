@@ -2337,6 +2337,7 @@ mod macos {
                 "browser" => self.browser.setHidden(!shown),
                 _ => {}
             }
+            self.apply_sidebar_width();
             Some(shown)
         }
 
@@ -2770,15 +2771,18 @@ mod macos {
             self.sidebar
                 .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, full.height)));
             let editor_w = (full.width - w - 4.0).max(0.0);
+            // `drawerInset`: an open terminal drawer takes the editor's bottom.
+            let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
+            let inset = if self.drawers.terminal_shown() { term_h } else { 0.0 };
+            let editor_h = (full.height - inset).max(0.0);
             self.editor_scroll.setFrame(NSRect::new(
                 NSPoint::new(w + 4.0, 0.0),
-                NSSize::new(editor_w, full.height),
+                NSSize::new(editor_w, editor_h),
             ));
             self.prose_switch.place(self.editor_scroll.frame());
             if let Some(p) = &self.prose {
                 p.set_frame(self.editor_scroll.frame());
             }
-            let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
             self.terminal.setFrame(NSRect::new(
                 NSPoint::new(w + 4.0, full.height - term_h),
                 NSSize::new(editor_w, term_h),
@@ -2786,8 +2790,15 @@ mod macos {
             if let Some(view) = self.vim.as_ref().and_then(|p| p.view()) {
                 view.setFrame(NSRect::new(
                     NSPoint::new(w + 4.0 + 8.0, 4.0),
-                    NSSize::new((editor_w - 16.0).max(0.0), (full.height - 8.0).max(0.0)),
+                    NSSize::new((editor_w - 16.0).max(0.0), (editor_h - 8.0).max(0.0)),
                 ));
+            }
+            // Drawers above the editor (a relaunched nvim pane is re-added).
+            if self.drawers.terminal_shown() {
+                self.root.addSubview_positioned_relativeTo(&self.terminal, objc2_app_kit::NSWindowOrderingMode::Above, None);
+            }
+            if self.drawers.browser_shown() {
+                self.root.addSubview_positioned_relativeTo(&self.browser, objc2_app_kit::NSWindowOrderingMode::Above, None);
             }
         }
 
