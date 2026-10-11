@@ -3899,6 +3899,9 @@ mod daemon_ui {
         /// [`popup::route_key`] decision, execute Esc-hide and edit keys, and
         /// consume only what is acted on (everything else passes through).
         fn route_key_event(&self, event: &NSEvent) -> bool {
+            if crate::ui::inline_rename::active() {
+                return false;
+            }
             if self.route_overlay_key(event) {
                 return true;
             }
@@ -6853,8 +6856,8 @@ mod daemon_ui {
                         self.files_surface(|b| b.toggle_quick_look(mtm));
                     }
                 }
-                15 if cmd && !shift => crate::ui::toast::not_ported("Files inline rename"),
-                120 if !cmd && !ctrl => crate::ui::toast::not_ported("Files inline rename"),
+                15 if cmd && !shift => self.files_begin_rename(),
+                120 if !cmd && !ctrl => self.files_begin_rename(),
                 51 if cmd && in_list => {
                     let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
                     if paths.is_empty() {
@@ -7289,6 +7292,91 @@ mod daemon_ui {
             ui.show(items);
         }
 
+        /// The name column of list row `i` in `list`'s coordinates.
+        fn rename_rect(list: &crate::views::files_view::FileListView, i: usize) -> NSRect {
+            let r = list.row_rect(i);
+            let x = r.x + 30.0;
+            NSRect::new(NSPoint::new(x, r.y), NSSize::new((r.width * 0.55 - x).max(120.0), r.height))
+        }
+
+        /// `PopupFileBrowser.beginRename()` (Cmd+R / F2).
+        fn files_begin_rename(&self) {
+            let Some(Some((i, path, is_dir, list))) = self.files_surface(|b| {
+                b.begin_rename(None);
+                let (path, _) = b.rename.clone()?;
+                let i = b.list.selection;
+                let is_dir = b.list.rows.get(i).is_some_and(|e| e.is_dir);
+                Some((i, path, is_dir, b.view.as_ref()?.list_view()))
+            }) else {
+                return;
+            };
+            let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let wl = objc2::rc::Weak::from_retained(&list);
+            crate::ui::inline_rename::begin(
+                &list,
+                Self::rename_rect(&list, i),
+                &name,
+                is_dir,
+                crate::ui::theme::section_colors("files"),
+                12.0,
+                Box::new(move |text| {
+                    let Some(ui) = weak.load() else { return };
+                    let msg = ui.files_surface(|b| match &text {
+                        Some(t) => {
+                            if let Some((p, _)) = b.rename.clone() {
+                                b.rename = Some((p, t.clone()));
+                            }
+                            b.commit_rename()
+                        }
+                        None => {
+                            b.cancel_rename();
+                            None
+                        }
+                    });
+                    if let Some(Some(m)) = msg {
+                        crate::ui::toast::show(&m, "exclamationmark.triangle.fill");
+                    }
+                    if let (Some(l), Some(w)) = (wl.load(), wl.load().and_then(|l| l.window())) {
+                        w.makeFirstResponder(Some(&l));
+                    }
+                }),
+            );
+        }
+
+        /// `PathsWindow.beginRename()` (Cmd+R).
+        fn paths_begin_rename(&self) {
+            let Some(Some((i, path, list))) = self.paths_surface(|w| {
+                let i = w.selection;
+                let path = w.rows.get(i)?.path.clone();
+                Some((i, path, w.list.clone()?))
+            }) else {
+                return;
+            };
+            let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let is_dir = std::path::Path::new(&path).is_dir();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            crate::ui::inline_rename::begin(
+                &list,
+                Self::rename_rect(&list, i),
+                &name,
+                is_dir,
+                crate::ui::theme::PopupThemeDefaults::colors(),
+                12.0,
+                Box::new(move |text| {
+                    let Some(ui) = weak.load() else { return };
+                    let Some(t) = text else { return };
+                    let msg = ui.paths_surface(|w| {
+                        w.begin_rename(&t);
+                        w.commit_rename()
+                    });
+                    if let Some(Some(m)) = msg {
+                        crate::ui::toast::show(&m, "pencil");
+                    }
+                }),
+            );
+        }
+
         /// `PathsWindow.handleKey` for what the field delegate doesn't see:
         /// Cmd+C / Cmd+Shift+C, Space / Cmd+Y Quick Look, Cmd+O, Cmd+R,
         /// Cmd+Shift+R, Cmd+Delete.
@@ -7343,7 +7431,7 @@ mod daemon_ui {
                     }
                 }
                 PathsKey::Reveal => reveal_in_finder(&paths),
-                PathsKey::BeginRename => crate::ui::toast::not_ported("Paths inline rename"),
+                PathsKey::BeginRename => self.paths_begin_rename(),
                 PathsKey::Forget => {
                     SHELF.with(|s| {
                         if let Some(sh) = s.borrow().as_ref() {
@@ -7753,10 +7841,7 @@ mod daemon_ui {
                     self.files_surface(|_| ()).is_some()
                 }
                 popup::FileBrowserAction::Rename => {
-                    self.ivars()
-                        .controller
-                        .log("file browser rename field not modelled yet");
-                    crate::ui::toast::not_ported("Rename");
+                    self.files_begin_rename();
                     true
                 }
                 popup::FileBrowserAction::Copy

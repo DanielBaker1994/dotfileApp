@@ -5,6 +5,7 @@ pub mod ansi_text;
 pub mod card;
 pub mod chrome;
 pub mod field;
+pub mod inline_rename;
 pub mod list_panel;
 pub mod menu_kit;
 pub mod panel_frame;
