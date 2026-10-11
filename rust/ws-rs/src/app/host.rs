@@ -3483,14 +3483,7 @@ mod daemon_ui {
             let st = state.get_or_insert_with(|| self.build_window(mtm));
             let mut panel = st.switcher.take().unwrap_or_else(ViewSwitcherPanel::new);
             // The views' "where it is" (read here: the state is borrowed).
-            let wheres = (
-                st.files.as_ref().map(|b| b.where_text()).unwrap_or_default(),
-                st.notes
-                    .as_ref()
-                    .and_then(|s| s.selected_path())
-                    .and_then(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().into_owned()))
-                    .unwrap_or_default(),
-            );
+            let wheres = Self::where_texts(st, &controller);
             let rows = self.prepare_panel(
                 &mut panel,
                 Box::new({
@@ -3512,12 +3505,47 @@ mod daemon_ui {
             controller.set_window_count(visible_window_count(mtm));
         }
 
+        /// `showViewSwitcher`'s per-view "where it is" (`whereText` / `tabName`).
+        fn where_texts(st: &DaemonUiState, controller: &SwitcherController) -> HashMap<SlotView, String> {
+            let mut w = HashMap::new();
+            if let Some(b) = st.files.as_ref() {
+                w.insert(SlotView::Files, b.where_text());
+            }
+            if let Some(name) = st
+                .notes
+                .as_ref()
+                .and_then(|s| s.selected_path())
+                .and_then(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().into_owned()))
+            {
+                w.insert(SlotView::Notes, name.trim_end_matches(".json").to_string());
+            }
+            if let Some((l, _)) = st.jira.as_ref() {
+                let sb = l.snapshot().sidebar;
+                let t = match &sb.pinned_selected {
+                    Some(k) => sb.pinned.iter().find(|p| &p.key == k).map(|p| p.label.clone()),
+                    None => sb.selected.and_then(|i| sb.rows.get(i)).map(|r| r.title.clone()),
+                };
+                w.insert(SlotView::Jira, t.unwrap_or_default());
+            }
+            if let Some(c) = st.confluence.as_ref() {
+                w.insert(SlotView::Confluence, c.model.where_text());
+            }
+            if let Some(a) = st.ai.as_ref() {
+                w.insert(SlotView::Ai, a.model.where_text());
+            }
+            if let Some(m) = controller.compare_model() {
+                let label = m.lock().unwrap().current().map(|s| s.label()).unwrap_or_else(|| "Home".into());
+                w.insert(SlotView::Compare, label);
+            }
+            w
+        }
+
         /// Wire the shared row set + callbacks onto a panel.
         fn prepare_panel(
             &self,
             panel: &mut ViewSwitcherPanel,
             on_close: Box<dyn FnMut()>,
-            (files_where, notes_tab): (String, String),
+            wheres: HashMap<SlotView, String>,
         ) -> Vec<String> {
             let controller = self.ivars().controller.clone();
             // `showViewSwitcher`: each view's "where it is" + `aliases`.
@@ -3536,11 +3564,8 @@ mod daemon_ui {
                         SlotView::Ai => ("AI", "ai"),
                         _ => ("Jira", "jira"),
                     };
-                    let loc = match n.view {
-                        SlotView::Files => files_where.clone(),
-                        SlotView::Notes => notes_tab.trim_end_matches(".json").to_string(),
-                        _ => String::new(),
-                    };
+                    let key = if n.view.is_jira() { SlotView::Jira } else { n.view };
+                    let loc = wheres.get(&key).cloned().unwrap_or_default();
                     icons.push((n.id, nav_icon_image(n.view, n.image_key.as_deref(), &assets)));
                     let mut v = SwitchView::new(n.id, name, loc);
                     v.aliases = crate::views::notes::section_value(section, "aliases")
