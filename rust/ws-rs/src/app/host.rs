@@ -4015,6 +4015,9 @@ mod daemon_ui {
             }
 
             let current = self.ivars().controller.current();
+            if current.is_some_and(|v| v.is_jira()) && self.jira_key(&key) {
+                return true;
+            }
             if current == Some(SlotView::Ai) {
                 // `AIWindow.handleKey`: Esc stops a run, Ctrl/Cmd+Return runs,
                 // Cmd+L focuses the input.
@@ -6721,6 +6724,56 @@ mod daemon_ui {
                 return;
             }
             self.jira_surface(|l| l.refresh());
+        }
+
+        /// The list window's Jira keys (`hostShortcutKey` + `listKey`):
+        /// Cmd+I issue panel, Ctrl+Space tick, Tab / Shift+Tab, Home / End /
+        /// Page Up / Page Down, Cmd+F live search.
+        fn jira_key(&self, key: &popup::KeyInput) -> bool {
+            let plain = !key.cmd && !key.ctrl && !key.opt;
+            match key.key_code {
+                34 if key.cmd && !key.ctrl => {
+                    self.jira_surface(|l| l.inspector = !l.inspector);
+                    if let Some((_, v)) = self.ivars().state.borrow().as_ref().and_then(|s| s.jira.as_ref()) {
+                        v.layout_panes();
+                    }
+                    true
+                }
+                3 if key.cmd && !key.ctrl && !key.shift => {
+                    crate::ui::toast::not_ported("Jira live search (Cmd+F)");
+                    true
+                }
+                49 if key.ctrl && !key.cmd => {
+                    self.jira_surface(|l| {
+                        if let Some(k) = l.selected().and_then(|r| r.get("key")).cloned() {
+                            if !l.checked.remove(&k) {
+                                l.checked.insert(k);
+                            }
+                        }
+                    });
+                    true
+                }
+                48 if !key.cmd && !key.ctrl && !key.opt => {
+                    self.jira_surface(|l| jira_move(l, if key.shift { -1 } else { 1 }));
+                    true
+                }
+                115 | 119 | 116 | 121 if plain => {
+                    self.jira_surface(|l| {
+                        let n = l.rows.len();
+                        if n == 0 {
+                            return;
+                        }
+                        l.selection = match key.key_code {
+                            115 => 0,
+                            119 => n - 1,
+                            116 => l.selection.saturating_sub(10),
+                            _ => (l.selection + 10).min(n - 1),
+                        };
+                    });
+                    true
+                }
+                _ => false,
+            }
         }
 
         /// `showActions()` for the Jira list: the highlighted row plus every
