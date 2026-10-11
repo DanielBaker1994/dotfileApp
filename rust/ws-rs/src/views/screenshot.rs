@@ -3628,6 +3628,38 @@ mod overlay {
         shot_cg::draw_text(ctx, &o);
     }
 
+    /// Draw an SF Symbol centred in `r` into the overlay's current graphics
+    /// context (Swift: `NSImage(systemSymbolName:)` with a palette colour).
+    fn draw_symbol(name: &str, r: Rect, point: f64, bold: bool, color: ShotColor) {
+        use crate::ui::style::{symbol_image, Weight};
+        use crate::ui::theme::Rgba;
+        if name.is_empty() {
+            return;
+        }
+        let w = if bold { Weight::Semibold } else { Weight::Medium };
+        let Some(img) = symbol_image(name, point, w, Rgba::new(color.r, color.g, color.b, color.a)) else {
+            return;
+        };
+        let sz = img.size();
+        let dst = objc2_foundation::NSRect::new(
+            objc2_foundation::NSPoint::new(
+                (r.mid_x() - sz.width / 2.0).round(),
+                (r.mid_y() - sz.height / 2.0).round(),
+            ),
+            sz,
+        );
+        unsafe {
+            img.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+                dst,
+                objc2_foundation::NSRect::ZERO,
+                objc2_app_kit::NSCompositingOperation::SourceOver,
+                1.0,
+                true,
+                None,
+            );
+        }
+    }
+
     /// `ShotModePill` + `ShotRecentButton`, laid out like `layoutChrome`:
     /// the pill is centred 16pt under the menu bar, the 28pt recents button
     /// 12pt to its right. Records the painted rects for the click hit test.
@@ -3675,7 +3707,16 @@ mod overlay {
             }
             let fg = if on { ShotColor::WHITE } else { ShotColor::WHITE.with_alpha(0.75) };
             let tw = shot_cg::measure_text_width(title, 16.0, true);
-            draw_text_at(ctx, title, r.x + (r.w - tw) / 2.0, r.mid_y() - 10.0, 16.0, fg, true);
+            let content = 18.0 + 8.0 + tw;
+            let x0 = r.x + (r.w - content) / 2.0;
+            draw_symbol(
+                if i == 0 { "text.viewfinder" } else { "camera" },
+                Rect::new(x0, r.y, 18.0, r.h),
+                16.0,
+                true,
+                fg,
+            );
+            draw_text_at(ctx, title, x0 + 18.0 + 8.0, r.mid_y() - 10.0, 16.0, fg, true);
             x += *w;
         }
         // Recents button: disc + a clock-with-arrow glyph.
@@ -3687,15 +3728,7 @@ mod overlay {
             Some(ctx),
             cg_rect(Rect::new(recent.x + 0.5, recent.y + 0.5, recent.w - 1.0, recent.h - 1.0)),
         );
-        set_stroke(ctx, ShotColor::WHITE);
-        CGContext::set_line_width(Some(ctx), 1.6);
-        CGContext::set_line_cap(Some(ctx), CGLineCap::Round);
-        let (cx, cy) = (recent.mid_x(), recent.mid_y());
-        CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(cx - 6.5, cy - 6.5, 13.0, 13.0)));
-        CGContext::move_to_point(Some(ctx), cx, cy - 4.0);
-        CGContext::add_line_to_point(Some(ctx), cx, cy);
-        CGContext::add_line_to_point(Some(ctx), cx + 3.0, cy + 2.0);
-        CGContext::stroke_path(Some(ctx));
+        draw_symbol("clock.arrow.circlepath", recent, 14.0, true, ShotColor::WHITE);
     }
 
     /// `ShotHelpCard`: a centred rounded card of key/action rows.
@@ -3761,8 +3794,11 @@ mod overlay {
             let c = Point::new(f.mid_x(), f.mid_y());
             let r = (f.w / 2.0 - 0.5).max(1.0);
             let active = session.tool == Some(*t) || (*t == ShotTool::Move && session.move_mode);
+            let hover = session.mouse.is_some_and(|(md, mp)| md == d && f.contains_point(mp));
             let fill = if active {
                 cfg.ui_color.mixed(&ShotColor::BLACK, 0.25)
+            } else if hover {
+                cfg.ui_color.mixed(&ShotColor::WHITE, 0.18)
             } else {
                 cfg.ui_color
             };
@@ -3779,6 +3815,10 @@ mod overlay {
                     Some(ctx),
                     cg_rect(Rect::new(c.x - rr, c.y - rr, 2.0 * rr, 2.0 * rr)),
                 );
+            }
+            if *t != ShotTool::Size {
+                let fg = if cfg.ui_color.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK };
+                draw_symbol(t.symbol(), *f, f.h * 0.42, false, fg);
             }
             if *t == ShotTool::Size {
                 let badge = format!("{}\n{}", sel.w.round() as i64, sel.h.round() as i64);
