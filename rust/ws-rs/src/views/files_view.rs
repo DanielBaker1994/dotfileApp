@@ -199,6 +199,12 @@ mod appkit {
                 true
             }
 
+            /// `FileListPane` takes the keyboard (Ctrl+HJKL `files-list`).
+            #[unsafe(method(acceptsFirstResponder))]
+            fn afr(&self) -> bool {
+                true
+            }
+
             #[unsafe(method(mouseDownCanMoveWindow))]
             fn mdcmw(&self) -> bool {
                 false
@@ -445,6 +451,7 @@ mod appkit {
         pub struct FilesView;
 
         impl FilesView {
+
             #[unsafe(method(isFlipped))]
             fn is_flipped(&self) -> bool {
                 true
@@ -563,6 +570,24 @@ mod appkit {
     }
 
     impl FilesView {
+        /// `PopupFileBrowser.navPanes`: sidebar, filter, list, preview.
+        pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            use crate::app::live_panes::LivePane;
+            let iv = self.ivars();
+            let mut out = vec![
+                LivePane::new("files-sidebar", &iv.sidebar),
+                LivePane::new("files-filter", &iv.search_box).focusing(&iv.search),
+                LivePane::new("files-list", &iv.list_scroll).focusing(&iv.list),
+            ];
+            if !iv.preview_list_scroll.isHidden() {
+                out.push(LivePane::new("files-preview", &iv.preview_list_scroll).focusing(&iv.preview_list));
+            } else if !iv.preview_scroll.isHidden() {
+                out.push(LivePane::new("files-preview", &iv.preview_scroll).focusing(&iv.preview_text));
+            } else if !iv.preview_image.isHidden() && iv.preview_image.image().is_some() {
+                out.push(LivePane::new("files-preview", &iv.preview_image));
+            }
+            out
+        }
         pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("files");

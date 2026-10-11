@@ -328,6 +328,19 @@ mod appkit {
     );
 
     impl CompareView {
+        /// `CompareWindow.navPanes` (chrome half): sidebar, both path boxes,
+        /// the recent filter.
+        pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            use crate::app::live_panes::LivePane;
+            let iv = self.ivars();
+            vec![
+                LivePane::new("sidebar", &iv.sidebar),
+                LivePane::new("left-path", &iv.left_box).focusing(&iv.left),
+                LivePane::new("right-path", &iv.right_box).focusing(&iv.right),
+                LivePane::new("recent-filter", &iv.filter_box).focusing(&iv.filter),
+            ]
+        }
+
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64) -> Retained<Self> {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("compare");

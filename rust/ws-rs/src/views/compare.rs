@@ -4492,6 +4492,16 @@ pub struct CompareSurface {
 
 #[cfg(target_os = "macos")]
 impl CompareSurface {
+    /// `CompareWindow.navPanes`: the chrome's panes plus the diff body
+    /// (text pane or folder tree, whichever is up).
+    pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+        use crate::app::live_panes::LivePane;
+        let mut out = self.chrome.nav_panes();
+        out.push(LivePane::new("diff", &self.pane));
+        out.push(LivePane::new("tree", &self.tree));
+        out
+    }
+
     pub fn build(mtm: objc2::MainThreadMarker) -> Self {
         use objc2_app_kit::{NSAutoresizingMaskOptions as M, NSView};
         use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -4763,6 +4773,11 @@ mod macos {
         impl ComparePaneView {
             #[unsafe(method(isFlipped))]
             fn is_flipped(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(acceptsFirstResponder))]
+            fn afr(&self) -> bool {
                 true
             }
 
@@ -5208,6 +5223,11 @@ mod macos {
         impl FolderTreeView {
             #[unsafe(method(isFlipped))]
             fn is_flipped(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(acceptsFirstResponder))]
+            fn afr(&self) -> bool {
                 true
             }
 

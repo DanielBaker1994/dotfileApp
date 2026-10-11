@@ -166,6 +166,7 @@ mod appkit {
         pub struct AIView;
 
         impl AIView {
+
             #[unsafe(method(isFlipped))]
             fn is_flipped(&self) -> bool { true }
 
@@ -266,6 +267,21 @@ mod appkit {
     );
 
     impl AIView {
+        /// `AIWindow.navPanes`: sidebar, input, answer (web or text).
+        pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            use crate::app::live_panes::LivePane;
+            let iv = self.ivars();
+            let mut out = vec![
+                LivePane::new("sidebar", &iv.sidebar),
+                LivePane::new("input", &iv.in_scroll).focusing(&iv.input),
+            ];
+            if !iv.web.isHidden() {
+                out.push(LivePane::new("answer", &iv.web));
+            } else {
+                out.push(LivePane::new("answer", &iv.out_scroll).focusing(&iv.output));
+            }
+            out
+        }
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, web: Retained<NSView>, sidebar_w: f64, split: f64) -> Retained<Self> {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("ai");

@@ -76,6 +76,85 @@ pub enum SidebarEvent {
     MenuPinned(String, f64, f64),
 }
 
+/// `handleNavKey`'s outcome for a key while the rail has the keyboard.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NavKeyResult {
+    /// Not a rail key — let it pass.
+    Pass,
+    /// Cursor moved (or the key was swallowed); just redraw.
+    Moved,
+    /// Activate the row under the cursor, then optionally leave right.
+    Activate { row: usize, leave: bool },
+    /// Close the (non-pinned) row under the cursor.
+    Close(usize),
+    Leave,
+}
+
+/// `PopupTabsBar.handleNavKey` over `n` rows (pinned first), cursor `cur`,
+/// `page` rows per page. `titles` gives each row's title for letter jumps.
+/// Returns the outcome and the new cursor.
+pub fn nav_key(
+    key_code: u16,
+    ctrl: bool,
+    cmd: bool,
+    opt: bool,
+    shift: bool,
+    ch: Option<char>,
+    cur: usize,
+    n: usize,
+    page: usize,
+    titles: &dyn Fn(usize) -> String,
+) -> (NavKeyResult, usize) {
+    let clamp = |r: i64| -> usize { r.clamp(0, n.saturating_sub(1) as i64) as usize };
+    let plain = !ctrl && !cmd && !opt && !shift;
+    let c = cur as i64;
+    let page = page.max(1) as i64;
+    let moved = |to: i64| (NavKeyResult::Moved, if n == 0 { 0 } else { clamp(to) });
+    match key_code {
+        125 if plain => moved(c + 1),
+        45 if ctrl && !cmd && !opt && !shift => moved(c + 1),
+        126 if plain => moved(c - 1),
+        35 if ctrl && !cmd && !opt && !shift => moved(c - 1),
+        115 if plain => moved(0),
+        126 if cmd && !ctrl && !opt && !shift => moved(0),
+        119 if plain => moved(n as i64 - 1),
+        125 if cmd && !ctrl && !opt && !shift => moved(n as i64 - 1),
+        116 if plain => moved(c - page),
+        121 if plain => moved(c + page),
+        36 | 76 if plain => {
+            if n == 0 {
+                (NavKeyResult::Leave, cur)
+            } else {
+                (NavKeyResult::Activate { row: cur, leave: true }, cur)
+            }
+        }
+        49 if plain => {
+            if n == 0 {
+                (NavKeyResult::Moved, cur)
+            } else {
+                (NavKeyResult::Activate { row: cur, leave: false }, cur)
+            }
+        }
+        53 if plain => (NavKeyResult::Leave, cur),
+        51 | 117 if !ctrl && !opt && !shift => (NavKeyResult::Close(cur), cur),
+        _ => {
+            if cmd || ctrl || opt || key_code == 48 {
+                return (NavKeyResult::Pass, cur);
+            }
+            let Some(ch) = ch.map(|c| c.to_ascii_lowercase()).filter(|c| c.is_alphanumeric()) else {
+                return (NavKeyResult::Moved, cur);
+            };
+            for step in 1..=n {
+                let r = (cur + step) % n;
+                if titles(r).to_lowercase().starts_with(ch) {
+                    return (NavKeyResult::Moved, r);
+                }
+            }
+            (NavKeyResult::Moved, cur)
+        }
+    }
+}
+
 /// Hit ids: row index (>= 0), -2 add, -4 toggle, -10-k pinned k.
 pub const HIT_ADD: i64 = -2;
 pub const HIT_TOGGLE: i64 = -4;
@@ -214,7 +293,7 @@ pub fn icon_for_name(name: &str) -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
-pub use appkit::SidebarView;
+pub use appkit::{set_leave_right, SidebarView};
 
 #[cfg(target_os = "macos")]
 mod appkit {
@@ -227,6 +306,27 @@ mod appkit {
     use objc2_app_kit::{NSEvent, NSGraphicsContext, NSBezierPath, NSTrackingArea, NSTrackingAreaOptions, NSView};
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        /// The host's `PaneNav.shared.move(.right)` (Return / Esc on the rail).
+        static LEAVE_RIGHT: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// Install the host's "focus the pane right of the rail" action.
+    pub fn set_leave_right(f: Box<dyn Fn()>) {
+        LEAVE_RIGHT.with(|l| *l.borrow_mut() = Some(f));
+    }
+
+    fn leave_right() {
+        // Deferred: the host re-enters AppKit focus, never while a view borrow is held.
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            LEAVE_RIGHT.with(|l| {
+                if let Some(f) = l.borrow().as_ref() {
+                    f();
+                }
+            })
+        });
+    }
 
     fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
         unsafe { &*(obj as *const T as *const AnyObject) }
@@ -242,6 +342,10 @@ mod appkit {
         on_event: RefCell<Option<Box<dyn Fn(SidebarEvent)>>>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
         collapse_key: RefCell<String>,
+        /// Whether the rail holds the keyboard (`keyFocused`).
+        key_focused: Cell<bool>,
+        /// The keyboard cursor over pinned rows then list rows (`cursor`).
+        cursor: Cell<usize>,
     }
 
     define_class!(
@@ -270,6 +374,41 @@ mod appkit {
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 self.draw();
+            }
+
+            #[unsafe(method(acceptsFirstResponder))]
+            fn accepts_first_responder(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(becomeFirstResponder))]
+            fn become_first_responder(&self) -> bool {
+                let start = {
+                    let m = self.ivars().model.borrow();
+                    match (&m.pinned_selected, m.selected) {
+                        (Some(k), _) => m.pinned.iter().position(|p| &p.key == k).unwrap_or(0),
+                        (None, Some(i)) => m.pinned.len() + i,
+                        _ => 0,
+                    }
+                };
+                self.ivars().cursor.set(start);
+                self.ivars().key_focused.set(true);
+                self.setNeedsDisplay(true);
+                true
+            }
+
+            #[unsafe(method(resignFirstResponder))]
+            fn resign_first_responder(&self) -> bool {
+                self.ivars().key_focused.set(false);
+                self.setNeedsDisplay(true);
+                true
+            }
+
+            #[unsafe(method(keyDown:))]
+            fn key_down(&self, e: &NSEvent) {
+                if !self.handle_nav_key(e) {
+                    let _: () = unsafe { msg_send![super(self), keyDown: e] };
+                }
             }
 
             #[unsafe(method(setFrameSize:))]
@@ -426,10 +565,112 @@ mod appkit {
                 on_event: RefCell::new(None),
                 tracking: RefCell::new(None),
                 collapse_key: RefCell::new(String::new()),
+                key_focused: Cell::new(false),
+                cursor: Cell::new(0),
             });
             unsafe {
                 msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 400.0))]
             }
+        }
+
+        /// Whether the rail holds the keyboard (`keyFocused`).
+        pub fn key_focused(&self) -> bool {
+            self.ivars().key_focused.get()
+        }
+
+        /// `handleNavKey(_:)`: ↑↓ / Ctrl+N/P, Home/End, Page, Return (open +
+        /// leave right), Space (open), Esc (leave right), Delete (close),
+        /// letter jump. `false` = not a rail key.
+        pub fn handle_nav_key(&self, e: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            if !self.key_focused() {
+                return false;
+            }
+            let mods = e.modifierFlags();
+            let ch = e.charactersIgnoringModifiers().and_then(|s| s.to_string().chars().next());
+            let (n, pins, page) = {
+                let m = self.ivars().model.borrow();
+                let g = self.geometry();
+                (m.pinned.len() + m.rows.len(), m.pinned.len(), (g.list.height / (ROW_H + 1.0)) as usize)
+            };
+            let titles = |r: usize| -> String {
+                let m = self.ivars().model.borrow();
+                if r < m.pinned.len() {
+                    m.pinned[r].label.clone()
+                } else {
+                    m.rows.get(r - m.pinned.len()).map(|x| x.title.clone()).unwrap_or_default()
+                }
+            };
+            let (res, cur) = nav_key(
+                e.keyCode(),
+                mods.contains(F::Control),
+                mods.contains(F::Command),
+                mods.contains(F::Option),
+                mods.contains(F::Shift),
+                ch,
+                self.ivars().cursor.get(),
+                n,
+                page.saturating_sub(1),
+                &titles,
+            );
+            self.ivars().cursor.set(cur);
+            self.reveal_cursor();
+            match res {
+                NavKeyResult::Pass => return false,
+                NavKeyResult::Moved => {}
+                NavKeyResult::Activate { row, leave } => {
+                    self.activate(row);
+                    if leave && self.key_focused() {
+                        leave_right();
+                    }
+                }
+                NavKeyResult::Close(row) => {
+                    let closable = self.ivars().model.borrow().closable;
+                    if closable && row >= pins {
+                        self.emit(SidebarEvent::Close(row - pins));
+                        let n = {
+                            let m = self.ivars().model.borrow();
+                            m.pinned.len() + m.rows.len()
+                        };
+                        self.ivars().cursor.set(cur.min(n.saturating_sub(1)));
+                    }
+                }
+                NavKeyResult::Leave => leave_right(),
+            }
+            self.setNeedsDisplay(true);
+            true
+        }
+
+        /// `activate(row:)`: pinned rows open their key, list rows select.
+        fn activate(&self, row: usize) {
+            let ev = {
+                let mut m = self.ivars().model.borrow_mut();
+                if row < m.pinned.len() {
+                    SidebarEvent::Pinned(m.pinned[row].key.clone())
+                } else {
+                    let i = row - m.pinned.len();
+                    if i >= m.rows.len() {
+                        return;
+                    }
+                    m.selected = Some(i);
+                    SidebarEvent::Select(i)
+                }
+            };
+            self.emit(ev);
+        }
+
+        /// `revealCursor()`.
+        fn reveal_cursor(&self) {
+            let (pins, n) = {
+                let m = self.ivars().model.borrow();
+                (m.pinned.len(), m.rows.len())
+            };
+            let cur = self.ivars().cursor.get();
+            if cur < pins {
+                return;
+            }
+            let g = self.geometry();
+            self.ivars().scroll.set(g.reveal(cur - pins, self.ivars().scroll.get(), n));
         }
 
         pub fn set_on_event(&self, cb: Box<dyn Fn(SidebarEvent)>) {
@@ -670,6 +911,17 @@ mod appkit {
                     style::cross(close, if hc { c.tone(PopupTone::Danger) } else { c.dim }, 3.0);
                 }
             }
+            if self.key_focused() {
+                let cur = self.ivars().cursor.get();
+                let pins = m.pinned.len();
+                let r = if cur < pins { g.pinned_rows.get(cur).copied() } else { (cur - pins < m.rows.len()).then(|| g.row_rect(cur - pins, scroll)) };
+                if let Some(r) = r {
+                    // `drawCursor`: the pane ring color, a touch stronger.
+                    let ring = crate::panes::pane_nav::RingStyle::default().rgba();
+                    let a = (ring.a + 0.25).min(1.0);
+                    style::stroke_rounded(r.inset_by(0.5, 0.5), radius, 1.0, ring.with_alpha(a));
+                }
+            }
             NSGraphicsContext::restoreGraphicsState_class();
             {
                 let st = if hover == Some(HIT_TOGGLE) { style::ButtonState::Hover } else { style::ButtonState::Idle };
@@ -794,5 +1046,41 @@ mod tests {
         assert_eq!(icon_for_name("a.toml"), "gearshape");
         assert_eq!(icon_for_name("a.rs"), "chevron.left.forwardslash.chevron.right");
         assert_eq!(icon_for_name("a.pdf"), "doc");
+    }
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::*;
+
+    fn key(code: u16, ctrl: bool, ch: Option<char>, cur: usize) -> (NavKeyResult, usize) {
+        let titles = |r: usize| ["alpha", "beta", "bravo", "gamma"][r].to_string();
+        nav_key(code, ctrl, false, false, false, ch, cur, 4, 2, &titles)
+    }
+
+    #[test]
+    fn arrows_and_ctrl_np_move_and_clamp() {
+        assert_eq!(key(125, false, None, 0), (NavKeyResult::Moved, 1));
+        assert_eq!(key(45, true, None, 3), (NavKeyResult::Moved, 3));
+        assert_eq!(key(126, false, None, 0), (NavKeyResult::Moved, 0));
+        assert_eq!(key(35, true, None, 2), (NavKeyResult::Moved, 1));
+        assert_eq!(key(119, false, None, 0), (NavKeyResult::Moved, 3));
+    }
+
+    #[test]
+    fn return_activates_and_leaves_space_stays_esc_leaves() {
+        assert_eq!(key(36, false, None, 2), (NavKeyResult::Activate { row: 2, leave: true }, 2));
+        assert_eq!(key(49, false, None, 1), (NavKeyResult::Activate { row: 1, leave: false }, 1));
+        assert_eq!(key(53, false, None, 1), (NavKeyResult::Leave, 1));
+        assert_eq!(key(51, false, None, 1), (NavKeyResult::Close(1), 1));
+    }
+
+    #[test]
+    fn letters_jump_cyclically_and_ctrl_keys_pass() {
+        assert_eq!(key(11, false, Some('b'), 0), (NavKeyResult::Moved, 1));
+        assert_eq!(key(11, false, Some('b'), 1), (NavKeyResult::Moved, 2));
+        assert_eq!(key(11, false, Some('b'), 2), (NavKeyResult::Moved, 1));
+        assert_eq!(key(4, true, Some('h'), 2).0, NavKeyResult::Pass);
+        assert_eq!(key(48, false, None, 2).0, NavKeyResult::Pass);
     }
 }

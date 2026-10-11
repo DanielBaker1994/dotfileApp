@@ -2912,6 +2912,47 @@ mod macos {
             }
         }
 
+        /// `PopupWindow.navPanes` for the notes member: sidebar, editor
+        /// (nvim / prose / text), browser drawer, terminal drawer.
+        pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            use crate::app::live_panes::LivePane;
+            let mut out = vec![LivePane::new("sidebar", &self.sidebar)];
+            if self.prose_shown {
+                if let Some(p) = &self.prose {
+                    out.push(LivePane::new("editor", &p.web));
+                }
+            } else if let Some(v) = self.vim.as_ref().and_then(|v| v.view()) {
+                let mut e = LivePane::new("editor", &v);
+                e.vim_splits = true;
+                out.push(e);
+            } else {
+                out.push(LivePane::new("editor", &self.editor_scroll).focusing(&self.editor));
+            }
+            if self.drawers.browser_shown() {
+                out.push(LivePane::new("browser", &self.browser));
+            }
+            if self.drawers.terminal_shown() {
+                out.push(LivePane::new("terminal", &self.terminal));
+            }
+            out
+        }
+
+        /// `vimSplitMove`: `wincmd` inside nvim when a split lies that way.
+        pub fn vim_split_move(&self, dir: crate::panes::pane_geometry::PaneDir) -> bool {
+            let Some(v) = self.vim.as_ref() else { return false };
+            if !v.has_focus() {
+                return false;
+            }
+            let k = dir.raw_value();
+            match v.eval(&format!("winnr('{k}') != winnr()")) {
+                Some(r) if r.trim() == "1" => {
+                    v.command(&format!("wincmd {k}"));
+                    true
+                }
+                _ => false,
+            }
+        }
+
         /// Whether the embedded nvim pane is active for this surface.
         pub fn vim_active(&self) -> bool {
             self.vim.is_some()

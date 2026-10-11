@@ -368,6 +368,7 @@ mod appkit {
         pub struct ConfluenceView;
 
         impl ConfluenceView {
+
             #[unsafe(method(isFlipped))]
             fn is_flipped(&self) -> bool { true }
 
@@ -490,6 +491,17 @@ mod appkit {
     );
 
     impl ConfluenceView {
+        /// `ConfluenceWindow.navPanes`: sidebar, search, results, preview.
+        pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            use crate::app::live_panes::LivePane;
+            let iv = self.ivars();
+            vec![
+                LivePane::new("sidebar", &iv.sidebar),
+                LivePane::new("search", &iv.search_box).focusing(&iv.search),
+                LivePane::new("results", &iv.scroll).focusing(&iv.results),
+                LivePane::new("preview", &iv.web),
+            ]
+        }
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, web: Retained<NSView>, sidebar_w: f64, split: f64) -> Retained<Self> {
             let snap = Rc::new(RefCell::new(ConfSnapshot::default()));
             let sidebar = SidebarView::new(mtm, colors);

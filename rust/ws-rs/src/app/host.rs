@@ -133,6 +133,10 @@ pub enum UiCommand {
     /// Show a toast pill (text, SF Symbol) — socket verbs run off the main
     /// thread, so they queue it here.
     Toast(String, &'static str),
+    /// Ctrl+HJKL / `do:pane:h|j|k|l` over the live AppKit panes.
+    PaneMove(PaneDir),
+    /// `do:pane:focus:<id>`.
+    PaneFocus(String),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -177,6 +181,9 @@ struct ControllerInner {
     members: HashMap<SlotView, MemberState>,
     panes: Vec<PaneSpec>,
     pane_nav: PaneNav,
+    /// `PaneNav.testState` from the live AppKit panes (main thread), which
+    /// `state.pane` reports instead of the headless model when set.
+    live_pane: Option<Value>,
     vim_keys: VimKeys,
     settings: AppSettings,
     return_wid: Option<String>,
@@ -486,7 +493,9 @@ impl ControllerInner {
         }
 
         let panes = self.panel_list();
-        let pane = if self.current.is_some() {
+        let pane = if let (Some(_), Some(live)) = (self.current, &self.live_pane) {
+            live.clone()
+        } else if self.current.is_some() {
             serde_json::to_value(self.pane_nav.test_state(&panes))
                 .unwrap_or_else(|_| json!({}))
         } else {
@@ -560,6 +569,7 @@ impl SwitcherController {
             members: HashMap::new(),
             panes: Vec::new(),
             pane_nav: PaneNav::new(),
+            live_pane: None,
             vim_keys: VimKeys::new(),
             settings,
             return_wid: None,
@@ -993,6 +1003,11 @@ impl SwitcherController {
 
     /// Drop a tool panel's `tools` entry (`unregisterSubWindow`).
     /// `state.terminalPanel` ← the live panel document (daemon UI).
+    /// The live `PaneNav.testState` (main thread, after each ring refresh).
+    pub fn set_live_pane_state(&self, state: Value) {
+        self.inner.lock().unwrap().live_pane = Some(state);
+    }
+
     pub fn set_terminal_panel_state(&self, state: Value) {
         let mut inner = self.inner.lock().unwrap();
         inner.terminal_panel = state["shown"].as_bool().unwrap_or(false);
@@ -1474,6 +1489,18 @@ impl SwitcherController {
             let mut inner = self.inner.lock().unwrap();
             if inner.current.is_none() {
                 return Some(json!({ "error": "no view shown" }));
+            }
+            if inner.main_queue.is_some() {
+                // The daemon: real AppKit focus, on main before the reply.
+                if let Some(id) = v.strip_prefix("focus:") {
+                    inner.ui_push(UiCommand::PaneFocus(id.to_string()));
+                    return None;
+                }
+                if let Some(dir) = v.chars().next().and_then(PaneDir::from_raw) {
+                    inner.ui_push(UiCommand::PaneMove(dir));
+                    return None;
+                }
+                return Some(json!({ "error": "pane:h|j|k|l|focus:ID" }));
             }
             let panes = inner.panel_list();
             if let Some(id) = v.strip_prefix("focus:") {
@@ -2813,6 +2840,10 @@ mod daemon_ui {
         last_other_click: Rc<Cell<f64>>,
         /// The global click monitor (`globalClickMonitor`).
         click_monitor: RefCell<Option<Retained<AnyObject>>>,
+        /// `PaneNav.shared` over the shared window's real panes.
+        live_nav: RefCell<crate::app::live_panes::LiveNav>,
+        /// Last published `state.pane` (only re-sent on change).
+        live_pane_sig: RefCell<String>,
     }
 
     define_class!(
@@ -2886,9 +2917,26 @@ mod daemon_ui {
             bridge_mtime: Cell::new(None),
             last_other_click: Rc::new(Cell::new(0.0)),
             click_monitor: RefCell::new(None),
+            live_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
+            live_pane_sig: RefCell::new(String::new()),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
+        {
+            // Return / Esc on a sidebar rail hands the keyboard right.
+            crate::ui::sidebar::set_leave_right(Box::new(|| {
+                if let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) {
+                    ui.live_pane_move(PaneDir::Right);
+                }
+            }));
+            let s = ui.ivars().controller.settings();
+            let c = s.pane_focus_color;
+            let byte = |v: f64| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
+            ui.ivars().live_nav.borrow_mut().style = crate::panes::pane_nav::RingStyle {
+                color_argb: byte(c.a) << 24 | byte(c.r) << 16 | byte(c.g) << 8 | byte(c.b),
+                width: s.pane_focus_width,
+            };
+        }
         // The Recent seed runs `mdfind`: start it after launch settles.
         dispatch2::DispatchQueue::main()
             .after(dispatch2::DispatchTime::NOW.time(2_000_000_000), configure_recent_and_shelf)
@@ -2976,6 +3024,14 @@ mod daemon_ui {
                             self.route_reset_size();
                         }
                         UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
+                        UiCommand::PaneMove(dir) => {
+                            self.live_pane_move(dir);
+                        }
+                        UiCommand::PaneFocus(id) => {
+                            if !self.live_pane_focus(&id) {
+                                self.ivars().controller.log(&format!("pane:focus:{id}: no such pane"));
+                            }
+                        }
                     }
                 }
             }
@@ -2983,6 +3039,7 @@ mod daemon_ui {
             self.sync_member_states();
             self.sync_compare();
             self.watch_focus();
+            self.live_pane_refresh();
             self.refresh_workspace_strip();
             self.refresh_files_recent();
             self.refresh_jira();
@@ -3823,7 +3880,7 @@ mod daemon_ui {
                         popup::Direction::Up => PaneDir::Up,
                         popup::Direction::Down => PaneDir::Down,
                     };
-                    self.ivars().controller.pane_move(pane_dir);
+                    self.live_pane_move(pane_dir);
                     return true;
                 }
                 popup::PrefixOutcome::Command(ch) => {
@@ -3831,6 +3888,18 @@ mod daemon_ui {
                     return true;
                 }
                 popup::PrefixOutcome::Passthrough => {}
+            }
+
+            // `(w.firstResponder as? PopupTabsBar)?.handleNavKey(e)`: a rail
+            // with the keyboard owns ↑↓ / Return / Esc / letters.
+            let rail = self.ivars().state.borrow().as_ref().and_then(|st| st.window.firstResponder());
+            if let Some(r) = rail {
+                let any: &AnyObject = unsafe { &*(&*r as *const objc2_app_kit::NSResponder as *const AnyObject) };
+                if let Some(bar) = any.downcast_ref::<crate::ui::sidebar::SidebarView>() {
+                    if bar.handle_nav_key(event) {
+                        return true;
+                    }
+                }
             }
 
             let current = self.ivars().controller.current();
@@ -4351,6 +4420,66 @@ mod daemon_ui {
         }
 
         /// Run `f` against the notes surface when it exists.
+        /// The current member's `navPanes` (real AppKit views) + the window.
+        fn live_panes(&self) -> Option<(Retained<SlotHostWindow>, Vec<crate::app::live_panes::LivePane>)> {
+            let state = self.ivars().state.borrow();
+            let st = state.as_ref()?;
+            let panes = match st.current? {
+                SlotView::Notes => st.notes.as_ref()?.nav_panes(),
+                SlotView::Files => st.files.as_ref()?.view.as_ref()?.nav_panes(),
+                SlotView::Jira => st.jira.as_ref()?.1.nav_panes(),
+                SlotView::Confluence => st.confluence.as_ref()?.view.nav_panes(),
+                SlotView::Ai => st.ai.as_ref()?.view.nav_panes(),
+                SlotView::Compare | SlotView::CompareText => st.compare.as_ref()?.nav_panes(),
+                _ => return None,
+            };
+            Some((st.window.clone(), panes))
+        }
+
+        /// `PaneNav.shared.move(_:in:)` on the live window (Ctrl+HJKL).
+        fn live_pane_move(&self, dir: PaneDir) -> bool {
+            let Some((w, panes)) = self.live_panes() else { return false };
+            let split = |d: PaneDir| self.notes_surface(|s| s.vim_split_move(d)).unwrap_or(false);
+            let moved = self.ivars().live_nav.borrow_mut().move_dir(&w, &panes, dir, &split);
+            self.publish_live_pane(&w, &panes);
+            moved
+        }
+
+        /// `PaneNav.shared.focus(_:in:)` (`do:pane:focus:<id>`).
+        fn live_pane_focus(&self, id: &str) -> bool {
+            let Some((w, panes)) = self.live_panes() else { return false };
+            let ok = self.ivars().live_nav.borrow_mut().focus(&w, &panes, id);
+            self.publish_live_pane(&w, &panes);
+            ok
+        }
+
+        /// `refreshSoon`: keep the ring on whatever holds the keyboard (a
+        /// click, a sheet, a view switch) — run from the drain tick.
+        fn live_pane_refresh(&self) {
+            match self.live_panes() {
+                Some((w, panes)) => {
+                    self.ivars().live_nav.borrow_mut().refresh(&w, &panes);
+                    self.publish_live_pane(&w, &panes);
+                }
+                None => {
+                    let sig = "none".to_string();
+                    if *self.ivars().live_pane_sig.borrow() != sig {
+                        *self.ivars().live_pane_sig.borrow_mut() = sig;
+                        self.ivars().controller.set_live_pane_state(json!({}));
+                    }
+                }
+            }
+        }
+
+        fn publish_live_pane(&self, w: &objc2_app_kit::NSWindow, panes: &[crate::app::live_panes::LivePane]) {
+            let doc = self.ivars().live_nav.borrow().test_state(w, panes);
+            let sig = doc.to_string();
+            if *self.ivars().live_pane_sig.borrow() != sig {
+                *self.ivars().live_pane_sig.borrow_mut() = sig;
+                self.ivars().controller.set_live_pane_state(doc);
+            }
+        }
+
         fn notes_surface<R>(&self, f: impl FnOnce(&mut crate::views::notes::NotesSurface) -> R) -> Option<R> {
             let mut state = self.ivars().state.borrow_mut();
             state

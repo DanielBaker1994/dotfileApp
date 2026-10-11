@@ -1558,6 +1558,7 @@ mod appkit {
         pub struct JiraView;
 
         impl JiraView {
+
             #[unsafe(method(isFlipped))]
             fn is_flipped(&self) -> bool { true }
 
@@ -1597,6 +1598,17 @@ mod appkit {
     );
 
     impl JiraView {
+        /// `JiraDashboard.navPanes`: sidebar, search, list, issue.
+        pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
+            use crate::app::live_panes::LivePane;
+            let iv = self.ivars();
+            vec![
+                LivePane::new("sidebar", &iv.sidebar),
+                LivePane::new("search", &iv.search_box).focusing(&iv.search),
+                LivePane::new("list", &iv.scroll).focusing(&iv.table),
+                LivePane::new("issue", &iv.inspector),
+            ]
+        }
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64, inspector_w: f64) -> Retained<Self> {
             let snap = Rc::new(RefCell::new(JiraSnapshot::default()));
             let sidebar = SidebarView::new(mtm, colors);
