@@ -22,6 +22,5 @@ git show <commit>:AGENT_CONTEXT.md   # the old full document
 - `rule.md` — the non-negotiable UX/git/SwiftTerm rules.
 - `PLAN-rust-port.md` — Rust port status, remaining `todo!()` seams, and the
   Phase-4 parity cutover gate.
-- `REVIEW-architecture.md` — known IPC/architecture debt.
-- `BACKLOG.md`, `PRD-*.md`, `PLAN-*.md`, `FINDINGS-*.md`, `PRODUCT.md`,
-  `DESIGN.md`, `README.md` — project-specific deep dives.
+- `BACKLOG.md`, `PRD-*.md`, `PRODUCT.md`, `DESIGN.md`, `README.md` — deep
+  dives for the parts they cover.

@@ -1,4 +1,4 @@
-"""ONE JSON data manager for the shipped JSON homes (PLAN-json-manager).
+"""ONE JSON data manager for the shipped JSON homes.
 
 Every shipped ``*.json`` file (15 homes: pylib, jira, confluence, notify,
 settings_hub) loads through this module: one parse per home per process,

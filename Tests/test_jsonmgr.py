@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""jsonmgr — the one JSON data manager (PLAN-json-manager, wave M0).
+"""jsonmgr — the one JSON data manager (wave M0).
 
     python3 Tests/test_jsonmgr.py
 

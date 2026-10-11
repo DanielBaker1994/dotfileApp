@@ -193,7 +193,7 @@ impl Paths {
 /// `JiraPaths` — resolved once through the helper (`jira.paths`, the same
 /// method the Swift reads and `jira_paths.py` owns). A failed resolution is
 /// an EXPLICIT state so Jira is disabled visibly; it never turns into
-/// relative / empty paths (REVIEW-architecture #6b).
+/// relative / empty paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JiraPaths {
     pub config_json: String,

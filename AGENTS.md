@@ -208,13 +208,11 @@ root); `Tests/` (Python tests + `helper_fixtures/`, `snippet_render/`,
 
 ### Docs
 
-`rule.md` (non-negotiables), `PLAN-rust-port.md` (port history + cutover),
-`HANDOFF-rust-port-next.md` (latest status / open items),
-`PLAN-json-manager.md`, `PLAN-data-out-of-code.md`, `PLAN-py-core.md`,
-`PRD-*.md` (`PRD-keyboard.md` = pane/vim spec; `PRD-compare.md`; …),
-`REVIEW-architecture.md`, `FINDINGS-*.md`, `BACKLOG.md`, `PRODUCT.md`,
-`DESIGN.md`, `README.md`. Older plans/PRDs name Swift files — map them to the
-Rust module of the same name.
+`rule.md` (non-negotiables), `HANDOFF-rust-port-next.md` (latest status /
+open items), `PLAN-rust-port.md` (port history + cutover), `PRD-*.md`
+(`PRD-keyboard.md` = pane/vim spec; `PRD-compare.md`; …), `BACKLOG.md`,
+`PRODUCT.md`, `DESIGN.md`, `README.md`. Older plans/PRDs name Swift files —
+map them to the Rust module of the same name.
 
 ## Architecture
 

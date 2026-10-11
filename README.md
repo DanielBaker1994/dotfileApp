@@ -4,6 +4,23 @@ A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
 with a borders focused-window outline. Native AppKit app written in Rust
 (objc2; `rust/`), no runtime dependencies beyond what the installer brings.
 
+## Docs map
+
+The repo has a lot of markdown; start here:
+
+| You want | Read |
+| --- | --- |
+| current state / next work | `HANDOFF-rust-port-next.md` |
+| repo layout, commands, conventions | `AGENTS.md` (`AGENT_CONTEXT.md` / `CLAUDE.md` only point at it) |
+| non-negotiable UX rules | `rule.md` |
+| open bugs / ideas | `BACKLOG.md` |
+| a feature spec | its `PRD-<feature>.md` (+ the matching `PLAN-<feature>.md` for build order) |
+| what the product is / how it should look | `PRODUCT.md`, `DESIGN.md` |
+
+Consumed prompts, session reports and finished plans get deleted as their work
+lands — for history, use `git log`. Live docs say so at the top; when in
+doubt, the code is truth.
+
 ## Install (end user — pick one)
 
 ### The app (disk image)
