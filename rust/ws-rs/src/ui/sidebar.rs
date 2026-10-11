@@ -641,6 +641,22 @@ mod appkit {
             true
         }
 
+        /// `PopupTabsBar: VimRows` — titles (pinned then rows), cursor, page.
+        pub fn vim_rows(&self) -> (Vec<String>, usize, usize) {
+            let m = self.ivars().model.borrow();
+            let mut t: Vec<String> = m.pinned.iter().map(|p| p.label.clone()).collect();
+            t.extend(m.rows.iter().map(|r| r.title.clone()));
+            let page = (self.geometry().list.height / (ROW_H + 1.0)) as usize;
+            (t, self.ivars().cursor.get(), page.max(1))
+        }
+
+        /// `vimMove(to:)`: move the keyboard cursor.
+        pub fn vim_move(&self, row: usize) {
+            self.ivars().cursor.set(row);
+            self.reveal_cursor();
+            self.setNeedsDisplay(true);
+        }
+
         /// `activate(row:)`: pinned rows open their key, list rows select.
         fn activate(&self, row: usize) {
             let ev = {

@@ -2477,6 +2477,7 @@ pub use daemon_ui::install_daemon_ui;
 
 #[cfg(target_os = "macos")]
 mod daemon_ui {
+    mod host_vim;
     use super::{DrawerSide, MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue, DEFAULT_VIEW};
     use crate::app::registry::{RectI, SlotView};
     use crate::panes::pane_geometry::PaneDir;
@@ -2844,6 +2845,8 @@ mod daemon_ui {
         live_nav: RefCell<crate::app::live_panes::LiveNav>,
         /// Last published `state.pane` (only re-sent on change).
         live_pane_sig: RefCell<String>,
+        /// `VimKeys.shared` + its search bar / mode badge.
+        vim: RefCell<host_vim::VimHost>,
     }
 
     define_class!(
@@ -2919,6 +2922,7 @@ mod daemon_ui {
             click_monitor: RefCell::new(None),
             live_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
             live_pane_sig: RefCell::new(String::new()),
+            vim: RefCell::new(host_vim::VimHost::default()),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
@@ -2932,6 +2936,7 @@ mod daemon_ui {
             let s = ui.ivars().controller.settings();
             let c = s.pane_focus_color;
             let byte = |v: f64| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xff;
+            ui.ivars().vim.borrow_mut().keys.enabled = s.vim_keys;
             ui.ivars().live_nav.borrow_mut().style = crate::panes::pane_nav::RingStyle {
                 color_argb: byte(c.a) << 24 | byte(c.r) << 16 | byte(c.g) << 8 | byte(c.b),
                 width: s.pane_focus_width,
@@ -3823,6 +3828,11 @@ mod daemon_ui {
                 }
             }
 
+            // `VimKeys.searching(in:)`: an open `/` bar owns every key.
+            if self.vim_searching() {
+                return self.vim_key(event);
+            }
+
             // `overlayKey`: the shortcuts sheet owns the keyboard while up.
             let sheet = self.ivars().state.borrow().as_ref().and_then(|st| st.shortcuts.clone());
             if let Some(sheet) = sheet {
@@ -3888,6 +3898,11 @@ mod daemon_ui {
                     return true;
                 }
                 popup::PrefixOutcome::Passthrough => {}
+            }
+
+            // `if !armed, VimKeys.shared.handle(e, in: w)`.
+            if self.vim_key(event) {
+                return true;
             }
 
             // `(w.firstResponder as? PopupTabsBar)?.handleNavKey(e)`: a rail
@@ -4459,6 +4474,7 @@ mod daemon_ui {
             match self.live_panes() {
                 Some((w, panes)) => {
                     self.ivars().live_nav.borrow_mut().refresh(&w, &panes);
+                    self.vim_refresh(&w, &panes);
                     self.publish_live_pane(&w, &panes);
                 }
                 None => {
@@ -4472,7 +4488,12 @@ mod daemon_ui {
         }
 
         fn publish_live_pane(&self, w: &objc2_app_kit::NSWindow, panes: &[crate::app::live_panes::LivePane]) {
-            let doc = self.ivars().live_nav.borrow().test_state(w, panes);
+            let mut doc = self.ivars().live_nav.borrow().test_state(w, panes);
+            if let (Some(o), Some(v)) = (doc.as_object_mut(), self.vim_test_state().as_object()) {
+                for (k, val) in v {
+                    o.insert(k.clone(), val.clone());
+                }
+            }
             let sig = doc.to_string();
             if *self.ivars().live_pane_sig.borrow() != sig {
                 *self.ivars().live_pane_sig.borrow_mut() = sig;
