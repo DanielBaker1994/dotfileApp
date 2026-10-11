@@ -1296,12 +1296,20 @@ mod macos {
 
     // -- the `show` command palette panel -----------------------------------
 
+    /// The palette is wider than the switcher: two panes side by side.
+    pub const PALETTE_WIDTH: f64 = 680.0;
+
+    /// `splitMid(_:)`.
+    pub fn split_mid(width: f64) -> f64 {
+        (width * 0.46).round()
+    }
+
     pub const PALETTE_SEARCH_PLACEHOLDER: &str =
         "commands + workspaces — type to filter · ↩ run · ⇥ pane";
 
     pub struct PaletteHandlerIvars {
         pub model: RefCell<PaletteModel>,
-        pub rows_view: Retained<NSView>,
+        pub rows_view: Retained<crate::ui::list_panel::ListRows>,
         pub search: Retained<NSTextField>,
         pub panel: Retained<crate::ui::popup::PopupPanel>,
         pub on_action: RefCell<Option<Box<dyn FnMut(PaletteAction)>>>,
@@ -1362,7 +1370,7 @@ mod macos {
         pub fn new(
             mtm: MainThreadMarker,
             model: PaletteModel,
-            rows_view: Retained<NSView>,
+            rows_view: Retained<crate::ui::list_panel::ListRows>,
             search: Retained<NSTextField>,
             panel: Retained<crate::ui::popup::PopupPanel>,
             on_action: Option<Box<dyn FnMut(PaletteAction)>>,
@@ -1391,62 +1399,99 @@ mod macos {
             self.ivars().model.borrow_mut()
         }
 
-        /// Replace the row buttons from the model; the selected row carries a
-        /// tinted background.
+        /// Push the model's rows / selection into the drawn list and size the
+        /// panel to them (top edge kept).
         pub fn rebuild(&self) {
-            let rows_view = &self.ivars().rows_view;
-            let subs = rows_view.subviews();
-            for s in &subs {
-                s.removeFromSuperview();
-            }
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
+            let (n, sel) = {
+                let model = self.ivars().model.borrow();
+                (model.rows().len(), model.selection)
             };
+            self.ivars().rows_view.set_count(n, sel);
+            let h = crate::ui::list_panel::panel_height(n, ROW_HEIGHT, MAX_ROWS);
+            let panel = &self.ivars().panel;
+            let f = panel.frame();
+            let top = f.origin.y + f.size.height;
+            panel.setFrame_display(
+                NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(PALETTE_WIDTH, h)),
+                true,
+            );
+        }
+
+        /// A click: the half picks the pane (`splitMid`), then accept.
+        pub fn click(&self, row: usize, x: f64) {
+            let action = {
+                let mut m = self.ivars().model.borrow_mut();
+                m.selection = row;
+                m.split_pane = if x < split_mid(PALETTE_WIDTH) { 0 } else { 1 };
+                m.accept()
+            };
+            if let Some(action) = action {
+                self.ivars().panel.orderOut(None);
+                if let Some(cb) = self.ivars().on_action.borrow_mut().as_mut() {
+                    cb(action);
+                }
+            }
+        }
+
+        /// `drawSplitRow(_:_:_:)`: the command cell left of `splitMid`, the
+        /// workspace cell (id chip, apps / match, unread) right of it.
+        pub fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+            use crate::ui::chrome::Rect;
+            use crate::ui::style::{self, Weight};
+            let c = crate::ui::theme::PopupThemeDefaults::colors();
             let model = self.ivars().model.borrow();
             let rows = model.rows();
-            let total = rows.len().max(1);
-            for (i, row) in rows.iter().enumerate() {
-                let label = if row.command.is_some() || row.workspace.is_some() {
-                    row.summary()
-                } else {
-                    String::new()
-                };
-                let button = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        &NSString::from_str(&label),
-                        Some(as_any(self)),
-                        Some(objc2::sel!(pick:)),
-                        mtm,
-                    )
-                };
-                button.setTag(i as objc2_foundation::NSInteger);
-                button.setBordered(false);
-                button.setFrame(NSRect::new(
-                    NSPoint::new(0.0, i as f64 * ROW_HEIGHT),
-                    NSSize::new(PANEL_WIDTH, ROW_HEIGHT),
-                ));
-                button.setFont(Some(&NSFont::systemFontOfSize(12.5)));
-                button.setWantsLayer(true);
-                if let Some(layer) = button.layer() {
-                    let colors = crate::ui::theme::PopupThemeDefaults::colors();
-                    let bg = if i == model.selection && i < total {
-                        colors.highlight
-                    } else {
-                        crate::ui::theme::Rgba::from_u8(0, 0, 0, 0)
-                    };
-                    layer.setBackgroundColor(Some(&bg.to_nscolor().CGColor()));
+            let Some(r) = rows.get(i) else { return };
+            let mid = split_mid(rect.width);
+            style::fill_rect(Rect::new(mid, rect.y + 4.0, 1.0, rect.height - 8.0), c.text.with_alpha(0.1));
+            let pill = |x: f64, w: f64| Rect::new(x, rect.mid_y() - 13.0, w, 26.0);
+            if let Some((_, label)) = &r.command {
+                let on = selected && model.split_pane == 0;
+                let cell = pill(8.0, mid - 16.0);
+                if on {
+                    style::fill_rounded(cell, 6.0, c.highlight);
+                    style::fill_rounded(Rect::new(cell.x, cell.y + 5.0, 3.0, cell.height - 10.0), 1.5, c.accent);
                 }
-                rows_view.addSubview(&button);
+                let f = style::system_font(13.0, if on { Weight::Semibold } else { Weight::Regular });
+                style::draw_text_left(
+                    label,
+                    Rect::new(cell.x + 14.0, cell.y, cell.width - 22.0, cell.height),
+                    &f,
+                    if on { c.text } else { c.text.with_alpha(0.88) },
+                );
             }
-            let count = rows.len();
-            let (_, total_h) = panel_size(count);
-            rows_view.setFrame(NSRect::new(
-                NSPoint::new(0.0, SEARCH_HEIGHT),
-                NSSize::new(PANEL_WIDTH, (total_h - SEARCH_HEIGHT).max(0.0)),
-            ));
-            self.ivars()
-                .panel
-                .setContentSize(NSSize::new(PANEL_WIDTH, total_h));
+            if let Some(ws) = &r.workspace {
+                let on = selected && model.split_pane == 1;
+                let cell = pill(mid + 8.0, rect.width - mid - 16.0);
+                if on {
+                    style::fill_rounded(cell, 6.0, c.highlight);
+                    style::fill_rounded(Rect::new(cell.x, cell.y + 5.0, 3.0, cell.height - 10.0), 1.5, c.accent);
+                }
+                let mono = style::mono_font(11.5, Weight::Semibold);
+                let chip = Rect::new(cell.x + 10.0, cell.mid_y() - 9.0, 22.0, 18.0);
+                let tint = if ws.focused { c.accent } else { c.dim };
+                style::fill_rounded(chip, 5.0, tint.with_alpha(0.18));
+                let (tw, th) = style::text_size(&ws.id, &mono);
+                style::draw_text(&ws.id, chip.mid_x() - tw / 2.0, chip.mid_y() - th / 2.0, &mono, tint);
+                let mut right = cell.max_x() - 10.0;
+                if !ws.unread.is_empty() {
+                    let uf = style::system_font(10.5, Weight::Semibold);
+                    let uw = style::draw_text_right(&ws.unread, Rect::new(cell.x, cell.y, cell.width - 10.0, cell.height), &uf, c.tone(crate::ui::theme::PopupTone::Warning));
+                    right -= uw + 8.0;
+                }
+                let text = if !ws.match_text.is_empty() {
+                    ws.match_text.clone()
+                } else {
+                    ws.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(" · ")
+                };
+                let x = chip.max_x() + 10.0;
+                style::draw_text_left(
+                    &text,
+                    Rect::new(x, cell.y, (right - x).max(0.0), cell.height),
+                    &style::system_font(12.5, if on { Weight::Medium } else { Weight::Regular }),
+                    if on { c.text } else { c.dim },
+                );
+            }
         }
     }
 
@@ -1602,7 +1647,7 @@ mod macos {
             }
             if let Some(panel) = &self.window {
                 let count = self.model.rows().len();
-                let (w, h) = panel_size(count);
+                let (w, h) = (PALETTE_WIDTH, crate::ui::list_panel::panel_height(count, ROW_HEIGHT, MAX_ROWS));
                 panel.setContentSize(NSSize::new(w, h));
                 if let Some(host) = host {
                     let (x, y) = panel_origin(host, (w, h));
@@ -1618,53 +1663,80 @@ mod macos {
         }
 
         fn build_macos(&mut self, mtm: MainThreadMarker) {
+            use crate::ui::list_panel::ListPanel;
             use crate::ui::popup::PopupConfig;
 
-            let (w, h) = panel_size(self.model.rows().len());
+            let colors = crate::ui::theme::PopupThemeDefaults::colors();
+            let list = ListPanel::new(mtm, colors, PALETTE_WIDTH, ROW_HEIGHT, PALETTE_SEARCH_PLACEHOLDER);
+            let h = list.height(self.model.rows().len(), MAX_ROWS);
             let config = PopupConfig {
                 name: "palette".to_string(),
-                frame: crate::ui::popup::CardFrame {
-                    x: 0.0,
-                    y: 0.0,
-                    width: w,
-                    height: h,
-                },
+                frame: crate::ui::popup::CardFrame { x: 0.0, y: 0.0, width: PALETTE_WIDTH, height: h },
                 tool_panel: true,
                 floating: true,
                 ..PopupConfig::default()
             };
             let panel = crate::ui::popup::PopupPanel::create(mtm, &config);
-
-            let root = SwitchFlippedView::new(mtm);
-            let search = make_search(mtm);
-            search.setPlaceholderString(Some(&NSString::from_str(PALETTE_SEARCH_PLACEHOLDER)));
-            search.setFrame(NSRect::new(
-                NSPoint::new(PANEL_MARGIN, PANEL_MARGIN),
-                NSSize::new(w - PANEL_MARGIN * 2.0, SEARCH_HEIGHT - PANEL_MARGIN),
-            ));
-            search.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
-            let rows_view = SwitchFlippedView::new(mtm);
-            rows_view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
-            root.addSubview(&search);
-            root.addSubview(&rows_view);
-            panel.setContentView(Some(&root));
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+            panel.setHasShadow(true);
+            panel.setContentView(Some(&list.root));
 
             let handler = PaletteHandler::new(
                 mtm,
                 self.model.clone(),
-                rows_view.clone().into_super(),
-                search.clone(),
+                list.rows.clone(),
+                list.search.clone(),
                 panel.clone(),
                 self.on_action.take(),
                 self.on_close.take(),
             );
-            unsafe { search.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*handler))) };
             retain_palette_handler(&handler);
+            let weak = objc2::rc::Weak::from_retained(&handler);
+            list.set_drawer(Box::new(move |r, i, sel, _hover| {
+                if let Some(h) = weak.load() {
+                    h.draw_row(r, i, sel);
+                }
+            }));
+            let weak = objc2::rc::Weak::from_retained(&handler);
+            list.set_on_click(Box::new(move |row, x, _double| {
+                if let Some(h) = weak.load() {
+                    h.click(row, x);
+                }
+            }));
+            let (w1, w2) = (objc2::rc::Weak::from_retained(&handler), objc2::rc::Weak::from_retained(&handler));
+            list.set_on_field(
+                Box::new(move |q: String| {
+                    if let Some(h) = w1.load() {
+                        h.ivars().model.borrow_mut().set_query(&q);
+                        h.rebuild();
+                    }
+                }),
+                Box::new(move |cmd| {
+                    // Arrows / Return / Esc come through the host's key
+                    // monitor first; this covers a click-focused field.
+                    let Some(h) = w2.load() else { return false };
+                    if cmd == "cancelOperation:" {
+                        h.ivars().panel.orderOut(None);
+                        if let Some(cb) = h.ivars().on_close.borrow_mut().as_mut() {
+                            cb();
+                        }
+                        return true;
+                    }
+                    false
+                }),
+            );
             handler.rebuild();
 
             self.window = Some(panel);
             self.handler = Some(handler);
+            PALETTE_LISTS.with(|l| l.borrow_mut().push(list));
         }
+    }
+
+    thread_local! {
+        /// The palettes' list pieces (the field delegate lives on them).
+        static PALETTE_LISTS: RefCell<Vec<crate::ui::list_panel::ListPanel>> = const { RefCell::new(Vec::new()) };
     }
 }
 

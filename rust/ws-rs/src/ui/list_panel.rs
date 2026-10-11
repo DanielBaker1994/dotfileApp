@@ -142,6 +142,15 @@ mod appkit {
         }
     }
 
+    impl ListRows {
+        /// New row count / selection (for owners that keep only the rows).
+        pub fn set_count(&self, count: usize, selection: usize) {
+            self.ivars().count.set(count);
+            self.ivars().selection.set(selection);
+            self.setNeedsDisplay(true);
+        }
+    }
+
     /// The built panel pieces.
     pub struct ListPanel {
         pub root: Retained<NSView>,
