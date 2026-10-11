@@ -13,10 +13,20 @@ pub enum MenuEntry {
         enabled: bool,
         /// A color swatch drawn as the item image (the theme presets).
         swatch: Option<crate::ui::theme::Rgba>,
+        /// Runs while the row is highlighted (live preview on hover).
+        hover: Option<std::rc::Rc<dyn Fn()>>,
         action: Box<dyn FnOnce()>,
     },
-    /// A nested submenu (`NSMenuItem.submenu`).
-    Submenu { title: String, checked: bool, swatch: Option<crate::ui::theme::Rgba>, entries: Vec<MenuEntry> },
+    /// A nested submenu (`NSMenuItem.submenu`). `restore` undoes the hover
+    /// previews of its rows when the pointer leaves them or the menu closes.
+    Submenu {
+        title: String,
+        checked: bool,
+        swatch: Option<crate::ui::theme::Rgba>,
+        hover: Option<std::rc::Rc<dyn Fn()>>,
+        restore: Option<std::rc::Rc<dyn Fn()>>,
+        entries: Vec<MenuEntry>,
+    },
     /// A section title (`NSMenuItem.sectionHeader(title:)`).
     Header(String),
     Separator,
@@ -24,19 +34,19 @@ pub enum MenuEntry {
 
 impl MenuEntry {
     pub fn item(title: &str, action: impl FnOnce() + 'static) -> Self {
-        MenuEntry::Item { title: title.to_string(), checked: false, enabled: true, swatch: None, action: Box::new(action) }
+        MenuEntry::Item { title: title.to_string(), checked: false, enabled: true, swatch: None, hover: None, action: Box::new(action) }
     }
 
     pub fn checked(title: &str, on: bool, action: impl FnOnce() + 'static) -> Self {
-        MenuEntry::Item { title: title.to_string(), checked: on, enabled: true, swatch: None, action: Box::new(action) }
+        MenuEntry::Item { title: title.to_string(), checked: on, enabled: true, swatch: None, hover: None, action: Box::new(action) }
     }
 
     pub fn disabled(title: &str) -> Self {
-        MenuEntry::Item { title: title.to_string(), checked: false, enabled: false, swatch: None, action: Box::new(|| {}) }
+        MenuEntry::Item { title: title.to_string(), checked: false, enabled: false, swatch: None, hover: None, action: Box::new(|| {}) }
     }
 
     pub fn submenu(title: &str, entries: Vec<MenuEntry>) -> Self {
-        MenuEntry::Submenu { title: title.to_string(), checked: false, swatch: None, entries }
+        MenuEntry::Submenu { title: title.to_string(), checked: false, swatch: None, hover: None, restore: None, entries }
     }
 
     /// Attach a color swatch (items and submenus).
@@ -44,6 +54,24 @@ impl MenuEntry {
         match &mut self {
             MenuEntry::Item { swatch, .. } | MenuEntry::Submenu { swatch, .. } => *swatch = Some(c),
             _ => {}
+        }
+        self
+    }
+
+    /// Run `f` while this row is highlighted (the Theme menu's live preview).
+    pub fn with_hover(mut self, f: impl Fn() + 'static) -> Self {
+        match &mut self {
+            MenuEntry::Item { hover, .. } | MenuEntry::Submenu { hover, .. } => *hover = Some(std::rc::Rc::new(f)),
+            _ => {}
+        }
+        self
+    }
+
+    /// On a submenu: undo the hover previews of its rows when the highlight
+    /// leaves them or the menu closes (`ThemePreviewDelegate.onClose`).
+    pub fn with_preview_restore(mut self, f: impl Fn() + 'static) -> Self {
+        if let MenuEntry::Submenu { restore, .. } = &mut self {
+            *restore = Some(std::rc::Rc::new(f));
         }
         self
     }
@@ -65,8 +93,10 @@ mod appkit {
     use objc2::runtime::{AnyObject, NSObject};
     use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuItem, NSView};
+    use objc2_app_kit::NSMenuDelegate;
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSString};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     pub struct PickIvars {
         chosen: Cell<Option<isize>>,
@@ -89,6 +119,65 @@ mod appkit {
 
         unsafe impl NSObjectProtocol for MenuPick {}
     );
+
+    pub struct HoverIvars {
+        /// Hover closures, indexed by the `representedObject` number.
+        hovers: RefCell<Vec<Rc<dyn Fn()>>>,
+        restore: Option<Rc<dyn Fn()>>,
+        current: Cell<isize>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSMenuHover"]
+        #[ivars = HoverIvars]
+        struct MenuHover;
+
+        unsafe impl NSObjectProtocol for MenuHover {}
+
+        unsafe impl NSMenuDelegate for MenuHover {
+            #[unsafe(method(menu:willHighlightItem:))]
+            fn will_highlight(&self, _menu: &NSMenu, item: Option<&NSMenuItem>) {
+                let idx: isize = item
+                    .and_then(|i| i.representedObject())
+                    .and_then(|o| o.downcast::<objc2_foundation::NSNumber>().ok())
+                    .map(|n| n.integerValue())
+                    .unwrap_or(-1);
+                if idx == self.ivars().current.get() {
+                    return;
+                }
+                self.ivars().current.set(idx);
+                let f = if idx >= 0 { self.ivars().hovers.borrow().get(idx as usize).cloned() } else { None };
+                match (f, &self.ivars().restore) {
+                    (Some(f), Some(r)) => {
+                        r();
+                        f();
+                    }
+                    (Some(f), None) => f(),
+                    (None, Some(r)) => r(),
+                    (None, None) => {}
+                }
+            }
+
+            #[unsafe(method(menuDidClose:))]
+            fn menu_did_close(&self, _menu: &NSMenu) {
+                self.ivars().current.set(-1);
+                if let Some(r) = &self.ivars().restore {
+                    r();
+                }
+            }
+        }
+    );
+
+    /// Tag a row with its hover closure index.
+    fn set_hover(item: &NSMenuItem, hover: Option<Rc<dyn Fn()>>, hv: &mut Vec<Rc<dyn Fn()>>) {
+        if let Some(h) = hover {
+            let n = objc2_foundation::NSNumber::new_isize(hv.len() as isize);
+            unsafe { item.setRepresentedObject(Some(&n)) };
+            hv.push(h);
+        }
+    }
 
     /// A 14×14 rounded swatch image (`ThemePreset.swatch()`).
     fn swatch_image(c: crate::ui::theme::Rgba) -> Retained<objc2_app_kit::NSImage> {
@@ -116,6 +205,8 @@ mod appkit {
         entries: Vec<MenuEntry>,
         target: &MenuPick,
         actions: &mut Vec<Option<Box<dyn FnOnce()>>>,
+        keep: &mut Vec<Retained<MenuHover>>,
+        hv: &mut Vec<Rc<dyn Fn()>>,
     ) {
         for e in entries {
             match e {
@@ -124,7 +215,7 @@ mod appkit {
                     let item = NSMenuItem::sectionHeaderWithTitle(&NSString::from_str(&title), mtm);
                     menu.addItem(&item);
                 }
-                MenuEntry::Submenu { title, checked, swatch, entries } => {
+                MenuEntry::Submenu { title, checked, swatch, hover, restore, entries } => {
                     let item = unsafe {
                         NSMenuItem::initWithTitle_action_keyEquivalent(
                             NSMenuItem::alloc(mtm),
@@ -137,13 +228,29 @@ mod appkit {
                     if let Some(c) = swatch {
                         item.setImage(Some(&swatch_image(c)));
                     }
+                    set_hover(&item, hover, hv);
                     let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(&title));
                     sub.setAutoenablesItems(false);
-                    fill(mtm, &sub, entries, target, actions);
+                    // A submenu with a restore hook previews its rows: its own
+                    // delegate owns the rows' hover closures.
+                    if restore.is_some() {
+                        let mut local: Vec<Rc<dyn Fn()>> = Vec::new();
+                        fill(mtm, &sub, entries, target, actions, keep, &mut local);
+                        let d = MenuHover::alloc(mtm).set_ivars(HoverIvars {
+                            hovers: RefCell::new(local),
+                            restore,
+                            current: Cell::new(-1),
+                        });
+                        let d: Retained<MenuHover> = unsafe { msg_send![super(d), init] };
+                        sub.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*d)));
+                        keep.push(d);
+                    } else {
+                        fill(mtm, &sub, entries, target, actions, keep, hv);
+                    }
                     item.setSubmenu(Some(&sub));
                     menu.addItem(&item);
                 }
-                MenuEntry::Item { title, checked, enabled, swatch, action } => {
+                MenuEntry::Item { title, checked, enabled, swatch, hover, action } => {
                     let item = unsafe {
                         NSMenuItem::initWithTitle_action_keyEquivalent(
                             NSMenuItem::alloc(mtm),
@@ -159,6 +266,7 @@ mod appkit {
                     if let Some(c) = swatch {
                         item.setImage(Some(&swatch_image(c)));
                     }
+                    set_hover(&item, hover, hv);
                     menu.addItem(&item);
                     actions.push(Some(action));
                 }
@@ -195,7 +303,9 @@ mod appkit {
         let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
         let mut actions: Vec<Option<Box<dyn FnOnce()>>> = Vec::new();
-        fill(mtm, &menu, entries, &target, &mut actions);
+        let mut keep: Vec<Retained<MenuHover>> = Vec::new();
+        let mut hv: Vec<Rc<dyn Fn()>> = Vec::new();
+        fill(mtm, &menu, entries, &target, &mut actions, &mut keep, &mut hv);
         show(&menu);
         if let Some(i) = target.ivars().chosen.get() {
             if let Some(Some(a)) = actions.get_mut(i as usize).map(|a| a.take()) {

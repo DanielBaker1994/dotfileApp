@@ -5010,6 +5010,13 @@ mod daemon_ui {
                             }
                         })
                     };
+                    let wk = objc2::rc::Weak::from_retained(&self.retain());
+                    let pv = p.clone();
+                    let entry = entry.with_hover(move || {
+                        if let Some(ui) = wk.load() {
+                            ui.preview_theme_preset(section, &pv, ThemeScope::Window);
+                        }
+                    });
                     theme.push(entry.with_swatch(p.background).with_checked(on));
                 }
             }
@@ -5027,7 +5034,14 @@ mod daemon_ui {
             let conf = self.ivars().controller.settings().commands_conf_path();
             let c = self.ivars().controller.clone();
             let entries = vec![
-                MenuEntry::submenu("Theme", theme),
+                MenuEntry::submenu("Theme", theme).with_preview_restore({
+                    let wk = objc2::rc::Weak::from_retained(&self.retain());
+                    move || {
+                        if let Some(ui) = wk.load() {
+                            ui.after_theme_change(None);
+                        }
+                    }
+                }),
                 MenuEntry::Separator,
                 MenuEntry::item("Reset Default Size", move || {
                     if let Some(ui) = w1.load() {
@@ -5061,6 +5075,34 @@ mod daemon_ui {
         /// `applyThemePreset(_:scope:to:section:)` — persist the preset's
         /// colors into `[section]`, then re-theme.
         fn apply_theme_preset(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) {
+            let kv = self.theme_preset_kv(section, p, scope);
+            crate::app::config::save_config_values(section, &kv);
+            self.ivars().controller.log(&format!("theme '{}' applied to [{section}]", p.name));
+            self.after_theme_change(None);
+        }
+
+        /// Hover preview (`applyThemePreset(persist: false)`): re-theme with the
+        /// preset's colors without touching `commands.toml`.
+        fn preview_theme_preset(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) {
+            let kv = self.theme_preset_kv(section, p, scope);
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let mut sections = super::parse_sections(&text);
+            let sec = sections.entry(section.to_string()).or_default();
+            for (k, v) in kv {
+                match v {
+                    Some(v) => {
+                        sec.insert(k, v);
+                    }
+                    None => {
+                        sec.remove(&k);
+                    }
+                }
+            }
+            self.after_theme_change(Some(sections));
+        }
+
+        /// The `[section]` keys a preset writes for `scope`.
+        fn theme_preset_kv(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) -> Vec<(String, Option<String>)> {
             use crate::ui::theme::HexColor;
             let cur = |k: &str| crate::views::notes::section_value(section, k).and_then(|v| HexColor::parse(v.trim()));
             // `max(current alpha, presetMinOpacity)`
@@ -5098,9 +5140,7 @@ mod daemon_ui {
                 let pal = p.palette.all().map(|c| HexColor::format_rgb(&c)).join(", ");
                 kv.push(("palette".to_string(), Some(pal)));
             }
-            crate::app::config::save_config_values(section, &kv);
-            self.ivars().controller.log(&format!("theme '{}' applied to [{section}]", p.name));
-            self.after_theme_change();
+            kv
         }
 
         /// `resetWindowTheme` — drop the section's color keys.
@@ -5114,14 +5154,16 @@ mod daemon_ui {
             .collect();
             crate::app::config::save_config_values(section, &kv);
             self.ivars().controller.log(&format!("theme reset for [{section}]"));
-            self.after_theme_change();
+            self.after_theme_change(None);
         }
 
         /// Reload `[theme]` + sections, then re-color the notes surface in
         /// place and rebuild any other current view with the new colors.
-        fn after_theme_change(&self) {
-            let text = crate::app::config::read_config_text().unwrap_or_default();
-            let sections = super::parse_sections(&text);
+        fn after_theme_change(&self, over: Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>>) {
+            let sections = over.unwrap_or_else(|| {
+                let text = crate::app::config::read_config_text().unwrap_or_default();
+                super::parse_sections(&text)
+            });
             crate::ui::theme::install_theme(&sections.get("theme").cloned().unwrap_or_default(), sections);
             let Some(v) = self.ivars().controller.current() else { return };
             if v == SlotView::Notes {

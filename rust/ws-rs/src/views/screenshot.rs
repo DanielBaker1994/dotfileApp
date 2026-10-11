@@ -5210,6 +5210,20 @@ impl ScreenshotController {
                             disp.top_inset = scr.top_inset;
                             s.add_display(disp);
                         }
+                        // Start with the pointer where it is, so the mode pill
+                        // (and loupe) show before the first mouse move.
+                        #[cfg(target_os = "macos")]
+                        {
+                            let m = objc2_app_kit::NSEvent::mouseLocation();
+                            let hit = s.displays.iter().position(|d| {
+                                m.x >= d.frame.x && m.x < d.frame.x + d.frame.w
+                                    && m.y >= d.frame.y && m.y < d.frame.y + d.frame.h
+                            });
+                            if let Some(i) = hit {
+                                let f = s.displays[i].frame;
+                                s.mouse = Some((i, Point::new(m.x - f.x, f.y + f.h - m.y)));
+                            }
+                        }
                         #[cfg(target_os = "macos")]
                         for image in &images {
                             if let Some(i) = s.displays.iter().position(|d| d.id == image.display) {
