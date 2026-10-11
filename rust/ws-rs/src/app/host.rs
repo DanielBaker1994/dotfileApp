@@ -3702,7 +3702,7 @@ mod daemon_ui {
                 PathsCmd::Hide => win.hide_window(),
                 PathsCmd::Return => match win.return_action {
                     PathsReturn::Path => copy_text_to_pasteboard(&win.copy_paths_text()),
-                    PathsReturn::File => copy_files_to_pasteboard(&win.copy_files()),
+                    PathsReturn::File => { copy_files_toast(&win.copy_files()); }
                     PathsReturn::Open => {
                         for p in win.open_paths() {
                             open_path(&p);
@@ -3740,7 +3740,7 @@ mod daemon_ui {
             };
             match action {
                 PathsReturn::Path => copy_text_to_pasteboard(&text),
-                PathsReturn::File => copy_files_to_pasteboard(&files),
+                PathsReturn::File => { copy_files_toast(&files); }
                 PathsReturn::Open => {
                     for p in open {
                         open_path(&p);
@@ -3782,7 +3782,7 @@ mod daemon_ui {
                     let w1 = weak.clone();
                     popup(
                         vec![
-                            MenuEntry::item("Copy File", move || copy_files_to_pasteboard(&[p1])),
+                            MenuEntry::item("Copy File", move || { copy_files_toast(&[p1]); }),
                             MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p2)),
                             MenuEntry::Separator,
                             MenuEntry::item("Open in Notes", move || {
@@ -7379,15 +7379,16 @@ mod daemon_ui {
                 }
                 8 if cmd && !shift && in_list => {
                     let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
-                    copy_files_to_pasteboard(&paths);
-                    FILES_CUT.with(|c| c.set(false));
-                    crate::ui::toast::show(&format!("Copied {} item(s)", paths.len()), "doc.on.doc");
+                    if copy_files_toast(&paths) {
+                        FILES_CUT.with(|c| c.set(false));
+                    }
                 }
                 7 if cmd && in_list => {
                     let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
-                    copy_files_to_pasteboard(&paths);
-                    FILES_CUT.with(|c| c.set(true));
-                    crate::ui::toast::show(&format!("Cut {} item(s) · ⌘V moves them here", paths.len()), "scissors");
+                    if copy_files_to_pasteboard(&paths) {
+                        FILES_CUT.with(|c| c.set(true));
+                        crate::ui::toast::show(&format!("cut {} · ⌘V moves it here", copied_what(&paths)), "scissors");
+                    }
                 }
                 9 if cmd && in_list => {
                     let src = pasteboard_file_paths();
@@ -7697,7 +7698,7 @@ mod daemon_ui {
             }
             {
                 let ps = paths.clone();
-                entries.push(MenuEntry::item("Copy", move || copy_files_to_pasteboard(&ps)));
+                entries.push(MenuEntry::item("Copy", move || { copy_files_toast(&ps); }));
             }
             entries.push(MenuEntry::Separator);
             {
@@ -7929,8 +7930,7 @@ mod daemon_ui {
                 // The field delegate already routes these (`PathsEvent`).
                 PathsKey::Hide | PathsKey::Move(..) | PathsKey::RunDefault => return false,
                 PathsKey::CopyFiles => {
-                    copy_files_to_pasteboard(&paths);
-                    crate::ui::toast::show(&format!("Copied {} file(s)", paths.len()), "doc.on.doc");
+                    copy_files_toast(&paths);
                 }
                 PathsKey::CopyPaths => {
                     if !paths.is_empty() {
@@ -9107,22 +9107,48 @@ mod daemon_ui {
             .unwrap_or_default()
     }
 
-    fn copy_files_to_pasteboard(paths: &[String]) {
+    /// Swift `copyFiles`: one pasteboard item per path carrying both a
+    /// `public.file-url` (Finder pastes the file) and a plain string (text
+    /// fields / terminals paste the path). Returns whether anything was written.
+    fn copy_files_to_pasteboard(paths: &[String]) -> bool {
         use objc2::runtime::ProtocolObject;
-        use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+        use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardWriting};
         use objc2_foundation::NSURL;
+        if paths.is_empty() {
+            return false;
+        }
         let pb = NSPasteboard::generalPasteboard();
         pb.clearContents();
         let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
             .iter()
             .map(|p| {
+                let item = NSPasteboardItem::new();
                 let url = NSURL::fileURLWithPath(&NSString::from_str(p));
-                ProtocolObject::from_retained(url)
+                if let Some(abs) = url.absoluteString() {
+                    let _ = item.setString_forType(&abs, unsafe { NSPasteboardTypeFileURL });
+                }
+                let _ = item.setString_forType(&NSString::from_str(p), unsafe { NSPasteboardTypeString });
+                ProtocolObject::from_retained(item)
             })
             .collect();
-        if !objects.is_empty() {
-            let array = objc2_foundation::NSArray::from_retained_slice(&objects);
-            let _ = pb.writeObjects(&array);
+        let array = objc2_foundation::NSArray::from_retained_slice(&objects);
+        pb.writeObjects(&array)
+    }
+
+    /// Copy files and toast Swift's wording; only toasts when something landed.
+    fn copy_files_toast(paths: &[String]) -> bool {
+        let ok = copy_files_to_pasteboard(paths);
+        if ok {
+            crate::ui::toast::show(&format!("copied {} · ⌘V pastes the file, or its path as text", copied_what(paths)), "doc.on.doc");
+        }
+        ok
+    }
+
+    /// Swift `items(n, leaf)`: “name” for one path, "N items" otherwise.
+    fn copied_what(paths: &[String]) -> String {
+        match paths {
+            [one] => format!("“{}”", std::path::Path::new(one).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()),
+            _ => format!("{} items", paths.len()),
         }
     }
 
