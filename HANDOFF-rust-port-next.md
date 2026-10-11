@@ -1,113 +1,121 @@
-# ▶ NEXT SESSION START HERE (rewritten Oct 11 2026, second session)
+# ▶ NEXT SESSION START HERE (rewritten Oct 11 2026, third session)
 
-Work directly on `main` (the old `rust-parity` branch was merged and deleted;
-don't create feature branches). Not pushed. Read
-this section, then `AGENTS.md` / `rule.md`. `PARITY-shortcuts.md` has
-per-row tables, but its ❌/🟡 marks predate this session; this section wins.
+Work directly on `main`. Don't create feature branches: the old
+`rust-parity` branch was merged and deleted at the owner's request. Nothing
+is pushed. Read this section, then `AGENTS.md` / `rule.md`.
+`PARITY-shortcuts.md` has per-row tables, but its ❌/🟡 marks predate the last
+two sessions; this section wins.
 
 ## Working rules (owner feedback, keep them)
 
 - Run `bin/parity-audit.sh` first (about 30 s, writes `.build/parity-audit.md`).
-  Socket and nvim verbs are now all ✅. Dead code is down from 709 to about 600 items.
 - A row is done only after you see it work in the live app (a screenshot, or
-  `state.pane` from real AppKit focus). Unit tests prove the model, not the feature.
-- **No retry loops.** If a live check fails, read the code and the AppKit API
-  semantics, then fix and verify once. Stop and report after two misses. (The
-  last session burned six rebuilds on an `NSView.hitTest` coordinate mistake.)
+  `state` from the socket). Unit tests prove the model, not the feature.
+- **No retry loops.** If a live check fails, read the code and the AppKit API,
+  then fix and verify once. Stop and report after two misses.
 - Stubs must be loud: use `crate::ui::toast::not_ported("what")`, never a silent log.
-- Test file ops only in `/tmp`. Don't open user files in other apps (Return
-  on a files row opens it in the default app). Don't flip `[jira] enabled`
-  on the owner's config (`jira-poll off` really disables polling).
-- Verify fast: `./ws build`, then `echo state | nc -U -w3 $TMPDIR/ws-notes.sock | jq .pane`,
-  `do:pane:focus:<id>`, real keys via `osascript … key code N using …`,
-  clicks via `cliclick`, window shots via `screencapture -o -l <wid>`.
-  Swift reference: `git archive 608d07d | tar -x -C <scratch>`.
+- Test file ops only in `/tmp`. Don't open user files in other apps. Don't flip
+  `[jira] enabled` on the owner's config.
+- **Stop GUI driving when the owner is at the machine.** `cliclick` and
+  `osascript` keys land in whatever is frontmost. Passive `screencapture -o -l
+  <wid>` is fine.
+- Verify fast: `./ws build`, then `echo state | nc -U -w3 $TMPDIR/ws-notes.sock | jq …`,
+  clicks via `cliclick` (top-left screen points), window shots via
+  `screencapture -o -l <wid>`. Swift reference: `git archive 608d07d | tar -x -C <scratch>`.
+- **Isolated test daemon** for config-dependent features (vim-mode off, Jira):
+  copy `commands.toml` to /tmp, edit it, then
+  `open -n -g --env TMPDIR=/tmp/x/rt/ --env WS_RS_ASSET_DIR=$PWD --env WS_COMMANDS_CONF=/tmp/x/commands.toml kitchen-sink.app --args notes`.
+  Stop it with `kill $(lsof -t /tmp/x/rt/ws-notes.sock)`. `[notes] paths` is
+  the notes tab list, so set it to a /tmp note.
+  **Jira gotcha:** `JIRA_CONFIG_JSON` alone is not isolation. With no file
+  there, `jira_config.py` migrates the owner's legacy config (token included)
+  into that path. Also set `JIRA_CONFIG_FILE`, `JIRA_TEAM_JSON` and
+  `JIRA_CACHE_DIR` to /tmp paths, and delete them afterwards. A successful
+  Save & Enable also runs `sync_launch_agent`, which touches the real
+  `~/Library/LaunchAgents/com.jira.poll.plist`.
+- To see a daemon's panic text, launch it with
+  `open -n -g --stderr <file> kitchen-sink.app --args notes`. Once this
+  session the daemon exited cleanly, with no crash report, around a
+  `do:screenshot:show`, and stderr was lost. It didn't happen again with
+  stderr captured.
 
-## Done this session (each verified live unless noted)
+## Done this session (all on main, each verified live unless noted)
 
-- Loud `not ported` toasts for remaining stubs (`UiCommand::Toast`).
-- **Ctrl+H/J/K/L** over real panes (`app/live_panes.rs`, each view's `nav_panes()`),
-  silver focus ring, nvim splits first. `state.pane` reports the live responder.
-- **Sidebar rail keyboard**: arrows / Ctrl+N/P, Return, Space, Esc, Delete, letter jump, cursor ring.
-- **Vim keys on non-nvim panes** (`app/host/daemon_ui/host_vim.rs`): j/k, gg/G,
-  Ctrl+D/U, `/` `?` `n` `N` with a search bar, i/a ↔ Esc between field and list,
-  NORMAL/INSERT badge. Rows, NSTextView and WKWebView targets.
-- **Leader+sf / leader+sg** (`views/note_find.rs`, `do:notes-find|grep`);
-  grep jumps nvim to the line. **`do:jira-jump`** sidebar jump.
-- `jira-poll on|off|toggle|dashboard` (`app/jira_poll.rs`: config check,
-  login test, launch agent sync). Only the already-on path was live-tested
-  (the owner's Jira is enabled).
-- **Cmd+K action picker** (`ui/action_picker.rs`) for Jira and Compare.
-- Per-view keys: AI (Ctrl/Cmd+Return, Esc stop, Cmd+L), Paths shelf (Cmd+C,
-  Cmd+Shift+C, Space / Cmd+Y, Cmd+O, Cmd+R, Cmd+Shift+R, Cmd+Delete), Jira
-  (Cmd+I, Ctrl+Space, Tab, Home/End/Page), Confluence (Cmd+L/F/G/D/R,
-  Cmd+Return, Cmd+C; copy unverified because no site is configured on this
-  Mac), Files (history, hidden, new folder, ← →, Space Quick Look, Cmd+C/X/V/D/Z,
-  Cmd+Delete), Compare text + folder (`CompareWindowModel::handle_key`).
-- **Inline rename** (`ui/inline_rename.rs`): files Cmd+R / F2, paths Cmd+R.
-- Hyper+S palette redrawn on `ListPanel` with split rows.
-- Each view focuses a sensible pane on show. Switcher "where" text for every
-  view. Cmd+± zooms the file list text. The notes editor now shrinks while
-  the terminal drawer is open (nvim rows used to sit under it).
+- `0aa467b` **Compare text pane menu** (`compare_pane_menu`): right-click
+  moves cursor and focus, then Copy, Copy (Line) to other side, Paste
+  Clipboard Here, Select Section, Align With / Remove / Clear All, Convert
+  Side, Copy Path, Reveal, Open in Notes / Default App, Open File into This
+  Side, Save This Side. Edit Section and Find toast (not routed yet).
+- `0539055` **Compare folder tree menu** (`compare_folder_menu`), including
+  a clash prompt (Replace / Keep Both / Skip) and the fixed `set_base`, which
+  used to set both roots to one side's path.
+- `8fb33e7` Compare session-row menu now matches Swift `pillMenu` (Close,
+  Copy / Reveal per side). The old handoff's "pill extras" list was wrong.
+  Recents gain Fill the Path Fields, Remove All Missing (n), Clear All Recents.
+- `523ef4d` **Jira header menu**: Fit Columns to Content (`fit_column_pcts`).
+  Saving the widths and Group By toast as not ported.
+- `6bd8f3d` **Screenshot pin menu**: copy, save, real pixel rotation
+  (`shot_cg::rotate_png`), opacity, close. Save not clicked live, because it
+  writes to the owner's screenshot folder.
+- `83eb2d6` **Recent screenshots grid** (`recent_grid`): ⌘R in the overlay
+  had been recorded and then ignored. Now there's the grid, click to reopen as
+  a pin, and a right-click menu. Adds `menu_kit::popup_context`: a plain
+  `popup` opens *below* windows above the menu level.
+- `6151396` **Notes plain-editor menu** (`WSNotesTextView`): image-link items
+  (Open Full Size toasts, because the FilePopup window isn't ported), Copy
+  File Path, Open file at path…. Verified in an isolated daemon.
+- `97bd455` **Jira setup window** (`ui/jira_setup.rs`). Verified live: it
+  opens and prefills. **Not yet verified live: Test Connection, Copy curl,
+  Save & Enable.** Do that first, in an isolated daemon with every Jira env
+  override (see the gotcha above), against `jira/fake_jira.py` on :8766.
 
 ## Still open (priority order)
 
-1. **Right-click menus** (rule.md #2). Already in Rust: files rows, paths rows,
-   notes sidebar, Jira rows, Confluence rows, AI rules, Compare sidebar pills
-   + recents (partial). Missing, with Swift items:
-   - Compare **text pane** (`ComparePane.rightMouseDown` → `CompareWindow.paneMenu`):
-     Copy · Copy to other side · Copy Line to other side · Paste Clipboard Here ·
-     Edit Section · Select Section · Find… · Align With… / Cancel / Remove This
-     Alignment / Clear All Alignments · Copy Path · Reveal in Finder · Open in
-     Notes · Open in Default App · Open File into This Side… · Save This Side.
-     The model has most of these (`CompareWindowModel::test_do`).
-   - Compare **folder tree** (`CompareFolderView.menu(_:_:)`): Copy/Move to
-     Right/Left · Rename… · New Folder… · Move to Trash · Copy Path · Reveal ·
-     Open in Notes · Open in Default App · Quick Look · Set as Base Folder
-     (Left/Right) · Exclude "<name>".
-   - Compare **pill** extras: Copy to other side, Copy Line, Paste Clipboard
-     Here, Edit Section, Select Section. **Recents** extras: Fill the Path
-     Fields, Remove All Missing, Clear All Recents.
-   - Jira **column header**: Fit Columns to Content.
-   - Screenshot **history grid**: Reopen as Pin · Copy · Open in Preview · Reveal
-     in Finder · Delete. Screenshot **pin**: Copy to clipboard · Save to file ·
-     Rotate Right/Left · Increase/Decrease Opacity · Close.
-   - Notes **plain editor** (vim-mode off, image links): Open Full Size · copy
-     image path · Copy File Path · Open file at path….
-   - **Terminal / nvim pane menus are parked by owner decision** (see 6).
-     For any new right-click code: `NSView.hitTest(_:)` takes the point in the
-     *superview's* coordinates. For a window's content view, pass
-     `event.locationInWindow()` unconverted. Converting into the (flipped)
-     content view mirrors y.
-2. Jira **setup window** (`JiraSetupWindow`) and Jira **live search** Cmd+F
-   (`JiraSearchPanel`). Both toast not-ported now. Both are large forms.
-3. Theme menu extras: live preview on hover, Custom Color…, Transparency ▸,
+1. Finish verifying the Jira setup window (see above). Its header text is
+   clipped at the third line (same 34 pt frame as Swift); widen it or shrink
+   the font if it looks wrong.
+2. Jira **live search** Cmd+F (`JiraSearchPanel`, JiraSearch.swift
+   729–1366, with `JiraMultiPicker` / `JiraChoiceButton`). Still toasts.
+3. Found this session:
+   - Folder copy/move from **keys and Cmd+K** (`folder-copy:*` →
+     `FolderPageState::transfer`) still overwrites without asking. Only the
+     right-click path prompts. Route both through
+     `compare_folder_transfer`.
+   - Some unit test writes 1–7 byte junk `shot-*.png` files into the
+     **real** `~/.cache/kitchen-sink/screenshots` (they show as blank cells
+     in the grid). Find it (`record_png` callers in tests) and point it at a
+     temp dir.
+   - The screenshot overlay's **recent button** (`ShotRecentButton`) isn't
+     drawn. ⌘R works.
+   - Jira **Group By** menu and saving fitted column widths
+     (`columnsResized` → `jira_config.py --set-columns`) aren't ported.
+   - The **FilePopup** window (notes Open Full Size, Swift `FilePopup.show`)
+     isn't ported.
+4. Theme menu extras: live preview on hover, Custom Color…, Transparency ▸,
    per-view card theme menu. Jira list text zoom (toasts).
-4. Small: `state.paths` (`selection`, `rowCount`) is stale between pushes. The
-   files listing doesn't watch the disk (a new file shows only after re-entering
-   the folder). Compare `Return` begin-edit and Cmd+C copy-rows are not routed.
-   Compare text Cmd+F/G find is not routed.
-5. Older items further down this file: hide-on-focus-loss bridge, nvim `:q`
+5. Small: `state.paths` (`selection`, `rowCount`) is stale between pushes. The
+   files listing doesn't watch the disk. Compare `Return` begin-edit, Cmd+C
+   copy-rows and Cmd+F/G find aren't routed; the text-pane menu toasts for
+   them.
+6. Older items further down this file: hide-on-focus-loss bridge, nvim `:q`
    relaunch, AeroSpace re-show (ask the owner), screenshot/compare gaps.
-6. **Terminal strategy (owner wants this):** drop SwiftTerm for a Rust-only
-   build. SwiftTerm costs a Swift toolchain step, the fetched checkout,
-   `patches/swiftterm-cellstorage-cache.patch`, the precompiled static lib and
-   `rust/swiftterm-shim/`. Plan: `alacritty_terminal` (VT parser, grid,
-   PTY / event loop) plus our own renderer, a Core Text–drawn `NSView` behind
-   the same API the shim exposes today (`create_terminal`, `start_process`,
-   `send_text`, `set_font`, `set_colors`, running / exit code), so the notes
-   nvim pane, the drawer and the `/terminal` panel switch over in one place.
-   Must cover: selection + copy/paste, mouse reporting (nvim), scrollback,
-   IME / dead keys, bold/italic/underline, 256 + truecolor, cursor shapes,
-   resize → PTY winsize, font fallback, and performance good enough for nvim.
-   Do it after parity, as its own branch.
+7. **Terminal / nvim right-click menus and the SwiftTerm replacement are
+   parked by owner decision.** Plan, when asked: `alacritty_terminal` plus a
+   Core Text `NSView` behind the shim's API (`create_terminal`,
+   `start_process`, `send_text`, `set_font`, `set_colors`, running / exit
+   code). It must cover selection + copy/paste, mouse reporting, scrollback,
+   IME, styles, 256 + truecolor, cursor shapes, winsize and font fallback.
+   Do it on `main`, after parity.
+
+Right-click notes for new code: `NSView.hitTest(_:)` takes the point in the
+*superview's* coordinates. Use `menu_kit::popup_context` from inside a
+`rightMouseDown:` when the window floats above the menu level.
 
 ## Uncommitted
 
 `samples/graphviz-showcase.md` line 1 changed from `doc paper clean` to
 `doc executive`. Probably from keystrokes sent into nvim during testing; the
 owner decides whether to revert.
-
 
 ---
 
