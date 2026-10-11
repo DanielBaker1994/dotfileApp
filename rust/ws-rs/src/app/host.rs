@@ -2838,6 +2838,11 @@ mod daemon_ui {
     }
 
     thread_local! {
+        /// Cmd+X in the file list: the next Cmd+V moves instead of copies.
+        static FILES_CUT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    thread_local! {
         /// The daemon UI, for main-thread hops from worker threads.
         static UI_WEAK: RefCell<Option<objc2::rc::Weak<DaemonUi>>> = const { RefCell::new(None) };
     }
@@ -4016,6 +4021,9 @@ mod daemon_ui {
 
             let current = self.ivars().controller.current();
             if current.is_some_and(|v| v.is_jira()) && self.jira_key(&key) {
+                return true;
+            }
+            if current == Some(SlotView::Files) && self.files_key(&key) {
                 return true;
             }
             if current == Some(SlotView::Confluence) && self.conf_key(&key) {
@@ -6776,6 +6784,111 @@ mod daemon_ui {
             true
         }
 
+        /// `PopupFileBrowser.handleShortcut` + `FileListPane` keys: history,
+        /// hidden files, new folder, parent / open, and (list focused) ← →,
+        /// Space Quick Look, Cmd+C/X/V files, Cmd+D, Cmd+Delete, Cmd+Z.
+        fn files_key(&self, key: &popup::KeyInput) -> bool {
+            use crate::engines::file_ops::FileOps;
+            let in_list = self.focused_pane_id().as_deref() == Some("files-list");
+            let (cmd, shift, opt, ctrl) = (key.cmd, key.shift, key.opt, key.ctrl);
+            let plain = !cmd && !ctrl && !opt && !shift;
+            let done = |ui: &Self, what: String, failed: Option<String>| {
+                ui.files_surface(|b| b.reload());
+                match failed {
+                    Some(f) => crate::ui::toast::show(&f, "exclamationmark.triangle.fill"),
+                    None if !what.is_empty() => crate::ui::toast::show(&what, "checkmark.circle.fill"),
+                    None => {}
+                }
+            };
+            match key.key_code {
+                33 if cmd => {
+                    self.files_surface(|b| b.go_back());
+                }
+                30 if cmd => {
+                    self.files_surface(|b| b.go_forward());
+                }
+                47 if cmd && shift => {
+                    self.files_surface(|b| b.toggle_hidden());
+                }
+                37 if cmd && !shift => {
+                    self.live_pane_focus("files-filter");
+                }
+                45 if cmd && shift => {
+                    let Some(Some(dir)) = self.files_surface(|b| b.ops_directory()) else { return true };
+                    let o = FileOps::create("untitled folder", &dir, true, FileOps::shared());
+                    done(self, String::new(), o.failed);
+                }
+                126 if cmd && !shift => {
+                    self.files_surface(|b| b.cd_parent());
+                }
+                125 if cmd && !shift && in_list => {
+                    self.files_accept_selected();
+                }
+                123 if plain && in_list => {
+                    self.files_surface(|b| b.cd_parent());
+                }
+                124 if plain && in_list => {
+                    let dir = self.files_surface(|b| {
+                        b.visible_rows().get(b.selection()).filter(|e| e.is_dir).map(|e| e.path.clone())
+                    });
+                    if let Some(Some(d)) = dir {
+                        self.files_surface(|b| b.cd(&d));
+                    }
+                }
+                49 if plain && in_list => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        self.files_surface(|b| b.toggle_quick_look(mtm));
+                    }
+                }
+                15 if cmd && !shift => crate::ui::toast::not_ported("Files inline rename"),
+                120 if !cmd && !ctrl => crate::ui::toast::not_ported("Files inline rename"),
+                51 if cmd && in_list => {
+                    let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+                    if paths.is_empty() {
+                        return true;
+                    }
+                    let o = FileOps::trash(&paths, FileOps::shared());
+                    done(self, format!("Moved {} item(s) to the Trash · ⌘Z undoes", paths.len()), o.failed);
+                }
+                2 if cmd && in_list => {
+                    let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+                    let o = FileOps::duplicate(&paths, FileOps::shared());
+                    done(self, String::new(), o.failed);
+                }
+                8 if cmd && !shift && in_list => {
+                    let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+                    copy_files_to_pasteboard(&paths);
+                    FILES_CUT.with(|c| c.set(false));
+                    crate::ui::toast::show(&format!("Copied {} item(s)", paths.len()), "doc.on.doc");
+                }
+                7 if cmd && in_list => {
+                    let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+                    copy_files_to_pasteboard(&paths);
+                    FILES_CUT.with(|c| c.set(true));
+                    crate::ui::toast::show(&format!("Cut {} item(s) · ⌘V moves them here", paths.len()), "scissors");
+                }
+                9 if cmd && in_list => {
+                    let src = pasteboard_file_paths();
+                    let Some(Some(dir)) = self.files_surface(|b| b.ops_directory()) else { return true };
+                    if src.is_empty() {
+                        return true;
+                    }
+                    let mv = opt || FILES_CUT.with(|c| c.replace(false));
+                    let o = FileOps::transfer(&src, &dir, mv, FileOps::shared());
+                    let verb = if mv { "Moved" } else { "Copied" };
+                    done(self, format!("{verb} {} item(s) here", src.len()), o.failed);
+                }
+                6 if cmd && !shift && in_list => {
+                    match FileOps::undo(FileOps::shared()) {
+                        Some((what, o)) => done(self, format!("Undid {what}"), o.failed),
+                        None => crate::ui::toast::show("Nothing to undo", "arrow.uturn.backward"),
+                    }
+                }
+                _ => return false,
+            }
+            true
+        }
+
         /// The list window's Jira keys (`hostShortcutKey` + `listKey`):
         /// Cmd+I issue panel, Ctrl+Space tick, Tab / Shift+Tab, Home / End /
         /// Page Up / Page Down, Cmd+F live search.
@@ -8219,6 +8332,23 @@ mod daemon_ui {
         let pb = NSPasteboard::generalPasteboard();
         pb.clearContents();
         let _ = unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) };
+    }
+
+    /// The file URLs on the general pasteboard, as paths.
+    fn pasteboard_file_paths() -> Vec<String> {
+        use objc2_app_kit::NSPasteboard;
+        let pb = NSPasteboard::generalPasteboard();
+        let ty = NSString::from_str("public.file-url");
+        pb.pasteboardItems()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|it| it.stringForType(&ty))
+                    .filter_map(|s| objc2_foundation::NSURL::URLWithString(&s))
+                    .filter_map(|u| u.path().map(|p| p.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn copy_files_to_pasteboard(paths: &[String]) {
