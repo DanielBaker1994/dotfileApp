@@ -7081,6 +7081,25 @@ mod daemon_ui {
             (list, view)
         }
 
+        /// `onTableFit`: size the columns to their content. Saving the new
+        /// widths (`columnsResized` → `jira_config.py --set-columns`) is not
+        /// ported, so the fit lasts until the list reloads its columns.
+        fn jira_fit_columns(&self) {
+            let view = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone()));
+            let Some(view) = view else { return };
+            self.jira_surface(|l| {
+                let rows: Vec<_> = l.rows.iter().filter_map(|&i| l.all.get(i).cloned()).collect();
+                let pcts = view.fit_columns(&l.columns, &rows, 400);
+                for (c, p) in l.columns.iter_mut().zip(pcts) {
+                    c.width = p;
+                }
+            });
+            crate::ui::toast::show(
+                "Columns fitted to their content · saving the widths: not ported yet",
+                "arrow.left.and.right",
+            );
+        }
+
         fn jira_event(&self, ev: crate::views::jira_view::JiraEvent) {
             use crate::ui::sidebar::SidebarEvent;
             use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, MY_WORK_PREFIX};
@@ -7112,6 +7131,26 @@ mod daemon_ui {
                 }
                 E::Sort(i) => {
                     self.jira_surface(|l| l.sort_by(i));
+                }
+                E::HeaderMenu { x, y } => {
+                    // `PopupTableHeader.rightMouseDown`: Fit Columns to
+                    // Content, then the list's extra items (Group By).
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let w1 = objc2::rc::Weak::from_retained(&self.retain());
+                    popup(
+                        vec![
+                            MenuEntry::item("Fit Columns to Content", move || {
+                                if let Some(ui) = w1.load() {
+                                    ui.jira_fit_columns();
+                                }
+                            }),
+                            MenuEntry::Separator,
+                            MenuEntry::item("Group By…", || crate::ui::toast::not_ported("Jira Group By")),
+                        ],
+                        None,
+                        x,
+                        y,
+                    );
                 }
                 E::Query(q) => {
                     self.jira_surface(|l| {

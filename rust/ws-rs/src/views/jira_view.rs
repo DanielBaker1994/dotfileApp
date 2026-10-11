@@ -893,7 +893,32 @@ pub enum JiraEvent {
     Escape,
     OpenDetail,
     RowMenu { row: usize, x: f64, y: f64 },
+    /// Right-click on the column header (`PopupTableHeader.rightMouseDown`).
+    HeaderMenu { x: f64, y: f64 },
     Sidebar(crate::ui::sidebar::SidebarEvent),
+}
+
+/// `fitTableColumns`' width solver: cap each column's needed width at
+/// `max(160, 45%)`, shrink the widest ones together until the total fits
+/// `usable`, then turn the widths into percentages (one decimal).
+pub fn fit_column_pcts(need: &[f64], usable: f64) -> Vec<f64> {
+    let usable = usable.max(1.0);
+    let mut need: Vec<f64> = need.iter().map(|w| w.min(160f64.max(usable * 0.45))).collect();
+    let mut over = need.iter().sum::<f64>() - usable;
+    while over > 0.5 {
+        let max_w = need.iter().cloned().fold(0.0, f64::max);
+        let idx: Vec<usize> = (0..need.len()).filter(|&i| need[i] >= max_w - 0.5).collect();
+        let next = need.iter().cloned().filter(|w| *w < max_w - 0.5).fold(40.0, f64::max);
+        let step = (over / idx.len() as f64).min(max_w - next.max(40.0));
+        if step <= 0.5 {
+            break;
+        }
+        for &i in &idx {
+            need[i] -= step;
+        }
+        over -= step * idx.len() as f64;
+    }
+    need.iter().map(|w| ((w / usable * 100.0) * 10.0).round() / 10.0).collect()
 }
 
 /// Everything the view draws.
@@ -1320,6 +1345,15 @@ mod appkit {
                 }
             }
 
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, _e: &NSEvent) {
+                let s = self.ivars().sink.borrow().clone();
+                if let Some(s) = s {
+                    let m = NSEvent::mouseLocation();
+                    s(JiraEvent::HeaderMenu { x: m.x, y: m.y });
+                }
+            }
+
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 self.draw();
@@ -1598,6 +1632,37 @@ mod appkit {
     );
 
     impl JiraView {
+        /// `fitTableColumns(sample:)`: measure each column's header and up to
+        /// `sample` rows' cells, and solve percentages for the header width.
+        pub fn fit_columns(&self, cols: &[ListColumn], rows: &[Record], sample: usize) -> Vec<f64> {
+            let font = style::system_font(12.0, Weight::Regular);
+            let bold = style::system_font(12.0, Weight::Bold);
+            let hfont = style::system_font(12.0 * 0.86, Weight::Bold);
+            let need: Vec<f64> = cols
+                .iter()
+                .enumerate()
+                .map(|(i, col)| {
+                    let mut w = style::text_size(&kerned(&format!("{} ↑", col.title.to_uppercase())), &hfont).0 + 12.0;
+                    if col.filterable {
+                        w += 22.0;
+                    }
+                    for r in rows.iter().take(sample) {
+                        let flat = display_cell(&col.field, r.get(&col.field).map(String::as_str).unwrap_or(""));
+                        if flat.is_empty() {
+                            continue;
+                        }
+                        let f = if i == 0 { &bold } else { &font };
+                        w = w.max(style::text_size(&flat.replace('\n', " "), f).0 + 22.0);
+                    }
+                    w.ceil()
+                })
+                .collect();
+            let width = self.ivars().header.bounds().size.width;
+            fit_column_pcts(&need, width - LEAD - (PADDING + 10.0))
+        }
+    }
+
+    impl JiraView {
         /// The rail (`sidebarJumpItems` / `do:jira-jump`).
         pub fn sidebar(&self) -> Retained<SidebarView> {
             self.ivars().sidebar.clone()
@@ -1750,6 +1815,17 @@ mod appkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_column_pcts_fits_and_shrinks_the_widest() {
+        // Room to spare: plain percentages of the usable width.
+        assert_eq!(fit_column_pcts(&[100.0, 50.0], 1000.0), vec![10.0, 5.0]);
+        // Too wide: the widest columns shrink together until the total fits.
+        let p = fit_column_pcts(&[400.0, 400.0, 100.0], 500.0);
+        assert!((p.iter().sum::<f64>() - 100.0).abs() < 0.5, "{p:?}");
+        assert_eq!(p[0], p[1]);
+        assert_eq!(p[2], 20.0);
+    }
 
     fn col(field: &str, w: f64) -> ListColumn {
         ListColumn { field: field.into(), title: field.into(), width: w, align: "left".into(), sortable: true, filterable: true }
