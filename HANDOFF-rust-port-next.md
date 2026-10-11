@@ -1,140 +1,112 @@
-# ▶ NEXT SESSION START HERE (written Oct 11 2026, end of session)
+# ▶ NEXT SESSION START HERE (rewritten Oct 11 2026, second session)
 
-Read this section, then `PARITY-shortcuts.md` (the full Swift-vs-Rust shortcut
-table with per-row status), then `AGENTS.md` / `rule.md`. The rest of this file
-below the line is older context.
+Branch `rust-parity` (off `main`, 20 commits, not merged, not pushed). Read
+this section, then `AGENTS.md` / `rule.md`. `PARITY-shortcuts.md` has
+per-row tables, but its ❌/🟡 marks predate this session; this section wins.
 
-## Why gaps kept slipping through, and the one-shot fix
+## Working rules (owner feedback, keep them)
 
-**Run `bin/parity-audit.sh` first** (about 30 s, writes `.build/parity-audit.md`). It lists:
-items written but never called, stub markers, Swift `do:` verbs vs Rust,
-nvim→app verbs, and `[shortcuts]` rows per view. Work the list; re-run it to
-show progress.
+- Run `bin/parity-audit.sh` first (about 30 s, writes `.build/parity-audit.md`).
+  Socket and nvim verbs are now all ✅. Dead code is down from 709 to about 600 items.
+- A row is done only after you see it work in the live app (a screenshot, or
+  `state.pane` from real AppKit focus). Unit tests prove the model, not the feature.
+- **No retry loops.** If a live check fails, read the code and the AppKit API
+  semantics, then fix and verify once. Stop and report after two misses. (The
+  last session burned six rebuilds on an `NSView.hitTest` coordinate mistake.)
+- Stubs must be loud: use `crate::ui::toast::not_ported("what")`, never a silent log.
+- Test file ops only in `/tmp`. Don't open user files in other apps (Return
+  on a files row opens it in the default app). Don't flip `[jira] enabled`
+  on the owner's config (`jira-poll off` really disables polling).
+- Verify fast: `./ws build`, then `echo state | nc -U -w3 $TMPDIR/ws-notes.sock | jq .pane`,
+  `do:pane:focus:<id>`, real keys via `osascript … key code N using …`,
+  clicks via `cliclick`, window shots via `screencapture -o -l <wid>`.
+  Swift reference: `git archive 608d07d | tar -x -C <scratch>`.
 
-Root causes (Oct 11 finding):
-1. **`#![allow(dead_code)]` in `rust/ws-rs/src/main.rs` hides it.** With dead
-   code forced on there are **709 written-but-unused items**. Among them:
-   `PaneFocusRing` and `PaneProvider` (the Ctrl+HJKL ring and pane
-   registration), `VimRows`/`VimText`/`VimWeb`/`VimTarget` (normal mode and `/`
-   search targets), `NoteFindModel` users, and `AIState::handle_key`. The port
-   wrote models plus unit tests, then never connected them to the AppKit side.
-   Green tests proved the model, not the feature.
-2. **Silent stubs look like success.** `do:notes-find` returns OK and only
-   logs "not modelled yet", and the router treats Cmd+K as handled. A key
-   that is caught but does nothing reads as "routed" in an audit.
-3. **Audits judged "routed", not "does the thing".** The previous session's
-   audit marked rows by whether a key path existed. A row is ✅ only after
-   the behavior is seen in the live app (screenshot or `state` field
-   reflecting real AppKit focus).
-4. **Shortcuts live outside keyDown.** nvim lua (`ask_app`) → socket verbs,
-   AeroSpace bindings, menus, and right-click menus. The audit script covers the
-   socket and nvim sources. Menus and right-click menus still need a manual
-   pass against Swift `menuItem(` calls.
+## Done this session (each verified live unless noted)
 
-Suggested guardrails: when something gets wired, remove its dead-code entry
-(the count should only go down). Make stubs loud (a toast "not ported: X")
-instead of a silent log. Have `state.pane` report the real first responder,
-not the model.
+- Loud `not ported` toasts for remaining stubs (`UiCommand::Toast`).
+- **Ctrl+H/J/K/L** over real panes (`app/live_panes.rs`, each view's `nav_panes()`),
+  silver focus ring, nvim splits first. `state.pane` reports the live responder.
+- **Sidebar rail keyboard**: arrows / Ctrl+N/P, Return, Space, Esc, Delete, letter jump, cursor ring.
+- **Vim keys on non-nvim panes** (`app/host/daemon_ui/host_vim.rs`): j/k, gg/G,
+  Ctrl+D/U, `/` `?` `n` `N` with a search bar, i/a ↔ Esc between field and list,
+  NORMAL/INSERT badge. Rows, NSTextView and WKWebView targets.
+- **Leader+sf / leader+sg** (`views/note_find.rs`, `do:notes-find|grep`);
+  grep jumps nvim to the line. **`do:jira-jump`** sidebar jump.
+- `jira-poll on|off|toggle|dashboard` (`app/jira_poll.rs`: config check,
+  login test, launch agent sync). Only the already-on path was live-tested
+  (the owner's Jira is enabled).
+- **Cmd+K action picker** (`ui/action_picker.rs`) for Jira and Compare.
+- Per-view keys: AI (Ctrl/Cmd+Return, Esc stop, Cmd+L), Paths shelf (Cmd+C,
+  Cmd+Shift+C, Space / Cmd+Y, Cmd+O, Cmd+R, Cmd+Shift+R, Cmd+Delete), Jira
+  (Cmd+I, Ctrl+Space, Tab, Home/End/Page), Confluence (Cmd+L/F/G/D/R,
+  Cmd+Return, Cmd+C; copy unverified because no site is configured on this
+  Mac), Files (history, hidden, new folder, ← →, Space Quick Look, Cmd+C/X/V/D/Z,
+  Cmd+Delete), Compare text + folder (`CompareWindowModel::handle_key`).
+- **Inline rename** (`ui/inline_rename.rs`): files Cmd+R / F2, paths Cmd+R.
+- Hyper+S palette redrawn on `ListPanel` with split rows.
+- Each view focuses a sensible pane on show. Switcher "where" text for every
+  view. Cmd+± zooms the file list text. The notes editor now shrinks while
+  the terminal drawer is open (nvim rows used to sit under it).
 
-## Owner's notes and concerns (verbatim intent)
+## Still open (priority order)
 
-- "Are you saying you have finished?" — **No.** The previous session fixed a
-  handful of items and over-summarised. Do not report done until the owner's
-  workflow keys actually work in the live app, shown by screenshots.
-- The owner works keyboard-first, tmux-style, and expects **every** shortcut
-  the Swift app had. Missing so far, called out by name:
-  1. **Ctrl+H/J/K/L pane focus** — move the keyboard between sidebar, editor,
-     list, preview and terminal, with the thin silver focus ring, like Swift's
-     `PaneNav`.
-  2. **`/` search on non-nvim panes** — vim-like `/` `?` `n` `N` (plus j/k,
-     gg/G, Ctrl+D/U, i/a, the NORMAL chip) on lists, sidebars, preview pages
-     and Compare sides (Swift `VimKeys` / `VimSearch`).
-  3. **Leader+sf in notes nvim** — the interactive picker over open notes
-     (Swift `NoteFindWindow`).
-  4. **Leader+sg in notes nvim** — ripgrep the open notes; Return jumps to the
-     line (also `NoteFindWindow`).
-- Previously reported and now fixed (verify they still work, don't redo):
-  Ctrl+B W popup look, Ctrl+B T prose toggle, the prose capsule, the Theme
-  menu (header app icon ▸ Theme).
-- Standing owner rules: no bash+sleep UI suites; verify with socket probes +
-  screenshots; fix the code, iterate fast. Don't obsess over the vim pane.
+1. **Right-click menus** (rule.md #2). Already in Rust: files rows, paths rows,
+   notes sidebar, Jira rows, Confluence rows, AI rules, Compare sidebar pills
+   + recents (partial). Missing, with Swift items:
+   - Compare **text pane** (`ComparePane.rightMouseDown` → `CompareWindow.paneMenu`):
+     Copy · Copy to other side · Copy Line to other side · Paste Clipboard Here ·
+     Edit Section · Select Section · Find… · Align With… / Cancel / Remove This
+     Alignment / Clear All Alignments · Copy Path · Reveal in Finder · Open in
+     Notes · Open in Default App · Open File into This Side… · Save This Side.
+     The model has most of these (`CompareWindowModel::test_do`).
+   - Compare **folder tree** (`CompareFolderView.menu(_:_:)`): Copy/Move to
+     Right/Left · Rename… · New Folder… · Move to Trash · Copy Path · Reveal ·
+     Open in Notes · Open in Default App · Quick Look · Set as Base Folder
+     (Left/Right) · Exclude "<name>".
+   - Compare **pill** extras: Copy to other side, Copy Line, Paste Clipboard
+     Here, Edit Section, Select Section. **Recents** extras: Fill the Path
+     Fields, Remove All Missing, Clear All Recents.
+   - Jira **column header**: Fit Columns to Content.
+   - Screenshot **history grid**: Reopen as Pin · Copy · Open in Preview · Reveal
+     in Finder · Delete. Screenshot **pin**: Copy to clipboard · Save to file ·
+     Rotate Right/Left · Increase/Decrease Opacity · Close.
+   - Notes **plain editor** (vim-mode off, image links): Open Full Size · copy
+     image path · Copy File Path · Open file at path….
+   - **Terminal / nvim pane menus are parked by owner decision** (see 6).
+     For any new right-click code: `NSView.hitTest(_:)` takes the point in the
+     *superview's* coordinates. For a window's content view, pass
+     `event.locationInWindow()` unconverted. Converting into the (flipped)
+     content view mirrors y.
+2. Jira **setup window** (`JiraSetupWindow`) and Jira **live search** Cmd+F
+   (`JiraSearchPanel`). Both toast not-ported now. Both are large forms.
+3. Theme menu extras: live preview on hover, Custom Color…, Transparency ▸,
+   per-view card theme menu. Jira list text zoom (toasts).
+4. Small: `state.paths` (`selection`, `rowCount`) is stale between pushes. The
+   files listing doesn't watch the disk (a new file shows only after re-entering
+   the folder). Compare `Return` begin-edit and Cmd+C copy-rows are not routed.
+   Compare text Cmd+F/G find is not routed.
+5. Older items further down this file: hide-on-focus-loss bridge, nvim `:q`
+   relaunch, AeroSpace re-show (ask the owner), screenshot/compare gaps.
+6. **Terminal strategy (owner wants this):** drop SwiftTerm for a Rust-only
+   build. SwiftTerm costs a Swift toolchain step, the fetched checkout,
+   `patches/swiftterm-cellstorage-cache.patch`, the precompiled static lib and
+   `rust/swiftterm-shim/`. Plan: `alacritty_terminal` (VT parser, grid,
+   PTY / event loop) plus our own renderer, a Core Text–drawn `NSView` behind
+   the same API the shim exposes today (`create_terminal`, `start_process`,
+   `send_text`, `set_font`, `set_colors`, running / exit code), so the notes
+   nvim pane, the drawer and the `/terminal` panel switch over in one place.
+   Must cover: selection + copy/paste, mouse reporting (nvim), scrollback,
+   IME / dead keys, bold/italic/underline, 256 + truecolor, cursor shapes,
+   resize → PTY winsize, font fallback, and performance good enough for nvim.
+   Do it after parity, as its own branch.
 
-## Verified state of each missing item (code facts, Oct 11)
+## Uncommitted
 
-1. **Ctrl+HJKL** — `PrefixState::handle` (ui/popup.rs) returns
-   `PaneMove(dir)` → `route_key_event` → `SwitcherController::pane_move` →
-   `ControllerInner.pane_nav.move_dir(dir, &inner.panel_list())`. That is a
-   **model only**: `panel_list()` is built from `inner.panes` (fed by
-   tests/`do:`), not from the real AppKit views, and nothing calls
-   `makeFirstResponder` or draws a ring. Port Swift `PaneNav.swift`
-   (`PaneNav.shared.move(_:in:)`, `track`, the ring overlay) and each view's
-   `navPanes` (`PopupWindow: PaneProvider` at PopupWindow.swift ~11351:
-   sidebar/search/page/list/editor/terminal/browser), plus the nvim-first rule
-   (`vim pane: its own splits first` — Swift asks nvim `wincmd` before leaving
-   the pane). Keep `do:pane:h|j|k|l` / `state.pane` reporting real focus.
-2. **`/` search + normal mode** — `panes/vim_keys.rs` + `panes/vim_search.rs`
-   exist (ported, unit-tested) and `VimKeys` is stored on the controller
-   (host.rs `vim_keys: VimKeys::new()`), but **`route_key_event` never calls
-   it**. Swift calls `VimKeys.shared.handle(e, in: w)` inside
-   `SharedWindow.prefixKey` *before* the armed-prefix check, and
-   `VimKeys.searching(in:)` first of all. Wire it there, target the
-   focused pane from item 1, and draw the NORMAL/INSERT chip + search bar.
-3. + 4. **Leader+sf / Leader+sg** — `vim/init.lua:67-69` sends
-   `ask_app('notes-find' | 'notes-grep')` → socket `do:notes-find` /
-   `do:notes-grep` → host.rs `do_host_action` arm
-   `"jira-jump" | "notes-find" | "notes-grep"` just logs "not modelled yet".
-   The model `NoteFindModel` exists in `views/notes.rs` ("Find / grep window
-   model"); the window does not. Port `NoteFindWindow.swift` (313 lines) on
-   `ui/list_panel.rs::ListPanel` (same pattern as the rebuilt Ctrl+B W
-   switcher in `views/switcher.rs` `switch_ui`), `[notes-find]` config, then
-   jump nvim via `VimPane::command("call cursor(N,1)")` / `vim_open(path)`.
-   `jira-jump` (`SidebarJump.swift`) is the same shape — do it alongside.
-   Also missing socket verbs (from the audit): `jira-poll-on`, `jira-poll-off`,
-   `jira-setup`.
+`samples/graphviz-showcase.md` line 1 changed from `doc paper clean` to
+`doc executive`. Probably from keystrokes sent into nvim during testing; the
+owner decides whether to revert.
 
-## Everything else still open (priority order)
-
-5. **Cmd+K action picker** (`actionPicker`, PopupWindow/CompareWindow; Jira:
-   copy / copy URL+title / open, 1-9 in menu) — currently logs only.
-6. **Per-view keys not wired** (see PARITY tables): AI (`AIState::handle_key`
-   exists, unconnected), paths (`PathsShelf::key` exists), Jira
-   (`JiraDashboard.handleKey`: Cmd+F, Cmd+I, Ctrl+Space, Tab…), Confluence
-   (Cmd+Return, Cmd+C/⇧C, Cmd+D, Cmd+G, Cmd+R), files (←/→, Tab complete, Space
-   Quick Look, Cmd+C/X/V/D/Delete/Z, Cmd+Shift+N, Cmd+[ ], Cmd+↑↓, rename F2/
-   Cmd+R, Cmd+Shift+.), Compare + compare-folders (~45 rows, none routed).
-7. **Sidebar keyboard nav** (`PopupTabsBar.handleNavKey`: ↑↓/Ctrl+N/P,
-   Return, Space, Home/End, letter jump, Esc, Delete) — needs item 1 first.
-8. **Hyper+S palette** still renders rows as plain `NSButton`s — move to
-   `ListPanel` like the switcher (`views/switcher.rs` `PalettePanel`).
-9. **Theme menu extras**: live preview on hover, Custom Color…, Transparency ▸,
-   per-view card theme menu; list-view text zoom (`setTextZoom`, Cmd+± on
-   files/jira currently resizes the window).
-10. Switcher "where" text for Jira/Confluence/Compare/AI (`whereText`).
-11. Older items further down this file: hide-on-focus-loss bridge, notes vim
-    `:q` relaunch, AeroSpace re-show (ask owner), screenshot/compare gaps.
-
-## Done in the Oct 11 session (uncommitted at time of writing)
-
-Ctrl+B T (prose first) / Ctrl+B L fallback; Ctrl+B W redrawn
-(`views/switcher.rs` `switch_ui` on `ui/list_panel.rs`); in-window prose view
-`views/notes_prose.rs` (Swift page JS verbatim in `views/prose_js/`), capsule
-clicks, doc-style menu, Cmd+Shift+P/O, Cmd+P PDF, prose search keys; Cmd+N /
-Ctrl+N; Ctrl+Shift+J/K VM cursors; Cmd+± vs Cmd+Opt+± swap fixed; Cmd+/ sheet
-`ui/shortcuts.rs`; header icon menu with Theme ▸ (`header_icon_menu`,
-`apply_theme_preset`, `after_theme_change` in host.rs); `ui/toast.rs`;
-`ui/menu_kit.rs` gained submenus/headers/swatches. 695 cargo tests green.
-
-## How to verify fast (learned this session)
-
-- Real keys: `osascript -e 'tell application "System Events" to key code 11 using control down'`
-  (B=11, T=17, W=13, H=4, J=38, K=40, L=37, `/`=44 — `keystroke "/"` sends
-  keypad 75, don't use it). Clicks: `cliclick c:X,Y` (screen points, top-left).
-- Window shot: `screencapture -x -o -l $(echo state | nc -U -w3 $TMPDIR/ws-notes.sock | jq -r .views.notes.wid) out.png`.
-- Capture panics: `./ws build --build-only` then
-  `open -g --stderr <file> kitchen-sink.app --args notes`. A RefCell
-  double-borrow panics and kills the daemon silently (happened once:
-  never call a helper that borrows `state` while holding `borrow_mut`).
-- Stop driving the UI the moment the owner is using the machine.
 
 ---
 

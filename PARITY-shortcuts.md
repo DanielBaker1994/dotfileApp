@@ -1,5 +1,9 @@
 # Shortcut parity — Swift (608d07d) vs Rust port
 
+> **Stale marks:** many ❌/🟡 rows below were fixed on Oct 11 (second session).
+> The current status is the top section of `HANDOFF-rust-port-next.md`.
+
+
 One-time audit (Oct 11 2026). Sources: the `[shortcuts]` table in
 `commands.toml` (unchanged since Swift — it is what Hyper+/ / `ws-settings`
 lists) **plus** the Swift key handlers, read from git:
