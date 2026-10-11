@@ -1759,7 +1759,11 @@ mod macos {
     use std::collections::HashMap;
     use std::rc::Rc;
 
-    pub struct NotesFlippedIvars;
+    pub struct NotesFlippedIvars {
+        /// The rail column: the tree card over the Open sidebar. Re-split on
+        /// every resize so the tree stays only as tall as its rows.
+        rail: RefCell<Option<(Retained<crate::ui::tree_view::TreeView>, Retained<crate::ui::sidebar::SidebarView>)>>,
+    }
 
     define_class!(
         #[unsafe(super(NSView))]
@@ -1773,14 +1777,36 @@ mod macos {
             fn is_flipped(&self) -> bool {
                 true
             }
+
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.layout_rail();
+            }
         }
 
         unsafe impl NSObjectProtocol for NotesFlippedView {}
     );
 
     impl NotesFlippedView {
+        fn set_rail(&self, tree: &Retained<crate::ui::tree_view::TreeView>, sidebar: &Retained<crate::ui::sidebar::SidebarView>) {
+            *self.ivars().rail.borrow_mut() = Some((tree.clone(), sidebar.clone()));
+        }
+
+        /// Stack tree over sidebar inside the current height.
+        fn layout_rail(&self) {
+            let guard = self.ivars().rail.borrow();
+            let Some((tree, sidebar)) = guard.as_ref() else { return };
+            let h = self.frame().size.height;
+            let w = sidebar.frame().size.width;
+            let show = !tree.isHidden();
+            let (tree_h, open_h) = crate::views::notes_tree::rail_split(h, show, tree.wanted_height());
+            tree.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, tree_h)));
+            sidebar.setFrame(NSRect::new(NSPoint::new(0.0, tree_h), NSSize::new(w, open_h)));
+        }
+
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(NotesFlippedIvars);
+            let this = Self::alloc(mtm).set_ivars(NotesFlippedIvars { rail: RefCell::new(None) });
             unsafe {
                 msg_send![
                     super(this),
@@ -2736,8 +2762,11 @@ mod macos {
         vim_frame: NSRect,
         /// The live model behind the tree (tabs + sidebar cursor).
         model: NotesView,
-        /// The vertical sidebar (`PopupTabsBar` NOTES rail).
+        /// The vertical sidebar (`PopupTabsBar` NOTES rail): the open tabs.
         sidebar: Retained<crate::ui::sidebar::SidebarView>,
+        /// The pinned-folder tree stacked above the sidebar in the rail.
+        tree: Retained<crate::ui::tree_view::TreeView>,
+        tree_model: crate::views::notes_tree::NotesTree,
         /// The bottom-right "Prose | nvim" capsule (`ProseModeSwitch`).
         prose_switch: Retained<crate::ui::prose_switch::ProseSwitch>,
         /// The editor scroll view (moved when the rail collapses).
@@ -2769,7 +2798,7 @@ mod macos {
     }
 
     /// The NOTES sidebar rows (`PopupTabsBar` titles + `vIcon` + `vMeta`).
-    fn notes_sidebar_model(model: &NotesView) -> crate::ui::sidebar::SidebarModel {
+    fn notes_sidebar_model(model: &NotesView, has_tree: bool) -> crate::ui::sidebar::SidebarModel {
         use crate::ui::sidebar::{icon_for_name, SidebarModel, SidebarRow};
         let rows = model
             .tabs
@@ -2784,7 +2813,7 @@ mod macos {
             })
             .collect();
         SidebarModel {
-            section_title: "Notes".into(),
+            section_title: if has_tree { "Open" } else { "Notes" }.into(),
             rows,
             selected: (!model.tabs.tabs.is_empty()).then_some(model.tabs.selected),
             add_button: true,
@@ -2812,10 +2841,21 @@ mod macos {
         let colors = crate::ui::theme::section_colors("notes");
         let mut model = NotesView::new(cfg.clone());
         let raw = setting("notes", "paths").unwrap_or_default();
-        let paths = existing_note_paths(&raw, &|p| Path::new(p).exists());
+        // Directories in `[notes] paths` become pinned tree roots; files stay tabs.
+        let (roots, paths) = crate::views::notes_tree::split_roots(&raw, &|p| Path::new(p).is_dir(), &|p| Path::new(p).exists());
         for p in &paths {
             model.tabs.append(p);
         }
+        let show_hidden = matches!(setting("notes", "tree-show-hidden").as_deref(), Some("true") | Some("yes") | Some("on") | Some("1"));
+        let mut expanded = crate::views::notes_tree::load_expanded();
+        if expanded.is_empty() {
+            expanded.extend(roots.iter().take(1).cloned());
+        }
+        let mut tree_model = crate::views::notes_tree::NotesTree::new(roots, expanded, show_hidden);
+        if let Some(p) = model.tabs.selected_path() {
+            tree_model.reveal(p);
+        }
+        let has_tree = !tree_model.is_empty();
         model.refresh_sidebar(now_secs());
 
         let sidebar_w = model.sidebar.width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
@@ -2831,10 +2871,28 @@ mod macos {
         sidebar.set_collapse_key("notes");
         model.sidebar.collapsed = sidebar.collapsed();
         let sidebar_w = model.sidebar.visible_width();
-        sidebar.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(sidebar_w, 600.0)));
-        sidebar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
-        sidebar.set_model(notes_sidebar_model(&model));
+        let tree_wanted = if crate::views::notes_tree::load_tree_collapsed() { crate::ui::tree_view::TreeGeometry::collapsed_height() } else { crate::ui::tree_view::TreeGeometry::height_for(tree_model.rows().len()) };
+        let (tree_h, open_h) = crate::views::notes_tree::rail_split(600.0, has_tree && !model.sidebar.collapsed, tree_wanted);
+        sidebar.setFrame(NSRect::new(NSPoint::new(0.0, tree_h), NSSize::new(sidebar_w, open_h)));
+        // Tree and open list share the column: the open list's top margin
+        // flexes with the tree's height so they stay edge to edge on resize.
+        sidebar.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+        sidebar.set_model(notes_sidebar_model(&model, has_tree));
         root.addSubview(&sidebar);
+
+        // --- pinned-folder tree (above the open-tabs sidebar) ------------------
+        let tree = crate::ui::tree_view::TreeView::new(mtm, colors);
+        tree.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(sidebar_w, tree_h)));
+        tree.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+        tree.set_indent(number("notes", "tree-indent", 14.0));
+        tree.setHidden(tree_h <= 0.0);
+        let tree_rows = tree_model.rows();
+        tree.set_rows(tree_rows.clone(), tree_model.selected.clone());
+        if let Some(i) = tree_model.selected.as_deref().and_then(|p| crate::views::notes_tree::NotesTree::row_of(&tree_rows, p)) {
+            tree.reveal_row(i);
+        }
+        root.addSubview(&tree);
+        root.set_rail(&tree, &sidebar);
 
         // --- editor ----------------------------------------------------------
         let editor_w = (900.0 - sidebar_w - 4.0).max(0.0);
@@ -3069,6 +3127,8 @@ mod macos {
             vim_frame,
             model,
             sidebar,
+            tree,
+            tree_model,
             prose_switch,
             editor_scroll: editor,
             rail_expanded_width: sidebar_w,
@@ -3156,6 +3216,11 @@ mod macos {
                 "findBar": self.find_shown,
                 "collapsed": self.model.sidebar.collapsed,
                 "tabs": self.model.tabs.titles(),
+                "pinnedRoots": self.tree_model.roots,
+                "treeSelection": self.tree_model.selected,
+                "treeExpanded": self.tree_model.expanded,
+                "treeRows": self.tree.row_count(),
+                "treeCollapsed": self.tree.collapsed(),
                 "vimCellHeight": self.vim_cell.get().1,
                 "vimFontSize": self.vim_font_size.get(),
             })
@@ -3227,7 +3292,116 @@ mod macos {
 
         /// Push the tab rows / selection into the sidebar view.
         fn repaint_rows(&mut self) {
-            self.sidebar.set_model(notes_sidebar_model(&self.model));
+            self.sidebar.set_model(notes_sidebar_model(&self.model, !self.tree_model.is_empty()));
+        }
+
+        /// The tree view (the host routes its clicks).
+        pub fn tree_view(&self) -> Retained<crate::ui::tree_view::TreeView> {
+            self.tree.clone()
+        }
+
+        /// Push the model's rows + selection into the tree view.
+        fn repaint_tree(&mut self, scroll_to_selection: bool) {
+            let rows = self.tree_model.rows();
+            self.tree.set_rows(rows.clone(), self.tree_model.selected.clone());
+            if scroll_to_selection {
+                if let Some(i) = self.tree_model.selected.as_deref().and_then(|p| crate::views::notes_tree::NotesTree::row_of(&rows, p)) {
+                    self.tree.reveal_row(i);
+                }
+            }
+            // The tree is only as tall as its rows: re-split the rail.
+            self.apply_sidebar_width();
+        }
+
+        /// The open file changed: expand its ancestors and select its row. A
+        /// file outside every pinned root clears the selection (it still shows
+        /// in the Open list) instead of faking a position.
+        fn tree_reveal(&mut self, path: &str) {
+            if self.tree_model.is_empty() {
+                return;
+            }
+            let before = self.tree_model.expanded.len();
+            self.tree_model.reveal(path);
+            if self.tree_model.expanded.len() != before {
+                crate::views::notes_tree::save_expanded(&self.tree_model.expanded);
+            }
+            self.repaint_tree(true);
+        }
+
+        /// A left click in the tree: folders toggle, files open (adding a tab).
+        pub fn tree_click(&mut self, path: &str, is_dir: bool) {
+            if is_dir {
+                self.tree_model.toggle(path);
+                crate::views::notes_tree::save_expanded(&self.tree_model.expanded);
+                self.repaint_tree(false);
+            } else {
+                self.open_external_path(path);
+            }
+        }
+
+        /// Collapse / expand every folder under `path` from the context menu.
+        pub fn tree_set_expanded(&mut self, path: &str, open: bool) {
+            if open {
+                self.tree_model.expanded.insert(path.to_string());
+            } else {
+                self.tree_model.expanded.remove(path);
+            }
+            crate::views::notes_tree::save_expanded(&self.tree_model.expanded);
+            self.repaint_tree(false);
+        }
+
+        /// The PINNED header: collapse / expand the whole tree card.
+        pub fn tree_toggle_section(&mut self) {
+            self.tree.set_collapsed(!self.tree.collapsed());
+            self.apply_sidebar_width();
+        }
+
+        /// A file or folder under a pinned root was trashed: close the tabs it
+        /// held and drop it from the tree.
+        pub fn tree_removed(&mut self, path: &str) {
+            let prefix = format!("{path}/");
+            let doomed: Vec<usize> = self
+                .model
+                .tabs
+                .paths()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.as_str() == path || p.starts_with(&prefix))
+                .map(|(i, _)| i)
+                .collect();
+            for i in doomed.into_iter().rev() {
+                self.close_tab(i);
+            }
+            if self.tree_model.selected.as_deref().is_some_and(|p| p == path || p.starts_with(&prefix)) {
+                self.tree_model.selected = None;
+            }
+            self.tree_model.expanded.retain(|p| p != path && !p.starts_with(&prefix));
+            self.repaint_tree(false);
+        }
+
+        /// Re-read the expanded folders (after a create / rename / trash).
+        pub fn tree_refresh(&mut self) {
+            self.repaint_tree(false);
+        }
+
+        /// A new note goes into the selected folder (or the open file's
+        /// folder); used by the tree's "New Note Here".
+        pub fn tree_new_note_in(&mut self, dir: &str) {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+            let snippets: Value = std::fs::read_to_string(format!("{assets}/vim/snippets/markdown.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(Value::Null);
+            let _ = home;
+            let open = self.model.tabs.paths();
+            let plan = plan_new_note(dir, false, &snippets, &self.model.config, &open);
+            if plan.write().is_err() {
+                return;
+            }
+            let path = plan.path.clone();
+            self.tree_model.expanded.insert(dir.to_string());
+            self.open_external_path(&path);
         }
 
         /// The sidebar view (the host routes its clicks).
@@ -3706,6 +3880,7 @@ mod macos {
             let colors = crate::ui::theme::section_colors("notes");
             self.colors = colors;
             self.sidebar.set_colors(colors);
+            self.tree.set_colors(colors);
             self.prose_switch.set_colors(colors);
             self.editor_scroll.setBackgroundColor(&colors.base().to_nscolor());
             self.editor.setBackgroundColor(&colors.base().to_nscolor());
@@ -3750,8 +3925,13 @@ mod macos {
         fn apply_sidebar_width(&mut self) {
             let full = self.root.frame().size;
             let w = self.model.sidebar.visible_width();
+            let show_tree = !self.tree_model.is_empty() && !self.model.sidebar.collapsed;
+            let wanted = self.tree.wanted_height();
+            let (tree_h, open_h) = crate::views::notes_tree::rail_split(full.height, show_tree, wanted);
+            self.tree.setHidden(!show_tree);
+            self.tree.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, tree_h)));
             self.sidebar
-                .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, full.height)));
+                .setFrame(NSRect::new(NSPoint::new(0.0, tree_h), NSSize::new(w, open_h)));
             let editor_w = (full.width - w - 4.0).max(0.0);
             // `drawerInset`: an open terminal drawer takes the editor's bottom.
             let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
@@ -3915,7 +4095,11 @@ mod macos {
         /// (nvim / prose / text), browser drawer, terminal drawer.
         pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
             use crate::app::live_panes::LivePane;
-            let mut out = vec![LivePane::new("sidebar", &self.sidebar)];
+            let mut out = Vec::new();
+            if !self.tree_model.is_empty() {
+                out.push(LivePane::new("tree", &self.tree));
+            }
+            out.push(LivePane::new("sidebar", &self.sidebar));
             if self.prose_shown {
                 if let Some(p) = &self.prose {
                     out.push(LivePane::new("editor", &p.web));
@@ -3991,6 +4175,7 @@ mod macos {
         /// `openNoteFile(_:)`'s surface subset: the vim pane follows the path,
         /// the plain editor loads the file (used when vim-mode is off).
         pub fn open_note(&mut self, path: &str) {
+            self.tree_reveal(path);
             // An open tab: keep the rail's selection in step.
             if let Some(i) = self.model.tabs.paths().iter().position(|p| p == path) {
                 if self.model.tabs.selected != i {
@@ -4271,10 +4456,7 @@ impl NoteFindModel {
             self.grep_note = if paths.is_empty() {
                 "No notes are open".to_string()
             } else {
-                format!(
-                    "Type 2+ characters to search {} open notes",
-                    paths.len()
-                )
+                String::new()
             };
             self.show_grep(&[], paths.len());
         }
@@ -4297,7 +4479,7 @@ impl NoteFindModel {
         self.lines = hits.iter().map(|h| h.line).collect();
         self.grep_texts = hits.iter().map(|h| h.text.clone()).collect();
         self.selection = 0;
-        if hits.is_empty() && open_count > 0 {
+        if hits.is_empty() && open_count > 0 && self.query.trim().chars().count() >= 2 {
             self.grep_note = format!("No match for “{}”", self.query.trim());
         }
     }

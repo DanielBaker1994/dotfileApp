@@ -358,6 +358,22 @@ mod appkit {
             Rect::new(0.0, i as f64 * h, self.bounds().size.width, h)
         }
 
+        /// The visible rows' rects (for the vim search highlight overlay).
+        pub fn vim_shown_rects(&self) -> Vec<(usize, Rect)> {
+            let n = self.row_count();
+            let rh = self.row_h();
+            let vis = self.visibleRect();
+            if n == 0 || rh <= 0.0 || vis.size.height <= 0.0 {
+                return Vec::new();
+            }
+            let first = (vis.origin.y / rh).floor().max(0.0) as usize;
+            let last = (((vis.origin.y + vis.size.height) / rh).floor() as usize).min(n - 1);
+            if first > last {
+                return Vec::new();
+            }
+            (first..=last).map(|i| (i, self.row_rect(i))).collect()
+        }
+
         fn draw(&self, dirty: NSRect) {
             let c = self.ivars().colors.get();
             let z = self.ivars().zoom.get();
@@ -687,6 +703,14 @@ mod appkit {
 
         pub fn list_view(&self) -> Retained<FileListView> {
             self.ivars().list.clone()
+        }
+
+        /// The file list's document view plus each visible row's rect (the vim
+        /// search highlight draws the overlay into it).
+        pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
+            let l = self.list_view();
+            let rects = l.vim_shown_rects();
+            (Retained::into_super(l), rects)
         }
 
         pub fn sidebar(&self) -> Retained<SidebarView> {

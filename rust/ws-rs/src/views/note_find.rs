@@ -5,6 +5,7 @@
 
 #![cfg(target_os = "macos")]
 
+use crate::engines::list_filter::FuzzyIndex;
 use crate::ui::list_panel::ListPanel;
 use crate::ui::popup::{CardFrame, PopupConfig, PopupPanel};
 use crate::ui::style::{self, Weight};
@@ -64,11 +65,7 @@ thread_local! {
 impl NoteFindUi {
     pub fn new(mtm: MainThreadMarker, mode: NoteFindMode, cfg: NoteFindConfig) -> Rc<NoteFindUi> {
         let colors = crate::ui::theme::PopupThemeDefaults::colors();
-        let placeholder = match mode {
-            NoteFindMode::Files => "open notes — type to filter · ↩ switch · esc close",
-            NoteFindMode::Grep => "search the open notes (ripgrep) — ↩ jump to the line · esc close",
-        };
-        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, placeholder);
+        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, "");
         let h = list.height(1, cfg.rows);
         let config = PopupConfig {
             name: "notes-find".to_string(),
@@ -276,7 +273,12 @@ impl NoteFindUi {
             (m.shown.len(), m.selection, m.empty_message())
         };
         self.list.set_rows(n, sel);
-        let h = self.list.height(n, self.cfg.rows);
+        // Nothing to list and nothing to say: just the search field.
+        let h = if n == 0 && note.is_empty() {
+            crate::ui::list_panel::SEARCH_H + crate::ui::list_panel::PAD_BOTTOM
+        } else {
+            self.list.height(n, self.cfg.rows)
+        };
         let f = self.panel.frame();
         let top = f.origin.y + f.size.height;
         self.panel.setFrame_display(
@@ -284,7 +286,7 @@ impl NoteFindUi {
             true,
         );
         self.empty.setStringValue(&NSString::from_str(&note));
-        self.empty.setHidden(n > 0);
+        self.empty.setHidden(n > 0 || note.is_empty());
         self.empty.setFrame(NSRect::new(
             NSPoint::new(18.0, h - crate::ui::list_panel::SEARCH_H - ROW_H + 7.0),
             NSSize::new(self.cfg.width - 36.0, 16.0),
@@ -375,8 +377,60 @@ impl NoteFindUi {
         let tf = style::system_font(10.0, Weight::Regular);
         let tw = style::draw_text_right(&trailing, band(inner.x, inner.width - 10.0), &tf, c.dim);
         let font = style::system_font(13.0, Weight::Regular);
-        style::draw_text_left(&name, band(name_x, inner.max_x() - name_x - tw - 20.0), &font, c.text);
+        let avail = inner.max_x() - name_x - tw - 20.0;
+        if m.mode == NoteFindMode::Grep {
+            // Cleaned line, windowed on the match, with the match accented.
+            let (before, hit, after) = grep_snippet(&name, &m.query);
+            let mut x = name_x;
+            for (seg, color) in [(before, c.text), (hit, c.accent), (after, c.text)] {
+                if seg.is_empty() {
+                    continue;
+                }
+                let left = (name_x + avail - x).max(0.0);
+                if left < 6.0 {
+                    break;
+                }
+                x += style::draw_text_left(&seg, band(x, left), &font, color);
+            }
+            return;
+        }
+        style::draw_text_left(&name, band(name_x, avail), &font, c.text);
     }
+}
+
+/// A grep hit line made readable: markdown noise and runs of whitespace
+/// removed, then windowed so the first match of `query` is visible near the
+/// start. Returns (before, match, after).
+pub fn grep_snippet(line: &str, query: &str) -> (String, String, String) {
+    let mut clean = String::new();
+    for ch in line.replace("**", "").replace('`', "").trim_start_matches(['#', '>', '-', '*', ' ', '\t']).chars() {
+        if ch.is_whitespace() {
+            if !clean.ends_with(' ') {
+                clean.push(' ');
+            }
+        } else {
+            clean.push(ch);
+        }
+    }
+    let clean = clean.trim().to_string();
+    let chars: Vec<char> = clean.chars().collect();
+    let q: Vec<char> = query.trim().to_lowercase().chars().collect();
+    let lower: Vec<char> = clean.to_lowercase().chars().collect();
+    let pos = if q.is_empty() || lower.len() != chars.len() {
+        None
+    } else {
+        (0..=chars.len().saturating_sub(q.len())).find(|&i| lower[i..].starts_with(&q))
+    };
+    let Some(p) = pos else { return (String::new(), clean, String::new()) };
+    let start = p.saturating_sub(18);
+    let before: String = if start > 0 {
+        format!("…{}", chars[start..p].iter().collect::<String>().trim_start())
+    } else {
+        chars[..p].iter().collect()
+    };
+    let hit: String = chars[p..p + q.len()].iter().collect();
+    let after: String = chars[p + q.len()..].iter().collect();
+    (before, hit, after)
 }
 
 static GREP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -439,7 +493,7 @@ pub struct SidebarJumpUi {
 impl SidebarJumpUi {
     pub fn new(mtm: MainThreadMarker, cfg: NoteFindConfig) -> Rc<SidebarJumpUi> {
         let colors = crate::ui::theme::PopupThemeDefaults::colors();
-        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, "jump to a sidebar item — type to filter · ↩ open · esc close");
+        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, "");
         let config = PopupConfig {
             name: "sidebar-jump".to_string(),
             frame: CardFrame { x: 0.0, y: 0.0, width: cfg.width, height: list.height(1, cfg.rows) },
@@ -607,6 +661,193 @@ impl SidebarJumpUi {
     }
 }
 
+// ------------------------------------------------------------- pane finder
+
+/// The pane item finder behind `<leader>sf` on the non-nvim panes: a floating
+/// fuzzy list over the focused pane's rows (Jira issues, Confluence results,
+/// the files list, the sidebar). Picking a row activates it, exactly like a
+/// mouse click on that row.
+pub struct PaneFindUi {
+    pub panel: Retained<PopupPanel>,
+    list: ListPanel,
+    empty: Retained<NSTextField>,
+    all: RefCell<Vec<String>>,
+    /// Indices into `all`, in filtered order.
+    shown: RefCell<Vec<usize>>,
+    /// An index into `shown`.
+    selection: Cell<usize>,
+    cfg: NoteFindConfig,
+    colors: PopupColors,
+    on_pick: RefCell<Option<Box<dyn Fn(usize)>>>,
+}
+
+impl PaneFindUi {
+    pub fn new(mtm: MainThreadMarker, placeholder: &str, cfg: NoteFindConfig) -> Rc<PaneFindUi> {
+        let colors = crate::ui::theme::PopupThemeDefaults::colors();
+        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, placeholder);
+        let config = PopupConfig {
+            name: "pane-find".to_string(),
+            frame: CardFrame { x: 0.0, y: 0.0, width: cfg.width, height: list.height(1, cfg.rows) },
+            tool_panel: true,
+            floating: true,
+            ..PopupConfig::default()
+        };
+        let panel = PopupPanel::create(mtm, &config);
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+        panel.setHasShadow(true);
+        panel.setContentView(Some(&list.root));
+        let empty = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        empty.setFont(Some(&style::system_font(12.0, Weight::Regular)));
+        empty.setTextColor(Some(&colors.dim.to_nscolor()));
+        empty.setHidden(true);
+        list.root.addSubview(&empty);
+        let ui = Rc::new(PaneFindUi {
+            panel,
+            list,
+            empty,
+            all: RefCell::new(Vec::new()),
+            shown: RefCell::new(Vec::new()),
+            selection: Cell::new(0),
+            cfg,
+            colors,
+            on_pick: RefCell::new(None),
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.list.set_drawer(Box::new(move |r, i, sel, _hover| {
+            if let Some(ui) = weak.upgrade() {
+                ui.draw_row(r, i, sel);
+            }
+        }));
+        let weak = Rc::downgrade(&ui);
+        ui.list.set_on_click(Box::new(move |row, _, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open(row);
+            }
+        }));
+        let weak = Rc::downgrade(&ui);
+        let weak_cmd = Rc::downgrade(&ui);
+        ui.list.set_on_field(
+            Box::new(move |_q: String| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.reload();
+                }
+            }),
+            Box::new(move |cmd| {
+                let Some(ui) = weak_cmd.upgrade() else { return false };
+                match cmd {
+                    "cancelOperation:" => ui.hide(),
+                    "insertNewline:" => ui.open(ui.selection.get()),
+                    "moveDown:" => ui.move_selection(1),
+                    "moveUp:" => ui.move_selection(-1),
+                    _ => return false,
+                }
+                true
+            }),
+        );
+        ui
+    }
+
+    pub fn set_on_pick(&self, f: Box<dyn Fn(usize)>) {
+        *self.on_pick.borrow_mut() = Some(f);
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self.panel.isVisible()
+    }
+
+    pub fn has_key(&self) -> bool {
+        self.panel.isKeyWindow()
+    }
+
+    pub fn selection(&self) -> usize {
+        self.selection.get()
+    }
+
+    /// Show (or re-raise) over `items`, resetting the query.
+    pub fn show(&self, items: Vec<String>) {
+        *self.all.borrow_mut() = items;
+        self.list.search.setStringValue(&NSString::from_str(""));
+        self.reload();
+        if !self.is_shown() {
+            place_top_center(&self.panel);
+        }
+        self.panel.makeKeyAndOrderFront(None);
+        self.panel.makeFirstResponder(Some(&self.list.search));
+    }
+
+    pub fn hide(&self) {
+        self.panel.orderOut(None);
+    }
+
+    fn reload(&self) {
+        let q = self.list.search.stringValue().to_string();
+        let all = self.all.borrow();
+        let q = q.trim();
+        let shown: Vec<usize> = if q.is_empty() {
+            (0..all.len()).collect()
+        } else {
+            let mut idx = FuzzyIndex::new(&all[..]);
+            idx.ranked(q)
+        };
+        let n = shown.len();
+        *self.shown.borrow_mut() = shown;
+        self.selection.set(0);
+        self.list.set_rows(n, 0);
+        let h = self.list.height(n, self.cfg.rows);
+        let f = self.panel.frame();
+        let top = f.origin.y + f.size.height;
+        self.panel
+            .setFrame_display(NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(self.cfg.width, h)), true);
+        let note = if all.is_empty() {
+            "Nothing to pick in this pane".to_string()
+        } else {
+            format!("No item matches “{}”", q)
+        };
+        self.empty.setStringValue(&NSString::from_str(&note));
+        self.empty.setHidden(n > 0);
+        self.empty.setFrame(NSRect::new(
+            NSPoint::new(18.0, h - crate::ui::list_panel::SEARCH_H - ROW_H + 7.0),
+            NSSize::new(self.cfg.width - 36.0, 16.0),
+        ));
+    }
+
+    pub fn move_selection(&self, d: i64) {
+        let n = self.shown.borrow().len() as i64;
+        if n == 0 {
+            return;
+        }
+        let s = (self.selection.get() as i64 + d).rem_euclid(n) as usize;
+        self.selection.set(s);
+        self.list.set_rows(n as usize, s);
+    }
+
+    /// Pick shown row `i`: hide, then run the activation callback with the
+    /// original item index.
+    pub fn open(&self, i: usize) {
+        let Some(orig) = self.shown.borrow().get(i).copied() else { return };
+        self.hide();
+        if let Some(f) = self.on_pick.borrow().as_ref() {
+            f(orig);
+        }
+    }
+
+    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+        use crate::ui::chrome::Rect;
+        let c = &self.colors;
+        let shown = self.shown.borrow();
+        let Some(orig) = shown.get(i).copied() else { return };
+        let text = self.all.borrow().get(orig).cloned().unwrap_or_default();
+        let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
+        if selected {
+            style::fill_rounded(inner, 7.0, c.highlight);
+            style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
+        }
+        let band = Rect::new(inner.x + 12.0, inner.y, inner.width - 22.0, inner.height);
+        style::draw_text_left(&text, band, &style::system_font(13.0, Weight::Regular), c.text);
+    }
+}
+
 /// `place()`: centered on the mouse's screen, 20% down from the top.
 fn place_top_center(panel: &PopupPanel) {
     let Some(mtm) = MainThreadMarker::new() else { return };
@@ -625,4 +866,20 @@ fn place_top_center(panel: &PopupPanel) {
     let x = vis.origin.x + vis.size.width / 2.0 - f.size.width / 2.0;
     let y = (vis.origin.y + vis.size.height - vis.size.height * 0.2 - f.size.height).max(vis.origin.y);
     panel.setFrameOrigin(NSPoint::new(x.round(), y.round()));
+}
+
+#[cfg(test)]
+mod grep_snippet_tests {
+    use super::grep_snippet;
+
+    #[test]
+    fn windows_on_the_match() {
+        let (b, h, a) = grep_snippet("  **Themed** `dot` fences: no colors, fonts or sizes", "DOT");
+        assert_eq!((b.as_str(), h.as_str()), ("Themed ", "dot"));
+        assert!(a.starts_with(" fences"));
+        let long = "x".repeat(60) + " needle tail";
+        let (b, h, _) = grep_snippet(&long, "needle");
+        assert!(b.starts_with('…') && h == "needle");
+        assert_eq!(grep_snippet("no hit here", "zzz").1, "no hit here");
+    }
 }

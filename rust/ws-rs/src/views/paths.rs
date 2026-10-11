@@ -710,7 +710,7 @@ impl PathsWindow {
             mtm,
             &colors,
             13.0,
-            "recent files — type to filter · ↩ copy file · ⌘C copy path · drag a row out",
+            "",
             6.0,
             28.0,
         );
@@ -1055,7 +1055,7 @@ mod macos {
         // Search / query field.
         let search = NSTextField::textFieldWithString(&NSString::from_str(query), mtm);
         search.setPlaceholderString(Some(&NSString::from_str(
-            "recent files — type to filter · ↩ copy file",
+            "",
         )));
         search.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         search.setBezeled(true);

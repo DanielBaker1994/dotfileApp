@@ -1084,7 +1084,8 @@ impl SwitcherController {
             }
             "terminal" => self.toggle_terminal_panel(),
             "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
-            | "compare" | "prettyprint" | "filefast" | "health" | "health-checks" => {
+            | "compare" | "prettyprint" | "filefast" | "health" | "health-checks"
+            | "notes-find" | "notes-grep" => {
                 self.toggle_command(name)
             }
             _ => {
@@ -1464,6 +1465,14 @@ impl SwitcherController {
             }
             "health" | "health-checks" | "prettyprint" | "filefast" => {
                 self.toggle_tool(name);
+            }
+            // `startCommandServer`'s fall-through: the notes vim pane's
+            // leader+sf / leader+sg send these raw (no `do:`) over `g:ws_sock`.
+            "notes-find" | "notes-grep" => {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .ui_push(UiCommand::NoteFind(name == "notes-grep"));
             }
             _ => {
                 self.inner
@@ -2897,6 +2906,10 @@ mod daemon_ui {
         static FILES_CUT: Cell<bool> = const { Cell::new(false) };
     }
 
+    /// Last `gather_workspaces()` result, so the palette opens instantly.
+    static WORKSPACE_CACHE: std::sync::Mutex<Vec<crate::views::switcher::WorkspaceRow>> =
+        std::sync::Mutex::new(Vec::new());
+
     thread_local! {
         /// The daemon UI, for main-thread hops from worker threads.
         static UI_WEAK: RefCell<Option<objc2::rc::Weak<DaemonUi>>> = const { RefCell::new(None) };
@@ -2981,6 +2994,8 @@ mod daemon_ui {
         note_grep: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
         /// `sidebarJumpWindow` (`do:jira-jump`).
         sidebar_jump: RefCell<Option<Rc<crate::views::note_find::SidebarJumpUi>>>,
+        /// The `<leader>sf` item finder on the non-nvim panes.
+        pane_find: RefCell<Option<Rc<crate::views::note_find::PaneFindUi>>>,
         /// The Cmd+K action picker while it is up.
         action_picker: RefCell<Option<Retained<crate::ui::action_picker::ActionPicker>>>,
     }
@@ -3065,6 +3080,7 @@ mod daemon_ui {
             note_find: RefCell::new(None),
             note_grep: RefCell::new(None),
             sidebar_jump: RefCell::new(None),
+            pane_find: RefCell::new(None),
             action_picker: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
@@ -3497,6 +3513,16 @@ mod daemon_ui {
         }
 
         /// `showViewSwitcher()` — show the palette over the shared window.
+        /// Swap fresh `aerospace` rows into an open palette (see `show_palette`).
+        fn refresh_palette_workspaces(&self, workspaces: Vec<crate::views::switcher::WorkspaceRow>) {
+            let Ok(mut state) = self.ivars().state.try_borrow_mut() else { return };
+            if let Some(p) = state.as_mut().and_then(|st| st.palette.as_mut()) {
+                if p.is_visible() {
+                    p.refresh_workspaces(workspaces);
+                }
+            }
+        }
+
         fn show_palette(&self) {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
@@ -3511,8 +3537,16 @@ mod daemon_ui {
                 .iter()
                 .map(|c| (c.id.clone(), c.title.clone()))
                 .collect();
-            let workspaces = gather_workspaces();
+            // The `aerospace` CLI can stall for seconds (it did when the
+            // palette was opened from the Ctrl+B key chord), so never wait on
+            // it here: paint with the last known rows and refresh off-main.
+            let workspaces = WORKSPACE_CACHE.lock().unwrap().clone();
             panel.set_rows(commands, workspaces);
+            std::thread::spawn(|| {
+                let fresh = gather_workspaces();
+                *WORKSPACE_CACHE.lock().unwrap() = fresh.clone();
+                on_ui(move |ui| ui.refresh_palette_workspaces(fresh));
+            });
             panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
@@ -4121,6 +4155,11 @@ mod daemon_ui {
                         return true;
                     }
                 }
+                if let Some(tree) = any.downcast_ref::<crate::ui::tree_view::TreeView>() {
+                    if tree.handle_nav_key(event) {
+                        return true;
+                    }
+                }
             }
 
             let current = self.ivars().controller.current();
@@ -4390,11 +4429,14 @@ mod daemon_ui {
                             if code == popup::KEY_ESC {
                                 sw.hide_panel();
                                 Out::SwitcherClosed
-                            } else if code == popup::KEY_DOWN {
+                            } else if code == popup::KEY_DOWN || (code == 45 && ctrl) {
                                 sw.move_selection(1);
                                 Out::Consumed
-                            } else if code == popup::KEY_UP {
+                            } else if code == popup::KEY_UP || (code == 35 && ctrl) {
                                 sw.move_selection(-1);
+                                Out::Consumed
+                            } else if code == popup::KEY_TAB {
+                                sw.move_selection(if shift { -1 } else { 1 });
                                 Out::Consumed
                             } else if code == popup::KEY_RETURN || code == 76 {
                                 match sw.accept() {
@@ -4422,6 +4464,11 @@ mod daemon_ui {
                 Out::NotHandled => false,
                 Out::Consumed => true,
                 Out::Palette(action) => {
+                    // Return accepted from the key monitor: close the panel
+                    // like a click does (it used to linger after Enter).
+                    if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
+                        p.hide_panel();
+                    }
                     match action {
                         PaletteAction::Command(name) => {
                             self.ivars().controller.run_palette_command(&name)
@@ -4689,7 +4736,10 @@ mod daemon_ui {
                     });
                     c.nav_clicked(id);
                 }
-                'w' => self.ivars().controller.view_switcher_show(),
+                // Ctrl+B W opens the same two-pane palette as Hyper+S (`show`):
+                // commands on the left, workspaces/apps on the right. Kept in
+                // step with `do:show` / the `show` verb so both are consistent.
+                'w' => self.ivars().controller.palette_toggle(),
                 't' => {
                     // `toggleProseFromPrefix`: the notes vim pane / reading
                     // view flips prose; anything else gets the terminal.
@@ -5419,6 +5469,105 @@ mod daemon_ui {
                 None => "Style removed".to_string(),
             };
             crate::ui::toast::show(&msg, "paintpalette");
+        }
+
+        /// The notes pinned-folder tree: clicks toggle folders / open files;
+        /// the right-click menu follows the file-browser rule (copy path, open
+        /// in default app, reveal in the app's own Files view).
+        fn notes_tree_event(&self, ev: crate::ui::tree_view::TreeEvent) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            use crate::ui::tree_view::TreeEvent as E;
+            match ev {
+                E::ToggleSection => {
+                    self.notes_surface(|s| s.tree_toggle_section());
+                }
+                E::Click { path, is_dir } => {
+                    self.notes_surface(|s| s.tree_click(&path, is_dir));
+                }
+                E::Menu { path, is_dir, is_root, x, y } => {
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let (p1, p2, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
+                    let mut entries = Vec::new();
+                    if is_dir {
+                        let w = weak.clone();
+                        entries.push(MenuEntry::item("New Note Here", move || {
+                            if let Some(ui) = w.load() {
+                                ui.notes_surface(|s| s.tree_new_note_in(&p4));
+                            }
+                        }));
+                        let w = weak.clone();
+                        entries.push(MenuEntry::item("Collapse / Expand", move || {
+                            if let Some(ui) = w.load() {
+                                ui.notes_surface(|s| s.tree_click(&p5, true));
+                            }
+                        }));
+                        entries.push(MenuEntry::Separator);
+                    } else {
+                        let w = weak.clone();
+                        entries.push(MenuEntry::item("Open", move || {
+                            if let Some(ui) = w.load() {
+                                ui.notes_surface(|s| s.tree_click(&p4, false));
+                            }
+                        }));
+                        entries.push(MenuEntry::Separator);
+                    }
+                    let pc = path.clone();
+                    entries.push(MenuEntry::item("Copy File", move || {
+                        copy_files_toast(&[pc]);
+                    }));
+                    if !is_root {
+                        let (w, pd) = (weak.clone(), path.clone());
+                        entries.push(MenuEntry::item("Duplicate", move || {
+                            use crate::engines::file_ops::FileOps;
+                            let o = FileOps::duplicate(&[pd], FileOps::shared());
+                            if let Some(ui) = w.load() {
+                                if let Some(msg) = o.failed.as_deref() {
+                                    crate::ui::toast::show(msg, "exclamationmark.triangle");
+                                }
+                                ui.notes_surface(|s| s.tree_refresh());
+                            }
+                        }));
+                    }
+                    entries.push(MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)));
+                    if !is_dir || is_root {
+                        entries.push(MenuEntry::item("Open in Default App", move || open_path(&p2)));
+                    }
+                    entries.push(MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p3])));
+                    if !is_root {
+                        entries.push(MenuEntry::Separator);
+                        let (w, pt) = (weak.clone(), path.clone());
+                        entries.push(MenuEntry::item("Delete…", move || {
+                            let Some(ui) = w.load() else { return };
+                            let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                            let name = std::path::Path::new(&pt).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let weak = objc2::rc::Weak::from_retained(&ui.retain());
+                            crate::ui::sheet::alert_sheet(
+                                &window,
+                                &format!("Delete “{name}”?"),
+                                "It goes to the Trash.",
+                                &["Move to Trash", "Cancel"],
+                                move |b| {
+                                    if b != 0 {
+                                        return;
+                                    }
+                                    use crate::engines::file_ops::FileOps;
+                                    let o = FileOps::trash(&[pt.clone()], FileOps::shared());
+                                    if let Some(ui) = weak.load() {
+                                        match o.failed.as_deref() {
+                                            Some(msg) => crate::ui::toast::show(msg, "exclamationmark.triangle"),
+                                            None => {
+                                                ui.notes_surface(|s| s.tree_removed(&pt));
+                                                crate::ui::toast::show("Moved to the Trash", "trash");
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                        }));
+                    }
+                    popup(entries, None, x, y);
+                }
+            }
         }
 
         fn notes_sidebar_event(&self, ev: crate::ui::sidebar::SidebarEvent) {
@@ -7887,8 +8036,20 @@ mod daemon_ui {
             use crate::views::notes::NoteFindMode;
             let Some(mtm) = MainThreadMarker::new() else { return };
             let slot = if grep { &self.ivars().note_grep } else { &self.ivars().note_find };
-            let ui = slot.borrow().clone();
-            let ui = match ui {
+            let own = slot.borrow().clone();
+            // `showNoteFind`: toggle the same panel, and hide the other mode's
+            // window first (files vs grep).
+            if let Some(u) = &own {
+                if u.is_shown() {
+                    u.hide();
+                    return;
+                }
+            }
+            let other = if grep { &self.ivars().note_find } else { &self.ivars().note_grep };
+            if let Some(o) = other.borrow().clone() {
+                o.hide();
+            }
+            let ui = match own {
                 Some(u) => u,
                 None => {
                     let text = crate::app::config::read_config_text().unwrap_or_default();
@@ -8137,6 +8298,29 @@ mod daemon_ui {
                     _ => return false,
                 }
                 if !j.is_shown() {
+                    if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
+                        if w.isVisible() {
+                            w.makeKeyAndOrderFront(None);
+                        }
+                    }
+                }
+                return true;
+            }
+            // The `<leader>sf` pane item finder (Jira / Confluence / files /
+            // sidebar): nav + accept only, so typing reaches its search field.
+            let pf_open = self.ivars().pane_find.borrow().clone();
+            if let Some(pf) = pf_open.filter(|u| u.has_key()) {
+                let ctrl = event.modifierFlags().contains(F::Control);
+                match event.keyCode() {
+                    popup::KEY_ESC => pf.hide(),
+                    popup::KEY_DOWN => pf.move_selection(1),
+                    45 if ctrl => pf.move_selection(1),
+                    popup::KEY_UP => pf.move_selection(-1),
+                    35 if ctrl => pf.move_selection(-1),
+                    popup::KEY_RETURN | 76 => pf.open(pf.selection()),
+                    _ => return false,
+                }
+                if !pf.is_shown() {
                     if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
                         if w.isVisible() {
                             w.makeKeyAndOrderFront(None);
@@ -8695,6 +8879,12 @@ mod daemon_ui {
                                     surface.sidebar_view().set_on_event(Box::new(move |ev| {
                                         if let Some(ui) = weak.load() {
                                             ui.notes_sidebar_event(ev);
+                                        }
+                                    }));
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.tree_view().set_on_event(Box::new(move |ev| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_tree_event(ev);
                                         }
                                     }));
                                     let weak = objc2::rc::Weak::from_retained(&self.retain());

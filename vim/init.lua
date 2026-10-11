@@ -64,6 +64,8 @@ local function ask_app(msg)
     pipe:write(msg, function() pipe:close() end)
   end)
 end
+-- Esc clears the search highlight (like `:nohl`) and still behaves as Esc.
+vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR><Esc>', { silent = true })
 vim.keymap.set('n', '<leader>sf', function() ask_app('notes-find') end,
   { desc = 'find among the open notes (popup)', silent = true })
 vim.keymap.set('n', '<leader>sg', function() ask_app('notes-grep') end,

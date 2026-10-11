@@ -247,6 +247,9 @@ pub enum VimAction {
     SearchCopy(String),
     /// Esc cleared the active highlight.
     ClearHighlight,
+    /// `<leader>sf`: open the pane's item finder (the host fuzzy-picks one of
+    /// the pane's rows and activates it like a click).
+    OpenFind,
 }
 
 /// Per-key context: the focused pane and everything `handle` needs from it.
@@ -296,6 +299,12 @@ pub struct VimKeys {
     pub pending_g: bool,
     /// When the pending `g` was pressed; `gg` only fires within 0.8 s.
     pending_g_at: Option<Instant>,
+    /// `<leader>` (Space, `vim/init.lua`'s mapleader) was pressed; `s` may follow.
+    pending_leader: bool,
+    /// When the pending leader was pressed; the sequence only fires within 0.8 s.
+    pending_leader_at: Option<Instant>,
+    /// `<leader>s` was pressed; `f` opens the pane's item finder.
+    pending_s: bool,
     /// An active highlight exists (set by the host); Esc clears it.
     pub highlighting: bool,
     /// A jira-list-style field kept in normal mode (caret hidden).
@@ -321,6 +330,9 @@ impl VimKeys {
             show_badge: true,
             pending_g: false,
             pending_g_at: None,
+            pending_leader: false,
+            pending_leader_at: None,
+            pending_s: false,
             highlighting: false,
             field_normal: false,
             last_query: String::new(),
@@ -438,6 +450,32 @@ impl VimKeys {
 
         let ch = if mods_shift_only { key.chars } else { None };
 
+        // `<leader>sf` (leader = Space, like `vim/init.lua`'s mapleader) opens
+        // the pane's item finder on the non-nvim panes (the Jira/Confluence
+        // lists, the files list, the sidebar). `<leader>s` arms it, `f` fires.
+        if self.pending_s {
+            self.pending_s = false;
+            if ch == Some('f') {
+                self.reset_pending_g();
+                self.pending_leader = false;
+                self.pending_leader_at = None;
+                return VimAction::OpenFind;
+            }
+        }
+        if self.pending_leader_fresh(now) {
+            self.pending_leader = false;
+            self.pending_leader_at = None;
+            if ch == Some('s') {
+                self.pending_s = true;
+                return VimAction::Handled;
+            }
+            // Not a leader command: fall through and handle the key normally.
+        } else if ch == Some(' ') {
+            self.pending_leader = true;
+            self.pending_leader_at = Some(now);
+            return VimAction::Handled;
+        }
+
         if ch == Some('g') {
             if self.pending_g_fresh(now) {
                 self.reset_pending_g();
@@ -515,6 +553,14 @@ impl VimKeys {
         self.pending_g
             && self
                 .pending_g_at
+                .map(|t| now.saturating_duration_since(t) < Duration::from_millis(800))
+                .unwrap_or(false)
+    }
+
+    fn pending_leader_fresh(&self, now: Instant) -> bool {
+        self.pending_leader
+            && self
+                .pending_leader_at
                 .map(|t| now.saturating_duration_since(t) < Duration::from_millis(800))
                 .unwrap_or(false)
     }
@@ -1055,6 +1101,42 @@ mod tests {
             VimTarget::Rows(r) => assert_eq!(r.cursor, 0, "gg jumps to the first row"),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn leader_sf_opens_the_pane_finder() {
+        // `<leader>` (Space) then `s` then `f` -> OpenFind.
+        let mut vim = VimKeys::new();
+        let mut t = rows(20);
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(49, Some(' '))), VimAction::Handled);
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(1, Some('s'))), VimAction::Handled);
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(3, Some('f'))), VimAction::OpenFind);
+
+        // A bare leader does not move the list.
+        let mut vim = VimKeys::new();
+        let mut t = rows(20);
+        apply(&mut vim, &mut t, "list", false, key(KEY_J, Some('j')));
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(49, Some(' '))), VimAction::Handled);
+        match &t {
+            VimTarget::Rows(r) => assert_eq!(r.cursor, 1, "Space alone does not move"),
+            _ => panic!(),
+        }
+
+        // A stale leader (past 0.8 s) is not a leader any more.
+        let mut vim = VimKeys::new();
+        let mut t = rows(20);
+        let t0 = Instant::now();
+        assert_eq!(apply_at(&mut vim, &mut t, "list", key(49, Some(' ')), t0), VimAction::Handled);
+        assert_eq!(
+            apply_at(&mut vim, &mut t, "list", key(1, Some('s')), t0 + Duration::from_millis(900)),
+            VimAction::Pass,
+            "a stale 's' is not the leader command and falls through unhandled"
+        );
+        assert_ne!(
+            apply_at(&mut vim, &mut t, "list", key(3, Some('f')), t0 + Duration::from_millis(1800)),
+            VimAction::OpenFind,
+            "without an armed leader, 'f' is not OpenFind"
+        );
     }
 
     #[test]

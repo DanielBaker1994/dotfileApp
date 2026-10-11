@@ -281,6 +281,23 @@ mod appkit {
             (i >= 0.0 && (i as usize) < n).then_some(i as usize)
         }
 
+        /// The visible result rows' rects (for the vim search highlight).
+        pub fn vim_shown_rects(&self) -> Vec<(usize, Rect)> {
+            let n = self.ivars().snap.borrow().rows.len();
+            let vis = self.visibleRect();
+            let row_h = RESULT_H + RESULT_GAP;
+            if n == 0 || row_h <= 0.0 || vis.size.height <= 0.0 {
+                return Vec::new();
+            }
+            let first = (vis.origin.y / row_h).floor().max(0.0) as usize;
+            let last = (((vis.origin.y + vis.size.height) / row_h).floor() as usize).min(n - 1);
+            if first > last {
+                return Vec::new();
+            }
+            let w = self.bounds().size.width;
+            (first..=last).map(|i| (i, Rect::new(0.0, i as f64 * row_h, w, RESULT_H))).collect()
+        }
+
         fn draw(&self) {
             let c = self.ivars().colors.get();
             let snap = self.ivars().snap.borrow();
@@ -570,6 +587,14 @@ mod appkit {
 
         pub fn results_view(&self) -> Retained<NSView> {
             Retained::into_super(self.ivars().results.clone())
+        }
+
+        /// The results list's document view plus each visible row's rect (the
+        /// vim search highlight draws the overlay into it).
+        pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
+            let r = self.ivars().results.clone();
+            let rects = r.vim_shown_rects();
+            (Retained::into_super(r), rects)
         }
 
         pub fn apply(&self, s: ConfSnapshot) {

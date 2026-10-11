@@ -370,6 +370,11 @@ exported for Python readers).
 - Hide-on-focus-loss: the setting is reported, but the Swift focus bridge
   (`ws-aerospace-focus` watcher) is not ported.
 - AeroSpace re-show differs from Swift ("no jump back" in the focus suite).
-- `Cmd+K` action picker, `Cmd+/` shortcuts sheet, `do:notes-find` /
-  `do:notes-grep` / `do:jira-jump`, pane-shot preview window, compare
-  `summary` label.
+- Vim search highlight (`VimMatchOverlay`/`hlsearch`): rows are ported for the
+  sidebar, files, Jira and Confluence lists; text (`NSTextView` temporary
+  background) and web (`CSS.highlights`) targets are still unported.
+- `Cmd+K` action picker, `Cmd+/` shortcuts sheet, pane-shot preview window,
+  compare `summary` label. (`do:notes-find` / `do:notes-grep` / `do:jira-jump`
+  windows are ported: `views/note_find.rs`; the notes vim pane's `leader+sf` /
+  `leader+sg` route raw `notes-find` / `notes-grep`; `<leader>sf` on the
+  non-nvim panes opens `PaneFindUi`.)

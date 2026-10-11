@@ -38,6 +38,16 @@ pub(super) struct VimHost {
     pub keys: VimKeys,
     bar: Option<Retained<VimSearchBarView>>,
     badge: Option<Retained<VimModeBadge>>,
+    /// The active search highlight (`VimHighlight` / vim's `hlsearch`).
+    hl: Option<VimHl>,
+}
+
+/// `VimKeys.swift`'s `VimHighlight`: the pane + document view the search
+/// matches are painted over, and the overlay drawing the row bands.
+pub(super) struct VimHl {
+    pane: String,
+    view: Retained<NSView>,
+    overlay: Retained<VimMatchOverlay>,
 }
 
 /// `VimTarget.find(in:)`: the first web / non-field text view under `v`.
@@ -302,6 +312,10 @@ impl DaemonUi {
                 true
             }
             VimAction::Handled | VimAction::ClearHighlight => true,
+            VimAction::OpenFind => {
+                self.vim_open_find(&live);
+                true
+            }
         };
         // Web search runs in the page (`WKWebView.find`).
         if let (Some(Live::Web(wv)), Some((q, back))) = (&live, &query) {
@@ -311,6 +325,7 @@ impl DaemonUi {
             }
         }
         self.vim_sync_bar();
+        self.vim_paint_highlight(&pane.id, &live);
         self.live_pane_refresh();
         consumed
     }
@@ -410,6 +425,14 @@ impl DaemonUi {
                 v.keys.mode = VimMode::Normal;
             }
             v.keys.pane = cur.map(|c| c.id.clone()).unwrap_or_default();
+            // `clearHighlight`: the search highlights go with the pane / window
+            // that had the keyboard.
+            let cur_pane = cur.map(|c| c.id.as_str()).unwrap_or("");
+            if v.hl.as_ref().is_some_and(|h| !key || h.pane.as_str() != cur_pane) {
+                if let Some(h) = v.hl.take() {
+                    h.overlay.removeFromSuperview();
+                }
+            }
         }
         self.vim_sync_bar();
         let mode = match (cur, w.firstResponder()) {
@@ -459,6 +482,178 @@ impl DaemonUi {
             b.setHidden(true);
         }
         v.keys.mode = mode.unwrap_or(if v.keys.search.is_some() { VimMode::Search } else { VimMode::Normal });
+    }
+
+    /// The focused pane's document view, one rect per visible row, and the row
+    /// texts/cursor — everything the highlight overlay needs.
+    fn vim_shown(
+        &self,
+        live: &Option<Live>,
+    ) -> Option<(Retained<NSView>, Vec<(usize, crate::ui::chrome::Rect)>, VimRows)> {
+        let Live::Rows(src, bar) = live.as_ref()? else { return None };
+        let rows = self.vim_rows(*src, bar.as_deref())?;
+        let (view, rects) = match src {
+            RowsSource::Sidebar => {
+                let b = bar.as_ref()?;
+                (Retained::into_super(b.clone()), b.vim_shown_rects())
+            }
+            RowsSource::Files => {
+                let view = self
+                    .ivars()
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|st| st.files.as_ref())
+                    .and_then(|b| b.view.clone())?;
+                view.vim_shown_rows()
+            }
+            RowsSource::Jira => {
+                let view = self
+                    .ivars()
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|st| st.jira.as_ref().map(|j| j.1.clone()))?;
+                view.vim_shown_rows()
+            }
+            RowsSource::Confluence => {
+                let view = self
+                    .ivars()
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .and_then(|st| st.confluence.as_ref().map(|cs| cs.view.clone()))?;
+                view.vim_shown_rows()
+            }
+        };
+        Some((view, rects, rows))
+    }
+
+    /// `VimKeys.swift`'s `highlight(_:query:pane:in:)` / `paint(_:)`: paint a
+    /// band over every matching row while a search is active, or clear it.
+    fn vim_paint_highlight(&self, pane_id: &str, live: &Option<Live>) {
+        let (query, on) = {
+            let k = self.ivars().vim.borrow();
+            let q = match &k.keys.search {
+                Some(s) if !s.query.is_empty() => s.query.clone(),
+                _ if k.keys.highlighting => k.keys.last_query.clone(),
+                _ => String::new(),
+            };
+            let has = k.keys.highlighting && !q.is_empty();
+            (q, has)
+        };
+        if !on {
+            self.vim_clear_highlight();
+            return;
+        }
+        let Some((view, rects, rows)) = self.vim_shown(live) else {
+            self.vim_clear_highlight();
+            return;
+        };
+        let marks: Vec<(crate::ui::chrome::Rect, bool)> = rects
+            .iter()
+            .filter(|(row, _)| crate::panes::vim_search::matches(rows.text(*row), &query))
+            .map(|(row, r)| (*r, *row == rows.cursor))
+            .collect();
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let mut v = self.ivars().vim.borrow_mut();
+        let reuse = v
+            .hl
+            .as_ref()
+            .is_some_and(|h| h.pane == pane_id && std::ptr::eq(&*h.view as *const NSView, &*view as *const NSView));
+        if !reuse {
+            if let Some(old) = v.hl.take() {
+                old.overlay.removeFromSuperview();
+            }
+            let overlay = VimMatchOverlay::create(mtm);
+            view.addSubview(&overlay);
+            v.hl = Some(VimHl { pane: pane_id.to_string(), view: view.clone(), overlay });
+        }
+        let h = v.hl.as_ref().unwrap();
+        h.overlay.set_marks(marks);
+        if h.overlay.frame() != view.bounds() {
+            h.overlay.setFrame(view.bounds());
+        }
+        // Keep the overlay above any sibling the view adds later.
+        let overlay_super = unsafe { h.overlay.superview() };
+        if overlay_super.is_some_and(|s| !std::ptr::eq(&*s as *const NSView, &*view as *const NSView)) {
+            h.overlay.removeFromSuperview();
+            view.addSubview(&h.overlay);
+        }
+        h.overlay.setNeedsDisplay(true);
+    }
+
+    /// Drop the search highlight overlay (`clearHighlight(_:)`).
+    fn vim_clear_highlight(&self) {
+        if let Some(h) = self.ivars().vim.borrow_mut().hl.take() {
+            h.overlay.removeFromSuperview();
+        }
+    }
+
+    /// The `<leader>sf` item finder UI, built lazily (like `note_find`).
+    fn pane_find_ui(&self) -> Rc<crate::views::note_find::PaneFindUi> {
+        if let Some(u) = self.ivars().pane_find.borrow().clone() {
+            return u;
+        }
+        use crate::views::note_find::{NoteFindConfig, PaneFindUi};
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let text = crate::app::config::read_config_text().unwrap_or_default();
+        let sec = crate::app::host::parse_sections(&text).get("notes-find").cloned().unwrap_or_default();
+        let u = PaneFindUi::new(
+            mtm,
+            "",
+            NoteFindConfig::from_section(&sec),
+        );
+        *self.ivars().pane_find.borrow_mut() = Some(u.clone());
+        u
+    }
+
+    /// `<leader>sf`: fuzzy-pick one of the focused pane's rows and activate it
+    /// like a mouse click.
+    fn vim_open_find(&self, live: &Option<Live>) {
+        let Some(Live::Rows(src, bar)) = live else { return };
+        let Some(rows) = self.vim_rows(*src, bar.as_deref()) else { return };
+        let items = rows.texts.clone();
+        if items.is_empty() {
+            return;
+        }
+        let src = *src;
+        let weak = objc2::rc::Weak::from_retained(&self.retain());
+        let weak_bar = bar.as_ref().map(objc2::rc::Weak::from_retained);
+        let ui = self.pane_find_ui();
+        ui.set_on_pick(Box::new(move |i| {
+            let Some(me) = weak.load() else { return };
+            let bar = weak_bar.as_ref().and_then(|b| b.load());
+            me.vim_activate_row(src, bar.as_deref(), i);
+        }));
+        ui.show(items);
+    }
+
+    /// Activate row `row` of `src` exactly as a mouse click on that row: the
+    /// Jira inspector / files preview / Confluence preview / sidebar follow.
+    fn vim_activate_row(
+        &self,
+        src: RowsSource,
+        bar: Option<&crate::ui::sidebar::SidebarView>,
+        row: usize,
+    ) {
+        use crate::views::files_view::FilesEvent;
+        use crate::views::jira_view::JiraEvent;
+        match src {
+            RowsSource::Sidebar => {
+                if let Some(b) = bar {
+                    b.activate_row(row);
+                }
+            }
+            RowsSource::Files => self.files_event(FilesEvent::Click {
+                row,
+                cmd: false,
+                shift: false,
+                double: false,
+            }),
+            RowsSource::Jira => self.jira_event(JiraEvent::Click { row, double: false }),
+            RowsSource::Confluence => self.conf_load_preview(row),
+        }
     }
 
     /// `pane.vimMode` / `pane.vimSearch` for `state.pane`.
@@ -546,5 +741,69 @@ impl VimSearchBarView {
             *self.ivars().status.borrow_mut() = status.to_string();
             self.setNeedsDisplay(true);
         }
+    }
+}
+
+// ------------------------------------------------------------- match overlay
+
+pub(super) struct VimMatchOverlayIvars {
+    marks: RefCell<Vec<(crate::ui::chrome::Rect, bool)>>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "WSVimMatchOverlay"]
+    #[ivars = VimMatchOverlayIvars]
+    /// `VimMatchOverlay`: a translucent band over every search match, the
+    /// cursor's row stronger with an accent rail and a border.
+    pub(super) struct VimMatchOverlay;
+
+    impl VimMatchOverlay {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _p: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            use crate::ui::style;
+            use crate::ui::theme::PopupThemeDefaults;
+            let col = PopupThemeDefaults::colors().palette.warning;
+            for (r, current) in self.ivars().marks.borrow().iter() {
+                let band = r.inset_by(1.0, 1.0);
+                if band.width <= 0.0 || band.height <= 0.0 {
+                    continue;
+                }
+                style::fill_rounded(band, 5.0, col.with_alpha(if *current { 0.40 } else { 0.22 }));
+                style::fill_rounded(
+                    crate::ui::chrome::Rect::new(band.x, band.y + 3.0, 3.0, (band.height - 6.0).max(0.0)),
+                    1.5,
+                    col.with_alpha(if *current { 1.0 } else { 0.7 }),
+                );
+                if *current {
+                    style::stroke_rounded(band, 5.0, 1.5, col);
+                }
+            }
+        }
+    }
+);
+
+impl VimMatchOverlay {
+    fn create(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(VimMatchOverlayIvars { marks: RefCell::new(Vec::new()) });
+        let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        v.setWantsLayer(true);
+        v
+    }
+
+    fn set_marks(&self, marks: Vec<(crate::ui::chrome::Rect, bool)>) {
+        *self.ivars().marks.borrow_mut() = marks;
+        self.setNeedsDisplay(true);
     }
 }

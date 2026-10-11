@@ -1161,6 +1161,22 @@ mod appkit {
             }
         }
 
+        /// The visible rows' rects (for the vim search highlight overlay).
+        pub fn vim_shown_rects(&self) -> Vec<(usize, Rect)> {
+            let n = self.ivars().snap.borrow().rows.len();
+            let vis = self.visibleRect();
+            if n == 0 || vis.size.height <= 0.0 {
+                return Vec::new();
+            }
+            let first = (vis.origin.y / ROW_H).floor().max(0.0) as usize;
+            let last = (((vis.origin.y + vis.size.height) / ROW_H).floor() as usize).min(n - 1);
+            if first > last {
+                return Vec::new();
+            }
+            let w = self.bounds().size.width;
+            (first..=last).map(|i| (i, Rect::new(0.0, i as f64 * ROW_H, w, ROW_H))).collect()
+        }
+
         fn draw(&self, dirty: NSRect) {
             let c = self.ivars().colors.get();
             let snap = self.ivars().snap.borrow();
@@ -1666,6 +1682,14 @@ mod appkit {
         /// The rail (`sidebarJumpItems` / `do:jira-jump`).
         pub fn sidebar(&self) -> Retained<SidebarView> {
             self.ivars().sidebar.clone()
+        }
+
+        /// The issue list's document view plus each visible row's rect (the vim
+        /// search highlight draws the overlay into it).
+        pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
+            let t = self.ivars().table.clone();
+            let rects = t.vim_shown_rects();
+            (Retained::into_super(t), rects)
         }
 
         /// `JiraDashboard.navPanes`: sidebar, search, list, issue.

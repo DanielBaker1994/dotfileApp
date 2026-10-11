@@ -65,7 +65,7 @@ Legend: ✅ works · 🟡 partial / differs · ❌ missing · ❓ unverified
 | Cmd+P (prose) export PDF | ✅ (path copied + toast) |
 | Cmd+S save / Cmd+F find / Cmd+O open path | ✅ (vim + editor) |
 | Cmd+N new note now / Ctrl+N new from template | ✅ |
-| Space s g / Space s f (nvim → `do:notes-grep` / `do:notes-find`) | ❌ hook only logs "not modelled"; NoteFindWindow not ported |
+| Space s g / Space s f (nvim → `notes-grep` / `notes-find`) | ✅ `views/note_find.rs` (`NoteFindUi`); the notes pane sends them raw over `g:ws_sock`; the host VimKeys `<leader>sf` opens `PaneFindUi` on the non-nvim panes |
 | Space i insert picker | ✅ (nvim-side) |
 | Cmd+C/V/Ctrl+V editor + terminal | ✅ |
 

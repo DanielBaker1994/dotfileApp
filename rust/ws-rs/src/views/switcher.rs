@@ -83,7 +83,7 @@ pub const ROW_HEIGHT: f64 = 32.0;
 pub const SEARCH_HEIGHT: f64 = 34.0;
 pub const PANEL_MARGIN: f64 = 6.0;
 pub const MAX_ROWS: usize = 12;
-pub const SEARCH_PLACEHOLDER: &str = "switch view — type to filter · ↩ open · 1–9 jump";
+pub const SEARCH_PLACEHOLDER: &str = "";
 
 /// A plain (bottom-left) frame, matching `NSWindow.frame` in the placement math.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1304,8 +1304,7 @@ mod macos {
         (width * 0.46).round()
     }
 
-    pub const PALETTE_SEARCH_PLACEHOLDER: &str =
-        "commands + workspaces — type to filter · ↩ run · ⇥ pane";
+    pub const PALETTE_SEARCH_PLACEHOLDER: &str = "";
 
     pub struct PaletteHandlerIvars {
         pub model: RefCell<PaletteModel>,
@@ -1479,20 +1478,60 @@ mod macos {
                     let uw = style::draw_text_right(&ws.unread, Rect::new(cell.x, cell.y, cell.width - 10.0, cell.height), &uf, c.tone(crate::ui::theme::PopupTone::Warning));
                     right -= uw + 8.0;
                 }
-                let text = if !ws.match_text.is_empty() {
-                    ws.match_text.clone()
-                } else {
-                    ws.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(" · ")
-                };
-                let x = chip.max_x() + 10.0;
-                style::draw_text_left(
-                    &text,
-                    Rect::new(x, cell.y, (right - x).max(0.0), cell.height),
-                    &style::system_font(12.5, if on { Weight::Medium } else { Weight::Regular }),
-                    if on { c.text } else { c.dim },
-                );
+                // App icons (like the header strip), not names: ≤3 + "+N".
+                let mut names: Vec<&str> = Vec::new();
+                for a in &ws.apps {
+                    if !names.contains(&a.name.as_str()) {
+                        names.push(&a.name);
+                    }
+                }
+                let mut x = chip.max_x() + 12.0;
+                let size = 20.0;
+                for name in names.iter().take(3) {
+                    if x + size > right {
+                        break;
+                    }
+                    style::draw_image(&app_icon_for_name(name), Rect::new(x, cell.mid_y() - size / 2.0, size, size), 1.0);
+                    x += size + 6.0;
+                }
+                if names.len() > 3 {
+                    style::draw_text_left(
+                        &format!("+{}", names.len() - 3),
+                        Rect::new(x, cell.y, (right - x).max(0.0), cell.height),
+                        &style::system_font(11.0, Weight::Medium),
+                        c.dim,
+                    );
+                }
             }
         }
+    }
+
+    thread_local! {
+        static APP_ICONS: RefCell<std::collections::HashMap<String, Retained<objc2_app_kit::NSImage>>>
+            = RefCell::new(std::collections::HashMap::new());
+    }
+
+    /// The app's Dock icon by display name (cached); a generic glyph when the
+    /// bundle cannot be found.
+    fn app_icon_for_name(name: &str) -> Retained<objc2_app_kit::NSImage> {
+        if let Some(img) = APP_ICONS.with(|c| c.borrow().get(name).cloned()) {
+            return img;
+        }
+        let ws = objc2_app_kit::NSWorkspace::sharedWorkspace();
+        #[allow(deprecated)]
+        let mut path = ws.fullPathForApplication(&NSString::from_str(name)).map(|p| p.to_string());
+        if path.is_none() {
+            path = ["/Applications", "/System/Applications", "/Applications/Utilities"]
+                .iter()
+                .map(|d| format!("{d}/{name}.app"))
+                .find(|p| std::path::Path::new(p).exists());
+        }
+        let img = match path {
+            Some(p) => ws.iconForFile(&NSString::from_str(&p)),
+            None => crate::ui::style::glyph_icon("app.dashed", "?", crate::ui::theme::PopupColors::default().dim, 32.0),
+        };
+        APP_ICONS.with(|c| c.borrow_mut().insert(name.to_string(), img.clone()));
+        img
     }
 
     thread_local! {
@@ -1560,6 +1599,15 @@ mod macos {
             }
         }
 
+        /// Swap in fresh workspace rows without disturbing the selection.
+        pub fn refresh_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
+            self.model.workspaces = workspaces.clone();
+            if let Some(h) = &self.handler {
+                h.model_mut().workspaces = workspaces;
+                h.rebuild();
+            }
+        }
+
         pub fn set_callbacks(
             &mut self,
             on_action: Box<dyn FnMut(PaletteAction)>,
@@ -1589,12 +1637,20 @@ mod macos {
             cmd: bool,
             opt: bool,
         ) -> Option<PaletteAction> {
-            self.model.set_query(&self.live_query());
-            let action = self.model.key(code, ctrl, shift, cmd, opt);
+            let q = self.live_query();
+            // The drawn list reads the handler's model (typing and clicks
+            // update that one), so keys must drive it, not the stale copy.
             if let Some(h) = &self.handler {
+                let action = {
+                    let mut m = h.model_mut();
+                    m.set_query(&q);
+                    m.key(code, ctrl, shift, cmd, opt)
+                };
                 h.rebuild();
+                return action;
             }
-            action
+            self.model.set_query(&q);
+            self.model.key(code, ctrl, shift, cmd, opt)
         }
 
         pub fn live_query(&self) -> String {

@@ -293,7 +293,7 @@ pub fn icon_for_name(name: &str) -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
-pub use appkit::{set_leave_right, SidebarView};
+pub use appkit::{leave_right, set_leave_right, SidebarView};
 
 #[cfg(target_os = "macos")]
 mod appkit {
@@ -317,7 +317,7 @@ mod appkit {
         LEAVE_RIGHT.with(|l| *l.borrow_mut() = Some(f));
     }
 
-    fn leave_right() {
+    pub fn leave_right() {
         // Deferred: the host re-enters AppKit focus, never while a view borrow is held.
         dispatch2::DispatchQueue::main().exec_async(|| {
             LEAVE_RIGHT.with(|l| {
@@ -655,6 +655,25 @@ mod appkit {
             self.ivars().cursor.set(row);
             self.reveal_cursor();
             self.setNeedsDisplay(true);
+        }
+
+        /// `vimShownRows()` for the search highlight: every pinned chip, plus
+        /// each list row inside the visible list area (current scroll applied).
+        pub fn vim_shown_rects(&self) -> Vec<(usize, Rect)> {
+            let m = self.ivars().model.borrow();
+            let g = self.geometry();
+            let scroll = self.ivars().scroll.get();
+            let mut out: Vec<(usize, Rect)> =
+                g.pinned_rows.iter().enumerate().map(|(k, r)| (k, *r)).collect();
+            let base = m.pinned.len();
+            let (top, bot) = (g.list.y, g.list.max_y());
+            for i in 0..m.rows.len() {
+                let r = g.row_rect(i, scroll);
+                if r.max_y() > top && r.y < bot {
+                    out.push((base + i, r));
+                }
+            }
+            out
         }
 
         /// `sidebarJumpItems`: (title, section, icon) per row, pinned first.

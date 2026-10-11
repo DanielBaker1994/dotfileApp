@@ -247,9 +247,9 @@ wanted before changing anything; if Swift's, compare the show sequence
 ### 5. Remaining feature gaps (each self-contained; port from the Swift file)
 - `Cmd+K` action picker — `PopupWindow.swift` / `CompareWindow.swift` `actionPicker`.
 - `Cmd+/` shortcuts sheet — `showShortcuts` (CardWindow/PopupWindow/…; rows from `[shortcuts]`).
-- `do:notes-find` / `do:notes-grep` window — `NoteFindWindow.swift` (Rust model
-  `NoteFindModel` in `views/notes.rs` exists; the window doesn't).
-- `do:jira-jump` sidebar jump — `SidebarJump.swift`.
+- Vim search highlight — `VimMatchOverlay`/`hlsearch` (`VimKeys.swift`). Rows
+  are ported (`views/note_find.rs` `PaneFindUi`, `host_vim.rs` overlay); the
+  text/web targets are still unported.
 - `terminalPanel` state — Swift `TerminalPanel.swift` `testState()`; Rust reports `{"shown"}` only.
 - File-browser inline rename — `InlineRename.swift`; filefast `PathShelf` add.
 - pane-shot preview window — `Screenshot.swift` `func preview(_ img:`.
