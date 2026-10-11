@@ -130,6 +130,9 @@ pub enum UiCommand {
     ToolClose(String),
     /// `do:reset-size` — restore the shared window's default size.
     ResetSize,
+    /// Show a toast pill (text, SF Symbol) — socket verbs run off the main
+    /// thread, so they queue it here.
+    Toast(String, &'static str),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -1655,12 +1658,17 @@ impl SwitcherController {
                 self.view_switcher_hide();
                 None
             }
-            "jira-jump" | "notes-find" | "notes-grep" => {
+            "jira-jump" | "jira-poll-on" | "jira-poll-off" | "jira-setup" | "notes-find"
+            | "notes-grep" => {
                 {
                     let mut inner = self.inner.lock().unwrap();
                     inner
                         .logs
                         .push(format!("do:{action}: not modelled yet"));
+                    inner.ui_push(UiCommand::Toast(
+                        crate::ui::toast::not_ported_text(&format!("do:{action}")),
+                        crate::ui::toast::NOT_PORTED_SYMBOL,
+                    ));
                 }
                 None
             }
@@ -2611,6 +2619,8 @@ mod daemon_ui {
         paths: Option<PathsWindow>,
         /// The `/terminal` tool panel (`do:term` / Ctrl+B T).
         terminal_panel: Option<TerminalPanel>,
+        /// The Cmd+/ shortcuts sheet while it is up.
+        shortcuts: Option<Retained<crate::ui::shortcuts::ShortcutsOverlay>>,
         /// The `openTool` panels (prettyprint / filefast / health-checks).
         tools: HashMap<String, ToolPanel>,
         /// When each tool panel was opened (the `reclaimToolKey` window).
@@ -2965,6 +2975,7 @@ mod daemon_ui {
                         UiCommand::ResetSize => {
                             self.route_reset_size();
                         }
+                        UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
                     }
                 }
             }
@@ -3321,12 +3332,22 @@ mod daemon_ui {
             let mut state = self.ivars().state.borrow_mut();
             let st = state.get_or_insert_with(|| self.build_window(mtm));
             let mut panel = st.switcher.take().unwrap_or_else(ViewSwitcherPanel::new);
+            // The views' "where it is" (read here: the state is borrowed).
+            let wheres = (
+                st.files.as_ref().map(|b| b.where_text()).unwrap_or_default(),
+                st.notes
+                    .as_ref()
+                    .and_then(|s| s.selected_path())
+                    .and_then(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().into_owned()))
+                    .unwrap_or_default(),
+            );
             let rows = self.prepare_panel(
                 &mut panel,
                 Box::new({
                     let c = controller.clone();
                     move || c.set_view_switcher(false)
                 }),
+                wheres,
             );
             let host = st.window.frame();
             panel.present(Some(SwitchFrame::new(
@@ -3346,14 +3367,42 @@ mod daemon_ui {
             &self,
             panel: &mut ViewSwitcherPanel,
             on_close: Box<dyn FnMut()>,
+            (files_where, notes_tab): (String, String),
         ) -> Vec<String> {
             let controller = self.ivars().controller.clone();
+            // `showViewSwitcher`: each view's "where it is" + `aliases`.
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+            let mut icons = Vec::new();
             let views: Vec<SwitchView> = controller
                 .registry()
                 .nav_icons()
                 .iter()
-                .map(|n| SwitchView::new(n.id, n.view.title(), ""))
+                .map(|n| {
+                    let (name, section) = match n.view {
+                        SlotView::Files => ("Files", "files"),
+                        SlotView::Notes => ("Notes", "notes"),
+                        SlotView::Confluence => ("Confluence", "confluence"),
+                        SlotView::Compare | SlotView::CompareText => ("Compare", "compare"),
+                        SlotView::Ai => ("AI", "ai"),
+                        _ => ("Jira", "jira"),
+                    };
+                    let loc = match n.view {
+                        SlotView::Files => files_where.clone(),
+                        SlotView::Notes => notes_tab.trim_end_matches(".json").to_string(),
+                        _ => String::new(),
+                    };
+                    icons.push((n.id, nav_icon_image(n.view, n.image_key.as_deref(), &assets)));
+                    let mut v = SwitchView::new(n.id, name, loc);
+                    v.aliases = crate::views::notes::section_value(section, "aliases")
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(|a| a.trim().to_string())
+                        .filter(|a| !a.is_empty())
+                        .collect();
+                    v
+                })
                 .collect();
+            panel.set_icons(icons);
             panel.set_commands(
                 controller
                     .registry()
@@ -3374,7 +3423,8 @@ mod daemon_ui {
             );
             panel.set_on_close(on_close);
             let current = controller.current().map(|v| v.nav_id());
-            panel.show(&views, current, current);
+            // `preselect: slot.previousNav ?? cur`
+            panel.show(&views, current, controller.previous_nav().or(current));
             views.iter().map(|v| format!("{}|{}", v.name, v.location)).collect()
         }
 
@@ -3716,6 +3766,20 @@ mod daemon_ui {
                 }
             }
 
+            // `overlayKey`: the shortcuts sheet owns the keyboard while up.
+            let sheet = self.ivars().state.borrow().as_ref().and_then(|st| st.shortcuts.clone());
+            if let Some(sheet) = sheet {
+                let mods = event.modifierFlags();
+                use objc2_app_kit::NSEventModifierFlags as F;
+                sheet.handle_key(event.keyCode(), mods.contains(F::Control), mods.contains(F::Command));
+                // A close clears `st.shortcuts` itself; make sure it is gone.
+                if unsafe { sheet.superview() }.is_none() {
+                    if let Some(st) = self.ivars().state.borrow_mut().as_mut() {
+                        st.shortcuts = None;
+                    }
+                }
+                return true;
+            }
             let mut key = popup::key_input_from_event(event);
             if key.key_code == popup::KEY_ESC {
                 let now = event.timestamp();
@@ -3770,6 +3834,11 @@ mod daemon_ui {
             }
 
             let current = self.ivars().controller.current();
+            if current == Some(SlotView::Notes) {
+                if let Some(r) = self.route_notes_key(&key, event.timestamp()) {
+                    return r;
+                }
+            }
             let (edit_mode, vim_active) = {
                 let state = self.ivars().state.borrow();
                 // `config.editMode` is per-window: only the notes member is an
@@ -3859,8 +3928,14 @@ mod daemon_ui {
                 KeyAction::CycleTabs(dir) => self.route_cycle_tabs(dir),
                 KeyAction::ToggleSidebarRail => self.route_rail_toggle(),
                 KeyAction::PaneResize(dir) => self.route_resize(dir),
-                KeyAction::ResizeStep(sign) | KeyAction::FontStep(sign) => {
-                    self.route_resize_by(sign)
+                KeyAction::ResizeStep(sign) => self.route_resize_by(sign),
+                KeyAction::FontStep(sign) => {
+                    if current == Some(SlotView::Notes) {
+                        self.notes_surface(|s| s.step_font(sign)).is_some()
+                    } else {
+                        // List text zoom (`setTextZoom`) is not ported yet.
+                        self.route_resize_by(sign)
+                    }
                 }
                 KeyAction::ResizeReset => self.route_reset_size(),
                 KeyAction::CommandF => self.route_find_toggle(),
@@ -3872,12 +3947,11 @@ mod daemon_ui {
                     self.ivars()
                         .controller
                         .log("Cmd+K: action picker not modelled yet");
+                    crate::ui::toast::not_ported("Cmd+K action picker");
                     true
                 }
                 KeyAction::ShowShortcuts => {
-                    self.ivars()
-                        .controller
-                        .log("Cmd+/: shortcuts sheet not modelled yet");
+                    self.show_shortcuts();
                     true
                 }
                 _ => false,
@@ -4110,17 +4184,165 @@ mod daemon_ui {
             }
         }
 
+        /// The notes window's own keys ahead of the shared router — Swift
+        /// `handleKey`'s prose search, `overlayKey` Esc, `windowSizeKey` page
+        /// zoom and the `modifiedKey` notes branches.
+        fn route_notes_key(&self, key: &popup::KeyInput, now: f64) -> Option<bool> {
+            use crate::views::notes::Mods;
+            let code = key.key_code;
+            let m = Mods { command: key.cmd, control: key.ctrl, option: key.opt, shift: key.shift };
+            let prose = self.notes_surface(|s| s.prose_shown()).unwrap_or(false);
+            if prose {
+                if let Some(Some(r)) = self.notes_surface(|s| s.prose_pane().and_then(|p| p.search_key(code, m, now))) {
+                    if r && code != popup::KEY_ESC {
+                        self.notes_surface(|s| s.focus_prose());
+                    }
+                    return Some(r);
+                }
+                if code == popup::KEY_ESC && !key.cmd && !key.ctrl && !key.opt {
+                    self.notes_surface(|s| s.set_prose(false));
+                    return Some(true);
+                }
+                let plus = code == popup::KEY_PLUS || code == popup::KEY_KEYPAD_PLUS;
+                let minus = code == popup::KEY_MINUS || code == popup::KEY_KEYPAD_MINUS;
+                if key.cmd && !key.opt && (plus || minus) {
+                    let f = if plus { 1.1 } else { 1.0 / 1.1 };
+                    self.notes_surface(|s| s.prose_pane().map(|p| p.zoom_by(f)));
+                    return Some(true);
+                }
+                if key.cmd && !key.opt && code == popup::KEY_ZERO {
+                    self.notes_surface(|s| s.prose_pane().map(|p| p.reset_zoom()));
+                    return Some(true);
+                }
+            }
+            if key.cmd && key.shift && !key.ctrl && code == popup::KEY_P {
+                if self.notes_surface(|s| s.has_prose_source()) == Some(true) {
+                    self.notes_surface(|s| s.set_prose(!s.prose_shown()));
+                    return Some(true);
+                }
+            }
+            if key.cmd && key.shift && !key.ctrl && code == popup::KEY_O {
+                if self.notes_surface(|s| s.has_prose_source()) == Some(true) {
+                    self.notes_prose_switch_event(crate::ui::prose_switch::ProseSwitchEvent::PopOut);
+                    return Some(true);
+                }
+            }
+            if prose && code == popup::KEY_P && m == Mods::CMD {
+                let toast = self.ivars().controller.settings().copy_toast.clone();
+                self.notes_surface(|s| {
+                    let cfg = crate::views::notes::NotesConfig::load();
+                    if let Some(p) = s.prose_pane() {
+                        p.export_pdf(&cfg, &toast);
+                    }
+                });
+                return Some(true);
+            }
+            if code == popup::KEY_N && m == Mods::CMD {
+                self.notes_surface(|s| s.new_note_from(false));
+                return Some(true);
+            }
+            if code == popup::KEY_N && m == Mods::CTRL {
+                // Not in the drawer shell, and only from vim Normal mode.
+                let ok = self
+                    .notes_surface(|s| {
+                        if s.terminal_has_focus() {
+                            return false;
+                        }
+                        if !s.vim_has_focus() {
+                            return true;
+                        }
+                        s.vim_pane()
+                            .and_then(|v| v.eval("mode() . (get(g:, 'ws_picking', 0) ? 'p' : '')"))
+                            .map(|m| m.trim() == "n")
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if ok {
+                    self.notes_surface(|s| s.new_note_from(true));
+                    return Some(true);
+                }
+            }
+            if (code == popup::KEY_J || code == popup::KEY_K) && key.ctrl && key.shift && !key.cmd && !key.opt {
+                if self.notes_surface(|s| s.vim_has_focus()) == Some(true) {
+                    let plug = if code == popup::KEY_J {
+                        "<Plug>(VM-Add-Cursor-Down)"
+                    } else {
+                        "<Plug>(VM-Add-Cursor-Up)"
+                    };
+                    self.notes_surface(|s| s.vim_pane().map(|v| v.remote(plug)));
+                    return Some(true);
+                }
+            }
+            if prose && m.is_empty() && (code == popup::KEY_J || code == popup::KEY_K) {
+                let dy = if code == popup::KEY_J { 60 } else { -60 };
+                self.notes_surface(|s| s.prose_pane().map(|p| p.scroll_by(dy)));
+                return Some(true);
+            }
+            None
+        }
+
+        /// `showShortcuts(on:view:)` — Cmd+/: the view's `[shortcuts]` rows
+        /// then the shared groups, in a sheet over the window.
+        fn show_shortcuts(&self) {
+            use crate::ui::shortcuts::{groups_for, parse_entries, ShortcutsOverlay};
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let view = self.ivars().controller.current().map(theme_section).unwrap_or("all");
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let groups = groups_for(view, &parse_entries(&text));
+            if groups.is_empty() {
+                crate::ui::toast::show("No shortcuts listed — add a [shortcuts] section to commands.toml", "keyboard");
+                return;
+            }
+            let mut state = self.ivars().state.borrow_mut();
+            let Some(st) = state.as_mut() else { return };
+            if let Some(old) = st.shortcuts.take() {
+                old.removeFromSuperview();
+            }
+            let Some(root) = st.window.contentView() else { return };
+            let colors = crate::ui::theme::section_colors(view);
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let o = ShortcutsOverlay::show(
+                mtm,
+                &root,
+                groups,
+                colors,
+                "Keyboard Shortcuts",
+                Box::new(move || {
+                    if let Some(ui) = weak.load() {
+                        if let Ok(mut state) = ui.ivars().state.try_borrow_mut() {
+                            if let Some(st) = state.as_mut() {
+                                st.shortcuts = None;
+                            }
+                        }
+                    }
+                }),
+            );
+            st.shortcuts = Some(o);
+        }
+
         /// The armed prefix's `l`/`w`/`t`/`b` (`SharedWindow.prefixKey`).
         fn run_prefix_command(&self, ch: char) {
             match ch {
                 'l' => {
-                    let prev = self.ivars().controller.previous_nav();
-                    if let Some(id) = prev {
-                        self.ivars().controller.nav_clicked(id);
-                    }
+                    // `previousNav ?? (current == .files ? navNotes : navFiles)`
+                    use crate::app::registry::nav;
+                    let c = &self.ivars().controller;
+                    let id = c.previous_nav().unwrap_or(if c.current() == Some(SlotView::Files) {
+                        nav::NOTES
+                    } else {
+                        nav::FILES
+                    });
+                    c.nav_clicked(id);
                 }
                 'w' => self.ivars().controller.view_switcher_show(),
-                't' => self.ivars().controller.toggle_terminal_panel(),
+                't' => {
+                    // `toggleProseFromPrefix`: the notes vim pane / reading
+                    // view flips prose; anything else gets the terminal.
+                    let notes = self.ivars().controller.current() == Some(SlotView::Notes);
+                    if !(notes && self.notes_surface(|s| s.toggle_prose_from_prefix()) == Some(true)) {
+                        self.ivars().controller.toggle_terminal_panel();
+                    }
+                }
                 'b' => {
                     self.route_rail_toggle();
                 }
@@ -4358,6 +4580,343 @@ mod daemon_ui {
         }
 
         /// The notes sidebar: select / close / "+" / rail / row menu.
+        /// The header app-icon menu (`onChromeIconClick`): Theme ▸ and the
+        /// window settings (`addWindowSettingsItems`), Open Config, the
+        /// shortcuts list, then the app menu.
+        fn header_icon_menu(&self, view: &NSView, x: f64, y: f64) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            use crate::ui::theme::{grouped_by_tone, HexColor, ThemePreset};
+            let Some(v) = self.ivars().controller.current() else {
+                crate::app::menu::pop_status_menu(view, x, y);
+                return;
+            };
+            let section = theme_section(v);
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let sections = super::parse_sections(&text);
+            let overrides: Vec<(String, String)> = sections
+                .get("themes")
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default();
+            let presets = ThemePreset::all_from(&overrides);
+            let current_bg = crate::ui::theme::section_colors(section).base();
+            let notes = v == SlotView::Notes;
+            let mut theme = Vec::new();
+            for (i, (_, title, group)) in grouped_by_tone(&presets).into_iter().enumerate() {
+                if i > 0 {
+                    theme.push(MenuEntry::Separator);
+                }
+                theme.push(MenuEntry::Header(title.to_string()));
+                for p in group {
+                    let on = HexColor::format_rgb(&p.background) == HexColor::format_rgb(&current_bg);
+                    let entry = if notes {
+                        // `themeScopes`: the notes window adds per-part scopes.
+                        let mut scopes = Vec::new();
+                        for (j, (scope, label)) in [
+                            (ThemeScope::Window, "Whole Window"),
+                            (ThemeScope::Notepad, "Notepad Only"),
+                            (ThemeScope::Terminal, "Terminal Only"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let weak = objc2::rc::Weak::from_retained(&self.retain());
+                            let p = p.clone();
+                            scopes.push(MenuEntry::item(label, move || {
+                                if let Some(ui) = weak.load() {
+                                    ui.apply_theme_preset(section, &p, scope);
+                                }
+                            }));
+                            if j == 0 {
+                                scopes.push(MenuEntry::Separator);
+                            }
+                        }
+                        MenuEntry::submenu(&p.name, scopes)
+                    } else {
+                        let weak = objc2::rc::Weak::from_retained(&self.retain());
+                        let pc = p.clone();
+                        MenuEntry::item(&p.name, move || {
+                            if let Some(ui) = weak.load() {
+                                ui.apply_theme_preset(section, &pc, ThemeScope::Window);
+                            }
+                        })
+                    };
+                    theme.push(entry.with_swatch(p.background).with_checked(on));
+                }
+            }
+            theme.push(MenuEntry::Separator);
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            theme.push(MenuEntry::item("Reset to Defaults", move || {
+                if let Some(ui) = weak.load() {
+                    ui.reset_theme(section);
+                }
+            }));
+
+            let w1 = objc2::rc::Weak::from_retained(&self.retain());
+            let w2 = objc2::rc::Weak::from_retained(&self.retain());
+            let w3 = objc2::rc::Weak::from_retained(&self.retain());
+            let conf = self.ivars().controller.settings().commands_conf_path();
+            let c = self.ivars().controller.clone();
+            let entries = vec![
+                MenuEntry::submenu("Theme", theme),
+                MenuEntry::Separator,
+                MenuEntry::item("Reset Default Size", move || {
+                    if let Some(ui) = w1.load() {
+                        ui.route_reset_size();
+                    }
+                }),
+                MenuEntry::item("Reset Default Colors", move || {
+                    if let Some(ui) = w2.load() {
+                        ui.reset_theme(section);
+                    }
+                }),
+                MenuEntry::Separator,
+                MenuEntry::item("Open Config", move || {
+                    c.set_pending_note_external(conf.to_string_lossy().into_owned());
+                    c.open(SlotView::Notes);
+                }),
+                MenuEntry::item("Keyboard Shortcuts   ⌘/", move || {
+                    if let Some(ui) = w3.load() {
+                        ui.show_shortcuts();
+                    }
+                }),
+                MenuEntry::Separator,
+                MenuEntry::item("App Menu…", {
+                    let view = view.retain();
+                    move || crate::app::menu::pop_status_menu(&view, x, y)
+                }),
+            ];
+            popup(entries, Some(view), x, y);
+        }
+
+        /// `applyThemePreset(_:scope:to:section:)` — persist the preset's
+        /// colors into `[section]`, then re-theme.
+        fn apply_theme_preset(&self, section: &str, p: &crate::ui::theme::ThemePreset, scope: ThemeScope) {
+            use crate::ui::theme::HexColor;
+            let cur = |k: &str| crate::views::notes::section_value(section, k).and_then(|v| HexColor::parse(v.trim()));
+            // `max(current alpha, presetMinOpacity)`
+            let paint = |k: &str, c: crate::ui::theme::Rgba| -> (String, Option<String>) {
+                let a = cur(k).map(|x| x.a).unwrap_or(1.0).max(0.6);
+                (k.to_string(), Some(HexColor::format(&c.with_alpha(a))))
+            };
+            let mut kv: Vec<(String, Option<String>)> = Vec::new();
+            let notes = section == "notes";
+            match scope {
+                ThemeScope::Window => {
+                    kv.push(paint("background-color", p.background));
+                    kv.push(paint("header-color", p.header));
+                    if notes || section == "files" {
+                        kv.push(paint("browser-background", if notes { p.browser } else { p.background }));
+                    }
+                    if notes {
+                        kv.push(paint("terminal-background", p.terminal));
+                    }
+                    kv.push(("terminal-foreground".to_string(), None));
+                }
+                ThemeScope::Notepad => {
+                    kv.push(paint("background-color", p.background));
+                    kv.push(paint("header-color", p.header));
+                }
+                ThemeScope::Terminal => {
+                    kv.push(paint("terminal-background", p.background));
+                    kv.push(("terminal-foreground".to_string(), Some(HexColor::format_rgb(&p.text))));
+                }
+            }
+            if matches!(scope, ThemeScope::Window | ThemeScope::Notepad) {
+                for (k, c) in [("text-color", p.text), ("dim-color", p.dim), ("highlight-color", p.highlight), ("accent-color", p.accent)] {
+                    kv.push((k.to_string(), Some(HexColor::format_rgb(&c))));
+                }
+                let pal = p.palette.all().map(|c| HexColor::format_rgb(&c)).join(", ");
+                kv.push(("palette".to_string(), Some(pal)));
+            }
+            crate::app::config::save_config_values(section, &kv);
+            self.ivars().controller.log(&format!("theme '{}' applied to [{section}]", p.name));
+            self.after_theme_change();
+        }
+
+        /// `resetWindowTheme` — drop the section's color keys.
+        fn reset_theme(&self, section: &str) {
+            let kv: Vec<(String, Option<String>)> = [
+                "browser-background", "terminal-background", "background-color", "header-color",
+                "text-color", "dim-color", "highlight-color", "accent-color", "terminal-foreground", "palette",
+            ]
+            .iter()
+            .map(|k| (k.to_string(), None))
+            .collect();
+            crate::app::config::save_config_values(section, &kv);
+            self.ivars().controller.log(&format!("theme reset for [{section}]"));
+            self.after_theme_change();
+        }
+
+        /// Reload `[theme]` + sections, then re-color the notes surface in
+        /// place and rebuild any other current view with the new colors.
+        fn after_theme_change(&self) {
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let sections = super::parse_sections(&text);
+            crate::ui::theme::install_theme(&sections.get("theme").cloned().unwrap_or_default(), sections);
+            let Some(v) = self.ivars().controller.current() else { return };
+            if v == SlotView::Notes {
+                self.notes_surface(|s| s.retheme());
+                return;
+            }
+            {
+                let mut state = self.ivars().state.borrow_mut();
+                let Some(st) = state.as_mut() else { return };
+                if let Some(view) = st.views.remove(&v) {
+                    view.removeFromSuperview();
+                }
+                match v {
+                    SlotView::Files => st.files = None,
+                    SlotView::Ai => st.ai = None,
+                    SlotView::Confluence => st.confluence = None,
+                    SlotView::Compare | SlotView::CompareText => {
+                        st.compare = None;
+                        st.views.remove(&SlotView::Compare);
+                        st.views.remove(&SlotView::CompareText);
+                    }
+                    _ if v.is_jira() => st.jira = None,
+                    _ => {}
+                }
+                st.current = None;
+            }
+            self.present(v);
+        }
+
+        /// The prose capsule: Prose / nvim segments, ⤢ pop out, ◐ doc style
+        /// (`installProseSwitch`).
+        fn notes_prose_switch_event(&self, ev: crate::ui::prose_switch::ProseSwitchEvent) {
+            use crate::ui::prose_switch::ProseSwitchEvent as P;
+            match ev {
+                P::Mode(on) => {
+                    self.notes_surface(|s| s.set_prose(on));
+                }
+                P::PopOut => {
+                    self.notes_surface(|s| {
+                        if let Some(v) = s.vim_pane() {
+                            v.command("silent! update");
+                        }
+                        s.pop_out_prose();
+                    });
+                }
+                P::Style => self.notes_doc_style_menu(),
+            }
+        }
+
+        /// A message from the reading view's page scripts.
+        fn notes_prose_msg(&self, m: crate::views::notes_prose::ProseMsg) {
+            use crate::views::notes_prose::ProseMsg as M;
+            match m {
+                M::Search(state) => {
+                    self.notes_surface(|s| {
+                        if let Some(p) = s.prose_pane() {
+                            p.state.set_search_state(&state);
+                        }
+                    });
+                }
+                M::Jump(n) => {
+                    self.notes_surface(|s| s.prose_jump(n));
+                }
+                M::Image(path) => open_path(&path),
+            }
+        }
+
+        /// `docTemplateMenu` — the ◐ document-style menu
+        /// (`doc_templates.menu` → pick → `doc_templates.edit`).
+        fn notes_doc_style_menu(&self) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            let Some(Some(text)) = self.notes_surface(|s| s.prose_markdown()) else { return };
+            let configured = crate::views::notes::section_value("notes", "doc-templates").unwrap_or_default();
+            let css_path = crate::views::notes::section_value("notes", "pdf-css")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
+            let css = if css_path.is_empty() {
+                String::new()
+            } else {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let p = match css_path.strip_prefix("~/") {
+                    Some(rest) => format!("{home}/{rest}"),
+                    None => css_path.clone(),
+                };
+                std::fs::read_to_string(p).unwrap_or_default()
+            };
+            let menu = crate::app::python_helper::PythonHelper::shared()
+                .call(
+                    "doc_templates.menu",
+                    serde_json::json!({"text": text, "configured": configured, "css": css}),
+                    std::time::Duration::from_secs(3),
+                    std::time::Duration::from_secs(3),
+                )
+                .ok();
+            let names: Option<Vec<String>> = menu.as_ref().and_then(|m| {
+                m.get("names")?
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            });
+            let current = menu
+                .as_ref()
+                .and_then(|m| m.get("current"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let mouse = objc2_app_kit::NSEvent::mouseLocation();
+            let Some(names) = names else {
+                popup(vec![MenuEntry::disabled("Document styles unavailable (python helper)")], None, mouse.x, mouse.y);
+                return;
+            };
+            let mut entries = vec![MenuEntry::disabled("Document style")];
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            entries.push(MenuEntry::checked("Plain (no style)", current.is_none(), move || {
+                if let Some(ui) = weak.load() {
+                    ui.notes_apply_doc_template(None);
+                }
+            }));
+            entries.push(MenuEntry::Separator);
+            for name in names {
+                let weak = objc2::rc::Weak::from_retained(&self.retain());
+                let on = current.as_deref() == Some(name.as_str());
+                let n = name.clone();
+                entries.push(MenuEntry::checked(&name, on, move || {
+                    if let Some(ui) = weak.load() {
+                        ui.notes_apply_doc_template(Some(n));
+                    }
+                }));
+            }
+            popup(entries, None, mouse.x, mouse.y);
+        }
+
+        /// `applyDocTemplate` + `applyDocTemplateChange`.
+        fn notes_apply_doc_template(&self, name: Option<String>) {
+            let Some(Some(text)) = self.notes_surface(|s| s.prose_markdown()) else { return };
+            let r = crate::app::python_helper::PythonHelper::shared().call(
+                "doc_templates.edit",
+                serde_json::json!({"text": text, "template": name}),
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(3),
+            );
+            let edit = r.ok().and_then(|v| {
+                let remove = v.get("remove")?.as_i64()?;
+                let insert: Vec<String> = v
+                    .get("insert")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect();
+                Some((remove, insert))
+            });
+            let Some((remove, insert)) = edit else {
+                crate::ui::toast::show("Style change failed (python helper)", "exclamationmark.triangle.fill");
+                return;
+            };
+            if remove == 0 && insert.is_empty() {
+                return;
+            }
+            self.notes_surface(|s| s.apply_doc_template_change(remove as usize, &insert));
+            self.notes_surface(|s| s.refresh_prose());
+            let msg = match &name {
+                Some(n) => format!("Style: {n}"),
+                None => "Style removed".to_string(),
+            };
+            crate::ui::toast::show(&msg, "paintpalette");
+        }
+
         fn notes_sidebar_event(&self, ev: crate::ui::sidebar::SidebarEvent) {
             use crate::ui::sidebar::SidebarEvent as E;
             match ev {
@@ -6330,6 +6889,7 @@ mod daemon_ui {
                     self.ivars()
                         .controller
                         .log("file browser rename field not modelled yet");
+                    crate::ui::toast::not_ported("Rename");
                     true
                 }
                 popup::FileBrowserAction::Copy
@@ -6438,14 +6998,14 @@ mod daemon_ui {
                                     let weak = objc2::rc::Weak::from_retained(&self.retain());
                                     surface.prose_switch().set_on_event(Box::new(move |ev| {
                                         if let Some(ui) = weak.load() {
-                                            use crate::ui::prose_switch::ProseSwitchEvent as P;
-                                            match ev {
-                                                P::Mode(true) | P::PopOut => {
-                                                    ui.notes_surface(|s| s.pop_out_prose());
-                                                    ui.notes_surface(|s| s.prose_switch().set_prose(false));
-                                                }
-                                                _ => {}
-                                            }
+                                            ui.notes_prose_switch_event(ev);
+                                        }
+                                    }));
+                                    let mut surface = surface;
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.set_prose_sink(std::rc::Rc::new(move |m| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_prose_msg(m);
                                         }
                                     }));
                                     st.notes = Some(surface);
@@ -6652,13 +7212,14 @@ mod daemon_ui {
             {
                 let controller = self.ivars().controller.clone();
                 let weak = objc2::rc::Weak::from_retained(&chrome);
+                let weak_ui = objc2::rc::Weak::from_retained(&self.retain());
                 chrome.set_on_click(Box::new(move |id| match id {
                     crate::ui::chrome::HEADER_CLOSE_ID => controller.hide("✕"),
                     crate::ui::chrome::HEADER_ICON_ID => {
-                        if let Some(ch) = weak.load() {
+                        if let (Some(ch), Some(ui)) = (weak.load(), weak_ui.load()) {
                             let r = ch.icon_button_rect();
                             ch.set_icon_menu_open(true);
-                            crate::app::menu::pop_status_menu(&ch, r.x, r.max_y() + 4.0);
+                            ui.header_icon_menu(&ch, r.x, r.max_y() + 4.0);
                             ch.set_icon_menu_open(false);
                         }
                     }
@@ -6707,7 +7268,28 @@ mod daemon_ui {
                 terminal_panel: None,
                 tools: HashMap::new(),
                 tool_opened_at: HashMap::new(),
+                shortcuts: None,
             }
+        }
+    }
+
+    /// `ThemeScope` — which part of the window a preset paints.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ThemeScope {
+        Window,
+        Notepad,
+        Terminal,
+    }
+
+    /// The `commands.toml` section that holds a view's colors (`cmd.name`).
+    fn theme_section(v: SlotView) -> &'static str {
+        match v {
+            SlotView::Notes => "notes",
+            SlotView::Files => "files",
+            SlotView::Confluence => "confluence",
+            SlotView::Ai => "ai",
+            SlotView::Compare | SlotView::CompareText => "compare",
+            _ => "jira",
         }
     }
 

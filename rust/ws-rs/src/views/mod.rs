@@ -12,6 +12,7 @@ pub mod inspector;
 pub mod jira;
 pub mod jira_view;
 pub mod notes;
+pub mod notes_prose;
 pub mod notes_vim;
 pub mod paths;
 pub mod screenshot;

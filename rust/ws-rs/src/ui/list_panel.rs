@@ -131,6 +131,11 @@ mod appkit {
     );
 
     impl ListRows {
+        /// The highlighted row.
+        pub fn selection(&self) -> usize {
+            self.ivars().selection.get()
+        }
+
         fn row_at(&self, y: f64) -> Option<usize> {
             let i = (y / self.ivars().row_h.get()).floor();
             (i >= 0.0 && (i as usize) < self.ivars().count.get()).then_some(i as usize)

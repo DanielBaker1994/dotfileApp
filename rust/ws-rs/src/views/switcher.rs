@@ -169,6 +169,17 @@ pub fn filter_commands(commands: &[(String, String)], query: &str) -> Vec<usize>
     FuzzyIndex::new(&texts).ranked(q)
 }
 
+/// The pick / command / close callbacks, shared with the AppKit rows (a row
+/// click picks without going through the host's key router).
+#[derive(Default)]
+pub struct SwitchCallbacks {
+    pub on_pick: Option<Box<dyn FnMut(i64)>>,
+    /// Called with the command name when a command row is picked (`/` mode).
+    pub on_command: Option<Box<dyn FnMut(String)>>,
+    /// Called (alongside hiding) when Esc cancels the panel.
+    pub on_close: Option<Box<dyn FnMut()>>,
+}
+
 #[derive(Default)]
 pub struct ViewSwitcherPanel {
     pub rows: Vec<SwitchRow>,
@@ -177,17 +188,9 @@ pub struct ViewSwitcherPanel {
     pub shown: bool,
     /// Palette commands for `/` command mode as `(name, title)` pairs.
     pub commands: Vec<(String, String)>,
-    pub on_pick: Option<Box<dyn FnMut(i64)>>,
-    /// Called with the command name when a command row is picked (`/` mode).
-    pub on_command: Option<Box<dyn FnMut(String)>>,
-    /// Called (alongside hiding) when Esc cancels the panel.
-    pub on_close: Option<Box<dyn FnMut()>>,
+    pub callbacks: std::rc::Rc<std::cell::RefCell<SwitchCallbacks>>,
     #[cfg(target_os = "macos")]
-    pub window: Option<Retained<PopupPanel>>,
-    #[cfg(target_os = "macos")]
-    pub rows_view: Option<Retained<NSView>>,
-    #[cfg(target_os = "macos")]
-    handler: Option<Retained<macos::SwitcherHandler>>,
+    ui: Option<std::rc::Rc<switch_ui::SwitchUi>>,
 }
 
 impl std::fmt::Debug for ViewSwitcherPanel {
@@ -222,6 +225,10 @@ impl ViewSwitcherPanel {
             })
             .collect();
         self.current_query.clear();
+        #[cfg(target_os = "macos")]
+        if let Some(ui) = &self.ui {
+            ui.clear_query();
+        }
         self.selection = self
             .rows
             .iter()
@@ -249,7 +256,7 @@ impl ViewSwitcherPanel {
     /// `key(_:_:)` — a bare digit jumps straight to that numbered view. Returns
     /// the picked nav id, or `None` if the key is not consumed.
     pub fn key(&self, code: u16, cmd: bool, ctrl: bool, opt: bool) -> Option<i64> {
-        if cmd || ctrl || opt || !self.current_query.is_empty() {
+        if cmd || ctrl || opt || !self.live_query().is_empty() {
             return None;
         }
         let n = digit_for(code)?;
@@ -273,6 +280,7 @@ impl ViewSwitcherPanel {
             }
             None => self.selection = idx[0],
         }
+        self.sync_ui();
     }
 
     /// Return: the selected row's nav id (the filtered list's selection index).
@@ -289,8 +297,8 @@ impl ViewSwitcherPanel {
     pub fn hide_panel(&mut self) {
         self.shown = false;
         #[cfg(target_os = "macos")]
-        if let Some(w) = &self.window {
-            w.orderOut(None);
+        if let Some(ui) = &self.ui {
+            ui.panel.orderOut(None);
         }
     }
 
@@ -298,8 +306,8 @@ impl ViewSwitcherPanel {
     /// falls back to the `shown` flag when the AppKit window is not built.
     pub fn is_visible(&self) -> bool {
         #[cfg(target_os = "macos")]
-        if let Some(w) = &self.window {
-            return w.isVisible();
+        if let Some(ui) = &self.ui {
+            return ui.panel.isVisible();
         }
         self.shown
     }
@@ -307,8 +315,8 @@ impl ViewSwitcherPanel {
     /// Whether the panel window currently has the keyboard.
     pub fn has_key(&self) -> bool {
         #[cfg(target_os = "macos")]
-        if let Some(w) = &self.window {
-            return w.isKeyWindow();
+        if let Some(ui) = &self.ui {
+            return ui.panel.isKeyWindow();
         }
         false
     }
@@ -317,8 +325,8 @@ impl ViewSwitcherPanel {
     /// [`Self::current_query`].
     pub fn live_query(&self) -> String {
         #[cfg(target_os = "macos")]
-        if let Some(h) = &self.handler {
-            return h.query();
+        if let Some(ui) = &self.ui {
+            return ui.query();
         }
         self.current_query.clone()
     }
@@ -328,49 +336,36 @@ impl ViewSwitcherPanel {
         is_command_query(&self.live_query())
     }
 
-    /// Store the palette commands (`(name, title)` pairs) used in `/` mode and
-    /// refresh the AppKit rows when the panel is already built.
+    /// Store the palette commands (`(name, title)` pairs) used in `/` mode.
     pub fn set_commands(&mut self, commands: Vec<(String, String)>) {
         self.commands = commands;
-        #[cfg(target_os = "macos")]
-        if let Some(h) = &self.handler {
-            h.set_commands(self.commands.clone());
-            let q = h.query();
-            h.rebuild(&q);
-        }
+        self.sync_ui();
     }
 
-    /// Wire the pick and command callbacks. Moves them into the live handler
-    /// when the panel is already built, otherwise stores them for [`Self::build`].
+    /// Wire the pick and command callbacks.
     pub fn set_callbacks(
         &mut self,
         on_pick: Box<dyn FnMut(i64)>,
         on_command: Box<dyn FnMut(String)>,
     ) {
-        let mut pick: Option<Box<dyn FnMut(i64)>> = Some(on_pick);
-        let mut command: Option<Box<dyn FnMut(String)>> = Some(on_command);
-        #[cfg(target_os = "macos")]
-        if let Some(h) = &self.handler {
-            h.set_on_pick(pick.take());
-            h.set_on_command(command.take());
-        }
-        if let Some(p) = pick {
-            self.on_pick = Some(p);
-        }
-        if let Some(c) = command {
-            self.on_command = Some(c);
-        }
+        let mut cb = self.callbacks.borrow_mut();
+        cb.on_pick = Some(on_pick);
+        cb.on_command = Some(on_command);
     }
 
-    /// Wire the Esc/close callback (moved into the live handler when built).
+    /// Wire the Esc/close callback.
     pub fn set_on_close(&mut self, on_close: Box<dyn FnMut()>) {
-        let mut close: Option<Box<dyn FnMut()>> = Some(on_close);
-        #[cfg(target_os = "macos")]
-        if let Some(h) = &self.handler {
-            h.set_on_close(close.take());
+        self.callbacks.borrow_mut().on_close = Some(on_close);
+    }
+
+    /// The row icons (`SharedWindow.navIcons` images) by nav id.
+    #[cfg(target_os = "macos")]
+    pub fn set_icons(&mut self, icons: Vec<(i64, Retained<objc2_app_kit::NSImage>)>) {
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            self.ensure_ui(mtm);
         }
-        if let Some(c) = close {
-            self.on_close = Some(c);
+        if let Some(ui) = &self.ui {
+            *ui.icons.borrow_mut() = icons.into_iter().collect();
         }
     }
 
@@ -403,97 +398,296 @@ impl ViewSwitcherPanel {
         })
     }
 
-    /// Build the AppKit panel, its search field and the row buttons.
+    /// Build the AppKit panel (search line + drawn rows).
     pub fn build(&mut self, mtm: objc2::MainThreadMarker) {
         #[cfg(target_os = "macos")]
-        self.build_macos(mtm);
+        self.ensure_ui(mtm);
         #[cfg(not(target_os = "macos"))]
         let _ = mtm;
+    }
+
+    #[cfg(target_os = "macos")]
+    fn ensure_ui(&mut self, mtm: objc2::MainThreadMarker) {
+        if self.ui.is_none() {
+            self.ui = Some(switch_ui::SwitchUi::new(mtm, self.callbacks.clone()));
+        }
+    }
+
+    /// Push rows / filter / selection into the drawn list and size the panel.
+    fn sync_ui(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(ui) = &self.ui {
+            ui.sync(self);
+        }
     }
 
     /// `show` over a host window: rebuild the rows and place the panel.
     pub fn present(&mut self, host: Option<SwitchFrame>) {
         self.shown = true;
         #[cfg(target_os = "macos")]
-        self.present_macos(host);
+        {
+            let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+            self.ensure_ui(mtm);
+            let ui = self.ui.clone().unwrap();
+            ui.sync(self);
+            let size = ui.panel.frame().size;
+            if let Some(host) = host {
+                let (x, y) = panel_origin(host, (size.width, size.height));
+                ui.panel.setFrameOrigin(objc2_foundation::NSPoint::new(x, y));
+            }
+            ui.panel.makeKeyAndOrderFront(None);
+            ui.panel.makeFirstResponder(Some(&ui.list.search));
+        }
         #[cfg(not(target_os = "macos"))]
         let _ = host;
     }
+}
 
-    #[cfg(target_os = "macos")]
-    fn build_macos(&mut self, mtm: objc2::MainThreadMarker) {
-        if self.window.is_some() {
-            return;
-        }
-        use crate::ui::popup::{CardFrame, PopupConfig};
+/// The AppKit side of the view switcher: `ViewSwitcherPanel`'s
+/// `PopupWindow(toolPanel)` look via [`crate::ui::list_panel::ListPanel`] and
+/// `ViewSwitcherPanel.draw(_:_:_:)` for each row.
+#[cfg(target_os = "macos")]
+mod switch_ui {
+    use super::*;
+    use crate::ui::list_panel::ListPanel;
+    use crate::ui::style::{self, Weight};
+    use crate::ui::theme::PopupColors;
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSImage;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::{Rc, Weak};
 
-        let (w, h) = panel_size(self.rows.len());
-        let config = PopupConfig {
-            name: "view-switcher".to_string(),
-            frame: CardFrame { x: 0.0, y: 0.0, width: w, height: h },
-            tool_panel: true,
-            floating: true,
-            ..PopupConfig::default()
-        };
-        let panel = PopupPanel::create(mtm, &config);
-
-        let root = macos::SwitchFlippedView::new(mtm);
-        let search = macos::make_search(mtm);
-        search.setFrame(objc2_foundation::NSRect::new(
-            objc2_foundation::NSPoint::new(PANEL_MARGIN, PANEL_MARGIN),
-            objc2_foundation::NSSize::new(w - PANEL_MARGIN * 2.0, SEARCH_HEIGHT - PANEL_MARGIN),
-        ));
-        search.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
-        let rows_view = macos::SwitchFlippedView::new(mtm);
-        rows_view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
-        root.addSubview(&search);
-        root.addSubview(&rows_view);
-        panel.setContentView(Some(&root));
-
-        let handler = macos::SwitcherHandler::new(
-            mtm,
-            self.rows.clone(),
-            rows_view.clone().into_super(),
-            search.clone(),
-            panel.clone(),
-            self.commands.clone(),
-            self.on_pick.take(),
-            self.on_command.take(),
-            self.on_close.take(),
-        );
-        unsafe { search.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*handler))) };
-        macos::retain_handler(&handler);
-        handler.rebuild(&self.current_query);
-
-        self.window = Some(panel);
-        self.rows_view = Some(rows_view.into_super());
-        self.handler = Some(handler);
+    /// What the row drawer reads.
+    #[derive(Default)]
+    struct DrawModel {
+        rows: Vec<SwitchRow>,
+        commands: Vec<(String, String)>,
+        /// Indices into `rows` (view mode) or `commands` (`/` mode).
+        visible: Vec<usize>,
+        command_mode: bool,
     }
 
-    #[cfg(target_os = "macos")]
-    fn present_macos(&mut self, host: Option<SwitchFrame>) {
-        let mtm = match objc2::MainThreadMarker::new() {
-            Some(m) => m,
-            None => return,
-        };
-        if self.window.is_none() {
-            self.build_macos(mtm);
+    pub struct SwitchUi {
+        pub panel: Retained<PopupPanel>,
+        pub list: ListPanel,
+        pub icons: RefCell<HashMap<i64, Retained<NSImage>>>,
+        model: RefCell<DrawModel>,
+        callbacks: Rc<RefCell<SwitchCallbacks>>,
+        /// Typing re-filters through the owning panel's model; the panel
+        /// lives in the host state, so the field change re-syncs from here.
+        colors: PopupColors,
+    }
+
+    impl SwitchUi {
+        pub fn new(mtm: MainThreadMarker, callbacks: Rc<RefCell<SwitchCallbacks>>) -> Rc<SwitchUi> {
+            use crate::ui::popup::{CardFrame, PopupConfig};
+            let colors = crate::ui::theme::PopupThemeDefaults::colors();
+            let list = ListPanel::new(mtm, colors, PANEL_WIDTH, ROW_HEIGHT, SEARCH_PLACEHOLDER);
+            let h = list.height(1, MAX_ROWS);
+            let config = PopupConfig {
+                name: "view-switcher".to_string(),
+                frame: CardFrame { x: 0.0, y: 0.0, width: PANEL_WIDTH, height: h },
+                tool_panel: true,
+                floating: true,
+                ..PopupConfig::default()
+            };
+            let panel = PopupPanel::create(mtm, &config);
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+            panel.setHasShadow(true);
+            panel.setContentView(Some(&list.root));
+            let ui = Rc::new(SwitchUi {
+                panel,
+                list,
+                icons: RefCell::new(HashMap::new()),
+                model: RefCell::new(DrawModel::default()),
+                callbacks,
+                colors,
+            });
+            let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
+            ui.list.set_drawer(Box::new(move |r, i, sel, _hover| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.draw_row(r, i, sel);
+                }
+            }));
+            let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
+            ui.list.set_on_click(Box::new(move |row, _x, _double| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.pick_visible(row);
+                }
+            }));
+            let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
+            let weak_cmd: Weak<SwitchUi> = Rc::downgrade(&ui);
+            ui.list.set_on_field(
+                Box::new(move |q: String| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.refilter(&q);
+                    }
+                }),
+                Box::new(move |cmd| {
+                    // Arrows / Return / Esc arrive through the host's key
+                    // monitor first; this covers a click-focused field.
+                    let Some(ui) = weak_cmd.upgrade() else { return false };
+                    match cmd {
+                        "cancelOperation:" => {
+                            ui.panel.orderOut(None);
+                            if let Some(cb) = ui.callbacks.borrow_mut().on_close.as_mut() {
+                                cb();
+                            }
+                            true
+                        }
+                        "insertNewline:" => {
+                            let sel = ui.list.rows.selection();
+                            ui.pick_visible(sel);
+                            true
+                        }
+                        _ => false,
+                    }
+                }),
+            );
+            ui
         }
-        if let Some(handler) = &self.handler {
-            handler.set_rows(self.rows.clone());
+
+        pub fn query(&self) -> String {
+            self.list.search.stringValue().to_string()
         }
-        if let Some(panel) = &self.window {
-            let count = self.filter(&self.current_query).len();
-            let (w, h) = panel_size(count);
-            panel.setContentSize(objc2_foundation::NSSize::new(w, h));
-            if let Some(host) = host {
-                let (x, y) = panel_origin(host, (w, h));
-                panel.setFrameOrigin(objc2_foundation::NSPoint::new(x, y));
+
+        pub fn clear_query(&self) {
+            self.list.search.setStringValue(&objc2_foundation::NSString::from_str(""));
+        }
+
+        /// Mirror the panel model into the drawn rows and resize to fit.
+        pub fn sync(&self, p: &ViewSwitcherPanel) {
+            let q = self.query();
+            let command_mode = is_command_query(&q);
+            let visible = if command_mode { filter_commands(&p.commands, &q) } else { p.filter(&q) };
+            let sel = if command_mode {
+                0
+            } else {
+                visible.iter().position(|i| *i == p.selection).unwrap_or(0)
+            };
+            let n = visible.len();
+            *self.model.borrow_mut() = DrawModel {
+                rows: p.rows.clone(),
+                commands: p.commands.clone(),
+                visible,
+                command_mode,
+            };
+            self.list.set_rows(n, sel);
+            self.resize(n);
+        }
+
+        /// Typing in the field: re-filter with the stored rows, cursor on top.
+        fn refilter(&self, q: &str) {
+            let n = {
+                let mut m = self.model.borrow_mut();
+                m.command_mode = is_command_query(q);
+                m.visible = if m.command_mode {
+                    filter_commands(&m.commands, q)
+                } else {
+                    let tmp = ViewSwitcherPanel { rows: m.rows.clone(), ..ViewSwitcherPanel::new() };
+                    tmp.filter(q)
+                };
+                m.visible.len()
+            };
+            self.list.set_rows(n, 0);
+            self.resize(n);
+        }
+
+        fn resize(&self, n: usize) {
+            let h = self.list.height(n, MAX_ROWS);
+            let f = self.panel.frame();
+            // Keep the top edge put (AppKit frames grow from the bottom).
+            let top = f.origin.y + f.size.height;
+            self.panel.setFrame_display(
+                objc2_foundation::NSRect::new(
+                    objc2_foundation::NSPoint::new(f.origin.x, top - h),
+                    objc2_foundation::NSSize::new(PANEL_WIDTH, h),
+                ),
+                true,
+            );
+        }
+
+        /// The row at visible position `pos` was clicked / accepted.
+        fn pick_visible(&self, pos: usize) {
+            let (command, nav) = {
+                let m = self.model.borrow();
+                let Some(&i) = m.visible.get(pos) else { return };
+                if m.command_mode {
+                    (m.commands.get(i).map(|c| c.0.clone()), None)
+                } else {
+                    (None, m.rows.get(i).map(|r| r.nav_id))
+                }
+            };
+            self.panel.orderOut(None);
+            let mut cb = self.callbacks.borrow_mut();
+            if let Some(name) = command {
+                if let Some(f) = cb.on_command.as_mut() {
+                    f(name);
+                }
+            } else if let Some(id) = nav {
+                if let Some(f) = cb.on_pick.as_mut() {
+                    f(id);
+                }
             }
-            panel.makeKeyAndOrderFront(None);
+            if let Some(f) = cb.on_close.as_mut() {
+                f();
+            }
         }
-        if let Some(handler) = &self.handler {
-            handler.rebuild(&self.current_query);
+
+        /// `ViewSwitcherPanel.draw(_:_:_:)`.
+        fn draw_row(&self, rect: crate::ui::chrome::Rect, pos: usize, selected: bool) {
+            use crate::ui::chrome::Rect;
+            let c = &self.colors;
+            let m = self.model.borrow();
+            let Some(&i) = m.visible.get(pos) else { return };
+            let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
+            if selected {
+                style::fill_rounded(inner, 7.0, c.highlight);
+                style::fill_rounded(
+                    Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0),
+                    1.5,
+                    c.accent,
+                );
+            }
+            let mono = style::mono_font(11.0, Weight::Regular);
+            let mut x = inner.x + 12.0;
+            let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
+            if m.command_mode {
+                let (name, title) = &m.commands[i];
+                let nw = style::draw_text_left(title, band(x, 260.0), &style::system_font(13.0, Weight::Medium), c.text);
+                x += nw.max(160.0) + 10.0;
+                style::draw_text_left(&format!("/{name}"), band(x, inner.max_x() - x - 8.0), &style::system_font(12.0, Weight::Regular), c.dim);
+                return;
+            }
+            let r = &m.rows[i];
+            let num = if r.number > 0 { r.number.to_string() } else { " ".into() };
+            style::draw_text_left(&num, band(x, 14.0), &mono, c.dim);
+            x += 18.0;
+            if let Some(img) = self.icons.borrow().get(&r.nav_id) {
+                style::draw_image(img, Rect::new(x, inner.mid_y() - 9.0, 18.0, 18.0), 1.0);
+            }
+            x += 26.0;
+            let mark_w = 64.0;
+            let name_w = style::draw_text_left(&r.name, band(x, 110.0), &style::system_font(13.0, Weight::Medium), c.text);
+            x += name_w.max(96.0) + 10.0;
+            if !r.location.is_empty() {
+                style::draw_text_left(
+                    &r.location,
+                    band(x, inner.max_x() - mark_w - x - 8.0),
+                    &style::system_font(12.0, Weight::Regular),
+                    c.dim,
+                );
+            }
+            if r.is_current {
+                style::draw_text_right(
+                    "● here",
+                    band(inner.max_x() - 12.0 - mark_w, mark_w),
+                    &style::system_font(11.0, Weight::Medium),
+                    c.accent,
+                );
+            }
         }
     }
 }

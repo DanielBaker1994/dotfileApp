@@ -2030,6 +2030,11 @@ mod macos {
         rail_expanded_width: f64,
         /// Whether the native `NSTextView` find bar is up (`Cmd+F`).
         find_shown: bool,
+        /// The in-place reading view (`ProseView`), built on first use.
+        prose: Option<crate::views::notes_prose::ProsePane>,
+        prose_shown: bool,
+        prose_sink: Option<std::rc::Rc<dyn Fn(crate::views::notes_prose::ProseMsg)>>,
+        colors: PopupColors,
     }
 
     /// The NOTES sidebar rows (`PopupTabsBar` titles + `vIcon` + `vMeta`).
@@ -2299,6 +2304,10 @@ mod macos {
             editor_scroll: editor,
             rail_expanded_width: sidebar_w,
             find_shown: false,
+            prose: None,
+            prose_shown: false,
+            prose_sink: None,
+            colors,
         })
     }
 
@@ -2459,6 +2468,18 @@ mod macos {
         /// The sidebar "+" (`onNewNote`): `dir/<new-note-name>-N.md` beside
         /// the current note (else `~/notes`), opened as a new tab.
         pub fn new_note(&mut self) {
+            self.new_note_from(false);
+        }
+
+        /// `newNote(template:)` — Cmd+N (`new-note-name`) / Ctrl+N
+        /// (`new-doc-name`); both start from the `new-doc-template` snippet in
+        /// `vim/snippets/markdown.json`, as the Swift code does.
+        pub fn new_note_from(&mut self, template: bool) {
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+            let snippets: Value = std::fs::read_to_string(format!("{assets}/vim/snippets/markdown.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(Value::Null);
             let home = std::env::var("HOME").unwrap_or_default();
             let dir = self
                 .selected_path()
@@ -2466,7 +2487,7 @@ mod macos {
                 .unwrap_or_else(|| format!("{home}/notes"));
             let _ = std::fs::create_dir_all(&dir);
             let open = self.model.tabs.paths();
-            let plan = plan_new_note(&dir, false, &Value::Null, &self.model.config, &open);
+            let plan = plan_new_note(&dir, template, &snippets, &self.model.config, &open);
             if plan.write().is_err() {
                 return;
             }
@@ -2505,6 +2526,230 @@ mod macos {
             }
         }
 
+        // -- the in-place reading view (`setProse` / `ProseView`) -----------
+
+        /// Whether the reading view covers the editor (`proseShown`).
+        pub fn prose_shown(&self) -> bool {
+            self.prose_shown
+        }
+
+        /// `proseProvider != nil` — a selected note that exists on disk.
+        pub fn has_prose_source(&self) -> bool {
+            self.selected_path().is_some_and(|p| Path::new(&p).exists())
+        }
+
+        /// The host's handler for page messages (outline jump, find state,
+        /// image double-click). Also receives the top line on close.
+        pub fn set_prose_sink(&mut self, cb: std::rc::Rc<dyn Fn(crate::views::notes_prose::ProseMsg)>) {
+            if let Some(p) = &self.prose {
+                let cb = cb.clone();
+                p.set_on_message(Box::new(move |m| cb(m)));
+            }
+            self.prose_sink = Some(cb);
+        }
+
+        /// `toggleProseFromPrefix()` (Ctrl+B T): only from the vim pane or the
+        /// reading view; `false` lets the prefix fall back to the terminal.
+        pub fn toggle_prose_from_prefix(&mut self) -> bool {
+            if !self.has_prose_source() || !(self.prose_shown || self.vim.is_some()) {
+                return false;
+            }
+            let on = !self.prose_shown;
+            self.set_prose(on);
+            true
+        }
+
+        /// `setProse(_:)`.
+        pub fn set_prose(&mut self, on: bool) {
+            self.prose_switch.set_prose(on);
+            if !on {
+                if !self.prose_shown {
+                    return;
+                }
+                self.prose_shown = false;
+                if let (Some(pv), true) = (&self.prose, self.vim.is_some()) {
+                    if let Some(sink) = self.prose_sink.clone() {
+                        pv.top_source_line(move |n| {
+                            if let Some(n) = n {
+                                sink(crate::views::notes_prose::ProseMsg::Jump(n));
+                            }
+                        });
+                    }
+                }
+                if let Some(pv) = &self.prose {
+                    pv.view().setHidden(true);
+                }
+                self.focus_editor();
+                return;
+            }
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            if let Some(vim) = &self.vim {
+                vim.command("silent! update");
+            } else {
+                self.commit();
+            }
+            let Some(path) = self.selected_path().filter(|p| Path::new(p).exists()) else {
+                self.prose_switch.set_prose(false);
+                return;
+            };
+            let Ok(markdown) = std::fs::read_to_string(&path) else {
+                self.prose_switch.set_prose(false);
+                return;
+            };
+            if self.prose.is_none() {
+                let pane = crate::views::notes_prose::ProsePane::new(mtm, self.editor_scroll.frame());
+                if let Some(cb) = self.prose_sink.clone() {
+                    pane.set_on_message(Box::new(move |m| cb(m)));
+                }
+                self.root.addSubview_positioned_relativeTo(
+                    pane.view(),
+                    objc2_app_kit::NSWindowOrderingMode::Below,
+                    Some(&self.prose_switch),
+                );
+                self.prose = Some(pane);
+            }
+            self.prose_shown = true;
+            let sync = self
+                .vim
+                .as_ref()
+                .and_then(|v| v.eval("line('w0')"))
+                .and_then(|l| l.trim().parse::<i64>().ok());
+            let cfg = self.model.config.clone();
+            let colors = self.colors;
+            let frame = self.editor_scroll.frame();
+            let pv = self.prose.as_mut().unwrap();
+            pv.set_frame(frame);
+            pv.view().setHidden(false);
+            pv.sync_line = sync;
+            let (font, size, width) = (cfg.prose_font.clone(), cfg.prose_font_size, cfg.prose_width);
+            pv.show(ProseSource::new(markdown, path), colors, &font, size, width, &cfg);
+            if let Some(w) = self.root.window() {
+                w.makeFirstResponder(Some(pv.view()));
+            }
+        }
+
+        /// Re-render the reading view after the note changed (doc style).
+        pub fn refresh_prose(&mut self) {
+            if self.prose_shown {
+                self.prose_shown = false;
+                self.set_prose(true);
+            }
+        }
+
+        /// The open reading view, for key routing.
+        pub fn prose_pane(&mut self) -> Option<&mut crate::views::notes_prose::ProsePane> {
+            if self.prose_shown {
+                self.prose.as_mut()
+            } else {
+                None
+            }
+        }
+
+        /// `wsJump` / the close sync: put the vim pane's top line at `n`.
+        pub fn prose_jump(&self, n: i64) {
+            if let Some(vim) = &self.vim {
+                vim.command(&format!("call cursor({n}, 1) | normal! zt"));
+            }
+        }
+
+        /// `applyDocTemplateChange`: replace the first `remove` lines with
+        /// `insert` — through nvim (`nvim_buf_set_lines` + `update`) in the vim
+        /// pane, else in the editor (then saved).
+        pub fn apply_doc_template_change(&mut self, remove: usize, insert: &[String]) {
+            use crate::engines::nvim_rpc::{vim_dq, vim_string};
+            if let Some(vim) = &self.vim {
+                let lua = [
+                    "(function(a)",
+                    "local n = tonumber(a:match('^(%d+)\\n'))",
+                    "local rest = a:gsub('^%d+\\n', '')",
+                    "local new = rest == '' and {} or vim.split(rest, '\\n', {plain = true})",
+                    "vim.api.nvim_buf_set_lines(0, 0, n, false, new)",
+                    "vim.cmd('silent! update') return 1 end)(_A)",
+                ]
+                .join(" ");
+                let arg = format!("{remove}\n{}", insert.join("\n"));
+                vim.eval(&format!("luaeval({}, {})", vim_string(&lua), vim_dq(&arg)));
+                return;
+            }
+            let text = self.editor.string().to_string();
+            let mut end = 0usize;
+            for _ in 0..remove {
+                if end >= text.len() {
+                    break;
+                }
+                end = text[end..].find('\n').map(|i| end + i + 1).unwrap_or(text.len());
+            }
+            let new_head = if insert.is_empty() { String::new() } else { insert.join("\n") + "\n" };
+            let out = format!("{new_head}{}", &text[end..]);
+            self.editor.setString(&NSString::from_str(&out));
+            self.commit();
+        }
+
+        /// `stepFontSizes(_:)` (Cmd+± in the notes window): editor and drawer
+        /// terminal font sizes ±1, saved as `[notes] font-size` /
+        /// `[app] terminal-font-size`.
+        pub fn step_font(&mut self, delta: i32) {
+            let d = delta as f64;
+            let editor = setting("notes", "font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(14.0);
+            let next = (editor + d).clamp(8.0, 40.0);
+            if let Some(vim) = self.vim.as_mut() {
+                if let Some((name, _)) = vim.font() {
+                    vim.set_font(&name, next);
+                }
+            }
+            if let Some(f) = self.editor.font() {
+                let nf = NSFont::fontWithName_size(&f.fontName(), next);
+                self.editor.setFont(nf.as_deref());
+            }
+            crate::app::config::save_config_value("notes", "font-size", &format!("{}", next as i64));
+            let term = setting("app", "terminal-font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(12.0);
+            let tnext = (term + d).clamp(8.0, 40.0);
+            if let Ok(shim) = self.terminal.clone().downcast::<swiftterm_shim::WSShim>() {
+                let tf = setting("app", "terminal-font").unwrap_or_else(|| "Menlo".to_string());
+                swiftterm_shim::set_font(&shim, &tf, tnext);
+            }
+            crate::app::config::save_config_value("app", "terminal-font-size", &format!("{}", tnext as i64));
+        }
+
+        /// Give the reading view the keyboard (search keys land in the page).
+        pub fn focus_prose(&self) {
+            if let (true, Some(pv), Some(w)) = (self.prose_shown, &self.prose, self.root.window()) {
+                w.makeFirstResponder(Some(pv.view()));
+            }
+        }
+
+        /// Re-color in place after a theme change (`setThemeColor` /
+        /// `setTextColors`) — the nvim pane and shell keep running.
+        pub fn retheme(&mut self) {
+            let colors = crate::ui::theme::section_colors("notes");
+            self.colors = colors;
+            self.sidebar.set_colors(colors);
+            self.prose_switch.set_colors(colors);
+            self.editor_scroll.setBackgroundColor(&colors.base().to_nscolor());
+            self.editor.setBackgroundColor(&colors.base().to_nscolor());
+            self.editor.setTextColor(Some(&colors.text.to_nscolor()));
+            let pal: Vec<Retained<objc2_app_kit::NSColor>> =
+                crate::ui::theme::ansi_palette(&colors).into_iter().map(|c| c.to_nscolor()).collect();
+            if let Some(view) = self.vim.as_ref().and_then(|p| p.view()) {
+                if let Ok(shim) = view.downcast::<swiftterm_shim::WSShim>() {
+                    swiftterm_shim::set_colors(&shim, &objc2_app_kit::NSColor::clearColor(), &colors.text.to_nscolor(), &pal);
+                }
+            }
+            if let Ok(shim) = self.terminal.clone().downcast::<swiftterm_shim::WSShim>() {
+                let sec = |k: &str| setting("notes", k).and_then(|v| crate::ui::theme::HexColor::parse(v.trim()));
+                let bg = sec("terminal-background").unwrap_or(colors.background).with_alpha(1.0);
+                let fg = sec("terminal-foreground").unwrap_or(colors.text);
+                swiftterm_shim::set_colors(&shim, &bg.to_nscolor(), &fg.to_nscolor(), &pal);
+            }
+            self.root.setNeedsDisplay(true);
+            self.refresh_prose();
+        }
+
+        /// The note text the doc-style menu reads (`proseProvider().markdown`).
+        pub fn prose_markdown(&self) -> Option<String> {
+            self.selected_path().and_then(|p| std::fs::read_to_string(p).ok())
+        }
+
         /// `PopupTabsBar.toggleRail` — collapse / expand the notes sidebar.
         pub fn toggle_rail(&mut self) {
             self.model.sidebar.collapsed = !self.model.sidebar.collapsed;
@@ -2524,12 +2769,15 @@ mod macos {
             let w = self.model.sidebar.visible_width();
             self.sidebar
                 .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, full.height)));
-            self.prose_switch.place(self.editor_scroll.frame());
             let editor_w = (full.width - w - 4.0).max(0.0);
             self.editor_scroll.setFrame(NSRect::new(
                 NSPoint::new(w + 4.0, 0.0),
                 NSSize::new(editor_w, full.height),
             ));
+            self.prose_switch.place(self.editor_scroll.frame());
+            if let Some(p) = &self.prose {
+                p.set_frame(self.editor_scroll.frame());
+            }
             let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
             self.terminal.setFrame(NSRect::new(
                 NSPoint::new(w + 4.0, full.height - term_h),
@@ -2642,6 +2890,25 @@ mod macos {
             }
             if let Some(window) = self.editor.window() {
                 window.makeFirstResponder(Some(&self.editor));
+            }
+        }
+
+        /// Whether the drawer terminal holds the keyboard (`focusedTerm()`).
+        pub fn terminal_has_focus(&self) -> bool {
+            if self.terminal.isHidden() {
+                return false;
+            }
+            let Some(w) = self.terminal.window() else { return false };
+            let Some(fr) = w.firstResponder() else { return false };
+            let fr_ptr = objc2::rc::Retained::as_ptr(&fr) as *const objc2::runtime::AnyObject;
+            let term_ptr = objc2::rc::Retained::as_ptr(&self.terminal) as *const objc2::runtime::AnyObject;
+            if fr_ptr == term_ptr {
+                return true;
+            }
+            let fr_any: &objc2::runtime::AnyObject = unsafe { &*fr_ptr };
+            match fr_any.downcast_ref::<NSView>() {
+                Some(v) => v.isDescendantOf(&self.terminal),
+                None => false,
             }
         }
 

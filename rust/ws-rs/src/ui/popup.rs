@@ -417,11 +417,12 @@ fn window_size_key(_config: &PopupConfig, key: KeyInput) -> Option<KeyAction> {
     let minus = key.key_code == KEY_MINUS || key.key_code == KEY_KEYPAD_MINUS;
     if key.cmd && (plus || minus) {
         let sign = if plus { 1 } else { -1 };
-        // Documented handleKey order: Cmd+Opt+± = font, Cmd+± = resize.
+        // `windowSizeKey`: Cmd+Opt+± resizes the window, Cmd+± zooms the
+        // text (prose page / font sizes / list zoom).
         if key.opt {
-            return Some(KeyAction::FontStep(sign));
+            return Some(KeyAction::ResizeStep(sign));
         }
-        return Some(KeyAction::ResizeStep(sign));
+        return Some(KeyAction::FontStep(sign));
     }
     if key.cmd && key.key_code == KEY_ZERO && !key.opt {
         return Some(KeyAction::ResizeReset);
@@ -1033,9 +1034,9 @@ mod tests {
         let c = list_config();
         let mut cmd_plus = key(KEY_PLUS);
         cmd_plus.cmd = true;
-        assert_eq!(route_key(&c, cmd_plus), KeyAction::ResizeStep(1));
-        cmd_plus.opt = true;
         assert_eq!(route_key(&c, cmd_plus), KeyAction::FontStep(1));
+        cmd_plus.opt = true;
+        assert_eq!(route_key(&c, cmd_plus), KeyAction::ResizeStep(1));
         let mut cmd_zero = key(KEY_ZERO);
         cmd_zero.cmd = true;
         assert_eq!(route_key(&c, cmd_zero), KeyAction::ResizeReset);

@@ -440,6 +440,11 @@ impl VimPane {
 
     /// `PopupWindow.vimFont`-style font; applied immediately when built, else
     /// stored for `build`.
+    /// The `(name, size)` last applied with [`Self::set_font`].
+    pub fn font(&self) -> Option<(String, f64)> {
+        self.font.clone()
+    }
+
     pub fn set_font(&mut self, name: &str, size: f64) {
         self.font = Some((name.to_string(), size));
         #[cfg(target_os = "macos")]

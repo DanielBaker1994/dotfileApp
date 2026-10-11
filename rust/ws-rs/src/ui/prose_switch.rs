@@ -151,6 +151,11 @@ mod appkit {
             *self.ivars().on_event.borrow_mut() = Some(cb);
         }
 
+        pub fn set_colors(&self, c: PopupColors) {
+            self.ivars().colors.set(c);
+            self.setNeedsDisplay(true);
+        }
+
         pub fn set_prose(&self, on: bool) {
             self.ivars().prose.set(on);
             self.setNeedsDisplay(true);
