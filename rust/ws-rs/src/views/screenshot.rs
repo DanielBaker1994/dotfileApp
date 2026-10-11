@@ -404,11 +404,13 @@ pub struct ScreenRef {
     pub id: u32,
     pub frame: Rect,
     pub scale: f64,
+    /// Menu bar / notch height (`frame.maxY - visibleFrame.maxY`).
+    pub top_inset: f64,
 }
 
 impl ScreenRef {
     pub fn new(id: u32, frame: Rect, scale: f64) -> Self {
-        ScreenRef { id, frame, scale }
+        ScreenRef { id, frame, scale, top_inset: 0.0 }
     }
     pub fn bounds(&self) -> Rect {
         Rect::new(0.0, 0.0, self.frame.w, self.frame.h)
@@ -666,11 +668,13 @@ pub fn current_screens() -> Vec<ScreenRef> {
                 .and_then(|o| o.downcast::<NSNumber>().ok())?
                 .unsignedIntValue();
             let f = scr.frame();
-            Some(ScreenRef::new(
+            let mut r = ScreenRef::new(
                 id,
                 Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height),
                 scr.backingScaleFactor(),
-            ))
+            );
+            r.top_inset = f.origin.y + f.size.height - (scr.visibleFrame().origin.y + scr.visibleFrame().size.height);
+            Some(r)
         })
         .collect()
 }
@@ -713,6 +717,10 @@ impl ScreenToast {
         if text.is_empty() {
             return;
         }
+        // The model slot is what tests read; the live pill is the AppKit pass
+        // (a no-op off the main thread).
+        #[cfg(target_os = "macos")]
+        crate::ui::toast::show(&text, symbol);
         *slot = Some(ScreenToast::with_symbol(text, symbol));
     }
 }
@@ -1203,6 +1211,8 @@ pub struct ShotDisplay {
     pub level: i64,
     /// The live overlay panel's window number (0 until presented).
     pub wid: i64,
+    /// Menu bar height above the usable area (chrome sits below it).
+    pub top_inset: f64,
 }
 
 impl ShotDisplay {
@@ -1213,6 +1223,7 @@ impl ShotDisplay {
             scale,
             key: false,
             wid: 0,
+            top_inset: 0.0,
             // NSScreenSaverWindowLevel.
             level: 1000,
         }
@@ -1293,6 +1304,8 @@ pub struct ShotSession {
     pub finished: bool,
     pub outcome: Option<ShotOutcome>,
     pub recent_requested: bool,
+    pub chrome_rects: std::cell::Cell<Option<ChromeRects>>,
+    chrome_press: Option<ChromePress>,
     pub mouse: Option<(usize, Point)>,
     pub primary_max_y: f64,
     ring_new: bool,
@@ -1335,6 +1348,8 @@ impl ShotSession {
             finished: false,
             outcome: None,
             recent_requested: false,
+            chrome_rects: std::cell::Cell::new(None),
+            chrome_press: None,
             mouse: None,
             primary_max_y: 0.0,
             ring_new: true,
@@ -2023,9 +2038,28 @@ impl ShotSession {
         self.change_size(step);
     }
 
+    /// `mouseMoved(_:_:)`: track the pointer (loupe, cursor, mode pill).
+    pub fn mouse_moved(&mut self, d: usize, p: Point) {
+        self.mouse = Some((d, p));
+    }
+
     pub fn mouse_down(&mut self, d: usize, p: Point, click_count: i64, shift: bool, cmd: bool) {
         let _ = (shift, cmd);
         self.mouse = Some((d, p));
+        // The mode pill / recent button are subviews in Swift: they take the
+        // click before the selection state machine sees it.
+        if let Some(c) = self.chrome_rects.get() {
+            if c.display == d && !self.is_dragging() {
+                if c.pill.contains_point(p) {
+                    self.chrome_press = Some(ChromePress::Pill(ShotModePill::right_segment(p.x - c.pill.x, c.first_w)));
+                    return;
+                }
+                if c.recent.contains_point(p) {
+                    self.chrome_press = Some(ChromePress::Recent);
+                    return;
+                }
+            }
+        }
         if self.shortcuts_shown {
             self.hide_shortcuts();
             return;
@@ -2128,6 +2162,7 @@ impl ShotSession {
             Drag::Selecting { start } => {
                 let q = if shift { ShotSnap::square(start, p) } else { p };
                 self.select(Some(ShotGeom::rect(start, q)), Some(d), true);
+                self.drag = Drag::Selecting { start };
             }
             Drag::Resizing {
                 handle,
@@ -2137,6 +2172,7 @@ impl ShotSession {
                 let r =
                     ShotSession::resize(from, handle, (p.x - start.x, p.y - start.y), shift, cmd);
                 self.select(Some(r), self.active, true);
+                self.drag = Drag::Resizing { handle, from, start };
             }
             Drag::MovingSelection { from, start } => {
                 if let Some(a) = self.active {
@@ -2151,6 +2187,7 @@ impl ShotSession {
                     r.y = 0.0f64.max(r.y.min(b.h - r.h));
                     self.select(Some(r), Some(a), false);
                 }
+                self.drag = Drag::MovingSelection { from, start };
             }
             Drag::Drawing(mut o) => {
                 match o.tool {
@@ -2196,7 +2233,22 @@ impl ShotSession {
     }
 
     pub fn mouse_up(&mut self, d: usize, p: Point, shift: bool, cmd: bool) {
-        let _ = (d, p, shift, cmd);
+        let _ = (shift, cmd);
+        if let Some(press) = self.chrome_press.take() {
+            if let Some(c) = self.chrome_rects.get().filter(|c| c.display == d) {
+                match press {
+                    // Left segment = Copy Text, right = Screenshot.
+                    ChromePress::Pill(right) if c.pill.contains_point(p) => {
+                        if self.text_mode == right {
+                            self.toggle_text_mode();
+                        }
+                    }
+                    ChromePress::Recent if c.recent.contains_point(p) => self.pressed(ShotTool::Recent),
+                    _ => {}
+                }
+            }
+            return;
+        }
         let was = std::mem::replace(&mut self.drag, Drag::None);
         match was {
             Drag::None => {}
@@ -2380,6 +2432,24 @@ impl ShotLoupe {
         }
         o
     }
+}
+
+/// Where the mode pill and recent button were last painted on a display
+/// (written by the overlay render, read by the click hit test).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChromeRects {
+    pub display: usize,
+    pub pill: Rect,
+    /// Width of the first ("Copy Text") segment.
+    pub first_w: f64,
+    pub recent: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChromePress {
+    /// `true` = the second ("Screenshot") segment.
+    Pill(bool),
+    Recent,
 }
 
 /// `ShotRecentButton` — the recents button beside the mode pill.
@@ -3159,6 +3229,11 @@ mod overlay {
     use std::cell::{Cell, RefCell};
 
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSApplication, NSTrackingArea, NSTrackingAreaOptions};
+    use super::{ChromeRects, ShotModePill, ShotRecentButton};
+    use objc2::AnyThread;
+    use objc2_core_graphics::{CGLineCap, CGPath};
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSPanel,
@@ -3203,6 +3278,7 @@ mod overlay {
 
     #[derive(Clone, Copy)]
     enum MousePhase {
+        Moved,
         Down,
         Dragged,
         Up,
@@ -3212,6 +3288,7 @@ mod overlay {
         /// The live session. Owned by the controller; cleared before it drops.
         session: Cell<*mut ShotSession>,
         display: Cell<usize>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     }
 
     define_class!(
@@ -3230,6 +3307,28 @@ mod overlay {
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, _dirty: NSRect) {
                 self.render();
+            }
+
+            #[unsafe(method(updateTrackingAreas))]
+            fn update_tracking_areas(&self) {
+                let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
+                    self.removeTrackingArea(&t);
+                }
+                let opts = NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect;
+                let owner: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+                let t = unsafe {
+                    NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), self.bounds(), opts, Some(owner), None)
+                };
+                self.addTrackingArea(&t);
+                *self.ivars().tracking.borrow_mut() = Some(t);
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, event: &NSEvent) {
+                self.feed(event, MousePhase::Moved);
             }
 
             #[unsafe(method(mouseDown:))]
@@ -3266,6 +3365,7 @@ mod overlay {
             let this = ShotOverlayView::alloc(mtm).set_ivars(ShotOverlayViewIvars {
                 session: Cell::new(session),
                 display: Cell::new(display),
+                tracking: RefCell::new(None),
             });
             let view: Retained<ShotOverlayView> = unsafe {
                 msg_send![
@@ -3307,9 +3407,25 @@ mod overlay {
             let shift = mods.contains(NSEventModifierFlags::Shift);
             let cmd = mods.contains(NSEventModifierFlags::Command);
             match phase {
+                MousePhase::Moved => {
+                    session.mouse_moved(d, p);
+                    // The pill / loupe follow the pointer across displays.
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        for w in NSApplication::sharedApplication(mtm).windows().iter() {
+                            if let Some(cv) = w.contentView() {
+                                if cv.downcast_ref::<ShotOverlayView>().is_some() {
+                                    cv.setNeedsDisplay(true);
+                                }
+                            }
+                        }
+                    }
+                }
                 MousePhase::Down => session.mouse_down(d, p, click, shift, cmd),
                 MousePhase::Dragged => session.mouse_dragged(d, p, shift, cmd),
                 MousePhase::Up => session.mouse_up(d, p, shift, cmd),
+            }
+            if matches!(phase, MousePhase::Down | MousePhase::Up) {
+                super::pump_after_mouse();
             }
             self.setNeedsDisplay(true);
         }
@@ -3452,6 +3568,10 @@ mod overlay {
                 draw_help_card(ctx, session, full);
             }
 
+            // Mode pill (Copy Text | Screenshot) + the recents button beside
+            // it, on the display the pointer is on.
+            draw_mode_chrome(ctx, session, full, d);
+
             // Button ring: only around a live selection, not in text mode.
             if let Some(sel) = mine {
                 if !session.text_mode {
@@ -3506,6 +3626,76 @@ mod overlay {
         o.text = text.to_string();
         o.style.bold = bold;
         shot_cg::draw_text(ctx, &o);
+    }
+
+    /// `ShotModePill` + `ShotRecentButton`, laid out like `layoutChrome`:
+    /// the pill is centred 16pt under the menu bar, the 28pt recents button
+    /// 12pt to its right. Records the painted rects for the click hit test.
+    fn draw_mode_chrome(ctx: &CGContext, session: &ShotSession, full: Rect, d: usize) {
+        let shown = session.mouse.map(|(md, _)| md) == Some(d) && !session.is_dragging();
+        if !shown {
+            if session.chrome_rects.get().is_some_and(|c| c.display == d) {
+                session.chrome_rects.set(None);
+            }
+            return;
+        }
+        let Some(display) = session.displays.get(d) else { return };
+        let top = display.top_inset.max(24.0);
+        let titles = ["Copy Text", "Screenshot"];
+        let widths: Vec<f64> = titles
+            .iter()
+            .map(|t| shot_cg::measure_text_width(t, 16.0, true).ceil() + 18.0 + 8.0 + 28.0)
+            .collect();
+        let pw = widths.iter().sum::<f64>() + 12.0;
+        let pill = Rect::new(ShotModePill::origin_x(full.w, pw), top + 16.0, pw, ShotModePill::HEIGHT);
+        let recent = Rect::new(pill.max_x() + 12.0, top + 19.0, ShotRecentButton::SIZE, ShotRecentButton::SIZE);
+        session.chrome_rects.set(Some(ChromeRects { display: d, pill, first_w: widths[0], recent }));
+
+        let rounded = |r: Rect, rad: f64| unsafe {
+            let path = CGPath::with_rounded_rect(cg_rect(r), rad, rad, std::ptr::null());
+            CGContext::add_path(Some(ctx), Some(&*path));
+        };
+        // Pill body + hairline border.
+        set_fill(ctx, ShotColor::BLACK.with_alpha(0.72));
+        rounded(pill, pill.h / 2.0);
+        CGContext::fill_path(Some(ctx));
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.25));
+        CGContext::set_line_width(Some(ctx), 1.0);
+        rounded(Rect::new(pill.x + 0.5, pill.y + 0.5, pill.w - 1.0, pill.h - 1.0), pill.h / 2.0);
+        CGContext::stroke_path(Some(ctx));
+        // Segments: the active one is filled (blue for text mode).
+        let mut x = pill.x + 4.0;
+        for (i, (title, w)) in titles.iter().zip(widths.iter()).enumerate() {
+            let r = Rect::new(x, pill.y + 4.0, *w, pill.h - 8.0);
+            let on = (i == 0) == session.text_mode;
+            if on {
+                set_fill(ctx, if i == 0 { SHOT_TEXT_BLUE } else { session.cfg.ui_color });
+                rounded(r, r.h / 2.0);
+                CGContext::fill_path(Some(ctx));
+            }
+            let fg = if on { ShotColor::WHITE } else { ShotColor::WHITE.with_alpha(0.75) };
+            let tw = shot_cg::measure_text_width(title, 16.0, true);
+            draw_text_at(ctx, title, r.x + (r.w - tw) / 2.0, r.mid_y() - 10.0, 16.0, fg, true);
+            x += *w;
+        }
+        // Recents button: disc + a clock-with-arrow glyph.
+        set_fill(ctx, ShotColor::BLACK.with_alpha(0.72));
+        CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(recent));
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.25));
+        CGContext::set_line_width(Some(ctx), 1.0);
+        CGContext::stroke_ellipse_in_rect(
+            Some(ctx),
+            cg_rect(Rect::new(recent.x + 0.5, recent.y + 0.5, recent.w - 1.0, recent.h - 1.0)),
+        );
+        set_stroke(ctx, ShotColor::WHITE);
+        CGContext::set_line_width(Some(ctx), 1.6);
+        CGContext::set_line_cap(Some(ctx), CGLineCap::Round);
+        let (cx, cy) = (recent.mid_x(), recent.mid_y());
+        CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(cx - 6.5, cy - 6.5, 13.0, 13.0)));
+        CGContext::move_to_point(Some(ctx), cx, cy - 4.0);
+        CGContext::add_line_to_point(Some(ctx), cx, cy);
+        CGContext::add_line_to_point(Some(ctx), cx + 3.0, cy + 2.0);
+        CGContext::stroke_path(Some(ctx));
     }
 
     /// `ShotHelpCard`: a centred rounded card of key/action rows.
@@ -4467,6 +4657,36 @@ impl Drop for KeyMonitor {
     }
 }
 
+/// The live controller, for the overlay view's mouse events (a click can
+/// finish the session or ask for the recents grid, exactly like a key).
+#[cfg(target_os = "macos")]
+static LIVE_CONTROLLER: std::sync::Mutex<Option<std::sync::Weak<Mutex<ScreenshotController>>>> =
+    std::sync::Mutex::new(None);
+
+/// After the overlay view fed a mouse event into the session: complete a
+/// finished session / open the recents grid on the next main-queue turn
+/// (never inside the event dispatch itself).
+#[cfg(target_os = "macos")]
+fn pump_after_mouse() {
+    dispatch2::DispatchQueue::main().exec_async(|| {
+        let Some(ctrl) = LIVE_CONTROLLER.lock().ok().and_then(|g| g.as_ref().and_then(|w| w.upgrade())) else {
+            return;
+        };
+        let Ok(mut c) = ctrl.try_lock() else { return };
+        if c.session.as_ref().is_some_and(|s| s.finished) {
+            c.complete_finished_session();
+            return;
+        }
+        if c.session.as_ref().is_some_and(|s| s.recent_requested) {
+            if let Some(s) = c.session.as_mut() {
+                s.recent_requested = false;
+            }
+            c.toggle_recent();
+        }
+        c.redraw_overlays();
+    });
+}
+
 /// Reinterpret any Objective-C object as `AnyObject` (for `downcast_ref`).
 #[cfg(target_os = "macos")]
 fn as_any<T: objc2::Message + ?Sized>(obj: &T) -> &objc2::runtime::AnyObject {
@@ -4754,6 +4974,9 @@ impl ScreenshotController {
             return;
         };
         let weak = std::sync::Arc::downgrade(&ctrl);
+        if let Ok(mut g) = LIVE_CONTROLLER.lock() {
+            *g = Some(weak.clone());
+        }
         let block = block2::RcBlock::new(
             move |event: std::ptr::NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
                 // SAFETY: AppKit hands us a live `NSEvent` for the duration of
@@ -4943,7 +5166,9 @@ impl ScreenshotController {
                         let mut s =
                             ShotSession::new(cfg.clone(), args.clone(), self.state_path.clone());
                         for scr in &self.screens {
-                            s.add_display(ShotDisplay::new(scr.id, scr.frame, scr.scale));
+                            let mut disp = ShotDisplay::new(scr.id, scr.frame, scr.scale);
+                            disp.top_inset = scr.top_inset;
+                            s.add_display(disp);
                         }
                         #[cfg(target_os = "macos")]
                         for image in &images {
@@ -5281,7 +5506,15 @@ impl ScreenshotController {
     }
 
     pub fn copy_text(&mut self, text: &str, cfg: &ScreenshotConfig) {
-        // NSPasteboard.string write is the AppKit pass.
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            let _ = unsafe {
+                pb.setString_forType(&objc2_foundation::NSString::from_str(text), NSPasteboardTypeString)
+            };
+        }
         self.last_output["copied"] = json!(true);
         if !cfg.text_toast.is_empty() {
             let summary = crate::engines::screenshot_text::ShotOCR::summary(text);
@@ -5718,6 +5951,8 @@ impl ScreenshotController {
         };
         st["moveMode"] = json!(s.move_mode);
         st["textMode"] = json!(s.text_mode);
+        st["finished"] = json!(s.finished);
+        st["dragging"] = json!(s.is_dragging());
         st["modePill"] = Value::Null;
         st["size"] = match s.active_size() {
             Some(v) => json!(v),
