@@ -1304,6 +1304,9 @@ pub struct ShotSession {
     pub finished: bool,
     pub outcome: Option<ShotOutcome>,
     pub recent_requested: bool,
+    /// The recents grid is open (the pill's third stop). Kept in sync by the
+    /// controller's `toggle_recent` / `close_recent`.
+    pub recent_open: bool,
     pub chrome_rects: std::cell::Cell<Option<ChromeRects>>,
     chrome_press: Option<ChromePress>,
     pub mouse: Option<(usize, Point)>,
@@ -1348,6 +1351,7 @@ impl ShotSession {
             finished: false,
             outcome: None,
             recent_requested: false,
+            recent_open: false,
             chrome_rects: std::cell::Cell::new(None),
             chrome_press: None,
             mouse: None,
@@ -1442,6 +1446,45 @@ impl ShotSession {
             self.set_tool(t);
         }
     }
+    /// The pill's current stop: 0 Copy Text, 1 Screenshot, 2 Recent.
+    pub fn stop(&self) -> usize {
+        if self.recent_open {
+            2
+        } else if self.text_mode {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Move to stop `n` (0 Copy Text, 1 Screenshot, 2 Recent). Leaving or
+    /// re-selecting Recent closes the grid; reaching it opens the grid, via
+    /// `recent_requested` (the controller toggles it).
+    pub fn goto_stop(&mut self, n: usize) {
+        let cur = self.stop();
+        if n == cur {
+            if cur == 2 {
+                self.recent_requested = true;
+            }
+            return;
+        }
+        if cur == 2 {
+            self.recent_requested = true;
+        }
+        match n {
+            0 if !self.text_mode => self.toggle_text_mode(),
+            1 if self.text_mode => self.toggle_text_mode(),
+            2 => self.recent_requested = true,
+            _ => {}
+        }
+    }
+
+    /// `Tab` / `Shift+Tab` through Copy Text → Screenshot → Recent.
+    pub fn cycle_stop(&mut self, back: bool) {
+        let cur = self.stop();
+        self.goto_stop(if back { (cur + 2) % 3 } else { (cur + 1) % 3 });
+    }
+
     pub fn toggle_text_mode(&mut self) {
         self.commit_text();
         self.close_wheel();
@@ -1785,7 +1828,7 @@ impl ShotSession {
             return true;
         }
         if code == KEY_TAB && !k.cmd && !k.ctrl && !k.opt {
-            self.toggle_text_mode();
+            self.cycle_stop(k.shift);
             return true;
         }
         if k.cmd && k.shift && ch == Some('c') {
@@ -2050,12 +2093,18 @@ impl ShotSession {
         // click before the selection state machine sees it.
         if let Some(c) = self.chrome_rects.get() {
             if c.display == d && !self.is_dragging() {
-                if c.pill.contains_point(p) {
-                    self.chrome_press = Some(ChromePress::Pill(ShotModePill::right_segment(p.x - c.pill.x, c.first_w)));
-                    return;
-                }
                 if c.recent.contains_point(p) {
                     self.chrome_press = Some(ChromePress::Recent);
+                    return;
+                }
+                if c.pill.contains_point(p) {
+                    let x = p.x - c.pill.x;
+                    // Segments only; the hairline gap before the chip is dead.
+                    if x >= 4.0 && x < 4.0 + c.first_w + c.second_w {
+                        self.chrome_press = Some(ChromePress::Pill(ShotModePill::right_segment(x, c.first_w)));
+                    } else {
+                        self.chrome_press = Some(ChromePress::Dead);
+                    }
                     return;
                 }
             }
@@ -2239,11 +2288,9 @@ impl ShotSession {
                 match press {
                     // Left segment = Copy Text, right = Screenshot.
                     ChromePress::Pill(right) if c.pill.contains_point(p) => {
-                        if self.text_mode == right {
-                            self.toggle_text_mode();
-                        }
+                        self.goto_stop(if right { 1 } else { 0 });
                     }
-                    ChromePress::Recent if c.recent.contains_point(p) => self.pressed(ShotTool::Recent),
+                    ChromePress::Recent if c.recent.contains_point(p) => self.goto_stop(2),
                     _ => {}
                 }
             }
@@ -2442,6 +2489,9 @@ pub struct ChromeRects {
     pub pill: Rect,
     /// Width of the first ("Copy Text") segment.
     pub first_w: f64,
+    /// Width of the second ("Screenshot") segment.
+    pub second_w: f64,
+    /// The recents chip inside the pill's right end.
     pub recent: Rect,
 }
 
@@ -2450,6 +2500,8 @@ enum ChromePress {
     /// `true` = the second ("Screenshot") segment.
     Pill(bool),
     Recent,
+    /// A press on the pill's padding or divider: swallowed, does nothing.
+    Dead,
 }
 
 /// `ShotRecentButton` — the recents button beside the mode pill.
@@ -3678,10 +3730,19 @@ mod overlay {
             .iter()
             .map(|t| shot_cg::measure_text_width(t, 16.0, true).ceil() + 18.0 + 8.0 + 28.0)
             .collect();
-        let pw = widths.iter().sum::<f64>() + 12.0;
+        let sum = widths.iter().sum::<f64>();
+        // [4 pad][segments][hairline gap 11][chip 26][8 pad]
+        let pw = sum + 4.0 + 11.0 + 26.0 + 8.0;
         let pill = Rect::new(ShotModePill::origin_x(full.w, pw), top + 16.0, pw, ShotModePill::HEIGHT);
-        let recent = Rect::new(pill.max_x() + 12.0, top + 19.0, ShotRecentButton::SIZE, ShotRecentButton::SIZE);
-        session.chrome_rects.set(Some(ChromeRects { display: d, pill, first_w: widths[0], recent }));
+        let recent = Rect::new(pill.x + 4.0 + sum + 11.0, pill.mid_y() - 13.0, 26.0, 26.0);
+        session.chrome_rects.set(Some(ChromeRects {
+            display: d,
+            pill,
+            first_w: widths[0],
+            second_w: widths[1],
+            recent,
+        }));
+        let in_recent = session.recent_open;
 
         let rounded = |r: Rect, rad: f64| unsafe {
             let path = CGPath::with_rounded_rect(cg_rect(r), rad, rad, std::ptr::null());
@@ -3695,11 +3756,12 @@ mod overlay {
         CGContext::set_line_width(Some(ctx), 1.0);
         rounded(Rect::new(pill.x + 0.5, pill.y + 0.5, pill.w - 1.0, pill.h - 1.0), pill.h / 2.0);
         CGContext::stroke_path(Some(ctx));
-        // Segments: the active one is filled (blue for text mode).
+        // Segments: the active one is filled (blue for text mode). While the
+        // recents grid is the active stop, neither mode is lit.
         let mut x = pill.x + 4.0;
         for (i, (title, w)) in titles.iter().zip(widths.iter()).enumerate() {
             let r = Rect::new(x, pill.y + 4.0, *w, pill.h - 8.0);
-            let on = (i == 0) == session.text_mode;
+            let on = !in_recent && (i == 0) == session.text_mode;
             if on {
                 set_fill(ctx, if i == 0 { SHOT_TEXT_BLUE } else { session.cfg.ui_color });
                 rounded(r, r.h / 2.0);
@@ -3719,16 +3781,27 @@ mod overlay {
             draw_text_at(ctx, title, x0 + 18.0 + 8.0, r.mid_y() - 10.0, 16.0, fg, true);
             x += *w;
         }
-        // Recents button: disc + a clock-with-arrow glyph.
-        set_fill(ctx, ShotColor::BLACK.with_alpha(0.72));
+        // Hairline between the modes and the recents chip.
+        set_fill(ctx, ShotColor::WHITE.with_alpha(0.22));
+        CGContext::fill_rect(
+            Some(ctx),
+            cg_rect(Rect::new(pill.x + 4.0 + sum + 4.0, pill.mid_y() - 9.0, 1.0, 18.0)),
+        );
+        // Recents chip: smaller, same clock glyph as the standalone button.
+        if in_recent {
+            set_fill(ctx, ShotColor::WHITE);
+        } else {
+            set_fill(ctx, ShotColor::WHITE.with_alpha(0.08));
+        }
         CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(recent));
-        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.25));
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(if in_recent { 1.0 } else { 0.25 }));
         CGContext::set_line_width(Some(ctx), 1.0);
         CGContext::stroke_ellipse_in_rect(
             Some(ctx),
             cg_rect(Rect::new(recent.x + 0.5, recent.y + 0.5, recent.w - 1.0, recent.h - 1.0)),
         );
-        draw_symbol("clock.arrow.circlepath", recent, 14.0, true, ShotColor::WHITE);
+        let glyph = if in_recent { ShotColor::BLACK } else { ShotColor::WHITE.with_alpha(0.85) };
+        draw_symbol("clock.arrow.circlepath", recent, 13.0, true, glyph);
     }
 
     /// `ShotHelpCard`: a centred rounded card of key/action rows.
@@ -5464,6 +5537,9 @@ impl ScreenshotController {
     /// Close the recent grid; `true` when one was open.
     #[cfg(target_os = "macos")]
     pub fn close_recent(&mut self) -> bool {
+        if let Some(s) = self.session.as_mut() {
+            s.recent_open = false;
+        }
         match self.recent_panel.0.take() {
             Some(p) => {
                 p.orderOut(None);
