@@ -1,4 +1,4 @@
-<div class="doc paper clean"></div>
+<div class="doc executive"></div>
 
 # Graphviz showcase
 
