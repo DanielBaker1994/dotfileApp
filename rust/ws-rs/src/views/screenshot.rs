@@ -4692,10 +4692,16 @@ impl Default for ScreenshotController {
 impl ScreenshotController {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
+        // Unit tests record fake PNGs: keep them out of the real cache dir.
+        #[cfg(test)]
+        let home = {
+            let d = std::env::temp_dir().join(format!("ks-test-home-{}", std::process::id()));
+            d.to_string_lossy().into_owned()
+        };
         ScreenshotController {
             config: ScreenshotConfig::default(),
             state_path: format!("{home}/.cache/kitchen-sink/screenshot-state.json"),
-            history: ShotHistory::default(),
+            history: ShotHistory::new(format!("{home}/.cache/kitchen-sink/screenshots")),
             screens: Vec::new(),
             session: None,
             pins: Vec::new(),
