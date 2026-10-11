@@ -154,7 +154,7 @@ mod appkit {
     use std::cell::RefCell;
 
     const W: f64 = 520.0;
-    const H: f64 = 372.0;
+    const H: f64 = 400.0;
 
     pub struct Ivars {
         window: Retained<NSWindow>,
@@ -288,7 +288,7 @@ mod appkit {
                 true,
             );
             head.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-            head.setFrame(rect(20.0, H - 50.0, W - 40.0, 34.0));
+            head.setFrame(rect(20.0, H - 80.0, W - 40.0, 64.0));
             content.addSubview(&head);
             let field = || NSTextField::new(mtm);
             let site = field();
@@ -296,7 +296,7 @@ mod appkit {
             let token: Retained<NSTextField> = Retained::into_super(NSSecureTextField::new(mtm));
             let project = field();
             let max = field();
-            let mut y = H - 88.0;
+            let mut y = H - 116.0;
             for (text, f, placeholder) in [
                 ("Site URL", &site, "https://jira.example.com"),
                 ("Email (Cloud only)", &email, "only for *.atlassian.net — blank for a personal access token"),

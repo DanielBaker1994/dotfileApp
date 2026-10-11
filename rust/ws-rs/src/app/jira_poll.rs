@@ -171,6 +171,10 @@ fn launchctl(args: &[&str]) -> i32 {
 /// `syncJiraLaunchAgent()`: install/refresh `com.jira.poll.plist` while the
 /// poller is active, boot it out otherwise.
 pub fn sync_launch_agent() {
+    // Test daemons (isolated config) must never touch the real LaunchAgents.
+    if std::env::var_os("WS_SKIP_LAUNCH_AGENT").is_some() {
+        return;
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     let plist = format!("{home}/Library/LaunchAgents/com.jira.poll.plist");
     let uid = unsafe { libc::getuid() };
