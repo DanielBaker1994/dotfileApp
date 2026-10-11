@@ -4078,6 +4078,16 @@ mod daemon_ui {
                     .as_ref()
                     .and_then(|st| st.window.firstResponder())
                     .is_some_and(|r| as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some());
+                // Folder copy / move chords ask Replace / Keep Both / Skip first.
+                if !in_text {
+                    if let Some((from, move_)) = crate::views::compare::folder_transfer_key(&key) {
+                        let is_folder = self.compare_with(|m| m.current_is_folder()).unwrap_or(false);
+                        if is_folder {
+                            self.compare_folder_transfer(from, move_);
+                            return true;
+                        }
+                    }
+                }
                 if let Some(m) = self.ivars().controller.compare_model() {
                     if m.lock().unwrap().handle_key(key, in_text) {
                         return true;
@@ -7497,6 +7507,7 @@ mod daemon_ui {
             let Some(root) = self.ivars().state.borrow().as_ref().and_then(|st| st.window.contentView()) else { return };
             let acts: Vec<String> = items.iter().map(|i| i.2.to_string()).collect();
             let ctrl = self.ivars().controller.clone();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
             let picker = crate::ui::action_picker::ActionPicker::show(
                 mtm,
                 &root,
@@ -7514,6 +7525,17 @@ mod daemon_ui {
                         }
                         "folder-key:ctrl-p" => {
                             m.handle_key(key(35), false);
+                        }
+                        "folder-copy:right" | "folder-copy:left" => {
+                            let from = if a == "folder-copy:right" {
+                                crate::views::compare::CompareSide::Left
+                            } else {
+                                crate::views::compare::CompareSide::Right
+                            };
+                            drop(m);
+                            if let Some(ui) = weak.load() {
+                                ui.compare_folder_transfer(from, false);
+                            }
                         }
                         other => {
                             if let Some(err) = m.test_do(other) {

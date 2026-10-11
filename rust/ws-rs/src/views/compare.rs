@@ -4110,10 +4110,10 @@ impl CompareWindowModel {
                     move_to(fp, i, false);
                 }
             }
-            15 if ctrl && !cmd => fp.transfer(CompareSide::Left, opt, Clash::Replace),
-            37 if ctrl && opt && !cmd => fp.transfer(CompareSide::Right, true, Clash::Replace),
-            124 if opt && !cmd => fp.transfer(CompareSide::Left, ctrl, Clash::Replace),
-            123 if opt && !cmd => fp.transfer(CompareSide::Right, ctrl, Clash::Replace),
+            15 | 37 | 123 | 124 if folder_transfer_key(&key).is_some() => {
+                let (from, move_) = folder_transfer_key(&key).unwrap();
+                fp.transfer(from, move_, Clash::Replace)
+            }
             6 if cmd && !shift => {
                 fp.test_do("undo", "");
             }
@@ -6979,5 +6979,19 @@ mod tests {
             editor_edit_action(crate::engines::text_edit_keys::KEY_V, bare, editable),
             Some(crate::engines::text_edit_keys::EditAction::Paste)
         );
+    }
+}
+
+/// The folder page's copy / move chords: Ctrl+R / Alt+→ copy from the left,
+/// Alt+← from the right, with Ctrl added (or Ctrl+Alt+R / L) to move.
+/// Returns `(from, move)`; the host routes it through the clash prompt.
+pub fn folder_transfer_key(key: &crate::ui::popup::KeyInput) -> Option<(CompareSide, bool)> {
+    let (ctrl, cmd, opt) = (key.ctrl, key.cmd, key.opt);
+    match key.key_code {
+        15 if ctrl && !cmd => Some((CompareSide::Left, opt)),
+        37 if ctrl && opt && !cmd => Some((CompareSide::Right, true)),
+        124 if opt && !cmd => Some((CompareSide::Left, ctrl)),
+        123 if opt && !cmd => Some((CompareSide::Right, ctrl)),
+        _ => None,
     }
 }
