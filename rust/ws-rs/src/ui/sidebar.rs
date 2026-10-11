@@ -657,6 +657,21 @@ mod appkit {
             self.setNeedsDisplay(true);
         }
 
+        /// `sidebarJumpItems`: (title, section, icon) per row, pinned first.
+        pub fn jump_items(&self) -> Vec<(String, String, String)> {
+            let m = self.ivars().model.borrow();
+            let mut out: Vec<(String, String, String)> =
+                m.pinned.iter().map(|p| (p.label.clone(), p.section.clone(), p.icon.clone())).collect();
+            out.extend(m.rows.iter().map(|r| (r.title.clone(), m.section_title.clone(), r.icon.clone())));
+            out
+        }
+
+        /// Jump to a row as if clicked (`onJump`).
+        pub fn activate_row(&self, row: usize) {
+            self.vim_move(row);
+            self.activate(row);
+        }
+
         /// `activate(row:)`: pinned rows open their key, list rows select.
         fn activate(&self, row: usize) {
             let ev = {

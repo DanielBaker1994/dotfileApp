@@ -1598,6 +1598,11 @@ mod appkit {
     );
 
     impl JiraView {
+        /// The rail (`sidebarJumpItems` / `do:jira-jump`).
+        pub fn sidebar(&self) -> Retained<SidebarView> {
+            self.ivars().sidebar.clone()
+        }
+
         /// `JiraDashboard.navPanes`: sidebar, search, list, issue.
         pub fn nav_panes(&self) -> Vec<crate::app::live_panes::LivePane> {
             use crate::app::live_panes::LivePane;

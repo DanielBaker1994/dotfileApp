@@ -201,25 +201,7 @@ impl NoteFindUi {
     }
 
     fn place(&self) {
-        let Some(mtm) = MainThreadMarker::new() else { return };
-        let mouse = NSEvent::mouseLocation();
-        let screens = NSScreen::screens(mtm);
-        let scr = screens
-            .iter()
-            .find(|s| {
-                let f = s.frame();
-                mouse.x >= f.origin.x
-                    && mouse.x <= f.origin.x + f.size.width
-                    && mouse.y >= f.origin.y
-                    && mouse.y <= f.origin.y + f.size.height
-            })
-            .or_else(|| NSScreen::mainScreen(mtm));
-        let Some(scr) = scr else { return };
-        let vis = scr.visibleFrame();
-        let f = self.panel.frame();
-        let x = vis.origin.x + vis.size.width / 2.0 - f.size.width / 2.0;
-        let y = (vis.origin.y + vis.size.height - vis.size.height * 0.2 - f.size.height).max(vis.origin.y);
-        self.panel.setFrameOrigin(NSPoint::new(x.round(), y.round()));
+        place_top_center(&self.panel);
     }
 
     fn query_changed(&self, q: &str) {
@@ -398,3 +380,249 @@ impl NoteFindUi {
 }
 
 static GREP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// ------------------------------------------------------------- sidebar jump
+
+/// One `PopupWindow.SidebarJumpItem`: a sidebar entry (`row` indexes the
+/// rail's pinned-then-list order).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JumpItem {
+    pub title: String,
+    pub section: String,
+    pub icon: String,
+    pub row: usize,
+}
+
+/// `SidebarJumpWindow.score(_:_:)`: title span first, else section + title.
+pub fn jump_score(item: &JumpItem, q: &str) -> Option<i64> {
+    if q.is_empty() {
+        return Some(0);
+    }
+    let span = |s: &str| -> Option<i64> {
+        let chars: Vec<char> = s.to_lowercase().chars().collect();
+        let (mut i, mut first, mut last) = (0usize, -1i64, -1i64);
+        for ch in q.chars() {
+            let j = chars[i..].iter().position(|c| *c == ch)? + i;
+            if first < 0 {
+                first = j as i64;
+            }
+            last = j as i64;
+            i = j + 1;
+        }
+        Some((last - first) * 4 + first)
+    };
+    span(&item.title).or_else(|| span(&format!("{} {}", item.section, item.title)).map(|s| 1000 + s))
+}
+
+/// `reload()`: the ranked, filtered items.
+pub fn jump_filter(all: &[JumpItem], query: &str) -> Vec<JumpItem> {
+    let q: String = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let mut scored: Vec<(usize, i64)> =
+        all.iter().enumerate().filter_map(|(i, it)| jump_score(it, &q).map(|s| (i, s))).collect();
+    scored.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    scored.into_iter().map(|(i, _)| all[i].clone()).collect()
+}
+
+/// `SidebarJumpWindow` (`do:jira-jump`).
+pub struct SidebarJumpUi {
+    pub panel: Retained<PopupPanel>,
+    list: ListPanel,
+    empty: Retained<NSTextField>,
+    all: RefCell<Vec<JumpItem>>,
+    shown: RefCell<Vec<JumpItem>>,
+    selection: Cell<usize>,
+    cfg: NoteFindConfig,
+    colors: PopupColors,
+    on_jump: RefCell<Option<Box<dyn Fn(usize)>>>,
+}
+
+impl SidebarJumpUi {
+    pub fn new(mtm: MainThreadMarker, cfg: NoteFindConfig) -> Rc<SidebarJumpUi> {
+        let colors = crate::ui::theme::PopupThemeDefaults::colors();
+        let list = ListPanel::new(mtm, colors, cfg.width, ROW_H, "jump to a sidebar item — type to filter · ↩ open · esc close");
+        let config = PopupConfig {
+            name: "sidebar-jump".to_string(),
+            frame: CardFrame { x: 0.0, y: 0.0, width: cfg.width, height: list.height(1, cfg.rows) },
+            tool_panel: true,
+            floating: true,
+            ..PopupConfig::default()
+        };
+        let panel = PopupPanel::create(mtm, &config);
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+        panel.setHasShadow(true);
+        panel.setContentView(Some(&list.root));
+        let empty = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        empty.setFont(Some(&style::system_font(12.0, Weight::Regular)));
+        empty.setTextColor(Some(&colors.dim.to_nscolor()));
+        empty.setHidden(true);
+        list.root.addSubview(&empty);
+        let ui = Rc::new(SidebarJumpUi {
+            panel,
+            list,
+            empty,
+            all: RefCell::new(Vec::new()),
+            shown: RefCell::new(Vec::new()),
+            selection: Cell::new(0),
+            cfg,
+            colors,
+            on_jump: RefCell::new(None),
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.list.set_drawer(Box::new(move |r, i, sel, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.draw_row(r, i, sel);
+            }
+        }));
+        let weak = Rc::downgrade(&ui);
+        ui.list.set_on_click(Box::new(move |row, _, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open(row);
+            }
+        }));
+        let weak = Rc::downgrade(&ui);
+        let weak_cmd = Rc::downgrade(&ui);
+        ui.list.set_on_field(
+            Box::new(move |_q: String| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.reload();
+                }
+            }),
+            Box::new(move |cmd| {
+                let Some(ui) = weak_cmd.upgrade() else { return false };
+                match cmd {
+                    "cancelOperation:" => ui.hide(),
+                    "insertNewline:" => ui.open(ui.selection.get()),
+                    "moveDown:" => ui.move_selection(1),
+                    "moveUp:" => ui.move_selection(-1),
+                    _ => return false,
+                }
+                true
+            }),
+        );
+        ui
+    }
+
+    pub fn set_on_jump(&self, f: Box<dyn Fn(usize)>) {
+        *self.on_jump.borrow_mut() = Some(f);
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self.panel.isVisible()
+    }
+
+    pub fn has_key(&self) -> bool {
+        self.panel.isKeyWindow()
+    }
+
+    pub fn show(&self, items: Vec<JumpItem>) {
+        *self.all.borrow_mut() = items;
+        self.reload();
+        if !self.is_shown() {
+            place_top_center(&self.panel);
+        }
+        self.panel.makeKeyAndOrderFront(None);
+        self.panel.makeFirstResponder(Some(&self.list.search));
+    }
+
+    pub fn hide(&self) {
+        self.panel.orderOut(None);
+    }
+
+    fn reload(&self) {
+        let q = self.list.search.stringValue().to_string();
+        let shown = jump_filter(&self.all.borrow(), &q);
+        let n = shown.len();
+        *self.shown.borrow_mut() = shown;
+        self.selection.set(0);
+        self.list.set_rows(n, 0);
+        let h = self.list.height(n, self.cfg.rows);
+        let f = self.panel.frame();
+        let top = f.origin.y + f.size.height;
+        self.panel
+            .setFrame_display(NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(self.cfg.width, h)), true);
+        let note = if self.all.borrow().is_empty() {
+            "The sidebar is empty".to_string()
+        } else {
+            format!("No sidebar item matches “{}”", q.trim())
+        };
+        self.empty.setStringValue(&NSString::from_str(&note));
+        self.empty.setHidden(n > 0);
+        self.empty.setFrame(NSRect::new(
+            NSPoint::new(18.0, h - crate::ui::list_panel::SEARCH_H - ROW_H + 7.0),
+            NSSize::new(self.cfg.width - 36.0, 16.0),
+        ));
+    }
+
+    pub fn move_selection(&self, d: i64) {
+        let n = self.shown.borrow().len() as i64;
+        if n == 0 {
+            return;
+        }
+        let s = (self.selection.get() as i64 + d).rem_euclid(n) as usize;
+        self.selection.set(s);
+        self.list.set_rows(n as usize, s);
+    }
+
+    pub fn selection(&self) -> usize {
+        self.selection.get()
+    }
+
+    pub fn open(&self, i: usize) {
+        let Some(row) = self.shown.borrow().get(i).map(|it| it.row) else { return };
+        self.hide();
+        if let Some(f) = self.on_jump.borrow().as_ref() {
+            f(row);
+        }
+    }
+
+    fn draw_row(&self, rect: crate::ui::chrome::Rect, i: usize, selected: bool) {
+        use crate::ui::chrome::Rect;
+        use crate::ui::theme::PopupTone;
+        let c = &self.colors;
+        let shown = self.shown.borrow();
+        let Some(it) = shown.get(i) else { return };
+        let inner = Rect::new(rect.x + 6.0, rect.y + 2.0, rect.width - 12.0, rect.height - 4.0);
+        if selected {
+            style::fill_rounded(inner, 7.0, c.highlight);
+            style::fill_rounded(Rect::new(inner.x, inner.y + 4.0, 3.0, inner.height - 8.0), 1.5, c.accent);
+        }
+        // `tone(_:)` per section, drawn as a tinted chip.
+        let tone = match it.section.as_str() {
+            "My work" | "My Work" | "MY WORK" => PopupTone::Accent,
+            "Boards" | "BOARDS" => PopupTone::Info,
+            "Pinned" | "PINNED" => PopupTone::Warning,
+            _ => PopupTone::Accent2,
+        };
+        let col = c.tone(tone);
+        let chip = Rect::new(inner.x + 10.0, inner.mid_y() - 9.0, 18.0, 18.0);
+        style::fill_rounded(chip, 5.0, col.with_alpha(0.18));
+        let icon = if it.icon.is_empty() { "list.bullet.rectangle" } else { it.icon.as_str() };
+        style::draw_symbol(icon, chip, col, 11.0);
+        let band = |x: f64, w: f64| Rect::new(x, inner.y, w.max(0.0), inner.height);
+        let tf = style::system_font(10.0, Weight::Regular);
+        let tw = style::draw_text_right(&it.section, band(inner.x, inner.width - 10.0), &tf, c.dim);
+        let x = chip.max_x() + 10.0;
+        style::draw_text_left(&it.title, band(x, inner.max_x() - x - tw - 20.0), &style::system_font(13.0, Weight::Regular), c.text);
+    }
+}
+
+/// `place()`: centered on the mouse's screen, 20% down from the top.
+fn place_top_center(panel: &PopupPanel) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let mouse = NSEvent::mouseLocation();
+    let screens = NSScreen::screens(mtm);
+    let scr = screens
+        .iter()
+        .find(|s| {
+            let f = s.frame();
+            mouse.x >= f.origin.x && mouse.x <= f.origin.x + f.size.width && mouse.y >= f.origin.y && mouse.y <= f.origin.y + f.size.height
+        })
+        .or_else(|| NSScreen::mainScreen(mtm));
+    let Some(scr) = scr else { return };
+    let vis = scr.visibleFrame();
+    let f = panel.frame();
+    let x = vis.origin.x + vis.size.width / 2.0 - f.size.width / 2.0;
+    let y = (vis.origin.y + vis.size.height - vis.size.height * 0.2 - f.size.height).max(vis.origin.y);
+    panel.setFrameOrigin(NSPoint::new(x.round(), y.round()));
+}

@@ -139,6 +139,10 @@ pub enum UiCommand {
     PaneFocus(String),
     /// `do:notes-find` (false) / `do:notes-grep` (true) — `NoteFindWindow`.
     NoteFind(bool),
+    /// `do:jira-jump` — `SidebarJumpWindow` over the Jira rail.
+    JiraJump,
+    /// `jira-poll on`'s checks finished: (ok, message).
+    JiraEnable(bool, String),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -1172,6 +1176,61 @@ impl SwitcherController {
         inner.pane_nav.move_dir(dir, &panes);
     }
 
+    /// `kitchen-sink jira-poll on|off|toggle` (`enableJiraChecked` /
+    /// `setJiraEnabled`). The checks hit the network, so they run off-thread;
+    /// `toggle` from the CLI stops polling outright (Swift asks in an alert).
+    fn jira_poll(&self, name: &str) {
+        use crate::app::jira_poll::{self as jp, EnableCheck};
+        let on = jp::enabled_in_config();
+        let want_on = match name {
+            "jira-poll-on" => true,
+            "jira-poll-off" => false,
+            _ => !on,
+        };
+        if want_on == on {
+            self.log(&format!("jira: {name}: already {}", if on { "on" } else { "off" }));
+            if on {
+                self.open(SlotView::Jira);
+            }
+            return;
+        }
+        if !want_on {
+            jp::set_enabled(false, false);
+            let _ = self.reload_config();
+            self.log("jira: [jira] enabled = false (jira-poll off)");
+            if self.current() == Some(SlotView::Jira) {
+                self.hide("jira-poll off");
+            }
+            return;
+        }
+        let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else { return };
+        std::thread::spawn(move || {
+            let result = match jp::enable_check() {
+                EnableCheck::Ok => (true, String::new()),
+                EnableCheck::Setup(reason) => (false, format!("Jira setup needed: {reason}")),
+                EnableCheck::Login(msg) => (false, format!("Jira login failed: {msg}")),
+            };
+            queue.lock().unwrap().push(UiCommand::JiraEnable(result.0, result.1));
+        });
+    }
+
+    /// `enableJiraChecked`'s main-thread tail (after the off-thread checks).
+    pub fn jira_enable_result(&self, ok: bool, msg: &str) {
+        if !ok {
+            self.log(&format!("jira: enable refused: {}", msg.replace('\n', "; ")));
+            self.inner.lock().unwrap().ui_push(UiCommand::Toast(
+                msg.lines().next().unwrap_or("").to_string(),
+                "exclamationmark.triangle.fill",
+            ));
+            return;
+        }
+        crate::app::jira_poll::set_enabled(true, false);
+        let _ = self.reload_config();
+        self.log("jira: [jira] enabled = true (jira-poll on)");
+        self.inner.lock().unwrap().ui_push(UiCommand::Toast("Jira polling on".into(), "checkmark.circle.fill"));
+        self.open(SlotView::Jira);
+    }
+
     /// `slot.previousNav` — the nav id of the view shown before `current`.
     pub fn previous_nav(&self) -> Option<i64> {
         self.inner.lock().unwrap().previous.map(|v| v.nav_id())
@@ -1340,6 +1399,15 @@ impl SwitcherController {
             }
             "jira" => {
                 self.hotkey(SlotView::Jira);
+            }
+            "jira-dashboard" => self.open(SlotView::Jira),
+            "jira-poll-on" | "jira-poll-off" | "jira-poll-toggle" => self.jira_poll(name),
+            "jira-setup" => {
+                self.log("jira-setup: the Jira setup window is not ported yet");
+                self.inner.lock().unwrap().ui_push(UiCommand::Toast(
+                    crate::ui::toast::not_ported_text("Jira setup window"),
+                    crate::ui::toast::NOT_PORTED_SYMBOL,
+                ));
             }
             "notes" => {
                 self.hotkey(SlotView::Notes);
@@ -1692,17 +1760,12 @@ impl SwitcherController {
                 inner.ui_push(UiCommand::NoteFind(action == "notes-grep"));
                 None
             }
-            "jira-jump" | "jira-poll-on" | "jira-poll-off" | "jira-setup" => {
-                {
-                    let mut inner = self.inner.lock().unwrap();
-                    inner
-                        .logs
-                        .push(format!("do:{action}: not modelled yet"));
-                    inner.ui_push(UiCommand::Toast(
-                        crate::ui::toast::not_ported_text(&format!("do:{action}")),
-                        crate::ui::toast::NOT_PORTED_SYMBOL,
-                    ));
-                }
+            "jira-jump" => {
+                self.inner.lock().unwrap().ui_push(UiCommand::JiraJump);
+                None
+            }
+            "jira-poll-on" | "jira-poll-off" | "jira-setup" => {
+                self.toggle_command(action);
                 None
             }
             "reset-size" => {
@@ -2856,6 +2919,8 @@ mod daemon_ui {
         /// `noteFindWindow` / `noteGrepWindow` (leader+sf / leader+sg).
         note_find: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
         note_grep: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
+        /// `sidebarJumpWindow` (`do:jira-jump`).
+        sidebar_jump: RefCell<Option<Rc<crate::views::note_find::SidebarJumpUi>>>,
     }
 
     define_class!(
@@ -2934,6 +2999,7 @@ mod daemon_ui {
             vim: RefCell::new(host_vim::VimHost::default()),
             note_find: RefCell::new(None),
             note_grep: RefCell::new(None),
+            sidebar_jump: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
@@ -3041,6 +3107,8 @@ mod daemon_ui {
                         }
                         UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
                         UiCommand::NoteFind(grep) => self.show_note_find(grep),
+                        UiCommand::JiraJump => self.show_sidebar_jump(),
+                        UiCommand::JiraEnable(ok, msg) => self.ivars().controller.jira_enable_result(ok, &msg),
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
                         }
@@ -6751,9 +6819,67 @@ mod daemon_ui {
             ui.show(paths);
         }
 
+        /// `showSidebarJump(_:)`: toggle the jump list over the Jira rail.
+        fn show_sidebar_jump(&self) {
+            use crate::views::note_find::{JumpItem, NoteFindConfig, SidebarJumpUi};
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(bar) = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|j| j.1.sidebar())) else {
+                self.ivars().controller.log("jira-jump: the Jira view is not built");
+                return;
+            };
+            let existing = self.ivars().sidebar_jump.borrow().clone();
+            if let Some(u) = &existing {
+                if u.is_shown() {
+                    u.hide();
+                    return;
+                }
+            }
+            let ui = existing.unwrap_or_else(|| {
+                let text = crate::app::config::read_config_text().unwrap_or_default();
+                let sec = super::parse_sections(&text).get("notes-find").cloned().unwrap_or_default();
+                let u = SidebarJumpUi::new(mtm, NoteFindConfig::from_section(&sec));
+                *self.ivars().sidebar_jump.borrow_mut() = Some(u.clone());
+                u
+            });
+            let weak_bar = objc2::rc::Weak::from_retained(&bar);
+            ui.set_on_jump(Box::new(move |row| {
+                if let Some(b) = weak_bar.load() {
+                    b.activate_row(row);
+                }
+            }));
+            let items = bar
+                .jump_items()
+                .into_iter()
+                .enumerate()
+                .map(|(row, (title, section, icon))| JumpItem { title, section, icon, row })
+                .collect();
+            ui.show(items);
+        }
+
         /// `NoteFindWindow.key(_:_:)` while its panel is key.
         fn note_find_key(&self, event: &NSEvent) -> bool {
             use objc2_app_kit::NSEventModifierFlags as F;
+            if let Some(j) = self.ivars().sidebar_jump.borrow().clone().filter(|u| u.has_key()) {
+                use objc2_app_kit::NSEventModifierFlags as F;
+                let ctrl = event.modifierFlags().contains(F::Control);
+                match event.keyCode() {
+                    popup::KEY_ESC => j.hide(),
+                    popup::KEY_DOWN => j.move_selection(1),
+                    45 if ctrl => j.move_selection(1),
+                    popup::KEY_UP => j.move_selection(-1),
+                    35 if ctrl => j.move_selection(-1),
+                    popup::KEY_RETURN | 76 => j.open(j.selection()),
+                    _ => return false,
+                }
+                if !j.is_shown() {
+                    if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
+                        if w.isVisible() {
+                            w.makeKeyAndOrderFront(None);
+                        }
+                    }
+                }
+                return true;
+            }
             let ui = [&self.ivars().note_find, &self.ivars().note_grep]
                 .iter()
                 .find_map(|s| s.borrow().clone().filter(|u| u.has_key()));

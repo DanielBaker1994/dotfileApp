@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod config;
 pub mod hotkey;
+pub mod jira_poll;
 pub mod host;
 #[cfg(target_os = "macos")]
 pub mod live_panes;
