@@ -222,6 +222,8 @@ pub fn rename_path(old_path: &str, new_name: &str) -> Result<Option<String>, Str
 // `PathsWindow` surface geometry (flipped, top-left origin).
 pub const PATHS_DEFAULT_WIDTH: f64 = 680.0;
 pub const PATHS_DEFAULT_HEIGHT: f64 = 300.0;
+/// `PathsWindow` grows with its rows up to this (Swift's 602 pt panel).
+pub const PATHS_MAX_HEIGHT: f64 = 602.0;
 pub const PATH_ROW_HEIGHT: f64 = 22.0;
 pub const PATH_SEARCH_HEIGHT: f64 = 30.0;
 pub const PATH_MARGIN: f64 = 6.0;
@@ -294,6 +296,29 @@ pub struct PathsWindow {
     /// The query field, kept so `show_window` can make it first responder.
     #[cfg(target_os = "macos")]
     pub search: Option<Retained<NSTextField>>,
+    /// The drawn rows (`FileListPane` look) + the empty hint + the field's
+    /// delegate (kept alive here; the field holds it weakly).
+    #[cfg(target_os = "macos")]
+    pub list: Option<Retained<crate::views::files_view::FileListView>>,
+    #[cfg(target_os = "macos")]
+    pub empty_label: Option<Retained<NSTextField>>,
+    #[cfg(target_os = "macos")]
+    pub list_scroll: Option<Retained<objc2_app_kit::NSScrollView>>,
+    #[cfg(target_os = "macos")]
+    pub delegate: Option<Retained<crate::ui::field::FieldDelegate>>,
+    /// The host's event sink (`PathsEvent`).
+    pub on_event: Option<std::rc::Rc<dyn Fn(PathsEvent)>>,
+}
+
+/// Clicks / keys from the live paths panel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PathsEvent {
+    Query(String),
+    Enter,
+    Move(i64),
+    Escape,
+    Click { row: usize, double: bool },
+    RowMenu { row: usize, x: f64, y: f64 },
 }
 
 impl PathsWindow {
@@ -317,6 +342,15 @@ impl PathsWindow {
             window: None,
             #[cfg(target_os = "macos")]
             search: None,
+            #[cfg(target_os = "macos")]
+            list: None,
+            #[cfg(target_os = "macos")]
+            empty_label: None,
+            #[cfg(target_os = "macos")]
+            list_scroll: None,
+            #[cfg(target_os = "macos")]
+            delegate: None,
+            on_event: None,
         }
     }
 
@@ -647,16 +681,153 @@ impl PathsWindow {
 
     #[cfg(target_os = "macos")]
     fn build_macos(&mut self, mtm: objc2::MainThreadMarker) {
+        use objc2_app_kit::{NSAutoresizingMaskOptions as M, NSScrollView};
+        use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
         if self.root.is_some() {
             return;
         }
-        let colors = crate::ui::theme::PopupThemeDefaults::colors();
-        let rows = self.rows.clone();
-        let query = self.query.clone();
-        let empty_text = self.is_empty_text();
-        let (view, search) = macos::build_view(mtm, &query, &rows, &empty_text, &colors);
-        self.root = Some(view);
+        let colors = crate::ui::theme::section_colors("paths");
+        let (w, h) = (PATHS_DEFAULT_WIDTH, PATHS_MAX_HEIGHT);
+        let frame = crate::ui::panel_frame::build(
+            mtm,
+            w,
+            h,
+            crate::ui::panel_frame::PanelSpec {
+                colors,
+                header_color: None,
+                title: None,
+                meta: "",
+                buttons: Vec::new(),
+                icon: None,
+                tint_alpha: 0.78,
+            },
+        );
+        frame.chrome.setHidden(true);
+        let content = frame.content.clone();
+        content.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)));
+        // `content` is unflipped: lay out from the top with `h - y`.
+        let (sbox, search) = crate::ui::field::search_box(
+            mtm,
+            &colors,
+            13.0,
+            "recent files — type to filter · ↩ copy file · ⌘C copy path · drag a row out",
+            6.0,
+            28.0,
+        );
+        sbox.setFrame(NSRect::new(NSPoint::new(18.0, h - 36.0), NSSize::new(w - 36.0, 28.0)));
+        sbox.setAutoresizingMask(M::ViewWidthSizable | M::ViewMinYMargin);
+        content.addSubview(&sbox);
+        let scroll = NSScrollView::new(mtm);
+        scroll.setFrame(NSRect::new(NSPoint::new(4.0, 6.0), NSSize::new(w - 8.0, h - 48.0)));
+        scroll.setAutoresizingMask(M::ViewWidthSizable | M::ViewHeightSizable);
+        scroll.setHasVerticalScroller(true);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDrawsBackground(false);
+        let list = crate::views::files_view::FileListView::new(mtm, colors, false);
+        scroll.setDocumentView(Some(&list));
+        content.addSubview(&scroll);
+        let empty = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        empty.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(12.5)));
+        empty.setTextColor(Some(&colors.dim.to_nscolor()));
+        empty.setFrame(NSRect::new(NSPoint::new(22.0, h - 66.0), NSSize::new(w - 44.0, 18.0)));
+        empty.setAutoresizingMask(M::ViewWidthSizable | M::ViewMinYMargin);
+        content.addSubview(&empty);
+        self.root = Some(frame.root);
         self.search = Some(search);
+        self.list = Some(list);
+        self.empty_label = Some(empty);
+        self.list_scroll = Some(scroll);
+    }
+
+    /// Install the host's event sink (rows + the query field).
+    #[cfg(target_os = "macos")]
+    pub fn set_on_event(&mut self, cb: std::rc::Rc<dyn Fn(PathsEvent)>) {
+        let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+        self.on_event = Some(cb.clone());
+        if let Some(list) = &self.list {
+            let c = cb.clone();
+            list.set_on_event(Box::new(move |ev| match ev {
+                crate::views::files_view::FilesEvent::Click { row, double, .. } => c(PathsEvent::Click { row, double }),
+                crate::views::files_view::FilesEvent::RowMenu { row, x, y } => c(PathsEvent::RowMenu { row, x, y }),
+                _ => {}
+            }));
+        }
+        if let Some(search) = &self.search {
+            let (c1, c2) = (cb.clone(), cb);
+            self.delegate = Some(crate::ui::field::FieldDelegate::attach(
+                mtm,
+                search,
+                Box::new(move |t| c1(PathsEvent::Query(t))),
+                Box::new(move |name| {
+                    let ev = match name {
+                        "insertNewline:" => PathsEvent::Enter,
+                        "moveUp:" => PathsEvent::Move(-1),
+                        "moveDown:" => PathsEvent::Move(1),
+                        "cancelOperation:" => PathsEvent::Escape,
+                        _ => return false,
+                    };
+                    c2(ev);
+                    true
+                }),
+            ));
+        }
+    }
+
+    /// Push the rows / selection / empty hint, and size the panel to them
+    /// (`dynamicHeight`).
+    #[cfg(target_os = "macos")]
+    pub fn sync_view(&self) {
+        use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+        let Some(list) = &self.list else { return };
+        let entries: Vec<crate::views::files::Entry> = self
+            .rows
+            .iter()
+            .map(|r| {
+                let mut e = crate::views::files::Entry::new(r.name.clone(), r.path.clone(), false, 0);
+                e.trailing_text = r.trailing.clone();
+                e
+            })
+            .collect();
+        list.set_rows(&entries, self.selection, &std::collections::BTreeSet::new());
+        if let Some(l) = &self.empty_label {
+            let t = if self.rows.is_empty() { self.is_empty_text() } else { String::new() };
+            l.setStringValue(&NSString::from_str(&t));
+        }
+        let rh = list.row_h();
+        let body = if self.rows.is_empty() { 40.0 } else { self.rows.len() as f64 * rh + 12.0 };
+        let h = (48.0 + body).min(PATHS_MAX_HEIGHT).max(100.0);
+        if let Some(scroll) = &self.list_scroll {
+            let w = scroll.frame().size.width;
+            list.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, (self.rows.len() as f64 * rh).max(h - 54.0))));
+        }
+        if let Some(panel) = &self.window {
+            let f = panel.frame();
+            if (f.size.height - h).abs() > 0.5 {
+                let top = f.origin.y + f.size.height;
+                panel.setFrame_display(
+                    NSRect::new(NSPoint::new(f.origin.x, top - h), NSSize::new(f.size.width, h)),
+                    true,
+                );
+            }
+        }
+        // Keep the selection visible.
+        if let Some(scroll) = &self.list_scroll {
+            let clip = scroll.contentView();
+            let vis = clip.bounds();
+            let (top, bot) = (self.selection as f64 * rh, (self.selection + 1) as f64 * rh);
+            if vis.size.height >= rh {
+                let mut t = vis.origin.y;
+                if bot > vis.origin.y + vis.size.height {
+                    t = bot - vis.size.height;
+                } else if top < vis.origin.y {
+                    t = top;
+                }
+                if t != vis.origin.y {
+                    clip.scrollToPoint(NSPoint::new(0.0, t));
+                    scroll.reflectScrolledClipView(&clip);
+                }
+            }
+        }
     }
 
     /// Build (once) the standalone tool panel and order it front, focusing the
@@ -686,7 +857,7 @@ impl PathsWindow {
                     x: 0.0,
                     y: 0.0,
                     width: PATHS_DEFAULT_WIDTH,
-                    height: PATHS_DEFAULT_HEIGHT,
+                    height: PATHS_MAX_HEIGHT,
                 },
                 tool_panel: true,
                 floating: true,
@@ -713,9 +884,10 @@ impl PathsWindow {
                 vf.size.width,
                 vf.size.height,
                 PATHS_DEFAULT_WIDTH,
-                PATHS_DEFAULT_HEIGHT,
+                PATHS_MAX_HEIGHT,
             );
             panel.setFrameOrigin(NSPoint::new(x, y));
+            self.sync_view();
             panel.makeKeyAndOrderFront(None);
             if let Some(search) = &self.search {
                 let responder: &NSResponder = &**search;

@@ -244,6 +244,54 @@ pub fn header_background_ops(
     }
 }
 
+/// `PopupChrome.workspaceBase` — header ids at/above this are workspace cells.
+pub const WORKSPACE_BASE: i32 = 1000;
+/// Header click id for the ✕ glyph.
+pub const HEADER_CLOSE_ID: i32 = -1;
+/// Header click id for the app-icon menu button.
+pub const HEADER_ICON_ID: i32 = -2;
+/// `wsCellH`.
+pub const WS_CELL_HEIGHT: f64 = 24.0;
+
+/// One workspace strip cell's width (`wsCellRects` widths): key + icons
+/// (+ "+N" extra) (+ unread badge).
+pub fn ws_cell_width(icons: usize, extra: bool, unread: bool) -> f64 {
+    let mut w = 10.0 + 9.0 + 6.0 + icons as f64 * 19.0 + 4.0;
+    if extra {
+        w += 18.0;
+    }
+    if unread {
+        w += 22.0;
+    }
+    w
+}
+
+/// `wsCellRects()`: right-aligned cells ending at `ws_right - 3`, dropping
+/// leading cells until the strip clears `min_x`. Dropped cells are `None`.
+pub fn ws_cell_rects(widths: &[f64], min_x: f64, ws_right: f64, header_h: f64) -> Vec<Option<Rect>> {
+    if widths.is_empty() || header_h <= 0.0 || ws_right <= 0.0 {
+        return Vec::new();
+    }
+    let total = |f: usize| -> f64 {
+        widths[f..].iter().sum::<f64>() + (widths.len() - f).saturating_sub(1) as f64 * 2.0
+    };
+    let mut first = 0;
+    while first < widths.len() && ws_right - 3.0 - total(first) < min_x {
+        first += 1;
+    }
+    if first >= widths.len() {
+        return Vec::new();
+    }
+    let mut x = ws_right - 3.0 - total(first);
+    let y = (header_h - WS_CELL_HEIGHT) / 2.0;
+    let mut out: Vec<Option<Rect>> = vec![None; first];
+    for w in &widths[first..] {
+        out.push(Some(Rect::new(x, y, *w, WS_CELL_HEIGHT)));
+        x += w + 2.0;
+    }
+    out
+}
+
 /// A nav icon model (`navIcons` entries); the image is optional so the model
 /// stays usable in tests.
 #[derive(Clone)]
@@ -284,7 +332,7 @@ impl Default for ChromeConfig {
 }
 
 #[cfg(target_os = "macos")]
-pub use appkit::PopupChrome;
+pub use appkit::{set_workspace_cells, workspace_cell_key, PopupChrome, WorkspaceCell};
 
 #[cfg(target_os = "macos")]
 mod appkit {
@@ -295,12 +343,38 @@ mod appkit {
         define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
     };
     use objc2_app_kit::{
-        NSApplication, NSBezierPath, NSColor, NSColorSpace, NSGradient, NSImage, NSLineCapStyle,
-        NSView,
+        NSApplication, NSBezierPath, NSColor, NSColorSpace, NSEvent, NSGradient, NSImage,
+        NSLineCapStyle, NSTrackingArea, NSTrackingAreaOptions, NSView,
     };
-    use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRect, NSSize};
+    use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    use crate::ui::style;
+
+    /// `PopupChrome.WorkspaceCell`.
+    #[derive(Clone)]
+    pub struct WorkspaceCell {
+        pub key: String,
+        pub icons: Vec<Retained<NSImage>>,
+        pub extra: Option<String>,
+        pub unread: String,
+        pub focused: bool,
+    }
+
+    thread_local! {
+        /// `PopupChrome.workspaceCells` (static, shared by every chrome).
+        static WORKSPACE_CELLS: RefCell<Vec<WorkspaceCell>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Replace the strip cells and redraw every chrome (main thread).
+    pub fn set_workspace_cells(mtm: MainThreadMarker, cells: Vec<WorkspaceCell>) {
+        WORKSPACE_CELLS.with(|c| *c.borrow_mut() = cells);
+        PopupChrome::redraw_all(mtm);
+    }
+
+    pub fn workspace_cell_key(index: usize) -> Option<String> {
+        WORKSPACE_CELLS.with(|c| c.borrow().get(index).map(|w| w.key.clone()))
+    }
 
     fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
         unsafe { &*(obj as *const T as *const AnyObject) }
@@ -358,6 +432,17 @@ mod appkit {
         pub icon_hovered: Cell<bool>,
         pub close_hovered: Cell<bool>,
         pub icon_menu_open: Cell<bool>,
+        pub hovered: Cell<Option<i32>>,
+        pub on_click: RefCell<Option<Box<dyn Fn(i32)>>>,
+        pub tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+        pub tip_owners: RefCell<Vec<Retained<NSString>>>,
+        pub tip_rects: RefCell<Vec<Rect>>,
+        /// `itemCount` / `footerText` — the dim hint after the left inset.
+        pub meta: RefCell<String>,
+        /// Force-draw the title even in the quiet style (tool panels).
+        pub always_title: Cell<bool>,
+        /// The ✓ feedback segment id (`feedback`) and when it expires.
+        pub feedback: Cell<i32>,
     }
 
     define_class!(
@@ -382,7 +467,80 @@ mod appkit {
                 let bounds = self.bounds();
                 let header = Rect::new(0.0, 0.0, bounds.size.width, h);
                 self.draw_header_background(header);
+                self.draw_title(bounds.size.width);
                 self.draw_close_glyph();
+                if let Some(icon) = self.ivars().header_icon.borrow().clone() {
+                    self.draw_icon_menu_button(&icon);
+                }
+                self.ivars().extra_button_rects.borrow_mut().clear();
+                let bar_w = self.draw_header_segs(bounds.size.width);
+                if !self.ivars().nav_icons.borrow().is_empty() {
+                    self.draw_nav_icons();
+                    self.draw_workspace_cells(bounds.size.width - 10.0 - bar_w);
+                }
+                self.draw_meta(bounds.size.width - bar_w - 20.0);
+            }
+
+            #[unsafe(method(updateTrackingAreas))]
+            fn update_tracking_areas(&self) {
+                let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
+                    self.removeTrackingArea(&t);
+                }
+                let opts = NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect;
+                let t = unsafe {
+                    NSTrackingArea::initWithRect_options_owner_userInfo(
+                        NSTrackingArea::alloc(),
+                        self.bounds(),
+                        opts,
+                        Some(as_any(self)),
+                        None,
+                    )
+                };
+                self.addTrackingArea(&t);
+                *self.ivars().tracking.borrow_mut() = Some(t);
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, event: &NSEvent) {
+                let p = self.convertPoint_fromView(event.locationInWindow(), None);
+                let hit = self.hit_id(p.x, p.y);
+                self.ivars().close_hovered.set(hit == Some(HEADER_CLOSE_ID));
+                self.ivars().icon_hovered.set(hit == Some(HEADER_ICON_ID));
+                if hit != self.ivars().hovered.get() {
+                    self.ivars().hovered.set(hit);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseExited:))]
+            fn mouse_exited(&self, _event: &NSEvent) {
+                self.ivars().close_hovered.set(false);
+                self.ivars().icon_hovered.set(false);
+                self.ivars().hovered.set(None);
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+                true
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, event: &NSEvent) {
+                let p = self.convertPoint_fromView(event.locationInWindow(), None);
+                if let Some(id) = self.hit_id(p.x, p.y) {
+                    if let Some(cb) = self.ivars().on_click.borrow().as_ref() {
+                        cb(id);
+                    }
+                    return;
+                }
+                if let Some(w) = self.window() {
+                    w.performWindowDragWithEvent(event);
+                }
             }
         }
 
@@ -406,6 +564,14 @@ mod appkit {
                 icon_hovered: Cell::new(false),
                 close_hovered: Cell::new(false),
                 icon_menu_open: Cell::new(false),
+                hovered: Cell::new(None),
+                on_click: RefCell::new(None),
+                tracking: RefCell::new(None),
+                tip_owners: RefCell::new(Vec::new()),
+                tip_rects: RefCell::new(Vec::new()),
+                meta: RefCell::new(String::new()),
+                always_title: Cell::new(false),
+                feedback: Cell::new(0),
             };
             let this = PopupChrome::alloc(mtm).set_ivars(ivars);
             let view: Retained<PopupChrome> =
@@ -571,6 +737,349 @@ mod appkit {
             x.setLineCapStyle(NSLineCapStyle::Round);
             x_color.to_nscolor().setStroke();
             x.stroke();
+        }
+
+        /// Route header clicks (nav ids, `WORKSPACE_BASE + i`, the close /
+        /// icon ids) to `cb` (Swift `onHeaderButton`).
+        pub fn set_on_click(&self, cb: Box<dyn Fn(i32)>) {
+            *self.ivars().on_click.borrow_mut() = Some(cb);
+        }
+
+        /// The header id under (x, y), if any.
+        pub fn hit_id(&self, x: f64, y: f64) -> Option<i32> {
+            let h = self.ivars().drag_header_height.get();
+            if h <= 0.0 || y > h {
+                return None;
+            }
+            if self.close_button_rect().contains(x, y) {
+                return Some(HEADER_CLOSE_ID);
+            }
+            if self.ivars().header_icon.borrow().is_some() && self.icon_button_rect().contains(x, y) {
+                return Some(HEADER_ICON_ID);
+            }
+            for (id, r) in self.seg_rects(self.bounds().size.width) {
+                if r.contains(x, y) {
+                    return Some(id);
+                }
+            }
+            let icons = self.ivars().nav_icons.borrow();
+            for (i, n) in icons.iter().enumerate() {
+                if self.nav_rect(i).contains(x, y) {
+                    return Some(n.id);
+                }
+            }
+            if !icons.is_empty() {
+                let w = self.bounds().size.width - 10.0;
+                for (i, r) in self.ws_rects(w).iter().enumerate() {
+                    if let Some(r) = r {
+                        if r.contains(x, y) {
+                            return Some(WORKSPACE_BASE + i as i32);
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        fn ws_rects(&self, ws_right: f64) -> Vec<Option<Rect>> {
+            let n = self.ivars().nav_icons.borrow().len();
+            if n == 0 {
+                return Vec::new();
+            }
+            let widths: Vec<f64> = WORKSPACE_CELLS.with(|c| {
+                c.borrow()
+                    .iter()
+                    .map(|w| ws_cell_width(w.icons.len(), w.extra.is_some(), !w.unread.is_empty()))
+                    .collect()
+            });
+            let min_x = self.nav_rect(n - 1).max_x() + 24.0;
+            ws_cell_rects(&widths, min_x, ws_right, self.ivars().drag_header_height.get())
+        }
+
+        /// Show the dim header hint (`footerText`).
+        pub fn set_meta(&self, text: &str) {
+            *self.ivars().meta.borrow_mut() = text.to_string();
+            self.setNeedsDisplay(true);
+        }
+
+        pub fn set_always_title(&self, on: bool) {
+            self.ivars().always_title.set(on);
+            self.setNeedsDisplay(true);
+        }
+
+        /// Flash "✓ " on segment `id` (`flashFeedback`) for ~1.2 s.
+        pub fn flash(&self, id: i32) {
+            self.ivars().feedback.set(id);
+            self.setNeedsDisplay(true);
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let bound = dispatch2::MainThreadBound::new(objc2::rc::Weak::from_retained(&self.retain()), mtm);
+            dispatch2::DispatchQueue::main().after(
+                dispatch2::DispatchTime::NOW.time(1_200_000_000),
+                move || {
+                    let Some(mtm) = MainThreadMarker::new() else { return };
+                    if let Some(ch) = bound.get(mtm).load() {
+                        if ch.ivars().feedback.get() == id {
+                            ch.ivars().feedback.set(0);
+                            ch.setNeedsDisplay(true);
+                        }
+                    }
+                },
+            ).ok();
+        }
+
+        /// `headerSegs()` — copy path (1), copy config (2), extras (≥ 10).
+        fn segs(&self) -> Vec<(String, i32)> {
+            let mut out = Vec::new();
+            let p = self.ivars().copy_path_label.borrow();
+            if !p.is_empty() {
+                out.push((p.clone(), 1));
+            }
+            let c = self.ivars().copy_config_label.borrow();
+            if !c.is_empty() {
+                out.push((c.clone(), 2));
+            }
+            out.extend(self.ivars().extra_buttons.borrow().iter().cloned());
+            out
+        }
+
+        /// The right-aligned segmented bar rects.
+        fn seg_rects(&self, width: f64) -> Vec<(i32, Rect)> {
+            let h = self.ivars().drag_header_height.get();
+            let segs = self.segs();
+            if segs.is_empty() || h <= 0.0 {
+                return Vec::new();
+            }
+            let f = style::system_font(10.5, style::Weight::Semibold);
+            let fb = self.ivars().feedback.get();
+            let ws: Vec<f64> = segs
+                .iter()
+                .map(|(t, id)| {
+                    let t = if *id == fb { format!("✓ {t}") } else { t.clone() };
+                    style::text_size(&t, &f).0 + 30.0
+                })
+                .collect();
+            let total: f64 = ws.iter().sum::<f64>() + (ws.len() - 1) as f64;
+            let mut x = width - 10.0 - total;
+            let y = (h - 20.0) / 2.0;
+            segs.iter()
+                .zip(ws)
+                .map(|((_, id), w)| {
+                    let r = Rect::new(x, y, w, 20.0);
+                    x += w + 1.0;
+                    (*id, r)
+                })
+                .collect()
+        }
+
+        /// Draw the header buttons (`ButtonStyle` bar); returns its width.
+        fn draw_header_segs(&self, width: f64) -> f64 {
+            let rects = self.seg_rects(width);
+            if rects.is_empty() {
+                return 0.0;
+            }
+            let c = self.ivars().config.colors;
+            let segs = self.segs();
+            let bar = Rect::new(rects[0].1.x, rects[0].1.y, rects.last().unwrap().1.max_x() - rects[0].1.x, 20.0);
+            style::draw_button(bar, style::ButtonState::Idle, &c, self.ivars().config.button_radius, false);
+            let f = style::system_font(10.5, style::Weight::Semibold);
+            let hover = self.ivars().hovered.get();
+            let fb = self.ivars().feedback.get();
+            for (i, ((label, id), (_, r))) in segs.iter().zip(rects.iter()).enumerate() {
+                let st = if *id == fb {
+                    style::ButtonState::Pressed
+                } else if hover == Some(*id) {
+                    style::ButtonState::Hover
+                } else {
+                    style::ButtonState::Idle
+                };
+                if i > 0 && st == style::ButtonState::Idle && hover != Some(segs[i - 1].1) {
+                    style::vline(r.x, r.y + 5.0, r.max_y() - 5.0, c.text.with_alpha(0.10));
+                }
+                if st != style::ButtonState::Idle {
+                    style::draw_button(r.inset_by(2.0, 2.0), st, &c, self.ivars().config.button_radius - 2.0, false);
+                }
+                let t = if *id == fb { format!("✓ {label}") } else { label.clone() };
+                style::draw_text_centered(&t, *r, &f, style::button_text(st, &c));
+                self.ivars().extra_button_rects.borrow_mut().insert(*id, *r);
+            }
+            bar.width + 10.0
+        }
+
+        /// `meta` — the dim hint after the left inset (truncated).
+        fn draw_meta(&self, right: f64) {
+            let meta = self.ivars().meta.borrow().clone();
+            if meta.is_empty() {
+                return;
+            }
+            let c = self.ivars().config.colors;
+            let h = self.ivars().drag_header_height.get();
+            let x0 = self.left_inset();
+            let f = style::system_font(10.0, style::Weight::Regular);
+            style::draw_text_left(&meta, Rect::new(x0, 0.0, (right - x0).max(60.0), h), &f, c.dim);
+        }
+
+        /// The header title (non-quiet styles), centered like Swift's pill.
+        fn draw_title(&self, width: f64) {
+            let title = self.ivars().header_title.borrow().clone();
+            let title = if self.ivars().always_title.get() {
+                title.filter(|t| !t.is_empty())
+            } else {
+                effective_header_title(current_header_style(), title.as_deref())
+            };
+            let Some(title) = title else {
+                return;
+            };
+            let c = &self.ivars().config.colors;
+            let font = style::system_font(13.5, style::Weight::Bold);
+            let (tw, th) = style::text_size(&title, &font);
+            let pad_x = 12.0;
+            let center = (tw / 2.0 + pad_x).max((width - 10.0) / 2.0);
+            let pill = Rect::new(center - tw / 2.0 - pad_x, 4.0, tw + pad_x * 2.0, th + 8.0);
+            if self.ivars().config.title_pill {
+                style::fill_rounded(pill, 7.0, c.highlight.with_alpha(0.35));
+            }
+            style::draw_text(&title, pill.mid_x() - tw / 2.0, pill.mid_y() - th / 2.0, &font, c.text);
+        }
+
+        /// `drawIconMenuButton(_:)` — the app icon + a chevron.
+        fn draw_icon_menu_button(&self, icon: &NSImage) {
+            let c = &self.ivars().config.colors;
+            let badge = self.icon_button_rect();
+            let st = if self.ivars().icon_menu_open.get() {
+                style::ButtonState::On
+            } else if self.ivars().icon_hovered.get() {
+                style::ButtonState::Hover
+            } else {
+                style::ButtonState::Idle
+            };
+            style::draw_button(badge, st, c, self.ivars().config.button_radius, true);
+            let isz = 16.0;
+            style::draw_image(icon, Rect::new(badge.x + 6.0, badge.mid_y() - isz / 2.0, isz, isz), 1.0);
+            style::chevron(
+                Rect::new(badge.max_x() - 13.0, badge.mid_y() - 4.0, 8.0, 8.0),
+                style::button_text(st, c),
+            );
+        }
+
+        /// `drawNavIcons()` — one capsule track, a chip per view, the icon.
+        fn draw_nav_icons(&self) {
+            let c = self.ivars().config.colors;
+            let icons = self.ivars().nav_icons.borrow();
+            let first = self.nav_rect(0);
+            let last = self.nav_rect(icons.len() - 1);
+            let well = Rect::new(
+                first.x - 3.0,
+                first.y - 3.0,
+                last.max_x() - first.x + 6.0,
+                first.height + 6.0,
+            );
+            style::capsule_track(well, &c);
+            let on = self.ivars().nav_on.get();
+            let hovered = self.ivars().hovered.get();
+            let mut tips: Vec<Rect> = Vec::new();
+            for (i, n) in icons.iter().enumerate() {
+                let r = self.nav_rect(i);
+                let is_on = on == Some(n.id);
+                let hov = hovered == Some(n.id);
+                style::capsule_chip(r, &c, is_on, hov);
+                let isz = 16.0;
+                if let Some(img) = &n.image {
+                    style::draw_image(
+                        img,
+                        Rect::new(r.mid_x() - isz / 2.0, r.mid_y() - isz / 2.0, isz, isz),
+                        if is_on || hov { 1.0 } else { 0.7 },
+                    );
+                }
+                self.ivars().extra_button_rects.borrow_mut().insert(n.id, r);
+                tips.push(r);
+            }
+            if *self.ivars().tip_rects.borrow() != tips {
+                self.removeAllToolTips();
+                let owners: Vec<Retained<NSString>> =
+                    icons.iter().map(|n| NSString::from_str(&n.tip)).collect();
+                for (r, o) in tips.iter().zip(owners.iter()) {
+                    unsafe {
+                        self.addToolTipRect_owner_userData(
+                            style::ns(*r),
+                            as_any(&**o),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+                *self.ivars().tip_owners.borrow_mut() = owners;
+                *self.ivars().tip_rects.borrow_mut() = tips;
+            }
+        }
+
+        /// `drawWorkspaceCells()` — the AeroSpace strip at the header's right.
+        fn draw_workspace_cells(&self, ws_right: f64) {
+            let c = self.ivars().config.colors;
+            let rects = self.ws_rects(ws_right);
+            let Some(first_shown) = rects.iter().position(|r| r.is_some()) else {
+                return;
+            };
+            let (Some(first), Some(Some(last))) = (rects[first_shown], rects.last()) else {
+                return;
+            };
+            style::capsule_track(
+                Rect::new(
+                    first.x - 3.0,
+                    first.y - 3.0,
+                    last.max_x() - first.x + 6.0,
+                    first.height + 6.0,
+                ),
+                &c,
+            );
+            let hovered = self.ivars().hovered.get();
+            let key_font = style::system_font(11.0, style::Weight::Bold);
+            let extra_font = style::system_font(10.0, style::Weight::Regular);
+            let badge_font = style::system_font(9.5, style::Weight::Semibold);
+            WORKSPACE_CELLS.with(|cells| {
+                for (i, cell) in cells.borrow().iter().enumerate() {
+                    let Some(Some(r)) = rects.get(i).copied() else {
+                        continue;
+                    };
+                    let id = WORKSPACE_BASE + i as i32;
+                    let hov = hovered == Some(id);
+                    style::capsule_chip(r, &c, cell.focused, hov);
+                    let (_, kh) = style::text_size(&cell.key, &key_font);
+                    style::draw_text(
+                        &cell.key,
+                        r.x + 10.0,
+                        r.mid_y() - kh / 2.0,
+                        &key_font,
+                        if cell.focused { c.text } else { c.dim },
+                    );
+                    let mut x = r.x + 10.0 + 9.0 + 6.0;
+                    for img in &cell.icons {
+                        style::draw_image(
+                            img,
+                            Rect::new(x, r.mid_y() - 8.0, 16.0, 16.0),
+                            if cell.focused || hov { 1.0 } else { 0.8 },
+                        );
+                        x += 19.0;
+                    }
+                    if let Some(extra) = &cell.extra {
+                        let (_, eh) = style::text_size(extra, &extra_font);
+                        style::draw_text(extra, x, r.mid_y() - eh / 2.0, &extra_font, c.dim);
+                        x += 18.0;
+                    }
+                    if !cell.unread.is_empty() {
+                        let (bw0, bh) = style::text_size(&cell.unread, &badge_font);
+                        let bw = (bw0 + 9.0).max(15.0);
+                        let br = Rect::new(x, r.mid_y() - 7.5, bw, 15.0);
+                        style::fill_rounded(br, 7.5, c.tone(PopupTone::Danger));
+                        style::draw_text(
+                            &cell.unread,
+                            br.mid_x() - bw0 / 2.0,
+                            br.mid_y() - bh / 2.0,
+                            &badge_font,
+                            Rgba::new(1.0, 1.0, 1.0, 1.0),
+                        );
+                    }
+                    self.ivars().extra_button_rects.borrow_mut().insert(id, r);
+                }
+            });
         }
 
         /// `PopupChrome.redrawAll()`.

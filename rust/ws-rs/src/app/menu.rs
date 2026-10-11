@@ -489,7 +489,8 @@ pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
 #[cfg(target_os = "macos")]
 #[allow(unused_imports)]
 pub use appkit::{
-    build_status_menu, install_main_menu, install_status_item, MenuTarget, StatusMenuHandle,
+    build_status_menu, install_main_menu, install_status_item, pop_status_menu, MenuTarget,
+    StatusMenuHandle,
 };
 
 #[cfg(target_os = "macos")]
@@ -650,6 +651,24 @@ mod appkit {
         menu
     }
 
+    thread_local! {
+        /// The status menu, reused by the header app-icon button.
+        static STATUS_MENU: std::cell::RefCell<Option<Retained<NSMenu>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Pop the status menu under `(x, y)` in `view` (Swift `popUpIconMenu`).
+    pub fn pop_status_menu(view: &objc2_app_kit::NSView, x: f64, y: f64) {
+        let Some(menu) = STATUS_MENU.with(|m| m.borrow().clone()) else {
+            return;
+        };
+        menu.popUpMenuPositioningItem_atLocation_inView(
+            None,
+            objc2_foundation::NSPoint::new(x, y),
+            Some(view),
+        );
+    }
+
     /// The live status item + the objects that must outlive it (`target` is a
     /// weak `NSMenuItem.target`, the menu a weak delegate).
     pub struct StatusMenuHandle {
@@ -679,6 +698,7 @@ mod appkit {
             button.setTitle(ns_string!("☰"));
         }
         status_item.setMenu(Some(&menu));
+        STATUS_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
 
         StatusMenuHandle {
             status_item,

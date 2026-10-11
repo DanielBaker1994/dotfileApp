@@ -60,6 +60,25 @@ public final class WSShim: NSView, LocalProcessTerminalViewDelegate {
             ?? NSFont.monospacedSystemFont(ofSize: CGFloat(size), weight: .regular)
     }
 
+    /// Theme the terminal: background (clear → transparent, Swift's vim
+    /// pane), foreground, and the 16-color ANSI palette (`ansiPalette`).
+    @objc(setColorsBackground:foreground:palette:)
+    public func setColors(background: NSColor, foreground: NSColor, palette: [NSColor]) {
+        terminal.nativeBackgroundColor = background
+        terminal.nativeForegroundColor = foreground
+        let clear = (background.usingColorSpace(.sRGB) ?? background).alphaComponent < 0.01
+        terminal.wantsLayer = true
+        terminal.layer?.backgroundColor = clear ? NSColor.clear.cgColor : background.cgColor
+        if palette.count == 16 {
+            terminal.installColors(palette.map { c in
+                let s = c.usingColorSpace(.sRGB) ?? c
+                return SwiftTerm.Color(red: UInt16(s.redComponent * 65535),
+                                       green: UInt16(s.greenComponent * 65535),
+                                       blue: UInt16(s.blueComponent * 65535))
+            })
+        }
+    }
+
     @objc public var terminalRunning: Bool { terminal.process?.running ?? false }
     @objc public var terminalExitCode: Int32 { exitCode }
 

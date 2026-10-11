@@ -340,13 +340,165 @@ impl PopupColors {
     }
 }
 
-/// `PopupThemeDefaults` — a single default `PopupColors`.
+/// `PopupThemeDefaults` — the window colors from the loaded `[theme]`
+/// (Swift `windowColors()` over `THEME`), else the built-in defaults.
 pub struct PopupThemeDefaults;
 
 impl PopupThemeDefaults {
     pub fn colors() -> PopupColors {
-        PopupColors::default()
+        theme_state().map(|t| t.globals.window_colors()).unwrap_or_default()
     }
+}
+
+/// The loaded theme: `[theme]` globals + each section's color keys.
+#[derive(Clone, Debug, Default)]
+pub struct LoadedTheme {
+    pub globals: ThemeGlobals,
+    pub sections: HashMap<String, HashMap<String, String>>,
+}
+
+static THEME_STATE: std::sync::RwLock<Option<LoadedTheme>> = std::sync::RwLock::new(None);
+
+fn theme_state() -> Option<LoadedTheme> {
+    THEME_STATE.read().ok().and_then(|g| g.clone())
+}
+
+/// Install the theme parsed from commands.toml (`parseTheme()`); `sections`
+/// maps each section to its raw entries (only the color keys are read).
+pub fn install_theme(theme: &HashMap<String, String>, sections: HashMap<String, HashMap<String, String>>) {
+    let map: HashMap<String, Rgba> = theme
+        .iter()
+        .filter_map(|(k, v)| HexColor::parse(v.trim()).map(|c| (k.to_lowercase(), c)))
+        .collect();
+    let globals = ThemeGlobals::from_overrides(&map);
+    if let Ok(mut g) = THEME_STATE.write() {
+        *g = Some(LoadedTheme { globals, sections });
+    }
+}
+
+fn hsb(c: Rgba) -> (f64, f64, f64) {
+    let (r, g, b) = (c.r, c.g, c.b);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / d) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let h = if h < 0.0 { h + 360.0 } else { h };
+    let s = if max == 0.0 { 0.0 } else { d / max };
+    (h, s, max)
+}
+
+fn from_hsb(h: f64, s: f64, v: f64) -> Rgba {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match (h / 60.0) as i64 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Rgba::new(r + m, g + m, b + m, 1.0)
+}
+
+/// `PopupWindow.ansiPalette(_:)` — the 16 ANSI colors derived from the theme
+/// (blue / magenta picked by hue from accent / accent2 / info, black / white
+/// from the surfaces, brights lifted 15 %).
+pub fn ansi_palette(c: &PopupColors) -> Vec<Rgba> {
+    let p = c.palette;
+    let dist = |a: f64, b: f64| {
+        let d = (a - b).abs();
+        d.min(360.0 - d)
+    };
+    let pick = |target: f64, from: &[Rgba], base: Rgba| -> Rgba {
+        let best = from
+            .iter()
+            .copied()
+            .min_by(|x, y| dist(hsb(x.opaque()).0, target).partial_cmp(&dist(hsb(y.opaque()).0, target)).unwrap())
+            .unwrap_or(base);
+        if dist(hsb(best.opaque()).0, target) <= 50.0 {
+            return best;
+        }
+        let (_, sat, bri) = hsb(base.opaque());
+        from_hsb(target, sat.max(0.35), bri)
+    };
+    let blue = pick(220.0, &[c.accent, p.accent2, p.info], c.accent);
+    let mag_from: Vec<Rgba> = [c.accent, p.accent2].into_iter().filter(|x| *x != blue).collect();
+    let magenta = pick(300.0, &mag_from, p.accent2);
+    let light = c.is_light();
+    let black = if light { c.dim.blended(0.35, c.text) } else { c.surface1() };
+    let white = if light { c.surface1() } else { c.dim };
+    let normal = [black, p.danger, p.success, p.warning, blue, magenta, p.info, white];
+    let mut out: Vec<Rgba> = normal.iter().map(|x| x.opaque()).collect();
+    for (i, x) in normal.iter().enumerate() {
+        let b = if i == 0 {
+            if light { c.dim } else { c.highlight.blended(0.25, c.text) }
+        } else if i == 7 {
+            c.text
+        } else {
+            x.opaque().blended(0.15, if light { Rgba::new(0.0, 0.0, 0.0, 1.0) } else { Rgba::new(1.0, 1.0, 1.0, 1.0) })
+        };
+        out.push(b.opaque());
+    }
+    out
+}
+
+/// `parsePalette` — "9D79D6, 81B29A, …" (accent2, success, warning, danger, info).
+pub fn parse_palette(s: &str) -> Option<PopupPalette> {
+    let cols: Vec<Rgba> = s.split(',').filter_map(|p| HexColor::parse(p.trim())).collect();
+    PopupPalette::from_slice(&cols)
+}
+
+/// `cardColors(_:)` / `windowColors(cmd)` — a section's
+/// `background-color` / `text-color` / `dim-color` / `highlight-color` /
+/// `accent-color` / `palette` over the `[theme]` globals.
+pub fn section_colors(section: &str) -> PopupColors {
+    let Some(t) = theme_state() else { return PopupColors::default() };
+    let g = &t.globals;
+    let Some(sec) = t.sections.get(section) else { return g.window_colors() };
+    let v = |k: &str| sec.get(k).and_then(|x| HexColor::parse(x.trim()));
+    let mut c = PopupColors {
+        background: v("background-color").map(|b| b.with_alpha(1.0)).unwrap_or(g.bar),
+        border: g.border,
+        text: v("text-color").unwrap_or(g.text),
+        dim: v("dim-color").unwrap_or(g.dim),
+        highlight: v("highlight-color").unwrap_or(g.group_bg),
+        accent: v("accent-color").unwrap_or(g.accent),
+        palette: sec.get("palette").and_then(|p| parse_palette(p)).unwrap_or(g.palette),
+    };
+    if v("accent-color").is_some() || !g.has_border {
+        c.border = c.outline();
+    }
+    c
+}
+
+/// A section's `header-color` (else `[theme] header`, else blue-silver).
+pub fn section_header_color(section: &str) -> Rgba {
+    let t = theme_state().unwrap_or_default();
+    t.sections
+        .get(section)
+        .and_then(|s| s.get("header-color"))
+        .and_then(|x| HexColor::parse(x.trim()))
+        .unwrap_or_else(|| t.globals.header_color())
+}
+
+/// A section's `browser-background` (the file-browser / list fill).
+pub fn section_browser_background(section: &str) -> Option<Rgba> {
+    let t = theme_state()?;
+    t.sections
+        .get(section)
+        .and_then(|s| s.get("browser-background"))
+        .and_then(|x| HexColor::parse(x.trim()))
+        .or(t.globals.browser)
 }
 
 /// The `[theme]` globals (`THEME` / `BAR` / `GROUP_BG` / `TEXT` / `DIM` …).

@@ -1,0 +1,1804 @@
+//! The live Jira list view — a port of Swift's `ListSession` (the `[jira]`
+//! list window, kitchen_sink.swift) + `PopupRowView.drawTableRow` /
+//! `PopupTableHeaderView` / `PopupInspectorView` (PopupWindow.swift,
+//! PopupInspector.swift).
+//!
+//! Data: every `*.json` under `[jira] sources` (the poller's output dir) is
+//! a SYNCED tab of flat issue records; per-tab columns come from the
+//! endpoint's `columns` in the jira config (else `[jira] columns`). The
+//! sidebar adds MY WORK (`jira_poll.py --my-work`), PINNED (views /
+//! favourite releases / labels) and BOARDS (catalog + pinned boards).
+
+use crate::app::paths::JiraPaths;
+use crate::ui::chrome::Rect;
+use crate::ui::sidebar::{SidebarModel, SidebarPin, SidebarRow};
+use crate::ui::theme::PopupTone;
+use crate::app::config::ListColumn;
+use crate::views::jira::{base_field_label, parse_columns, style_rules, CellStyle, StyleRules};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
+
+pub type Record = BTreeMap<String, String>;
+
+pub const ROW_H: f64 = 32.0;
+pub const HEADER_H: f64 = 26.0;
+pub const PADDING: f64 = 8.0;
+/// `rowLeadInset` with checkboxes + stars: padding + 10 + 22 + 20.
+pub const LEAD: f64 = PADDING + 10.0 + 22.0 + 20.0;
+
+/// One SYNCED tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JiraTab {
+    pub path: String,
+    pub file: String,
+    pub title: String,
+    pub columns: Vec<ListColumn>,
+    pub badge: Option<(String, PopupTone)>,
+}
+
+/// Where the list is (`currentTab` vs `pinView`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum JiraPlace {
+    Tab(usize),
+    Pin(String),
+}
+
+/// `ListSession.myWork`.
+pub const MY_WORK: [(&str, &str, &str); 4] = [
+    ("mine", "Assigned to me", "person"),
+    ("reported", "Reported by me", "square.and.pencil"),
+    ("today", "Updated today", "clock"),
+    ("watching", "Watching", "eye"),
+];
+pub const MY_WORK_PREFIX: &str = "mywork:";
+pub const BOARD_PREFIX: &str = "board:";
+pub const VIEW_PREFIX: &str = "view:";
+pub const LABEL_PREFIX: &str = "label:";
+pub const BOARD_LIST_KEY: &str = "boards:all";
+
+/// `PopupTableColumn.frames(x0:usable:)` — percent widths, autos share the
+/// leftover, scaled down when they sum past 100.
+pub fn column_frames(cols: &[ListColumn], x0: f64, usable: f64) -> Vec<(f64, f64)> {
+    if cols.is_empty() || usable <= 0.0 {
+        return cols.iter().map(|_| (x0, 0.0)).collect();
+    }
+    let explicit: f64 = cols.iter().map(|c| c.width.max(0.0)).sum();
+    let autos = cols.iter().filter(|c| c.width <= 0.0).count();
+    let leftover = (100.0_f64 - explicit).max(0.0);
+    let mut pcts: Vec<f64> = cols
+        .iter()
+        .map(|c| if c.width > 0.0 { c.width } else if autos > 0 { leftover / autos as f64 } else { 0.0 })
+        .collect();
+    for p in pcts.iter_mut() {
+        if *p <= 0.0 {
+            *p = 5.0;
+        }
+    }
+    let total: f64 = pcts.iter().sum();
+    let scale = if total > 100.0 { 100.0 / total } else { 1.0 };
+    let mut x = x0;
+    pcts.iter()
+        .map(|p| {
+            let w = usable * p * scale / 100.0;
+            let f = (x, w);
+            x += w;
+            f
+        })
+        .collect()
+}
+
+/// `jiraCellStyle(_:_:)` over the ported [`StyleRules`].
+pub fn cell_style(rules: &StyleRules, field: &str, text: &str) -> Option<CellStyle> {
+    let f = field.to_lowercase();
+    let v = text.to_lowercase();
+    if rules.dim_fields.iter().any(|d| *d == f) {
+        return Some(CellStyle { tone: Some("dim".into()), ..Default::default() });
+    }
+    let hit = |words: &[String]| words.iter().any(|w| !w.is_empty() && v.contains(w.as_str()));
+    match f.as_str() {
+        "status" | "statuscategory" => Some(
+            rules
+                .status
+                .iter()
+                .find(|r| hit(&r.words))
+                .map(|r| r.style.clone())
+                .unwrap_or_else(|| rules.status_fallback.clone()),
+        ),
+        "priority" => Some(
+            rules
+                .priority
+                .iter()
+                .find(|r| hit(&r.words))
+                .map(|r| r.style.clone())
+                .unwrap_or_else(|| rules.priority_fallback.clone()),
+        ),
+        "releasestatus" => rules
+            .release_status
+            .iter()
+            .find(|r| !r.contains.is_empty() && v.contains(&r.contains))
+            .map(|r| r.style.clone()),
+        _ => None,
+    }
+}
+
+pub fn tone_of(name: Option<&str>) -> PopupTone {
+    match name.unwrap_or("") {
+        "dim" => PopupTone::Dim,
+        "accent" => PopupTone::Accent,
+        "accent2" => PopupTone::Accent2,
+        "success" => PopupTone::Success,
+        "warning" => PopupTone::Warning,
+        "danger" => PopupTone::Danger,
+        "info" => PopupTone::Info,
+        _ => PopupTone::Text,
+    }
+}
+
+/// Flatten one JSON issue record into strings (arrays join with ", ").
+pub fn record_of(v: &Value) -> Option<Record> {
+    let o = v.as_object()?;
+    let mut r = Record::new();
+    for (k, val) in o {
+        let s = match val {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            Value::Array(a) => a
+                .iter()
+                .map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            other => other.to_string(),
+        };
+        r.insert(k.clone(), s);
+    }
+    Some(r)
+}
+
+pub fn load_records(path: &str) -> Vec<Record> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let arr = match &v {
+        Value::Array(a) => a.clone(),
+        Value::Object(o) => o.get("items").and_then(Value::as_array).cloned().unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    arr.iter().filter_map(record_of).collect()
+}
+
+/// `updated` → "2026-10-08 20:11" (Jira ISO stamps shown short).
+pub fn display_cell(field: &str, value: &str) -> String {
+    let flat = value.replace('\n', " ");
+    if matches!(field, "updated" | "created" | "resolved") && flat.len() >= 16 && flat.as_bytes()[10] == b'T' {
+        return format!("{} {}", &flat[..10], &flat[11..16]);
+    }
+    flat
+}
+
+/// `JiraPoll.windowSeconds` ("10m" → 600).
+pub fn window_seconds(w: &str) -> Option<f64> {
+    let unit = w.chars().last()?;
+    let n: f64 = w[..w.len() - unit.len_utf8()].parse().ok()?;
+    let mult = match unit {
+        's' => 1.0,
+        'm' => 60.0,
+        'h' => 3600.0,
+        'd' => 86400.0,
+        'w' => 604800.0,
+        _ => return None,
+    };
+    Some(n * mult)
+}
+
+/// `JiraPoll.age`.
+pub fn age(secs: f64) -> String {
+    let s = secs.max(0.0) as i64;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86400 {
+        format!("{}h", s / 3600)
+    } else {
+        format!("{}d", s / 86400)
+    }
+}
+
+/// "2026-10-10 23:35:09" (local) → epoch seconds.
+pub fn parse_stamp(s: &str) -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSDateFormatter, NSLocale, NSString};
+        if s.is_empty() {
+            return None;
+        }
+        let f = NSDateFormatter::new();
+        f.setLocale(Some(&NSLocale::localeWithLocaleIdentifier(&NSString::from_str("en_US_POSIX"))));
+        f.setDateFormat(Some(&NSString::from_str("yyyy-MM-dd HH:mm:ss")));
+        return f.dateFromString(&NSString::from_str(s)).map(|d| d.timeIntervalSince1970());
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = s;
+        None
+    }
+}
+
+fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn read_json(path: &str) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null)
+}
+
+fn str_list(v: &Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// The list model.
+#[derive(Clone, Debug, Default)]
+pub struct JiraList {
+    pub section: HashMap<String, String>,
+    pub paths: Option<JiraPaths>,
+    pub config: Value,
+    pub tabs: Vec<JiraTab>,
+    pub place: Option<JiraPlace>,
+    pub all: Vec<Record>,
+    pub columns: Vec<ListColumn>,
+    pub query: String,
+    pub sort: Option<(String, bool)>,
+    /// Indices into `all`, filtered + sorted.
+    pub rows: Vec<usize>,
+    pub selection: usize,
+    pub checked: BTreeSet<String>,
+    pub favs: BTreeSet<String>,
+    pub rules: Option<StyleRules>,
+    pub catalog: Vec<(String, String, String)>,
+    pub boards: Vec<(String, String)>,
+    pub status_line: Option<(String, PopupTone)>,
+    pub note: Option<String>,
+    pub inspector: bool,
+    /// The shown list file + its mtime (the `reloadWatcher`).
+    pub shown_path: String,
+    pub shown_mtime: Option<std::time::SystemTime>,
+}
+
+impl JiraList {
+    pub fn new(section: HashMap<String, String>, paths: Option<JiraPaths>) -> Self {
+        let mut l = JiraList { section, paths, inspector: true, ..Default::default() };
+        let words: serde_json::Map<String, Value> = l
+            .section
+            .iter()
+            .filter(|(k, _)| k.ends_with("-words"))
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        l.rules = Some(style_rules(&Value::Object(words)));
+        l.sort = l.section.get("table-sort").and_then(|s| {
+            let (f, d) = s.split_once(':').unwrap_or((s.as_str(), "asc"));
+            (!f.trim().is_empty()).then(|| (f.trim().to_string(), d.trim().to_lowercase() != "desc"))
+        });
+        l.reload_meta();
+        l
+    }
+
+    fn sources_dir(&self) -> String {
+        let raw = self.section.get("sources").cloned().unwrap_or_default();
+        let home = std::env::var("HOME").unwrap_or_default();
+        match raw.strip_prefix('~') {
+            Some(rest) => format!("{home}{rest}"),
+            None if raw.is_empty() => self.paths.as_ref().map(|p| p.out_dir.clone()).unwrap_or_default(),
+            None => raw,
+        }
+    }
+
+    fn endpoints(&self) -> Vec<Value> {
+        self.config.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default()
+    }
+
+    /// `JiraPoll.listTitle(file:)`.
+    pub fn list_title(&self, file: &str) -> String {
+        if let Some(p) = &self.paths {
+            if p.tabs.get("liveSearch").map(String::as_str) == Some(file) {
+                return "Search results".into();
+            }
+            if p.tabs.get("blacklistRelease").map(String::as_str) == Some(file) {
+                return "Hidden releases".into();
+            }
+        }
+        for ep in self.endpoints() {
+            let Some(name) = ep.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let f = ep.get("file").and_then(Value::as_str).map(str::to_string).unwrap_or(format!("{name}.json"));
+            if f != file {
+                continue;
+            }
+            if let Some(t) = ep.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                return t.to_string();
+            }
+            return match ep.get("type").and_then(Value::as_str) {
+                Some("releases") => "Releases".into(),
+                Some("favorites") => "Starred issues".into(),
+                _ if name == "all" => "All projects".into(),
+                _ => name.to_string(),
+            };
+        }
+        file.trim_end_matches(".json").to_string()
+    }
+
+    /// `ListSession.tabColumns(cmd, path)` — the endpoint's spec, labeled.
+    pub fn tab_columns(&self, file: &str) -> Vec<ListColumn> {
+        let spec = self
+            .endpoints()
+            .iter()
+            .find(|ep| {
+                let name = ep.get("name").and_then(Value::as_str).unwrap_or("");
+                ep.get("file").and_then(Value::as_str).map(str::to_string).unwrap_or(format!("{name}.json")) == file
+            })
+            .and_then(|ep| ep.get("columns").and_then(Value::as_str).map(str::to_string))
+            .or_else(|| self.section.get("columns").cloned())
+            .unwrap_or_default();
+        let mut cols = parse_columns(&spec);
+        for c in cols.iter_mut() {
+            if c.title == c.field || c.title.is_empty() {
+                c.title = base_field_label(&c.field).map(str::to_string).unwrap_or_else(|| c.field.clone());
+            }
+        }
+        cols
+    }
+
+    /// Re-read the config / tabs / catalog / status (cheap; JSON files).
+    pub fn reload_meta(&mut self) {
+        if let Some(p) = &self.paths {
+            self.config = read_json(&p.config_json);
+        }
+        self.favs = str_list(&self.config, "favorites").into_iter().collect();
+        let dir = self.sources_dir();
+        let mut files: Vec<String> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().into_owned();
+                        (n.ends_with(".json") || n.ends_with(".tsv")).then_some(n)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        let status = self
+            .paths
+            .as_ref()
+            .map(|p| read_json(&p.cache_file("status")))
+            .unwrap_or(Value::Null);
+        self.tabs = files
+            .iter()
+            .map(|f| JiraTab {
+                path: format!("{dir}/{f}"),
+                file: f.clone(),
+                title: self.list_title(f),
+                columns: self.tab_columns(f),
+                badge: self.tab_badge(f, &status),
+            })
+            .collect();
+        self.status_line = self.sync_summary(&status);
+        self.catalog = Vec::new();
+        if let Some(p) = &self.paths {
+            let cat = read_json(&p.cache_file("boardCatalog"));
+            for proj in cat.get("projects").and_then(Value::as_array).cloned().unwrap_or_default() {
+                let pk = proj.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                for b in proj.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
+                    let Some(id) = b.get("id").and_then(Value::as_str) else { continue };
+                    if self.catalog.iter().any(|c| c.0 == id) {
+                        continue;
+                    }
+                    let name = b.get("name").and_then(Value::as_str).unwrap_or(id).to_string();
+                    self.catalog.push((id.to_string(), name, pk.clone()));
+                }
+            }
+        }
+        self.boards = str_list(&self.config, "pinnedBoards")
+            .into_iter()
+            .map(|id| {
+                let name = self.catalog.iter().find(|c| c.0 == id).map(|c| c.1.clone()).unwrap_or(format!("Board {id}"));
+                (id, name)
+            })
+            .collect();
+    }
+
+    /// `JiraPoll.tabBadge` → `(text, tone)`; success badges stay quiet in
+    /// the sidebar (Swift `quietOKTabBadges`).
+    fn tab_tone(&self, file: &str, status: &Value) -> Option<(String, PopupTone)> {
+        let eps = self.endpoints();
+        let blacklist = self.paths.as_ref().and_then(|p| p.tabs.get("blacklistRelease")).map(String::as_str) == Some(file);
+        let ep = eps
+            .iter()
+            .find(|e| {
+                let name = e.get("name").and_then(Value::as_str).unwrap_or("");
+                e.get("file").and_then(Value::as_str).map(str::to_string).unwrap_or(format!("{name}.json")) == file
+            })
+            .or_else(|| blacklist.then(|| eps.iter().find(|e| e.get("type").and_then(Value::as_str) == Some("releases"))).flatten())?;
+        let name = ep.get("name").and_then(Value::as_str)?;
+        let entry = status
+            .get("endpoints")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find(|e| e.get("name").and_then(Value::as_str) == Some(name)).cloned())
+            .unwrap_or(Value::Null);
+        let window = ep.get("window").and_then(Value::as_str).unwrap_or("10m");
+        let wsec = window_seconds(window).unwrap_or(600.0);
+        let ok = entry.get("lastSuccess").and_then(Value::as_str).and_then(parse_stamp);
+        let failed = entry.get("status").and_then(Value::as_str) == Some("error");
+        let stale = ok.map_or(true, |t| now() - t > wsec + (wsec / 2.0).max(300.0));
+        let tone = if !stale && !failed {
+            PopupTone::Success
+        } else if stale && failed {
+            PopupTone::Danger
+        } else {
+            PopupTone::Warning
+        };
+        Some((ok.map_or("never".to_string(), |t| age(now() - t)), tone))
+    }
+
+    fn tab_badge(&self, file: &str, status: &Value) -> Option<(String, PopupTone)> {
+        self.tab_tone(file, status).filter(|(_, t)| *t != PopupTone::Success)
+    }
+
+    /// `JiraPoll.syncSummary`.
+    fn sync_summary(&self, status: &Value) -> Option<(String, PopupTone)> {
+        let skip: Vec<&str> = self
+            .paths
+            .as_ref()
+            .map(|p| ["liveSearch", "blacklistRelease"].iter().filter_map(|k| p.tabs.get(*k).map(String::as_str)).collect())
+            .unwrap_or_default();
+        let entries = status.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut newest: Option<f64> = None;
+        let (mut behind, mut polled, mut failing) = (0, 0, false);
+        for t in &self.tabs {
+            if skip.contains(&t.file.as_str()) {
+                continue;
+            }
+            let Some((_, tone)) = self.tab_tone(&t.file, status) else { continue };
+            polled += 1;
+            let name = self
+                .endpoints()
+                .iter()
+                .find(|e| {
+                    let n = e.get("name").and_then(Value::as_str).unwrap_or("");
+                    e.get("file").and_then(Value::as_str).map(str::to_string).unwrap_or(format!("{n}.json")) == t.file
+                })
+                .and_then(|e| e.get("name").and_then(Value::as_str).map(str::to_string));
+            if let Some(ts) = entries
+                .iter()
+                .find(|e| e.get("name").and_then(Value::as_str).map(str::to_string) == name)
+                .and_then(|e| e.get("lastSuccess").and_then(Value::as_str))
+                .and_then(parse_stamp)
+            {
+                newest = Some(newest.map_or(ts, |n: f64| n.max(ts)));
+            }
+            if tone != PopupTone::Success {
+                behind += 1;
+            }
+            if tone == PopupTone::Danger {
+                failing = true;
+            }
+        }
+        if polled == 0 {
+            return None;
+        }
+        let Some(n) = newest else {
+            return Some(("Never synced".into(), PopupTone::Danger));
+        };
+        let ago = age(now() - n);
+        if behind > 0 {
+            return Some((
+                format!("{behind} out of date · last sync {ago} ago"),
+                if failing { PopupTone::Danger } else { PopupTone::Warning },
+            ));
+        }
+        Some((format!("Synced {ago} ago"), PopupTone::Success))
+    }
+
+    /// The reload watcher: re-read the sidebar meta and, when the shown
+    /// file changed on disk, its rows (keeping the selected key).
+    pub fn refresh(&mut self) {
+        self.reload_meta();
+        if self.shown_path.is_empty() {
+            return;
+        }
+        let m = std::fs::metadata(&self.shown_path).and_then(|m| m.modified()).ok();
+        if m == self.shown_mtime {
+            return;
+        }
+        self.shown_mtime = m;
+        let keep = self.selected().and_then(|r| r.get("key")).cloned();
+        self.all = load_records(&self.shown_path);
+        self.refilter();
+        if let Some(k) = keep {
+            if let Some(i) = self.rows.iter().position(|&j| self.all[j].get("key") == Some(&k)) {
+                self.selection = i;
+            }
+        }
+    }
+
+    /// Pick the startup tab (the last one shown, else the first project tab).
+    pub fn start(&mut self, last: Option<&str>) {
+        let i = last
+            .and_then(|l| self.tabs.iter().position(|t| t.file == l))
+            .unwrap_or(0);
+        if !self.tabs.is_empty() {
+            self.select_tab(i);
+        }
+    }
+
+    pub fn select_tab(&mut self, i: usize) {
+        let Some(t) = self.tabs.get(i).cloned() else { return };
+        self.place = Some(JiraPlace::Tab(i));
+        self.columns = t.columns.clone();
+        self.all = load_records(&t.path);
+        self.shown_path = t.path.clone();
+        self.shown_mtime = std::fs::metadata(&t.path).and_then(|m| m.modified()).ok();
+        self.selection = 0;
+        self.note = None;
+        self.refilter();
+    }
+
+    /// Show a pinned list (`showPinFile`).
+    pub fn show_pin_file(&mut self, key: &str, path: &str, columns: Vec<ListColumn>) {
+        self.place = Some(JiraPlace::Pin(key.to_string()));
+        self.columns = columns;
+        self.all = load_records(path);
+        self.shown_path = path.to_string();
+        self.shown_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        self.selection = 0;
+        self.refilter();
+    }
+
+    /// `boardListRows()` as records (the "All boards" pin).
+    pub fn show_board_list(&mut self) {
+        self.place = Some(JiraPlace::Pin(BOARD_LIST_KEY.into()));
+        self.columns = parse_columns("name:Board:40:left:filter+sort, project:Project:20:left:filter+sort, boardId:ID:10:left:sort");
+        self.all = self
+            .catalog
+            .iter()
+            .map(|(id, name, proj)| {
+                let mut r = Record::new();
+                r.insert("key".into(), format!("{BOARD_PREFIX}{id}"));
+                r.insert("name".into(), name.clone());
+                r.insert("title".into(), name.clone());
+                r.insert("project".into(), proj.clone());
+                r.insert("boardId".into(), id.clone());
+                r
+            })
+            .collect();
+        self.selection = 0;
+        self.refilter();
+    }
+
+    fn default_columns(&self) -> Vec<ListColumn> {
+        let mut cols = parse_columns(self.section.get("columns").map(String::as_str).unwrap_or(""));
+        for c in cols.iter_mut() {
+            if c.title.is_empty() {
+                c.title = c.field.clone();
+            }
+        }
+        cols
+    }
+
+    /// A pinned board's cached issues (`showBoardPin`), else poll it.
+    pub fn board_path(&self, id: &str) -> Option<String> {
+        let p = self.paths.as_ref()?;
+        let side = p.side_dirs.get("boards")?;
+        let out = Path::new(&p.out_dir).parent()?.join(side).join(format!("board-{id}.json"));
+        Some(out.to_string_lossy().into_owned())
+    }
+
+    pub fn open_board(&mut self, id: &str) -> bool {
+        let Some(path) = self.board_path(id) else { return false };
+        if !Path::new(&path).exists() {
+            return false;
+        }
+        let cols = self.default_columns();
+        self.show_pin_file(&format!("{BOARD_PREFIX}{id}"), &path, cols);
+        true
+    }
+
+    /// `showMyWorkPin` — `jira_poll.py --my-work` → `<dir>/<id>.json`.
+    pub fn open_my_work(&mut self, id: &str) -> Result<(), String> {
+        let out = crate::views::jira::run_jira_poll(&["--my-work"], None)?;
+        let dir = out.get("dir").and_then(Value::as_str).ok_or("my work: no dir")?;
+        let path = format!("{dir}/{id}.json");
+        if !Path::new(&path).exists() {
+            return Err(format!("my work: {id} not synced yet"));
+        }
+        let cols = self.default_columns();
+        self.show_pin_file(&format!("{MY_WORK_PREFIX}{id}"), &path, cols);
+        Ok(())
+    }
+
+    fn filter_fields(&self) -> Vec<String> {
+        self.section
+            .get("filter")
+            .map(|f| f.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_else(|| vec!["key".into(), "title".into()])
+    }
+
+    pub fn refilter(&mut self) {
+        let fields = self.filter_fields();
+        let words: Vec<String> = self.query.to_lowercase().split_whitespace().map(str::to_string).collect();
+        let mut idx: Vec<usize> = (0..self.all.len())
+            .filter(|&i| {
+                if words.is_empty() {
+                    return true;
+                }
+                let r = &self.all[i];
+                let hay: String = fields
+                    .iter()
+                    .chain(["name".to_string()].iter())
+                    .filter_map(|f| r.get(f))
+                    .map(|s| s.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .collect();
+        if let Some((field, asc)) = &self.sort {
+            if self.columns.iter().any(|c| &c.field == field) {
+                idx.sort_by(|&a, &b| {
+                    let x = self.all[a].get(field).map(String::as_str).unwrap_or("");
+                    let y = self.all[b].get(field).map(String::as_str).unwrap_or("");
+                    let o = crate::engines::list_filter::localized_standard_compare(x, y);
+                    if *asc { o } else { o.reverse() }
+                });
+            }
+        }
+        self.rows = idx;
+        if self.selection >= self.rows.len() {
+            self.selection = self.rows.len().saturating_sub(1);
+        }
+    }
+
+    /// Header click: sort by column `i` (toggle when already sorted).
+    pub fn sort_by(&mut self, i: usize) {
+        let Some(c) = self.columns.get(i) else { return };
+        if !c.sortable {
+            return;
+        }
+        let field = c.field.clone();
+        self.sort = match &self.sort {
+            Some((f, asc)) if *f == field => Some((field, !asc)),
+            _ => Some((field, true)),
+        };
+        self.refilter();
+    }
+
+    pub fn selected(&self) -> Option<&Record> {
+        self.rows.get(self.selection).and_then(|&i| self.all.get(i))
+    }
+
+    pub fn row(&self, i: usize) -> Option<&Record> {
+        self.rows.get(i).and_then(|&j| self.all.get(j))
+    }
+
+    pub fn site(&self) -> String {
+        self.config.get("site").and_then(Value::as_str).unwrap_or("").trim_end_matches('/').to_string()
+    }
+
+    /// The sidebar (`syncReleasePins` + the SYNCED tabs).
+    pub fn sidebar_model(&self) -> SidebarModel {
+        let mut pinned: Vec<SidebarPin> = Vec::new();
+        let my_work = self
+            .section
+            .get("my-work")
+            .map_or(true, |v| !matches!(v.to_lowercase().as_str(), "false" | "no" | "0" | "off"));
+        if my_work {
+            for (id, title, icon) in MY_WORK {
+                pinned.push(SidebarPin {
+                    key: format!("{MY_WORK_PREFIX}{id}"),
+                    label: title.into(),
+                    icon: icon.into(),
+                    section: "My work".into(),
+                    tip: "From the issues already synced (no request)".into(),
+                    ..Default::default()
+                });
+            }
+        }
+        for v in str_list(&self.config, "pinnedBoardViews") {
+            let board = v.split('|').next().unwrap_or("").to_string();
+            let name = self.catalog.iter().find(|c| c.0 == board).map(|c| c.1.clone()).unwrap_or(format!("Board {board}"));
+            let sprint = self.sprint_name(&board);
+            let label = if sprint.is_empty() { name } else { format!("{name} · {sprint}") };
+            pinned.push(SidebarPin {
+                key: format!("{VIEW_PREFIX}{v}"),
+                label,
+                icon: if v.ends_with("|table") { "tablecells" } else { "rectangle.split.3x1.fill" }.into(),
+                section: "Pinned".into(),
+                meta: "Board".into(),
+                ..Default::default()
+            });
+        }
+        for r in str_list(&self.config, "favoriteReleases") {
+            let label = match r.split_once('-') {
+                Some((a, b)) => format!("{a} {b}"),
+                None => r.clone(),
+            };
+            pinned.push(SidebarPin {
+                key: r.clone(),
+                label,
+                icon: "shippingbox".into(),
+                section: "Pinned".into(),
+                meta: "Release".into(),
+                tip: format!("Show every issue in {r} here"),
+            });
+        }
+        for l in str_list(&self.config, "pinnedLabels") {
+            pinned.push(SidebarPin {
+                key: format!("{LABEL_PREFIX}{l}"),
+                label: l.clone(),
+                icon: "tag".into(),
+                section: "Pinned".into(),
+                meta: "Label".into(),
+                tip: format!("Show every issue labelled {l} here"),
+            });
+        }
+        if !self.catalog.is_empty() || !self.boards.is_empty() {
+            pinned.push(SidebarPin {
+                key: BOARD_LIST_KEY.into(),
+                label: "All boards".into(),
+                icon: "square.grid.2x2".into(),
+                section: "Boards".into(),
+                meta: if self.catalog.is_empty() { String::new() } else { self.catalog.len().to_string() },
+                tip: "Every board in the projects in scope — ☆ one to pin it here".into(),
+            });
+        }
+        for (id, name) in &self.boards {
+            pinned.push(SidebarPin {
+                key: format!("{BOARD_PREFIX}{id}"),
+                label: name.clone(),
+                icon: "rectangle.split.3x1".into(),
+                section: "Boards".into(),
+                ..Default::default()
+            });
+        }
+        let rows = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let name = t.file.to_lowercase();
+                let icon = if name.contains("blacklist_release") {
+                    "eye.slash"
+                } else if name.starts_with("release") {
+                    "shippingbox"
+                } else if name.starts_with("favorites") {
+                    "star"
+                } else if name.starts_with("search") {
+                    "magnifyingglass"
+                } else {
+                    "list.bullet.rectangle"
+                };
+                SidebarRow {
+                    title: t.title.clone(),
+                    icon: icon.into(),
+                    badge: t.badge.clone(),
+                    tip: t.path.clone(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let (selected, pinned_selected) = match &self.place {
+            Some(JiraPlace::Tab(i)) => (Some(*i), None),
+            Some(JiraPlace::Pin(k)) => (None, Some(k.clone())),
+            None => (None, None),
+        };
+        SidebarModel {
+            section_title: "Synced".into(),
+            rows,
+            selected,
+            pinned,
+            pinned_selected,
+            status: self.status_line.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn sprint_name(&self, board: &str) -> String {
+        let Some(p) = &self.paths else { return String::new() };
+        let cat = read_json(&p.cache_file("boardCatalog"));
+        for proj in cat.get("projects").and_then(Value::as_array).cloned().unwrap_or_default() {
+            for b in proj.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
+                if b.get("id").and_then(Value::as_str) != Some(board) {
+                    continue;
+                }
+                for s in b.get("sprints").and_then(Value::as_array).cloned().unwrap_or_default() {
+                    if s.get("state").and_then(Value::as_str) == Some("active") {
+                        return s.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    /// The inspector content (`inspectorContent`): key, title, chips from
+    /// `[jira] trailing`, body, fields from `detail` + project / updated.
+    pub fn inspector_content(&self) -> Option<InspectorContent> {
+        let r = self.selected()?;
+        let key = r.get("key").cloned().unwrap_or_default();
+        let title = r.get("title").or_else(|| r.get("name")).cloned().unwrap_or_default();
+        let rules = self.rules.clone().unwrap_or_else(|| style_rules(&Value::Null));
+        let trailing: Vec<String> = self
+            .section
+            .get("trailing")
+            .map(|t| t.split(',').map(|x| x.trim().to_string()).collect())
+            .unwrap_or_else(|| vec!["status".into()]);
+        let chips = trailing
+            .iter()
+            .filter_map(|f| {
+                let v = r.get(f).filter(|v| !v.is_empty())?;
+                let tone = cell_style(&rules, f, v).map(|s| tone_of(s.tone.as_deref())).unwrap_or(PopupTone::Dim);
+                Some((v.clone(), tone))
+            })
+            .collect();
+        let mut fields: Vec<(String, String)> = Vec::new();
+        let detail: Vec<String> = self
+            .section
+            .get("detail")
+            .map(|t| t.split(',').map(|x| x.trim().to_string()).collect())
+            .unwrap_or_default();
+        for f in detail.iter().chain(["project".to_string(), "updated".to_string()].iter()) {
+            if fields.iter().any(|(l, _)| l == f) {
+                continue;
+            }
+            let v = r.get(f).cloned().unwrap_or_default();
+            let label = base_field_label(f).map(str::to_string).unwrap_or_else(|| f.clone());
+            fields.push((label, display_cell(f, &v)));
+        }
+        let body = r.get("description").cloned().unwrap_or_default();
+        Some(InspectorContent { key, title, chips, fields, body })
+    }
+}
+
+/// `PopupInspectorContent`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InspectorContent {
+    pub key: String,
+    pub title: String,
+    pub chips: Vec<(String, PopupTone)>,
+    pub fields: Vec<(String, String)>,
+    pub body: String,
+}
+
+/// What the view reports.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JiraEvent {
+    Click { row: usize, double: bool },
+    Check(usize),
+    Star(usize),
+    Sort(usize),
+    Query(String),
+    Enter,
+    Move(i64),
+    Escape,
+    OpenDetail,
+    RowMenu { row: usize, x: f64, y: f64 },
+    Sidebar(crate::ui::sidebar::SidebarEvent),
+}
+
+/// Everything the view draws.
+#[derive(Clone, Debug, Default)]
+pub struct JiraSnapshot {
+    pub columns: Vec<ListColumn>,
+    pub rows: Vec<Record>,
+    pub selection: usize,
+    pub checked: BTreeSet<String>,
+    pub favs: BTreeSet<String>,
+    pub sort: Option<(usize, bool)>,
+    pub sidebar: SidebarModel,
+    pub inspector: Option<InspectorContent>,
+    pub show_inspector: bool,
+    pub query: String,
+    pub empty: String,
+    pub rules: Option<StyleRules>,
+}
+
+impl JiraList {
+    pub fn snapshot(&self) -> JiraSnapshot {
+        let rows: Vec<Record> = self.rows.iter().filter_map(|&i| self.all.get(i).cloned()).collect();
+        let sort = self
+            .sort
+            .as_ref()
+            .and_then(|(f, asc)| self.columns.iter().position(|c| &c.field == f).map(|i| (i, *asc)));
+        JiraSnapshot {
+            columns: self.columns.clone(),
+            rows,
+            selection: self.selection,
+            checked: self.checked.clone(),
+            favs: self.favs.clone(),
+            sort,
+            sidebar: self.sidebar_model(),
+            inspector: self.inspector_content(),
+            show_inspector: self.inspector,
+            query: self.query.clone(),
+            empty: if self.tabs.is_empty() {
+                "No synced Jira lists yet — run the Jira setup (Settings ▸ Jira).".into()
+            } else if self.all.is_empty() {
+                "Nothing in this list.".into()
+            } else {
+                "No matches.".into()
+            },
+            rules: self.rules.clone(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use appkit::{draw_wrapped, JiraView};
+
+#[cfg(target_os = "macos")]
+mod appkit {
+    use super::*;
+    use crate::ui::sidebar::SidebarView;
+    use crate::ui::style::{self, ButtonState, Weight};
+    use crate::ui::theme::{PopupColors, Rgba};
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, ProtocolObject, Sel};
+    use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2_app_kit::{
+        NSStringDrawingDeprecated, NSBezierPath, NSControlTextEditingDelegate, NSEvent, NSFocusRingType, NSFont,
+        NSGraphicsContext, NSScrollView, NSStringDrawingOptions, NSTextField, NSTextFieldDelegate,
+        NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    };
+    use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
+        unsafe { &*(obj as *const T as *const AnyObject) }
+    }
+
+    fn ns(r: Rect) -> NSRect {
+        style::ns(r)
+    }
+
+    fn tracking(view: &NSView) -> Retained<NSTrackingArea> {
+        let opts = NSTrackingAreaOptions::MouseMoved
+            | NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::ActiveAlways
+            | NSTrackingAreaOptions::InVisibleRect;
+        let t = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                view.bounds(),
+                opts,
+                Some(as_any(view)),
+                None,
+            )
+        };
+        view.addTrackingArea(&t);
+        t
+    }
+
+    /// Wrapped text in `r`; returns the drawn height.
+    pub fn draw_wrapped(s: &str, r: Rect, font: &NSFont, color: Rgba) -> f64 {
+        let a = style::attrs(font, color);
+        let text = NSString::from_str(s);
+        let opts = NSStringDrawingOptions::UsesLineFragmentOrigin | NSStringDrawingOptions::UsesFontLeading;
+        let b = unsafe {
+            text.boundingRectWithSize_options_attributes(NSSize::new(r.width, f64::MAX), opts, Some(&a))
+        };
+        let h = b.size.height.min(r.height).ceil();
+        unsafe {
+            text.drawWithRect_options_attributes(
+                NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, h)),
+                opts | NSStringDrawingOptions::TruncatesLastVisibleLine,
+                Some(&a),
+            )
+        };
+        h
+    }
+
+    type Sink = Rc<dyn Fn(JiraEvent)>;
+
+    // ------------------------------------------------------------- table
+
+    pub struct TableIvars {
+        snap: Rc<RefCell<JiraSnapshot>>,
+        colors: Cell<PopupColors>,
+        hover: Cell<Option<usize>>,
+        sink: RefCell<Option<Sink>>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJiraTableView"]
+        #[ivars = TableIvars]
+        pub struct JiraTableView;
+
+        impl JiraTableView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(acceptsFirstResponder))]
+            fn afr(&self) -> bool { true }
+
+            #[unsafe(method(mouseDownCanMoveWindow))]
+            fn mdcmw(&self) -> bool { false }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn afm(&self, _e: Option<&NSEvent>) -> bool { true }
+
+            #[unsafe(method(updateTrackingAreas))]
+            fn uta(&self) {
+                let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
+                    self.removeTrackingArea(&t);
+                }
+                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let n = self.ivars().snap.borrow().rows.len();
+                let i = (p.y / ROW_H).floor();
+                let h = (i >= 0.0 && (i as usize) < n).then_some(i as usize);
+                if h != self.ivars().hover.get() {
+                    self.ivars().hover.set(h);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseExited:))]
+            fn mouse_exited(&self, _e: &NSEvent) {
+                self.ivars().hover.set(None);
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let n = self.ivars().snap.borrow().rows.len();
+                let i = (p.y / ROW_H).floor();
+                if i < 0.0 || i as usize >= n {
+                    return;
+                }
+                let row = i as usize;
+                let band = Rect::new(0.0, row as f64 * ROW_H, self.bounds().size.width, ROW_H);
+                let ev = if check_rect(band).inset_by(-4.0, -6.0).contains(p.x, p.y) {
+                    JiraEvent::Check(row)
+                } else if star_rect(band).inset_by(-3.0, -6.0).contains(p.x, p.y) {
+                    JiraEvent::Star(row)
+                } else {
+                    JiraEvent::Click { row, double: e.clickCount() >= 2 }
+                };
+                self.emit(ev);
+            }
+
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let n = self.ivars().snap.borrow().rows.len();
+                let i = (p.y / ROW_H).floor();
+                if i < 0.0 || i as usize >= n {
+                    return;
+                }
+                let s = NSEvent::mouseLocation();
+                self.emit(JiraEvent::RowMenu { row: i as usize, x: s.x, y: s.y });
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, dirty: NSRect) {
+                self.draw(dirty);
+            }
+        }
+
+        unsafe impl NSObjectProtocol for JiraTableView {}
+    );
+
+    fn check_rect(band: Rect) -> Rect {
+        Rect::new(PADDING + 2.0, band.mid_y() - 6.5, 13.0, 13.0)
+    }
+
+    fn star_rect(band: Rect) -> Rect {
+        Rect::new(PADDING + 2.0 + 22.0 - 1.0, band.mid_y() - 7.0, 14.0, 14.0)
+    }
+
+    impl JiraTableView {
+        fn new(mtm: MainThreadMarker, snap: Rc<RefCell<JiraSnapshot>>, colors: PopupColors) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(TableIvars {
+                snap,
+                colors: Cell::new(colors),
+                hover: Cell::new(None),
+                sink: RefCell::new(None),
+                tracking: RefCell::new(None),
+            });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        fn emit(&self, ev: JiraEvent) {
+            let s = self.ivars().sink.borrow().clone();
+            if let Some(s) = s {
+                s(ev);
+            }
+        }
+
+        fn draw(&self, dirty: NSRect) {
+            let c = self.ivars().colors.get();
+            let snap = self.ivars().snap.borrow();
+            let w = self.bounds().size.width;
+            if snap.rows.is_empty() {
+                let f = style::system_font(12.5, Weight::Regular);
+                style::draw_text_centered(&snap.empty, Rect::new(0.0, 24.0, w, 24.0), &f, c.dim);
+                return;
+            }
+            let first = (dirty.origin.y / ROW_H).floor().max(0.0) as usize;
+            let last = (((dirty.origin.y + dirty.size.height) / ROW_H).ceil() as usize).min(snap.rows.len());
+            let frames = column_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0));
+            let font = style::system_font(12.0, Weight::Regular);
+            let bold = style::system_font(12.0, Weight::Bold);
+            let rules = snap.rules.clone().unwrap_or_else(|| style_rules(&Value::Null));
+            let hover = self.ivars().hover.get();
+            for i in first..last {
+                let r = &snap.rows[i];
+                let band = Rect::new(0.0, i as f64 * ROW_H, w, ROW_H);
+                let pill = Rect::new(4.0, band.y + 1.0, w - 8.0 - 6.0, band.height - 2.0);
+                if i == snap.selection {
+                    style::fill_rounded(pill, 5.0, c.highlight);
+                    NSGraphicsContext::saveGraphicsState_class();
+                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns(pill), 5.0, 5.0).addClip();
+                    style::fill_rect(Rect::new(pill.x, pill.y, 3.0, pill.height), c.accent_on());
+                    NSGraphicsContext::restoreGraphicsState_class();
+                } else if hover == Some(i) {
+                    style::fill_rounded(pill, 5.0, style::button_fill(ButtonState::Hover, &c));
+                }
+                let key = r.get("key").cloned().unwrap_or_default();
+                draw_check(check_rect(band), snap.checked.contains(&key), &c);
+                draw_star(star_rect(band), snap.favs.contains(&key), &c);
+                let cells: Vec<(String, Option<CellStyle>)> = snap
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        let flat = display_cell(&col.field, r.get(&col.field).map(String::as_str).unwrap_or(""));
+                        let st = if flat.is_empty() { None } else { cell_style(&rules, &col.field, &flat) };
+                        (flat, st)
+                    })
+                    .collect();
+                let quiet = cells.iter().any(|(_, s)| s.as_ref().and_then(|s| s.quiets_row) == Some(true));
+                let alpha = if quiet { 0.6 } else { 1.0 };
+                for (k, col) in snap.columns.iter().enumerate() {
+                    let Some(&(fx, fw)) = frames.get(k) else { continue };
+                    if fw <= 8.0 {
+                        continue;
+                    }
+                    let (flat, st) = &cells[k];
+                    if flat.is_empty() {
+                        continue;
+                    }
+                    let hue = st.as_ref().map(|s| c.tone(tone_of(s.tone.as_deref())));
+                    let tinted = st.as_ref().is_some_and(|s| s.tinted == Some(true) || s.tone.as_deref() == Some("dim"));
+                    let color = if tinted { hue.unwrap_or(c.text) } else { c.text };
+                    let f = if st.as_ref().and_then(|s| s.bold) == Some(true) { &bold } else { &font };
+                    let mut cell = Rect::new(fx + 3.0, band.y, fw - 8.0, band.height);
+                    if let (Some(s), Some(h)) = (st, hue) {
+                        if let Some(mark) = &s.mark {
+                            let side = 9.0;
+                            draw_mark(
+                                Rect::new(cell.x, (band.mid_y() - side / 2.0).round(), side, side),
+                                mark,
+                                h.with_alpha(h.a * alpha),
+                            );
+                            cell.x += side + 7.0;
+                            cell.width = (cell.width - side - 7.0).max(0.0);
+                        }
+                    }
+                    let col_color = color.with_alpha(color.a * alpha);
+                    if col.align == "right" {
+                        style::draw_text_right(flat, cell, f, col_color);
+                    } else if col.align == "center" {
+                        style::draw_text_centered(flat, cell, f, col_color);
+                    } else {
+                        style::draw_text_left(flat, cell, f, col_color);
+                    }
+                }
+                style::hline(LEAD - 6.0, w - PADDING - 10.0, band.max_y() - 1.0, c.hairline());
+            }
+        }
+    }
+
+    fn draw_check(r: Rect, on: bool, c: &PopupColors) {
+        if on {
+            style::fill_rounded(r, 3.0, c.accent_on());
+            let p = NSBezierPath::bezierPath();
+            p.setLineWidth(1.6);
+            p.moveToPoint(NSPoint::new(r.x + 3.0, r.mid_y() + 0.5));
+            p.lineToPoint(NSPoint::new(r.mid_x() - 0.5, r.max_y() - 3.0));
+            p.lineToPoint(NSPoint::new(r.max_x() - 2.5, r.y + 3.0));
+            c.on_accent().to_nscolor().setStroke();
+            p.stroke();
+        } else {
+            style::fill_rounded(r, 3.0, c.highlight.with_alpha(0.5));
+            style::stroke_rounded(r, 3.0, 1.0, c.dim.with_alpha(0.8));
+        }
+    }
+
+    fn draw_star(r: Rect, on: bool, c: &PopupColors) {
+        let p = NSBezierPath::bezierPath();
+        let (cx, cy) = (r.mid_x(), r.mid_y() + 0.5);
+        let outer = r.width / 2.0;
+        let inner = outer * 0.45;
+        for k in 0..10 {
+            // Flipped view: start at -90° (up) means +y is down, so negate.
+            let a = (-90.0 + k as f64 * 36.0_f64).to_radians();
+            let rad = if k % 2 == 0 { outer } else { inner };
+            let pt = NSPoint::new(cx + a.cos() * rad, cy + a.sin() * rad);
+            if k == 0 { p.moveToPoint(pt) } else { p.lineToPoint(pt) }
+        }
+        p.closePath();
+        p.setLineJoinStyle(objc2_app_kit::NSLineJoinStyle::Round);
+        if on {
+            c.tone(PopupTone::Warning).to_nscolor().setFill();
+            p.fill();
+        } else {
+            c.dim.with_alpha(0.55).to_nscolor().setStroke();
+            p.setLineWidth(1.1);
+            p.stroke();
+        }
+    }
+
+    /// `drawStageMark`.
+    fn draw_mark(r: Rect, mark: &str, color: Rgba) {
+        let lw = 1.5;
+        let bx = r.inset_by(lw / 2.0, lw / 2.0);
+        match mark {
+            "filled" => style::fill_rounded(r, 2.0, color),
+            "half" => {
+                NSGraphicsContext::saveGraphicsState_class();
+                NSBezierPath::clipRect(ns(Rect::new(r.x, r.y, r.width / 2.0, r.height)));
+                style::fill_rounded(r, 2.0, color);
+                NSGraphicsContext::restoreGraphicsState_class();
+                let p = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns(bx), 2.0, 2.0);
+                p.setLineWidth(lw);
+                color.to_nscolor().setStroke();
+                p.stroke();
+            }
+            _ => {
+                let p = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns(bx), 2.0, 2.0);
+                p.setLineWidth(lw);
+                color.to_nscolor().setStroke();
+                p.stroke();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ header
+
+    pub struct HeaderIvars {
+        snap: Rc<RefCell<JiraSnapshot>>,
+        colors: Cell<PopupColors>,
+        sink: RefCell<Option<Sink>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJiraHeaderView"]
+        #[ivars = HeaderIvars]
+        pub struct JiraHeaderView;
+
+        impl JiraHeaderView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(mouseDownCanMoveWindow))]
+            fn mdcmw(&self) -> bool { false }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let w = self.bounds().size.width;
+                let cols = self.ivars().snap.borrow().columns.clone();
+                let frames = column_frames(&cols, LEAD, w - LEAD - (PADDING + 10.0));
+                if let Some(i) = frames.iter().position(|(x, fw)| p.x >= *x && p.x < x + fw) {
+                    let s = self.ivars().sink.borrow().clone();
+                    if let Some(s) = s {
+                        s(JiraEvent::Sort(i));
+                    }
+                }
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _dirty: NSRect) {
+                self.draw();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for JiraHeaderView {}
+    );
+
+    impl JiraHeaderView {
+        fn new(mtm: MainThreadMarker, snap: Rc<RefCell<JiraSnapshot>>, colors: PopupColors) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(HeaderIvars { snap, colors: Cell::new(colors), sink: RefCell::new(None) });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        fn draw(&self) {
+            let c = self.ivars().colors.get();
+            let b = self.bounds();
+            let (w, h) = (b.size.width, b.size.height);
+            style::fill_rect(Rect::new(0.0, 0.0, w, h), c.mantle());
+            let snap = self.ivars().snap.borrow();
+            let frames = column_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0));
+            let font = style::system_font(12.0 * 0.86, Weight::Bold);
+            // The "fit columns" glyph in the lead gutter.
+            style::draw_symbol("arrow.left.and.right", Rect::new(LEAD / 2.0 + 6.0, 0.0, 16.0, h), c.dim.with_alpha(0.9), 9.0);
+            for (i, col) in snap.columns.iter().enumerate() {
+                let Some(&(fx, fw)) = frames.get(i) else { continue };
+                let mut title = col.title.to_uppercase();
+                let sorted = snap.sort.map(|(si, _)| si) == Some(i);
+                if sorted {
+                    title.push_str(if snap.sort.unwrap().1 { " ↑" } else { " ↓" });
+                }
+                let color = if sorted { c.accent_on() } else { c.dim };
+                let filter = col.filterable && fw > 30.0;
+                let fr = Rect::new(fx + fw - 16.0 - 5.0, h / 2.0 - 8.0, 16.0, 16.0);
+                let tw = (fw - 8.0 - if filter { 18.0 } else { 0.0 }).max(0.0);
+                let r = Rect::new(fx + 3.0, 0.0, tw, h);
+                let spaced = kerned(&title);
+                if col.align == "right" {
+                    style::draw_text_right(&spaced, r, &font, color);
+                } else {
+                    style::draw_text_left(&spaced, r, &font, color);
+                }
+                if filter {
+                    style::chevron(fr.inset_by(4.0, 4.0), c.dim.with_alpha(0.9));
+                }
+                if i + 1 < snap.columns.len() {
+                    style::vline(fx + fw - 0.5, 6.0, h - 6.0, c.hairline());
+                }
+            }
+            style::hline(0.0, w, h - 1.0, c.hairline());
+        }
+    }
+
+    /// Approximate `.kern: 0.6` with hair spaces between letters.
+    fn kerned(s: &str) -> String {
+        let mut out = String::new();
+        for (i, ch) in s.chars().enumerate() {
+            if i > 0 && ch != ' ' {
+                out.push('\u{200A}');
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    // ---------------------------------------------------------- inspector
+
+    pub struct InspectorIvars {
+        snap: Rc<RefCell<JiraSnapshot>>,
+        colors: Cell<PopupColors>,
+        hover: Cell<bool>,
+        sink: RefCell<Option<Sink>>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJiraInspectorView"]
+        #[ivars = InspectorIvars]
+        pub struct JiraInspectorView;
+
+        impl JiraInspectorView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(mouseDownCanMoveWindow))]
+            fn mdcmw(&self) -> bool { false }
+
+            #[unsafe(method(updateTrackingAreas))]
+            fn uta(&self) {
+                let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
+                    self.removeTrackingArea(&t);
+                }
+                *self.ivars().tracking.borrow_mut() = Some(tracking(self));
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let on = self.button_rect().contains(p.x, p.y);
+                if on != self.ivars().hover.get() {
+                    self.ivars().hover.set(on);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if self.button_rect().contains(p.x, p.y) && self.ivars().snap.borrow().inspector.is_some() {
+                    let s = self.ivars().sink.borrow().clone();
+                    if let Some(s) = s {
+                        s(JiraEvent::OpenDetail);
+                    }
+                }
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _dirty: NSRect) {
+                self.draw();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for JiraInspectorView {}
+    );
+
+    impl JiraInspectorView {
+        fn new(mtm: MainThreadMarker, snap: Rc<RefCell<JiraSnapshot>>, colors: PopupColors) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(InspectorIvars {
+                snap,
+                colors: Cell::new(colors),
+                hover: Cell::new(false),
+                sink: RefCell::new(None),
+                tracking: RefCell::new(None),
+            });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        fn button_rect(&self) -> Rect {
+            let b = self.bounds();
+            let footer = 70.0;
+            let bw = (b.size.width - 36.0).max(160.0);
+            Rect::new((b.size.width - bw) / 2.0, b.size.height - footer + 8.0, bw, 32.0)
+        }
+
+        fn draw(&self) {
+            let c = self.ivars().colors.get();
+            let b = self.bounds();
+            let (w, h) = (b.size.width, b.size.height);
+            style::fill_rect(Rect::new(0.0, 0.0, w, h), c.mantle().with_alpha(0.7));
+            style::fill_rect(Rect::new(0.0, 0.0, 1.0, h), c.hairline());
+            let snap = self.ivars().snap.borrow();
+            let Some(ic) = &snap.inspector else {
+                let f = style::system_font(13.0, Weight::Regular);
+                style::draw_text(&"Select an issue".to_string(), 15.0, 16.0, &f, c.dim);
+                return;
+            };
+            let x = 15.0;
+            let tw = w - 30.0;
+            let mut y = 14.0;
+            y += draw_wrapped(&ic.key, Rect::new(x, y, tw, 40.0), &style::system_font(12.5, Weight::Bold), c.accent) + 4.0;
+            y += draw_wrapped(&ic.title, Rect::new(x, y, tw, 120.0), &style::system_font(16.0, Weight::Semibold), c.text) + 10.0;
+            if !ic.chips.is_empty() {
+                let f = style::system_font(12.0, Weight::Semibold);
+                let mut cx = x;
+                for (t, tone) in &ic.chips {
+                    let col = c.tone(*tone);
+                    let (cw, ch) = style::text_size(t, &f);
+                    let r = Rect::new(cx, y, cw + 6.0, ch + 2.0);
+                    style::fill_rect(r, col.with_alpha(0.18));
+                    style::draw_text(t, cx + 3.0, y + 1.0, &f, col);
+                    cx += r.width + 8.0;
+                }
+                y += 30.0;
+            }
+            if !ic.body.is_empty() {
+                let body: String = if ic.body.chars().count() > 700 {
+                    ic.body.chars().take(700).collect::<String>() + "…"
+                } else {
+                    ic.body.clone()
+                };
+                y += draw_wrapped(&body, Rect::new(x, y, tw, (h - 90.0 - y).max(0.0)), &style::system_font(13.0, Weight::Regular), c.text) + 14.0;
+            }
+            let lf = style::system_font(12.0, Weight::Regular);
+            let vf = style::system_font(12.5, Weight::Regular);
+            for (label, value) in &ic.fields {
+                if value.is_empty() {
+                    continue;
+                }
+                if y > h - 90.0 {
+                    break;
+                }
+                style::draw_text(label, x, y, &lf, c.dim);
+                let vh = draw_wrapped(value, Rect::new(x + 84.0, y - 0.5, tw - 84.0, 60.0), &vf, c.text);
+                y += vh.max(16.0) + 5.0;
+            }
+            let br = self.button_rect();
+            let fill = if self.ivars().hover.get() { c.accent_on().with_alpha(0.28) } else { c.accent_on().with_alpha(0.18) };
+            style::fill_rounded(br, 8.0, fill);
+            let bf = style::system_font(13.0, Weight::Semibold);
+            let (_, bh) = style::text_size("Open full detail", &bf);
+            style::draw_text("Open full detail", br.x + 14.0, br.mid_y() - bh / 2.0, &bf, c.accent);
+            let kc = Rect::new(br.max_x() - 30.0, br.mid_y() - 9.0, 20.0, 18.0);
+            style::fill_rounded(kc, 4.0, c.accent_on().with_alpha(0.25));
+            style::draw_text_centered("⏎", kc, &style::system_font(10.0, Weight::Semibold), c.readable(c.accent, 4.0));
+            let hf = style::system_font(11.0, Weight::Regular);
+            style::draw_text_centered("⌘I hides this panel", Rect::new(8.0, h - 70.0 + 42.0, w - 16.0, 16.0), &hf, c.dim);
+        }
+    }
+
+    // ---------------------------------------------------------- container
+
+    pub struct JiraIvars {
+        snap: Rc<RefCell<JiraSnapshot>>,
+        colors: Cell<PopupColors>,
+        sidebar: Retained<SidebarView>,
+        search: Retained<NSTextField>,
+        search_box: Retained<NSView>,
+        header: Retained<JiraHeaderView>,
+        scroll: Retained<NSScrollView>,
+        table: Retained<JiraTableView>,
+        inspector: Retained<JiraInspectorView>,
+        sink: RefCell<Option<Sink>>,
+        sidebar_w: Cell<f64>,
+        inspector_w: Cell<f64>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJiraView"]
+        #[ivars = JiraIvars]
+        pub struct JiraView;
+
+        impl JiraView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(setFrameSize:))]
+            fn set_frame_size(&self, size: NSSize) {
+                let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+                self.layout_panes();
+            }
+
+            #[unsafe(method(controlTextDidChange:))]
+            fn control_text_did_change(&self, _n: &NSNotification) {
+                let q = self.ivars().search.stringValue().to_string();
+                self.emit(JiraEvent::Query(q));
+            }
+
+            #[unsafe(method(control:textView:doCommandBySelector:))]
+            fn do_command(&self, _c: &AnyObject, _tv: &NSTextView, cmd: Sel) -> objc2::runtime::Bool {
+                let ev = if cmd == sel!(insertNewline:) {
+                    JiraEvent::Enter
+                } else if cmd == sel!(moveDown:) {
+                    JiraEvent::Move(1)
+                } else if cmd == sel!(moveUp:) {
+                    JiraEvent::Move(-1)
+                } else if cmd == sel!(cancelOperation:) {
+                    JiraEvent::Escape
+                } else {
+                    return objc2::runtime::Bool::NO;
+                };
+                self.emit(ev);
+                objc2::runtime::Bool::YES
+            }
+        }
+
+        unsafe impl NSObjectProtocol for JiraView {}
+        unsafe impl NSControlTextEditingDelegate for JiraView {}
+        unsafe impl NSTextFieldDelegate for JiraView {}
+    );
+
+    impl JiraView {
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64, inspector_w: f64) -> Retained<Self> {
+            let snap = Rc::new(RefCell::new(JiraSnapshot::default()));
+            let sidebar = SidebarView::new(mtm, colors);
+            sidebar.set_collapse_key("jira");
+            let (search_box, search) = crate::ui::field::search_box(mtm, &colors, 13.0, "search...", 6.0, 28.0);
+            let header = JiraHeaderView::new(mtm, snap.clone(), colors);
+            let scroll = NSScrollView::new(mtm);
+            scroll.setHasVerticalScroller(true);
+            scroll.setAutohidesScrollers(true);
+            scroll.setDrawsBackground(false);
+            let table = JiraTableView::new(mtm, snap.clone(), colors);
+            scroll.setDocumentView(Some(&table));
+            let inspector = JiraInspectorView::new(mtm, snap.clone(), colors);
+            let this = Self::alloc(mtm).set_ivars(JiraIvars {
+                snap,
+                colors: Cell::new(colors),
+                sidebar,
+                search,
+                search_box,
+                header,
+                scroll,
+                table,
+                inspector,
+                sink: RefCell::new(None),
+                sidebar_w: Cell::new(sidebar_w),
+                inspector_w: Cell::new(inspector_w),
+            });
+            let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            let iv = v.ivars();
+            for sub in [&*iv.sidebar as &NSView, &iv.search_box, &iv.header, &iv.scroll, &iv.inspector] {
+                v.addSubview(sub);
+            }
+            unsafe { iv.search.setDelegate(Some(ProtocolObject::from_ref(&*v))) };
+            v
+        }
+
+        pub fn set_on_event(&self, cb: Box<dyn Fn(JiraEvent)>) {
+            let rc: Sink = Rc::from(cb);
+            *self.ivars().sink.borrow_mut() = Some(rc.clone());
+            *self.ivars().table.ivars().sink.borrow_mut() = Some(rc.clone());
+            *self.ivars().header.ivars().sink.borrow_mut() = Some(rc.clone());
+            *self.ivars().inspector.ivars().sink.borrow_mut() = Some(rc.clone());
+            self.ivars().sidebar.set_on_event(Box::new(move |e| rc(JiraEvent::Sidebar(e))));
+        }
+
+        fn emit(&self, ev: JiraEvent) {
+            let s = self.ivars().sink.borrow().clone();
+            if let Some(s) = s {
+                s(ev);
+            }
+        }
+
+        pub fn table_view(&self) -> Retained<NSView> {
+            Retained::into_super(self.ivars().table.clone())
+        }
+
+        pub fn search_field(&self) -> Retained<NSTextField> {
+            self.ivars().search.clone()
+        }
+
+        pub fn apply(&self, s: JiraSnapshot) {
+            let iv = self.ivars();
+            iv.sidebar.set_model(s.sidebar.clone());
+            let editing = iv.search.currentEditor().is_some();
+            if !editing && iv.search.stringValue().to_string() != s.query {
+                iv.search.setStringValue(&NSString::from_str(&s.query));
+            }
+            let rows_changed = {
+                let old = iv.snap.borrow();
+                old.rows.len() != s.rows.len()
+                    || old.rows.first().and_then(|r| r.get("key")) != s.rows.first().and_then(|r| r.get("key"))
+                    || old.columns != s.columns
+            };
+            *iv.snap.borrow_mut() = s;
+            self.layout_panes();
+            if rows_changed {
+                iv.scroll.contentView().scrollToPoint(NSPoint::new(0.0, 0.0));
+                iv.scroll.reflectScrolledClipView(&iv.scroll.contentView());
+            }
+            self.scroll_selection_visible();
+            for v in [&*iv.table as &NSView, &iv.header, &iv.inspector] {
+                v.setNeedsDisplay(true);
+            }
+        }
+
+        pub fn layout_panes(&self) {
+            let iv = self.ivars();
+            let b = self.bounds();
+            let (w, h) = (b.size.width, b.size.height);
+            let sw = iv.sidebar.width(iv.sidebar_w.get());
+            let show_insp = iv.snap.borrow().show_inspector;
+            let insp = if show_insp { iv.inspector_w.get().min(w * 0.4) } else { 0.0 };
+            iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, h)));
+            let x0 = sw + 4.0;
+            let mw = (w - insp - x0).max(100.0);
+            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, 9.0, (mw * 0.9 - 22.0).max(80.0), 28.0)));
+            iv.header.setFrame(ns(Rect::new(x0, 50.0, mw, HEADER_H)));
+            let ty = 50.0 + HEADER_H + 2.0;
+            iv.scroll.setFrame(ns(Rect::new(x0, ty, mw, (h - ty).max(0.0))));
+            let n = iv.snap.borrow().rows.len();
+            let doc_h = (n as f64 * ROW_H).max(h - ty);
+            iv.table.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(mw, doc_h)));
+            iv.inspector.setHidden(!show_insp);
+            iv.inspector.setFrame(ns(Rect::new(w - insp, 0.0, insp, h)));
+        }
+
+        fn scroll_selection_visible(&self) {
+            let iv = self.ivars();
+            let sel = iv.snap.borrow().selection;
+            let clip = iv.scroll.contentView();
+            let vis = clip.bounds();
+            if vis.size.height < ROW_H {
+                return;
+            }
+            let (top, bot) = (sel as f64 * ROW_H, (sel + 1) as f64 * ROW_H);
+            let mut t = vis.origin.y;
+            if bot > vis.origin.y + vis.size.height {
+                t = bot - vis.size.height;
+            } else if top < vis.origin.y {
+                t = top;
+            }
+            if t != vis.origin.y {
+                clip.scrollToPoint(NSPoint::new(0.0, t));
+                iv.scroll.reflectScrolledClipView(&clip);
+            }
+        }
+
+        pub fn sidebar_collapsed_changed(&self) {
+            self.layout_panes();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(field: &str, w: f64) -> ListColumn {
+        ListColumn { field: field.into(), title: field.into(), width: w, align: "left".into(), sortable: true, filterable: true }
+    }
+
+    #[test]
+    fn frames_follow_percent_widths() {
+        let f = column_frames(&[col("a", 25.0), col("b", 75.0)], 10.0, 400.0);
+        assert_eq!(f, vec![(10.0, 100.0), (110.0, 300.0)]);
+    }
+
+    #[test]
+    fn frames_scale_down_over_100() {
+        let f = column_frames(&[col("a", 100.0), col("b", 100.0)], 0.0, 400.0);
+        assert!((f[0].1 - 200.0).abs() < 1e-9 && (f[1].0 - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn autos_share_leftover() {
+        let f = column_frames(&[col("a", 50.0), col("b", 0.0), col("c", 0.0)], 0.0, 100.0);
+        assert_eq!(f[1].1, 25.0);
+        assert_eq!(f[2].1, 25.0);
+    }
+
+    #[test]
+    fn iso_updated_displays_short() {
+        assert_eq!(display_cell("updated", "2026-10-08T20:14:20.595-0400"), "2026-10-08 20:14");
+        assert_eq!(display_cell("title", "a\nb"), "a b");
+    }
+
+    #[test]
+    fn status_styles_follow_word_rules() {
+        let mut v = serde_json::Map::new();
+        v.insert("status-done-words".into(), Value::String("done, closed".into()));
+        v.insert("status-active-words".into(), Value::String("progress".into()));
+        let r = style_rules(&Value::Object(v));
+        assert_eq!(cell_style(&r, "status", "Done").unwrap().mark.as_deref(), Some("filled"));
+        assert_eq!(cell_style(&r, "status", "In Progress").unwrap().mark.as_deref(), Some("half"));
+        assert_eq!(cell_style(&r, "status", "To Do").unwrap().mark.as_deref(), Some("hollow"));
+        assert!(cell_style(&r, "title", "x").is_none());
+    }
+
+    #[test]
+    fn sort_toggles_and_filters() {
+        let mut l = JiraList::default();
+        l.columns = vec![col("key", 50.0), col("title", 50.0)];
+        l.section.insert("filter".into(), "key,title".into());
+        for (k, t) in [("A-2", "beta"), ("A-1", "alpha"), ("A-3", "gamma")] {
+            let mut r = Record::new();
+            r.insert("key".into(), k.into());
+            r.insert("title".into(), t.into());
+            l.all.push(r);
+        }
+        l.sort_by(0);
+        assert_eq!(l.row(0).unwrap()["key"], "A-1");
+        l.sort_by(0);
+        assert_eq!(l.row(0).unwrap()["key"], "A-3");
+        l.query = "alp".into();
+        l.refilter();
+        assert_eq!(l.rows.len(), 1);
+    }
+
+    #[test]
+    fn record_flattens_arrays() {
+        let r = record_of(&serde_json::json!({"key": "K-1", "labels": ["a", "b"], "n": 3})).unwrap();
+        assert_eq!(r["labels"], "a, b");
+        assert_eq!(r["n"], "3");
+    }
+}

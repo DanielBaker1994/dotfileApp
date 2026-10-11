@@ -1073,6 +1073,17 @@ pub struct FileBrowser {
     /// The built AppKit view tree (`build_macos`).
     #[cfg(target_os = "macos")]
     pub root: Option<Retained<NSView>>,
+    /// The live view (`FilesView`) the model pushes snapshots into.
+    #[cfg(target_os = "macos")]
+    pub view: Option<Retained<crate::views::files_view::FilesView>>,
+    /// `[files] favorites` (static) + the pinned list (`files-favorites.json`).
+    pub static_favorites: Vec<String>,
+    pub pinned_favorites: Vec<String>,
+    pub favorites_file: String,
+    /// `[files] recent-scope` != home (`recentEverywhere`).
+    pub recent_everywhere: bool,
+    /// A transient status message (`setStatus`) shown until the next change.
+    pub status_note: Option<String>,
 }
 
 impl FileBrowser {
@@ -1096,6 +1107,313 @@ impl FileBrowser {
             rename_editor: None,
             #[cfg(target_os = "macos")]
             root: None,
+            #[cfg(target_os = "macos")]
+            view: None,
+            static_favorites: Vec::new(),
+            pinned_favorites: Vec::new(),
+            favorites_file: format!(
+                "{}/.cache/kitchen-sink/files-favorites.json",
+                std::env::var("HOME").unwrap_or_default()
+            ),
+            recent_everywhere: true,
+            status_note: None,
+        }
+    }
+
+    /// Apply the `[files]` section (Swift `applyBrowserSettings` +
+    /// `fileBrowserFavorites` + `loadFavorites` + the sort settings).
+    pub fn configure(&mut self, section: &std::collections::HashMap<String, String>) {
+        if let Some(s) = section.get("sort") {
+            self.sort_key = SortKey::from_raw(s);
+        }
+        self.sort_descending = match section.get("sort-order").map(|s| s.to_lowercase()) {
+            Some(o) if o == "desc" => true,
+            Some(o) if o == "asc" => false,
+            _ => self.sort_key.natural_descending(),
+        };
+        self.static_favorites = section
+            .get("favorites")
+            .map(|f| f.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default();
+        self.recent_everywhere = section
+            .get("recent-scope")
+            .map_or(true, |s| s.to_lowercase() != "home");
+        if let Ok(text) = std::fs::read_to_string(&self.favorites_file) {
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(&text) {
+                self.pinned_favorites = v;
+            }
+        }
+    }
+
+    /// `mergedFavorites()` — existing folders, static first, de-duplicated.
+    pub fn merged_favorites(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for raw in self.static_favorites.iter().chain(self.pinned_favorites.iter()) {
+            let p = standardize(&expand_tilde(raw));
+            if Path::new(&p).is_dir() && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    fn save_favorites(&self) {
+        if let Some(dir) = Path::new(&self.favorites_file).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(text) = serde_json::to_string(&self.pinned_favorites) {
+            let _ = std::fs::write(&self.favorites_file, text);
+        }
+    }
+
+    /// `toggleStar()` — pin / unpin the current folder.
+    pub fn toggle_pin(&mut self) {
+        if self.in_recent() {
+            return;
+        }
+        let cwd = self.cwd.clone();
+        if self.merged_favorites().contains(&cwd) && self.pinned_favorites.contains(&cwd) {
+            self.pinned_favorites.retain(|p| p != &cwd);
+        } else if !self.merged_favorites().contains(&cwd) {
+            self.pinned_favorites.push(cwd.clone());
+        }
+        self.save_favorites();
+        let on = self.merged_favorites().contains(&cwd);
+        self.status_note = Some(if on {
+            format!("★ pinned {}", display_path(&cwd))
+        } else {
+            format!("unpinned {}", display_path(&cwd))
+        });
+    }
+
+    /// Persist the pinned list after an external edit (sidebar "Unpin").
+    pub fn toggle_pin_save(&mut self) {
+        self.save_favorites();
+    }
+
+    /// `pickSortKey` / `toggleSortOrder` → `applySort()`.
+    pub fn set_sort(&mut self, key: SortKey) {
+        if key != self.sort_key {
+            self.sort_descending = key.natural_descending();
+        }
+        self.sort_key = key;
+        self.resort();
+    }
+
+    pub fn toggle_order(&mut self) {
+        self.sort_descending = !self.sort_descending;
+        self.resort();
+    }
+
+    fn resort(&mut self) {
+        let key = self.sort_key;
+        let mut all = std::mem::take(&mut self.all);
+        if !self.in_recent() {
+            for e in all.iter_mut() {
+                decorate(e, key);
+            }
+            all = sort_entries(&all, key, self.sort_descending);
+        }
+        self.all = all;
+        self.refilter();
+    }
+
+    /// `recentEntries()` — the virtual list rows with Swift's trailing text
+    /// ("~/dir · ↓ source · 12 KB · 5m ago").
+    pub fn recent_entries(&self, arrived: bool) -> Vec<Entry> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        recent_snapshot(arrived)
+            .into_iter()
+            .filter_map(|it| {
+                let md = std::fs::metadata(&it.path).ok()?;
+                let mut e = Entry::new(basename(&it.path), it.path.clone(), md.is_dir(), md.len() as i64);
+                let mut dir = display_path(
+                    &Path::new(&it.path).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default(),
+                );
+                if let Some(rest) = dir.strip_prefix("/private/tmp") {
+                    dir = format!("/tmp{rest}");
+                }
+                let mut parts = vec![dir];
+                if let Some(src) = &it.source {
+                    parts.push(format!("↓ {src}"));
+                }
+                if !e.is_dir {
+                    parts.push(human_size(e.size));
+                }
+                parts.push(ago(now - it.at));
+                e.trailing_text = parts.join(" · ");
+                Some(e)
+            })
+            .collect()
+    }
+
+    /// `updateStatus()`.
+    pub fn status_text(&self) -> String {
+        if let Some(n) = &self.status_note {
+            return n.clone();
+        }
+        let items = self.list.rows.iter().filter(|e| !e.is_parent()).count();
+        let count = format!("{items} item{}", if items == 1 { "" } else { "s" });
+        match &self.mode {
+            QueryMode::All if self.in_recent() => {
+                let status = match self.virtual_index {
+                    Some(1) => "downloads, AirDrop, Messages / Mail saves — wherever they were saved".to_string(),
+                    _ => format!(
+                        "newest first · created or changed anywhere {}",
+                        if self.recent_everywhere { "on this Mac (outside system folders)" } else { "in ~ or /tmp" }
+                    ),
+                };
+                format!("{count} · {status}")
+            }
+            QueryMode::All => format!("{count} · sorted by {}", self.sort_key.label().to_lowercase()),
+            QueryMode::Terminal(dir) => format!("↵ open a terminal in {}", display_path(dir)),
+            QueryMode::Local(_) => {
+                if items == 0 {
+                    "no matches — try a path (~/…) or **/name to search subfolders".to_string()
+                } else {
+                    format!("{count} · ↵ open")
+                }
+            }
+            QueryMode::Dir { dir, pat } => {
+                if !Path::new(dir).is_dir() {
+                    return format!("no such folder: {}", display_path(dir));
+                }
+                let exact = Path::new(dir).join(pat);
+                if !pat.is_empty() && exact.exists() {
+                    if exact.is_dir() {
+                        format!("↵ cd {} · ⇥ list it", display_path(&exact.to_string_lossy()))
+                    } else {
+                        format!("↵ open {}", display_path(&exact.to_string_lossy()))
+                    }
+                } else {
+                    format!("{count} in {} · ⇥ complete · ↵ open", display_path(dir))
+                }
+            }
+            QueryMode::Recursive { .. } => String::new(),
+        }
+    }
+
+    /// `previewSelection()` — synchronous (text capped at 256 KB).
+    pub fn preview(&self) -> (String, crate::views::files_view::Preview) {
+        use crate::views::files_view::Preview;
+        let Some(e) = self.list.rows.get(self.list.selection) else {
+            return (String::new(), Preview::Hint(String::new()));
+        };
+        let key = format!("{}|{}|{}", e.path, e.modified, e.size);
+        if e.is_dir {
+            let rows: Vec<Entry> = self
+                .list_dir(&e.path, false)
+                .into_iter()
+                .filter(|r| !r.is_parent())
+                .collect();
+            return (key, Preview::Folder(rows));
+        }
+        let ext = Path::new(&e.path)
+            .extension()
+            .map(|x| x.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        const IMAGES: [&str; 9] = ["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff", "pdf"];
+        if IMAGES.contains(&ext.as_str()) {
+            return (key, Preview::Image(e.path.clone()));
+        }
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Ok(f) = std::fs::File::open(&e.path) {
+            let _ = f.take(262_144).read_to_end(&mut buf);
+        }
+        if !buf.is_empty() {
+            let text = match String::from_utf8(buf) {
+                Ok(t) => Some(t),
+                Err(err) => {
+                    // A cut multi-byte char at the cap is still text.
+                    let valid = err.utf8_error().valid_up_to();
+                    let bytes = err.into_bytes();
+                    (valid + 4 >= bytes.len() && valid > 0)
+                        .then(|| String::from_utf8_lossy(&bytes[..valid]).into_owned())
+                }
+            };
+            if let Some(t) = text {
+                if !t.contains('\0') {
+                    return (key, Preview::Text(t));
+                }
+            }
+        }
+        (key, Preview::Hint("no preview".into()))
+    }
+
+    /// The sidebar model (`syncSidebar`): Pinned favorites + the Places
+    /// rows (Recent, Arrived, Home, Desktop, Documents, Downloads).
+    pub fn sidebar_model(&self) -> crate::ui::sidebar::SidebarModel {
+        use crate::ui::sidebar::{SidebarModel, SidebarPin, SidebarRow};
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut rows: Vec<SidebarRow> = default_virtual_lists()
+            .into_iter()
+            .map(|(t, sym)| SidebarRow::new(&t, &sym))
+            .collect();
+        let places = places(&home);
+        rows.extend(places.iter().map(|p| SidebarRow::new(&p.title, &p.symbol)));
+        let selected = match self.virtual_index {
+            Some(v) => Some(v),
+            None => places.iter().position(|p| p.path == self.cwd).map(|k| 2 + k),
+        };
+        let pinned = self
+            .merged_favorites()
+            .into_iter()
+            .map(|p| SidebarPin {
+                label: display_path(&p),
+                tip: format!("Open {} in the file browser", display_path(&p)),
+                key: p,
+                icon: "folder".into(),
+                section: "Pinned".into(),
+                meta: String::new(),
+            })
+            .collect();
+        SidebarModel {
+            section_title: "Places".into(),
+            rows,
+            selected,
+            pinned,
+            pinned_selected: (!self.in_recent()).then(|| self.cwd.clone()),
+            ..Default::default()
+        }
+    }
+
+    /// The full view snapshot.
+    pub fn snapshot(&self) -> crate::views::files_view::FilesSnapshot {
+        let (preview_key, preview) = self.preview();
+        let in_recent = self.in_recent();
+        crate::views::files_view::FilesSnapshot {
+            rows: self.list.rows.clone(),
+            selection: self.list.selection,
+            marked: self.list.marked.clone(),
+            sidebar: self.sidebar_model(),
+            pinned_on: !in_recent && self.merged_favorites().contains(&self.cwd),
+            can_pin: !in_recent,
+            sort_short: self.sort_key.short().to_string(),
+            descending: self.sort_descending,
+            status: self.status_text(),
+            placeholder: match self.virtual_index {
+                Some(v) => format!(
+                    "{} · type to filter",
+                    default_virtual_lists().get(v).map(|x| x.0.clone()).unwrap_or_default()
+                ),
+                None => "filter…".into(),
+            },
+            query: self.query.clone(),
+            field_text: if in_recent { String::new() } else { self.cwd.clone() },
+            preview,
+            preview_key,
+        }
+    }
+
+    /// Push the current state into the live view (no-op before `build`).
+    pub fn sync_view(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(v) = &self.view {
+            v.apply(self.snapshot());
         }
     }
 
@@ -1162,7 +1480,8 @@ impl FileBrowser {
 
     /// `reload()` for the plain (non-Recent) case.
     pub fn reload(&mut self) {
-        if self.in_recent() {
+        if let Some(v) = self.virtual_index {
+            self.all = self.recent_entries(v == 1);
             self.refilter();
             return;
         }
@@ -1405,19 +1724,15 @@ impl FileBrowser {
         if self.root.is_some() {
             return;
         }
-        let colors = crate::ui::theme::PopupThemeDefaults::colors();
-        let where_text = self.where_text();
-        let selected = self.list.rows.get(self.list.selection).cloned();
-        let view = macos::build_view(
-            mtm,
-            &where_text,
-            self.visible_rows(),
-            self.list.selection,
-            &self.list.marked,
-            selected.as_ref(),
-            &colors,
+        let colors = crate::ui::theme::section_colors("files");
+        let view = crate::views::files_view::FilesView::new(mtm, colors);
+        view.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        self.root = Some(view);
+        view.apply(self.snapshot());
+        self.root = Some(Retained::into_super(view.clone()));
+        self.view = Some(view);
     }
 
     /// The built AppKit root view, once [`Self::build`] has run.
@@ -1466,6 +1781,82 @@ impl std::fmt::Debug for FileBrowser {
 /// Build a default browser view rooted at `$HOME` (the real `reload()`
 /// listing), for the host to drop into a window.
 #[cfg(target_os = "macos")]
+// ------------------------------------------------------------ recent files
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// `RecentFiles.shared` — leaked once (its FSEvents context points at it).
+    static RECENT: std::cell::Cell<*mut crate::engines::recent_files::RecentFiles> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// `configureRecentFiles()` — start the shared Recent / Arrived engine
+/// (main thread, once) from the `[files]` section.
+pub fn start_recent(section: &std::collections::HashMap<String, String>) {
+    #[cfg(target_os = "macos")]
+    RECENT.with(|r| {
+        if !r.get().is_null() {
+            return;
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let enabled = section.get("recent").map_or(true, |v| !matches!(v.to_lowercase().as_str(), "false" | "no" | "0" | "off"));
+        if !enabled {
+            return;
+        }
+        let mut engine = Box::new(crate::engines::recent_files::RecentFiles::new(
+            &home,
+            &format!("{home}/.cache/kitchen-sink/recent.json"),
+        ));
+        let days = section.get("recent-days").and_then(|v| v.parse().ok()).unwrap_or(7);
+        let limit = section.get("recent-limit").and_then(|v| v.parse().ok()).unwrap_or(200);
+        let excludes: Vec<String> = section
+            .get("recent-exclude")
+            .map(|v| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default();
+        let everywhere = section.get("recent-scope").map_or(true, |s| s.to_lowercase() != "home");
+        engine.configure(true, days, limit, &excludes, everywhere);
+        engine.start();
+        r.set(Box::into_raw(engine));
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = section;
+}
+
+/// Run `f` on the shared Recent engine (no-op before `start_recent`).
+pub fn with_recent(f: impl FnOnce(&mut crate::engines::recent_files::RecentFiles)) {
+    #[cfg(target_os = "macos")]
+    RECENT.with(|r| {
+        let p = r.get();
+        if !p.is_null() {
+            // SAFETY: leaked box, main thread only.
+            f(unsafe { &mut *p });
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = f;
+}
+
+/// `RecentFiles.shared.entries(arrivedOnly:)` (empty before `start_recent`).
+pub fn recent_snapshot(arrived: bool) -> Vec<crate::engines::recent_files::Entry> {
+    #[cfg(target_os = "macos")]
+    {
+        return RECENT.with(|r| {
+            let p = r.get();
+            if p.is_null() {
+                Vec::new()
+            } else {
+                // SAFETY: leaked box, main thread only.
+                unsafe { (*p).entries(arrived) }
+            }
+        });
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = arrived;
+        Vec::new()
+    }
+}
+
 pub fn build_content(mtm: objc2::MainThreadMarker) -> Option<Retained<NSView>> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let mut browser = FileBrowser::new(&home);

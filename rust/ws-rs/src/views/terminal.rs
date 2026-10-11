@@ -422,11 +422,53 @@ impl TerminalPanel {
             ..PopupConfig::default()
         };
         let panel = PopupPanel::create(mtm, &cfg);
-        let view = swiftterm_shim::create_terminal(mtm, rect);
-        panel.setContentView(Some(&view));
+        // `TerminalPanel` chrome: a rounded opaque card, the "Terminal"
+        // header (✕ + title, drags the panel), the terminal inset 8 pt.
+        let colors = crate::ui::theme::section_colors("terminal");
+        let root = objc2_app_kit::NSView::initWithFrame(
+            <objc2_app_kit::NSView as objc2::MainThreadOnly>::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(f.width, f.height)),
+        );
+        root.setWantsLayer(true);
+        if let Some(l) = root.layer() {
+            l.setCornerRadius(12.0);
+            l.setMasksToBounds(true);
+            l.setBackgroundColor(Some(&colors.background.with_alpha(1.0).to_nscolor().CGColor()));
+            l.setBorderWidth(1.0);
+            l.setBorderColor(Some(&colors.text.with_alpha(0.1).to_nscolor().CGColor()));
+        }
+        let header = header::TerminalHeader::new(mtm, colors);
+        header.setFrame(NSRect::new(NSPoint::new(0.0, f.height - 30.0), NSSize::new(f.width, 30.0)));
+        header.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        {
+            let weak = objc2::rc::Weak::from_retained(&panel);
+            header.set_on_close(Box::new(move || {
+                if let Some(p) = weak.load() {
+                    p.orderOut(None);
+                }
+            }));
+        }
+        let view = swiftterm_shim::create_terminal(
+            mtm,
+            NSRect::new(NSPoint::new(8.0, 8.0), NSSize::new(f.width - 16.0, f.height - 30.0 - 12.0)),
+        );
+        view.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        root.addSubview(&view);
+        root.addSubview(&header);
+        panel.setContentView(Some(&root));
+        let _ = rect;
 
         if let Some(shim) = view.clone().downcast::<swiftterm_shim::WSShim>().ok() {
             swiftterm_shim::set_font(&shim, &self.config.font_name, self.config.font_size);
+            let pal: Vec<objc2::rc::Retained<objc2_app_kit::NSColor>> =
+                crate::ui::theme::ansi_palette(&colors).into_iter().map(|c| c.to_nscolor()).collect();
+            swiftterm_shim::set_colors(&shim, &colors.background.with_alpha(1.0).to_nscolor(), &colors.text.to_nscolor(), &pal);
             let home = std::env::var("HOME").ok();
             swiftterm_shim::start_process(
                 &shim,
@@ -678,5 +720,134 @@ mod tests {
         assert_eq!(v["cols"], 80);
         assert_eq!(v["rows"], 24);
         assert_eq!(v["frame"], json!([0, 0, 760, 460]));
+    }
+}
+
+
+/// `TerminalHeader` (TerminalPanel.swift): ✕ at the left, the centered dim
+/// title, a hairline; a drag elsewhere moves the panel.
+#[cfg(target_os = "macos")]
+mod header {
+    use crate::ui::chrome::Rect;
+    use crate::ui::style::{self, Weight};
+    use crate::ui::theme::PopupColors;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2_app_kit::{NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView};
+    use objc2_foundation::{NSObjectProtocol, NSRect};
+    use std::cell::{Cell, RefCell};
+
+    fn as_any<T: Message + ?Sized>(obj: &T) -> &AnyObject {
+        unsafe { &*(obj as *const T as *const AnyObject) }
+    }
+
+    pub struct HeaderIvars {
+        colors: Cell<PopupColors>,
+        hover: Cell<bool>,
+        on_close: RefCell<Option<Box<dyn Fn()>>>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSTerminalHeader"]
+        #[ivars = HeaderIvars]
+        pub struct TerminalHeader;
+
+        impl TerminalHeader {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(updateTrackingAreas))]
+            fn uta(&self) {
+                let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
+                    self.removeTrackingArea(&t);
+                }
+                let opts = NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect;
+                let t = unsafe {
+                    NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), self.bounds(), opts, Some(as_any(self)), None)
+                };
+                self.addTrackingArea(&t);
+                *self.ivars().tracking.borrow_mut() = Some(t);
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let h = self.close_rect().inset_by(-3.0, -3.0).contains(p.x, p.y);
+                if h != self.ivars().hover.get() {
+                    self.ivars().hover.set(h);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseExited:))]
+            fn mouse_exited(&self, _e: &NSEvent) {
+                self.ivars().hover.set(false);
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if self.close_rect().inset_by(-3.0, -3.0).contains(p.x, p.y) {
+                    if let Some(cb) = self.ivars().on_close.borrow().as_ref() {
+                        cb();
+                    }
+                    return;
+                }
+                if let Some(w) = self.window() {
+                    w.performWindowDragWithEvent(e);
+                }
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _d: NSRect) {
+                let c = self.ivars().colors.get();
+                let b = self.bounds();
+                let r = self.close_rect();
+                let hov = self.ivars().hover.get();
+                if hov {
+                    style::fill_rounded(r, 5.0, c.highlight);
+                }
+                style::draw_text_centered("✕", r, &style::system_font(11.0, Weight::Medium), if hov { c.text } else { c.dim });
+                style::draw_text_centered(
+                    "Terminal",
+                    Rect::new(40.0, 0.0, (b.size.width - 80.0).max(0.0), b.size.height),
+                    &style::system_font(11.5, Weight::Medium),
+                    c.dim,
+                );
+                style::fill_rect(Rect::new(0.0, b.size.height - 1.0, b.size.width, 1.0), c.text.with_alpha(0.08));
+            }
+        }
+
+        unsafe impl NSObjectProtocol for TerminalHeader {}
+    );
+
+    impl TerminalHeader {
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(HeaderIvars {
+                colors: Cell::new(colors),
+                hover: Cell::new(false),
+                on_close: RefCell::new(None),
+                tracking: RefCell::new(None),
+            });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        pub fn set_on_close(&self, cb: Box<dyn Fn()>) {
+            *self.ivars().on_close.borrow_mut() = Some(cb);
+        }
+
+        fn close_rect(&self) -> Rect {
+            let h = self.bounds().size.height;
+            Rect::new(10.0, (h - 18.0) / 2.0, 18.0, 18.0)
+        }
     }
 }

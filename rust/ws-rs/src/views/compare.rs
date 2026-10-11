@@ -4093,6 +4093,11 @@ pub struct PaneModel {
     pub ignore_unimportant: bool,
     pub left_name: String,
     pub right_name: String,
+    /// `headerL` / `headerR` text (the path, `~`-abbreviated) + dirty flags.
+    pub left_header: String,
+    pub right_header: String,
+    pub left_dirty: bool,
+    pub right_dirty: bool,
     pub mode: String,
     pub section: String,
     /// `summary.stringValue` — the header summary (`CompareSession::summary`).
@@ -4110,6 +4115,21 @@ impl Default for PaneModel {
     }
 }
 
+/// `headerL` / `headerR`: the side's path (`~`-abbreviated) or its name.
+fn header_text(s: &CompareSession, side: CompareSide) -> String {
+    match s.path.get(&side) {
+        Some(p) if !p.is_empty() => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            if !home.is_empty() && p.starts_with(&home) {
+                format!("~{}", &p[home.len()..])
+            } else {
+                p.clone()
+            }
+        }
+        _ => s.name(side),
+    }
+}
+
 impl PaneModel {
     pub fn empty() -> Self {
         PaneModel {
@@ -4123,6 +4143,10 @@ impl PaneModel {
             ignore_unimportant: false,
             left_name: String::new(),
             right_name: String::new(),
+            left_header: String::new(),
+            right_header: String::new(),
+            left_dirty: false,
+            right_dirty: false,
             mode: CompareFilter::All.title().to_string(),
             section: String::new(),
             summary: String::new(),
@@ -4155,6 +4179,10 @@ impl PaneModel {
             ignore_unimportant: m.ignore_unimportant,
             left_name: s.name(CompareSide::Left),
             right_name: s.name(CompareSide::Right),
+            left_header: header_text(s, CompareSide::Left),
+            right_header: header_text(s, CompareSide::Right),
+            left_dirty: s.dirty(CompareSide::Left),
+            right_dirty: s.dirty(CompareSide::Right),
             mode: s.filter.title().to_string(),
             section,
             summary: String::new(),
@@ -4453,6 +4481,8 @@ pub fn build_content(
 #[cfg(target_os = "macos")]
 pub struct CompareSurface {
     root: objc2::rc::Retained<objc2_app_kit::NSView>,
+    chrome: objc2::rc::Retained<crate::views::compare_view::CompareView>,
+    recent_filter: std::cell::RefCell<String>,
     pane: objc2::rc::Retained<macos::ComparePaneView>,
     tree: objc2::rc::Retained<macos::FolderTreeView>,
     last: std::cell::Cell<Option<(u64, i64)>>,
@@ -4463,27 +4493,126 @@ pub struct CompareSurface {
 #[cfg(target_os = "macos")]
 impl CompareSurface {
     pub fn build(mtm: objc2::MainThreadMarker) -> Self {
-        use objc2::MainThreadOnly;
         use objc2_app_kit::{NSAutoresizingMaskOptions as M, NSView};
         use objc2_foundation::{NSPoint, NSRect, NSSize};
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
-        let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        let colors = crate::ui::theme::section_colors("compare");
+        let sidebar_w = CompareConfig::load().number("sidebar-width", 210.0);
+        let chrome = crate::views::compare_view::CompareView::new(mtm, colors, sidebar_w.max(160.0));
+        chrome.setFrame(frame);
+        chrome.setAutoresizingMask(M::ViewWidthSizable | M::ViewHeightSizable);
         let pane = macos::ComparePaneView::create(mtm);
+        pane.set_colors(colors);
         let tree = macos::FolderTreeView::create(mtm);
-        for v in [&*pane as &NSView, &*tree as &NSView] {
-            v.setFrame(frame);
-            v.setAutoresizingMask(M::ViewWidthSizable | M::ViewHeightSizable);
-            root.addSubview(v);
-        }
+        chrome.set_body(vec![
+            objc2::rc::Retained::into_super(pane.clone()),
+            objc2::rc::Retained::into_super(tree.clone()),
+        ]);
         pane.set_model(PaneModel::empty());
         tree.setHidden(true);
+        // macOS 14+ defaults `clipsToBounds` to NO; the pane fills dirty rects
+        // that can reach past its frame.
+        pane.setClipsToBounds(true);
+        tree.setClipsToBounds(true);
+        let root: objc2::rc::Retained<NSView> = objc2::rc::Retained::into_super(chrome.clone());
         CompareSurface {
             root,
+            chrome,
+            recent_filter: std::cell::RefCell::new(String::new()),
             pane,
             tree,
             last: std::cell::Cell::new(None),
             pane_top: std::cell::Cell::new(0),
             tree_top: std::cell::Cell::new(0),
+        }
+    }
+
+    /// The chrome's event sink (sidebar / start page / toolbar clicks).
+    pub fn set_on_event(&self, cb: Box<dyn Fn(crate::views::compare_view::CompareEvent)>) {
+        self.chrome.set_on_event(cb);
+    }
+
+    pub fn chrome(&self) -> objc2::rc::Retained<crate::views::compare_view::CompareView> {
+        self.chrome.clone()
+    }
+
+    /// Force the next `sync` to repaint (after an event changed the model).
+    pub fn invalidate(&self) {
+        self.last.set(None);
+    }
+
+    pub fn set_recent_filter(&self, f: &str) {
+        *self.recent_filter.borrow_mut() = f.to_string();
+        self.last.set(None);
+    }
+
+    /// The recent rows shown on the start page (filtered, with missing flags).
+    pub fn recent_rows(&self, model: &CompareWindowModel) -> Vec<crate::views::compare_view::RecentRow> {
+        let q = self.recent_filter.borrow().to_lowercase();
+        model
+            .recent
+            .load()
+            .into_iter()
+            .filter(|e| q.is_empty() || e.left.to_lowercase().contains(&q) || e.right.to_lowercase().contains(&q))
+            .map(|e| crate::views::compare_view::RecentRow {
+                missing_left: !Path::new(&e.left).exists(),
+                missing_right: !Path::new(&e.right).exists(),
+                pasted_left: model.recent.is_pasted(&e.left),
+                pasted_right: model.recent.is_pasted(&e.right),
+                entry: e,
+            })
+            .collect()
+    }
+
+    fn chrome_snapshot(&self, model: &CompareWindowModel) -> crate::views::compare_view::CompareSnap {
+        use crate::ui::sidebar::{SidebarModel, SidebarPin, SidebarRow};
+        let on_start = model.on_start_page();
+        let rows = model
+            .sessions
+            .iter()
+            .map(|s| SidebarRow {
+                title: s.label(),
+                icon: if s.folder.is_some() { "folder".into() } else { "arrow.left.arrow.right".into() },
+                badge: s.is_dirty().then(|| (String::new(), crate::ui::theme::PopupTone::Warning)),
+                tip: format!(
+                    "{}\n{}",
+                    s.path.get(&CompareSide::Left).cloned().unwrap_or_else(|| s.name(CompareSide::Left)),
+                    s.path.get(&CompareSide::Right).cloned().unwrap_or_else(|| s.name(CompareSide::Right))
+                ),
+                ..Default::default()
+            })
+            .collect();
+        let pin = |key: &str, label: &str, icon: &str, tip: &str| SidebarPin {
+            key: key.into(),
+            label: label.into(),
+            icon: icon.into(),
+            section: "Compare".into(),
+            tip: tip.into(),
+            ..Default::default()
+        };
+        let sidebar = SidebarModel {
+            section_title: "Open".into(),
+            rows,
+            selected: model.selected,
+            pinned: vec![
+                pin("home", "Home", "house", "Recent comparisons, open files or folders (⌘0)"),
+                pin("new", "New text compare", "square.and.pencil", "Two empty sides — click one and paste (⌘N)"),
+            ],
+            pinned_selected: on_start.then(|| "home".to_string()),
+            closable: true,
+            ..Default::default()
+        };
+        let cur = model.current();
+        crate::views::compare_view::CompareSnap {
+            sidebar,
+            on_start,
+            folder: model.current_is_folder(),
+            recent: if on_start { self.recent_rows(model) } else { Vec::new() },
+            recent_sel: model.recent_selection,
+            filter: cur.map(|s| CompareFilter::ALL.iter().position(|f| *f == s.filter).unwrap_or(0)).unwrap_or(0),
+            summary: cur.map(|s| s.summary(&model.config)).unwrap_or_default(),
+            identical: cur.is_some_and(|s| s.model.sections().is_empty() && !s.is_binary()),
+            status: cur.map(|s| s.status.clone()).unwrap_or_default(),
         }
     }
 
@@ -4494,12 +4623,16 @@ impl CompareSurface {
     /// Repaint from `model` when anything drawn changed (or the height did).
     /// Writes the live scroll offset back as `scrollY` (`state.current`).
     pub fn sync(&self, model: &mut CompareWindowModel) {
-        let height = self.root.bounds().size.height;
+        let height = self.root.bounds().size.height - crate::views::compare_view::TOOLBAR_H - crate::views::compare_view::STATUS_H;
         let key = (model.draw_fingerprint(), height as i64);
         if self.last.get() == Some(key) {
             return;
         }
         self.last.set(Some(key));
+        self.chrome.apply(self.chrome_snapshot(model));
+        if model.on_start_page() {
+            return;
+        }
         if model.current_is_folder() {
             self.pane.setHidden(true);
             self.tree.setHidden(false);
@@ -4673,35 +4806,42 @@ mod macos {
             let layout = PaneLayout::new(b.size.width, b.size.height);
             fill(Rect::new(0.0, 0.0, b.size.width, b.size.height), colors.base());
 
-            // Header strip.
-            fill(Rect::new(0.0, 0.0, b.size.width, layout.header), colors.mantle());
+            // Path headers (`CompareHeaderLabel` per side).
             fill(
                 Rect::new(0.0, (layout.header - 1.0).max(0.0), b.size.width, 1.0),
                 colors.hairline(),
             );
-            let hfont = NSFont::systemFontOfSize_weight(12.0, unsafe { NSFontWeightSemibold });
-            let hattrs = text_attrs(&hfont, &colors.accent_on().to_nscolor());
-            let title = if model.section.is_empty() {
-                model.mode.clone()
-            } else {
-                format!("{}  ·  {}", model.mode, model.section)
-            };
-            draw_text(&title, 10.0, 6.0, &hattrs);
-            let nfont = NSFont::systemFontOfSize(11.0);
-            let nattrs = text_attrs(&nfont, &colors.dim.to_nscolor());
-            let names = format!("{}  ⇆  {}", model.left_name, model.right_name);
-            let nw = measure_text(&names, &nattrs);
-            draw_text(&names, (b.size.width - nw - 10.0).max(10.0), 6.0, &nattrs);
-            // `summary` label: success-tinted when there are no differences.
-            if !model.summary.is_empty() {
-                let tone = if model.identical {
-                    colors.tone(PopupTone::Success)
-                } else {
-                    colors.text
-                };
-                let sattrs = text_attrs(&nfont, &tone.to_nscolor());
-                let tw = measure_text(&title, &hattrs);
-                draw_text(&model.summary, 10.0 + tw + 16.0, 6.5, &sattrs);
+            for (side, text, dirty) in [
+                (CompareSide::Left, &model.left_header, model.left_dirty),
+                (CompareSide::Right, &model.right_header, model.right_dirty),
+            ] {
+                let x = layout.pane_x(side);
+                let w = layout.pane_w();
+                let focused = side == model.focus;
+                let font = NSFont::monospacedSystemFontOfSize_weight(
+                    11.5,
+                    unsafe { if focused { NSFontWeightSemibold } else { NSFontWeightRegular } },
+                );
+                let a = text_attrs(&font, &(if focused { colors.text } else { colors.dim }).to_nscolor());
+                let mut avail = w - 20.0;
+                if dirty {
+                    let ef = NSFont::systemFontOfSize_weight(11.0, unsafe { NSFontWeightSemibold });
+                    let ea = text_attrs(&ef, &colors.tone(PopupTone::Warning).to_nscolor());
+                    let ew = measure_text("  ● edited", &ea);
+                    let tw = measure_text(text, &a).min(avail - ew);
+                    draw_text("  ● edited", x + 10.0 + tw, (layout.header - 16.0) / 2.0 + 1.0, &ea);
+                    avail -= ew;
+                }
+                // Truncate from the head (`.byTruncatingHead`).
+                let mut shown = text.clone();
+                while measure_text(&shown, &a) > avail && shown.chars().count() > 2 {
+                    let rest: String = shown.chars().skip(2).collect();
+                    shown = format!("…{rest}");
+                }
+                draw_text(&shown, x + 10.0, (layout.header - 16.0) / 2.0, &a);
+                if focused {
+                    fill(Rect::new(x, layout.header - 2.0, w, 2.0), colors.accent_on());
+                }
             }
 
             // Centre gutter.

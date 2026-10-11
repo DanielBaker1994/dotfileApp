@@ -632,6 +632,10 @@ impl SwitcherController {
 
     fn register_views_from_text(&mut self, text: &str) {
         let sections = parse_sections(text);
+        crate::ui::theme::install_theme(
+            &sections.get("theme").cloned().unwrap_or_default(),
+            sections.clone(),
+        );
 
         self.inner.lock().unwrap().paths_enabled = section_flag(&sections, "paths", false);
 
@@ -786,8 +790,8 @@ impl SwitcherController {
         let icon = |name: &str| (!name.is_empty()).then(|| name.to_string());
 
         let mut nav = vec![
-            (SlotView::Files, "Files".to_string(), icon(&s.files_icon_name)),
             (SlotView::Notes, "Notes".to_string(), icon(&s.notes_icon_name)),
+            (SlotView::Files, "Files".to_string(), icon(&s.files_icon_name)),
             (SlotView::Jira, "Jira".to_string(), icon(&s.jira_icon_name)),
         ];
         if section_flag(sections, "confluence", false) {
@@ -2187,6 +2191,64 @@ impl FocusWatch {
 /// `focusBridgeChanged(_:)`'s decision: the bridge file names our shown
 /// shared window (`raw` = AeroSpace's focused window id), it was written
 /// within the last second, and the user did not just click another app.
+/// One AeroSpace workspace for the header strip (`WorkspaceInfo`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StripWorkspace {
+    pub id: String,
+    /// `(app name, bundle id, window title)` per window.
+    pub apps: Vec<(String, String, String)>,
+    pub focused: bool,
+}
+
+/// `gatherWorkspaces()` (with bundle ids) filtered like `refreshWorkspaceStrip`
+/// (only workspaces with windows, plus the focused one), numeric ids first.
+pub(crate) fn gather_strip_with(call: &dyn Fn(&[String]) -> Option<String>) -> Vec<StripWorkspace> {
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let order: Vec<String> = call(&args(&["list-workspaces", "--all"]))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if order.is_empty() {
+        return Vec::new();
+    }
+    let focused = call(&args(&["list-workspaces", "--focused"]))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let mut rows: Vec<StripWorkspace> = order
+        .iter()
+        .map(|id| StripWorkspace { id: id.clone(), apps: Vec::new(), focused: *id == focused })
+        .collect();
+    let wins = call(&args(&[
+        "list-windows",
+        "--all",
+        "--format",
+        "%{app-name}|%{app-bundle-id}|%{window-title}|%{workspace}",
+    ]))
+    .unwrap_or_default();
+    for line in wins.lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let ws = parts[parts.len() - 1];
+        let title = parts[2..parts.len() - 1].join("|");
+        if let Some(row) = rows.iter_mut().find(|w| w.id == ws) {
+            row.apps.push((parts[0].to_string(), parts[1].to_string(), title));
+        }
+    }
+    rows.sort_by(|a, b| match (a.id.parse::<i64>(), b.id.parse::<i64>()) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+        (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => a.id.to_lowercase().cmp(&b.id.to_lowercase()),
+    });
+    rows.retain(|w| !w.apps.is_empty() || w.focused);
+    rows
+}
+
 pub(crate) fn focus_bridge_should_activate(
     raw: &str,
     our_wid: i64,
@@ -2531,6 +2593,12 @@ mod daemon_ui {
         notes: Option<crate::views::notes::NotesSurface>,
         /// The files surface (kept so its list keys stay addressable).
         files: Option<crate::views::files::FileBrowser>,
+        /// The live AI window.
+        ai: Option<AIState>,
+        /// The live Confluence window (model + view + web preview).
+        confluence: Option<ConfState>,
+        /// The live Jira list (`ListSession`) + its view.
+        jira: Option<(crate::views::jira_view::JiraList, Retained<crate::views::jira_view::JiraView>)>,
         /// The live compare surface (compare + compareText share it).
         compare: Option<crate::views::compare::CompareSurface>,
         /// The Ctrl+B prefix machine (`SharedWindow.prefixKey`).
@@ -2600,7 +2668,112 @@ mod daemon_ui {
             .count() as i64
     }
 
+    /// `AIWindow`'s live pieces.
+    pub(crate) struct AIState {
+        model: crate::views::ai::AIWindowModel,
+        view: Retained<crate::views::ai_view::AIView>,
+        command: String,
+        tokens: String,
+        tokens_warn: bool,
+        token_due: Option<f64>,
+        token_gen: u64,
+        was_running: bool,
+        set_input: Option<String>,
+    }
+
+    /// `ConfluenceWindow`'s live pieces.
+    pub(crate) struct ConfState {
+        model: crate::views::confluence::ConfluenceModel,
+        view: Retained<crate::views::confluence_view::ConfluenceView>,
+        preview: crate::views::confluence::macos::ConfluencePreview,
+        pstate: crate::views::confluence_view::ConfPreviewState,
+        pages: HashMap<String, serde_json::Value>,
+        preview_id: String,
+        search_gen: u64,
+        preview_gen: u64,
+        last_hit: Option<(i64, i64, String)>,
+    }
+
+    thread_local! {
+        /// `PathShelf.shared` — the Paths tool's recent-files shelf.
+        static SHELF: RefCell<Option<Rc<RefCell<crate::engines::path_shelf::PathShelf>>>> = const { RefCell::new(None) };
+    }
+
+    /// `configureRecentFiles()` + `configurePathShelf()` at launch: the
+    /// Recent engine starts and feeds the shelf (`onKept` / `onRenamed`).
+    fn configure_recent_and_shelf() {
+        let text = crate::app::config::read_config_text().unwrap_or_default();
+        let sections = super::parse_sections(&text);
+        crate::views::files::start_recent(&sections.get("files").cloned().unwrap_or_default());
+        let Some(paths) = sections.get("paths") else { return };
+        let limit = paths.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(500);
+        let p = crate::app::paths::Paths::from_env();
+        let ignore = paths
+            .get("ignore-file")
+            .map(|v| crate::app::config::expand_tilde(v))
+            .filter(|v| !v.is_empty())
+            .map(|v| if v.starts_with('/') { v } else { format!("{}/{v}", p.user_dir()) })
+            .unwrap_or_else(|| format!("{}/config/paths.ignore", p.user_dir()));
+        let shelf = Rc::new(RefCell::new(crate::engines::path_shelf::PathShelf::new()));
+        shelf.borrow_mut().configure(limit, Some(&ignore));
+        let sh = shelf.clone();
+        crate::views::files::with_recent(|r| crate::engines::path_shelf::PathShelf::wire_recent(sh, r));
+        if shelf.borrow().is_empty() {
+            let seed: Vec<(String, f64, Option<String>)> =
+                crate::views::files::recent_snapshot(false).into_iter().map(|e| (e.path, e.at, e.source)).collect();
+            shelf.borrow_mut().seed(&seed);
+        }
+        SHELF.with(|s| *s.borrow_mut() = Some(shelf));
+    }
+
+    fn shelf_entries() -> Vec<crate::engines::path_shelf::Item> {
+        SHELF.with(|s| s.borrow().as_ref().map(|sh| sh.borrow().entries()).unwrap_or_default())
+    }
+
+    thread_local! {
+        /// The daemon UI, for main-thread hops from worker threads.
+        static UI_WEAK: RefCell<Option<objc2::rc::Weak<DaemonUi>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` on the main thread against the live daemon UI.
+    fn on_ui(f: impl FnOnce(&DaemonUi) + Send + 'static) {
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
+            if let Some(ui) = ui {
+                f(&ui);
+            }
+        });
+    }
+
+    /// `ConfluenceAPI.run(args, stdin:) { j in … }` — the CLI off-main, the
+    /// reply on main (`{"ok": false, "error"}` when the run itself fails).
+    fn conf_api(
+        args: Vec<String>,
+        stdin: Option<serde_json::Value>,
+        then: impl FnOnce(&DaemonUi, serde_json::Value) + Send + 'static,
+    ) {
+        std::thread::spawn(move || {
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let data = stdin.map(|v| serde_json::to_vec(&v).unwrap_or_default());
+            let j = match crate::views::confluence::run_api(&argv, data.as_deref()) {
+                Ok(v) => v,
+                Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            };
+            on_ui(move |ui| then(ui, j));
+        });
+    }
+
     pub struct DaemonUiIvars {
+        /// Header workspace strip: the background gather's latest result,
+        /// whether one is running, when it last ran, the drawn signature and
+        /// the per-app icon cache (`refreshWorkspaceStrip`, `iconCache`).
+        strip_result: Arc<std::sync::Mutex<Option<Vec<super::StripWorkspace>>>>,
+        strip_busy: Arc<std::sync::atomic::AtomicBool>,
+        strip_last: Cell<f64>,
+        files_recent_at: Cell<f64>,
+        jira_refresh_at: Cell<f64>,
+        strip_sig: RefCell<String>,
+        icon_cache: RefCell<HashMap<String, Retained<objc2_app_kit::NSImage>>>,
         controller: Arc<SwitcherController>,
         queue: UiQueue,
         /// The `do:` main-hop jobs (`SwitcherController::run_on_main`).
@@ -2682,6 +2855,13 @@ mod daemon_ui {
             let _ = std::fs::write(&bridge_path, "");
         }
         let this = DaemonUi::alloc(mtm).set_ivars(DaemonUiIvars {
+            strip_result: Arc::new(std::sync::Mutex::new(None)),
+            strip_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            strip_last: Cell::new(0.0),
+            files_recent_at: Cell::new(0.0),
+            jira_refresh_at: Cell::new(0.0),
+            strip_sig: RefCell::new(String::new()),
+            icon_cache: RefCell::new(HashMap::new()),
             controller,
             queue,
             main_queue,
@@ -2698,6 +2878,11 @@ mod daemon_ui {
             click_monitor: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
+        UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
+        // The Recent seed runs `mdfind`: start it after launch settles.
+        dispatch2::DispatchQueue::main()
+            .after(dispatch2::DispatchTime::NOW.time(2_000_000_000), configure_recent_and_shelf)
+            .ok();
         // The window's local keyDown guard (mirrors `PopupWindow.installMonitors`):
         // the block holds the UI weakly so AppKit's monitor retains no cycle.
         let weak = Weak::new(&*ui);
@@ -2787,6 +2972,11 @@ mod daemon_ui {
             self.sync_member_states();
             self.sync_compare();
             self.watch_focus();
+            self.refresh_workspace_strip();
+            self.refresh_files_recent();
+            self.refresh_jira();
+            self.poll_conf_hits();
+            self.poll_ai();
             if let Some(mtm) = MainThreadMarker::new() {
                 self.ivars()
                     .controller
@@ -2834,6 +3024,101 @@ mod daemon_ui {
         /// hide-on-focus-loss`, refocus after a swap steal), the "became key
         /// while inactive" self-activation, and `watchFocusBridge` (AeroSpace
         /// focused our window → activate).
+        /// `refreshWorkspaceStrip()`: every 6 s while the window is up, gather
+        /// AeroSpace off-main, then build the header cells (≤3 app icons, "+N",
+        /// focused) on main and redraw only when the signature changed.
+        fn refresh_workspace_strip(&self) {
+            use std::sync::atomic::Ordering;
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            if let Some(fresh) = self.ivars().strip_result.lock().unwrap().take() {
+                let sig = fresh
+                    .iter()
+                    .map(|w| format!("{}|{}|{}", w.id, w.apps.len(), w.focused))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                if *self.ivars().strip_sig.borrow() != sig {
+                    *self.ivars().strip_sig.borrow_mut() = sig;
+                    let cells: Vec<crate::ui::chrome::WorkspaceCell> = fresh
+                        .iter()
+                        .map(|w| crate::ui::chrome::WorkspaceCell {
+                            key: w.id.clone(),
+                            icons: w.apps.iter().take(3).map(|a| self.app_icon(a)).collect(),
+                            extra: (w.apps.len() > 3).then(|| format!("+{}", w.apps.len() - 3)),
+                            unread: String::new(),
+                            focused: w.focused,
+                        })
+                        .collect();
+                    crate::ui::chrome::set_workspace_cells(mtm, cells);
+                }
+            }
+            let visible = self
+                .ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .is_some_and(|st| st.window.isVisible());
+            let now = now_secs();
+            if !visible || now - self.ivars().strip_last.get() < 6.0 {
+                return;
+            }
+            if self.ivars().strip_busy.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            self.ivars().strip_last.set(now);
+            let out = self.ivars().strip_result.clone();
+            let busy = self.ivars().strip_busy.clone();
+            std::thread::spawn(move || {
+                let ipc = crate::app::hotkey::AeroIpc::discover();
+                let rows = super::gather_strip_with(&|args| {
+                    crate::app::hotkey::AeroCall::call(&ipc, args)
+                });
+                if !rows.is_empty() {
+                    *out.lock().unwrap() = Some(rows);
+                }
+                busy.store(false, Ordering::SeqCst);
+            });
+        }
+
+        /// `iconForApp(_:)` (cached): the bundle's icon, else `/Applications/<name>.app`.
+        fn app_icon(&self, app: &(String, String, String)) -> Retained<objc2_app_kit::NSImage> {
+            use objc2_app_kit::NSWorkspace;
+            let key = if app.1.is_empty() { app.0.clone() } else { app.1.clone() };
+            if let Some(img) = self.ivars().icon_cache.borrow().get(&key) {
+                return img.clone();
+            }
+            let ws = NSWorkspace::sharedWorkspace();
+            let mut path: Option<String> = None;
+            if !app.1.is_empty() {
+                if let Some(url) =
+                    ws.URLForApplicationWithBundleIdentifier(&NSString::from_str(&app.1))
+                {
+                    path = url.path().map(|p| p.to_string());
+                }
+            }
+            if path.is_none() {
+                for dir in ["/Applications", "/System/Applications", "/Applications/Utilities"] {
+                    let p = format!("{dir}/{}.app", app.0);
+                    if std::path::Path::new(&p).exists() {
+                        path = Some(p);
+                        break;
+                    }
+                }
+            }
+            let img = match path {
+                Some(p) => ws.iconForFile(&NSString::from_str(&p)),
+                None => crate::ui::style::glyph_icon(
+                    "app.dashed",
+                    "?",
+                    crate::ui::theme::PopupColors::default().dim,
+                    32.0,
+                ),
+            };
+            self.ivars().icon_cache.borrow_mut().insert(key, img.clone());
+            img
+        }
+
         fn watch_focus(&self) {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
@@ -3157,8 +3442,17 @@ mod daemon_ui {
                 .unwrap_or_else(|| PathsWindow::new(PathsReturn::File));
             match cmd {
                 PathsCmd::Show => {
+                    win.set_items(shelf_entries());
                     win.show();
                     win.build(mtm);
+                    if win.on_event.is_none() {
+                        let weak = objc2::rc::Weak::from_retained(&self.retain());
+                        win.set_on_event(Rc::new(move |ev| {
+                            if let Some(ui) = weak.load() {
+                                ui.paths_event(ev);
+                            }
+                        }));
+                    }
                     win.show_window(mtm);
                 }
                 PathsCmd::Hide => win.hide_window(),
@@ -3183,6 +3477,98 @@ mod daemon_ui {
             controller.set_paths_state(doc);
             controller.set_tool_state("paths", tool_doc);
             controller.set_window_count(visible_window_count(mtm));
+        }
+
+        /// Run `f` on the paths window, then repaint it.
+        fn paths_surface<R>(&self, f: impl FnOnce(&mut PathsWindow) -> R) -> Option<R> {
+            let mut state = self.ivars().state.borrow_mut();
+            let w = state.as_mut().and_then(|st| st.paths.as_mut())?;
+            let r = f(w);
+            w.sync_view();
+            Some(r)
+        }
+
+        fn paths_return(&self) {
+            let Some((action, text, files, open)) = self.paths_surface(|w| {
+                (w.return_action, w.copy_paths_text(), w.copy_files(), w.selected_paths())
+            }) else {
+                return;
+            };
+            match action {
+                PathsReturn::Path => copy_text_to_pasteboard(&text),
+                PathsReturn::File => copy_files_to_pasteboard(&files),
+                PathsReturn::Open => {
+                    for p in open {
+                        open_path(&p);
+                    }
+                }
+            }
+            self.paths_surface(|w| w.hide_window());
+        }
+
+        fn paths_event(&self, ev: crate::views::paths::PathsEvent) {
+            use crate::views::paths::PathsEvent as E;
+            match ev {
+                E::Query(q) => {
+                    self.paths_surface(|w| w.set_query(&q));
+                }
+                E::Move(d) => {
+                    self.paths_surface(|w| w.move_by(d));
+                }
+                E::Escape => {
+                    self.paths_surface(|w| w.hide_window());
+                }
+                E::Enter => self.paths_return(),
+                E::Click { row, double } => {
+                    self.paths_surface(|w| w.selection = row);
+                    if double {
+                        self.paths_return();
+                    }
+                }
+                E::RowMenu { row, x, y } => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let Some(Some(path)) = self.paths_surface(|w| {
+                        w.selection = row;
+                        w.rows.get(row).map(|r| r.path.clone())
+                    }) else {
+                        return;
+                    };
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let (p1, p2, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
+                    let w1 = weak.clone();
+                    popup(
+                        vec![
+                            MenuEntry::item("Copy File", move || copy_files_to_pasteboard(&[p1])),
+                            MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p2)),
+                            MenuEntry::Separator,
+                            MenuEntry::item("Open in Notes", move || {
+                                if let Some(ui) = w1.load() {
+                                    ui.open_in_notes(&p3);
+                                }
+                            }),
+                            MenuEntry::item("Open in Default App", move || open_path(&p4)),
+                            MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p5])),
+                            MenuEntry::Separator,
+                            MenuEntry::item("Forget", move || {
+                                SHELF.with(|s| {
+                                    if let Some(sh) = s.borrow().as_ref() {
+                                        sh.borrow_mut().remove(&[path.clone()]);
+                                    }
+                                });
+                                if let Some(ui) = weak.load() {
+                                    ui.paths_surface(|w| {
+                                        w.set_items(shelf_entries());
+                                        w.reload(true);
+                                    });
+                                }
+                            }),
+                        ],
+                        None,
+                        x,
+                        y,
+                    );
+                }
+            }
         }
 
         /// `toggleTerminalPanel()` — the `/terminal` tool panel.
@@ -3754,10 +4140,1902 @@ mod daemon_ui {
         /// Run `f` against the files browser when it exists.
         fn files_surface<R>(&self, f: impl FnOnce(&mut FileBrowser) -> R) -> Option<R> {
             let mut state = self.ivars().state.borrow_mut();
-            state
-                .as_mut()
-                .and_then(|st| st.files.as_mut())
-                .map(f)
+            let b = state.as_mut().and_then(|st| st.files.as_mut())?;
+            let r = f(b);
+            b.sync_view();
+            Some(r)
+        }
+
+        /// Build the live file browser (`makeFileBrowser`): `[files]` root /
+        /// sort / favorites / start page, the Recent engine, and the view's
+        /// event sink routed back to [`Self::files_event`].
+        fn build_files(&self, mtm: MainThreadMarker) -> Option<(FileBrowser, Retained<NSView>)> {
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let sections = super::parse_sections(&text);
+            let section: HashMap<String, String> = sections.get("files").cloned().unwrap_or_default();
+            crate::views::files::start_recent(&section);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            let root = section
+                .get("root")
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty())
+                .map(|r| if let Some(rest) = r.strip_prefix('~') { format!("{home}{rest}") } else { r })
+                .unwrap_or(home);
+            let mut browser = FileBrowser::new(&root);
+            browser.configure(&section);
+            if section.get("start").map(|s| s.to_lowercase()) == Some("recent".into()) {
+                browser.show_virtual(0);
+            } else {
+                browser.reload();
+            }
+            browser.build(mtm);
+            if let Some(v) = &browser.view {
+                let weak = objc2::rc::Weak::from_retained(&self.retain());
+                v.set_on_event(Box::new(move |ev| {
+                    if let Some(ui) = weak.load() {
+                        ui.files_event(ev);
+                    }
+                }));
+            }
+            let view = browser.content_view()?;
+            Some((browser, view))
+        }
+
+        /// A click / keystroke from the live file browser view.
+        fn files_event(&self, ev: crate::views::files_view::FilesEvent) {
+            use crate::ui::sidebar::SidebarEvent;
+            use crate::views::files_view::FilesEvent as E;
+            match ev {
+                E::Click { row, cmd, shift, double } => {
+                    self.files_surface(|b| {
+                        b.status_note = None;
+                        if shift {
+                            b.list.extend_selection(row);
+                        } else if cmd {
+                            b.list.command_click(row);
+                        } else {
+                            b.list.marked.clear();
+                            b.list.selection = row;
+                        }
+                    });
+                    if double && !cmd && !shift {
+                        self.files_accept_selected();
+                    }
+                    self.focus_files_list();
+                }
+                E::RowMenu { row, x, y } => {
+                    self.files_surface(|b| {
+                        if !b.list.marked.contains(&row) {
+                            b.list.marked.clear();
+                            b.list.selection = row;
+                        }
+                    });
+                    self.files_row_menu(x, y);
+                }
+                E::PreviewOpen(i) => {
+                    let target = self.files_surface(|b| match b.preview().1 {
+                        crate::views::files_view::Preview::Folder(rows) => rows.get(i).cloned(),
+                        _ => None,
+                    });
+                    if let Some(Some(e)) = target {
+                        if e.is_dir {
+                            self.files_surface(|b| b.cd(&e.path));
+                        } else {
+                            open_path(&e.path);
+                        }
+                    }
+                }
+                E::Parent => {
+                    self.files_surface(|b| b.cd_parent());
+                }
+                E::TogglePin => {
+                    self.files_surface(|b| b.toggle_pin());
+                }
+                E::ToggleOrder => {
+                    self.files_surface(|b| b.toggle_order());
+                }
+                E::SortMenu { x, y } => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    use crate::views::files::SortKey;
+                    let cur = self.files_surface(|b| b.sort_key).unwrap_or(SortKey::Name);
+                    let view = self.files_surface(|b| b.view.clone()).flatten();
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let entries = SortKey::ALL
+                        .iter()
+                        .map(|k| {
+                            let k = *k;
+                            let weak = weak.clone();
+                            MenuEntry::checked(k.label(), k == cur, move || {
+                                if let Some(ui) = weak.load() {
+                                    ui.files_surface(|b| b.set_sort(k));
+                                }
+                            })
+                        })
+                        .collect();
+                    if let Some(v) = view {
+                        popup(entries, Some(&v), x, y);
+                    }
+                }
+                E::Query(q) => {
+                    self.files_surface(|b| {
+                        b.status_note = None;
+                        b.list.selection = 0;
+                        b.set_query(&q);
+                    });
+                }
+                E::Enter => {
+                    let jumped = self.files_surface(|b| {
+                        let q = b.query.trim().to_string();
+                        if (q.contains('/') || q.starts_with('~')) && !crate::views::files::has_glob(&q) {
+                            let p = crate::views::files::resolve_path(&q, &b.cwd);
+                            if std::path::Path::new(&p).is_dir() {
+                                b.cd(&p);
+                                return Some(None);
+                            }
+                            if std::path::Path::new(&p).exists() {
+                                return Some(Some(p));
+                            }
+                        }
+                        None
+                    });
+                    match jumped {
+                        Some(Some(Some(p))) => open_path(&p),
+                        Some(Some(None)) => self.focus_files_list(),
+                        _ => {
+                            self.files_accept_selected();
+                        }
+                    }
+                }
+                E::Move(d) => {
+                    self.files_surface(|b| b.list.move_selection(d));
+                }
+                E::Escape => {
+                    self.files_surface(|b| {
+                        if !b.query.is_empty() {
+                            b.set_query("");
+                        }
+                    });
+                    self.focus_files_list();
+                }
+                E::Sidebar(SidebarEvent::Select(i)) => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let places = crate::views::files::places(&home);
+                    self.files_surface(|b| {
+                        b.status_note = None;
+                        if i < 2 {
+                            b.show_virtual(i);
+                        } else if let Some(p) = places.get(i - 2) {
+                            b.cd(&p.path);
+                        }
+                    });
+                }
+                E::Sidebar(SidebarEvent::Pinned(path)) => {
+                    if std::path::Path::new(&path).is_dir() {
+                        self.files_surface(|b| b.cd(&path));
+                    }
+                }
+                E::Sidebar(SidebarEvent::MenuPinned(path, x, y)) => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let pinned = self
+                        .files_surface(|b| b.pinned_favorites.contains(&path))
+                        .unwrap_or(false);
+                    let (p1, p2, p3, p4) = (path.clone(), path.clone(), path.clone(), path.clone());
+                    let w1 = weak.clone();
+                    let w4 = weak.clone();
+                    let mut entries = vec![
+                        MenuEntry::item("Open", move || {
+                            if let Some(ui) = w1.load() {
+                                ui.files_surface(|b| b.cd(&p1));
+                            }
+                        }),
+                        MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p2])),
+                        MenuEntry::item("Copy Path", move || copy_text_to_pasteboard(&p3)),
+                    ];
+                    if pinned {
+                        entries.push(MenuEntry::Separator);
+                        entries.push(MenuEntry::item("Unpin", move || {
+                            if let Some(ui) = w4.load() {
+                                ui.files_surface(|b| {
+                                    b.pinned_favorites.retain(|x| x != &p4);
+                                    b.toggle_pin_save();
+                                });
+                            }
+                        }));
+                    }
+                    popup(entries, None, x, y);
+                }
+                E::Sidebar(SidebarEvent::Rail(_)) => {
+                    self.files_surface(|b| {
+                        if let Some(v) = &b.view {
+                            v.layout_panes();
+                            v.setNeedsDisplay(true);
+                        }
+                    });
+                }
+                E::Sidebar(_) => {}
+            }
+        }
+
+        /// The notes sidebar: select / close / "+" / rail / row menu.
+        fn notes_sidebar_event(&self, ev: crate::ui::sidebar::SidebarEvent) {
+            use crate::ui::sidebar::SidebarEvent as E;
+            match ev {
+                E::Select(i) => {
+                    self.notes_surface(|s| s.click_row(i));
+                }
+                E::Close(i) => {
+                    self.notes_surface(|s| s.close_tab(i));
+                }
+                E::Add => {
+                    self.notes_surface(|s| s.new_note());
+                }
+                E::Rail(c) => {
+                    self.notes_surface(|s| s.rail_changed(c));
+                }
+                E::MenuRow(i, x, y) => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let Some(Some(path)) = self.notes_surface(|s| s.tab_path(i)) else { return };
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
+                    popup(
+                        vec![
+                            MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)),
+                            MenuEntry::item("Open in Default App", move || open_path(&p2)),
+                            MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p3])),
+                            MenuEntry::Separator,
+                            MenuEntry::item("Close", move || {
+                                if let Some(ui) = weak.load() {
+                                    ui.notes_surface(|s| s.close_tab(i));
+                                }
+                            }),
+                        ],
+                        None,
+                        x,
+                        y,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        /// Run `f` on the shared compare model, then repaint the surface.
+        fn compare_with<R>(&self, f: impl FnOnce(&mut crate::views::compare::CompareWindowModel) -> R) -> Option<R> {
+            let model = self.ivars().controller.compare_model()?;
+            let r = {
+                let mut m = model.lock().ok()?;
+                f(&mut m)
+            };
+            if let Some(st) = self.ivars().state.borrow().as_ref() {
+                if let Some(s) = st.compare.as_ref() {
+                    s.invalidate();
+                }
+            }
+            self.sync_compare();
+            Some(r)
+        }
+
+        fn compare_event(&self, ev: crate::views::compare_view::CompareEvent) {
+            use crate::ui::sidebar::SidebarEvent;
+            use crate::views::compare::{CompareFilter, CompareSide};
+            use crate::views::compare_view::CompareEvent as E;
+            match ev {
+                E::Sidebar(SidebarEvent::Select(i)) => {
+                    self.compare_with(|m| m.select(i));
+                }
+                E::Sidebar(SidebarEvent::Close(i)) => {
+                    self.compare_with(|m| m.close_session(i));
+                }
+                E::Sidebar(SidebarEvent::Pinned(k)) => {
+                    self.compare_with(|m| if k == "home" { m.show_start_page() } else { m.start_pasted() });
+                }
+                E::Sidebar(SidebarEvent::Rail(_)) => {
+                    if let Some(st) = self.ivars().state.borrow().as_ref() {
+                        if let Some(s) = st.compare.as_ref() {
+                            s.chrome().layout_all();
+                            s.invalidate();
+                        }
+                    }
+                }
+                E::Sidebar(SidebarEvent::MenuRow(i, x, y)) => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let w2 = weak.clone();
+                    popup(
+                        vec![
+                            MenuEntry::item("Show", move || {
+                                if let Some(ui) = weak.load() {
+                                    ui.compare_with(|m| m.select(i));
+                                }
+                            }),
+                            MenuEntry::item("Close", move || {
+                                if let Some(ui) = w2.load() {
+                                    ui.compare_with(|m| m.close_session(i));
+                                }
+                            }),
+                        ],
+                        None,
+                        x,
+                        y,
+                    );
+                }
+                E::Sidebar(_) => {}
+                E::Compare { left, right } => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let exp = |p: &str| -> String {
+                        let p = p.trim();
+                        if let Some(rest) = p.strip_prefix('~') { format!("{home}{rest}") } else { p.to_string() }
+                    };
+                    let (l, r) = (exp(&left), exp(&right));
+                    if l.is_empty() && r.is_empty() {
+                        return;
+                    }
+                    let dirs = std::path::Path::new(&l).is_dir() && std::path::Path::new(&r).is_dir();
+                    self.compare_with(|m| {
+                        if dirs {
+                            m.open_folders(&l, &r);
+                        } else {
+                            m.open_pair((!l.is_empty()).then_some(l.as_str()), (!r.is_empty()).then_some(r.as_str()));
+                        }
+                    });
+                }
+                E::NewText => {
+                    self.compare_with(|m| m.start_pasted());
+                }
+                E::Browse { right } => {
+                    let mtm = MainThreadMarker::new().unwrap();
+                    let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
+                    panel.setCanChooseFiles(true);
+                    panel.setCanChooseDirectories(true);
+                    panel.setAllowsMultipleSelection(false);
+                    if panel.runModal() == objc2_app_kit::NSModalResponseOK {
+                        if let Some(url) = panel.URLs().firstObject() {
+                            if let Some(p) = url.path() {
+                                if let Some(st) = self.ivars().state.borrow().as_ref() {
+                                    if let Some(s) = st.compare.as_ref() {
+                                        s.chrome().set_side_text(right, &p.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                E::OpenRecent(i) => {
+                    let rows = self.compare_with(|m| {
+                        m.recent_selection = i;
+                        m.recent.load()
+                    });
+                    let filter_rows = {
+                        let st = self.ivars().state.borrow();
+                        let model = self.ivars().controller.compare_model();
+                        match (st.as_ref().and_then(|s| s.compare.as_ref()), model) {
+                            (Some(s), Some(m)) => m.lock().ok().map(|m| s.recent_rows(&m)),
+                            _ => None,
+                        }
+                    };
+                    let _ = rows;
+                    let Some(e) = filter_rows.and_then(|r| r.get(i).cloned()) else { return };
+                    if e.missing() {
+                        return;
+                    }
+                    let (l, r) = (e.entry.left.clone(), e.entry.right.clone());
+                    let dirs = std::path::Path::new(&l).is_dir() && std::path::Path::new(&r).is_dir();
+                    self.compare_with(|m| {
+                        if dirs {
+                            m.open_folders(&l, &r);
+                        } else {
+                            m.open_pair(Some(&l), Some(&r));
+                        }
+                    });
+                }
+                E::RemoveRecent(i) => {
+                    let row = {
+                        let st = self.ivars().state.borrow();
+                        let model = self.ivars().controller.compare_model();
+                        match (st.as_ref().and_then(|s| s.compare.as_ref()), model) {
+                            (Some(s), Some(m)) => m.lock().ok().and_then(|m| s.recent_rows(&m).get(i).cloned()),
+                            _ => None,
+                        }
+                    };
+                    if let Some(r) = row {
+                        self.compare_with(|m| m.recent.remove(&r.entry));
+                    }
+                }
+                E::RecentMenu { row, x, y } => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let entry = {
+                        let st = self.ivars().state.borrow();
+                        let model = self.ivars().controller.compare_model();
+                        match (st.as_ref().and_then(|s| s.compare.as_ref()), model) {
+                            (Some(s), Some(m)) => m.lock().ok().and_then(|m| s.recent_rows(&m).get(row).cloned()),
+                            _ => None,
+                        }
+                    };
+                    let Some(e) = entry else { return };
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let (w1, w2) = (weak.clone(), weak);
+                    let (l, r) = (e.entry.left.clone(), e.entry.right.clone());
+                    let (l2, r2) = (l.clone(), r.clone());
+                    let ent = e.entry.clone();
+                    popup(
+                        vec![
+                            MenuEntry::item("Open", move || {
+                                if let Some(ui) = w1.load() {
+                                    ui.compare_event(E::OpenRecent(row));
+                                }
+                            }),
+                            MenuEntry::item("Reveal Left in Finder", move || reveal_in_finder(&[l2])),
+                            MenuEntry::item("Reveal Right in Finder", move || reveal_in_finder(&[r2])),
+                            MenuEntry::item("Copy Paths", move || copy_text_to_pasteboard(&format!("{l}\n{r}"))),
+                            MenuEntry::Separator,
+                            MenuEntry::item("Remove from Recent", move || {
+                                if let Some(ui) = w2.load() {
+                                    ui.compare_with(|m| m.recent.remove(&ent));
+                                }
+                            }),
+                        ],
+                        None,
+                        x,
+                        y,
+                    );
+                }
+                E::ClearMissing => {
+                    self.compare_with(|m| {
+                        let keep: Vec<_> = m
+                            .recent
+                            .load()
+                            .into_iter()
+                            .filter(|e| std::path::Path::new(&e.left).exists() && std::path::Path::new(&e.right).exists())
+                            .collect();
+                        m.recent.save(&keep);
+                    });
+                }
+                E::ClearAll => {
+                    let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    crate::ui::sheet::alert_sheet(
+                        &window,
+                        "Clear all recent comparisons?",
+                        "Pasted text kept for them is deleted too.",
+                        &["Clear All", "Cancel"],
+                        move |b| {
+                            if b == 0 {
+                                if let Some(ui) = weak.load() {
+                                    ui.compare_with(|m| m.recent.clear_all());
+                                }
+                            }
+                        },
+                    );
+                }
+                E::RecentFilter(q) => {
+                    if let Some(st) = self.ivars().state.borrow().as_ref() {
+                        if let Some(s) = st.compare.as_ref() {
+                            s.set_recent_filter(&q);
+                        }
+                    }
+                    self.sync_compare();
+                }
+                E::Filter(i) => {
+                    self.compare_with(|m| m.set_filter(CompareFilter::ALL[i.min(3)]));
+                }
+                E::Tool(i) => {
+                    self.compare_with(|m| match i {
+                        0 => m.jump_section(-1),
+                        1 => m.jump_section(1),
+                        2 => m.swap_sides(),
+                        3 => {
+                            let _ = m.test_do("reload");
+                        }
+                        _ => {}
+                    });
+                    let _ = CompareSide::Left;
+                }
+            }
+        }
+
+        /// Run `f` on the AI state, then push a fresh snapshot.
+        fn ai_surface<R>(&self, f: impl FnOnce(&mut AIState) -> R) -> Option<R> {
+            let mut state = self.ivars().state.borrow_mut();
+            let a = state.as_mut().and_then(|st| st.ai.as_mut())?;
+            let r = f(a);
+            let snap = ai_snapshot(a);
+            a.view.apply(snap);
+            Some(r)
+        }
+
+        fn build_ai(&self, mtm: MainThreadMarker) -> AIState {
+            use crate::views::ai::{AIConfig, AIWindowModel};
+            let cfg = AIConfig::load();
+            let sidebar_w = cfg.sidebar_width();
+            let split = cfg.split();
+            let mut model = AIWindowModel::new(cfg);
+            let dir = model.rules_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            model.reload_rules(&dir);
+            if let Some(keep) = defaults_string("aiRule") {
+                if let Some(i) = model.rules.iter().position(|r| r.file() == keep) {
+                    model.select(i);
+                }
+            }
+            if let Some(m) = defaults_string("aiViewMode") {
+                if let Some(pm) = model.modes().into_iter().find(|p| p.as_str() == m) {
+                    model.set_mode(pm);
+                }
+            }
+            let input = model.rule().and_then(|r| defaults_string(&format!("aiInput.{}", r.file()))).unwrap_or_default();
+            model.input = input.clone();
+            let colors = crate::ui::theme::section_colors("ai");
+            let web = model.preview_view().unwrap_or_else(|| NSView::new(mtm));
+            let view = crate::views::ai_view::AIView::new(mtm, colors, web, sidebar_w.max(160.0), split);
+            let mut a = AIState {
+                model,
+                view,
+                command: String::new(),
+                tokens: String::new(),
+                tokens_warn: false,
+                token_due: Some(now_secs()),
+                token_gen: 0,
+                was_running: false,
+                set_input: Some(input),
+            };
+            a.model.render_answer();
+            let snap = ai_snapshot(&mut a);
+            a.view.apply(snap);
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            a.view.set_on_event(Box::new(move |ev| {
+                if let Some(ui) = weak.load() {
+                    ui.ai_event(ev);
+                }
+            }));
+            self.ai_refresh_command_for(a.model.rule().cloned());
+            // `checkAvailable()`.
+            let bin = a.model.config.fm_bin();
+            std::thread::spawn(move || {
+                let res = if !std::path::Path::new(&bin).exists() {
+                    (false, format!("fm not found at {bin} ([ai] fm-bin) — it ships with macOS 26+"))
+                } else {
+                    match std::process::Command::new(&bin).arg("available").output() {
+                        Ok(o) => {
+                            let line = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim().to_string();
+                            let low = line.to_lowercase();
+                            let ok = o.status.success() && !low.contains("not ") && !low.contains("unavailable");
+                            (ok, if ok { String::new() } else { format!("Apple Intelligence unavailable: {}", if line.is_empty() { "fm available failed".into() } else { line }) })
+                        }
+                        Err(e) => (false, format!("fm available: {e}")),
+                    }
+                };
+                on_ui(move |ui| {
+                    ui.ai_surface(|a| {
+                        a.model.set_available(res.0, &res.1);
+                        if !res.0 {
+                            a.model.set_status(res.1.clone(), crate::views::ai::AITone::Danger);
+                        } else if !a.model.is_running() && a.model.run.answer.is_empty() {
+                            ai_set_ready(a);
+                        }
+                        a.token_due = Some(now_secs());
+                    });
+                });
+            });
+            a
+        }
+
+        /// The command line text (`r.preview` — a helper call, off-main).
+        fn ai_refresh_command_for(&self, rule: Option<crate::engines::ai_format::AIRule>) {
+            let Some(r) = rule else {
+                self.ai_surface(|a| {
+                    a.command = format!("no rules in {} — press + to make one", a.model.rules_dir());
+                });
+                return;
+            };
+            let file = r.file();
+            std::thread::spawn(move || {
+                let text = r.preview();
+                on_ui(move |ui| {
+                    ui.ai_surface(|a| {
+                        if a.model.rule().map(|x| x.file()) == Some(file) {
+                            a.command = text;
+                        }
+                    });
+                });
+            });
+        }
+
+        fn ai_select(&self, i: usize) {
+            let rule = self.ai_surface(|a| {
+                if let Some(r) = a.model.rule() {
+                    defaults_set_string(&format!("aiInput.{}", r.file()), &a.view.input_text());
+                }
+                a.model.select(i);
+                let r = a.model.rule().cloned();
+                if let Some(r) = &r {
+                    defaults_set_string("aiRule", &r.file());
+                    let input = defaults_string(&format!("aiInput.{}", r.file())).unwrap_or_default();
+                    a.model.input = input.clone();
+                    a.set_input = Some(input);
+                    a.model.run = Default::default();
+                    a.model.render_answer();
+                    ai_set_ready(a);
+                }
+                a.command.clear();
+                a.token_due = Some(now_secs());
+                r
+            });
+            if let Some(r) = rule {
+                self.ai_refresh_command_for(r);
+            }
+            self.ai_focus_input();
+        }
+
+        fn ai_focus_input(&self) {
+            let st = self.ivars().state.borrow();
+            if let Some(st) = st.as_ref() {
+                if let Some(a) = st.ai.as_ref() {
+                    st.window.makeFirstResponder(Some(&a.view.input_view()));
+                }
+            }
+        }
+
+        fn ai_new_rule(&self, source: Option<crate::engines::ai_format::AIRule>) {
+            use crate::ui::sheet::{form_sheet, FormRow};
+            let Some(dir) = self.ai_surface(|a| a.model.rules_dir()) else { return };
+            let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+            let home = std::env::var("HOME").unwrap_or_default();
+            let info = format!(
+                "A rule is a .md file in {}: frontmatter for the fm options, then the instructions.",
+                dir.replacen(&home, "~", 1)
+            );
+            let initial = source.as_ref().map(|r| format!("{} copy", r.name)).unwrap_or_default();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            form_sheet(
+                &window,
+                if source.is_none() { "New Rule" } else { "Duplicate Rule" },
+                &info,
+                vec![FormRow::new("Name", &initial, "Summarize, Rewrite formally, Explain…")],
+                "Create",
+                move |vals| {
+                    let (Some(v), Some(ui)) = (vals, weak.load()) else { return };
+                    let name = v[0].trim().to_string();
+                    let base: String = name
+                        .to_lowercase()
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect::<String>()
+                        .split('-')
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("-");
+                    if base.is_empty() {
+                        return;
+                    }
+                    let mut path = format!("{dir}/{base}.md");
+                    let mut n = 2;
+                    while std::path::Path::new(&path).exists() {
+                        path = format!("{dir}/{base}-{n}.md");
+                        n += 1;
+                    }
+                    let text = match source.as_ref().and_then(|r| std::fs::read_to_string(&r.path).ok()) {
+                        Some(body) => body
+                            .lines()
+                            .map(|l| if l.starts_with("name:") { format!("name: {name}") } else { l.to_string() })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        None => AI_RULE_TEMPLATE.replace("{name}", &name),
+                    };
+                    if let Err(e) = std::fs::write(&path, text) {
+                        ui.ai_surface(|a| a.model.set_status(format!("Couldn't write {path}: {e}"), crate::views::ai::AITone::Danger));
+                        return;
+                    }
+                    let file = std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                    defaults_set_string("aiRule", &file);
+                    let idx = ui.ai_surface(|a| {
+                        let d = a.model.rules_dir();
+                        a.model.reload_rules(&d);
+                        a.model.rules.iter().position(|r| r.path == path)
+                    });
+                    if let Some(Some(i)) = idx {
+                        ui.ai_select(i);
+                    }
+                    ui.open_in_notes(&path);
+                },
+            );
+        }
+
+        fn ai_rule_menu(&self, i: usize, x: f64, y: f64) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            let Some(Some(r)) = self.ai_surface(|a| a.model.rules.get(i).cloned()) else { return };
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let (p1, p2, p3, p4) = (r.path.clone(), r.path.clone(), r.path.clone(), r.path.clone());
+            let (w1, w2, w3) = (weak.clone(), weak.clone(), weak.clone());
+            let (r2, r3) = (r.clone(), r.clone());
+            popup(
+                vec![
+                    MenuEntry::item("Edit in Notes", move || {
+                        if let Some(ui) = w1.load() {
+                            ui.open_in_notes(&p1);
+                        }
+                    }),
+                    MenuEntry::item("Open in Default App", move || open_path(&p2)),
+                    MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&[p3])),
+                    MenuEntry::item("Copy Path", move || copy_text_to_pasteboard(&p4)),
+                    MenuEntry::Separator,
+                    MenuEntry::item("Duplicate…", move || {
+                        if let Some(ui) = w2.load() {
+                            ui.ai_new_rule(Some(r2));
+                        }
+                    }),
+                    MenuEntry::item("Delete…", move || {
+                        let Some(ui) = w3.load() else { return };
+                        let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                        let weak = objc2::rc::Weak::from_retained(&ui.retain());
+                        let r = r3.clone();
+                        crate::ui::sheet::alert_sheet(
+                            &window,
+                            &format!("Delete “{}”?", r.name),
+                            &format!("{} goes to the Trash.", r.file()),
+                            &["Move to Trash", "Cancel"],
+                            move |b| {
+                                if b != 0 {
+                                    return;
+                                }
+                                let undo = crate::engines::file_ops::UndoStack::default();
+                                let _ = crate::views::files::trash_paths(&[r.path.clone()], &undo);
+                                defaults_remove(&format!("aiInput.{}", r.file()));
+                                if let Some(ui) = weak.load() {
+                                    ui.ai_surface(|a| {
+                                        let d = a.model.rules_dir();
+                                        a.model.reload_rules(&d);
+                                    });
+                                    ui.ai_select(0);
+                                }
+                            },
+                        );
+                    }),
+                ],
+                None,
+                x,
+                y,
+            );
+        }
+
+        fn ai_event(&self, ev: crate::views::ai_view::AIEvent) {
+            use crate::ui::sidebar::SidebarEvent;
+            use crate::views::ai_view::AIEvent as E;
+            match ev {
+                E::Sidebar(SidebarEvent::Select(i)) => self.ai_select(i),
+                E::Sidebar(SidebarEvent::Add) => self.ai_new_rule(None),
+                E::Sidebar(SidebarEvent::MenuRow(i, x, y)) => self.ai_rule_menu(i, x, y),
+                E::Sidebar(SidebarEvent::Rail(_)) => {
+                    self.ai_surface(|a| a.view.layout_all());
+                }
+                E::Sidebar(_) => {}
+                E::InputChanged(text) => {
+                    self.ai_surface(|a| {
+                        if let Some(r) = a.model.rule() {
+                            defaults_set_string(&format!("aiInput.{}", r.file()), &text);
+                        }
+                        a.model.input = text;
+                        a.token_due = Some(now_secs() + 0.6);
+                    });
+                }
+                E::Mode(i) => {
+                    self.ai_surface(|a| {
+                        if let Some(m) = a.model.modes().get(i).copied() {
+                            a.model.set_mode(m);
+                            defaults_set_string("aiViewMode", m.as_str());
+                        }
+                    });
+                }
+                E::Copy => {
+                    self.ai_surface(|a| {
+                        use crate::engines::ai_format::RichText;
+                        match a.model.copy_plan(false) {
+                            crate::views::ai::CopyPlan::Nothing => {}
+                            crate::views::ai::CopyPlan::Markdown(md) => {
+                                copy_text_to_pasteboard(&md);
+                                a.model.set_status("Copied the Markdown", crate::views::ai::AITone::Success);
+                            }
+                            crate::views::ai::CopyPlan::Rich => {
+                                let t = a.model.target;
+                                let frag = RichText::html(&a.model.run.answer, t);
+                                RichText::copy(&a.model.run.answer, frag.as_deref(), t);
+                                a.model.set_status(format!("Copied for {}", t.title()), crate::views::ai::AITone::Success);
+                            }
+                        }
+                    });
+                }
+                E::Run => {
+                    self.ai_surface(|a| {
+                        if a.model.is_running() {
+                            a.model.cancel_run();
+                        } else {
+                            let text = a.view.input_text();
+                            let _ = a.model.start_run(&text);
+                            a.model.render_answer();
+                        }
+                    });
+                }
+                E::CopyCommand => {
+                    let job = self.ai_surface(|a| (a.model.rule().cloned(), a.view.input_text()));
+                    if let Some((Some(r), input)) = job {
+                        std::thread::spawn(move || {
+                            let cmd = r.runnable(&input);
+                            on_ui(move |ui| {
+                                copy_text_to_pasteboard(&cmd);
+                                ui.ai_surface(|a| a.model.set_status("Copied the command", crate::views::ai::AITone::Success));
+                            });
+                        });
+                    }
+                }
+            }
+        }
+
+        /// Drain tick: stream the run, and count tokens when due.
+        fn poll_ai(&self) {
+            let (running, due) = {
+                let state = self.ivars().state.borrow();
+                let Some(a) = state.as_ref().and_then(|st| st.ai.as_ref()) else { return };
+                (a.model.is_running() || a.was_running, a.token_due.is_some_and(|t| now_secs() >= t))
+            };
+            if running {
+                self.ai_surface(|a| {
+                    a.model.poll_stream();
+                    let now_running = a.model.is_running();
+                    if a.was_running && !now_running {
+                        a.model.render_answer();
+                    }
+                    a.was_running = now_running;
+                });
+            }
+            if due {
+                self.ai_count_tokens();
+            }
+        }
+
+        /// `countTokens()` — `fm count-tokens -q [-i instructions]` off-main.
+        fn ai_count_tokens(&self) {
+            use crate::engines::ai_format::{CodeGuard, TokenBudget};
+            let job = self.ai_surface(|a| {
+                a.token_due = None;
+                if a.model.available == Some(false) {
+                    a.tokens.clear();
+                    return None;
+                }
+                let r = a.model.rule()?.clone();
+                let text = a.view.input_text().trim().to_string();
+                if text.is_empty() {
+                    a.tokens.clear();
+                    return None;
+                }
+                let g = r.protect_code().then(|| CodeGuard::new(&text));
+                let guarded = g.as_ref().is_some_and(|g| !g.codes.is_empty());
+                let send = r.wrap(&r.prepare(if guarded { &g.as_ref().unwrap().text } else { &text }));
+                let instr = r.instructions_for(guarded);
+                let parts = if r.chunk() { TokenBudget::parts(&send, TokenBudget::part_budget(&instr)).len() } else { 1 };
+                a.token_gen += 1;
+                let codes = g.as_ref().map_or(0, |g| g.codes.len());
+                Some((a.model.config.fm_bin(), send, instr, a.token_gen, parts, codes, guarded))
+            });
+            let Some(Some((bin, send, instr, gen, parts, codes, guarded))) = job else { return };
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut cmd = std::process::Command::new(&bin);
+                cmd.arg("count-tokens").arg("-q");
+                if !instr.is_empty() {
+                    cmd.arg("-i").arg(&instr);
+                }
+                let out = cmd
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut c| {
+                        if let Some(mut si) = c.stdin.take() {
+                            let _ = si.write_all(send.as_bytes());
+                        }
+                        c.wait_with_output()
+                    });
+                let n = out.ok().filter(|o| o.status.success()).and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok());
+                on_ui(move |ui| {
+                    ui.ai_surface(|a| {
+                        if a.token_gen != gen {
+                            return;
+                        }
+                        let Some(n) = n else {
+                            a.tokens.clear();
+                            return;
+                        };
+                        let ctx = TokenBudget::context();
+                        let need = n + (n - TokenBudget::estimate(&instr));
+                        let mut s = format!("{n} / {ctx} tokens");
+                        if guarded {
+                            s.push_str(&format!(" · {codes} code kept out"));
+                        }
+                        if parts > 1 {
+                            s.push_str(&format!(" · runs in {parts} parts"));
+                        }
+                        a.tokens = s;
+                        a.tokens_warn = need > ctx && parts == 1;
+                    });
+                });
+            });
+        }
+
+        /// Run `f` on the Confluence state, then push a fresh snapshot.
+        fn conf_surface<R>(&self, f: impl FnOnce(&mut ConfState) -> R) -> Option<R> {
+            let mut state = self.ivars().state.borrow_mut();
+            let cs = state.as_mut().and_then(|st| st.confluence.as_mut())?;
+            let r = f(cs);
+            cs.view.apply(conf_snapshot(cs));
+            Some(r)
+        }
+
+        fn build_confluence(&self, mtm: MainThreadMarker) -> ConfState {
+            use crate::views::confluence::macos::ConfluencePreview;
+            use crate::views::confluence::{ConfluenceConfig, ConfluenceImageLoader, ConfluenceModel};
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let sections = super::parse_sections(&text);
+            let entries: HashMap<String, String> = sections.get("confluence").cloned().unwrap_or_default();
+            let config = ConfluenceConfig::from_entries(entries);
+            let sidebar_w = config.sidebar_width();
+            let split = config.split_clamped();
+            let mut model = ConfluenceModel::new(config);
+            model.show_search_empty();
+            model.set_status("", crate::views::confluence::StatusTone::Dim);
+            let mut loader = ConfluenceImageLoader::new();
+            let preview = ConfluencePreview::new(mtm, &mut loader);
+            std::mem::forget(loader);
+            let colors = crate::ui::theme::section_colors("confluence");
+            let web: Retained<NSView> = Retained::into_super(preview.web.clone());
+            let view = crate::views::confluence_view::ConfluenceView::new(mtm, colors, web, sidebar_w.max(0.0).max(160.0), split);
+            let cs = ConfState {
+                model,
+                view,
+                preview,
+                pstate: Default::default(),
+                pages: HashMap::new(),
+                preview_id: String::new(),
+                search_gen: 0,
+                preview_gen: 0,
+                last_hit: None,
+            };
+            cs.view.apply(conf_snapshot(&cs));
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            cs.view.set_on_event(Box::new(move |ev| {
+                if let Some(ui) = weak.load() {
+                    ui.conf_event(ev);
+                }
+            }));
+            conf_api(vec!["--check".into()], None, |ui, j| ui.conf_checked(j));
+            cs
+        }
+
+        /// `reloadConfig` — the `--check` reply.
+        fn conf_checked(&self, j: serde_json::Value) {
+            use crate::views::confluence::{PickerOption, StatusTone};
+            let configured = j.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            self.conf_surface(|cs| {
+                cs.model.configured = configured;
+                cs.model.site = j.get("site").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let opts: Vec<PickerOption> = j
+                    .get("spaces")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| {
+                                let k = s.get("key")?.as_str()?.to_string();
+                                Some(PickerOption {
+                                    title: k.clone(),
+                                    detail: s.get("name").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+                                    id: k,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                cs.model.spaces.set_options(opts);
+                if !configured {
+                    let probs = j
+                        .get("problems")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("; "))
+                        .unwrap_or_default();
+                    cs.model.rows.clear();
+                    cs.model.set_status(format!("Not set up yet: {probs}"), StatusTone::Warning);
+                    cs.pstate = crate::views::confluence_view::ConfPreviewState {
+                        hint: "Connect a Confluence site to start searching.".into(),
+                        setup: true,
+                        ..Default::default()
+                    };
+                } else {
+                    cs.pstate = Default::default();
+                    if cs.model.rows.is_empty() {
+                        cs.model.show_search_empty();
+                    }
+                }
+            });
+        }
+
+        fn conf_run_search(&self, more: bool) {
+            use crate::views::confluence::{Scope, StatusTone};
+            let plan = self.conf_surface(|cs| {
+                if !cs.model.configured {
+                    return None;
+                }
+                let mut crit = cs.model.criteria();
+                if cs.model.scope == Scope::Search && !cs.model.has_criteria() && !more {
+                    cs.model.show_search_empty();
+                    return Some(None);
+                }
+                if more {
+                    if cs.model.next_link.is_empty() {
+                        return Some(None);
+                    }
+                    if let Some(o) = crit.as_object_mut() {
+                        o.insert("next".into(), serde_json::Value::String(cs.model.next_link.clone()));
+                    }
+                }
+                cs.search_gen += 1;
+                cs.model.searching = true;
+                cs.model.set_status(if more { "Loading more…" } else { "Searching…" }, StatusTone::Dim);
+                Some(Some((crit, cs.search_gen)))
+            });
+            match plan {
+                Some(None) => self.conf_setup(),
+                None | Some(Some(None)) => {}
+                Some(Some(Some((crit, gen)))) => {
+                    conf_api(vec!["--search".into()], Some(crit), move |ui, j| {
+                        let first = ui.conf_surface(|cs| {
+                            if cs.search_gen != gen {
+                                return false;
+                            }
+                            cs.model.apply_search_result(&j, more, now_secs());
+                            !more && !cs.model.rows.is_empty()
+                        });
+                        if first == Some(true) {
+                            ui.conf_load_preview(0);
+                        }
+                    });
+                }
+            }
+        }
+
+        fn conf_load_favorites(&self, show: bool) {
+            conf_api(vec!["--favorites".into(), "--no-refresh".into()], None, move |ui, j| {
+                ui.conf_surface(|cs| cs.model.apply_favorites(&j, show, now_secs()));
+            });
+        }
+
+        /// `loadPreview(_:)`.
+        fn conf_load_preview(&self, i: usize) {
+            use crate::views::confluence_view::ConfPreviewState;
+            let job = self.conf_surface(|cs| {
+                let r = cs.model.rows.get(i)?.clone();
+                cs.model.selection = i;
+                cs.preview_gen += 1;
+                cs.preview_id = r.id.clone();
+                let mut meta = vec![if r.space_name.is_empty() { r.space.clone() } else { r.space_name.clone() }];
+                if !r.path.is_empty() {
+                    meta.push(r.path.clone());
+                }
+                if !r.author.is_empty() {
+                    meta.push(r.author.clone());
+                }
+                if !r.modified_text.is_empty() {
+                    meta.push(format!("updated {}", r.modified_text));
+                }
+                let meta = meta.into_iter().filter(|m| !m.is_empty()).collect::<Vec<_>>().join("  ·  ");
+                cs.pstate = ConfPreviewState { header: Some((r.title.clone(), meta, r.favorite)), ..Default::default() };
+                if r.missing {
+                    cs.pstate.hint = "This page wasn't found — deleted, moved, or you lost access.\nRemove it with ★.".into();
+                    return None;
+                }
+                if let Some(page) = cs.pages.get(&r.id).cloned() {
+                    return Some((page, r, cs.preview_gen, true));
+                }
+                cs.pstate.hits = Some("Loading page…".into());
+                Some((serde_json::Value::Null, r, cs.preview_gen, false))
+            });
+            let Some(Some((page, row, gen, cached))) = job else { return };
+            if cached {
+                self.conf_render(page, row);
+                return;
+            }
+            let id = row.id.clone();
+            conf_api(vec!["--page".into(), id.clone()], None, move |ui, j| {
+                let ok = j.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
+                let current = ui.conf_surface(|cs| {
+                    if cs.preview_gen != gen {
+                        return false;
+                    }
+                    if !ok {
+                        cs.pstate.hits = None;
+                        cs.pstate.hint = format!(
+                            "Couldn't load the page:\n{}",
+                            j.get("error").and_then(serde_json::Value::as_str).unwrap_or("failed")
+                        );
+                        return false;
+                    }
+                    cs.pages.insert(id.clone(), j.clone());
+                    if cs.pages.len() > 20 {
+                        if let Some(k) = cs.pages.keys().next().cloned() {
+                            cs.pages.remove(&k);
+                        }
+                    }
+                    true
+                });
+                if current == Some(true) {
+                    ui.conf_render(j, row);
+                }
+            });
+        }
+
+        /// `render(_:_:)` — `confluence.preview_html` off-main, then load.
+        fn conf_render(&self, page: serde_json::Value, r: crate::views::confluence::ConfluenceRow) {
+            let Some((site, terms, gen)) = self.conf_surface(|cs| (cs.model.site.clone(), cs.model.terms.clone(), cs.preview_gen)) else {
+                return;
+            };
+            let colors = crate::ui::theme::section_colors("confluence");
+            let pc: serde_json::Map<String, serde_json::Value> = crate::views::confluence::page_colors(&colors)
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v)))
+                .collect();
+            let base = page.get("site").and_then(serde_json::Value::as_str).map(str::to_string).unwrap_or(site.clone());
+            let params = serde_json::json!({
+                "page": page,
+                "row": {"type": r.kind, "url": r.url, "title": r.title},
+                "site": site,
+                "terms": terms,
+                "colors": pc,
+            });
+            let has_terms = !terms.is_empty();
+            std::thread::spawn(move || {
+                let html = crate::views::confluence::preview_html(&params);
+                on_ui(move |ui| {
+                    ui.conf_surface(|cs| {
+                        if cs.preview_gen != gen {
+                            return;
+                        }
+                        match &html {
+                            Some(h) => {
+                                cs.pstate.hint.clear();
+                                cs.pstate.web = true;
+                                cs.pstate.hits = Some(if has_terms { "Finding matches…".into() } else { String::new() });
+                                cs.preview.load_html(h, Some(&base));
+                            }
+                            None => cs.pstate.hint = "✗ preview failed (python helper unavailable)".into(),
+                        }
+                    });
+                });
+            });
+        }
+
+        fn conf_toggle_favorite(&self, i: usize) {
+            use crate::views::confluence::StatusTone;
+            let Some(Some((id, add, row_json))) = self.conf_surface(|cs| {
+                let r = cs.model.rows.get(i)?;
+                Some((r.id.clone(), !r.favorite, r.to_json()))
+            }) else {
+                return;
+            };
+            let args = vec!["--favorite".to_string(), if add { "add".into() } else { "remove".into() }, id.clone()];
+            conf_api(args, add.then(|| serde_json::Value::Array(vec![row_json])), move |ui, j| {
+                ui.conf_surface(|cs| {
+                    if j.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                        cs.model.set_status(j.get("error").and_then(serde_json::Value::as_str).unwrap_or("favorite failed"), StatusTone::Danger);
+                        return;
+                    }
+                    cs.model.favorites = j
+                        .get("favorites")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .map(|x| {
+                                    let mut r = crate::views::confluence::ConfluenceRow::from_json(x);
+                                    r.favorite = true;
+                                    r
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(r) = cs.model.rows.iter_mut().find(|r| r.id == id) {
+                        r.favorite = add;
+                    }
+                    if let Some((_, _, fav)) = cs.pstate.header.as_mut() {
+                        if cs.preview_id == id {
+                            *fav = add;
+                        }
+                    }
+                    if cs.model.showing_favorites && !add {
+                        cs.model.show_favorites(true, now_secs());
+                    }
+                    cs.model.set_status(
+                        if add { "★ Added to favorites" } else { "Removed from favorites" },
+                        if add { StatusTone::Success } else { StatusTone::Dim },
+                    );
+                });
+            });
+        }
+
+        /// `showSetup()` — the Site / Email / Token / Spaces sheet, then
+        /// `--detect-auth` → `--save` → spaces → `--check`.
+        fn conf_setup(&self) {
+            conf_api(vec!["--check".into()], None, |ui, j| {
+                use crate::ui::sheet::{form_sheet, FormRow};
+                let s = |k: &str| j.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let has_token = j.get("hasToken").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                let old: Vec<String> = j
+                    .get("spaces")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| a.iter().filter_map(|x| x.get("key").and_then(|k| k.as_str()).map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let state = if s("site").is_empty() {
+                    "○ Not set up yet.".to_string()
+                } else if !has_token {
+                    "● Site saved, token missing.".to_string()
+                } else {
+                    format!(
+                        "● Set up · {} · Test & Save re-checks the sign-in.",
+                        if old.is_empty() { "whole site".to_string() } else { format!("{} space{}", old.len(), if old.len() == 1 { "" } else { "s" }) }
+                    )
+                };
+                let info = format!(
+                    "{state}\n\nConfluence has its own site and token (not Jira's). Spaces work like Jira projects: searches stay inside them. Saved to {}.",
+                    if s("configPath").is_empty() { "config.json".to_string() } else { s("configPath") }
+                );
+                let rows = vec![
+                    FormRow::new("Site", &s("site"), "https://yourcompany.atlassian.net/wiki  or  https://confluence.corp/confluence"),
+                    FormRow::new("Email", &s("email"), "Cloud: your Atlassian account email (empty for a Data Center token)"),
+                    FormRow::new(
+                        "Token",
+                        "",
+                        if has_token { "saved — leave empty to keep it" } else { "API token (Cloud) or personal access token (Data Center)" },
+                    )
+                    .secure(),
+                    FormRow::new("Spaces", &old.join(", "), "space keys, e.g. ENG, OPS (empty = the whole site)"),
+                ];
+                let Some(window) = ui.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                let weak = objc2::rc::Weak::from_retained(&ui.retain());
+                form_sheet(&window, "Confluence Setup", &info, rows, "Test & Save", move |vals| {
+                    let (Some(v), Some(ui)) = (vals, weak.load()) else { return };
+                    let keys: Vec<String> = v[3]
+                        .to_uppercase()
+                        .split(|c: char| c == ',' || c == ' ')
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    ui.conf_save_setup(v[0].clone(), v[1].clone(), v[2].clone(), keys, old);
+                });
+            });
+        }
+
+        fn conf_save_setup(&self, site: String, email: String, token: String, keys: Vec<String>, old: Vec<String>) {
+            use crate::views::confluence::StatusTone;
+            self.conf_surface(|cs| {
+                cs.model.searching = true;
+                cs.model.set_status("Testing the connection…", StatusTone::Dim);
+            });
+            let mut given = serde_json::json!({"site": site, "email": email});
+            if !token.is_empty() {
+                given["token"] = serde_json::Value::String(token);
+            }
+            conf_api(vec!["--detect-auth".into()], Some(given.clone()), move |ui, j| {
+                let mut save = given.clone();
+                if j.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                    let err = j.get("error").and_then(serde_json::Value::as_str).unwrap_or("failed").to_string();
+                    ui.conf_surface(|cs| {
+                        cs.model.searching = false;
+                        cs.model.set_status(format!("Setup: {err}"), StatusTone::Danger);
+                    });
+                    return;
+                }
+                save["auth"] = j.get("auth").cloned().unwrap_or(serde_json::Value::String(String::new()));
+                if let Some(s) = j.get("site") {
+                    save["site"] = s.clone();
+                }
+                let user = j.get("user").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                conf_api(vec!["--save".into()], Some(save), move |_ui, _| {
+                    let gone: Vec<String> = old.iter().filter(|k| !keys.contains(k)).cloned().collect();
+                    let new: Vec<String> = keys.iter().filter(|k| !old.contains(k)).cloned().collect();
+                    let finish = move |ui: &DaemonUi| {
+                        let user = user.clone();
+                        conf_api(vec!["--check".into()], None, move |ui, j| {
+                            ui.conf_checked(j);
+                            ui.conf_surface(|cs| {
+                                cs.model.searching = false;
+                                let site = cs.model.site.clone();
+                                cs.model.set_status(
+                                    format!("Connected{} · {site}", if user.is_empty() { String::new() } else { format!(" as {user}") }),
+                                    StatusTone::Success,
+                                );
+                            });
+                        });
+                        let _ = ui;
+                    };
+                    let add = move |ui: &DaemonUi| {
+                        if new.is_empty() {
+                            finish(ui);
+                        } else {
+                            let mut a = vec!["--add-space".to_string()];
+                            a.extend(new.clone());
+                            conf_api(a, None, move |ui, _| finish(ui));
+                        }
+                    };
+                    if gone.is_empty() {
+                        on_ui(move |ui| add(ui));
+                    } else {
+                        let mut a = vec!["--remove-space".to_string()];
+                        a.extend(gone);
+                        conf_api(a, None, move |ui, _| add(ui));
+                    }
+                });
+            });
+        }
+
+        fn conf_event(&self, ev: crate::views::confluence_view::ConfEvent) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            use crate::ui::sidebar::SidebarEvent;
+            use crate::views::confluence::Scope;
+            use crate::views::confluence_view::{ConfEvent as E, MODIFIED, SORTS, TYPES};
+            match ev {
+                E::Sidebar(SidebarEvent::Select(i)) => {
+                    let s = if i == 0 { Scope::Search } else { Scope::Favorites };
+                    let configured = self.conf_surface(|cs| {
+                        cs.model.set_scope(s, now_secs());
+                        cs.model.configured
+                    });
+                    if s == Scope::Favorites {
+                        self.conf_load_favorites(true);
+                    } else if configured == Some(true) {
+                        self.conf_run_search(false);
+                    }
+                }
+                E::Sidebar(SidebarEvent::Rail(_)) => {
+                    self.conf_surface(|cs| cs.view.layout_all());
+                }
+                E::Sidebar(_) => {}
+                E::Query(q) => {
+                    self.conf_surface(|cs| {
+                        cs.model.query = q;
+                        if cs.model.scope == Scope::Favorites {
+                            cs.model.show_favorites(false, now_secs());
+                        }
+                    });
+                }
+                E::Enter | E::Search => self.conf_run_search(false),
+                E::Move(d) => {
+                    let next = self.conf_surface(|cs| {
+                        let n = cs.model.rows.len() as i64;
+                        (n > 0).then(|| (cs.model.selection as i64 + d).clamp(0, n - 1) as usize)
+                    });
+                    if let Some(Some(i)) = next {
+                        self.conf_load_preview(i);
+                    }
+                }
+                E::Escape => {
+                    self.conf_surface(|cs| {
+                        cs.model.escape();
+                    });
+                }
+                E::Mode(i) => {
+                    let go = self.conf_surface(|cs| {
+                        cs.model.mode_index = i;
+                        cs.model.configured && cs.model.has_criteria()
+                    });
+                    if go == Some(true) {
+                        self.conf_run_search(false);
+                    }
+                }
+                E::TitleOnly(on) => {
+                    let go = self.conf_surface(|cs| {
+                        cs.model.title_only = on;
+                        cs.model.configured && cs.model.has_criteria()
+                    });
+                    if go == Some(true) {
+                        self.conf_run_search(false);
+                    }
+                }
+                E::Chip { which, x, y } => {
+                    let Some(Some((view, cur, opts, sel_all, sel))) = self.conf_surface(|cs| {
+                        let cur = match which {
+                            2 => cs.model.type_choice.clone(),
+                            3 => cs.model.modified.clone(),
+                            4 => cs.model.sort.clone(),
+                            _ => String::new(),
+                        };
+                        let picker = if which == 0 { &cs.model.spaces } else { &cs.model.contributors };
+                        Some((
+                            cs.view.clone(),
+                            cur,
+                            picker.options.iter().map(|o| (o.id.clone(), o.title.clone(), o.detail.clone())).collect::<Vec<_>>(),
+                            picker.is_all(),
+                            picker.selected.clone(),
+                        ))
+                    }) else {
+                        return;
+                    };
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let mut entries = Vec::new();
+                    if which >= 2 {
+                        let items: &[(&str, &str)] = match which {
+                            2 => &TYPES,
+                            3 => &MODIFIED,
+                            _ => &SORTS,
+                        };
+                        for (t, v) in items {
+                            let (w, v2) = (weak.clone(), v.to_string());
+                            entries.push(MenuEntry::checked(t, *v == cur, move || {
+                                if let Some(ui) = w.load() {
+                                    let go = ui.conf_surface(|cs| {
+                                        match which {
+                                            2 => cs.model.type_choice = v2,
+                                            3 => cs.model.modified = v2,
+                                            _ => cs.model.sort = v2,
+                                        }
+                                        cs.model.configured && cs.model.has_criteria()
+                                    });
+                                    if go == Some(true) {
+                                        ui.conf_run_search(false);
+                                    }
+                                }
+                            }));
+                        }
+                    } else {
+                        let all_title = if which == 0 { "All spaces" } else { "Any contributor" };
+                        let w = weak.clone();
+                        entries.push(MenuEntry::checked(all_title, sel_all, move || {
+                            if let Some(ui) = w.load() {
+                                ui.conf_surface(|cs| {
+                                    let p = if which == 0 { &mut cs.model.spaces } else { &mut cs.model.contributors };
+                                    p.set(Vec::new(), true);
+                                });
+                            }
+                        }));
+                        if opts.is_empty() {
+                            entries.push(MenuEntry::disabled(if which == 0 { "(no spaces cached)" } else { "(no contributors cached)" }));
+                        } else {
+                            entries.push(MenuEntry::Separator);
+                        }
+                        for (id, title, detail) in opts {
+                            let on = !sel_all && sel.contains(&id);
+                            let w = weak.clone();
+                            let label = if detail.is_empty() { title } else { format!("{title} — {detail}") };
+                            entries.push(MenuEntry::checked(&label, on, move || {
+                                if let Some(ui) = w.load() {
+                                    ui.conf_surface(|cs| {
+                                        let p = if which == 0 { &mut cs.model.spaces } else { &mut cs.model.contributors };
+                                        let mut s = if p.is_all() { Vec::new() } else { p.selected.clone() };
+                                        if let Some(k) = s.iter().position(|x| *x == id) {
+                                            s.remove(k);
+                                        } else {
+                                            s.push(id.clone());
+                                        }
+                                        let all = s.is_empty();
+                                        p.set(s, all);
+                                    });
+                                }
+                            }));
+                        }
+                    }
+                    popup(entries, Some(&view), x, y);
+                }
+                E::Select { row, double } => {
+                    self.conf_load_preview(row);
+                    if double {
+                        self.conf_event(E::Open);
+                    }
+                    let v = self.conf_surface(|cs| cs.view.results_view());
+                    if let (Some(v), Some(st)) = (v, self.ivars().state.borrow().as_ref()) {
+                        st.window.makeFirstResponder(Some(&v));
+                    }
+                }
+                E::Star(row) => self.conf_toggle_favorite(row),
+                E::PreviewStar => {
+                    if let Some(i) = self.conf_surface(|cs| cs.model.selection) {
+                        self.conf_toggle_favorite(i);
+                    }
+                }
+                E::RowMenu { row, x, y } => {
+                    let Some(Some(r)) = self.conf_surface(|cs| cs.model.rows.get(row).cloned()) else { return };
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    let (u1, u2, t) = (r.url.clone(), r.url.clone(), r.title.clone());
+                    let w = weak.clone();
+                    popup(
+                        vec![
+                            MenuEntry::item("Open in Browser", move || open_url(&u1)),
+                            MenuEntry::item("Copy Link", move || copy_text_to_pasteboard(&u2)),
+                            MenuEntry::item("Copy Title", move || copy_text_to_pasteboard(&t)),
+                            MenuEntry::Separator,
+                            MenuEntry::item(if r.favorite { "Remove from Favorites" } else { "Add to Favorites" }, move || {
+                                if let Some(ui) = w.load() {
+                                    ui.conf_toggle_favorite(row);
+                                }
+                            }),
+                        ],
+                        None,
+                        x,
+                        y,
+                    );
+                }
+                E::LoadMore => self.conf_run_search(true),
+                E::CopyCql => {
+                    if let Some(c) = self.conf_surface(|cs| cs.model.last_cql.clone()).filter(|c| !c.is_empty()) {
+                        copy_text_to_pasteboard(&c);
+                    }
+                }
+                E::CopyCurl => {
+                    if let Some(c) = self.conf_surface(|cs| cs.model.last_curl.clone()).filter(|c| !c.is_empty()) {
+                        copy_text_to_pasteboard(&c);
+                    }
+                }
+                E::Setup => self.conf_setup(),
+                E::Open => {
+                    if let Some(Some(u)) = self.conf_surface(|cs| cs.model.rows.get(cs.model.selection).map(|r| r.url.clone())) {
+                        open_url(&u);
+                    }
+                }
+                E::CopyLink => {
+                    if let Some(Some(u)) = self.conf_surface(|cs| cs.model.rows.get(cs.model.selection).map(|r| r.url.clone())) {
+                        copy_text_to_pasteboard(&u);
+                    }
+                }
+                E::PrevHit => {
+                    self.conf_surface(|cs| cs.preview.prev_hit());
+                }
+                E::NextHit => {
+                    self.conf_surface(|cs| cs.preview.next_hit());
+                }
+            }
+        }
+
+        /// The web view's `{i, n, snippet}` highlighter posts → the hits bar.
+        fn poll_conf_hits(&self) {
+            let changed = {
+                let state = self.ivars().state.borrow();
+                let Some(cs) = state.as_ref().and_then(|st| st.confluence.as_ref()) else { return };
+                let hit = cs.preview.script.last_hit().map(|h| (h.index, h.count, h.snippet));
+                hit != cs.last_hit
+            };
+            if changed {
+                self.conf_surface(|cs| {
+                    let hit = cs.preview.script.last_hit().map(|h| (h.index, h.count, h.snippet));
+                    cs.last_hit = hit.clone();
+                    if let Some((i, n, snip)) = hit {
+                        cs.pstate.hits = Some(if n == 0 {
+                            "No matches in the page text (matched in title, labels or attachments)".into()
+                        } else {
+                            format!("{} of {}   “{}”", i + 1, n, snip)
+                        });
+                    }
+                });
+            }
+        }
+
+        /// Run `f` on the Jira list, then push a fresh snapshot.
+        fn jira_surface<R>(&self, f: impl FnOnce(&mut crate::views::jira_view::JiraList) -> R) -> Option<R> {
+            let mut state = self.ivars().state.borrow_mut();
+            let (list, view) = state.as_mut().and_then(|st| st.jira.as_mut())?;
+            let r = f(list);
+            view.apply(list.snapshot());
+            Some(r)
+        }
+
+        /// Build the Jira list (`openListWindow` for `[jira]`).
+        fn build_jira(
+            &self,
+            mtm: MainThreadMarker,
+        ) -> (crate::views::jira_view::JiraList, Retained<crate::views::jira_view::JiraView>) {
+            use crate::views::jira_view::{JiraList, JiraView};
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            let sections = super::parse_sections(&text);
+            let section: HashMap<String, String> = sections.get("jira").cloned().unwrap_or_default();
+            let paths = match crate::app::paths::JiraPaths::resolve() {
+                crate::app::paths::JiraPathsState::Resolved(p) => Some(p),
+                crate::app::paths::JiraPathsState::Failed(e) => {
+                    self.ivars().controller.log(&e);
+                    None
+                }
+            };
+            let sidebar_w = section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(245.0);
+            let insp_w = section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(340.0);
+            let mut list = JiraList::new(section, paths);
+            list.start(None);
+            let colors = crate::ui::theme::section_colors("jira");
+            let view = JiraView::new(mtm, colors, sidebar_w, insp_w);
+            view.apply(list.snapshot());
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            view.set_on_event(Box::new(move |ev| {
+                if let Some(ui) = weak.load() {
+                    ui.jira_event(ev);
+                }
+            }));
+            (list, view)
+        }
+
+        fn jira_event(&self, ev: crate::views::jira_view::JiraEvent) {
+            use crate::ui::sidebar::SidebarEvent;
+            use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, MY_WORK_PREFIX};
+            match ev {
+                E::Click { row, double } => {
+                    self.jira_surface(|l| l.selection = row);
+                    self.focus_jira_table();
+                    if double {
+                        self.jira_event(E::OpenDetail);
+                    }
+                }
+                E::Check(row) => {
+                    self.jira_surface(|l| {
+                        if let Some(k) = l.row(row).and_then(|r| r.get("key")).cloned() {
+                            if !l.checked.remove(&k) {
+                                l.checked.insert(k);
+                            }
+                        }
+                    });
+                }
+                E::Star(row) => {
+                    self.jira_surface(|l| {
+                        if let Some(k) = l.row(row).and_then(|r| r.get("key")).cloned() {
+                            if !l.favs.remove(&k) {
+                                l.favs.insert(k);
+                            }
+                        }
+                    });
+                }
+                E::Sort(i) => {
+                    self.jira_surface(|l| l.sort_by(i));
+                }
+                E::Query(q) => {
+                    self.jira_surface(|l| {
+                        l.query = q;
+                        l.selection = 0;
+                        l.refilter();
+                    });
+                }
+                E::Move(d) => {
+                    self.jira_surface(|l| jira_move(l, d));
+                }
+                E::Enter | E::OpenDetail => {
+                    let target = self.jira_surface(|l| {
+                        let r = l.selected()?;
+                        if let Some(b) = r.get("boardId").filter(|_| r.get("key").is_some_and(|k| k.starts_with(BOARD_PREFIX))) {
+                            return Some(Err(b.clone()));
+                        }
+                        let key = r.get("key")?.clone();
+                        let site = l.site();
+                        (!site.is_empty()).then(|| Ok(format!("{site}/browse/{key}")))
+                    });
+                    match target.flatten() {
+                        Some(Ok(url)) => open_url(&url),
+                        Some(Err(board)) => {
+                            let ok = self.jira_surface(|l| l.open_board(&board)).unwrap_or(false);
+                            if !ok {
+                                self.ivars().controller.log(&format!("jira: board {board} not synced yet"));
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                E::Escape => {
+                    self.jira_surface(|l| {
+                        l.query.clear();
+                        l.refilter();
+                    });
+                    self.focus_jira_table();
+                }
+                E::RowMenu { row, x, y } => {
+                    use crate::ui::menu_kit::{popup, MenuEntry};
+                    let info = self.jira_surface(|l| {
+                        l.selection = row;
+                        l.selected().map(|r| (r.get("key").cloned().unwrap_or_default(), r.get("title").cloned().unwrap_or_default(), l.site()))
+                    });
+                    if let Some(Some((key, title, site))) = info {
+                        let url = format!("{site}/browse/{key}");
+                        let (u1, u2, k1, kt) = (url.clone(), url, key.clone(), format!("{key} {title}"));
+                        popup(
+                            vec![
+                                MenuEntry::item("Open in Browser", move || open_url(&u1)),
+                                MenuEntry::Separator,
+                                MenuEntry::item("Copy Key", move || copy_text_to_pasteboard(&k1)),
+                                MenuEntry::item("Copy Key + Title", move || copy_text_to_pasteboard(&kt)),
+                                MenuEntry::item("Copy Link", move || copy_text_to_pasteboard(&u2)),
+                            ],
+                            None,
+                            x,
+                            y,
+                        );
+                    }
+                }
+                E::Sidebar(SidebarEvent::Select(i)) => {
+                    self.jira_surface(|l| l.select_tab(i));
+                }
+                E::Sidebar(SidebarEvent::Pinned(key)) => {
+                    let err = self.jira_surface(|l| -> Option<String> {
+                        if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
+                            return l.open_my_work(id).err();
+                        }
+                        if key == BOARD_LIST_KEY {
+                            l.show_board_list();
+                            return None;
+                        }
+                        if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
+                            return (!l.open_board(id)).then(|| format!("board {id} not synced yet"));
+                        }
+                        Some(format!("{key}: not available in the Rust port yet"))
+                    });
+                    if let Some(Some(e)) = err {
+                        self.ivars().controller.log(&format!("jira: {e}"));
+                    }
+                }
+                E::Sidebar(SidebarEvent::Rail(_)) => {
+                    let st = self.ivars().state.borrow();
+                    if let Some((_, v)) = st.as_ref().and_then(|s| s.jira.as_ref()) {
+                        v.layout_panes();
+                    }
+                }
+                E::Sidebar(_) => {}
+            }
+        }
+
+        /// Every 10 s while Jira is up: the sidebar badges / sync line and
+        /// the shown list follow the poller.
+        fn refresh_jira(&self) {
+            let now = now_secs();
+            if now - self.ivars().jira_refresh_at.get() < 10.0 {
+                return;
+            }
+            self.ivars().jira_refresh_at.set(now);
+            if !self.ivars().controller.current().is_some_and(|v| v.is_jira()) {
+                return;
+            }
+            self.jira_surface(|l| l.refresh());
+        }
+
+        fn focus_jira_table(&self) {
+            let st = self.ivars().state.borrow();
+            if let Some(st) = st.as_ref() {
+                if let Some((_, v)) = st.jira.as_ref() {
+                    st.window.makeFirstResponder(Some(&v.table_view()));
+                }
+            }
+        }
+
+        /// Give the file list keyboard focus (so arrows / ↵ / Space work).
+        fn focus_files_list(&self) {
+            let target = self
+                .files_surface(|b| b.view.as_ref().map(|v| v.list_view()))
+                .flatten();
+            if let (Some(list), Some(st)) = (target, self.ivars().state.borrow().as_ref()) {
+                st.window.makeFirstResponder(Some(&list));
+            }
+        }
+
+        /// The rule-2 file context menu: open, open in notes, open with the
+        /// default app, reveal in Finder, copy the absolute path, Quick Look,
+        /// rename, new terminal here, trash.
+        fn files_row_menu(&self, x: f64, y: f64) {
+            use crate::ui::menu_kit::{popup, MenuEntry};
+            let Some(paths) = self.files_surface(|b| b.selected_paths()) else {
+                return;
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let first = paths[0].clone();
+            let is_dir = std::path::Path::new(&first).is_dir();
+            let mut entries = Vec::new();
+            {
+                let w = weak.clone();
+                entries.push(MenuEntry::item("Open", move || {
+                    if let Some(ui) = w.load() {
+                        ui.files_accept_selected();
+                    }
+                }));
+            }
+            if !is_dir {
+                let w = weak.clone();
+                let p = first.clone();
+                entries.push(MenuEntry::item("Open in Notes", move || {
+                    if let Some(ui) = w.load() {
+                        ui.open_in_notes(&p);
+                    }
+                }));
+            }
+            {
+                let ps = paths.clone();
+                entries.push(MenuEntry::item("Open in Default App", move || {
+                    for p in &ps {
+                        open_path(p);
+                    }
+                }));
+            }
+            {
+                let ps = paths.clone();
+                entries.push(MenuEntry::item("Reveal in Finder", move || reveal_in_finder(&ps)));
+            }
+            entries.push(MenuEntry::Separator);
+            {
+                let joined = paths.join("\n");
+                let n = paths.len();
+                entries.push(MenuEntry::item(
+                    if n == 1 { "Copy Absolute Path" } else { "Copy Absolute Paths" },
+                    move || copy_text_to_pasteboard(&joined),
+                ));
+            }
+            {
+                let ps = paths.clone();
+                entries.push(MenuEntry::item("Copy", move || copy_files_to_pasteboard(&ps)));
+            }
+            entries.push(MenuEntry::Separator);
+            {
+                let w = weak.clone();
+                entries.push(MenuEntry::item("Quick Look", move || {
+                    if let (Some(ui), Some(mtm)) = (w.load(), MainThreadMarker::new()) {
+                        ui.files_surface(|b| b.toggle_quick_look(mtm));
+                    }
+                }));
+            }
+            {
+                let w = weak.clone();
+                entries.push(MenuEntry::item("Move to Trash", move || {
+                    if let Some(ui) = w.load() {
+                        ui.files_surface(|b| {
+                            let ps = b.selected_paths();
+                            let undo = crate::engines::file_ops::UndoStack::default();
+                            let _ = crate::views::files::trash_paths(&ps, &undo);
+                            b.reload();
+                        });
+                    }
+                }));
+            }
+            popup(entries, None, x, y);
+        }
+
+        /// `openNoteFile(_:)` from a file browser: show notes on `path`.
+        fn open_in_notes(&self, path: &str) {
+            self.ivars().controller.open(SlotView::Notes);
+            self.present(SlotView::Notes);
+            let p = path.to_string();
+            self.notes_surface(|s| s.open_note(&p));
+        }
+
+        /// The Recent / Arrived lists follow the engine (Swift
+        /// `recentChanged`, here polled every 2 s while the browser shows one).
+        fn refresh_files_recent(&self) {
+            let now = now_secs();
+            if now - self.ivars().files_recent_at.get() < 2.0 {
+                return;
+            }
+            self.ivars().files_recent_at.set(now);
+            if self.ivars().controller.current() != Some(SlotView::Files) {
+                return;
+            }
+            let need = {
+                let state = self.ivars().state.borrow();
+                state
+                    .as_ref()
+                    .and_then(|st| st.files.as_ref())
+                    .is_some_and(|b| b.in_recent() && b.query.is_empty())
+            };
+            if !need {
+                return;
+            }
+            self.files_surface(|b| {
+                let v = b.virtual_index.unwrap_or(0);
+                let fresh = b.recent_entries(v == 1);
+                let sig = |r: &[crate::views::files::Entry]| {
+                    r.iter().map(|e| format!("{}{}", e.path, e.trailing_text)).collect::<Vec<_>>()
+                };
+                if sig(&fresh) != sig(&b.all) {
+                    let keep = b.list.rows.get(b.list.selection).map(|e| e.path.clone());
+                    b.all = fresh;
+                    b.refilter();
+                    if let Some(k) = keep {
+                        if let Some(i) = b.list.rows.iter().position(|e| e.path == k) {
+                            b.list.selection = i;
+                        }
+                    }
+                }
+            });
         }
 
         // -- list keys (`PopupWindow.listKey` on the focused list) ------------
@@ -3768,6 +6046,7 @@ mod daemon_ui {
                 Some(SlotView::Files) => self
                     .files_surface(|b| b.list.move_selection(delta))
                     .is_some(),
+                Some(v) if v.is_jira() => self.jira_surface(|l| jira_move(l, delta)).is_some(),
                 _ => false,
             }
         }
@@ -3821,6 +6100,10 @@ mod daemon_ui {
             match self.ivars().controller.current() {
                 Some(SlotView::Notes) => self.notes_surface(|s| s.list_accept()).is_some(),
                 Some(SlotView::Files) => self.files_accept_selected(),
+                Some(v) if v.is_jira() => {
+                    self.jira_event(crate::views::jira_view::JiraEvent::OpenDetail);
+                    true
+                }
                 _ => false,
             }
         }
@@ -3863,26 +6146,8 @@ mod daemon_ui {
                     true
                 }
                 Some(crate::views::files::OpenOutcome::Cd(dir)) => {
-                    let Some((browser, view)) = build_files_browser_at(mtm, &dir) else {
-                        return false;
-                    };
-                    let mut state = self.ivars().state.borrow_mut();
-                    let Some(st) = state.as_mut() else {
-                        return false;
-                    };
-                    view.setFrame(NSRect::new(
-                        NSPoint::new(0.0, 0.0),
-                        st.content.bounds().size,
-                    ));
-                    view.setAutoresizingMask(mask_fill());
-                    if st.current == Some(SlotView::Files) {
-                        if let Some(old) = st.views.get(&SlotView::Files) {
-                            old.removeFromSuperview();
-                        }
-                        st.content.addSubview(&view);
-                    }
-                    st.views.insert(SlotView::Files, view);
-                    st.files = Some(browser);
+                    let _ = mtm;
+                    self.files_surface(|b| b.cd(&dir));
                     true
                 }
                 _ => false,
@@ -4164,22 +6429,65 @@ mod daemon_ui {
                             match crate::views::notes::NotesSurface::build(mtm) {
                                 Some(surface) => {
                                     let view = surface.content_view();
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.sidebar_view().set_on_event(Box::new(move |ev| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.notes_sidebar_event(ev);
+                                        }
+                                    }));
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.prose_switch().set_on_event(Box::new(move |ev| {
+                                        if let Some(ui) = weak.load() {
+                                            use crate::ui::prose_switch::ProseSwitchEvent as P;
+                                            match ev {
+                                                P::Mode(true) | P::PopOut => {
+                                                    ui.notes_surface(|s| s.pop_out_prose());
+                                                    ui.notes_surface(|s| s.prose_switch().set_prose(false));
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }));
                                     st.notes = Some(surface);
                                     view
                                 }
                                 None => placeholder(mtm, v),
                             }
                         } else if v == SlotView::Files {
-                            match build_files_browser(mtm) {
+                            match self.build_files(mtm) {
                                 Some((browser, view)) => {
                                     st.files = Some(browser);
                                     view
                                 }
                                 None => placeholder(mtm, v),
                             }
+                        } else if v == SlotView::Ai {
+                            let a = self.build_ai(mtm);
+                            let root: Retained<NSView> = Retained::into_super(a.view.clone());
+                            st.ai = Some(a);
+                            root
+                        } else if v == SlotView::Confluence {
+                            let cs = self.build_confluence(mtm);
+                            let root: Retained<NSView> = Retained::into_super(cs.view.clone());
+                            st.confluence = Some(cs);
+                            root
+                        } else if v == SlotView::Jira {
+                            let (list, view) = self.build_jira(mtm);
+                            let root: Retained<NSView> = Retained::into_super(view.clone());
+                            st.jira = Some((list, view));
+                            root
                         } else if matches!(v, SlotView::Compare | SlotView::CompareText) {
                             st.compare
-                                .get_or_insert_with(|| crate::views::compare::CompareSurface::build(mtm))
+                                .get_or_insert_with(|| {
+                                    let surface = crate::views::compare::CompareSurface::build(mtm);
+                                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                                    surface.set_on_event(Box::new(move |ev| {
+                                        if let Some(ui) = weak.load() {
+                                            ui.compare_event(ev);
+                                        }
+                                    }));
+                                    surface
+                                })
                                 .content_view()
                         } else {
                             content_for(mtm, v)
@@ -4264,7 +6572,7 @@ mod daemon_ui {
             );
             let width = settings.shared_width.max(420.0);
             let height = settings.shared_height.max(260.0);
-            let colors = PopupColors::default();
+            let colors = crate::ui::theme::PopupThemeDefaults::colors();
 
             let window = SlotHostWindow::create(mtm);
             window.setContentSize(NSSize::new(width, height));
@@ -4323,6 +6631,7 @@ mod daemon_ui {
                 NSSize::new(width, HEADER_HEIGHT),
             ));
             chrome.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
             let nav: Vec<NavIcon> = self
                 .ivars()
                 .controller
@@ -4332,60 +6641,40 @@ mod daemon_ui {
                 .map(|n| NavIcon {
                     id: n.id as i32,
                     tip: n.tip.clone(),
-                    image: None,
+                    image: Some(nav_icon_image(n.view, n.image_key.as_deref(), &assets)),
                 })
                 .collect();
             chrome.set_nav_icons(nav);
+            chrome.set_header_icon(
+                crate::ui::style::image_file(&asset_path(&assets, &settings.app_icon_name))
+                    .or_else(|| crate::ui::style::named_image("NSApplicationIcon")),
+            );
+            {
+                let controller = self.ivars().controller.clone();
+                let weak = objc2::rc::Weak::from_retained(&chrome);
+                chrome.set_on_click(Box::new(move |id| match id {
+                    crate::ui::chrome::HEADER_CLOSE_ID => controller.hide("✕"),
+                    crate::ui::chrome::HEADER_ICON_ID => {
+                        if let Some(ch) = weak.load() {
+                            let r = ch.icon_button_rect();
+                            ch.set_icon_menu_open(true);
+                            crate::app::menu::pop_status_menu(&ch, r.x, r.max_y() + 4.0);
+                            ch.set_icon_menu_open(false);
+                        }
+                    }
+                    id if id >= crate::ui::chrome::WORKSPACE_BASE => {
+                        let cell = (id - crate::ui::chrome::WORKSPACE_BASE) as usize;
+                        if let Some(key) = crate::ui::chrome::workspace_cell_key(cell) {
+                            controller.switch_workspace(&key);
+                        }
+                    }
+                    id => controller.nav_clicked(id as i64),
+                }));
+            }
 
             root.addSubview(&fx);
             root.addSubview(&tint);
             root.addSubview(&chrome);
-
-            // The view switcher: one transparent button per enabled view over
-            // the chrome band; a click routes through `controller.navClicked`.
-            let target = as_any(self);
-            let entries: Vec<(i64, String)> = self
-                .ivars()
-                .controller
-                .registry()
-                .nav_icons()
-                .iter()
-                .map(|n| (n.id, n.view.title().to_string()))
-                .collect();
-            for (i, (id, title)) in entries.iter().enumerate() {
-                let button = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        &NSString::from_str(title),
-                        Some(target),
-                        Some(sel!(navClicked:)),
-                        mtm,
-                    )
-                };
-                button.setTag(*id as NSInteger);
-                button.setBordered(false);
-                button.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-                button.setContentTintColor(Some(&colors.text.to_nscolor()));
-                button.setFrame(NSRect::new(
-                    NSPoint::new(
-                        NAV_X0 + i as f64 * NAV_STEP,
-                        (HEADER_HEIGHT - NAV_HEIGHT) / 2.0,
-                    ),
-                    NSSize::new(NAV_WIDTH, NAV_HEIGHT),
-                ));
-                root.addSubview(&button);
-            }
-            let close = unsafe {
-                NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str(""),
-                    Some(target),
-                    Some(sel!(closeClicked:)),
-                    mtm,
-                )
-            };
-            close.setBordered(false);
-            let (cx, cy, cw, ch) = super::HEADER_CLOSE_FRAME;
-            close.setFrame(NSRect::new(NSPoint::new(cx, cy), NSSize::new(cw, ch)));
-            root.addSubview(&close);
 
             let content = NSView::initWithFrame(
                 NSView::alloc(mtm),
@@ -4407,6 +6696,9 @@ mod daemon_ui {
                 current: None,
                 notes: None,
                 files: None,
+                jira: None,
+                confluence: None,
+                ai: None,
                 compare: None,
                 prefix: popup::PrefixState::new(),
                 palette: None,
@@ -4419,7 +6711,250 @@ mod daemon_ui {
         }
     }
 
+    /// `assetDir + "/" + name` (absolute names pass through, `~` expands).
+    fn asset_path(assets: &str, name: &str) -> String {
+        if name.is_empty() {
+            return String::new();
+        }
+        if let Some(rest) = name.strip_prefix("~/") {
+            return format!("{}/{}", std::env::var("HOME").unwrap_or_default(), rest);
+        }
+        if name.starts_with('/') {
+            return name.to_string();
+        }
+        format!("{assets}/{name}")
+    }
+
+    /// The header nav icon per view (`notesNavIcon`, `filesNavIcon`,
+    /// `jiraNavIcon`, `confluenceNavIcon`, `compareNavIcon`, `aiNavIcon`):
+    /// the configured image file, else Swift's glyph fallback.
+    fn nav_icon_image(
+        v: SlotView,
+        image_key: Option<&str>,
+        assets: &str,
+    ) -> Retained<objc2_app_kit::NSImage> {
+        use crate::ui::style::{glyph_icon, image_file, named_image, srgb};
+        if let Some(img) = image_key.and_then(|k| image_file(&asset_path(assets, k))) {
+            return img;
+        }
+        let jira_accent = srgb(0.36, 0.62, 0.95);
+        match v {
+            SlotView::Files => named_image("NSFolder")
+                .unwrap_or_else(|| glyph_icon("folder.fill", "F", jira_accent, 32.0)),
+            SlotView::Notes => glyph_icon("note.text", "N", srgb(0.98, 0.82, 0.35), 32.0),
+            SlotView::Confluence => glyph_icon("book.pages", "C", jira_accent, 32.0),
+            SlotView::Compare | SlotView::CompareText => {
+                glyph_icon("arrow.left.arrow.right", "⇆", srgb(0.53, 0.75, 0.95), 32.0)
+            }
+            SlotView::Ai => glyph_icon("sparkles", "✦", srgb(0.72, 0.56, 0.98), 32.0),
+            _ => glyph_icon("ticket", "J", jira_accent, 32.0),
+        }
+    }
+
     // -- pasteboard / open helpers for the paths shelf (`do:paths:return`) ----
+
+    const AI_RULE_TEMPLATE: &str = "---\nname: {name}\n# diff = show what changed vs your text · plain = just the answer\noutput: plain\ngreedy: true\n# guardrails: permissive-content-transformations\n# placeholder: hint shown in the empty input pane\n# prompt: a line put before your text, e.g. \"Summarize this text:\"\n# then: another-rule.md   (runs next, on this rule's answer)\n---\nDescribe what the model should do with the text it is given.\nReturn ONLY the result — no commentary, no preamble.\n";
+
+    fn defaults_string(key: &str) -> Option<String> {
+        let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        d.stringForKey(&NSString::from_str(key)).map(|s| s.to_string())
+    }
+
+    fn defaults_set_string(key: &str, value: &str) {
+        let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        unsafe { d.setObject_forKey(Some(&NSString::from_str(value)), &NSString::from_str(key)) };
+    }
+
+    fn defaults_remove(key: &str) {
+        let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
+        d.removeObjectForKey(&NSString::from_str(key));
+    }
+
+    /// `setReady()`.
+    fn ai_set_ready(a: &mut AIState) {
+        let s = a.model.rule().map(|r| format!("Ready — Ctrl+Enter runs “{}”", r.name)).unwrap_or_default();
+        a.model.set_status(s, crate::views::ai::AITone::Dim);
+    }
+
+    /// The AI view snapshot.
+    fn ai_snapshot(a: &mut AIState) -> crate::views::ai_view::AISnapshot {
+        use crate::engines::ai_format::AIRule;
+        use crate::ui::sidebar::{SidebarModel, SidebarRow};
+        use crate::views::ai_view::{AISnapshot, StepState};
+        let m = &a.model;
+        let rows: Vec<SidebarRow> = m
+            .rules
+            .iter()
+            .map(|r| SidebarRow {
+                title: r.name.clone(),
+                icon: "wand.and.stars".into(),
+                meta: short_mtime(&r.path),
+                tip: r.path.replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1),
+                ..Default::default()
+            })
+            .collect();
+        let rule = m.rule();
+        let chain = rule.map(AIRule::chain).unwrap_or_default();
+        let running = m.is_running();
+        let steps = chain
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let st = if running {
+                    if i < m.run.step_index {
+                        StepState::Done
+                    } else if i == m.run.step_index {
+                        StepState::Running
+                    } else {
+                        StepState::Waiting
+                    }
+                } else if !m.run.answer.is_empty() {
+                    if m.status_tone == crate::views::ai::AITone::Danger { StepState::Failed } else { StepState::Done }
+                } else {
+                    StepState::Waiting
+                };
+                (r.name.clone(), st)
+            })
+            .collect();
+        let modes = m.modes();
+        let output = if m.mode.target().is_some() {
+            None
+        } else if running {
+            Some(vec![(0, m.run.so_far().0)])
+        } else if m.run.answer.is_empty() {
+            Some(Vec::new())
+        } else if m.run.answer_diff && m.mode == crate::engines::ai_format::PaneMode::Diff {
+            Some(crate::views::ai::diff_ops(&m.run.answer_input, &m.run.answer))
+        } else {
+            Some(vec![(0, m.run.answer.clone())])
+        };
+        AISnapshot {
+            sidebar: SidebarModel {
+                section_title: "Rules".into(),
+                rows,
+                selected: (!m.rules.is_empty()).then_some(m.selected),
+                add_button: true,
+                ..Default::default()
+            },
+            command: if a.command.is_empty() { rule.map(|r| r.file()).unwrap_or_default() } else { a.command.clone() },
+            warning: rule.map(|r| r.warnings.join(", ")).unwrap_or_default(),
+            steps,
+            right_title: if rule.is_some_and(|r| r.diff()) { "Changes".into() } else { "Answer".into() },
+            mode: modes.iter().position(|x| *x == m.mode).unwrap_or(0),
+            modes: modes.iter().map(|x| x.title()).collect(),
+            copy_title: m.copy_title(),
+            placeholder: rule
+                .map(|r| if r.placeholder.is_empty() { "Type or paste your text — Ctrl+Enter runs it".to_string() } else { r.placeholder.clone() })
+                .unwrap_or_default(),
+            output,
+            running,
+            status: m.status.clone(),
+            tone: match m.status_tone {
+                crate::views::ai::AITone::Dim => 0,
+                crate::views::ai::AITone::Success => 1,
+                crate::views::ai::AITone::Warning => 2,
+                crate::views::ai::AITone::Danger => 3,
+            },
+            tokens: a.tokens.clone(),
+            tokens_warn: a.tokens_warn,
+            set_input: a.set_input.take(),
+        }
+    }
+
+    /// `vMeta` — a file's mtime as "HH:mm" today, else "MMM d".
+    fn short_mtime(path: &str) -> String {
+        use objc2_foundation::{NSDate, NSDateFormatter};
+        let Ok(t) = std::fs::metadata(path).and_then(|m| m.modified()) else { return String::new() };
+        let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let d = NSDate::dateWithTimeIntervalSince1970(secs);
+        let f = NSDateFormatter::new();
+        let today = objc2_foundation::NSCalendar::currentCalendar().isDateInToday(&d);
+        f.setDateFormat(Some(&NSString::from_str(if today { "HH:mm" } else { "MMM d" })));
+        f.stringFromDate(&d).to_string()
+    }
+
+    /// The Confluence view snapshot from the live state.
+    fn conf_snapshot(cs: &ConfState) -> crate::views::confluence_view::ConfSnapshot {
+        use crate::ui::sidebar::{SidebarModel, SidebarRow};
+        use crate::views::confluence::Scope;
+        use crate::views::confluence_view::{title_for, ConfSnapshot, MODIFIED, SORTS, TYPES};
+        let m = &cs.model;
+        let picker_text = |p: &crate::views::confluence::PickerModel| -> String {
+            if p.is_all() {
+                p.all_title.clone()
+            } else if p.selected.is_empty() {
+                p.placeholder.clone()
+            } else {
+                p.selected.join(", ")
+            }
+        };
+        let empty = if !m.configured {
+            String::new()
+        } else if m.showing_favorites {
+            m.favorites_empty_hint()
+        } else if m.has_criteria() && !m.searching {
+            String::new()
+        } else {
+            format!(
+                "Type to search {}, then Return.\n★ Favorites keeps the pages you open often.",
+                if m.site.is_empty() { "Confluence" } else { m.site.as_str() }
+            )
+        };
+        ConfSnapshot {
+            sidebar: SidebarModel {
+                section_title: "Confluence".into(),
+                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Favorites", "star")],
+                selected: Some(if m.scope == Scope::Favorites { 1 } else { 0 }),
+                ..Default::default()
+            },
+            mode: m.mode_index,
+            title_only: m.title_only,
+            query: m.query.clone(),
+            spaces: picker_text(&m.spaces),
+            spaces_all: m.spaces.is_all(),
+            people: picker_text(&m.contributors),
+            people_all: m.contributors.is_all(),
+            type_label: format!("Type: {}", title_for(&TYPES, &m.type_choice)),
+            mod_label: format!("Modified: {}", title_for(&MODIFIED, &m.modified)),
+            sort_label: format!("Sort: {}", title_for(&SORTS, &m.sort)),
+            rows: m.rows.clone(),
+            selection: (!m.rows.is_empty()).then_some(m.selection),
+            empty,
+            status: m.status.clone(),
+            tone: Some(m.status_tone),
+            searching: m.searching,
+            can_more: !m.next_link.is_empty(),
+            has_cql: !m.last_cql.is_empty(),
+            has_curl: !m.last_curl.is_empty(),
+            preview: cs.pstate.clone(),
+            favorites_scope: m.scope == Scope::Favorites,
+        }
+    }
+
+    fn jira_move(l: &mut crate::views::jira_view::JiraList, d: i64) {
+        let n = l.rows.len() as i64;
+        if n == 0 {
+            return;
+        }
+        l.selection = (l.selection as i64 + d).clamp(0, n - 1) as usize;
+    }
+
+    fn open_url(url: &str) {
+        use objc2_app_kit::NSWorkspace;
+        if let Some(u) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) {
+            NSWorkspace::sharedWorkspace().openURL(&u);
+        }
+    }
+
+    /// `activateFileViewerSelecting` — reveal `paths` in Finder.
+    fn reveal_in_finder(paths: &[String]) {
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::NSURL;
+        let urls: Vec<Retained<NSURL>> =
+            paths.iter().map(|p| NSURL::fileURLWithPath(&NSString::from_str(p))).collect();
+        let arr = objc2_foundation::NSArray::from_retained_slice(&urls);
+        NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&arr);
+    }
 
     fn copy_text_to_pasteboard(text: &str) {
         use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
@@ -5181,8 +7716,8 @@ enabled = true
         let ids: Vec<i64> = c.registry().nav_icons().iter().map(|n| n.id).collect();
         assert_eq!(
             ids,
-            vec![64, 60, 61, 65, 67, 66],
-            "files first, then notes / jira / confluence / compare / ai"
+            vec![60, 64, 61, 65, 67, 66],
+            "notes first, then files / jira / confluence / compare / ai (Swift navIcons)"
         );
 
         let titles: Vec<String> =
@@ -5210,7 +7745,7 @@ enabled = true
         let mut off = controller();
         off.register_views_from_text("");
         let ids: Vec<i64> = off.registry().nav_icons().iter().map(|n| n.id).collect();
-        assert_eq!(ids, vec![64, 60, 61], "confluence / compare / ai stay hidden");
+        assert_eq!(ids, vec![60, 64, 61], "confluence / compare / ai stay hidden");
         assert!(off.compare_model().is_none());
         let titles: Vec<String> =
             off.registry().palette_commands().iter().map(|p| p.title.clone()).collect();

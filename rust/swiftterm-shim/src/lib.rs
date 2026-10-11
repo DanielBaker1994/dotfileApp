@@ -50,6 +50,14 @@ mod present {
             #[unsafe(method(setFontWithName:size:))]
             pub fn set_font(&self, name: &NSString, size: f64);
 
+            #[unsafe(method(setColorsBackground:foreground:palette:))]
+            pub fn set_colors(
+                &self,
+                background: &objc2_app_kit::NSColor,
+                foreground: &objc2_app_kit::NSColor,
+                palette: &NSArray<objc2_app_kit::NSColor>,
+            );
+
             #[unsafe(method(terminalView))]
             pub fn terminal_view(&self) -> Retained<NSView>;
 
@@ -126,6 +134,17 @@ mod present {
         }
         start_process(view, executable, args, directory);
         true
+    }
+
+    /// Theme the terminal (background, foreground, 16 ANSI colors).
+    pub fn set_colors(
+        view: &WSShim,
+        background: &objc2_app_kit::NSColor,
+        foreground: &objc2_app_kit::NSColor,
+        palette: &[Retained<objc2_app_kit::NSColor>],
+    ) {
+        let arr = NSArray::from_retained_slice(palette);
+        view.set_colors(background, foreground, &arr);
     }
 
     /// Set the terminal font (`[app] terminal-font` / `terminal-font-size`).

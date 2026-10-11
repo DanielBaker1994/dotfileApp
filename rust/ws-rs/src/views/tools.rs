@@ -405,6 +405,16 @@ pub struct ToolPanel {
     /// Filefast's Return/Cmd+Return save guard.
     #[cfg(target_os = "macos")]
     key_monitor: Option<crate::ui::popup::MonitorHandle>,
+    /// The last header click (`onHeaderButton`), drained by `poll`.
+    click: std::rc::Rc<std::cell::Cell<i32>>,
+    #[cfg(target_os = "macos")]
+    chrome: Option<Retained<crate::ui::chrome::PopupChrome>>,
+    #[cfg(target_os = "macos")]
+    ff_hint: Option<Retained<objc2_app_kit::NSTextField>>,
+    #[cfg(target_os = "macos")]
+    colors: Option<crate::ui::theme::PopupColors>,
+    /// The health text last rendered (ANSI → attributed).
+    health_shown: String,
 }
 
 impl ToolPanel {
@@ -446,6 +456,14 @@ impl ToolPanel {
             pp_handler: None,
             #[cfg(target_os = "macos")]
             key_monitor: None,
+            click: std::rc::Rc::new(std::cell::Cell::new(0)),
+            #[cfg(target_os = "macos")]
+            chrome: None,
+            #[cfg(target_os = "macos")]
+            ff_hint: None,
+            #[cfg(target_os = "macos")]
+            colors: None,
+            health_shown: String::new(),
         }
     }
 
@@ -782,6 +800,45 @@ impl ToolPanel {
         }
     }
 
+    /// A header click: ✕ hides, the icon pops the app menu, 10/11 are the
+    /// panel's buttons (save / copy, copy output / copy config path).
+    #[cfg(target_os = "macos")]
+    fn header_click(&mut self, id: i32) {
+        use crate::ui::chrome::{HEADER_CLOSE_ID, HEADER_ICON_ID};
+        match id {
+            HEADER_CLOSE_ID => self.hide(),
+            HEADER_ICON_ID => {
+                if let Some(ch) = &self.chrome {
+                    let r = ch.icon_button_rect();
+                    crate::app::menu::pop_status_menu(ch, r.x, r.max_y() + 4.0);
+                }
+            }
+            10 | 11 => {
+                match (self.kind, id) {
+                    (ToolKind::PrettyPrint, 10) => {
+                        if let Some(h) = &self.pp_handler {
+                            let _: () = unsafe { objc2::msg_send![&**h, saveClicked: std::ptr::null::<objc2::runtime::AnyObject>()] };
+                        }
+                    }
+                    (ToolKind::PrettyPrint, _) => {
+                        if let Some(h) = &self.pp_handler {
+                            let _: () = unsafe { objc2::msg_send![&**h, copyClicked: std::ptr::null::<objc2::runtime::AnyObject>()] };
+                        }
+                    }
+                    (ToolKind::HealthChecks, 10) => copy_text(&self.health_out.lock().unwrap()),
+                    (ToolKind::HealthChecks, _) => {
+                        copy_text(&crate::app::paths::Paths::from_env().commands_conf_path());
+                    }
+                    _ => {}
+                }
+                if let Some(ch) = &self.chrome {
+                    ch.flash(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn set_pp_status(&mut self, status: Option<(String, bool)>) {
         use objc2_foundation::NSString;
@@ -833,163 +890,177 @@ impl ToolPanel {
         use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
         if self.window.is_none() {
+            let colors = crate::ui::theme::section_colors(self.kind.name());
+            let filefast = self.kind == ToolKind::Filefast;
             let w = self.spec.width.max(420.0);
-            let h = self.spec.height.max(220.0);
+            let h = if filefast { 46.0 } else { self.spec.height.max(220.0) };
             let cfg = PopupConfig {
                 name: self.kind.name().to_string(),
                 frame: CardFrame { x: 0.0, y: 0.0, width: w, height: h },
                 tool_panel: true,
                 floating: true,
+                enable_resize: !filefast,
                 ..PopupConfig::default()
             };
             let panel = PopupPanel::create(mtm, &cfg);
             panel.setTitle(&NSString::from_str(self.kind.name()));
-            let colors = crate::ui::theme::PopupThemeDefaults::colors();
-
-            let root = NSView::initWithFrame(
-                NSView::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)),
-            );
-
-            // prettyprint owns a 30 px header (buttons); every kind but
-            // health-checks owns a 20 px status line under the body.
-            let header_h = if self.kind == ToolKind::PrettyPrint { 30.0 } else { 0.0 };
-            let status_h = if self.kind == ToolKind::HealthChecks { 0.0 } else { 20.0 };
-            let mut text_top = h - header_h;
-            if self.kind == ToolKind::Filefast {
-                let field = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-                field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-                field.setTextColor(Some(&colors.text.to_nscolor()));
-                field.setFrame(NSRect::new(
-                    NSPoint::new(10.0, h - 34.0),
-                    NSSize::new(w - 20.0, 24.0),
-                ));
-                field.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable
-                        | NSAutoresizingMaskOptions::ViewMinYMargin,
-                );
-                root.addSubview(&field);
-                self.name_field = Some(field);
-                text_top = h - 42.0;
+            if filefast {
+                panel.setContentMinSize(NSSize::new(320.0, 46.0));
             }
-
-            let scroll_h = (text_top - status_h).max(0.0);
-            let scroll = NSScrollView::new(mtm);
-            scroll.setFrame(NSRect::new(
-                NSPoint::new(0.0, status_h),
-                NSSize::new(w, scroll_h),
-            ));
-            scroll.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            scroll.setHasVerticalScroller(true);
-            scroll.setDrawsBackground(true);
-            scroll.setBackgroundColor(&colors.base().to_nscolor());
-
-            let text = NSTextView::new(mtm);
-            text.setEditable(self.kind == ToolKind::PrettyPrint);
-            text.setSelectable(true);
-            text.setRichText(false);
-            text.setDrawsBackground(true);
-            text.setBackgroundColor(&colors.base().to_nscolor());
-            text.setTextColor(Some(&colors.text.to_nscolor()));
-            let size = 12.5;
-            let font = if self.spec.font.is_empty() {
-                NSFont::systemFontOfSize(size)
-            } else {
-                NSFont::fontWithName_size(&NSString::from_str(&self.spec.font), size)
-                    .unwrap_or_else(|| NSFont::systemFontOfSize(size))
+            let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
+            let icon = match self.kind {
+                ToolKind::HealthChecks => Some(crate::ui::style::glyph_icon(
+                    "heart.fill",
+                    "♥",
+                    crate::ui::theme::Rgba::new(1.0, 0.23, 0.19, 0.9),
+                    22.0,
+                )),
+                _ => crate::ui::style::image_file(&format!("{assets}/notes_icon.png")),
             };
-            text.setFont(Some(&font));
-            text.setTextContainerInset(NSSize::new(8.0, 6.0));
-            text.setVerticallyResizable(true);
-            text.setHorizontallyResizable(false);
-            text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, scroll_h)));
-            scroll.setDocumentView(Some(&text));
-            root.addSubview(&scroll);
-
-            match self.kind {
-                ToolKind::PrettyPrint => self.editor = Some(text.clone()),
-                ToolKind::Filefast => self.paste = Some(text.clone()),
-                ToolKind::HealthChecks => self.editor = Some(text.clone()),
+            let (meta, buttons): (&str, Vec<(String, i32)>) = match self.kind {
+                ToolKind::PrettyPrint => (
+                    "paste JSON or XML below — auto-formats",
+                    vec![("save file".into(), 10), ("copy contents".into(), 11)],
+                ),
+                ToolKind::HealthChecks => ("", vec![("copy output".into(), 10), ("copy config path".into(), 11)]),
+                ToolKind::Filefast => ("", Vec::new()),
+            };
+            let frame = crate::ui::panel_frame::build(
+                mtm,
+                w,
+                h,
+                crate::ui::panel_frame::PanelSpec {
+                    colors,
+                    header_color: Some(crate::ui::theme::section_header_color(self.kind.name())),
+                    title: None,
+                    meta,
+                    buttons,
+                    icon,
+                    tint_alpha: 0.78,
+                },
+            );
+            let content = frame.content.clone();
+            if filefast {
+                // No header: the card is one row (name box + paste box).
+                frame.chrome.setHidden(true);
+                content.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)));
             }
+            {
+                let click = self.click.clone();
+                frame.chrome.set_on_click(Box::new(move |id| click.set(id)));
+            }
+            self.chrome = Some(frame.chrome.clone());
+            let ch = content.frame().size.height;
 
-            if self.kind != ToolKind::HealthChecks {
+            if filefast {
+                let fw = (w * 0.42).round();
+                let (name_box, field) = crate::ui::field::search_box(mtm, &colors, 13.0, "file name", 6.0, 28.0);
+                name_box.setFrame(NSRect::new(NSPoint::new(10.0, 9.0), NSSize::new(fw - 10.0, 28.0)));
+                content.addSubview(&name_box);
+                self.name_field = Some(field);
+                let px = fw + 8.0;
+                let scroll = NSScrollView::new(mtm);
+                scroll.setFrame(NSRect::new(NSPoint::new(px, 9.0), NSSize::new(w - px - 10.0, 28.0)));
+                scroll.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                scroll.setHasVerticalScroller(false);
+                scroll.setDrawsBackground(false);
+                scroll.setWantsLayer(true);
+                if let Some(l) = scroll.layer() {
+                    l.setBackgroundColor(Some(&crate::ui::style::input_fill(&colors).to_nscolor().CGColor()));
+                    l.setCornerRadius(6.0);
+                    l.setBorderWidth(1.0);
+                    l.setBorderColor(Some(&crate::ui::style::input_stroke(&colors).to_nscolor().CGColor()));
+                }
+                let text = NSTextView::new(mtm);
+                text.setRichText(false);
+                text.setDrawsBackground(false);
+                text.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+                // The pasted text stays invisible; the hint reports it.
+                text.setTextColor(Some(&objc2_app_kit::NSColor::clearColor()));
+                text.setInsertionPointColor(Some(&colors.dim.to_nscolor()));
+                text.setTextContainerInset(NSSize::new(6.0, 5.0));
+                text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w - px - 10.0, 28.0)));
+                scroll.setDocumentView(Some(&text));
+                let hint = NSTextField::labelWithString(&NSString::from_str("paste output"), mtm);
+                hint.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+                hint.setTextColor(Some(&colors.dim.to_nscolor()));
+                hint.setFrame(NSRect::new(NSPoint::new(10.0, 5.0), NSSize::new(w - px - 30.0, 18.0)));
+                scroll.addSubview(&hint);
+                content.addSubview(&scroll);
+                self.paste = Some(text.clone());
+                self.ff_hint = Some(hint.clone());
+                // Status: a centered toast-like label over the row.
                 let status = NSTextField::labelWithString(&NSString::from_str(""), mtm);
                 status.setFont(Some(&NSFont::systemFontOfSize(11.0)));
                 status.setTextColor(Some(&colors.dim.to_nscolor()));
-                status.setFrame(NSRect::new(
-                    NSPoint::new(10.0, 2.0),
-                    NSSize::new(w - 20.0, 16.0),
-                ));
-                status.setAutoresizingMask(
-                    NSAutoresizingMaskOptions::ViewWidthSizable
-                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                status.setFrame(NSRect::new(NSPoint::new(10.0, 0.0), NSSize::new(w - 20.0, 9.0)));
+                content.addSubview(&status);
+                self.ff_status_label = Some(status);
+            } else {
+                let status_h = if self.kind == ToolKind::PrettyPrint { 18.0 } else { 0.0 };
+                let scroll = NSScrollView::new(mtm);
+                scroll.setFrame(NSRect::new(NSPoint::new(0.0, status_h), NSSize::new(w, (ch - status_h).max(0.0))));
+                scroll.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
                 );
-                root.addSubview(&status);
-                match self.kind {
-                    ToolKind::PrettyPrint => self.pp_status_label = Some(status),
-                    _ => self.ff_status_label = Some(status),
+                scroll.setHasVerticalScroller(true);
+                scroll.setAutohidesScrollers(true);
+                scroll.setDrawsBackground(false);
+                let text = NSTextView::new(mtm);
+                text.setEditable(self.kind == ToolKind::PrettyPrint);
+                text.setSelectable(true);
+                text.setRichText(self.kind == ToolKind::HealthChecks);
+                text.setDrawsBackground(false);
+                text.setTextColor(Some(&colors.text.to_nscolor()));
+                text.setInsertionPointColor(Some(&colors.accent_on().to_nscolor()));
+                let size = 13.0;
+                let font = if self.spec.font.is_empty() {
+                    NSFont::monospacedSystemFontOfSize_weight(size, unsafe { objc2_app_kit::NSFontWeightRegular })
+                } else {
+                    NSFont::fontWithName_size(&NSString::from_str(&self.spec.font), size).unwrap_or_else(|| {
+                        NSFont::monospacedSystemFontOfSize_weight(size, unsafe { objc2_app_kit::NSFontWeightRegular })
+                    })
+                };
+                text.setFont(Some(&font));
+                text.setTextContainerInset(NSSize::new(14.0, 14.0));
+                text.setVerticallyResizable(true);
+                text.setHorizontallyResizable(false);
+                text.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                if let Some(tc) = unsafe { text.textContainer() } {
+                    tc.setWidthTracksTextView(true);
                 }
-            }
-
-            if self.kind == ToolKind::PrettyPrint {
-                if let Some(status) = self.pp_status_label.clone() {
+                unsafe {
+                    text.setAutomaticQuoteSubstitutionEnabled(false);
+                    text.setAutomaticDashSubstitutionEnabled(false);
+                }
+                text.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, (ch - status_h).max(0.0))));
+                scroll.setDocumentView(Some(&text));
+                content.addSubview(&scroll);
+                self.editor = Some(text.clone());
+                if self.kind == ToolKind::PrettyPrint {
+                    let status = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+                    status.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                    status.setTextColor(Some(&colors.dim.to_nscolor()));
+                    status.setFrame(NSRect::new(NSPoint::new(14.0, 1.0), NSSize::new(w - 28.0, 16.0)));
+                    status.setAutoresizingMask(
+                        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                    );
+                    content.addSubview(&status);
+                    self.pp_status_label = Some(status.clone());
                     let handler = pp_handler::PrettyPrintHandler::new(
                         mtm,
                         text.clone(),
                         status,
                         self.spec.save_dir.clone(),
                     );
-                    let save = unsafe {
-                        NSButton::buttonWithTitle_target_action(
-                            &NSString::from_str("save file"),
-                            Some(pp_handler::as_any(&*handler)),
-                            Some(objc2::sel!(saveClicked:)),
-                            mtm,
-                        )
-                    };
-                    save.setBordered(false);
-                    save.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-                    save.setContentTintColor(Some(&colors.text.to_nscolor()));
-                    save.setFrame(NSRect::new(
-                        NSPoint::new(w - 108.0, h - 26.0),
-                        NSSize::new(100.0, 20.0),
-                    ));
-                    save.setAutoresizingMask(
-                        NSAutoresizingMaskOptions::ViewMinXMargin
-                            | NSAutoresizingMaskOptions::ViewMinYMargin,
-                    );
-                    root.addSubview(&save);
-
-                    let copy = unsafe {
-                        NSButton::buttonWithTitle_target_action(
-                            &NSString::from_str("copy contents"),
-                            Some(pp_handler::as_any(&*handler)),
-                            Some(objc2::sel!(copyClicked:)),
-                            mtm,
-                        )
-                    };
-                    copy.setBordered(false);
-                    copy.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-                    copy.setContentTintColor(Some(&colors.dim.to_nscolor()));
-                    copy.setFrame(NSRect::new(
-                        NSPoint::new(w - 218.0, h - 26.0),
-                        NSSize::new(104.0, 20.0),
-                    ));
-                    copy.setAutoresizingMask(
-                        NSAutoresizingMaskOptions::ViewMinXMargin
-                            | NSAutoresizingMaskOptions::ViewMinYMargin,
-                    );
-                    root.addSubview(&copy);
                     self.pp_handler = Some(handler);
                 }
             }
+            self.colors = Some(colors);
 
-            if self.kind == ToolKind::Filefast {
+            if filefast {
                 if let Some(field) = self.name_field.clone() {
-                    let paste = text.clone();
+                    let paste = self.paste.clone().unwrap();
                     let panel_ref = panel.clone();
                     let script = self.spec.script.clone();
                     let dir = self.filefast_dir();
@@ -1000,6 +1071,24 @@ impl ToolPanel {
                             return false;
                         }
                         let key = crate::ui::popup::key_input_from_event(event);
+                        if key.key_code == 48 && !key.ctrl {
+                            // Tab flips between the name and the paste box.
+                            let in_paste = panel_ref
+                                .firstResponder()
+                                .is_some_and(|r| std::ptr::eq(&*r as *const _ as *const u8, &*paste as *const _ as *const u8));
+                            if in_paste {
+                                let r: &objc2_app_kit::NSResponder = &field;
+                                panel_ref.makeFirstResponder(Some(r));
+                            } else {
+                                let r: &objc2_app_kit::NSResponder = &paste;
+                                panel_ref.makeFirstResponder(Some(r));
+                            }
+                            return true;
+                        }
+                        if key.key_code == crate::ui::popup::KEY_ESC {
+                            panel_ref.orderOut(None);
+                            return true;
+                        }
                         if key.key_code == crate::ui::popup::KEY_RETURN && !key.shift {
                             let name = field.stringValue().to_string().trim().to_string();
                             let contents = paste.string().to_string();
@@ -1023,7 +1112,7 @@ impl ToolPanel {
                 }
             }
 
-            panel.setContentView(Some(&root));
+            panel.setContentView(Some(&frame.root));
             self.window = Some(panel);
         }
         if let Some(panel) = &self.window {
@@ -1055,13 +1144,28 @@ impl ToolPanel {
 
     #[cfg(target_os = "macos")]
     fn poll_macos(&mut self) {
+        let click = self.click.replace(0);
+        if click != 0 {
+            self.header_click(click);
+        }
         match self.kind {
             ToolKind::HealthChecks => {
-                // Streaming: keep the read-only editor in step with the buffer.
-                if let Some(editor) = &self.editor {
-                    let text = self.health_out.lock().unwrap().clone();
-                    if editor.string().to_string() != text {
-                        editor.setString(&objc2_foundation::NSString::from_str(&text));
+                // Streaming: render the buffer's ANSI colors as attributes.
+                let text = self.health_out.lock().unwrap().clone();
+                let text = if text.is_empty() && !self.health_done.load(std::sync::atomic::Ordering::Relaxed) {
+                    "running health-checks…".to_string()
+                } else {
+                    text
+                };
+                if text != self.health_shown {
+                    self.health_shown = text.clone();
+                    if let (Some(editor), Some(c)) = (&self.editor, self.colors) {
+                        let font = editor.font().unwrap_or_else(|| objc2_app_kit::NSFont::systemFontOfSize(13.0));
+                        let attr = crate::ui::ansi_text::attributed(&text, &font, &c);
+                        if let Some(ts) = unsafe { editor.textStorage() } {
+                            ts.setAttributedString(&attr);
+                        }
+                        { use objc2_app_kit::NSStandardKeyBindingResponding; unsafe { editor.scrollToEndOfDocument(None) }; }
                     }
                 }
             }
@@ -1109,6 +1213,26 @@ impl ToolPanel {
                 }
             }
             ToolKind::Filefast => {
+                // `FileFastPasteView.refreshIndicator`.
+                if let (Some(paste), Some(hint), Some(c)) = (&self.paste, &self.ff_hint, self.colors) {
+                    let s = paste.string().to_string();
+                    let want = if s.is_empty() {
+                        "paste output".to_string()
+                    } else {
+                        let lines = s.split('\n').count();
+                        format!(
+                            "************************  {lines} line{}, {} chars pasted",
+                            if lines == 1 { "" } else { "s" },
+                            s.chars().count()
+                        )
+                    };
+                    if hint.stringValue().to_string() != want {
+                        hint.setStringValue(&objc2_foundation::NSString::from_str(&want));
+                        hint.setTextColor(Some(
+                            &(if s.is_empty() { c.dim } else { c.tone(crate::ui::theme::PopupTone::Success) }).to_nscolor(),
+                        ));
+                    }
+                }
                 let done = self.ff_out.lock().unwrap().take();
                 if let Some((ok, last)) = done {
                     if ok {

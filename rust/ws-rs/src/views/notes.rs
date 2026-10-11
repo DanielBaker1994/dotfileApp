@@ -2020,10 +2020,10 @@ mod macos {
         vim_frame: NSRect,
         /// The live model behind the tree (tabs + sidebar cursor).
         model: NotesView,
-        /// The sidebar scroll view (width follows the rail collapse).
-        sidebar: Retained<NSScrollView>,
-        /// The sidebar row title labels (repainted on selection changes).
-        row_titles: Vec<Retained<NSTextField>>,
+        /// The vertical sidebar (`PopupTabsBar` NOTES rail).
+        sidebar: Retained<crate::ui::sidebar::SidebarView>,
+        /// The bottom-right "Prose | nvim" capsule (`ProseModeSwitch`).
+        prose_switch: Retained<crate::ui::prose_switch::ProseSwitch>,
         /// The editor scroll view (moved when the rail collapses).
         editor_scroll: Retained<NSScrollView>,
         /// The expanded sidebar width, restored when the rail expands.
@@ -2032,11 +2032,48 @@ mod macos {
         find_shown: bool,
     }
 
+    /// The NOTES sidebar rows (`PopupTabsBar` titles + `vIcon` + `vMeta`).
+    fn notes_sidebar_model(model: &NotesView) -> crate::ui::sidebar::SidebarModel {
+        use crate::ui::sidebar::{icon_for_name, SidebarModel, SidebarRow};
+        let rows = model
+            .tabs
+            .tabs
+            .iter()
+            .map(|t| SidebarRow {
+                title: t.title.clone(),
+                icon: icon_for_name(&t.title).to_string(),
+                meta: short_mtime(&t.path),
+                tip: folder_text(&t.path),
+                ..Default::default()
+            })
+            .collect();
+        SidebarModel {
+            section_title: "Notes".into(),
+            rows,
+            selected: (!model.tabs.tabs.is_empty()).then_some(model.tabs.selected),
+            add_button: true,
+            closable: true,
+            ..Default::default()
+        }
+    }
+
+    /// `vMeta` — "HH:mm" today, else "MMM d".
+    fn short_mtime(path: &str) -> String {
+        use objc2_foundation::{NSCalendar, NSDate, NSDateFormatter};
+        let Ok(t) = std::fs::metadata(path).and_then(|m| m.modified()) else { return String::new() };
+        let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let d = NSDate::dateWithTimeIntervalSince1970(secs);
+        let f = NSDateFormatter::new();
+        let today = NSCalendar::currentCalendar().isDateInToday(&d);
+        f.setDateFormat(Some(&NSString::from_str(if today { "HH:mm" } else { "MMM d" })));
+        f.stringFromDate(&d).to_string()
+    }
+
     /// Build the sidebar + editor surface with its hidden drawers
     /// (see [`super::NotesSurface`]).
     fn build_surface(mtm: MainThreadMarker) -> Option<NotesSurface> {
         let cfg = NotesConfig::load();
-        let colors = crate::ui::theme::PopupThemeDefaults::colors();
+        let colors = crate::ui::theme::section_colors("notes");
         let mut model = NotesView::new(cfg.clone());
         let raw = setting("notes", "paths").unwrap_or_default();
         let paths = existing_note_paths(&raw, &|p| Path::new(p).exists());
@@ -2053,61 +2090,21 @@ mod macos {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
 
-        // --- sidebar ---------------------------------------------------------
-        let sidebar = NSScrollView::new(mtm);
-        sidebar.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(sidebar_w, 600.0),
-        ));
+        // --- sidebar (`PopupTabsBar` vertical, NOTES) -------------------------
+        let sidebar = crate::ui::sidebar::SidebarView::new(mtm, colors);
+        sidebar.set_collapse_key("notes");
+        model.sidebar.collapsed = sidebar.collapsed();
+        let sidebar_w = model.sidebar.visible_width();
+        sidebar.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(sidebar_w, 600.0)));
         sidebar.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
-        sidebar.setHasVerticalScroller(true);
-        sidebar.setDrawsBackground(true);
-        sidebar.setBackgroundColor(&colors.mantle().to_nscolor());
-        let rows_view = NotesFlippedView::new(mtm);
-        rows_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-        let row_h = 44.0;
-        let mut y = 6.0;
-        let mut row_titles: Vec<Retained<NSTextField>> = Vec::new();
-        for (tab, row) in model.tabs.tabs.iter().zip(model.sidebar.rows.iter()) {
-            let title = NSTextField::labelWithString(&NSString::from_str(&row.title), mtm);
-            title.setFont(Some(&NSFont::systemFontOfSize(12.5)));
-            title.setTextColor(Some(&colors.text.to_nscolor()));
-            title.setFrame(NSRect::new(
-                NSPoint::new(10.0, y),
-                NSSize::new((sidebar_w - 16.0).max(0.0), 16.0),
-            ));
-            title.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-            rows_view.addSubview(&title);
-            row_titles.push(title);
-
-            let folder = folder_text(&tab.path);
-            let sub = match &row.trailing {
-                Some(age) => format!("{folder}  \u{00b7}  {age}"),
-                None => folder,
-            };
-            let sub_label = NSTextField::labelWithString(&NSString::from_str(&sub), mtm);
-            sub_label.setFont(Some(&NSFont::systemFontOfSize(10.5)));
-            sub_label.setTextColor(Some(&colors.dim.to_nscolor()));
-            sub_label.setFrame(NSRect::new(
-                NSPoint::new(10.0, y + 18.0),
-                NSSize::new((sidebar_w - 16.0).max(0.0), 14.0),
-            ));
-            sub_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-            rows_view.addSubview(&sub_label);
-            y += row_h;
-        }
-        rows_view.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(sidebar_w, y.max(600.0)),
-        ));
-        sidebar.setDocumentView(Some(&rows_view));
+        sidebar.set_model(notes_sidebar_model(&model));
         root.addSubview(&sidebar);
 
         // --- editor ----------------------------------------------------------
-        let editor_w = (900.0 - sidebar_w - 1.0).max(0.0);
+        let editor_w = (900.0 - sidebar_w - 4.0).max(0.0);
         let editor = NSScrollView::new(mtm);
         editor.setFrame(NSRect::new(
-            NSPoint::new(sidebar_w + 1.0, 0.0),
+            NSPoint::new(sidebar_w + 4.0, 0.0),
             NSSize::new(editor_w, 600.0),
         ));
         editor.setAutoresizingMask(
@@ -2162,15 +2159,34 @@ mod macos {
         let vim_paths = crate::app::paths::Paths::from_env();
         let vim_asset = vim_paths.asset_dir().to_string();
         let vim_frame = NSRect::new(
-            NSPoint::new(sidebar_w + 1.0, 0.0),
-            NSSize::new(editor_w, 600.0),
+            NSPoint::new(sidebar_w + 4.0 + 8.0, 4.0),
+            NSSize::new(editor_w - 16.0, 600.0 - 8.0),
         );
         let mut vim = None;
         if vim_enabled {
             let file = model.tabs.selected_path().map(str::to_string);
             let mut pane =
                 crate::views::notes_vim::VimPane::new(vim_bin.clone(), vim_asset.clone(), file);
+            // `PopupWindow.vimFont`: [notes] font (or "<font> Mono") at font-size.
+            let size = setting("notes", "font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(14.0);
+            let font_name = setting("notes", "font").unwrap_or_default();
+            let mono = [font_name.clone(), format!("{font_name} Mono")]
+                .into_iter()
+                .find(|n| !n.is_empty() && NSFont::fontWithName_size(&NSString::from_str(n), size).is_some_and(|f| f.isFixedPitch()))
+                .or_else(|| setting("app", "terminal-font"))
+                .unwrap_or_else(|| "Menlo".to_string());
+            pane.set_font(&mono, size);
             if let Some(view) = pane.build(mtm, vim_frame) {
+                if let Ok(shim) = view.clone().downcast::<swiftterm_shim::WSShim>() {
+                    let pal: Vec<Retained<objc2_app_kit::NSColor>> =
+                        crate::ui::theme::ansi_palette(&colors).into_iter().map(|c| c.to_nscolor()).collect();
+                    swiftterm_shim::set_colors(
+                        &shim,
+                        &objc2_app_kit::NSColor::clearColor(),
+                        &colors.text.to_nscolor(),
+                        &pal,
+                    );
+                }
                 view.setAutoresizingMask(
                     NSAutoresizingMaskOptions::ViewWidthSizable
                         | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -2193,28 +2209,14 @@ mod macos {
             msg_send![super(h), init]
         };
         PROSE_HANDLERS.with(|v| v.borrow_mut().push(handler.clone()));
-        let pop = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Prose"),
-                Some(as_any(&*handler)),
-                Some(objc2::sel!(popOut:)),
-                mtm,
-            )
-        };
-        pop.setBordered(false);
-        pop.setEnabled(has_target);
-        pop.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-        pop.setContentTintColor(Some(&colors.text.to_nscolor()));
-        pop.sizeToFit();
-        let pop_w = pop.frame().size.width.max(52.0);
-        pop.setFrame(NSRect::new(
-            NSPoint::new((900.0 - pop_w - 12.0).max(sidebar_w + 8.0), 8.0),
-            NSSize::new(pop_w, 22.0),
-        ));
-        pop.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        let _ = has_target;
+        let edit_label = if vim.is_some() { "nvim" } else { "Edit" };
+        let prose_switch = crate::ui::prose_switch::ProseSwitch::new(mtm, colors, edit_label);
+        prose_switch.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
-        root.addSubview(&pop);
+        prose_switch.place(editor.frame());
+        root.addSubview(&prose_switch);
 
         // --- terminal drawer (bottom, hidden by default) ---------------------
         let terminal_rect = NSRect::new(
@@ -2227,7 +2229,12 @@ mod macos {
                 | NSAutoresizingMaskOptions::ViewMinYMargin,
         );
         if let Ok(shim) = terminal.clone().downcast::<swiftterm_shim::WSShim>() {
-            swiftterm_shim::set_font(&shim, "Menlo", 12.0);
+            let tf = setting("app", "terminal-font").unwrap_or_else(|| "Menlo".to_string());
+            let ts = setting("app", "terminal-font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(12.0);
+            swiftterm_shim::set_font(&shim, &tf, ts.min(18.0));
+            let pal: Vec<Retained<objc2_app_kit::NSColor>> =
+                crate::ui::theme::ansi_palette(&colors).into_iter().map(|c| c.to_nscolor()).collect();
+            swiftterm_shim::set_colors(&shim, &colors.background.with_alpha(1.0).to_nscolor(), &colors.text.to_nscolor(), &pal);
             let (shell, args, home) = drawer_shell();
             swiftterm_shim::start_process(&shim, &shell, &args, home.as_deref());
         }
@@ -2288,7 +2295,7 @@ mod macos {
             vim_frame,
             model,
             sidebar,
-            row_titles,
+            prose_switch,
             editor_scroll: editor,
             rail_expanded_width: sidebar_w,
             find_shown: false,
@@ -2431,22 +2438,83 @@ mod macos {
             }
         }
 
-        /// Tint the selected row (the labels stand in for the row views).
+        /// Push the tab rows / selection into the sidebar view.
         fn repaint_rows(&mut self) {
-            let colors = crate::ui::theme::PopupThemeDefaults::colors();
-            for (i, label) in self.row_titles.iter().enumerate() {
-                let color = if i == self.model.tabs.selected {
-                    colors.accent
-                } else {
-                    colors.text
-                };
-                label.setTextColor(Some(&color.to_nscolor()));
+            self.sidebar.set_model(notes_sidebar_model(&self.model));
+        }
+
+        /// The sidebar view (the host routes its clicks).
+        pub fn sidebar_view(&self) -> Retained<crate::ui::sidebar::SidebarView> {
+            self.sidebar.clone()
+        }
+
+        pub fn prose_switch(&self) -> Retained<crate::ui::prose_switch::ProseSwitch> {
+            self.prose_switch.clone()
+        }
+
+        pub fn tab_path(&self, i: usize) -> Option<String> {
+            self.model.tabs.tabs.get(i).map(|t| t.path.clone())
+        }
+
+        /// The sidebar "+" (`onNewNote`): `dir/<new-note-name>-N.md` beside
+        /// the current note (else `~/notes`), opened as a new tab.
+        pub fn new_note(&mut self) {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let dir = self
+                .selected_path()
+                .and_then(|p| Path::new(&p).parent().map(|d| d.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| format!("{home}/notes"));
+            let _ = std::fs::create_dir_all(&dir);
+            let open = self.model.tabs.paths();
+            let plan = plan_new_note(&dir, false, &Value::Null, &self.model.config, &open);
+            if plan.write().is_err() {
+                return;
+            }
+            let i = self.model.tabs.append(&plan.path);
+            self.select_row(i);
+            self.repaint_rows();
+            self.focus_editor();
+        }
+
+        /// The sidebar ✕ on tab `i` (`onCloseTab`).
+        pub fn close_tab(&mut self, i: usize) {
+            if self.model.tabs.close(i).is_none() {
+                return;
+            }
+            let n = self.model.tabs.tabs.len();
+            if n > 0 {
+                let sel = self.model.tabs.selected.min(n - 1);
+                self.model.tabs.selected = sel;
+                if let Some(p) = self.selected_path() {
+                    self.open_note(&p);
+                }
+            }
+            self.repaint_rows();
+        }
+
+        /// Select tab `i` from a sidebar click.
+        pub fn click_row(&mut self, i: usize) {
+            self.select_row(i);
+            self.focus_editor();
+        }
+
+        /// `popOutProse()` — the selected note in a floating prose window.
+        pub fn pop_out_prose(&self) {
+            if let Some(p) = prose_launch_target(self.selected_path().as_deref(), |p| Path::new(p).exists()) {
+                launch(&p);
             }
         }
 
         /// `PopupTabsBar.toggleRail` — collapse / expand the notes sidebar.
         pub fn toggle_rail(&mut self) {
             self.model.sidebar.collapsed = !self.model.sidebar.collapsed;
+            self.sidebar.set_collapsed(self.model.sidebar.collapsed);
+            self.apply_sidebar_width();
+        }
+
+        /// The sidebar view flipped its own rail (toggle button).
+        pub fn rail_changed(&mut self, collapsed: bool) {
+            self.model.sidebar.collapsed = collapsed;
             self.apply_sidebar_width();
         }
 
@@ -2456,73 +2524,27 @@ mod macos {
             let w = self.model.sidebar.visible_width();
             self.sidebar
                 .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, full.height)));
-            let editor_w = (full.width - w - 1.0).max(0.0);
+            self.prose_switch.place(self.editor_scroll.frame());
+            let editor_w = (full.width - w - 4.0).max(0.0);
             self.editor_scroll.setFrame(NSRect::new(
-                NSPoint::new(w + 1.0, 0.0),
+                NSPoint::new(w + 4.0, 0.0),
                 NSSize::new(editor_w, full.height),
             ));
             let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
             self.terminal.setFrame(NSRect::new(
-                NSPoint::new(w + 1.0, full.height - term_h),
+                NSPoint::new(w + 4.0, full.height - term_h),
                 NSSize::new(editor_w, term_h),
             ));
             if let Some(view) = self.vim.as_ref().and_then(|p| p.view()) {
                 view.setFrame(NSRect::new(
-                    NSPoint::new(w + 1.0, 0.0),
-                    NSSize::new(editor_w, full.height),
+                    NSPoint::new(w + 4.0 + 8.0, 4.0),
+                    NSSize::new((editor_w - 16.0).max(0.0), (full.height - 8.0).max(0.0)),
                 ));
             }
         }
 
-        /// Rebuild the sidebar labels from the model (new tabs etc.).
+        /// Rebuild the sidebar rows from the model (new tabs etc.).
         pub fn rebuild_sidebar_rows(&mut self) {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            let colors = crate::ui::theme::PopupThemeDefaults::colors();
-            let w = self.model.sidebar.visible_width();
-            let Some(rows_view) = self.row_titles.first().and_then(|t| unsafe { t.superview() }) else {
-                return;
-            };
-            let subs = rows_view.subviews();
-            for s in &subs {
-                s.removeFromSuperview();
-            }
-            self.row_titles.clear();
-            let row_h = 44.0;
-            let mut y = 6.0;
-            for (tab, row) in self.model.tabs.tabs.iter().zip(self.model.sidebar.rows.iter()) {
-                let title = NSTextField::labelWithString(&NSString::from_str(&row.title), mtm);
-                title.setFont(Some(&NSFont::systemFontOfSize(12.5)));
-                title.setTextColor(Some(&colors.text.to_nscolor()));
-                title.setFrame(NSRect::new(
-                    NSPoint::new(10.0, y),
-                    NSSize::new((w - 16.0).max(0.0), 16.0),
-                ));
-                title.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-                rows_view.addSubview(&title);
-                self.row_titles.push(title);
-
-                let folder = folder_text(&tab.path);
-                let sub = match &row.trailing {
-                    Some(age) => format!("{folder}  \u{00b7}  {age}"),
-                    None => folder,
-                };
-                let sub_label = NSTextField::labelWithString(&NSString::from_str(&sub), mtm);
-                sub_label.setFont(Some(&NSFont::systemFontOfSize(10.5)));
-                sub_label.setTextColor(Some(&colors.dim.to_nscolor()));
-                sub_label.setFrame(NSRect::new(
-                    NSPoint::new(10.0, y + 18.0),
-                    NSSize::new((w - 16.0).max(0.0), 14.0),
-                ));
-                sub_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-                rows_view.addSubview(&sub_label);
-                y += row_h;
-            }
-            rows_view.setFrame(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(w.max(0.0), y.max(600.0)),
-            ));
             self.repaint_rows();
         }
 

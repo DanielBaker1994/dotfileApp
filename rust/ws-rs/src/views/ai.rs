@@ -742,6 +742,21 @@ fn char_group(raw: Vec<(DiffOpKind, String)>) -> Vec<(DiffOpKind, String)> {
     out
 }
 
+/// `CharDiff.diff(a, b)` grouped: `(-1 del | 0 same | 1 ins, text)` runs.
+pub fn diff_ops(a: &str, b: &str) -> Vec<(i8, String)> {
+    char_group(char_raw_ops(a, b))
+        .into_iter()
+        .map(|(k, t)| {
+            let n = match k {
+                DiffOpKind::Same => 0,
+                DiffOpKind::Del => -1,
+                DiffOpKind::Ins => 1,
+            };
+            (n, t)
+        })
+        .collect()
+}
+
 /// `CharDiff.changes(CharDiff.diff(a, b))` — the number of change runs.
 fn diff_change_count(a: &str, b: &str) -> usize {
     let ops = char_group(char_raw_ops(a, b));
@@ -1314,6 +1329,21 @@ impl AIWindowModel {
         }
     }
 
+    /// The right-pane web preview (created on first use) for embedding.
+    #[cfg(target_os = "macos")]
+    pub fn preview_view(&mut self) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
+        let mtm = objc2::MainThreadMarker::new()?;
+        if self.preview.is_none() {
+            self.preview = Some(macos::AIPreview::new(mtm));
+        }
+        self.preview.as_ref().map(|p| objc2::rc::Retained::into_super(p.web.clone()))
+    }
+
+    /// The live child is running (`process != nil`).
+    pub fn is_running(&self) -> bool {
+        self.process.is_some() || self.run.running
+    }
+
     /// `showPreview()` — load `RichText.html` into the right-pane `WKWebView`.
     pub fn show_preview(&mut self) {
         #[cfg(target_os = "macos")]
@@ -1630,6 +1660,10 @@ pub mod macos {
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 240.0));
             let web = unsafe {
                 WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config)
+            };
+            let no = objc2_foundation::NSNumber::numberWithBool(false);
+            let _: () = unsafe {
+                msg_send![&*web, setValue: &*no, forKey: &*NSString::from_str("drawsBackground")]
             };
             AIPreview { web, link }
         }
