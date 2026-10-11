@@ -1,4 +1,4 @@
-// swiftterm-shim build script (PLAN-rust-port.md, Phase 0.7).
+// swiftterm-shim build script.
 //
 // Compiles `shim/WSShim.swift` against the pinned SwiftTerm module and links
 // the resulting object + `.build/SwiftTerm/libSwiftTerm.a` for dependents.

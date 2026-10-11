@@ -1,6 +1,6 @@
 # PRD: `ws-settings`, one place to see and change every shortcut and setting
 
-Status: approved, building (decisions + corrections: `PLAN-settings-hub.md`) · Written: 2026-10-03 · Target: a standalone Python tool beside kitchen-sink (macOS, arm64, python3 ≥ 3.11)
+Status: approved, building · Written: 2026-10-03 · Target: a standalone Python tool beside kitchen-sink (macOS, arm64, python3 ≥ 3.11)
 
 > **For the implementing agent.** Read `AGENT_CONTEXT.md` (= `CLAUDE.md`) and
 > `rule.md` first. They are binding. This PRD says *what* to build and which

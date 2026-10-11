@@ -1,5 +1,5 @@
 """ws-settings: every shortcut and setting of the kitchen-sink setup
-in one place (PRD-settings-hub.md, PLAN-settings-hub.md)."""
+in one place (PRD-settings-hub.md)."""
 import sys
 
 sys.dont_write_bytecode = True   # a __pycache__ in the app bundle breaks its signature

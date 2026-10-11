@@ -17,9 +17,9 @@ filefast, health checks, view switcher / command palette). It is a *regular* app
 (`pylib/` plus `jira/`, `confluence/`, `notify/`, `settings_hub/`) is the "cold
 path": the app talks to it over a persistent JSON-lines helper protocol.
 
-History: the app was Swift until the Phase-4 cutover (Oct 2026,
-`PLAN-rust-port.md`); the Rust port mirrors the old Swift files module for
-module, and Swift type names survive in comments (`SwitcherController`,
+History: the app was Swift until the Phase-4 cutover (Oct 2026); the Rust
+port mirrors the old Swift files module for module, and Swift type names
+survive in comments (`SwitcherController`,
 `PopupWindow.handleKey`, `testQuery`) — use them to find the Rust counterpart.
 The only Swift left is the SwiftTerm shim (`rust/swiftterm-shim`).
 
@@ -209,7 +209,7 @@ root); `Tests/` (Python tests + `helper_fixtures/`, `snippet_render/`,
 ### Docs
 
 `rule.md` (non-negotiables), `HANDOFF-rust-port-next.md` (latest status /
-open items), `PLAN-rust-port.md` (port history + cutover), `PRD-*.md`
+open items), `PRD-*.md`
 (`PRD-keyboard.md` = pane/vim spec; `PRD-compare.md`; …), `BACKLOG.md`,
 `PRODUCT.md`, `DESIGN.md`, `README.md`. Older plans/PRDs name Swift files —
 map them to the Rust module of the same name.

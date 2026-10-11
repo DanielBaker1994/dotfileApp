@@ -1,6 +1,6 @@
 //! Embed the bundle Info.plist into `__TEXT,__info_plist` (Swift builds do
 //! this with `-Xlinker -sectcreate`). TCC and `Bundle.main` read it before
-//! AppKit starts; see PLAN-rust-port.md item 7.
+//! AppKit starts.
 
 fn main() {
     println!("cargo:rerun-if-changed=../../Info.plist");

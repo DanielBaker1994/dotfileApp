@@ -20,7 +20,5 @@ git show <commit>:AGENT_CONTEXT.md   # the old full document
 - `AGENTS.md` — the single current context doc: rules, build/run/test, code
   map, architecture, the Rust port, common tasks, gotchas.
 - `rule.md` — the non-negotiable UX/git/SwiftTerm rules.
-- `PLAN-rust-port.md` — Rust port status, remaining `todo!()` seams, and the
-  Phase-4 parity cutover gate.
 - `BACKLOG.md`, `PRD-*.md`, `PRODUCT.md`, `DESIGN.md`, `README.md` — deep
   dives for the parts they cover.

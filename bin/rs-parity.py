@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """rs-parity — compare the Swift and Rust daemons' socket `state` JSON.
 
-The Rust port must keep the socket contract byte-compatible (PLAN-rust-port.md).
+The Rust port must keep the socket contract byte-compatible.
 This drives a scripted sequence of `do:ACTION` verbs against BOTH daemons and
 reports (a) `state` keys the Rust side is missing and (b) common scalar keys
 whose values disagree. It is a report tool, not a hard gate, unless --strict.

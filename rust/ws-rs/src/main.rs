@@ -1,8 +1,7 @@
 //! kitchen-sink — the app's entry point (the former Swift `main.swift`).
 //!
 //! One-shot commands, the install check, the CLI client pass (`app::cli`),
-//! then the daemon. The module tree mirrors the old Swift files (see
-//! `PLAN-rust-port.md`).
+//! then the daemon. The module tree mirrors the old Swift files.
 
 #![allow(dead_code)]
 
