@@ -4015,6 +4015,25 @@ mod daemon_ui {
             }
 
             let current = self.ivars().controller.current();
+            if current == Some(SlotView::Ai) {
+                // `AIWindow.handleKey`: Esc stops a run, Ctrl/Cmd+Return runs,
+                // Cmd+L focuses the input.
+                use crate::views::ai::{route_ai_key, AIKeyAction, KeyInputLike};
+                let running = self.ai_surface(|a| a.model.is_running()).unwrap_or(false);
+                let k = KeyInputLike { key_code: key.key_code, cmd: key.cmd, ctrl: key.ctrl };
+                match route_ai_key(k, running) {
+                    AIKeyAction::Stop | AIKeyAction::Run => {
+                        self.ai_event(crate::views::ai_view::AIEvent::Run);
+                        return true;
+                    }
+                    AIKeyAction::FocusInput => {
+                        self.live_pane_focus("input");
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            let current = self.ivars().controller.current();
             if current == Some(SlotView::Notes) {
                 if let Some(r) = self.route_notes_key(&key, event.timestamp()) {
                     return r;
