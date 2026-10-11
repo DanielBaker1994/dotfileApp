@@ -4018,6 +4018,9 @@ mod daemon_ui {
             if current.is_some_and(|v| v.is_jira()) && self.jira_key(&key) {
                 return true;
             }
+            if current == Some(SlotView::Confluence) && self.conf_key(&key) {
+                return true;
+            }
             if current == Some(SlotView::Ai) {
                 // `AIWindow.handleKey`: Esc stops a run, Ctrl/Cmd+Return runs,
                 // Cmd+L focuses the input.
@@ -4577,6 +4580,12 @@ mod daemon_ui {
                 _ => return None,
             };
             Some((st.window.clone(), panes))
+        }
+
+        /// The id of the pane that holds the keyboard right now.
+        fn focused_pane_id(&self) -> Option<String> {
+            let (w, panes) = self.live_panes()?;
+            crate::app::live_panes::current(&w, &panes).map(|p| p.id.clone())
         }
 
         /// `PaneNav.shared.move(_:in:)` on the live window (Ctrl+HJKL).
@@ -6724,6 +6733,47 @@ mod daemon_ui {
                 return;
             }
             self.jira_surface(|l| l.refresh());
+        }
+
+        /// `ConfluenceWindow.handleKey`: Cmd+L / Cmd+F search field, Cmd+G /
+        /// Cmd+Shift+G preview hits, Cmd+D favorite, Cmd+R search, Cmd+Return
+        /// open, Cmd+C / Cmd+Shift+C link (title + link) from the results.
+        fn conf_key(&self, key: &popup::KeyInput) -> bool {
+            use crate::views::confluence_view::ConfEvent as E;
+            if !key.cmd || key.ctrl || key.opt {
+                return false;
+            }
+            match key.key_code {
+                37 | 3 if !key.shift => {
+                    self.live_pane_focus("search");
+                }
+                5 => self.conf_event(if key.shift { E::PrevHit } else { E::NextHit }),
+                2 => {
+                    if let Some(i) = self.conf_surface(|cs| cs.model.selection) {
+                        self.conf_event(E::Star(i));
+                    }
+                }
+                15 => self.conf_event(E::Search),
+                36 | 76 => self.conf_event(E::Open),
+                8 => {
+                    // Only from the results list: the search field keeps Cmd+C.
+                    let on_results = self.focused_pane_id().as_deref() == Some("results");
+                    if !on_results {
+                        return false;
+                    }
+                    if key.shift {
+                        let r = self.conf_surface(|cs| cs.model.rows.get(cs.model.selection).map(|r| (r.title.clone(), r.url.clone())));
+                        if let Some(Some((t, u))) = r {
+                            copy_text_to_pasteboard(&format!("{t}\n{u}"));
+                            crate::ui::toast::show("Copied title + link", "link");
+                        }
+                    } else {
+                        self.conf_event(E::CopyLink);
+                    }
+                }
+                _ => return false,
+            }
+            true
         }
 
         /// The list window's Jira keys (`hostShortcutKey` + `listKey`):
