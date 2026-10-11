@@ -4169,7 +4169,7 @@ mod daemon_ui {
         /// typing still reaches their search fields.
         fn route_overlay_key(&self, event: &NSEvent) -> bool {
             use objc2_app_kit::NSEventModifierFlags;
-            if self.note_find_key(event) {
+            if self.note_find_key(event) || self.paths_key(event) {
                 return true;
             }
 
@@ -6993,6 +6993,76 @@ mod daemon_ui {
                 .map(|(row, (title, section, icon))| JumpItem { title, section, icon, row })
                 .collect();
             ui.show(items);
+        }
+
+        /// `PathsWindow.handleKey` for what the field delegate doesn't see:
+        /// Cmd+C / Cmd+Shift+C, Space / Cmd+Y Quick Look, Cmd+O, Cmd+R,
+        /// Cmd+Shift+R, Cmd+Delete.
+        fn paths_key(&self, event: &NSEvent) -> bool {
+            use crate::views::paths::{key_action, PathsKey};
+            let info = self.ivars().state.borrow().as_ref().and_then(|st| {
+                let w = st.paths.as_ref()?;
+                let win = w.window.as_ref()?;
+                if !win.isKeyWindow() {
+                    return None;
+                }
+                let sel = w
+                    .search
+                    .as_ref()
+                    .and_then(|f| f.currentEditor())
+                    .map(|e| e.selectedRange().length > 0)
+                    .unwrap_or(false);
+                let list_focused = match (win.firstResponder(), &w.list) {
+                    (Some(fr), Some(l)) => std::ptr::eq(
+                        &*fr as *const objc2_app_kit::NSResponder as *const u8,
+                        &**l as *const crate::views::files_view::FileListView as *const u8,
+                    ),
+                    _ => false,
+                };
+                Some((sel, w.query.trim().is_empty(), list_focused))
+            });
+            let Some((text_selected, query_empty, list_focused)) = info else { return false };
+            let key = popup::key_input_from_event(event);
+            let Some(action) = key_action(key, text_selected, query_empty, list_focused) else { return false };
+            let paths = self.paths_surface(|w| w.selected_paths()).unwrap_or_default();
+            match action {
+                // The field delegate already routes these (`PathsEvent`).
+                PathsKey::Hide | PathsKey::Move(..) | PathsKey::RunDefault => return false,
+                PathsKey::CopyFiles => {
+                    copy_files_to_pasteboard(&paths);
+                    crate::ui::toast::show(&format!("Copied {} file(s)", paths.len()), "doc.on.doc");
+                }
+                PathsKey::CopyPaths => {
+                    if !paths.is_empty() {
+                        copy_text_to_pasteboard(&paths.join("\n"));
+                        crate::ui::toast::show(&format!("Copied {} path(s)", paths.len()), "doc.on.clipboard");
+                    }
+                }
+                PathsKey::QuickLook => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        self.paths_surface(|w| w.toggle_quick_look(mtm));
+                    }
+                }
+                PathsKey::Open => {
+                    for p in &paths {
+                        open_path(p);
+                    }
+                }
+                PathsKey::Reveal => reveal_in_finder(&paths),
+                PathsKey::BeginRename => crate::ui::toast::not_ported("Paths inline rename"),
+                PathsKey::Forget => {
+                    SHELF.with(|s| {
+                        if let Some(sh) = s.borrow().as_ref() {
+                            sh.borrow_mut().remove(&paths);
+                        }
+                    });
+                    self.paths_surface(|w| {
+                        w.set_items(shelf_entries());
+                        w.reload(true);
+                    });
+                }
+            }
+            true
         }
 
         /// `NoteFindWindow.key(_:_:)` while its panel is key.
