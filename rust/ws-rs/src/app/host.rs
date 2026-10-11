@@ -444,7 +444,7 @@ impl ControllerInner {
                 }),
             });
             // The `PopupWindow.testState` keys the Swift notes / files / jira
-            // members always report (the ui-test drawer probes read these).
+            // members always report (the state probes read these).
             if matches!(v, SlotView::Notes | SlotView::Files | SlotView::Jira) {
                 let notes = v == SlotView::Notes;
                 if let Some(obj) = entry.as_object_mut() {

@@ -43,14 +43,15 @@ live focus read on main) and `do_host_action` + the views' registry hooks:
    view's `test_state` (and a `do:` verb in `do_host_action`) rather than
    reaching for osascript.
 
-In bin/ui-test.sh the same is wrapped as `ws_state JQ`, `ws_do ACTION`,
-`wait_state 'JQ_BOOL' [secs]` (50 ms polling — use instead of `sleep`).
+Poll for a state change at ~50 ms cadence — never fixed `sleep`s. (The old
+`bin/ui-test.sh` wrappers are gone; the UI suites were deleted.)
 
-Only real keyboard/mouse paths (the key routing in `route_key_event`, clicks)
-still need synthetic input; run the full suite at most once (it is slow).
+Real keyboard/mouse paths (the key routing in `route_key_event`, clicks) still
+need synthetic input — one-shot only, and prefer screenshots/artifacts over
+rerun loops.
 cliclick's keystrokes may not reach apps from the agent's session —
 `osascript -e 'tell application "System Events" to key code 53'` does.
 
-Show / hide / focus / workspace-follow changes: `bin/ui-test-focus.py`
-(or a subset: `show hide follow stranded swap focus esc single`) — timed,
-checks AeroSpace's view of the window too, restores everything after.
+Show / hide / focus / workspace-follow changes: capture `state` before/after
+(frames, `wid`, `visible`) plus a screenshot, and cross-check AeroSpace with
+`aerospace list-windows --all`. No scripted UI suite — deleted.

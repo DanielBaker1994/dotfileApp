@@ -6,7 +6,7 @@
 //! snippet picker. This module owns the process lifecycle, the socket/args/env
 //! contract and the RPC glue (`engines::nvim_rpc`).
 //!
-//! See `bin/ui-test-vim.sh` for the end-to-end contract:
+//! End-to-end contract (verify by hand with socket probes — no UI suite):
 //! * `--listen $HOME/.cache/kitchen-sink/nvim-notes-<pid>.sock` (so
 //!   `nvim --server … --remote-expr` and `NvimRpc` can drive the same editor);
 //! * `g:ws_sock` points at the app's command socket (`$TMPDIR/ws-notes.sock`)

@@ -12,8 +12,9 @@ ws — kitchen-sink entry point
   ws uninstall                      remove everything (UNINSTALL.sh)
   ws build [--force|--build-only]   compile + relaunch
   ws dmg [--no-notarize]            build the distributable .dmg
-  ws test [all|SUITE|ui|vim|focus|install]
-                                    unit tests (SUITE = config, compare, …) or UI suites
+  ws test [all|SUITE|install]
+                                    unit tests (SUITE = config, compare, …).
+                                    UI suites were deleted (owner decision)
   ws doctor [--fix]                 health check of the whole stack
   ws check [--json]                 preflight this Mac
   ws permissions grant|fix          macOS privacy permissions
@@ -37,7 +38,7 @@ ws_menu() {
         printf '   1) install       install everything\n'
         printf '   2) build         compile + relaunch\n'
         printf '   3) dmg           build the distributable .dmg\n'
-        printf '   4) test          unit + UI tests\n'
+        printf '   4) test          unit tests\n'
         printf '   5) doctor        health check of the whole stack\n'
         printf '   6) check         preflight this Mac\n'
         printf '   7) permissions   grant / fix macOS permissions\n'

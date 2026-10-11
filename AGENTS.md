@@ -92,18 +92,12 @@ the rest are Python (`config`, `fileops`, `jsonmgr`, `helper` (Python ≥ 3.11,
 `prose-pdf`, `snippets`, …). Direct: `cd rust && cargo test` (~660 tests) or
 `python3 Tests/test_x.py`.
 
-UI suites: `./ws test ui` (`bin/ui-test.sh`: cliclick + osascript; takes over
-the live app, snapshots/restores `commands.toml`; §14b types into whatever note
-is open — check `git status` after), `./ws test vim` (`bin/ui-test-vim.sh`:
-needs `[notes] vim-mode = true` and nvim; aborts if kitchen-sink isn't
-frontmost), `./ws test focus` (`bin/ui-test-focus.py`: daemon must be running;
-drives the real AeroSpace hotkey path; moves workspaces and restores them;
-sections selectable: `compare`, `swap`, `tools`, …), `./ws test install`
-(`Tests/test_install.sh`: needs `.build/dist/kitchen-sink.app`, throwaway
-`$HOME`). Slow/flaky and **need an unlocked screen** (AX sees no windows while
-the session is locked) — run at most once, don't loop them. Point a suite at
-another bundle with `WS_BIN=<bundle>/Contents/MacOS/kitchen-sink` and an
-isolated `TMPDIR`.
+UI test suites (`ui`, `vim`, `focus`) were **deleted by owner decision** — they
+were slow and ineffective; do not resurrect them or replace them with more
+bash+sleep automation. Verify UI work with artifacts + screenshots and the
+socket probes below (an unlocked screen is required — AX sees no windows while
+the session is locked). `./ws test install` (`Tests/test_install.sh`: needs
+`.build/dist/kitchen-sink.app`, throwaway `$HOME`) remains.
 
 Fast UI verification (the `ui-check` skill, `.claude/skills/ui-check/SKILL.md`):
 
