@@ -4080,6 +4080,349 @@ mod pin_window {
     }
 }
 
+/// `ShotRecentPanel` / `ShotRecentView` (Screenshot.swift): the floating
+/// "Recent screenshots" grid opened with ⌘R from the overlay. Click a cell
+/// to reopen it as a pin; right-click for its menu.
+#[cfg(target_os = "macos")]
+pub mod recent_grid {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSBackingStoreType, NSColor, NSEvent, NSImage, NSPanel, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
+
+    use super::ShotRecentEntry;
+    use crate::ui::chrome::Rect;
+    use crate::ui::style::{self, Weight};
+    use crate::ui::theme::Rgba;
+
+    pub const COLS: usize = 4;
+    const CELL_W: f64 = 172.0;
+    const CELL_H: f64 = 132.0;
+    const GAP: f64 = 10.0;
+    const PAD: f64 = 16.0;
+    const HEAD_H: f64 = 40.0;
+
+    /// `ShotRecentView.init`'s size for `n` entries.
+    pub fn grid_size(n: usize) -> (f64, f64) {
+        let cols = COLS as f64;
+        let rows = n.div_ceil(COLS).max(1) as f64;
+        let w = PAD * 2.0 + cols * CELL_W + (cols - 1.0) * GAP;
+        let h = if n == 0 { HEAD_H + 70.0 } else { HEAD_H + PAD + rows.min(3.5) * (CELL_H + GAP) - GAP + PAD };
+        (w, h)
+    }
+
+    /// `ShotRecentView.age(_:)`-style short age.
+    pub fn age(at: i64, now: i64) -> String {
+        let s = (now - at).max(0);
+        match s {
+            0..=59 => "just now".into(),
+            60..=3599 => format!("{} min ago", s / 60),
+            3600..=86399 => format!("{} h ago", s / 3600),
+            86400..=172_799 => "yesterday".into(),
+            _ => format!("{} d ago", s / 86400),
+        }
+    }
+
+    pub type EntryCb = Rc<dyn Fn(ShotRecentEntry)>;
+
+    pub struct ViewIvars {
+        entries: RefCell<Vec<ShotRecentEntry>>,
+        thumbs: RefCell<HashMap<String, Retained<NSImage>>>,
+        hover: Cell<Option<usize>>,
+        scroll: Cell<f64>,
+        ui: Cell<Rgba>,
+        tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+        pub on_open: RefCell<Option<EntryCb>>,
+        pub on_menu: RefCell<Option<EntryCb>>,
+        pub on_folder: RefCell<Option<Rc<dyn Fn()>>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSShotRecentView"]
+        #[ivars = ViewIvars]
+        pub struct ShotRecentView;
+
+        impl ShotRecentView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool { true }
+
+            #[unsafe(method(updateTrackingAreas))]
+            fn uta(&self) {
+                let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
+                if let Some(t) = self.ivars().tracking.borrow_mut().take() {
+                    self.removeTrackingArea(&t);
+                }
+                let opts = NSTrackingAreaOptions::MouseMoved
+                    | NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect;
+                let owner: &AnyObject = unsafe { &*(self as *const Self as *const AnyObject) };
+                let t = unsafe {
+                    NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), self.bounds(), opts, Some(owner), None)
+                };
+                self.addTrackingArea(&t);
+                *self.ivars().tracking.borrow_mut() = Some(t);
+            }
+
+            #[unsafe(method(mouseMoved:))]
+            fn mouse_moved(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let i = self.index_at(p.x, p.y);
+                if i != self.ivars().hover.get() {
+                    self.ivars().hover.set(i);
+                    self.setNeedsDisplay(true);
+                }
+            }
+
+            #[unsafe(method(mouseExited:))]
+            fn mouse_exited(&self, _e: &NSEvent) {
+                self.ivars().hover.set(None);
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(scrollWheel:))]
+            fn scroll_wheel(&self, e: &NSEvent) {
+                let visible = self.bounds().size.height - HEAD_H;
+                let n = self.ivars().entries.borrow().len();
+                let rows = n.div_ceil(COLS) as f64;
+                let content = rows * (CELL_H + GAP) - GAP + PAD * 2.0;
+                let k = if e.hasPreciseScrollingDeltas() { 1.0 } else { 10.0 };
+                let y = (self.ivars().scroll.get() - e.scrollingDeltaY() * k).clamp(0.0, (content - visible).max(0.0));
+                self.ivars().scroll.set(y);
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, _e: &NSEvent) {}
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if self.folder_rect().contains(p.x, p.y) {
+                    let cb = self.ivars().on_folder.borrow().clone();
+                    if let Some(cb) = cb {
+                        cb();
+                    }
+                    return;
+                }
+                if let Some(e) = self.index_at(p.x, p.y).and_then(|i| self.ivars().entries.borrow().get(i).cloned()) {
+                    let cb = self.ivars().on_open.borrow().clone();
+                    if let Some(cb) = cb {
+                        cb(e);
+                    }
+                }
+            }
+
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                if let Some(e) = self.index_at(p.x, p.y).and_then(|i| self.ivars().entries.borrow().get(i).cloned()) {
+                    let cb = self.ivars().on_menu.borrow().clone();
+                    if let Some(cb) = cb {
+                        cb(e);
+                    }
+                }
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _dirty: NSRect) {
+                self.draw();
+            }
+        }
+
+        unsafe impl NSObjectProtocol for ShotRecentView {}
+    );
+
+    impl ShotRecentView {
+        fn create(mtm: MainThreadMarker, entries: Vec<ShotRecentEntry>, ui: Rgba) -> Retained<Self> {
+            let (w, h) = grid_size(entries.len());
+            let thumbs = entries
+                .iter()
+                .filter_map(|e| style::image_file(&e.path).map(|i| (e.path.clone(), i)))
+                .collect();
+            let this = Self::alloc(mtm).set_ivars(ViewIvars {
+                entries: RefCell::new(entries),
+                thumbs: RefCell::new(thumbs),
+                hover: Cell::new(None),
+                scroll: Cell::new(0.0),
+                ui: Cell::new(ui),
+                tracking: RefCell::new(None),
+                on_open: RefCell::new(None),
+                on_menu: RefCell::new(None),
+                on_folder: RefCell::new(None),
+            });
+            unsafe { msg_send![super(this), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h))] }
+        }
+
+        /// `ShotRecentView.remove(_:)` (after menu ▸ Delete).
+        pub fn remove(&self, path: &str) {
+            self.ivars().entries.borrow_mut().retain(|e| e.path != path);
+            self.ivars().thumbs.borrow_mut().remove(path);
+            self.setNeedsDisplay(true);
+        }
+
+        fn folder_rect(&self) -> Rect {
+            Rect::new(self.bounds().size.width - PAD - 96.0, 9.0, 96.0, 24.0)
+        }
+
+        fn cell(&self, i: usize) -> Rect {
+            let (c, r) = ((i % COLS) as f64, (i / COLS) as f64);
+            Rect::new(PAD + c * (CELL_W + GAP), HEAD_H + PAD + r * (CELL_H + GAP) - self.ivars().scroll.get(), CELL_W, CELL_H)
+        }
+
+        fn index_at(&self, x: f64, y: f64) -> Option<usize> {
+            if y <= HEAD_H {
+                return None;
+            }
+            (0..self.ivars().entries.borrow().len()).find(|&i| self.cell(i).contains(x, y))
+        }
+
+        fn draw(&self) {
+            let b = self.bounds();
+            let white = |a: f64| Rgba::new(1.0, 1.0, 1.0, a);
+            let all = Rect::new(0.5, 0.5, b.size.width - 1.0, b.size.height - 1.0);
+            style::fill_rounded(all, 14.0, Rgba::new(0.10, 0.10, 0.10, 0.96));
+            style::stroke_rounded(all, 14.0, 1.0, white(0.12));
+            style::draw_text("Recent screenshots", PAD, 12.0, &style::system_font(13.0, Weight::Semibold), white(1.0));
+            let f = self.folder_rect();
+            style::fill_rounded(f, 6.0, white(0.08));
+            style::draw_text_centered("Open Folder", f, &style::system_font(11.5, Weight::Medium), white(0.85));
+            let entries = self.ivars().entries.borrow();
+            if entries.is_empty() {
+                style::draw_text(
+                    "No screenshots yet — copy, save or pin a capture and it shows up here.",
+                    PAD,
+                    HEAD_H + 16.0,
+                    &style::system_font(12.0, Weight::Regular),
+                    white(0.55),
+                );
+                return;
+            }
+            let clip = NSRect::new(NSPoint::new(0.0, HEAD_H), NSSize::new(b.size.width, b.size.height - HEAD_H));
+            objc2_app_kit::NSGraphicsContext::saveGraphicsState_class();
+            objc2_app_kit::NSBezierPath::clipRect(clip);
+            let thumbs = self.ivars().thumbs.borrow();
+            let now = super::unix_now();
+            let age_font = style::system_font(10.5, Weight::Regular);
+            for (i, e) in entries.iter().enumerate() {
+                let c = self.cell(i);
+                if c.y + c.height < HEAD_H || c.y > b.size.height {
+                    continue;
+                }
+                let well = Rect::new(c.x, c.y, c.width, c.height - 20.0);
+                style::fill_rounded(well, 8.0, white(0.05));
+                if let Some(t) = thumbs.get(&e.path) {
+                    let s = t.size();
+                    if s.width > 0.0 && s.height > 0.0 {
+                        let k = ((well.width - 8.0) / s.width).min((well.height - 8.0) / s.height);
+                        let (tw, th) = (s.width * k, s.height * k);
+                        let r = Rect::new(well.mid_x() - tw / 2.0, well.mid_y() - th / 2.0, tw, th);
+                        style::draw_image(t, r, 1.0);
+                    }
+                }
+                if self.ivars().hover.get() == Some(i) {
+                    style::stroke_rounded(well, 8.0, 2.0, self.ivars().ui.get());
+                }
+                style::draw_text(&age(e.at, now), c.x + 2.0, well.y + well.height + 4.0, &age_font, white(0.6));
+            }
+            objc2_app_kit::NSGraphicsContext::restoreGraphicsState_class();
+            let _ = NSColor::clearColor();
+        }
+    }
+
+    pub struct PanelIvars {
+        pub grid: Retained<ShotRecentView>,
+        pub on_escape: RefCell<Option<Rc<dyn Fn()>>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSPanel))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSShotRecentPanel"]
+        #[ivars = PanelIvars]
+        pub struct ShotRecentPanel;
+
+        impl ShotRecentPanel {
+            #[unsafe(method(canBecomeKeyWindow))]
+            fn can_become_key(&self) -> bool { true }
+
+            #[unsafe(method(cancelOperation:))]
+            fn cancel_operation(&self, _sender: Option<&AnyObject>) {
+                self.escape();
+            }
+
+            #[unsafe(method(keyDown:))]
+            fn key_down(&self, e: &NSEvent) {
+                if e.keyCode() == 53 {
+                    self.escape();
+                }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for ShotRecentPanel {}
+    );
+
+    impl ShotRecentPanel {
+        pub fn create(mtm: MainThreadMarker, entries: Vec<ShotRecentEntry>, ui: Rgba) -> Retained<Self> {
+            let grid = ShotRecentView::create(mtm, entries, ui);
+            let size = grid.frame().size;
+            let this = Self::alloc(mtm).set_ivars(PanelIvars { grid: grid.clone(), on_escape: RefCell::new(None) });
+            let panel: Retained<Self> = unsafe {
+                msg_send![
+                    super(this),
+                    initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), size),
+                    styleMask: NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+                    backing: NSBackingStoreType::Buffered,
+                    defer: false
+                ]
+            };
+            let base: &NSView = &grid;
+            panel.setContentView(Some(base));
+            panel.setFloatingPanel(true);
+            panel.setLevel(objc2_app_kit::NSScreenSaverWindowLevel + 1);
+            panel.setHidesOnDeactivate(false);
+            panel.setBackgroundColor(Some(&NSColor::clearColor()));
+            panel.setOpaque(false);
+            panel.setHasShadow(true);
+            unsafe { panel.setReleasedWhenClosed(false) };
+            panel
+        }
+
+        pub fn grid(&self) -> Retained<ShotRecentView> {
+            self.ivars().grid.clone()
+        }
+
+        fn escape(&self) {
+            let cb = self.ivars().on_escape.borrow().clone();
+            if let Some(cb) = cb {
+                cb();
+            }
+        }
+    }
+}
+
+/// The open recent-screenshots panel (`recentPanel`). `Send` is asserted
+/// like [`PinWindows`]: it is only touched on the main thread.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct RecentPanelSlot(Option<objc2::rc::Retained<recent_grid::ShotRecentPanel>>);
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for RecentPanelSlot {}
+
 /// Owned pin windows, parallel to [`ScreenshotController::pins`]. An entry is
 /// `None` when the pin was created off the main thread (model-only). `Send` is
 /// asserted for the same reason as [`OverlayPanels`]: the panels are only
@@ -4174,6 +4517,14 @@ fn monitor_key_down(
                 c.complete_finished_session();
                 return std::ptr::null_mut();
             }
+            // ⌘R (`pressed(.recent)` → `onRecent`): the recent-screenshots grid.
+            if c.session.as_ref().is_some_and(|s| s.recent_requested) {
+                if let Some(s) = c.session.as_mut() {
+                    s.recent_requested = false;
+                }
+                c.toggle_recent();
+                return std::ptr::null_mut();
+            }
             if handled {
                 c.redraw_overlays();
                 std::ptr::null_mut()
@@ -4220,6 +4571,43 @@ fn monitor_key_down(
 }
 
 
+
+/// A history PNG as a [`ShotImage`] (`ShotHistory.thumbnail(path, 100_000)`).
+#[cfg(target_os = "macos")]
+fn recent_image(path: &str) -> Option<ShotImage> {
+    let png = std::fs::read(path).ok()?;
+    let cg = pin_window::decode_png(&png)?;
+    let (w, h) = (
+        objc2_core_graphics::CGImage::width(Some(&cg)) as i64,
+        objc2_core_graphics::CGImage::height(Some(&cg)) as i64,
+    );
+    Some(ShotImage::with_png(w, h, png))
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_workspace(path: &str) {
+    let url = objc2_foundation::NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(path));
+    objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_workspace(path: &str) {
+    let url = objc2_foundation::NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(path));
+    let arr = objc2_foundation::NSArray::from_retained_slice(&[url]);
+    objc2_app_kit::NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&arr);
+}
+
+/// The frame of the screen under the mouse (`mouseScreen`).
+#[cfg(target_os = "macos")]
+fn mouse_screen_frame(mtm: objc2::MainThreadMarker) -> Option<objc2_foundation::NSRect> {
+    let m = objc2_app_kit::NSEvent::mouseLocation();
+    let screens = objc2_app_kit::NSScreen::screens(mtm);
+    screens
+        .iter()
+        .map(|s| s.frame())
+        .find(|f| m.x >= f.origin.x && m.x < f.origin.x + f.size.width && m.y >= f.origin.y && m.y < f.origin.y + f.size.height)
+        .or_else(|| objc2_app_kit::NSScreen::mainScreen(mtm).map(|s| s.frame()))
+}
 
 /// `PinPanel.menu()`: the pin window's right-click menu. The controller is
 /// locked only inside each action, never while the menu is up.
@@ -4291,6 +4679,8 @@ pub struct ScreenshotController {
     self_ref: std::sync::Weak<Mutex<ScreenshotController>>,
     #[cfg(target_os = "macos")]
     key_monitor: KeyMonitor,
+    #[cfg(target_os = "macos")]
+    recent_panel: RecentPanelSlot,
 }
 
 impl Default for ScreenshotController {
@@ -4327,6 +4717,8 @@ impl ScreenshotController {
             self_ref: std::sync::Weak::new(),
             #[cfg(target_os = "macos")]
             key_monitor: KeyMonitor::default(),
+            #[cfg(target_os = "macos")]
+            recent_panel: RecentPanelSlot::default(),
         }
     }
 
@@ -4699,6 +5091,130 @@ impl ScreenshotController {
             self.install_key_monitor();
         }
         self.pins.len() - 1
+    }
+
+    /// `showRecentScreenshots(_:)`: toggle the recent-screenshots grid over
+    /// the screen under the mouse (⌘R in the overlay).
+    #[cfg(target_os = "macos")]
+    pub fn toggle_recent(&mut self) {
+        use objc2::DefinedClass;
+        use std::rc::Rc;
+        if self.close_recent() {
+            return;
+        }
+        let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+        let cfg = ScreenshotConfig::load();
+        let ui = crate::ui::theme::Rgba::new(cfg.ui_color.r, cfg.ui_color.g, cfg.ui_color.b, 1.0);
+        let panel = recent_grid::ShotRecentPanel::create(mtm, self.history.entries(), ui);
+        let grid = panel.grid();
+        let me = self.self_ref.clone();
+        let with = move |f: Box<dyn FnOnce(&mut ScreenshotController)>| {
+            if let Some(c) = me.upgrade() {
+                if let Ok(mut c) = c.lock() {
+                    f(&mut c);
+                }
+            }
+        };
+        let w = with.clone();
+        *panel.ivars().on_escape.borrow_mut() = Some(Rc::new(move || {
+            w(Box::new(|c| {
+                c.close_recent();
+            }))
+        }));
+        let w = with.clone();
+        *grid.ivars().on_open.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
+            w(Box::new(move |c| c.reopen_recent_as_pin(&e.path)))
+        }));
+        let dir = self.history.dir.clone();
+        *grid.ivars().on_folder.borrow_mut() = Some(Rc::new(move || open_in_workspace(&dir)));
+        let w = with.clone();
+        let weak_grid = objc2::rc::Weak::from_retained(&grid);
+        *grid.ivars().on_menu.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
+            use crate::ui::menu_kit::{popup_context, MenuEntry};
+            let (w1, w2, w3, w4) = (w.clone(), w.clone(), w.clone(), w.clone());
+            let (p1, p2, p3, p4, p5) = (e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone());
+            let g = weak_grid.clone();
+            let Some(view) = weak_grid.load() else { return };
+            popup_context(
+                vec![
+                    MenuEntry::item("Reopen as Pin", move || w1(Box::new(move |c| c.reopen_recent_as_pin(&p1)))),
+                    MenuEntry::item("Copy", move || {
+                        w2(Box::new(move |c| {
+                            let Some(img) = recent_image(&p2) else { return };
+                            c.abort_session();
+                            c.copy(&img, &ScreenshotConfig::load(), None);
+                        }))
+                    }),
+                    MenuEntry::item("Open in Preview", move || {
+                        w3(Box::new(|c| c.abort_session()));
+                        open_in_workspace(&p3);
+                    }),
+                    MenuEntry::item("Reveal in Finder", move || {
+                        w4(Box::new(|c| c.abort_session()));
+                        reveal_in_workspace(&p4);
+                    }),
+                    MenuEntry::Separator,
+                    MenuEntry::item("Delete", move || {
+                        let _ = std::fs::remove_file(&p5);
+                        if let Some(g) = g.load() {
+                            g.remove(&p5);
+                        }
+                    }),
+                ],
+                &view,
+            );
+        }));
+        if let Some(f) = mouse_screen_frame(mtm) {
+            let sz = panel.frame().size;
+            panel.setFrameOrigin(objc2_foundation::NSPoint::new(
+                (f.origin.x + f.size.width / 2.0 - sz.width / 2.0).round(),
+                (f.origin.y + f.size.height / 2.0 - sz.height / 2.0).round(),
+            ));
+        }
+        panel.orderFrontRegardless();
+        panel.makeKeyWindow();
+        self.recent_panel.0 = Some(panel);
+    }
+
+    /// Close the recent grid; `true` when one was open.
+    #[cfg(target_os = "macos")]
+    pub fn close_recent(&mut self) -> bool {
+        match self.recent_panel.0.take() {
+            Some(p) => {
+                p.orderOut(None);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `finish(s, .abort)`: drop the overlay session (and the grid).
+    pub fn abort_session(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.close_recent();
+        if let Some(s) = self.session.as_mut() {
+            if !s.finished {
+                s.finish(ShotOutcome::Abort);
+            }
+        }
+        self.complete_finished_session();
+    }
+
+    /// The grid's `onOpen`: abort the overlay, then pin that file centred on
+    /// the screen under the mouse.
+    #[cfg(target_os = "macos")]
+    pub fn reopen_recent_as_pin(&mut self, path: &str) {
+        let Some(img) = recent_image(path) else { return };
+        self.abort_session();
+        let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+        let scale = 2.0;
+        let (w, h) = (img.width as f64 / scale, img.height as f64 / scale);
+        let frame = mouse_screen_frame(mtm).map(|f| {
+            Rect::new(f.origin.x + f.size.width / 2.0 - w / 2.0, f.origin.y + f.size.height / 2.0 - h / 2.0, w, h)
+        });
+        self.pin(&img, frame, None);
+        let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.note(format!("screenshot: reopened {name}"));
     }
 
     /// The pinned image at `i` (from its window), for copy / save.
@@ -5530,6 +6046,20 @@ pub(crate) fn epoch_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recent_grid_size_and_age() {
+        use super::recent_grid::{age, grid_size};
+        // 4 columns of 172 + 3 gaps of 10 + 16 padding each side.
+        assert_eq!(grid_size(0), (750.0, 110.0));
+        assert_eq!(grid_size(3).1, 40.0 + 16.0 + 132.0 + 16.0);
+        // Rows cap at 3.5 visible.
+        assert_eq!(grid_size(40).1, 40.0 + 16.0 + 3.5 * 142.0 - 10.0 + 16.0);
+        assert_eq!(age(100, 130), "just now");
+        assert_eq!(age(0, 7200), "2 h ago");
+        assert_eq!(age(0, 100_000), "yesterday");
+    }
     use crate::app::registry::Registry;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};

@@ -169,6 +169,24 @@ mod appkit {
     /// Pop `entries` at `(x, y)` in `view` coordinates (or screen coordinates
     /// when `view` is `None`), then run the chosen closure.
     pub fn popup(entries: Vec<MenuEntry>, view: Option<&NSView>, x: f64, y: f64) {
+        run(entries, |menu| {
+            menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), view);
+        });
+    }
+
+    /// `NSMenu.popUpContextMenu(_:with:for:)` for the event being handled
+    /// (a right-click). Unlike [`popup`], the menu opens above `view`'s
+    /// window even when that window floats over the normal menu level
+    /// (the screenshot overlay's recent grid).
+    pub fn popup_context(entries: Vec<MenuEntry>, view: &NSView) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(event) = objc2_app_kit::NSApplication::sharedApplication(mtm).currentEvent() else { return };
+        run(entries, |menu| NSMenu::popUpContextMenu_withEvent_forView(menu, &event, view));
+    }
+
+    /// Build the menu, show it with `show` (which blocks until it closes),
+    /// then run the chosen closure.
+    fn run(entries: Vec<MenuEntry>, show: impl FnOnce(&NSMenu)) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -178,7 +196,7 @@ mod appkit {
         menu.setAutoenablesItems(false);
         let mut actions: Vec<Option<Box<dyn FnOnce()>>> = Vec::new();
         fill(mtm, &menu, entries, &target, &mut actions);
-        menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), view);
+        show(&menu);
         if let Some(i) = target.ivars().chosen.get() {
             if let Some(Some(a)) = actions.get_mut(i as usize).map(|a| a.take()) {
                 a();
