@@ -3073,6 +3073,39 @@ mod shot_cg {
         Some(ShotImage::with_png(w, h, png))
     }
 
+    /// `PinPanel.rotate`'s pixels: turn an encoded PNG by `quarters` quarter
+    /// turns (positive = clockwise) and re-encode it; returns the new size.
+    pub fn rotate_png(png: &[u8], quarters: i64) -> Option<(i64, i64, Vec<u8>)> {
+        let data = NSData::with_bytes(png);
+        let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &data)?;
+        let img = rep.CGImage()?;
+        let (w, h) = (CGImage::width(Some(&img)) as f64, CGImage::height(Some(&img)) as f64);
+        let q = quarters.rem_euclid(4);
+        if q == 0 {
+            return Some((w as i64, h as i64, png.to_vec()));
+        }
+        let (nw, nh) = if q % 2 == 1 { (h, w) } else { (w, h) };
+        let ctx = bitmap_context(nw as i64, nh as i64)?;
+        let half = core::f64::consts::FRAC_PI_2;
+        match q {
+            1 => {
+                CGContext::translate_ctm(Some(&ctx), 0.0, w);
+                CGContext::rotate_ctm(Some(&ctx), -half);
+            }
+            2 => {
+                CGContext::translate_ctm(Some(&ctx), w, h);
+                CGContext::rotate_ctm(Some(&ctx), 2.0 * half);
+            }
+            _ => {
+                CGContext::translate_ctm(Some(&ctx), h, 0.0);
+                CGContext::rotate_ctm(Some(&ctx), half);
+            }
+        }
+        CGContext::draw_image(Some(&ctx), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)), Some(&img));
+        let out = CGBitmapContextCreateImage(Some(&ctx))?;
+        Some((nw as i64, nh as i64, encode_png(&out)?))
+    }
+
     pub(super) fn encode_png(image: &CGImage) -> Option<Vec<u8>> {
         let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), image);
         let props: Retained<NSDictionary<NSBitmapImageRepPropertyKey, AnyObject>> =
@@ -3853,6 +3886,8 @@ mod pin_window {
 
     pub struct WSPinViewIvars {
         image: RefCell<Option<Retained<CGImage>>>,
+        /// Right-click → `PinPanel.menu()` (set by the controller).
+        on_menu: RefCell<Option<std::rc::Rc<dyn Fn()>>>,
     }
 
     define_class!(
@@ -3885,6 +3920,14 @@ mod pin_window {
                 );
                 shot_cg::draw_image(&ctx, &image, r, true);
             }
+
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, _e: &objc2_app_kit::NSEvent) {
+                let cb = self.ivars().on_menu.borrow().clone();
+                if let Some(cb) = cb {
+                    cb();
+                }
+            }
         }
 
         unsafe impl NSObjectProtocol for WSPinView {}
@@ -3898,6 +3941,7 @@ mod pin_window {
         ) -> Retained<WSPinView> {
             let this = WSPinView::alloc(mtm).set_ivars(WSPinViewIvars {
                 image: RefCell::new(Some(image)),
+                on_menu: RefCell::new(None),
             });
             let view: Retained<WSPinView> = unsafe {
                 msg_send![
@@ -3912,6 +3956,8 @@ mod pin_window {
 
     pub struct WSPinPanelIvars {
         view: RefCell<Option<Retained<WSPinView>>>,
+        /// The pinned image's encoded PNG (copy / save / rotate source).
+        png: RefCell<Vec<u8>>,
     }
 
     define_class!(
@@ -3950,7 +3996,7 @@ mod pin_window {
                 NSSize::new(frame.w + m * 2.0, frame.h + m * 2.0),
             );
             let this = WSPinPanel::alloc(mtm)
-                .set_ivars(WSPinPanelIvars { view: RefCell::new(None) });
+                .set_ivars(WSPinPanelIvars { view: RefCell::new(None), png: RefCell::new(Vec::new()) });
             let panel: Retained<WSPinPanel> = unsafe {
                 msg_send![
                     super(this),
@@ -3997,6 +4043,39 @@ mod pin_window {
 
         pub fn window_number(&self) -> i64 {
             self.windowNumber() as i64
+        }
+
+        pub fn set_on_menu(&self, cb: std::rc::Rc<dyn Fn()>) {
+            if let Some(v) = self.ivars().view.borrow().as_ref() {
+                *v.ivars().on_menu.borrow_mut() = Some(cb);
+            }
+        }
+
+        pub fn png(&self) -> Vec<u8> {
+            self.ivars().png.borrow().clone()
+        }
+
+        pub fn set_png(&self, png: Vec<u8>) {
+            *self.ivars().png.borrow_mut() = png;
+        }
+
+        /// `PinPanel.rotate`: swap in the turned image and resize the
+        /// window around its centre (the image keeps its on-screen scale).
+        pub fn show_rotated(&self, png: Vec<u8>, odd: bool) {
+            let Some(cg) = decode_png(&png) else { return };
+            self.set_png(png);
+            if let Some(v) = self.ivars().view.borrow().as_ref() {
+                *v.ivars().image.borrow_mut() = Some(cg);
+                v.setNeedsDisplay(true);
+            }
+            if odd {
+                let f = self.frame();
+                // Margins are equal on every edge, so the frame just swaps.
+                let (w, h) = (f.size.height, f.size.width);
+                let c = NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height / 2.0);
+                let nf = NSRect::new(NSPoint::new((c.x - w / 2.0).round(), (c.y - h / 2.0).round()), NSSize::new(w, h));
+                self.setFrame_display(nf, true);
+            }
         }
     }
 }
@@ -4141,6 +4220,43 @@ fn monitor_key_down(
 }
 
 
+
+/// `PinPanel.menu()`: the pin window's right-click menu. The controller is
+/// locked only inside each action, never while the menu is up.
+#[cfg(target_os = "macos")]
+fn pin_menu(ctrl: &std::sync::Weak<Mutex<ScreenshotController>>, window_number: i64) {
+    use crate::ui::menu_kit::{popup, MenuEntry};
+    let act = |f: fn(&mut ScreenshotController, usize)| {
+        let ctrl = ctrl.clone();
+        move || {
+            let Some(c) = ctrl.upgrade() else { return };
+            let Ok(mut c) = c.lock() else { return };
+            if let Some(i) = c.pins.iter().position(|p| p.window_number == window_number) {
+                f(&mut c, i);
+            }
+        }
+    };
+    let entries = vec![
+        MenuEntry::item("Copy to clipboard", act(|c, i| {
+            if let Some(img) = c.pin_image(i) {
+                c.copy(&img, &ScreenshotConfig::load(), None);
+            }
+        })),
+        MenuEntry::item("Save to file", act(|c, i| {
+            if let Some(img) = c.pin_image(i) {
+                c.save(&img, &ScreenshotConfig::load(), None, None);
+            }
+        })),
+        MenuEntry::Separator,
+        MenuEntry::item("Rotate Right", act(|c, i| c.rotate_pin(i, 1))),
+        MenuEntry::item("Rotate Left", act(|c, i| c.rotate_pin(i, -1))),
+        MenuEntry::item("Increase Opacity", act(|c, i| c.pin_opacity(i, 0.1))),
+        MenuEntry::item("Decrease Opacity", act(|c, i| c.pin_opacity(i, -0.1))),
+        MenuEntry::Separator,
+        MenuEntry::item("Close", act(|c, i| c.close_pin(i))),
+    ];
+    popup(entries, None, objc2_app_kit::NSEvent::mouseLocation().x, objc2_app_kit::NSEvent::mouseLocation().y);
+}
 
 // ---------------------------------------------------------------------------
 // ScreenshotController
@@ -4565,8 +4681,12 @@ impl ScreenshotController {
         let window = match (objc2::MainThreadMarker::new(), img.png.as_deref()) {
             (Some(mtm), Some(png)) => pin_window::decode_png(png).map(|cg| {
                 let w = pin_window::WSPinPanel::create(mtm, cg, f);
+                w.set_png(png.to_vec());
                 panel.window_number = w.window_number();
                 panel.key = true;
+                let ctrl = self.self_ref.clone();
+                let wn = panel.window_number;
+                w.set_on_menu(std::rc::Rc::new(move || pin_menu(&ctrl, wn)));
                 w.present();
                 w
             }),
@@ -4579,6 +4699,63 @@ impl ScreenshotController {
             self.install_key_monitor();
         }
         self.pins.len() - 1
+    }
+
+    /// The pinned image at `i` (from its window), for copy / save.
+    pub fn pin_image(&self, i: usize) -> Option<ShotImage> {
+        #[cfg(target_os = "macos")]
+        {
+            let w = self.pin_windows.0.get(i)?.as_ref()?;
+            let png = w.png();
+            let cg = pin_window::decode_png(&png)?;
+            let (pw, ph) = (
+                objc2_core_graphics::CGImage::width(Some(&cg)) as i64,
+                objc2_core_graphics::CGImage::height(Some(&cg)) as i64,
+            );
+            return Some(ShotImage::with_png(pw, ph, png));
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+
+    /// `PinPanel.rotate(_:)` (menu ▸ Rotate Right / Left).
+    pub fn rotate_pin(&mut self, i: usize, quarters: i64) {
+        if let Some(p) = self.pins.get_mut(i) {
+            p.rotate(quarters);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(Some(w)) = self.pin_windows.0.get(i) {
+            if let Some((_, _, png)) = shot_cg::rotate_png(&w.png(), quarters) {
+                w.show_rotated(png, quarters % 2 != 0);
+            }
+        }
+    }
+
+    /// `PinPanel.opacity(_:)` (menu ▸ Increase / Decrease Opacity).
+    pub fn pin_opacity(&mut self, i: usize, delta: f64) {
+        let Some(p) = self.pins.get_mut(i) else { return };
+        p.opacity(delta);
+        #[cfg(target_os = "macos")]
+        if let Some(Some(w)) = self.pin_windows.0.get(i) {
+            w.set_alpha(p.alpha);
+        }
+    }
+
+    /// `PinPanel.closePin` (menu ▸ Close).
+    pub fn close_pin(&mut self, i: usize) {
+        #[cfg(target_os = "macos")]
+        if let Some(Some(w)) = self.pin_windows.0.get(i) {
+            w.close_pin();
+        }
+        if i < self.pins.len() {
+            self.pins.remove(i);
+            #[cfg(target_os = "macos")]
+            if i < self.pin_windows.0.len() {
+                self.pin_windows.0.remove(i);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        self.drop_key_monitor_if_idle();
     }
 
     pub fn copy_text(&mut self, text: &str, cfg: &ScreenshotConfig) {
