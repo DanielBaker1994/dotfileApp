@@ -137,6 +137,8 @@ pub enum UiCommand {
     PaneMove(PaneDir),
     /// `do:pane:focus:<id>`.
     PaneFocus(String),
+    /// `do:notes-find` (false) / `do:notes-grep` (true) — `NoteFindWindow`.
+    NoteFind(bool),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -1685,8 +1687,12 @@ impl SwitcherController {
                 self.view_switcher_hide();
                 None
             }
-            "jira-jump" | "jira-poll-on" | "jira-poll-off" | "jira-setup" | "notes-find"
-            | "notes-grep" => {
+            "notes-find" | "notes-grep" => {
+                let inner = self.inner.lock().unwrap();
+                inner.ui_push(UiCommand::NoteFind(action == "notes-grep"));
+                None
+            }
+            "jira-jump" | "jira-poll-on" | "jira-poll-off" | "jira-setup" => {
                 {
                     let mut inner = self.inner.lock().unwrap();
                     inner
@@ -2847,6 +2853,9 @@ mod daemon_ui {
         live_pane_sig: RefCell<String>,
         /// `VimKeys.shared` + its search bar / mode badge.
         vim: RefCell<host_vim::VimHost>,
+        /// `noteFindWindow` / `noteGrepWindow` (leader+sf / leader+sg).
+        note_find: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
+        note_grep: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
     }
 
     define_class!(
@@ -2923,6 +2932,8 @@ mod daemon_ui {
             live_nav: RefCell::new(crate::app::live_panes::LiveNav::default()),
             live_pane_sig: RefCell::new(String::new()),
             vim: RefCell::new(host_vim::VimHost::default()),
+            note_find: RefCell::new(None),
+            note_grep: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
@@ -3029,6 +3040,7 @@ mod daemon_ui {
                             self.route_reset_size();
                         }
                         UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
+                        UiCommand::NoteFind(grep) => self.show_note_find(grep),
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
                         }
@@ -4047,6 +4059,9 @@ mod daemon_ui {
         /// typing still reaches their search fields.
         fn route_overlay_key(&self, event: &NSEvent) -> bool {
             use objc2_app_kit::NSEventModifierFlags;
+            if self.note_find_key(event) {
+                return true;
+            }
 
             enum Out {
                 NotHandled,
@@ -6697,6 +6712,79 @@ mod daemon_ui {
                 }));
             }
             popup(entries, None, x, y);
+        }
+
+        /// `showNoteFind(grep:)`: the open-notes picker / ripgrep window.
+        fn show_note_find(&self, grep: bool) {
+            use crate::views::note_find::{NoteFindConfig, NoteFindUi};
+            use crate::views::notes::NoteFindMode;
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let slot = if grep { &self.ivars().note_grep } else { &self.ivars().note_find };
+            let ui = slot.borrow().clone();
+            let ui = match ui {
+                Some(u) => u,
+                None => {
+                    let text = crate::app::config::read_config_text().unwrap_or_default();
+                    let sec = super::parse_sections(&text).get("notes-find").cloned().unwrap_or_default();
+                    let mode = if grep { NoteFindMode::Grep } else { NoteFindMode::Files };
+                    let u = NoteFindUi::new(mtm, mode, NoteFindConfig::from_section(&sec));
+                    u.set_on_open(Box::new(|path, line| {
+                        let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) else { return };
+                        ui.open_in_notes(&path);
+                        if let Some(n) = line {
+                            // `vimCommand("normal! NGzz")` once nvim has the buffer.
+                            dispatch2::DispatchQueue::main()
+                                .after(dispatch2::DispatchTime::NOW.time(250_000_000), move || {
+                                    let Some(ui) = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load())) else { return };
+                                    ui.notes_surface(|s| s.vim_command(&format!("normal! {n}Gzz")));
+                                })
+                                .ok();
+                        }
+                    }));
+                    let c = self.ivars().controller.clone();
+                    u.set_on_log(Box::new(move |m| c.log(&m)));
+                    *slot.borrow_mut() = Some(u.clone());
+                    u
+                }
+            };
+            let paths = self.notes_surface(|s| s.open_paths()).unwrap_or_default();
+            ui.show(paths);
+        }
+
+        /// `NoteFindWindow.key(_:_:)` while its panel is key.
+        fn note_find_key(&self, event: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let ui = [&self.ivars().note_find, &self.ivars().note_grep]
+                .iter()
+                .find_map(|s| s.borrow().clone().filter(|u| u.has_key()));
+            let Some(ui) = ui else { return false };
+            let mods = event.modifierFlags();
+            let (cmd, ctrl) = (mods.contains(F::Command), mods.contains(F::Control));
+            match event.keyCode() {
+                popup::KEY_ESC => ui.hide(),
+                13 if cmd => ui.hide(),
+                popup::KEY_DOWN => ui.move_selection(1),
+                45 if ctrl => ui.move_selection(1),
+                popup::KEY_UP => ui.move_selection(-1),
+                35 if ctrl => ui.move_selection(-1),
+                popup::KEY_RETURN | 76 => ui.open(ui.selection()),
+                8 if cmd && !ui.field_has_selection() => {
+                    if let Some(p) = ui.selected_path() {
+                        copy_text_to_pasteboard(&p);
+                        crate::ui::toast::show(&format!("Copied {}", p.replace(&std::env::var("HOME").unwrap_or_default(), "~")), "checkmark.circle.fill");
+                    }
+                }
+                _ => return false,
+            }
+            if !ui.is_shown() {
+                // `hide(restore: true)`: the keyboard returns to the notes window.
+                if let Some(w) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) {
+                    if w.isVisible() {
+                        w.makeKeyAndOrderFront(None);
+                    }
+                }
+            }
+            true
         }
 
         /// `openNoteFile(_:)` from a file browser: show notes on `path`.

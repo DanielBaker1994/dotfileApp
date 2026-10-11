@@ -11,6 +11,7 @@ pub mod files_view;
 pub mod inspector;
 pub mod jira;
 pub mod jira_view;
+pub mod note_find;
 pub mod notes;
 pub mod notes_prose;
 pub mod notes_vim;

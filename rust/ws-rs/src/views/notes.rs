@@ -2953,6 +2953,18 @@ mod macos {
             }
         }
 
+        /// `openNotePaths` — every note open in the sidebar, in tab order.
+        pub fn open_paths(&self) -> Vec<String> {
+            self.model.tabs.paths()
+        }
+
+        /// `vimCommand(_:)` on the notes nvim pane.
+        pub fn vim_command(&self, ex: &str) {
+            if let Some(v) = &self.vim {
+                v.command(ex);
+            }
+        }
+
         /// Whether the embedded nvim pane is active for this surface.
         pub fn vim_active(&self) -> bool {
             self.vim.is_some()
@@ -2980,6 +2992,13 @@ mod macos {
         /// `openNoteFile(_:)`'s surface subset: the vim pane follows the path,
         /// the plain editor loads the file (used when vim-mode is off).
         pub fn open_note(&mut self, path: &str) {
+            // An open tab: keep the rail's selection in step.
+            if let Some(i) = self.model.tabs.paths().iter().position(|p| p == path) {
+                if self.model.tabs.selected != i {
+                    self.model.tabs.selected = i;
+                    self.repaint_rows();
+                }
+            }
             if self.vim.is_some() {
                 self.vim_open(path);
                 return;
@@ -3170,6 +3189,8 @@ pub struct NoteFindModel {
     pub all: Vec<NoteHit>,
     pub shown: Vec<NoteHit>,
     pub lines: Vec<i64>,
+    /// The matched line's text per grep row (the row title).
+    pub grep_texts: Vec<String>,
     pub selection: usize,
     pub grep_note: String,
     pub rows: usize,
@@ -3184,6 +3205,7 @@ impl NoteFindModel {
             all: Vec::new(),
             shown: Vec::new(),
             lines: Vec::new(),
+            grep_texts: Vec::new(),
             selection: 0,
             grep_note: String::new(),
             rows: rows.max(5),
@@ -3272,6 +3294,7 @@ impl NoteFindModel {
             })
             .collect();
         self.lines = hits.iter().map(|h| h.line).collect();
+        self.grep_texts = hits.iter().map(|h| h.text.clone()).collect();
         self.selection = 0;
         if hits.is_empty() && open_count > 0 {
             self.grep_note = format!("No match for “{}”", self.query.trim());
