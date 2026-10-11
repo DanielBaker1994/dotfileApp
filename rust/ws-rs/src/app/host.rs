@@ -2921,6 +2921,8 @@ mod daemon_ui {
         note_grep: RefCell<Option<Rc<crate::views::note_find::NoteFindUi>>>,
         /// `sidebarJumpWindow` (`do:jira-jump`).
         sidebar_jump: RefCell<Option<Rc<crate::views::note_find::SidebarJumpUi>>>,
+        /// The Cmd+K action picker while it is up.
+        action_picker: RefCell<Option<Retained<crate::ui::action_picker::ActionPicker>>>,
     }
 
     define_class!(
@@ -3000,6 +3002,7 @@ mod daemon_ui {
             note_find: RefCell::new(None),
             note_grep: RefCell::new(None),
             sidebar_jump: RefCell::new(None),
+            action_picker: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
@@ -3913,6 +3916,20 @@ mod daemon_ui {
                 return self.vim_key(event);
             }
 
+            // `actionPickerKey`: the Cmd+K card owns the keyboard while up.
+            let picker = self.ivars().action_picker.borrow().clone();
+            if let Some(p) = picker {
+                if unsafe { p.superview() }.is_some() {
+                    use objc2_app_kit::NSEventModifierFlags as F;
+                    let m = event.modifierFlags();
+                    if !p.key(event.keyCode(), m.contains(F::Control), m.contains(F::Shift)) {
+                        self.ivars().action_picker.borrow_mut().take();
+                    }
+                    return true;
+                }
+                self.ivars().action_picker.borrow_mut().take();
+            }
+
             // `overlayKey`: the shortcuts sheet owns the keyboard while up.
             let sheet = self.ivars().state.borrow().as_ref().and_then(|st| st.shortcuts.clone());
             if let Some(sheet) = sheet {
@@ -4107,13 +4124,19 @@ mod daemon_ui {
                 KeyAction::EditorCommit => self.route_commit(),
                 KeyAction::EditorOpenPath => self.route_open_path_prompt(),
                 KeyAction::FileBrowser(action) => self.route_file_browser(action),
-                KeyAction::CommandK => {
-                    self.ivars()
-                        .controller
-                        .log("Cmd+K: action picker not modelled yet");
-                    crate::ui::toast::not_ported("Cmd+K action picker");
-                    true
-                }
+                KeyAction::CommandK => match current {
+                    Some(v) if v.is_jira() => {
+                        self.jira_actions();
+                        true
+                    }
+                    Some(SlotView::Compare) | Some(SlotView::CompareText) => {
+                        self.ivars().controller.log("Cmd+K: compare action menu not ported yet");
+                        crate::ui::toast::not_ported("Compare Cmd+K actions");
+                        true
+                    }
+                    // Swift wires `onCommandK` only for list windows.
+                    _ => false,
+                },
                 KeyAction::ShowShortcuts => {
                     self.show_shortcuts();
                     true
@@ -6679,6 +6702,103 @@ mod daemon_ui {
                 return;
             }
             self.jira_surface(|l| l.refresh());
+        }
+
+        /// `showActions()` for the Jira list: the highlighted row plus every
+        /// ticked row.
+        fn jira_actions(&self) {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(Some((rows, site, favs))) = self.jira_surface(|l| {
+                let mut keys: Vec<String> = l.checked.iter().cloned().collect();
+                if let Some(k) = l.selected().and_then(|r| r.get("key")).cloned() {
+                    if !keys.contains(&k) {
+                        keys.insert(0, k);
+                    }
+                }
+                let rows: Vec<(String, String)> = keys
+                    .iter()
+                    .filter(|k| !k.is_empty())
+                    .map(|k| {
+                        let title = l
+                            .all
+                            .iter()
+                            .find(|r| r.get("key") == Some(k))
+                            .and_then(|r| r.get("title").or_else(|| r.get("summary")).cloned())
+                            .unwrap_or_default();
+                        (k.clone(), title.trim().to_string())
+                    })
+                    .collect();
+                (!rows.is_empty()).then(|| (rows, l.site(), l.favs.clone()))
+            }) else {
+                return;
+            };
+            let n = rows.len();
+            let what = if n == 1 { rows[0].0.clone() } else { format!("{n} rows") };
+            let s = if n == 1 { "" } else { "s" };
+            let mut items: Vec<(String, String)> = Vec::new();
+            if !site.is_empty() {
+                items.push(("Open in browser".into(), format!("opens {n} issue{s} · the highlighted row + ticked rows")));
+                items.push(("Copy URL and title".into(), format!("{n} issue{s} · one “URL Title” line each")));
+            }
+            items.push(("Copy to clipboard".into(), format!("{what} · key, title")));
+            let all_fav = rows.iter().all(|(k, _)| favs.contains(k));
+            items.push(if all_fav {
+                ("Remove from favorites".into(), format!("unpin {what}"))
+            } else {
+                ("Add to favorites".into(), format!("pin {what} · re-polled every run"))
+            });
+            let Some(root) = self.ivars().state.borrow().as_ref().and_then(|st| st.window.contentView()) else { return };
+            let titles: Vec<String> = items.iter().map(|i| i.0.clone()).collect();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let colors = crate::ui::theme::section_colors("jira");
+            let picker = crate::ui::action_picker::ActionPicker::show(
+                mtm,
+                &root,
+                &format!("Actions for {what}"),
+                items,
+                colors,
+                Box::new(move |i| {
+                    let Some(ui) = weak.load() else { return };
+                    let url = |k: &str| format!("{site}/browse/{k}");
+                    match titles.get(i).map(String::as_str) {
+                        Some("Open in browser") => {
+                            for (k, _) in &rows {
+                                open_url(&url(k));
+                            }
+                            let lines: Vec<String> = rows.iter().map(|(k, _)| format!("{k}\t{}", url(k))).collect();
+                            copy_text_to_pasteboard(&lines.join("\n"));
+                            crate::ui::toast::show(&format!("Opened {n} · copied keys + URLs"), "safari");
+                        }
+                        Some("Copy URL and title") => {
+                            let lines: Vec<String> = rows
+                                .iter()
+                                .map(|(k, t)| if t.is_empty() { url(k) } else { format!("{} {t}", url(k)) })
+                                .collect();
+                            copy_text_to_pasteboard(&lines.join("\n"));
+                            crate::ui::toast::show(&format!("Copied {n} URL{s} + title{s}"), "link");
+                        }
+                        Some("Copy to clipboard") => {
+                            let lines: Vec<String> = rows.iter().map(|(k, t)| format!("{k}\t{t}")).collect();
+                            copy_text_to_pasteboard(&lines.join("\n"));
+                            crate::ui::toast::show(&format!("Copied {what}"), "doc.on.clipboard");
+                        }
+                        Some("Add to favorites") | Some("Remove from favorites") => {
+                            let add = !all_fav;
+                            ui.jira_surface(|l| {
+                                for (k, _) in &rows {
+                                    if add {
+                                        l.favs.insert(k.clone());
+                                    } else {
+                                        l.favs.remove(k);
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                }),
+            );
+            *self.ivars().action_picker.borrow_mut() = picker;
         }
 
         fn focus_jira_table(&self) {

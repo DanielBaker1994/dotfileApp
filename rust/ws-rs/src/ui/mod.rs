@@ -16,4 +16,5 @@ pub mod prose_switch;
 pub mod sidebar;
 pub mod style;
 pub mod theme;
+pub mod action_picker;
 pub mod toast;
