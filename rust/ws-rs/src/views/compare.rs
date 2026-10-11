@@ -979,6 +979,28 @@ impl TextCompare {
     }
 }
 
+/// `ByteCountFormatter.string(fromByteCount:countStyle: .file)` — decimal
+/// units: "Zero KB", "1 byte", "999 bytes", "12 KB", "1.5 MB", "1.25 GB".
+pub fn byte_count_file(n: u64) -> String {
+    match n {
+        0 => "Zero KB".to_string(),
+        1 => "1 byte".to_string(),
+        2..=999 => format!("{n} bytes"),
+        1_000..=999_499 => format!("{} KB", ((n as f64) / 1e3).round() as u64),
+        _ if n < 999_950_000 => trim_zero(format!("{:.1}", n as f64 / 1e6)) + " MB",
+        _ if n < 999_995_000_000 => trim_zero(format!("{:.2}", n as f64 / 1e9)) + " GB",
+        _ => trim_zero(format!("{:.2}", n as f64 / 1e12)) + " TB",
+    }
+}
+
+/// "1.0" → "1", "1.50" → "1.5" (ByteCountFormatter drops trailing zeros).
+fn trim_zero(s: String) -> String {
+    if !s.contains('.') {
+        return s;
+    }
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// `BinaryCompare` — a 10-line byte compare on in-memory `Data` (no helper hop).
 pub struct BinaryCompare;
 
@@ -2050,7 +2072,7 @@ impl CompareSession {
         }
     }
 
-    fn edits(&self, s: CompareSide) -> i64 {
+    pub(crate) fn edits(&self, s: CompareSide) -> i64 {
         self.model.undo_count(s) as i64
     }
 
@@ -2071,6 +2093,94 @@ impl CompareSession {
 
     pub fn is_binary(&self) -> bool {
         !self.binary.is_empty() || self.too_large.values().any(|v| *v)
+    }
+
+    /// `CompareWindow.syncAll`'s header summary label (`state.current.summary`).
+    pub fn summary(&self, cfg: &CompareConfig) -> String {
+        let m = &self.model;
+        if self.is_binary() {
+            return self.binary_summary(cfg);
+        }
+        let n = m.sections().len();
+        if n == 0 {
+            return self.identical_summary(cfg);
+        }
+        let mut out = format!("≠ {n} section{}", if n == 1 { "" } else { "s" });
+        if m.unimportant_count() > 0 {
+            out.push_str(&format!(
+                "  ({} important · {} unimportant)",
+                m.important_count(),
+                m.unimportant_count()
+            ));
+        }
+        out
+    }
+
+    /// `identicalSummary(_:)`.
+    fn identical_summary(&self, cfg: &CompareConfig) -> String {
+        let (l, r) = (&self.model.left, &self.model.right);
+        if l.lines.is_empty() && r.lines.is_empty() {
+            return String::new();
+        }
+        if let (Some(a), Some(b)) = (
+            self.disk.get(&CompareSide::Left),
+            self.disk.get(&CompareSide::Right),
+        ) {
+            if a == b && !self.is_dirty() {
+                return cfg.label("same", "Identical", "");
+            }
+        }
+        if l.encoding == r.encoding && l.lines == r.lines && l.eols == r.eols {
+            return cfg.label("same", "Identical", "");
+        }
+        let mut why: Vec<String> = Vec::new();
+        if l.encoding != r.encoding {
+            why.push(format!("encoding {} vs {}", l.encoding.label(), r.encoding.label()));
+        }
+        if l.eol_label() != r.eol_label() || l.eols.last() != r.eols.last() {
+            why.push("line endings".into());
+        }
+        if self.model.ignore_unimportant
+            && self.model.rows().iter().any(|row| row.kind != RowKind::Same)
+        {
+            why.push("unimportant differences".into());
+        }
+        if why.is_empty() {
+            why.push("bytes (unimportant differences ignored)".into());
+        }
+        cfg.label("same-text", "Same text — files differ in {}", &why.join(", "))
+    }
+
+    /// `binarySummary(_:)`.
+    fn binary_summary(&self, cfg: &CompareConfig) -> String {
+        let empty: Vec<u8> = Vec::new();
+        let disk = |side| self.disk.get(&side).unwrap_or(&empty);
+        if self.too_large.values().any(|v| *v) && self.binary.is_empty() {
+            let d = BinaryCompare::first_difference(disk(CompareSide::Left), disk(CompareSide::Right));
+            let what = match d {
+                None => "identical bytes".to_string(),
+                Some(d) => format!("differ (first difference at byte {d})"),
+            };
+            return cfg.label(
+                "too-large",
+                "Too large for Text Compare ([compare] max-lines / max-bytes): {}",
+                &what,
+            );
+        }
+        let pick = |side| self.binary.get(&side).or_else(|| self.disk.get(&side)).unwrap_or(&empty);
+        let (a, b) = (pick(CompareSide::Left), pick(CompareSide::Right));
+        match BinaryCompare::first_difference(a, b) {
+            None => cfg.label("binary", "Binary files {}", "are identical"),
+            Some(d) => cfg.label(
+                "binary",
+                "Binary files {}",
+                &format!(
+                    "differ ({} vs {}, first difference at byte {d})",
+                    byte_count_file(a.len() as u64),
+                    byte_count_file(b.len() as u64)
+                ),
+            ),
+        }
     }
 
     pub fn display_count(&self) -> usize {
@@ -2328,6 +2438,8 @@ impl FolderPageState {
             "scanMs": s.scan_ms as i64,
             "canUndo": s.undo.can_undo(),
             "sharedCanUndo": FileOps::can_undo(),
+            // The drag-hover side; the port has no drag hover, so never set.
+            "dropSide": Value::Null,
             "back": s.back.len(),
             "forward": s.forward.len(),
             "quickLook": self.quick_look_paths,
@@ -2937,6 +3049,19 @@ pub struct CompareWindowModel {
     pub recent: CompareRecent,
     pub config: CompareConfig,
     pub folder_page: FolderPageState,
+    /// Id of the session whose `FolderSession` is bound into `folder_page`
+    /// (Swift keeps it on `CompareSession.folder`; the page shows the selected
+    /// one). Unselected folder sessions park theirs on `CompareSession.folder`.
+    folder_bound: Option<i64>,
+    /// `alignPick`: the first line picked for Align With (side, 0-based line).
+    pub align_pick: Option<(CompareSide, i64)>,
+    /// The compareText sub-view (Swift's separate `CompareWindow.sub`): the
+    /// session it shows and the one to reselect when it closes.
+    sub_session: Option<i64>,
+    sub_return: Option<i64>,
+    /// Set when the model opened the sub-view itself (`folder-open`); the
+    /// host takes it and pushes `.compareText`.
+    sub_pending: bool,
     pub recent_selection: usize,
     backend: Arc<dyn HelperBackend>,
 }
@@ -2960,6 +3085,11 @@ impl CompareWindowModel {
             recent,
             config,
             folder_page,
+            folder_bound: None,
+            align_pick: None,
+            sub_session: None,
+            sub_return: None,
+            sub_pending: false,
             recent_selection: 0,
             backend,
         }
@@ -2979,6 +3109,51 @@ impl CompareWindowModel {
         self.selected.is_none()
     }
 
+    /// The selected session is a folder pair (its `FolderSession` is bound
+    /// into `folder_page`, or parked on the session).
+    pub fn current_is_folder(&self) -> bool {
+        self.current()
+            .map_or(false, |s| s.folder.is_some() || self.folder_bound == Some(s.id))
+    }
+
+    /// A cheap fingerprint of everything the live compare surface draws, so
+    /// the daemon UI repaints only on change (no line text is hashed: edits,
+    /// reloads and re-diffs all move the row tuples / edit depths).
+    pub fn draw_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.selected, self.sub, self.sessions.len(), self.current_is_folder()).hash(&mut h);
+        if let Some(fs) = &self.folder_page.session {
+            (fs.rows.len(), fs.cursor, fs.scanning, fs.scanned, fs.tree.is_some()).hash(&mut h);
+            for r in &fs.rows {
+                (r.id, r.depth).hash(&mut h);
+            }
+        }
+        if let Some(s) = self.current() {
+            let m = &s.model;
+            (
+                s.id,
+                s.cursor,
+                s.focus.raw(),
+                s.filter.raw(),
+                s.display_count(),
+                s.edits(CompareSide::Left),
+                s.edits(CompareSide::Right),
+                m.left.lines.len(),
+                m.right.lines.len(),
+                m.sections().len(),
+                m.anchors().len(),
+                m.ignore_unimportant,
+            )
+                .hash(&mut h);
+            for r in m.rows() {
+                (r.l, r.r, r.kind as u8, r.important).hash(&mut h);
+            }
+            s.status.hash(&mut h);
+        }
+        h.finish()
+    }
+
     fn load_side(&self, path: Option<&str>) -> (TextSide, Option<Vec<u8>>, bool) {
         let Some(p) = path else {
             return (TextSide::default(), None, false);
@@ -2995,8 +3170,53 @@ impl CompareWindowModel {
         }
     }
 
-    /// Open a text pair (`CompareWindow.openPair`). A missing side is empty.
+    /// Park the bound folder session back on its `CompareSession`.
+    fn unbind_folder(&mut self) {
+        let Some(id) = self.folder_bound.take() else { return };
+        let fs = self.folder_page.session.take();
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+            s.folder = fs;
+        }
+    }
+
+    /// Bind the selected session's parked folder session into the page.
+    fn bind_selected_folder(&mut self) {
+        self.unbind_folder();
+        let Some(s) = self.selected.and_then(|i| self.sessions.get_mut(i)) else { return };
+        if let Some(fs) = s.folder.take() {
+            self.folder_bound = Some(s.id);
+            self.folder_page.bind(fs);
+        }
+    }
+
+    /// `CompareWindow.openFolders`: a folder session, scanned and bound.
+    pub fn open_folders(&mut self, left: &str, right: &str) -> usize {
+        self.unbind_folder();
+        let model =
+            TextCompare::with_backend(self.backend.clone(), TextSide::default(), TextSide::default(), self.config.importance(), false);
+        let mut s = CompareSession::new(model);
+        s.path.insert(CompareSide::Left, left.to_string());
+        s.path.insert(CompareSide::Right, right.to_string());
+        self.folder_bound = Some(s.id);
+        self.sessions.push(s);
+        let idx = self.sessions.len() - 1;
+        self.selected = Some(idx);
+        self.folder_page.bind(FolderSession::new(left, right));
+        self.folder_page.rescan();
+        self.recent.add(left, right, self.config.recent_limit());
+        idx
+    }
+
+    /// Open a pair (`CompareWindow.openPair`): two folders open a folder
+    /// session; otherwise a text pair, a missing side empty.
     pub fn open_pair(&mut self, left: Option<&str>, right: Option<&str>) -> usize {
+        let is_dir = |p: Option<&str>| p.map_or(false, |p| Path::new(p).is_dir());
+        if let (Some(l), Some(r)) = (left, right) {
+            if is_dir(left) && is_dir(right) {
+                return self.open_folders(l, r);
+            }
+        }
+        self.unbind_folder();
         let (lside, lbin, ltoo) = self.load_side(left);
         let (rside, rbin, rtoo) = self.load_side(right);
         let model = TextCompare::with_backend(
@@ -3022,6 +3242,10 @@ impl CompareWindowModel {
         s.too_large.insert(CompareSide::Left, ltoo);
         s.too_large.insert(CompareSide::Right, rtoo);
         s.refresh(self.config.context_lines());
+        // `openPair`: the cursor starts on the first difference.
+        if let Some(start) = s.model.sections().first().map(|x| x.rows.start) {
+            s.cursor = s.display_row(start);
+        }
         self.sessions.push(s);
         let idx = self.sessions.len() - 1;
         self.selected = Some(idx);
@@ -3029,6 +3253,126 @@ impl CompareWindowModel {
             self.recent.add(l, r, self.config.recent_limit());
         }
         idx
+    }
+
+    /// `beginEdit` + `commitEditor`: replace the cursor's block on `side` —
+    /// its whole section (unless filtering to Same), else its one row — with
+    /// `text`, then re-diff keeping the cursor.
+    pub fn edit_at_cursor(&mut self, side: CompareSide, text: &str) {
+        let ctx = self.config.context_lines();
+        let Some(s) = self.current_mut() else { return };
+        if s.is_binary() {
+            return;
+        }
+        s.focus = side;
+        let n = s.display_count();
+        let m = if n > 0 { s.model_row(s.cursor) } else { 0 };
+        let rows = if n == 0 {
+            0..0
+        } else {
+            match s.model.section_at(m) {
+                Some(si) if s.filter != CompareFilter::Same => s.model.sections()[si].rows.clone(),
+                _ => m..m + 1,
+            }
+        };
+        let lines = if n == 0 { 0..0 } else { s.model.line_range(side, rows) };
+        let original: String =
+            s.model.side(side).lines[lines.clone()].iter().map(|l| format!("{l}\n")).collect();
+        if text == original {
+            s.status.clear();
+            return;
+        }
+        s.will_edit(side);
+        s.model.replace(side, lines, &edited_lines(text));
+        s.status = "edited".to_string();
+        s.refresh(ctx);
+    }
+
+    /// `showCompare(paths, titles:, git:, waiter:)` from a `compare\t…` socket
+    /// message: open the pair with its titles; `wait` registers a waiter (the
+    /// git difftool `--wait`). Returns the session id.
+    pub fn open_message(
+        &mut self,
+        left: &str,
+        right: Option<&str>,
+        titles: &HashMap<CompareSide, String>,
+        wait: bool,
+    ) -> Option<i64> {
+        self.close_sub();
+        let idx = self.open_pair(Some(left), right);
+        let s = self.sessions.get_mut(idx)?;
+        s.title = titles.clone();
+        s.git = wait;
+        if wait {
+            s.waiters += 1;
+        }
+        Some(s.id)
+    }
+
+    /// Whether a `--wait` caller on session `id` is still waiting (the session
+    /// is open and its waiter has not been released).
+    pub fn is_waiting(&self, id: i64) -> bool {
+        self.sessions.iter().any(|s| s.id == id && s.waiters > 0)
+    }
+
+    /// `finishWaiters` (the view parked on hide): release every waiter, and
+    /// drop the clean git sessions they were holding.
+    pub fn finish_waiters(&mut self) {
+        let done: Vec<i64> = self
+            .sessions
+            .iter_mut()
+            .filter(|s| s.waiters > 0)
+            .map(|s| {
+                s.waiters = 0;
+                s.id
+            })
+            .collect();
+        for id in done {
+            if let Some(i) = self.sessions.iter().position(|s| s.id == id && s.git && !s.is_dirty()) {
+                self.close_session(i);
+            }
+        }
+    }
+
+    /// Open a pair in the compareText sub-view (`createSub` + `openPair`);
+    /// the current session is reselected by [`Self::close_sub`].
+    pub fn open_sub(&mut self, left: Option<&str>, right: Option<&str>) {
+        self.close_sub();
+        let ret = self.current().map(|s| s.id);
+        self.open_pair(left, right);
+        self.sub_session = self.current().map(|s| s.id);
+        self.sub_return = ret;
+        self.sub = true;
+        self.sub_pending = true;
+    }
+
+    /// The host's cue to push `.compareText` after a model-side `open_sub`.
+    pub fn take_sub_pending(&mut self) -> bool {
+        std::mem::take(&mut self.sub_pending)
+    }
+
+    /// The sub-view closed (back / Esc): drop its session and return to the
+    /// one underneath (rebinding a folder session).
+    pub fn close_sub(&mut self) {
+        if !self.sub {
+            return;
+        }
+        self.sub = false;
+        self.sub_pending = false;
+        if let Some(id) = self.sub_session.take() {
+            if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                if self.folder_bound == Some(id) {
+                    self.folder_bound = None;
+                    self.folder_page.session = None;
+                }
+                self.sessions.remove(i);
+            }
+        }
+        let ret = self.sub_return.take();
+        self.selected = ret
+            .and_then(|id| self.sessions.iter().position(|s| s.id == id))
+            .or_else(|| self.sessions.len().checked_sub(1));
+        self.bind_selected_folder();
     }
 
     pub fn show_start_page(&mut self) {
@@ -3068,12 +3412,17 @@ impl CompareWindowModel {
     pub fn close_session(&mut self, i: usize) {
         self.confirm = None;
         if i < self.sessions.len() {
+            if self.folder_bound == Some(self.sessions[i].id) {
+                self.folder_bound = None;
+                self.folder_page.session = None;
+            }
             self.sessions.remove(i);
             self.selected = if self.sessions.is_empty() {
                 None
             } else {
                 Some(i.min(self.sessions.len() - 1))
             };
+            self.bind_selected_folder();
         }
     }
 
@@ -3081,6 +3430,8 @@ impl CompareWindowModel {
         self.confirm = None;
         self.sessions.clear();
         self.selected = None;
+        self.folder_bound = None;
+        self.folder_page.session = None;
     }
 
     /// `folder-open`: activate the selected folder row — expand a directory, or
@@ -3129,10 +3480,7 @@ impl CompareWindowModel {
                     s.rebuild_rows();
                 }
             }
-            Act::Open(l, r) => {
-                self.open_pair(l.as_deref(), r.as_deref());
-                self.sub = true;
-            }
+            Act::Open(l, r) => self.open_sub(l.as_deref(), r.as_deref()),
             Act::Nothing => {}
         }
         None
@@ -3219,17 +3567,31 @@ impl CompareWindowModel {
         s.refresh(ctx);
     }
 
+    /// `alignWith(side:line:)`: the first call picks a line; a pick on the
+    /// other side then anchors the two together and moves the cursor there.
     pub fn align_with(&mut self, side: CompareSide, line: i64) {
         let ctx = self.config.context_lines();
+        let pick = self.align_pick;
         let Some(s) = self.current_mut() else { return };
         if line < 0 {
             return;
         }
-        match side {
-            CompareSide::Left => s.model.align(line as usize, 0),
-            CompareSide::Right => s.model.align(0, line as usize),
+        if let Some((_, pline)) = pick.filter(|(ps, _)| *ps != side) {
+            let (l, r) = if side == CompareSide::Left { (line, pline) } else { (pline, line) };
+            s.model.align(l as usize, r as usize);
+            s.status = format!("aligned left {} with right {}", l + 1, r + 1);
+            s.refresh(ctx);
+            if let Some(row) = s.model.rows.iter().position(|x| x.l as i64 == l && x.r as i64 == r) {
+                s.cursor = s.display_row(row);
+            }
+            self.align_pick = None;
+            return;
         }
-        s.refresh(ctx);
+        s.status = format!(
+            "Align With: now pick a line on the {} side (right-click ▸ Align With Picked…)",
+            side.other().raw()
+        );
+        self.align_pick = Some((side, line));
     }
 
     pub fn clear_alignment(&mut self, row: Option<usize>) {
@@ -3237,6 +3599,7 @@ impl CompareWindowModel {
         let Some(s) = self.current_mut() else { return };
         s.model.clear_alignment(row);
         s.refresh(ctx);
+        self.align_pick = None;
     }
 
     pub fn trim(&mut self, side: CompareSide) {
@@ -3343,7 +3706,11 @@ impl CompareWindowModel {
                 "find": false,
                 "pathEdit": false,
                 "banner": false,
-                "alignPick": Value::Null,
+                "alignPick": self
+                    .align_pick
+                    .map(|(side, line)| json!(format!("{}:{}", side.raw(), line + 1)))
+                    .unwrap_or(Value::Null),
+                "summary": s.summary(&self.config),
                 "status": s.status,
                 "scrollY": s.scroll_y as i64,
                 "leftLines": m.left.lines.len(),
@@ -3426,6 +3793,7 @@ impl CompareWindowModel {
                 if nums.len() != 2 {
                     return Some("align:LEFT,RIGHT (1-based lines)".to_string());
                 }
+                self.align_pick = None;
                 self.align_with(CompareSide::Left, nums[0] - 1);
                 self.align_with(CompareSide::Right, nums[1] - 1);
             }
@@ -3464,10 +3832,7 @@ impl CompareWindowModel {
                 else {
                     return Some("edit:left|right:TEXT".to_string());
                 };
-                if let Some(s) = self.current_mut() {
-                    s.focus = side;
-                }
-                self.set_pasted(&text.replace("\\n", "\n"), side);
+                self.edit_at_cursor(side, &text.replace("\\n", "\n"));
             }
             "cursor" => {
                 let Some(n) = parts.get(1).and_then(|s| s.parse::<i64>().ok()) else {
@@ -3480,6 +3845,17 @@ impl CompareWindowModel {
         }
         None
     }
+}
+
+/// `CompareEditor.editedLines`: normalize line endings, drop one trailing
+/// newline, split; empty text is no lines.
+pub(crate) fn edited_lines(text: &str) -> Vec<String> {
+    let t = text.replace("\r\n", "\n").replace('\r', "\n");
+    if t.is_empty() {
+        return Vec::new();
+    }
+    let t = t.strip_suffix('\n').unwrap_or(&t);
+    t.split('\n').map(str::to_string).collect()
 }
 
 fn swap_map<V: Clone>(m: &HashMap<CompareSide, V>) -> HashMap<CompareSide, V> {
@@ -3719,6 +4095,13 @@ pub struct PaneModel {
     pub right_name: String,
     pub mode: String,
     pub section: String,
+    /// `summary.stringValue` — the header summary (`CompareSession::summary`).
+    pub summary: String,
+    /// The summary reads as "no differences" (Swift tints it success).
+    pub identical: bool,
+    /// The first display row drawn at the top of the body (the scroll view's
+    /// offset in rows; kept so the cursor stays visible).
+    pub top: usize,
 }
 
 impl Default for PaneModel {
@@ -3742,6 +4125,9 @@ impl PaneModel {
             right_name: String::new(),
             mode: CompareFilter::All.title().to_string(),
             section: String::new(),
+            summary: String::new(),
+            identical: false,
+            top: 0,
         }
     }
 
@@ -3771,7 +4157,23 @@ impl PaneModel {
             right_name: s.name(CompareSide::Right),
             mode: s.filter.title().to_string(),
             section,
+            summary: String::new(),
+            identical: m.sections().is_empty() && !s.is_binary(),
+            top: 0,
         }
+    }
+
+    /// Keep `cursor` inside a body of `visible` rows: the smallest scroll from
+    /// `top` (Swift's `scrollRowToVisible`), clamped to the content.
+    pub fn scroll_top(top: usize, cursor: usize, visible: usize, count: usize) -> usize {
+        let visible = visible.max(1);
+        let mut t = top;
+        if cursor < t {
+            t = cursor;
+        } else if cursor >= t + visible {
+            t = cursor + 1 - visible;
+        }
+        t.min(count.saturating_sub(visible))
     }
 
     pub fn display_count(&self) -> usize {
@@ -3937,6 +4339,8 @@ pub struct FolderTreeModel {
     pub cursor: usize,
     pub flatten: bool,
     pub name_filter: String,
+    /// First row drawn under the header (scroll offset in rows).
+    pub top: usize,
 }
 
 impl FolderTreeModel {
@@ -3972,6 +4376,7 @@ impl FolderTreeModel {
             cursor: 0,
             flatten: view.flatten,
             name_filter: view.name_filter.clone(),
+            top: 0,
         }
     }
 
@@ -4040,6 +4445,97 @@ pub fn build_content(
     let view = macos::ComparePaneView::create(mtm);
     view.set_model(PaneModel::empty());
     Some(view.into_super())
+}
+
+/// The live compare surface for the shared window: the text pane and the
+/// folder tree, repainted from the [`CompareWindowModel`] whenever its
+/// [`CompareWindowModel::draw_fingerprint`] changes (Swift's `syncAll`).
+#[cfg(target_os = "macos")]
+pub struct CompareSurface {
+    root: objc2::rc::Retained<objc2_app_kit::NSView>,
+    pane: objc2::rc::Retained<macos::ComparePaneView>,
+    tree: objc2::rc::Retained<macos::FolderTreeView>,
+    last: std::cell::Cell<Option<(u64, i64)>>,
+    pane_top: std::cell::Cell<usize>,
+    tree_top: std::cell::Cell<usize>,
+}
+
+#[cfg(target_os = "macos")]
+impl CompareSurface {
+    pub fn build(mtm: objc2::MainThreadMarker) -> Self {
+        use objc2::MainThreadOnly;
+        use objc2_app_kit::{NSAutoresizingMaskOptions as M, NSView};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
+        let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        let pane = macos::ComparePaneView::create(mtm);
+        let tree = macos::FolderTreeView::create(mtm);
+        for v in [&*pane as &NSView, &*tree as &NSView] {
+            v.setFrame(frame);
+            v.setAutoresizingMask(M::ViewWidthSizable | M::ViewHeightSizable);
+            root.addSubview(v);
+        }
+        pane.set_model(PaneModel::empty());
+        tree.setHidden(true);
+        CompareSurface {
+            root,
+            pane,
+            tree,
+            last: std::cell::Cell::new(None),
+            pane_top: std::cell::Cell::new(0),
+            tree_top: std::cell::Cell::new(0),
+        }
+    }
+
+    pub fn content_view(&self) -> objc2::rc::Retained<objc2_app_kit::NSView> {
+        self.root.clone()
+    }
+
+    /// Repaint from `model` when anything drawn changed (or the height did).
+    /// Writes the live scroll offset back as `scrollY` (`state.current`).
+    pub fn sync(&self, model: &mut CompareWindowModel) {
+        let height = self.root.bounds().size.height;
+        let key = (model.draw_fingerprint(), height as i64);
+        if self.last.get() == Some(key) {
+            return;
+        }
+        self.last.set(Some(key));
+        if model.current_is_folder() {
+            self.pane.setHidden(true);
+            self.tree.setHidden(false);
+            let m = match model.folder_page.session.as_ref() {
+                Some(fs) => match fs.tree.as_ref() {
+                    Some(t) => {
+                        let mut m = FolderTreeModel::build(t, &fs.rows, t.counts(), &fs.view);
+                        m.cursor = fs.cursor;
+                        let vis = ((height - FOLDER_HEADER_HEIGHT) / FOLDER_ROW_HEIGHT).floor() as usize;
+                        m.top = PaneModel::scroll_top(self.tree_top.get(), fs.cursor, vis, m.rows.len());
+                        self.tree_top.set(m.top);
+                        m
+                    }
+                    None => FolderTreeModel::default(),
+                },
+                None => FolderTreeModel::default(),
+            };
+            self.tree.set_model(m);
+            return;
+        }
+        self.tree.setHidden(true);
+        self.pane.setHidden(false);
+        let summary = model.current().map(|s| s.summary(&model.config)).unwrap_or_default();
+        let Some(s) = model.current_mut() else {
+            self.pane_top.set(0);
+            self.pane.set_model(PaneModel::empty());
+            return;
+        };
+        let mut m = PaneModel::from_session(s);
+        m.summary = summary;
+        let vis = ((height - PANE_HEADER_HEIGHT) / PANE_ROW_HEIGHT).floor() as usize;
+        m.top = PaneModel::scroll_top(self.pane_top.get(), s.cursor, vis, m.display_count());
+        self.pane_top.set(m.top);
+        s.scroll_y = m.top as f64 * PANE_ROW_HEIGHT;
+        self.pane.set_model(m);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -4196,6 +4692,17 @@ mod macos {
             let names = format!("{}  ⇆  {}", model.left_name, model.right_name);
             let nw = measure_text(&names, &nattrs);
             draw_text(&names, (b.size.width - nw - 10.0).max(10.0), 6.0, &nattrs);
+            // `summary` label: success-tinted when there are no differences.
+            if !model.summary.is_empty() {
+                let tone = if model.identical {
+                    colors.tone(PopupTone::Success)
+                } else {
+                    colors.text
+                };
+                let sattrs = text_attrs(&nfont, &tone.to_nscolor());
+                let tw = measure_text(&title, &hattrs);
+                draw_text(&model.summary, 10.0 + tw + 16.0, 6.5, &sattrs);
+            }
 
             // Centre gutter.
             let pane_w = layout.pane_w();
@@ -4223,8 +4730,8 @@ mod macos {
                     &a,
                 );
             } else {
-                let first = layout.row_at(dirty.origin.y);
-                let last = layout.row_at(dirty.origin.y + dirty.size.height);
+                let first = layout.row_at(dirty.origin.y) + model.top;
+                let last = layout.row_at(dirty.origin.y + dirty.size.height) + model.top;
                 let lo = first.min(n - 1);
                 let hi = last.min(n - 1);
                 if lo <= hi {
@@ -4259,7 +4766,10 @@ mod macos {
             let Some(row) = model.rows.get(m) else {
                 return;
             };
-            let y = layout.row_y(d);
+            let Some(rel) = d.checked_sub(model.top) else {
+                return;
+            };
+            let y = layout.row_y(rel);
             let cursor = d == model.cursor;
             let line_no_w = layout.line_no_width(max_lines);
 
@@ -4523,16 +5033,7 @@ mod macos {
         /// `editedLines`: the text split on normalised newlines, no trailing
         /// empty line.
         pub fn edited_lines(&self) -> Vec<String> {
-            let t = self
-                .string()
-                .to_string()
-                .replace("\r\n", "\n")
-                .replace('\r', "\n");
-            if t.is_empty() {
-                return Vec::new();
-            }
-            let t = t.strip_suffix('\n').unwrap_or(&t);
-            t.split('\n').map(str::to_string).collect()
+            super::edited_lines(&self.string().to_string())
         }
     }
 
@@ -4633,8 +5134,8 @@ mod macos {
             }
 
             let mono = NSFont::systemFontOfSize(12.0);
-            for (i, row) in model.rows.iter().enumerate() {
-                let y = FOLDER_HEADER_HEIGHT + i as f64 * FOLDER_ROW_HEIGHT;
+            for (i, row) in model.rows.iter().enumerate().skip(model.top) {
+                let y = FOLDER_HEADER_HEIGHT + (i - model.top) as f64 * FOLDER_ROW_HEIGHT;
                 if y + FOLDER_ROW_HEIGHT < dirty.origin.y || y > dirty.origin.y + dirty.size.height
                 {
                     continue;
@@ -5267,6 +5768,72 @@ mod tests {
     }
 
     #[test]
+    fn align_with_picks_then_anchors_both_lines() {
+        // Swift `alignWith`: one side picks, the other side's pick aligns the
+        // two 0-based lines (never line 0 of the other side).
+        let stub = Stub::new();
+        stub.push("compare.new", new_snapshot());
+        let dir = temp_dir("align");
+        let mut model = CompareWindowModel::with_backend(
+            stub.clone(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+        assert_eq!(model.test_do("start-paste"), None);
+        model.align_with(CompareSide::Left, 1);
+        assert_eq!(model.align_pick, Some((CompareSide::Left, 1)));
+        assert_eq!(model.test_state()["current"]["alignPick"], json!("left:2"));
+        stub.push("compare.align", new_snapshot());
+        assert_eq!(model.test_do("align:2,3"), None);
+        let p = stub.params("compare.align");
+        assert_eq!((p["l"].clone(), p["r"].clone()), (json!(1), json!(2)));
+        assert_eq!(model.align_pick, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_pair_with_two_folders_binds_a_folder_session() {
+        let dir = temp_dir("folders");
+        let (a, b) = (format!("{dir}/A"), format!("{dir}/B"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut model = CompareWindowModel::with_backend(
+            Stub::new(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+        model.open_pair(Some(&a), Some(&b));
+        assert_eq!(model.sessions.len(), 1);
+        let fs = model.folder_page.session.as_ref().expect("folder session bound");
+        assert_eq!((fs.left_root.as_str(), fs.right_root.as_str()), (a.as_str(), b.as_str()));
+        model.close_session(0);
+        assert!(model.folder_page.session.is_none(), "closing it unbinds the page");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_message_waits_until_finish_waiters() {
+        let stub = Stub::new();
+        stub.push("compare.new", new_snapshot());
+        let dir = temp_dir("wait");
+        let mut model = CompareWindowModel::with_backend(
+            stub.clone(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+        let mut titles = HashMap::new();
+        titles.insert(CompareSide::Left, "a.txt (HEAD)".to_string());
+        let id = model.open_message("/nope/a", Some("/nope/b"), &titles, true).unwrap();
+        assert!(model.is_waiting(id));
+        assert!(model.sessions[0].git);
+        assert_eq!(model.sessions[0].title[&CompareSide::Left], "a.txt (HEAD)");
+        model.finish_waiters();
+        assert!(!model.is_waiting(id), "hiding releases the --wait caller");
+        assert!(model.sessions.is_empty(), "a clean git session is dropped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn edit_marks_dirty_and_save_marks_clean() {
         let stub = Stub::new();
         let dir = temp_dir("dirty");
@@ -5609,6 +6176,68 @@ mod tests {
         let empty = FolderTreeModel::build(&tree, &bad, FolderTreeCounts::default(), &FolderView::default());
         assert!(empty.is_empty());
         assert_eq!(empty.summary(), "no items");
+    }
+
+    #[test]
+    fn byte_count_file_matches_bytecountformatter() {
+        assert_eq!(byte_count_file(0), "Zero KB");
+        assert_eq!(byte_count_file(1), "1 byte");
+        assert_eq!(byte_count_file(999), "999 bytes");
+        assert_eq!(byte_count_file(1_000), "1 KB");
+        assert_eq!(byte_count_file(12_345), "12 KB");
+        assert_eq!(byte_count_file(1_500_000), "1.5 MB");
+        assert_eq!(byte_count_file(2_000_000), "2 MB");
+        assert_eq!(byte_count_file(1_250_000_000), "1.25 GB");
+    }
+
+    #[test]
+    fn scroll_top_keeps_the_cursor_visible() {
+        assert_eq!(PaneModel::scroll_top(0, 3, 10, 100), 0);
+        assert_eq!(PaneModel::scroll_top(0, 10, 10, 100), 1);
+        assert_eq!(PaneModel::scroll_top(20, 5, 10, 100), 5);
+        assert_eq!(PaneModel::scroll_top(5, 9, 10, 100), 5);
+        // Clamped to the content; a short list never scrolls.
+        assert_eq!(PaneModel::scroll_top(95, 99, 10, 100), 90);
+        assert_eq!(PaneModel::scroll_top(4, 2, 10, 5), 0);
+    }
+
+    #[test]
+    fn session_summary_mirrors_syncall() {
+        let cfg = CompareConfig::default();
+        let session = |snap: Value, l: TextSide, r: TextSide| {
+            let stub = Stub::new();
+            stub.push("compare.new", snap);
+            let backend: Arc<dyn HelperBackend> = stub.clone();
+            let tc = TextCompare::with_backend(backend, l, r, Importance::default(), false);
+            CompareSession::new(tc)
+        };
+        // Sections: "≠ N section(s)".
+        let s = session(new_snapshot(), side("a", "b"), side("a", "c"));
+        assert!(s.summary(&cfg).starts_with("≠ 1 section"), "{}", s.summary(&cfg));
+        // No sections, same text: "Identical".
+        let mut same = new_snapshot();
+        same["right"] = side("a", "b").json();
+        same["rows"] = json!([[0, 0, 0], [1, 1, 0]]);
+        same["sections"] = json!([]);
+        let s = session(same.clone(), side("a", "b"), side("a", "b"));
+        assert_eq!(s.summary(&cfg), "Identical");
+        // Both empty: no label.
+        let mut empty = same.clone();
+        empty["left"] = TextSide::default().json();
+        empty["right"] = TextSide::default().json();
+        empty["rows"] = json!([]);
+        let s = session(empty, TextSide::default(), TextSide::default());
+        assert_eq!(s.summary(&cfg), "");
+        // Binary: identical / first difference.
+        let mut s = session(same, side("a", "b"), side("a", "b"));
+        s.binary.insert(CompareSide::Left, vec![1, 2, 3]);
+        s.binary.insert(CompareSide::Right, vec![1, 2, 3]);
+        assert_eq!(s.summary(&cfg), "Binary files are identical");
+        s.binary.insert(CompareSide::Right, vec![1, 9, 3, 4]);
+        assert_eq!(
+            s.summary(&cfg),
+            "Binary files differ (3 bytes vs 4 bytes, first difference at byte 1)"
+        );
     }
 
     #[test]

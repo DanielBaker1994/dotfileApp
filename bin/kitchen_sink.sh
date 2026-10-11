@@ -108,7 +108,7 @@ case "$MODE" in window|notes|jira|voice|files|terminal|confluence|ai)
         # attribution and would answer future pings forever)
         pkill -f "$APP/Contents/MacOS" 2>/dev/null || true
         # cold start: "window" opens the first view, notes —
-        # main.swift maps it
+        # the CLI client (rust/ws-rs/src/app/cli.rs) maps it
         if ! open -n -g "$APP" --args "$MODE" >/dev/null 2>&1; then
             LOG "LaunchServices launch FAILED — voice permissions will be broken"
         fi

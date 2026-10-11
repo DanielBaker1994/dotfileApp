@@ -4,22 +4,16 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 TESTS="$ROOT/Tests"
 
-run_test() {
-    local file="$1"
-    local name="$(basename "$file" .swift)"
-    echo "Running $name..."
-    local sources
-    sources="$(sed -n 's|^// sources: *||p' "$file" | head -1)"
-    if [ -n "$sources" ]; then
-        local bin src=() dir
-        dir="$(mktemp -d)" || { echo "mktemp failed" >&2; return 1; }
-        bin="$dir/$name"
-        for s in $sources; do src+=("$ROOT/$s"); done
-        swiftc -O -o "$bin" "${src[@]}" "$file" || { rm -rf "$dir"; return 1; }
-        "$bin"
-        rm -rf "$dir"
+# The app's unit tests live in the Rust workspace (rust/): `rust_test FILTER`
+# runs the ws-rs tests whose path matches FILTER (a module, e.g.
+# engines::nvim_rpc); no filter runs the whole workspace.
+rust_test() {
+    echo "Running cargo test ${1:-(workspace)}..."
+    command -v cargo >/dev/null 2>&1 || { echo "cargo not found — install Rust" >&2; return 1; }
+    if [ -n "${1:-}" ]; then
+        (cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/rust/target" cargo test -q -p ws-rs "$1")
     else
-        swift "$file"
+        (cd "$ROOT/rust" && CARGO_TARGET_DIR="$ROOT/rust/target" cargo test -q)
     fi
     echo ""
 }
@@ -30,7 +24,7 @@ case "${1:-all}" in
         "$py" "$TESTS/test_config_text.py"
         ;;
     recent)
-        run_test "$TESTS/test_recent_files.swift"
+        rust_test engines::recent_files
         ;;
     fileops)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
@@ -45,13 +39,13 @@ case "${1:-all}" in
         "$py" "$TESTS/test_ai_format.py"
         ;;
     nvim)
-        run_test "$TESTS/test_nvim_rpc.swift"
+        rust_test engines::nvim_rpc
         ;;
     filter)
-        run_test "$TESTS/test_list_filter.swift"
+        rust_test engines::list_filter
         ;;
     paths)
-        run_test "$TESTS/test_path_shelf.swift"
+        rust_test engines::path_shelf
         ;;
     ignore)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
@@ -62,10 +56,10 @@ case "${1:-all}" in
         "$py" "$TESTS/test_jsonmgr.py"
         ;;
     screenshot)
-        run_test "$TESTS/test_screenshot.swift"
+        rust_test screenshot
         ;;
     ansi)
-        run_test "$TESTS/test_ansi_render.swift"
+        rust_test engines::ansi_render
         ;;
     ansi-parse)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
@@ -76,25 +70,26 @@ case "${1:-all}" in
         "$py" "$TESTS/test_paneshot.py"
         ;;
     prose)
-        run_test "$TESTS/test_prose_pdf.swift"
+        rust_test engines::ai_format
         ;;
     prose-pdf)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_prose_pdf.py"
         ;;
     snippets)
-        run_test "$TESTS/test_snippet_render.swift"
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" "$TESTS/test_snippet_render.py"
         ;;
     panes)
-        run_test "$TESTS/test_pane_geometry.swift"
+        rust_test panes::pane_geometry
         ;;
     vim-keys)
-        run_test "$TESTS/test_vim_search.swift"
+        rust_test panes::vim_search
         ;;
     compare)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_compare.py"
-        run_test "$TESTS/test_compare_folder.swift"
+        rust_test views::compare
         ;;
     settings)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
@@ -164,24 +159,23 @@ case "${1:-all}" in
         "$py" "$TESTS/test_helper.py"
         ;;
     helper-client)
-        run_test "$TESTS/test_python_helper.swift"
+        rust_test app::python_helper
         ;;
     doc-templates)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_doc_templates.py"
         ;;
-    ai-live)
-        run_test "$TESTS/live_ai_rules.swift"
+    rust)
+        rust_test
         ;;
     all|*)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        # the three ported python suites with no `ws test` case of their own
-        # (the rest have cases above); the Swift sweep stays unchanged
-        for t in "$TESTS/test_jira_poll.py" "$TESTS/test_confluence.py" "$TESTS/test_notifications.py"; do
+        # the python suites with no `ws test` case of their own (the rest
+        # have cases above), then every Rust test in the workspace
+        for t in "$TESTS/test_jira_poll.py" "$TESTS/test_confluence.py" "$TESTS/test_notifications.py" \
+                 "$TESTS/test_snippet_render.py"; do
             [ -f "$t" ] && echo "Running $(basename "$t" .py)..." && "$py" "$t"
         done
-        for f in "$TESTS"/test_*.swift; do
-            [ -f "$f" ] && run_test "$f"
-        done
+        rust_test
         ;;
 esac

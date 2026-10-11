@@ -1999,6 +1999,13 @@ mod macos {
     /// The stateful notes surface the shared host embeds: the sidebar + editor
     /// tree plus two initially hidden drawers (terminal, browser). See
     /// [`super::NotesSurface`].
+    /// The drawer shell: `$SHELL -l` in `$HOME` (Swift `config.shell` /
+    /// `shellArgs` / `terminalDir` defaults).
+    fn drawer_shell() -> (String, Vec<String>, Option<String>) {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        (shell, vec!["-l".to_string()], std::env::var("HOME").ok())
+    }
+
     pub struct NotesSurface {
         root: Retained<NSView>,
         editor: Retained<NSTextView>,
@@ -2011,6 +2018,18 @@ mod macos {
         vim_bin: String,
         vim_asset: String,
         vim_frame: NSRect,
+        /// The live model behind the tree (tabs + sidebar cursor).
+        model: NotesView,
+        /// The sidebar scroll view (width follows the rail collapse).
+        sidebar: Retained<NSScrollView>,
+        /// The sidebar row title labels (repainted on selection changes).
+        row_titles: Vec<Retained<NSTextField>>,
+        /// The editor scroll view (moved when the rail collapses).
+        editor_scroll: Retained<NSScrollView>,
+        /// The expanded sidebar width, restored when the rail expands.
+        rail_expanded_width: f64,
+        /// Whether the native `NSTextView` find bar is up (`Cmd+F`).
+        find_shown: bool,
     }
 
     /// Build the sidebar + editor surface with its hidden drawers
@@ -2048,6 +2067,7 @@ mod macos {
         rows_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
         let row_h = 44.0;
         let mut y = 6.0;
+        let mut row_titles: Vec<Retained<NSTextField>> = Vec::new();
         for (tab, row) in model.tabs.tabs.iter().zip(model.sidebar.rows.iter()) {
             let title = NSTextField::labelWithString(&NSString::from_str(&row.title), mtm);
             title.setFont(Some(&NSFont::systemFontOfSize(12.5)));
@@ -2058,6 +2078,7 @@ mod macos {
             ));
             title.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
             rows_view.addSubview(&title);
+            row_titles.push(title);
 
             let folder = folder_text(&tab.path);
             let sub = match &row.trailing {
@@ -2113,6 +2134,9 @@ mod macos {
         text.setTextContainerInset(NSSize::new(14.0, 14.0));
         text.setVerticallyResizable(true);
         text.setHorizontallyResizable(false);
+        // Cmd+F: the native `NSTextView` find bar (`findAction` below).
+        text.setUsesFindBar(true);
+        text.setIncrementalSearchingEnabled(true);
         if let Some(container) = unsafe { text.textContainer() } {
             container.setWidthTracksTextView(true);
         }
@@ -2204,9 +2228,7 @@ mod macos {
         );
         if let Ok(shim) = terminal.clone().downcast::<swiftterm_shim::WSShim>() {
             swiftterm_shim::set_font(&shim, "Menlo", 12.0);
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            let args = vec!["-l".to_string()];
-            let home = std::env::var("HOME").ok();
+            let (shell, args, home) = drawer_shell();
             swiftterm_shim::start_process(&shim, &shell, &args, home.as_deref());
         }
         terminal.setHidden(true);
@@ -2264,6 +2286,12 @@ mod macos {
             vim_bin,
             vim_asset,
             vim_frame,
+            model,
+            sidebar,
+            row_titles,
+            editor_scroll: editor,
+            rail_expanded_width: sidebar_w,
+            find_shown: false,
         })
     }
 
@@ -2301,6 +2329,288 @@ mod macos {
             self.drawers.test_state()
         }
 
+        // -- list keys / selection (`PopupWindow.moveSelection` etc.) --------
+
+        /// The selected sidebar row (`tabs.selected`).
+        pub fn selected_index(&self) -> usize {
+            self.model.tabs.selected
+        }
+
+        pub fn row_count(&self) -> usize {
+            self.model.tabs.tabs.len()
+        }
+
+        pub fn selected_path(&self) -> Option<String> {
+            self.model.tabs.selected_path().map(str::to_string)
+        }
+
+        /// Whether the sidebar rail is collapsed (`PopupTabsBar.collapsed`).
+        pub fn rail_collapsed(&self) -> bool {
+            self.model.sidebar.collapsed
+        }
+
+        /// Whether the native find bar is up.
+        pub fn find_shown(&self) -> bool {
+            self.find_shown
+        }
+
+        /// The `views.notes` selection extras the socket `state` reports.
+        pub fn selection_state(&self) -> Value {
+            json!({
+                "selection": self.model.tabs.selected,
+                "selectedTab": self.model.tabs.selected,
+                "rowCount": self.model.tabs.tabs.len(),
+                "sidebarCursor": self.model.tabs.selected,
+                "findBar": self.find_shown,
+                "collapsed": self.model.sidebar.collapsed,
+                "tabs": self.model.tabs.titles(),
+            })
+        }
+
+        /// `moveSelection(_:)`: clamp into the tab list.
+        pub fn list_move(&mut self, delta: i64) {
+            if self.model.tabs.tabs.is_empty() {
+                return;
+            }
+            let n = self.model.tabs.tabs.len() as i64;
+            let cur = self.model.tabs.selected as i64;
+            let next = (cur + delta).clamp(0, n - 1) as usize;
+            self.select_row(next);
+        }
+
+        /// Tab / Shift+Tab: wrap around the tab list.
+        pub fn list_move_wrap(&mut self, delta: i64) {
+            if self.model.tabs.tabs.is_empty() {
+                return;
+            }
+            let n = self.model.tabs.tabs.len() as i64;
+            let cur = self.model.tabs.selected as i64;
+            let next = ((cur + delta).rem_euclid(n)) as usize;
+            self.select_row(next);
+        }
+
+        /// Home / End / PageUp / PageDown (`listKey`'s page branch).
+        pub fn list_page(&mut self, page: crate::ui::popup::PageMove) {
+            use crate::ui::popup::PageMove;
+            let n = self.model.tabs.tabs.len();
+            if n == 0 {
+                return;
+            }
+            let cur = self.model.tabs.selected;
+            let next = match page {
+                PageMove::Home => 0,
+                PageMove::End => n - 1,
+                PageMove::Up => cur.saturating_sub(10),
+                PageMove::Down => (cur + 10).min(n - 1),
+            };
+            self.select_row(next);
+        }
+
+        /// `acceptSelection` — open the selected note.
+        pub fn list_accept(&mut self) {
+            if let Some(path) = self.selected_path() {
+                self.open_note(&path);
+            }
+        }
+
+        /// `toggleRowSelection` — the notes sidebar has no marked set.
+        pub fn list_toggle_selection(&mut self) {}
+
+        /// Move the cursor to row `i`: repaint the sidebar, open the note.
+        fn select_row(&mut self, i: usize) {
+            if i >= self.model.tabs.tabs.len() {
+                return;
+            }
+            let changed = self.model.tabs.selected != i;
+            self.model.tabs.selected = i;
+            self.repaint_rows();
+            if changed {
+                if let Some(path) = self.selected_path() {
+                    self.open_note(&path);
+                }
+            }
+        }
+
+        /// Tint the selected row (the labels stand in for the row views).
+        fn repaint_rows(&mut self) {
+            let colors = crate::ui::theme::PopupThemeDefaults::colors();
+            for (i, label) in self.row_titles.iter().enumerate() {
+                let color = if i == self.model.tabs.selected {
+                    colors.accent
+                } else {
+                    colors.text
+                };
+                label.setTextColor(Some(&color.to_nscolor()));
+            }
+        }
+
+        /// `PopupTabsBar.toggleRail` — collapse / expand the notes sidebar.
+        pub fn toggle_rail(&mut self) {
+            self.model.sidebar.collapsed = !self.model.sidebar.collapsed;
+            self.apply_sidebar_width();
+        }
+
+        /// Re-apply the sidebar / editor / drawer geometry after a rail flip.
+        fn apply_sidebar_width(&mut self) {
+            let full = self.root.frame().size;
+            let w = self.model.sidebar.visible_width();
+            self.sidebar
+                .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, full.height)));
+            let editor_w = (full.width - w - 1.0).max(0.0);
+            self.editor_scroll.setFrame(NSRect::new(
+                NSPoint::new(w + 1.0, 0.0),
+                NSSize::new(editor_w, full.height),
+            ));
+            let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
+            self.terminal.setFrame(NSRect::new(
+                NSPoint::new(w + 1.0, full.height - term_h),
+                NSSize::new(editor_w, term_h),
+            ));
+            if let Some(view) = self.vim.as_ref().and_then(|p| p.view()) {
+                view.setFrame(NSRect::new(
+                    NSPoint::new(w + 1.0, 0.0),
+                    NSSize::new(editor_w, full.height),
+                ));
+            }
+        }
+
+        /// Rebuild the sidebar labels from the model (new tabs etc.).
+        pub fn rebuild_sidebar_rows(&mut self) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let colors = crate::ui::theme::PopupThemeDefaults::colors();
+            let w = self.model.sidebar.visible_width();
+            let Some(rows_view) = self.row_titles.first().and_then(|t| unsafe { t.superview() }) else {
+                return;
+            };
+            let subs = rows_view.subviews();
+            for s in &subs {
+                s.removeFromSuperview();
+            }
+            self.row_titles.clear();
+            let row_h = 44.0;
+            let mut y = 6.0;
+            for (tab, row) in self.model.tabs.tabs.iter().zip(self.model.sidebar.rows.iter()) {
+                let title = NSTextField::labelWithString(&NSString::from_str(&row.title), mtm);
+                title.setFont(Some(&NSFont::systemFontOfSize(12.5)));
+                title.setTextColor(Some(&colors.text.to_nscolor()));
+                title.setFrame(NSRect::new(
+                    NSPoint::new(10.0, y),
+                    NSSize::new((w - 16.0).max(0.0), 16.0),
+                ));
+                title.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                rows_view.addSubview(&title);
+                self.row_titles.push(title);
+
+                let folder = folder_text(&tab.path);
+                let sub = match &row.trailing {
+                    Some(age) => format!("{folder}  \u{00b7}  {age}"),
+                    None => folder,
+                };
+                let sub_label = NSTextField::labelWithString(&NSString::from_str(&sub), mtm);
+                sub_label.setFont(Some(&NSFont::systemFontOfSize(10.5)));
+                sub_label.setTextColor(Some(&colors.dim.to_nscolor()));
+                sub_label.setFrame(NSRect::new(
+                    NSPoint::new(10.0, y + 18.0),
+                    NSSize::new((w - 16.0).max(0.0), 14.0),
+                ));
+                sub_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                rows_view.addSubview(&sub_label);
+                y += row_h;
+            }
+            rows_view.setFrame(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(w.max(0.0), y.max(600.0)),
+            ));
+            self.repaint_rows();
+        }
+
+        /// `commitSave` — flush the vim pane, else write the editor text.
+        pub fn commit(&mut self) -> bool {
+            if self.vim.is_some() {
+                self.vim_flush();
+                return true;
+            }
+            let Some(path) = self.selected_path() else {
+                return false;
+            };
+            let text = self.editor.string().to_string();
+            std::fs::write(&path, text).is_ok()
+        }
+
+        /// `onOpenExternalPath` — open an absolute path as a note.
+        pub fn open_external_path(&mut self, path: &str) {
+            if !std::path::Path::new(path).exists() {
+                return;
+            }
+            match self.model.tabs.tabs.iter().position(|t| t.path == path) {
+                Some(i) => {
+                    self.model.tabs.selected = i;
+                }
+                None => {
+                    self.model.tabs.append(path);
+                    self.model.refresh_sidebar(now_secs());
+                    self.rebuild_sidebar_rows();
+                }
+            }
+            self.repaint_rows();
+            self.open_note(path);
+        }
+
+        // -- find bar (Cmd+F / Enter / Esc) -----------------------------------
+
+        /// `toggleFindBar`: show or hide the native `NSTextView` find bar.
+        pub fn toggle_find(&mut self) {
+            if self.find_shown {
+                self.close_find();
+            } else {
+                self.find_command(objc2_app_kit::NSFindPanelAction::ShowFindPanel);
+                self.find_shown = true;
+            }
+        }
+
+        /// `findStep(_:)` — Return / Shift+Return while the editor is focused.
+        pub fn find_step(&mut self, dir: i64) {
+            let action = if dir >= 0 {
+                objc2_app_kit::NSFindPanelAction::Next
+            } else {
+                objc2_app_kit::NSFindPanelAction::Previous
+            };
+            self.find_command(action);
+        }
+
+        /// `closeFindBar` — the Esc branch while the bar is up.
+        pub fn close_find(&mut self) {
+            if !self.find_shown {
+                return;
+            }
+            self.find_shown = false;
+            if let Some(window) = self.editor.window() {
+                if let Some(fr) = window.firstResponder() {
+                    let sel = objc2::sel!(cancelOperation:);
+                    let any: &objc2::runtime::AnyObject =
+                        unsafe { &*(objc2::rc::Retained::as_ptr(&fr) as *const objc2::runtime::AnyObject) };
+                    let responds: bool = unsafe { objc2::msg_send![any, respondsToSelector: sel] };
+                    if responds {
+                        let _: () = unsafe { objc2::msg_send![any, cancelOperation: std::ptr::null::<objc2::runtime::AnyObject>()] };
+                    }
+                }
+            }
+            self.focus_editor();
+        }
+
+        /// Run one `NSFindPanelAction` against the editor (the action rides on
+        /// a throwaway menu item's tag, the AppKit convention).
+        fn find_command(&self, action: objc2_app_kit::NSFindPanelAction) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let item = objc2_app_kit::NSMenuItem::new(mtm);
+            item.setTag(action.0 as isize);
+            unsafe { self.editor.performFindPanelAction(Some(&item)) };
+        }
+
         /// Make the editor the first responder of its window (a no-op until the
         /// surface is attached to one).
         pub fn focus_editor(&self) {
@@ -2316,6 +2626,12 @@ mod macos {
         /// Whether the embedded nvim pane is active for this surface.
         pub fn vim_active(&self) -> bool {
             self.vim.is_some()
+        }
+
+        /// Whether the embedded nvim pane holds the keyboard (the `:q`
+        /// relaunch's `TerminalAutoRestart` reclaim check).
+        pub fn vim_has_focus(&self) -> bool {
+            self.vim.as_ref().map(|p| p.has_focus()).unwrap_or(false)
         }
 
         /// The embedded nvim pane, when active.
@@ -2351,44 +2667,27 @@ mod macos {
             }
         }
 
-        /// `onVimExit` — rebuild the pane on the current note after `:q` / a
-        /// crash; returns true when a relaunch happened.
-        pub fn vim_poll_exit(&mut self, mtm: MainThreadMarker) -> bool {
-            let (exited, file) = match self.vim.as_mut() {
-                Some(pane) => (pane.poll_exit(), pane.file().map(str::to_string)),
-                None => return false,
+        /// The drawer terminal's `TerminalAutoRestart`: `exit` in the shell
+        /// starts a new one in the same view. Returns true when it restarted.
+        pub fn terminal_poll_restart(&self) -> bool {
+            let Ok(shim) = self.terminal.clone().downcast::<swiftterm_shim::WSShim>() else {
+                return false;
             };
-            if !exited {
+            let (shell, args, home) = drawer_shell();
+            swiftterm_shim::restart_if_exited(&shim, &shell, &args, home.as_deref())
+        }
+
+        /// `onVimExit` — restart the editor on the current note after `:q` / a
+        /// crash (same terminal view, `startVimIfNeeded`); returns true when a
+        /// relaunch happened.
+        pub fn vim_poll_exit(&mut self, _mtm: MainThreadMarker) -> bool {
+            let Some(pane) = self.vim.as_mut() else {
+                return false;
+            };
+            if !pane.poll_exit() {
                 return false;
             }
-            if let Some(old) = self.vim.as_ref().and_then(|p| p.view()) {
-                old.removeFromSuperview();
-            }
-            let mut pane = crate::views::notes_vim::VimPane::new(
-                self.vim_bin.clone(),
-                self.vim_asset.clone(),
-                file.clone(),
-            );
-            match pane.build(mtm, self.vim_frame) {
-                Some(view) => {
-                    view.setAutoresizingMask(
-                        NSAutoresizingMaskOptions::ViewWidthSizable
-                            | NSAutoresizingMaskOptions::ViewHeightSizable,
-                    );
-                    self.root.addSubview(&view);
-                    self.vim = Some(pane);
-                    if let Some(f) = file {
-                        if let Some(p) = self.vim.as_mut() {
-                            p.open(&f);
-                        }
-                    }
-                    true
-                }
-                None => {
-                    self.vim = None;
-                    false
-                }
-            }
+            pane.restart()
         }
     }
 }

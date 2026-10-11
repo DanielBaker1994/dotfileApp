@@ -329,5 +329,66 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(res.is_err());
+        let msg = res.unwrap_err().0;
+        assert!(msg.contains("unknown method"), "fails with its name: {msg}");
+    }
+
+    fn live_helper() -> Option<PythonHelper> {
+        let lib = repo_pylib();
+        if find_python(&lib).is_none() || !lib_has_helper(&lib) {
+            return None;
+        }
+        let h = PythonHelper::new();
+        h.configure(&lib);
+        Some(h)
+    }
+
+    #[test]
+    fn ping_answers_with_a_version() {
+        let Some(h) = live_helper() else { return };
+        let v = h.call("ping", json!({}), Duration::from_secs(15), Duration::from_secs(5)).unwrap();
+        assert_eq!(v["version"], json!(1), "{v}");
+    }
+
+    #[test]
+    fn many_calls_in_flight_all_answer() {
+        let Some(h) = live_helper() else { return };
+        let h = Arc::new(h);
+        let workers: Vec<_> = (0..25)
+            .map(|_| {
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    h.call("ping", json!({}), Duration::from_secs(20), Duration::from_secs(5)).is_ok()
+                })
+            })
+            .collect();
+        let answered = workers.into_iter().filter_map(|w| w.join().ok()).filter(|ok| *ok).count();
+        assert_eq!(answered, 25, "25 calls in flight all answer");
+    }
+
+    #[test]
+    fn the_worker_restarts_after_being_killed() {
+        let Some(h) = live_helper() else { return };
+        assert!(h.call("ping", json!({}), Duration::from_secs(15), Duration::from_secs(5)).is_ok());
+        h.kill_for_testing();
+        let res = h.call("ping", json!({}), Duration::from_secs(20), Duration::from_secs(5));
+        assert!(res.is_ok(), "recovered: {res:?}");
+    }
+
+    #[test]
+    fn a_package_less_worker_fails_fast() {
+        let lib = repo_pylib();
+        if find_python(&lib).is_none() {
+            return;
+        }
+        let empty = std::env::temp_dir().join(format!("ws-helper-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let h = PythonHelper::new();
+        h.configure(empty.to_str().unwrap());
+        let started = std::time::Instant::now();
+        let res = h.call("ping", json!({}), Duration::from_secs(8), Duration::from_secs(2));
+        assert!(res.is_err(), "no helper package: must fail");
+        assert!(started.elapsed() < Duration::from_secs(11), "fails within the timeout");
+        let _ = std::fs::remove_dir_all(&empty);
     }
 }

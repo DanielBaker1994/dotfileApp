@@ -135,7 +135,7 @@ fi
 STEP="installing dependencies"
 step "2/6 dependencies (brew)"
 for f in $BREW_FORMULAE; do
-    if brew list "$f" >/dev/null 2>&1; then
+    if brew list "$f" >/dev/null 2>&1 || { [ "$f" = rust ] && command -v cargo >/dev/null 2>&1; }; then
         ok "$f already installed"
     else
         info "installing $f…"
@@ -160,8 +160,8 @@ ensure_sym_links || die "a real file is in the way of a config link (see ✘ abo
 ok "configs linked to the repo ($CONFIG_DIRS)"
 
 STEP="building the app"
-step "4/6 building kitchen-sink.app (compiling the Swift sources)"
-info "compiling (first run also precompiles SwiftTerm — a few minutes)…"
+step "4/6 building kitchen-sink.app (cargo build of rust/)"
+info "compiling (first run also fetches crates and precompiles SwiftTerm — a few minutes)…"
 "$ROOT/bin/build-app.sh" --force
 ok "compiled + code-signed + permissions granted"
 

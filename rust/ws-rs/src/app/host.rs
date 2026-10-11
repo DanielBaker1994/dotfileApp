@@ -1,17 +1,19 @@
 //! Port of the `SwitcherController` host from `kitchen_sink.swift`.
 //!
-//! Bounded first cut: the socket surface (`testQuery` + `startCommandServer`'s
-//! request routing), the hotkey path (`hotkeyPrep` / `applyHotkeyPrep` /
-//! `toggleCommand`), and `reloadConfig`. The shared-window transitions mirror
-//! `SharedWindow`'s pure state machine (open / toggle / hide / back / home /
-//! cycle / hotkey); AppKit members are reduced to per-view `MemberState` rows so
-//! the controller stays `Send + Sync` and can be handed to `CommandServer`.
+//! The socket surface (`testQuery` + `startCommandServer`'s request routing),
+//! the hotkey path (`hotkeyPrep` / `applyHotkeyPrep` / `toggleCommand`), and
+//! `reloadConfig` are real, as are the shared-window transitions (open / toggle
+//! / hide / back / home / cycle / hotkey), the `do:` host actions, and the
+//! daemon UI bridge (`install_daemon_ui`: the shared host window, the tool
+//! panels, the command palette, and the local key monitor that drives
+//! `PopupWindow.handleKey`'s full action set — list keys, window geometry,
+//! the notes find bar / rail / commit, and the path sheet).
 //!
-//! Unported view internals become `views.<view>` defaults; the documented
-//! top-level keys are always present. `PaneNav` / `VimKeys` are the real ported
-//! models. Raw verbs other than `reload` / `restart` fall through (None), and
-//! unhandled `do:` verbs delegate to `Registry::dispatch_test_do`, mirroring
-//! `testQuery`'s `compare:` / `screenshot:` delegation.
+//! The controller model stays `Send + Sync` (per-view `MemberState` rows) so it
+//! can be handed to `CommandServer`; AppKit lives only behind the main-thread
+//! [`UiQueue`]/[`MainQueue`] drain. Unported `do:` verbs delegate to
+//! `Registry::dispatch_test_do`, mirroring `testQuery`'s `compare:` /
+//! `screenshot:` delegation.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -22,12 +24,13 @@ use crate::app::config::{self, AppSettings, HeaderStyle};
 use crate::app::hotkey::{self, HotkeyPrep};
 use crate::app::paths::Paths;
 use crate::app::registry::{PaletteCommand, RectI, Registry, SlotView};
-use crate::app::socket::CommandHandler;
+use crate::app::socket::{CommandHandler, Reply};
 use crate::panes::pane_geometry::{PaneDir, Rect};
 use crate::panes::pane_nav::{NavPane, PaneNav, ViewId};
 use crate::panes::vim_keys::VimKeys;
 use crate::views::compare::{CompareConfig, CompareRecent, CompareWindowModel};
 use crate::views::screenshot::{ScreenshotConfig, ScreenshotController};
+use crate::views::tools::ToolKind;
 
 /// The sections `loadCommands` never turns into commands.
 const COMMAND_SECTION_SKIPS: [&str; 11] = [
@@ -103,7 +106,7 @@ pub struct PaneSpec {
 /// A cross-thread command from the socket thread to the daemon's main thread.
 /// AppKit is main-thread-only, so the controller only enqueues these; the
 /// daemon's UI bridge drains the queue on the main run loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiCommand {
     /// Show the shared host window on `v` (built on first use).
     Present(SlotView),
@@ -121,6 +124,12 @@ pub enum UiCommand {
     Paths(PathsCmd),
     /// Toggle the `/terminal` tool panel (`do:term`, Ctrl+B T).
     TerminalPanel,
+    /// Open (or re-raise) one of the `openTool` panels (`do:tool:*`).
+    Tool(ToolKind),
+    /// Order a tool panel out (`do:tool-close:*`).
+    ToolClose(String),
+    /// `do:reset-size` — restore the shared window's default size.
+    ResetSize,
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -178,6 +187,9 @@ struct ControllerInner {
     pane_shot: Value,
     tools: Map<String, Value>,
     terminal_panel: bool,
+    /// The live `TerminalPanel.testState()` once the panel is built (the
+    /// daemon UI pushes it each drain); `None` = never built.
+    terminal_panel_state: Option<Value>,
     view_switcher: bool,
     /// The rows `state.viewSwitcher.rows` reports (pushed by the daemon UI
     /// when the palette is built; empty until then).
@@ -196,6 +208,8 @@ struct ControllerInner {
     window_titles: HashMap<SlotView, String>,
     /// An `open:<path>` launch message waiting for the notes surface.
     pending_note_open: Option<String>,
+    /// A `Cmd+O` path-sheet result waiting for the notes surface.
+    pending_note_external: Option<String>,
     last_key: String,
     /// `[section] esc-close` values parsed from commands.toml.
     esc_sections: HashMap<String, i64>,
@@ -206,6 +220,10 @@ struct ControllerInner {
     /// The daemon UI's command queue (`install_ui`); `None` = headless (tests).
     ui_queue: Option<UiQueue>,
     main_queue: Option<MainQueue>,
+    /// The compare model, so every hide path can release `--wait` callers
+    /// (Swift `slotPark(stopVoice: true)` → `finishWaiters`). Lock order:
+    /// `inner` before the model, never the reverse.
+    compare_model: Option<Arc<Mutex<CompareWindowModel>>>,
 }
 
 impl ControllerInner {
@@ -249,6 +267,17 @@ impl ControllerInner {
         self.ui_push(UiCommand::Present(v));
     }
 
+    /// Toggle the `/terminal` panel: flip the mirror (and the live doc's
+    /// `shown` until the daemon UI's next push) and queue the UI command.
+    fn flip_terminal_panel(&mut self) {
+        self.terminal_panel = !self.terminal_panel;
+        let shown = self.terminal_panel;
+        if let Some(o) = self.terminal_panel_state.as_mut().and_then(Value::as_object_mut) {
+            o.insert("shown".into(), json!(shown));
+        }
+        self.ui_push(UiCommand::TerminalPanel);
+    }
+
     fn ui_push(&self, cmd: UiCommand) {
         if let Some(q) = &self.ui_queue {
             q.lock().unwrap().push(cmd);
@@ -276,6 +305,11 @@ impl ControllerInner {
     }
 
     fn hide(&mut self, reason: &str) {
+        if matches!(self.current, Some(SlotView::Compare) | Some(SlotView::CompareText)) {
+            if let Some(m) = &self.compare_model {
+                m.lock().unwrap().finish_waiters();
+            }
+        }
         self.visible = false;
         if let Some(cur) = self.current {
             if let Some(m) = self.members.get_mut(&cur) {
@@ -331,19 +365,29 @@ impl ControllerInner {
         ));
     }
 
-    fn toggle(&mut self) {
-        if self.shown_member().is_some() {
-            self.hide("toggle");
+    /// `hideOrFocus`: hide when the user is already in the window, else bring
+    /// the shown view forward (`slotShow`).
+    fn hide_or_focus(&mut self, v: SlotView, user_in_it: bool) {
+        if user_in_it {
+            self.hide("hotkey pressed while in it");
+        } else {
+            self.present(v);
+        }
+    }
+
+    fn toggle(&mut self, user_in_it: bool) {
+        if let Some(m) = self.shown_member() {
+            self.hide_or_focus(m, user_in_it);
             return;
         }
         self.open(self.last);
     }
 
-    fn hotkey(&mut self, v: SlotView) {
+    fn hotkey(&mut self, v: SlotView, user_in_it: bool) {
         if let Some(cur) = self.current {
             let same = if v == SlotView::Jira { cur.is_jira() } else { cur == v };
             if same && self.shown_member().is_some() {
-                self.hide("hotkey pressed while in it");
+                self.hide_or_focus(cur, user_in_it);
                 return;
             }
         }
@@ -472,7 +516,10 @@ impl ControllerInner {
             "frontmostPid": self.frontmost_pid,
             "tools": Value::Object(self.tools.clone()),
             "headerStyle": self.settings.header_style.raw(),
-            "terminalPanel": { "shown": self.terminal_panel },
+            "terminalPanel": self
+                .terminal_panel_state
+                .clone()
+                .unwrap_or_else(|| json!({ "shown": self.terminal_panel })),
             "viewSwitcher": {
                 "shown": self.view_switcher,
                 "rows": self.switcher_rows,
@@ -523,6 +570,7 @@ impl SwitcherController {
             pane_shot: json!({}),
             tools: Map::new(),
             terminal_panel: false,
+            terminal_panel_state: None,
             view_switcher: false,
             switcher_rows: Vec::new(),
             paths_state: json!({ "shown": false, "rows": [] }),
@@ -532,6 +580,7 @@ impl SwitcherController {
             window_count: 0,
             window_titles: HashMap::new(),
             pending_note_open: None,
+            pending_note_external: None,
             last_key: String::new(),
             esc_sections: HashMap::new(),
             esc_app,
@@ -539,6 +588,7 @@ impl SwitcherController {
             logs: Vec::new(),
             ui_queue: None,
             main_queue: None,
+            compare_model: None,
         };
         SwitcherController {
             inner: Mutex::new(inner),
@@ -622,6 +672,7 @@ impl SwitcherController {
                 CompareRecent::from_env(),
             )));
             crate::views::compare::register_compare_hooks(&mut self.registry, model.clone());
+            self.inner.lock().unwrap().compare_model = Some(model.clone());
             self.compare_model = Some(model);
         }
 
@@ -758,6 +809,24 @@ impl SwitcherController {
     /// `[app]` settings, for the caller to read.
     pub fn settings(&self) -> AppSettings {
         self.inner.lock().unwrap().settings.clone()
+    }
+
+    /// `(settings.hideOnFocusLoss, settings.focusLossDelay)` without cloning
+    /// the whole settings struct (read every drain tick).
+    pub fn focus_loss_settings(&self) -> (bool, f64) {
+        let inner = self.inner.lock().unwrap();
+        (inner.settings.hide_on_focus_loss, inner.settings.focus_loss_delay)
+    }
+
+    /// `setGlobalHideOnFocusLoss(_:)` — flip the global switch; `persist`
+    /// writes `[app] hide-on-focus-loss` (the status-menu path). The shared
+    /// window has no per-view `sticky` override, so nothing else changes.
+    pub fn set_hide_on_focus_loss(&self, on: bool, persist: bool) {
+        self.inner.lock().unwrap().settings.hide_on_focus_loss = on;
+        if persist {
+            config::save_config_value("app", "hide-on-focus-loss", if on { "true" } else { "false" });
+        }
+        self.log(&format!("[app] hide-on-focus-loss = {on}"));
     }
 
     /// Route UI commands to the daemon's main thread. Install once, before
@@ -905,6 +974,38 @@ impl SwitcherController {
         self.inner.lock().unwrap().paths_state = state;
     }
 
+    /// `state.tools.<name>` — a tool panel's `testState` + `wid`/`level`,
+    /// pushed by the daemon UI on every drain (`subWindows` mirror).
+    pub fn set_tool_state(&self, name: &str, state: Value) {
+        self.inner
+            .lock()
+            .unwrap()
+            .tools
+            .insert(name.to_string(), state);
+    }
+
+    /// Drop a tool panel's `tools` entry (`unregisterSubWindow`).
+    /// `state.terminalPanel` ← the live panel document (daemon UI).
+    pub fn set_terminal_panel_state(&self, state: Value) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.terminal_panel = state["shown"].as_bool().unwrap_or(false);
+        inner.terminal_panel_state = Some(state);
+    }
+
+    pub fn remove_tool_state(&self, name: &str) {
+        self.inner.lock().unwrap().tools.remove(name);
+    }
+
+    /// A `Cmd+O` path-sheet result; the daemon UI drains it on the next tick.
+    pub fn set_pending_note_external(&self, path: String) {
+        self.inner.lock().unwrap().pending_note_external = Some(path);
+    }
+
+    /// Take the pending external open (once).
+    pub fn take_pending_note_external(&self) -> Option<String> {
+        self.inner.lock().unwrap().pending_note_external.take()
+    }
+
     /// `views.notes.terminal` / `.browser`.
     pub fn set_notes_drawer(&self, side: DrawerSide, on: bool) {
         let mut inner = self.inner.lock().unwrap();
@@ -950,7 +1051,9 @@ impl SwitcherController {
             }
             "terminal" => self.toggle_terminal_panel(),
             "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
-            | "compare" => self.toggle_command(name),
+            | "compare" | "prettyprint" | "filefast" | "health" | "health-checks" => {
+                self.toggle_command(name)
+            }
             _ => {
                 self.inner
                     .lock()
@@ -982,7 +1085,31 @@ impl SwitcherController {
     }
 
     pub fn toggle(&self) {
-        self.inner.lock().unwrap().toggle();
+        let in_it = self.user_in_it();
+        self.inner.lock().unwrap().toggle(in_it);
+    }
+
+    /// Live `hideOrFocus` probe for the shown view (main-thread hop). Nothing
+    /// shown, headless, or a timed-out hop all count as "in it" — the answer
+    /// only matters when a view is shown.
+    fn user_in_it(&self) -> bool {
+        let wid = {
+            let inner = self.inner.lock().unwrap();
+            match inner.shown_member() {
+                Some(v) => inner.members.get(&v).map_or(0, |m| m.wid),
+                None => return true,
+            }
+        };
+        #[cfg(target_os = "macos")]
+        {
+            self.run_on_main(move || daemon_ui::user_in_it(wid), std::time::Duration::from_secs(2))
+                .unwrap_or(true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = wid;
+            true
+        }
     }
 
     pub fn hide(&self, reason: &str) {
@@ -990,7 +1117,15 @@ impl SwitcherController {
     }
 
     pub fn back(&self, esc: bool) {
+        let was_sub = self.current() == Some(SlotView::CompareText);
         self.inner.lock().unwrap().back(esc);
+        // Leaving compareText closes the sub-view's session (Swift's separate
+        // sub window) and returns to the session underneath.
+        if was_sub && self.current() != Some(SlotView::CompareText) {
+            if let Some(m) = &self.compare_model {
+                m.lock().unwrap().close_sub();
+            }
+        }
     }
 
     pub fn home(&self) {
@@ -1002,7 +1137,8 @@ impl SwitcherController {
     }
 
     pub fn hotkey(&self, v: SlotView) {
-        self.inner.lock().unwrap().hotkey(v);
+        let in_it = self.user_in_it();
+        self.inner.lock().unwrap().hotkey(v, in_it);
     }
 
     /// `PaneNav.shared.move(_:in:)` — move the focus ring one pane over.
@@ -1041,7 +1177,7 @@ impl SwitcherController {
                 if inner.current.map_or(false, |c| c.is_jira()) {
                     inner.home();
                 } else {
-                    inner.hotkey(SlotView::Jira);
+                    inner.hotkey(SlotView::Jira, true);
                 }
             }
             nav::CONFLUENCE => {
@@ -1155,9 +1291,7 @@ impl SwitcherController {
 
     /// `SwitcherController.toggleTerminalPanel()`.
     pub fn toggle_terminal_panel(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.terminal_panel = !inner.terminal_panel;
-        inner.ui_push(UiCommand::TerminalPanel);
+        self.inner.lock().unwrap().flip_terminal_panel();
     }
 
     /// `toggleCommand(_:)`: map a hotkey mode name onto a view / toggle.
@@ -1198,6 +1332,28 @@ impl SwitcherController {
             "compare" => {
                 self.hotkey(SlotView::Compare);
             }
+            "terminal" => {
+                self.toggle_terminal_panel();
+            }
+            "paths" => {
+                let shown = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .tools
+                    .get("paths")
+                    .and_then(|v| v.get("shown"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if shown {
+                    let _ = self.do_host_action("paths:hide");
+                } else {
+                    let _ = self.do_host_action("paths:show");
+                }
+            }
+            "health" | "health-checks" | "prettyprint" | "filefast" => {
+                self.toggle_tool(name);
+            }
             _ => {
                 self.inner
                     .lock()
@@ -1215,6 +1371,43 @@ impl SwitcherController {
             self.apply_hotkey_prep(&p);
         }
         self.toggle_command(message);
+    }
+
+    /// `switchWorkspace(cell:)` — `aerospace workspace <key>` off-main.
+    pub fn switch_workspace(&self, id: &str) {
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            let ipc = hotkey::AeroIpc::discover();
+            let _ = hotkey::AeroCall::call(&ipc, &["workspace".to_string(), id]);
+        });
+    }
+
+    /// Swift `toggleCommand`'s tool-panel half: hide when the panel is shown
+    /// and key, else raise it (`openTool`).
+    fn toggle_tool(&self, name: &str) {
+        let Some(kind) = ToolKind::from_name(name) else {
+            return;
+        };
+        let name = kind.name();
+        let (shown, key) = {
+            let inner = self.inner.lock().unwrap();
+            let entry = inner.tools.get(name);
+            (
+                entry
+                    .and_then(|v| v.get("shown"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                entry
+                    .and_then(|v| v.get("key"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        };
+        if shown && key {
+            let _ = self.do_host_action(&format!("tool-close:{name}"));
+        } else {
+            let _ = self.do_host_action(&format!("tool:{name}"));
+        }
     }
 
     fn do_host_action(&self, action: &str) -> Option<Value> {
@@ -1357,6 +1550,15 @@ impl SwitcherController {
                 }
             }
             return Some(json!({ "error": "esc-hides:VIEW:on|off" }));
+        } else if let Some(rest) = action.strip_prefix("hide-on-focus-loss:") {
+            // In-memory flip (tests); the status menu persists it.
+            return match rest {
+                "on" | "off" => {
+                    self.set_hide_on_focus_loss(rest == "on", false);
+                    None
+                }
+                _ => Some(json!({ "error": "hide-on-focus-loss:on|off" })),
+            };
         } else if let Some(name) = action.strip_prefix("tool:") {
             if name == "paths" {
                 if !self.paths_enabled() {
@@ -1367,6 +1569,14 @@ impl SwitcherController {
                     inner.tools.insert(name.to_string(), json!({ "shown": true }));
                 }
                 return self.do_host_action("paths:show");
+            }
+            if let Some(kind) = ToolKind::from_name(name) {
+                let mut inner = self.inner.lock().unwrap();
+                inner
+                    .tools
+                    .insert(name.to_string(), json!({ "shown": true, "key": true }));
+                inner.ui_push(UiCommand::Tool(kind));
+                return None;
             }
             let mut inner = self.inner.lock().unwrap();
             inner
@@ -1380,6 +1590,10 @@ impl SwitcherController {
                     if let Some(o) = entry.as_object_mut() {
                         o.insert("shown".into(), json!(false));
                     }
+                }
+                if ToolKind::is_panel(name) {
+                    inner.ui_push(UiCommand::ToolClose(name.to_string()));
+                    return None;
                 }
             }
             if name == "paths" {
@@ -1426,9 +1640,7 @@ impl SwitcherController {
                 None
             }
             "term" => {
-                let mut inner = self.inner.lock().unwrap();
-                inner.terminal_panel = !inner.terminal_panel;
-                inner.ui_push(UiCommand::TerminalPanel);
+                self.inner.lock().unwrap().flip_terminal_panel();
                 None
             }
             "switcher" => {
@@ -1439,7 +1651,20 @@ impl SwitcherController {
                 self.view_switcher_hide();
                 None
             }
-            "jira-jump" | "notes-find" | "notes-grep" | "reset-size" => None,
+            "jira-jump" | "notes-find" | "notes-grep" => {
+                {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner
+                        .logs
+                        .push(format!("do:{action}: not modelled yet"));
+                }
+                None
+            }
+            "reset-size" => {
+                let inner = self.inner.lock().unwrap();
+                inner.ui_push(UiCommand::ResetSize);
+                None
+            }
             _ => {
                 let rest = action
                     .split_once(':')
@@ -1449,12 +1674,194 @@ impl SwitcherController {
                     || action.starts_with("compare:")
                     || action.starts_with("screenshot:")
                 {
-                    return self.registry.dispatch_test_do(action).or_else(|| {
+                    let result = self.registry.dispatch_test_do(action).or_else(|| {
                         Some(json!({ "error": format!("unhandled action {rest}") }))
                     });
+                    // `folder-open` on a file pair opens the compareText sub-view.
+                    let push_sub = action.starts_with("compare:")
+                        && self
+                            .compare_model
+                            .as_ref()
+                            .map_or(false, |m| m.lock().unwrap().take_sub_pending());
+                    if push_sub {
+                        self.inner.lock().unwrap().push(SlotView::CompareText);
+                    }
+                    return result;
                 }
                 self.registry.dispatch_test_do(action)
             }
+        }
+    }
+
+    /// Queue `work` on the main thread without waiting (Swift's
+    /// `DispatchQueue.main.async`); inline when headless.
+    fn post_main(&self, work: impl FnOnce() + Send + 'static) {
+        let queue = self.inner.lock().unwrap().main_queue.clone();
+        match queue {
+            Some(q) => q.lock().unwrap().push(Box::new(work)),
+            None => work(),
+        }
+    }
+
+    /// `screenshot[\tWORDS]`: trigger on main; a caller that wants output
+    /// (`--raw`, `--print-geometry`, …) gets the controller's reply bytes once
+    /// the session finishes, everyone else is closed straight away.
+    fn screenshot_message(&self, rest: &str, reply: Reply) {
+        let words: Vec<String> =
+            rest.split('\t').filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let wants_reply = crate::engines::screenshot_annotations::ShotArgs::parse(&words)
+            .map(|a| a.wants_reply())
+            .unwrap_or(false);
+        let reply = if wants_reply { Some(reply) } else { None };
+        let Some(controller) = self.screenshot_controller.clone() else {
+            return;
+        };
+        self.post_main(move || {
+            let (finished, data) = {
+                let mut c = controller.lock().unwrap();
+                c.reply = None;
+                let _ = c.handle(&words);
+                #[cfg(target_os = "macos")]
+                c.redraw_overlays();
+                let finished = c.is_idle();
+                (finished, if finished { c.reply.take() } else { None })
+            };
+            let Some(reply) = reply else { return };
+            if finished {
+                reply.send_bytes(data.as_deref().unwrap_or_default());
+                return;
+            }
+            // An interactive overlay is up: answer when it closes.
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let mut c = controller.lock().unwrap();
+                if c.is_idle() {
+                    let data = c.reply.take();
+                    drop(c);
+                    reply.send_bytes(data.as_deref().unwrap_or_default());
+                    return;
+                }
+            });
+        });
+    }
+
+    /// `compare\tWORDS` (`handleCompareMessage`): `--title1/--title2 T`,
+    /// `--wait` (git difftool: reply `done` once the session is closed or the
+    /// view hides), then up to two paths.
+    fn compare_message(&self, rest: &str, reply: Reply) {
+        let words: Vec<&str> = rest.split('\t').collect();
+        let mut paths: Vec<String> = Vec::new();
+        let mut titles = HashMap::new();
+        let wait = words.contains(&"--wait");
+        let mut i = 0;
+        while i < words.len() {
+            match words[i] {
+                "--wait" | "" => {}
+                "--title1" if i + 1 < words.len() => {
+                    titles.insert(crate::views::compare::CompareSide::Left, words[i + 1].to_string());
+                    i += 1;
+                }
+                "--title2" if i + 1 < words.len() => {
+                    titles.insert(crate::views::compare::CompareSide::Right, words[i + 1].to_string());
+                    i += 1;
+                }
+                p => paths.push(p.to_string()),
+            }
+            i += 1;
+        }
+        let reply = if wait { Some(reply) } else { None };
+        let Some(model) = self.compare_model.clone() else {
+            if let Some(r) = reply {
+                r.send("done");
+            }
+            return;
+        };
+        self.open(SlotView::Compare);
+        let Some(left) = paths.first() else {
+            if let Some(r) = reply {
+                r.send("done");
+            }
+            return;
+        };
+        let id = model
+            .lock()
+            .unwrap()
+            .open_message(left, paths.get(1).map(String::as_str), &titles, wait);
+        let Some(reply) = reply else { return };
+        let Some(id) = id else {
+            reply.send("done");
+            return;
+        };
+        std::thread::spawn(move || {
+            while model.lock().unwrap().is_waiting(id) {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            reply.send("done");
+        });
+    }
+
+    /// `pane-shot[\tWORDS]` (`ScreenshotController.paneShot`): render the pane
+    /// off-main, deliver (save / copy) on main, reply with the path,
+    /// `copied`, or `error: …`.
+    fn pane_shot_message(&self, rest: &str, reply: Reply) {
+        use crate::engines::pane_shot::{PaneShotArgs, PaneShotConfig};
+        let words: Vec<String> =
+            rest.split('\t').filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let args = match PaneShotArgs::parse(&words) {
+            Ok(a) => a,
+            Err(p) => {
+                reply.send(&format!("error: {}", p.message));
+                return;
+            }
+        };
+        let Some(controller) = self.screenshot_controller.clone() else {
+            reply.send("error: [screenshot] is not enabled");
+            return;
+        };
+        let entries: HashMap<String, String> = config::read_config_text()
+            .map(|t| {
+                let lines = crate::engines::config_text::config_lines(&t);
+                crate::engines::config_text::config_section_entries(&lines, "pane-shot")
+                    .into_iter()
+                    .map(|(_, k, v)| (k, v))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = PaneShotConfig::from_entries(&entries);
+        #[cfg(target_os = "macos")]
+        {
+            let scale = self
+                .run_on_main(
+                    crate::views::screenshot::mouse_screen_scale,
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap_or(2.0);
+            let queue = self.inner.lock().unwrap().main_queue.clone();
+            std::thread::spawn(move || {
+                let started = crate::views::screenshot::epoch_millis();
+                let result = crate::views::screenshot::pane_shot_image(&args, &cfg, scale);
+                let deliver = move || {
+                    let mut c = controller.lock().unwrap();
+                    let line = match result {
+                        Ok(shot) => c.deliver_pane_shot(&shot, &args, &cfg, started),
+                        Err(f) => {
+                            c.pane_shot_failed(&f.message);
+                            format!("error: {}", f.message)
+                        }
+                    };
+                    drop(c);
+                    reply.send(&line);
+                };
+                match queue {
+                    Some(q) => q.lock().unwrap().push(Box::new(deliver)),
+                    None => deliver(),
+                }
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (args, cfg, controller);
+            reply.send("error: pane-shot needs macOS");
         }
     }
 
@@ -1476,7 +1883,16 @@ impl SwitcherController {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        model.lock().unwrap().open_pair(l.as_deref(), r.as_deref());
+        {
+            let mut m = model.lock().unwrap();
+            if sub {
+                m.open_sub(l.as_deref(), r.as_deref());
+                m.take_sub_pending();
+            } else {
+                m.close_sub();
+                m.open_pair(l.as_deref(), r.as_deref());
+            }
+        }
         self.open(SlotView::Compare);
         if sub {
             self.inner.lock().unwrap().push(SlotView::CompareText);
@@ -1582,7 +1998,7 @@ fn parse_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
             }
             out.entry(section.clone())
                 .or_default()
-                .insert(key.to_string(), strip_comment(v).trim().to_string());
+                .insert(key.to_string(), unquote_value(strip_comment(v)));
         }
     }
     out
@@ -1656,16 +2072,218 @@ fn count_sections(text: &str) -> usize {
         .count()
 }
 
+/// What [`FocusWatch::tick`] asks the daemon UI to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusAction {
+    None,
+    /// `checkFocusLoss` → `hide("focus loss → …", restoreFocus: false)`.
+    Hide,
+    /// Focus stolen right after a view swap → `m.slotShow` (refocus).
+    Refocus,
+    /// `startFocusBridge`'s didBecomeKey observer: our window became key while
+    /// the app is inactive (AeroSpace focused it) → `NSApp.activate`.
+    SelfActivate,
+}
+
+/// One drain tick's view of the shared window's focus (all live AppKit).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FocusSample {
+    pub now: f64,
+    /// The shared window is visible.
+    pub shown: bool,
+    /// The shared window is key.
+    pub key: bool,
+    /// `focusLeft(w)`: not key, no sheet, and no other visible window of
+    /// ours holds key.
+    pub left: bool,
+    /// Any window of ours is key (Swift's global didBecomeKey cancels a
+    /// pending focus-loss check).
+    pub any_key: bool,
+    pub app_active: bool,
+    /// A click in another app within the last second (`lastOtherAppClick`).
+    pub clicked_away: bool,
+}
+
+/// The polled port of `SharedWindow`'s didResignKey/didBecomeKey observers
+/// (`focusLossGen` + `asyncAfter(focusLossDelay)` + `checkFocusLoss`) and of
+/// `startFocusBridge`'s "became key while inactive" observer. The daemon UI
+/// samples AppKit every drain tick; the edges stand in for the notifications.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FocusWatch {
+    was_key: bool,
+    was_any_key: bool,
+    /// When the shared window resigned key (the pending check), if pending.
+    resigned_at: Option<f64>,
+    /// `swappedAt` — the last view swap inside the shown window.
+    swapped_at: Option<f64>,
+    /// Our own last `present` (it activates itself; the key edge it causes
+    /// is not an AeroSpace focus).
+    presented_at: Option<f64>,
+}
+
+impl FocusWatch {
+    /// `slot.present` swapped views inside the shown window.
+    pub fn note_swap(&mut self, now: f64) {
+        self.swapped_at = Some(now);
+    }
+
+    /// The daemon UI presented (activated + made key) the window itself.
+    pub fn note_present(&mut self, now: f64) {
+        self.presented_at = Some(now);
+    }
+
+    /// `hide()` clears `swappedAt` and any pending check.
+    pub fn reset(&mut self) {
+        *self = FocusWatch::default();
+    }
+
+    pub fn tick(&mut self, s: FocusSample, hide_on_focus_loss: bool, delay: f64) -> FocusAction {
+        if !s.shown {
+            self.reset();
+            return FocusAction::None;
+        }
+        let became_key = s.key && !self.was_key;
+        let resigned = !s.key && self.was_key;
+        // didBecomeKey (any window of ours) bumps `focusLossGen`.
+        let any_became_key = s.any_key && (!self.was_any_key || became_key);
+        self.was_key = s.key;
+        self.was_any_key = s.any_key;
+        if any_became_key {
+            self.resigned_at = None;
+        }
+        if became_key {
+            let own = self.presented_at.map_or(false, |t| s.now - t < 0.5);
+            if !s.app_active && !s.clicked_away && !own {
+                return FocusAction::SelfActivate;
+            }
+            return FocusAction::None;
+        }
+        if resigned {
+            self.resigned_at = Some(s.now);
+        }
+        let Some(t) = self.resigned_at else {
+            return FocusAction::None;
+        };
+        if s.now - t < delay {
+            return FocusAction::None;
+        }
+        self.resigned_at = None;
+        if !s.left {
+            return FocusAction::None;
+        }
+        if let Some(sw) = self.swapped_at.take() {
+            if s.now - sw < 1.0 {
+                return FocusAction::Refocus;
+            }
+        }
+        if hide_on_focus_loss {
+            FocusAction::Hide
+        } else {
+            FocusAction::None
+        }
+    }
+}
+
+/// `focusBridgeChanged(_:)`'s decision: the bridge file names our shown
+/// shared window (`raw` = AeroSpace's focused window id), it was written
+/// within the last second, and the user did not just click another app.
+pub(crate) fn focus_bridge_should_activate(
+    raw: &str,
+    our_wid: i64,
+    age: f64,
+    clicked_away: bool,
+) -> bool {
+    let Ok(id) = raw.trim().parse::<i64>() else {
+        return false;
+    };
+    our_wid != 0 && id == our_wid && !clicked_away && age < 1.0
+}
+
+/// Live AppKit focus, read on main for each `state` (see `daemon_ui::live_focus`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LiveFocus {
+    pub active: bool,
+    pub key_title: String,
+    pub key_wid: i64,
+    pub windows: i64,
+    pub frontmost: i32,
+    /// The primary screen's height (AppKit → top-left screen points).
+    pub main_h: f64,
+}
+
+/// The header ✕ button's frame in the flipped host root (x, y, w, h).
+const HEADER_CLOSE_FRAME: (f64, f64, f64, f64) = (4.0, 4.0, 26.0, 22.0);
+
+/// `closeButtonRect` in global top-left screen points (what `cliclick`
+/// takes), for a window `frame` [x, y, w, h] in AppKit coordinates.
+fn header_close_point(frame: &[f64], main_h: f64) -> [i64; 2] {
+    let (cx, cy, cw, ch) = HEADER_CLOSE_FRAME;
+    let (x, y, h) = (frame[0], frame[1], frame[3]);
+    [
+        (x + cx + cw / 2.0).round() as i64,
+        (main_h - (y + h - (cy + ch / 2.0))).round() as i64,
+    ]
+}
+
+impl ControllerInner {
+    /// Overwrite the present-time mirrors with live values. Every view shares
+    /// the one host window, so only the current view can be key (Swift: a
+    /// parked member's window is never key).
+    fn apply_live_focus(&mut self, f: &LiveFocus) {
+        self.active = f.active;
+        self.key_window = f.key_title.clone();
+        self.window_count = f.windows;
+        self.frontmost_pid = f.frontmost;
+        let current = self.current;
+        for (v, m) in self.members.iter_mut() {
+            m.key = Some(*v) == current && m.shown && m.wid != 0 && m.wid == f.key_wid;
+        }
+    }
+}
+
+impl SwitcherController {
+    /// One main-thread hop per `state`: read the live focus fields and sync
+    /// the screenshot overlay panels' key/wid into the controller.
+    #[cfg(target_os = "macos")]
+    fn live_focus(&self) -> Option<LiveFocus> {
+        let shot = self.screenshot_controller.clone();
+        self.run_on_main(
+            move || {
+                let f = daemon_ui::live_focus();
+                if f.is_some() {
+                    if let Some(c) = &shot {
+                        c.lock().unwrap().sync_live_overlay();
+                    }
+                }
+                f
+            },
+            std::time::Duration::from_secs(2),
+        )
+        .flatten()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn live_focus(&self) -> Option<LiveFocus> {
+        None
+    }
+}
+
 impl CommandHandler for SwitcherController {
     fn state_json(&self) -> Value {
+        let live = self.live_focus();
         let mut v = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(f) = &live {
+                inner.apply_live_focus(f);
+            }
             inner.state_with_registry(&self.registry)
         };
         // `screenshot` / `compare` report their real controllers when enabled
         // (the inner placeholder only covers a disabled/detached tool).
         if let Some(c) = &self.screenshot_controller {
-            v["screenshot"] = c.lock().unwrap().test_state();
+            let c = c.lock().unwrap();
+            v["screenshot"] = c.test_state();
+            v["paneShot"] = c.pane_shot_last.clone();
         }
         if let Some(m) = &self.compare_model {
             let mut st = m.lock().unwrap().test_state();
@@ -1679,6 +2297,20 @@ impl CommandHandler for SwitcherController {
             }
             let view = v["view"].clone();
             let is_compare = matches!(view.as_str(), Some("compare") | Some("compareText"));
+            // Swift reports the compare window's frame and its ✕ point.
+            if is_compare {
+                let frame: Option<Vec<f64>> = view
+                    .as_str()
+                    .and_then(|name| v["views"][name]["frame"].as_array())
+                    .map(|a| a.iter().filter_map(Value::as_f64).collect())
+                    .filter(|f: &Vec<f64>| f.len() == 4);
+                if let Some(f) = frame {
+                    st["frame"] = json!(f.iter().map(|x| x.round() as i64).collect::<Vec<_>>());
+                    if let Some(main_h) = live.as_ref().map(|l| l.main_h).filter(|h| *h > 0.0) {
+                        st["close"] = json!(header_close_point(&f, main_h));
+                    }
+                }
+            }
             // `sub` is the Swift sub-window flag: true while compareText is up.
             st["sub"] = json!(view.as_str() == Some("compareText"));
             st["view"] = if is_compare { view } else { json!("") };
@@ -1688,7 +2320,32 @@ impl CommandHandler for SwitcherController {
     }
 
     fn do_action(&self, action: &str) -> Option<Value> {
-        self.do_host_action(action)
+        let result = self.do_host_action(action);
+        // Swift's `testQuery` dispatches on main before replying. Flush the
+        // daemon UI queue the same way so a caller that immediately re-reads
+        // `state` sees the presented window (`views.*.shown`, `windows`).
+        let _ = self.run_on_main(|| {}, std::time::Duration::from_millis(1000));
+        // A registry hook answers `Some(null)` for "handled, no error"
+        // (`compareTestDo` returning nil): reply with the state like Swift,
+        // never a bare `null`.
+        result.filter(|v| !v.is_null())
+    }
+
+    fn raw_deferred(&self, verb: &str, rest: &str, reply: Reply) -> Option<Reply> {
+        match verb {
+            "screenshot-permission" => {
+                #[cfg(target_os = "macos")]
+                let ok = crate::views::screenshot::screen_capture_permitted();
+                #[cfg(not(target_os = "macos"))]
+                let ok = false;
+                reply.send(if ok { "granted" } else { "denied" });
+            }
+            "screenshot" => self.screenshot_message(rest, reply),
+            "compare" => self.compare_message(rest, reply),
+            "pane-shot" => self.pane_shot_message(rest, reply),
+            _ => return Some(reply),
+        }
+        None
     }
 
     fn raw_request(&self, verb: &str, _rest: &str) -> Option<String> {
@@ -1731,9 +2388,15 @@ mod daemon_ui {
     use crate::ui::shared_window::SlotHostWindow;
     use crate::ui::theme::{set_current_header_style, HeaderStyle as ThemeHeaderStyle, PopupColors};
     use crate::views::paths::{PathsWindow, ReturnAction as PathsReturn};
-    use crate::views::switcher::{SwitchFrame, SwitchView, ViewSwitcherPanel};
+    use crate::views::switcher::{
+        gather_workspaces, PaletteAction, PalettePanel, SwitchFrame, SwitchView,
+        ViewSwitcherPanel,
+    };
     use crate::views::terminal::{TerminalConfig, TerminalPanel};
+    use crate::views::tools::{ToolKind, ToolPanel};
+    use crate::views::files::FileBrowser;
     use objc2::rc::{Retained, Weak};
+    use serde_json::json;
     use objc2::runtime::{AnyObject, NSObject};
     use objc2::{
         define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
@@ -1746,7 +2409,15 @@ mod daemon_ui {
     use objc2_foundation::{NSInteger, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    use std::rc::Rc;
     use std::sync::Arc;
+
+    fn now_secs() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    }
 
     const HEADER_HEIGHT: f64 = 30.0;
     const NAV_X0: f64 = 36.0;
@@ -1761,6 +2432,14 @@ mod daemon_ui {
     fn mask_fill() -> NSAutoresizingMaskOptions {
         NSAutoresizingMaskOptions::ViewWidthSizable
             | NSAutoresizingMaskOptions::ViewHeightSizable
+    }
+
+    /// `NSApp.activate(ignoringOtherApps: true)` — the exact Swift call.
+    /// The non-deprecated `activate()` does not take focus for a
+    /// background-launched process on this OS.
+    #[allow(deprecated)]
+    fn activate_app(mtm: MainThreadMarker) {
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
     }
 
     /// Flipped (top-left origin) root so the header sits at y = 0.
@@ -1790,6 +2469,58 @@ mod daemon_ui {
         }
     }
 
+    /// The `presentPathSheet` OK/Cancel target (a `TextFieldSheet` mirror).
+    pub struct PathSheetHandlerIvars {
+        sheet: Retained<objc2_app_kit::NSWindow>,
+        field: Retained<NSTextField>,
+        on_result: RefCell<Option<Box<dyn FnMut(Option<String>)>>>,
+    }
+
+    thread_local! {
+        static PATH_SHEET_HANDLERS: RefCell<Vec<Retained<PathSheetHandler>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSPathSheetHandler"]
+        #[ivars = PathSheetHandlerIvars]
+        pub struct PathSheetHandler;
+
+        impl PathSheetHandler {
+            #[unsafe(method(ok:))]
+            fn ok(&self, _sender: Option<&AnyObject>) {
+                let value = self.ivars().field.stringValue().to_string();
+                self.end();
+                let cb = self.ivars().on_result.borrow_mut().take();
+                if let Some(mut cb) = cb {
+                    cb(Some(value));
+                }
+            }
+
+            #[unsafe(method(cancel:))]
+            fn cancel(&self, _sender: Option<&AnyObject>) {
+                self.end();
+                let cb = self.ivars().on_result.borrow_mut().take();
+                if let Some(mut cb) = cb {
+                    cb(None);
+                }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for PathSheetHandler {}
+    );
+
+    impl PathSheetHandler {
+        fn end(&self) {
+            if let Some(parent) = self.ivars().sheet.sheetParent() {
+                parent.endSheet(&self.ivars().sheet);
+            } else {
+                self.ivars().sheet.orderOut(None);
+            }
+        }
+    }
+
     struct DaemonUiState {
         window: Retained<SlotHostWindow>,
         chrome: Retained<PopupChrome>,
@@ -1798,19 +2529,69 @@ mod daemon_ui {
         current: Option<SlotView>,
         /// The notes surface (kept so its drawers/editor stay addressable).
         notes: Option<crate::views::notes::NotesSurface>,
+        /// The files surface (kept so its list keys stay addressable).
+        files: Option<crate::views::files::FileBrowser>,
+        /// The live compare surface (compare + compareText share it).
+        compare: Option<crate::views::compare::CompareSurface>,
         /// The Ctrl+B prefix machine (`SharedWindow.prefixKey`).
         prefix: popup::PrefixState,
-        /// The `show` palette (a `ViewSwitcherPanel`).
-        palette: Option<ViewSwitcherPanel>,
+        /// The `show` palette (commands + workspaces).
+        palette: Option<PalettePanel>,
         /// The Ctrl+B W view switcher (a second `ViewSwitcherPanel`).
         switcher: Option<ViewSwitcherPanel>,
         /// The `/paths` shelf tool window.
         paths: Option<PathsWindow>,
         /// The `/terminal` tool panel (`do:term` / Ctrl+B T).
         terminal_panel: Option<TerminalPanel>,
+        /// The `openTool` panels (prettyprint / filefast / health-checks).
+        tools: HashMap<String, ToolPanel>,
+        /// When each tool panel was opened (the `reclaimToolKey` window).
+        tool_opened_at: HashMap<String, f64>,
     }
 
     /// Every visible `NSWindow` of this app (`state.windows` mirror).
+    /// `SharedWindow.hideOrFocus`'s "user is in it": the shared window (window
+    /// number `wid`; `0` = unknown, any visible key window) is key, the app is
+    /// active, and it is the frontmost app. Off the main thread (headless
+    /// tests) there is no AppKit to ask, so it counts as in it.
+    /// The live focus fields `testQuery` reads straight from AppKit (`NSApp.isActive`,
+    /// `NSApp.keyWindow`, visible window count, frontmost app). `None` off the
+    /// main thread (headless tests keep the mirrored values).
+    pub(super) fn live_focus() -> Option<super::LiveFocus> {
+        let mtm = MainThreadMarker::new()?;
+        let app = NSApplication::sharedApplication(mtm);
+        let key = app.keyWindow();
+        Some(super::LiveFocus {
+            active: app.isActive(),
+            key_title: key.as_ref().map(|w| w.title().to_string()).unwrap_or_default(),
+            key_wid: key.as_ref().map_or(0, |w| w.windowNumber() as i64),
+            windows: visible_window_count(mtm),
+            frontmost: NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .map(|a| a.processIdentifier())
+                .unwrap_or(0),
+            main_h: objc2_app_kit::NSScreen::screens(mtm)
+                .firstObject()
+                .map(|s| s.frame().size.height)
+                .unwrap_or(0.0),
+        })
+    }
+
+    pub(super) fn user_in_it(wid: i64) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return true;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let key = app.keyWindow().map_or(false, |w| {
+            w.isVisible() && (wid == 0 || w.windowNumber() as i64 == wid)
+        });
+        let front = NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|a| a.processIdentifier())
+            .unwrap_or(0);
+        key && app.isActive() && front == std::process::id() as i32
+    }
+
     fn visible_window_count(mtm: MainThreadMarker) -> i64 {
         let app = NSApplication::sharedApplication(mtm);
         app.windows()
@@ -1833,6 +2614,22 @@ mod daemon_ui {
         key_monitor: RefCell<Option<MonitorHandle>>,
         /// Last `checktime` poll of the notes vim pane (Swift's note watcher).
         last_vim_check: Cell<f64>,
+        /// When the notes vim pane last relaunched (`:q`) — the
+        /// `TerminalAutoRestart` reclaim window.
+        last_vim_relaunch: Cell<f64>,
+        /// The polled didResignKey/didBecomeKey observers
+        /// (`SharedWindow.checkFocusLoss`, `startFocusBridge`).
+        focus_watch: RefCell<super::FocusWatch>,
+        /// `$TMPDIR/<[app] focus-bridge>` — AeroSpace's `on-focus-changed`
+        /// writes the focused window id here (`watchFocusBridge`).
+        bridge_path: String,
+        /// The bridge file's last seen mtime (`bridgeMtime`).
+        bridge_mtime: Cell<Option<std::time::SystemTime>>,
+        /// `lastOtherAppClick` (epoch seconds), fed by a global
+        /// left-mouse-down monitor.
+        last_other_click: Rc<Cell<f64>>,
+        /// The global click monitor (`globalClickMonitor`).
+        click_monitor: RefCell<Option<Retained<AnyObject>>>,
     }
 
     define_class!(
@@ -1875,6 +2672,15 @@ mod daemon_ui {
         queue: UiQueue,
         main_queue: MainQueue,
     ) -> Retained<DaemonUi> {
+        let bridge_path = format!(
+            "{}{}",
+            crate::app::paths::Paths::from_env().popup_tmp_dir(),
+            controller.settings().focus_bridge_name
+        );
+        // `watchFocusBridge` creates the file so AeroSpace's writes land.
+        if !std::path::Path::new(&bridge_path).exists() {
+            let _ = std::fs::write(&bridge_path, "");
+        }
         let this = DaemonUi::alloc(mtm).set_ivars(DaemonUiIvars {
             controller,
             queue,
@@ -1884,6 +2690,12 @@ mod daemon_ui {
             last_esc_at: Cell::new(0.0),
             key_monitor: RefCell::new(None),
             last_vim_check: Cell::new(0.0),
+            last_vim_relaunch: Cell::new(0.0),
+            focus_watch: RefCell::new(super::FocusWatch::default()),
+            bridge_path,
+            bridge_mtime: Cell::new(None),
+            last_other_click: Rc::new(Cell::new(0.0)),
+            click_monitor: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         // The window's local keyDown guard (mirrors `PopupWindow.installMonitors`):
@@ -1895,6 +2707,36 @@ mod daemon_ui {
                 .unwrap_or(false)
         });
         *ui.ivars().key_monitor.borrow_mut() = Some(monitor);
+        // `startFocusBridge`'s global click monitor: a click outside our
+        // windows marks `lastOtherAppClick` (the user left on purpose, so an
+        // AeroSpace focus echo must not pull the app back).
+        {
+            use block2::RcBlock;
+            use objc2_app_kit::NSEventMask;
+            let clicked = ui.ivars().last_other_click.clone();
+            let block = RcBlock::new(move |_event: std::ptr::NonNull<NSEvent>| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let p = NSEvent::mouseLocation();
+                let in_ours = NSApplication::sharedApplication(mtm).windows().iter().any(|w| {
+                    let f = w.frame();
+                    w.isVisible()
+                        && p.x >= f.origin.x
+                        && p.x <= f.origin.x + f.size.width
+                        && p.y >= f.origin.y
+                        && p.y <= f.origin.y + f.size.height
+                });
+                if !in_ours {
+                    clicked.set(now_secs());
+                }
+            });
+            let m = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+                NSEventMask::LeftMouseDown,
+                &block,
+            );
+            *ui.ivars().click_monitor.borrow_mut() = m;
+        }
         unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
                 0.03,
@@ -1911,20 +2753,9 @@ mod daemon_ui {
         fn apply_pending(&self) {
             // `onVimExit`: `:q` / a crash rebuilds the pane on the same note.
             self.poll_notes_vim();
-            // The `do:` main-hop jobs first: a waiting socket thread is the
-            // most latency-sensitive caller (Swift's 2 s semaphore).
-            for _ in 0..100 {
-                let jobs: Vec<Box<dyn FnOnce() + Send>> = {
-                    let mut q = self.ivars().main_queue.lock().unwrap();
-                    if q.is_empty() {
-                        break;
-                    }
-                    q.drain(..).collect()
-                };
-                for job in jobs {
-                    job();
-                }
-            }
+            // UI commands first, then the settling syncs, then the blocking
+            // `do:` jobs: a `do:` caller waits on a main-queue job and must see
+            // the window it just asked for (`views.*` / `windows`).
             for _ in 0..100 {
                 let cmds: Vec<UiCommand> = {
                     let mut q = self.ivars().queue.lock().unwrap();
@@ -1944,8 +2775,151 @@ mod daemon_ui {
                         UiCommand::ToggleDrawer(side) => self.toggle_drawer(side),
                         UiCommand::Paths(cmd) => self.run_paths_cmd(cmd),
                         UiCommand::TerminalPanel => self.toggle_terminal_panel(),
+                        UiCommand::Tool(kind) => self.open_tool(kind),
+                        UiCommand::ToolClose(name) => self.close_tool(&name),
+                        UiCommand::ResetSize => {
+                            self.route_reset_size();
+                        }
                     }
                 }
+            }
+            self.sync_tools();
+            self.sync_member_states();
+            self.sync_compare();
+            self.watch_focus();
+            if let Some(mtm) = MainThreadMarker::new() {
+                self.ivars()
+                    .controller
+                    .set_window_count(visible_window_count(mtm));
+            }
+            for _ in 0..100 {
+                let jobs: Vec<Box<dyn FnOnce() + Send>> = {
+                    let mut q = self.ivars().main_queue.lock().unwrap();
+                    if q.is_empty() {
+                        break;
+                    }
+                    q.drain(..).collect()
+                };
+                for job in jobs {
+                    job();
+                }
+            }
+        }
+
+        /// `CompareWindow.syncAll`: repaint the live compare surface from the
+        /// model while a compare view is up (a no-op unless it changed).
+        fn sync_compare(&self) {
+            let state = self.ivars().state.borrow();
+            let Some(st) = state.as_ref() else {
+                return;
+            };
+            if !matches!(st.current, Some(SlotView::Compare) | Some(SlotView::CompareText))
+                || !st.window.isVisible()
+            {
+                return;
+            }
+            let (Some(surface), Some(model)) =
+                (st.compare.as_ref(), self.ivars().controller.compare_model())
+            else {
+                return;
+            };
+            let Ok(mut m) = model.try_lock() else {
+                return;
+            };
+            surface.sync(&mut m);
+        }
+
+        /// The polled focus observers: `SharedWindow`'s didResignKey →
+        /// `focusLossDelay` → `checkFocusLoss` (hide with `[app]
+        /// hide-on-focus-loss`, refocus after a swap steal), the "became key
+        /// while inactive" self-activation, and `watchFocusBridge` (AeroSpace
+        /// focused our window → activate).
+        fn watch_focus(&self) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let now = now_secs();
+            let clicked_away = now - self.ivars().last_other_click.get() < 1.0;
+            let app = NSApplication::sharedApplication(mtm);
+            let (sample, wid) = {
+                let state = self.ivars().state.borrow();
+                let Some(st) = state.as_ref() else {
+                    return;
+                };
+                let w = &st.window;
+                let wid = w.windowNumber() as i64;
+                let key = w.isKeyWindow();
+                let key_win = app.keyWindow().filter(|k| k.isVisible());
+                let other_key = key_win
+                    .as_ref()
+                    .map_or(false, |k| k.windowNumber() as i64 != wid);
+                let sample = super::FocusSample {
+                    now,
+                    shown: w.isVisible(),
+                    key,
+                    left: !key && w.attachedSheet().is_none() && !other_key,
+                    any_key: key || key_win.is_some(),
+                    app_active: app.isActive(),
+                    clicked_away,
+                };
+                (sample, wid)
+            };
+            let controller = self.ivars().controller.clone();
+            let (hide_on_loss, delay) = controller.focus_loss_settings();
+            let action = self.ivars().focus_watch.borrow_mut().tick(sample, hide_on_loss, delay);
+            let front = || {
+                NSWorkspace::sharedWorkspace()
+                    .frontmostApplication()
+                    .and_then(|a| a.bundleIdentifier())
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|| "?".into())
+            };
+            match action {
+                super::FocusAction::None => {}
+                super::FocusAction::Hide => {
+                    controller.hide(&format!("focus loss → {}", front()));
+                }
+                super::FocusAction::Refocus | super::FocusAction::SelfActivate => {
+                    activate_app(mtm);
+                    if let Some(st) = self.ivars().state.borrow().as_ref() {
+                        st.window.orderFrontRegardless();
+                        if action == super::FocusAction::Refocus {
+                            st.window.makeKeyAndOrderFront(None);
+                        }
+                    }
+                    controller.log(if action == super::FocusAction::Refocus {
+                        "shared window: focus stolen right after a view swap — refocused"
+                    } else {
+                        "our window became key while inactive (aerospace focus) — self-activated"
+                    });
+                }
+            }
+            if !sample.shown {
+                return;
+            }
+            // `focusBridgeChanged`: act once per new mtime.
+            let Ok(meta) = std::fs::metadata(&self.ivars().bridge_path) else {
+                return;
+            };
+            let Ok(mtime) = meta.modified() else {
+                return;
+            };
+            if self.ivars().bridge_mtime.get() == Some(mtime) {
+                return;
+            }
+            self.ivars().bridge_mtime.set(Some(mtime));
+            let age = std::time::SystemTime::now()
+                .duration_since(mtime)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let raw = std::fs::read_to_string(&self.ivars().bridge_path).unwrap_or_default();
+            if super::focus_bridge_should_activate(&raw, wid, age, clicked_away) {
+                activate_app(mtm);
+                if let Some(st) = self.ivars().state.borrow().as_ref() {
+                    st.window.orderFrontRegardless();
+                    st.window.makeKeyAndOrderFront(None);
+                }
+                controller.log(&format!("aerospace focused our window {wid} — self-activated"));
             }
         }
 
@@ -1965,11 +2939,30 @@ mod daemon_ui {
             }
             let mut state = self.ivars().state.borrow_mut();
             if let Some(st) = state.as_mut() {
+                // The shells' `TerminalAutoRestart` (drawer + /terminal panel).
+                if let Some(tp) = st.terminal_panel.as_mut() {
+                    tp.poll_restart();
+                }
+                if let Some(surface) = st.notes.as_ref() {
+                    surface.terminal_poll_restart();
+                }
                 if let Some(surface) = st.notes.as_mut() {
                     let relaunched = surface.vim_poll_exit(mtm);
+                    if relaunched {
+                        self.ivars().last_vim_relaunch.set(now);
+                    }
                     // Swift's `TerminalAutoRestart`: after a relaunch, the new
-                    // terminal takes the keyboard back (only while shown).
-                    if relaunched && st.window.isVisible() {
+                    // terminal takes the keyboard back — and keeps it through
+                    // the next stretch (AppKit may drop the window's key status
+                    // or first responder while the pane is rebuilt).
+                    let reclaiming = now - self.ivars().last_vim_relaunch.get() <= 2.0;
+                    if st.window.isVisible() && reclaiming && !st.window.isKeyWindow() {
+                        st.window.makeKeyAndOrderFront(None);
+                    }
+                    if st.window.isVisible()
+                        && (relaunched
+                            || (reclaiming && st.window.isKeyWindow() && !surface.vim_has_focus()))
+                    {
                         surface.focus_editor();
                     }
                     if due && st.window.isVisible() {
@@ -1989,24 +2982,48 @@ mod daemon_ui {
             let controller = self.ivars().controller.clone();
             let mut state = self.ivars().state.borrow_mut();
             let st = state.get_or_insert_with(|| self.build_window(mtm));
-            let mut panel = st.palette.take().unwrap_or_else(ViewSwitcherPanel::new);
-            let rows = self.prepare_panel(
-                &mut panel,
+            let mut panel = st.palette.take().unwrap_or_else(PalettePanel::new);
+            let commands: Vec<(String, String)> = controller
+                .registry()
+                .palette_commands()
+                .iter()
+                .map(|c| (c.id.clone(), c.title.clone()))
+                .collect();
+            let workspaces = gather_workspaces();
+            panel.set_rows(commands, workspaces);
+            panel.set_callbacks(
                 Box::new({
                     let c = controller.clone();
-                    move || c.set_palette_visible(false)
+                    move |action: PaletteAction| {
+                        match action {
+                            PaletteAction::Command(name) => c.run_palette_command(&name),
+                            PaletteAction::Workspace(id) => c.switch_workspace(&id),
+                        }
+                        c.set_palette_visible(false);
+                    }
+                }),
+                Box::new({
+                    let c = controller.clone();
+                    move || {
+                        c.set_palette_visible(false);
+                    }
                 }),
             );
             let host = st.window.frame();
-            panel.present(Some(SwitchFrame::new(
-                host.origin.x,
-                host.origin.y,
-                host.size.width,
-                host.size.height,
-            )));
+            panel.present(
+                mtm,
+                Some(SwitchFrame::new(
+                    host.origin.x,
+                    host.origin.y,
+                    host.size.width,
+                    host.size.height,
+                )),
+            );
             st.palette = Some(panel);
             drop(state);
-            controller.set_switcher_rows(rows);
+            // `c.show()` on launch brings the app forward (the suite drives
+            // the palette with real keys immediately after).
+            activate_app(mtm);
             controller.set_window_count(visible_window_count(mtm));
         }
 
@@ -2157,9 +3174,14 @@ mod daemon_ui {
                 PathsCmd::Select(n) => win.test_select(n),
             }
             let doc = win.test_state();
+            let mut tool_doc = doc.clone();
+            if let Some(o) = tool_doc.as_object_mut() {
+                o.insert("wid".into(), json!(win.window_number()));
+            }
             st.paths = Some(win);
             drop(state);
             controller.set_paths_state(doc);
+            controller.set_tool_state("paths", tool_doc);
             controller.set_window_count(visible_window_count(mtm));
         }
 
@@ -2183,11 +3205,117 @@ mod daemon_ui {
             st.terminal_panel = Some(panel);
         }
 
+        /// `openTool` for the prettyprint / filefast / health-checks panels.
+        fn open_tool(&self, kind: ToolKind) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let settings = self.ivars().controller.settings();
+            let mut state = self.ivars().state.borrow_mut();
+            let st = state.get_or_insert_with(|| self.build_window(mtm));
+            let mut panel = st
+                .tools
+                .remove(kind.name())
+                .unwrap_or_else(|| ToolPanel::new(kind, &settings));
+            panel.show(mtm);
+            let doc = panel.test_state();
+            st.tools.insert(kind.name().to_string(), panel);
+            st.tool_opened_at.insert(
+                kind.name().to_string(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0),
+            );
+            drop(state);
+            self.ivars().controller.set_tool_state(kind.name(), doc);
+            self.ivars()
+                .controller
+                .set_window_count(visible_window_count(mtm));
+        }
+
+        /// `unregisterSubWindow` for a tool panel: order it out and drop it.
+        fn close_tool(&self, name: &str) {
+            let mut state = self.ivars().state.borrow_mut();
+            if let Some(st) = state.as_mut() {
+                if let Some(mut panel) = st.tools.remove(name) {
+                    panel.hide();
+                }
+            }
+            drop(state);
+            self.ivars().controller.remove_tool_state(name);
+            if let Some(mtm) = MainThreadMarker::new() {
+                self.ivars()
+                    .controller
+                    .set_window_count(visible_window_count(mtm));
+            }
+        }
+
+        /// Per-drain: let each tool panel apply background results, keep the
+        /// keyboard on a just-opened panel (`reclaimToolKey`), and mirror its
+        /// `testState` (+ wid/level) into `state.tools`.
+        fn sync_tools(&self) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let mut docs: Vec<(String, serde_json::Value)> = Vec::new();
+            {
+                let mut state = self.ivars().state.borrow_mut();
+                if let Some(st) = state.as_mut() {
+                    let mtm = MainThreadMarker::new();
+                    let key_wid: i64 = mtm
+                        .and_then(|m| {
+                            NSApplication::sharedApplication(m)
+                                .keyWindow()
+                                .map(|w| w.windowNumber() as i64)
+                        })
+                        .unwrap_or(0);
+                    for (name, panel) in st.tools.iter_mut() {
+                        // `reclaimToolKey`: one check 0.25 s after opening — if
+                        // another of our windows took the keyboard, take it
+                        // back once (a later hotkey to the shared window wins).
+                        if let (Some(mtm), Some(opened)) = (
+                            mtm,
+                            st.tool_opened_at.get(name).copied(),
+                        ) {
+                            if now - opened >= 0.25 {
+                                st.tool_opened_at.remove(name);
+                                if !panel.has_key()
+                                    && key_wid != 0
+                                    && key_wid != panel.window_number()
+                                {
+                                    panel.show(mtm);
+                                }
+                            }
+                        }
+                        panel.poll();
+                        docs.push((name.clone(), panel.test_state()));
+                    }
+                }
+            }
+            for (name, doc) in docs {
+                self.ivars().controller.set_tool_state(&name, doc);
+            }
+            let term_doc = self
+                .ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .and_then(|st| st.terminal_panel.as_ref().map(|tp| tp.test_state()));
+            if let Some(doc) = term_doc {
+                self.ivars().controller.set_terminal_panel_state(doc);
+            }
+        }
+
         /// The local keyDown guard (mirrors `PopupWindow.installMonitors`'
         /// handler, scaled to the shared host): route the ported
         /// [`popup::route_key`] decision, execute Esc-hide and edit keys, and
         /// consume only what is acted on (everything else passes through).
         fn route_key_event(&self, event: &NSEvent) -> bool {
+            if self.route_overlay_key(event) {
+                return true;
+            }
             {
                 let state = self.ivars().state.borrow();
                 let Some(st) = state.as_ref() else {
@@ -2269,9 +3397,21 @@ mod daemon_ui {
                         .unwrap_or(false);
                 (notes, vim)
             };
+            let (find_shown, _) = {
+                let state = self.ivars().state.borrow();
+                let surface = state.as_ref().and_then(|st| st.notes.as_ref());
+                (
+                    surface.map(|s| s.find_shown()).unwrap_or(false),
+                    surface.map(|s| s.rail_collapsed()).unwrap_or(false),
+                )
+            };
             let cfg = PopupConfig {
                 edit_mode,
                 vim_focus: vim_active,
+                has_cycle_view_hook: current.is_some(),
+                find_bar_shown: find_shown,
+                has_file_browser: current == Some(SlotView::Files),
+                browser_has_focus: current == Some(SlotView::Files),
                 esc_close_count: current
                     .map(|v| self.ivars().controller.esc_hide_count(v) as i32)
                     .unwrap_or_else(|| self.ivars().controller.settings().esc_close as i32),
@@ -2285,6 +3425,12 @@ mod daemon_ui {
                         // compare view (Swift `slot.back(esc: true)`), it never
                         // hides the window directly.
                         self.ivars().controller.back(true);
+                        return true;
+                    }
+                    if find_shown {
+                        // Swift `editorKey`: the find bar closes before the
+                        // window's own Esc policy runs.
+                        self.notes_find_close();
                         return true;
                     }
                     let closes = popup::esc_streak_closes(key.esc_streak, cfg.esc_close_count);
@@ -2311,14 +3457,192 @@ mod daemon_ui {
                     true
                 }
                 KeyAction::Vim(op) => self.perform_vim_op(op),
-                KeyAction::Edit(op) => self.perform_edit_op(op),
+                KeyAction::Edit(popup::EditOp::Find) => self.route_find_toggle(),
+                KeyAction::Edit(op) | KeyAction::SheetEdit(op) | KeyAction::Terminal(op) => {
+                    self.perform_edit_op(op)
+                }
+                KeyAction::ListMove(delta) => self.route_list_move(delta as i64),
+                KeyAction::ListMoveWrap(delta) => self.route_list_move_wrap(delta as i64),
+                KeyAction::ListAccept => self.route_list_accept(),
+                KeyAction::ListToggleSelection => self.route_list_toggle(),
+                KeyAction::ListPage(page) => self.route_list_page(page),
+                KeyAction::CycleView(dir) => {
+                    self.ivars().controller.cycle(dir);
+                    true
+                }
+                KeyAction::CycleTabs(dir) => self.route_cycle_tabs(dir),
+                KeyAction::ToggleSidebarRail => self.route_rail_toggle(),
+                KeyAction::PaneResize(dir) => self.route_resize(dir),
+                KeyAction::ResizeStep(sign) | KeyAction::FontStep(sign) => {
+                    self.route_resize_by(sign)
+                }
+                KeyAction::ResizeReset => self.route_reset_size(),
+                KeyAction::CommandF => self.route_find_toggle(),
+                KeyAction::FindNext(dir) => self.route_find_step(dir),
+                KeyAction::EditorCommit => self.route_commit(),
+                KeyAction::EditorOpenPath => self.route_open_path_prompt(),
+                KeyAction::FileBrowser(action) => self.route_file_browser(action),
+                KeyAction::CommandK => {
+                    self.ivars()
+                        .controller
+                        .log("Cmd+K: action picker not modelled yet");
+                    true
+                }
+                KeyAction::ShowShortcuts => {
+                    self.ivars()
+                        .controller
+                        .log("Cmd+/: shortcuts sheet not modelled yet");
+                    true
+                }
                 _ => false,
             }
         }
 
+        /// Keys for the key-window overlays (the `show` palette and the Ctrl+B
+        /// W view switcher). Only navigation/accept keys are consumed so
+        /// typing still reaches their search fields.
+        fn route_overlay_key(&self, event: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags;
+
+            enum Out {
+                NotHandled,
+                Consumed,
+                Palette(PaletteAction),
+                PaletteClosed,
+                SwitcherClosed,
+                Nav(i64),
+            }
+
+            let code = event.keyCode();
+            let mods = event.modifierFlags();
+            let cmd = mods.contains(NSEventModifierFlags::Command);
+            let ctrl = mods.contains(NSEventModifierFlags::Control);
+            let shift = mods.contains(NSEventModifierFlags::Shift);
+            let opt = mods.contains(NSEventModifierFlags::Option);
+
+            let out = {
+                let mut state = self.ivars().state.borrow_mut();
+                let Some(st) = state.as_mut() else {
+                    return false;
+                };
+                if let Some(p) = st.palette.as_mut() {
+                    if p.has_key() {
+                        if code == popup::KEY_ESC {
+                            if p.live_query().trim().is_empty() {
+                                p.hide_panel();
+                                Out::PaletteClosed
+                            } else {
+                                // `SwitcherController.handleEscape`: a live
+                                // query clears instead of hiding.
+                                p.clear_query();
+                                Out::Consumed
+                            }
+                        } else if code == popup::KEY_RETURN || code == 76 {
+                            match p.key(code, ctrl, shift, cmd, opt) {
+                                Some(a) => Out::Palette(a),
+                                None => Out::Consumed,
+                            }
+                        } else if matches!(
+                            code,
+                            popup::KEY_DOWN
+                                | popup::KEY_UP
+                                | popup::KEY_TAB
+                                | 45
+                                | 35
+                                | 123
+                                | 124
+                        ) {
+                            p.key(code, ctrl, shift, cmd, opt);
+                            Out::Consumed
+                        } else {
+                            Out::NotHandled
+                        }
+                    } else {
+                        Out::NotHandled
+                    }
+                } else {
+                    Out::NotHandled
+                }
+            };
+            let out = match out {
+                Out::NotHandled => {
+                    let mut state = self.ivars().state.borrow_mut();
+                    let Some(st) = state.as_mut() else {
+                        return false;
+                    };
+                    if let Some(sw) = st.switcher.as_mut() {
+                        if sw.has_key() {
+                            if code == popup::KEY_ESC {
+                                sw.hide_panel();
+                                Out::SwitcherClosed
+                            } else if code == popup::KEY_DOWN {
+                                sw.move_selection(1);
+                                Out::Consumed
+                            } else if code == popup::KEY_UP {
+                                sw.move_selection(-1);
+                                Out::Consumed
+                            } else if code == popup::KEY_RETURN || code == 76 {
+                                match sw.accept() {
+                                    Some(id) => Out::Nav(id),
+                                    None => Out::Consumed,
+                                }
+                            } else if let Some(id) =
+                                sw.key(code, cmd, ctrl, opt)
+                            {
+                                Out::Nav(id)
+                            } else {
+                                Out::NotHandled
+                            }
+                        } else {
+                            Out::NotHandled
+                        }
+                    } else {
+                        Out::NotHandled
+                    }
+                }
+                other => other,
+            };
+
+            match out {
+                Out::NotHandled => false,
+                Out::Consumed => true,
+                Out::Palette(action) => {
+                    match action {
+                        PaletteAction::Command(name) => {
+                            self.ivars().controller.run_palette_command(&name)
+                        }
+                        PaletteAction::Workspace(id) => {
+                            self.ivars().controller.switch_workspace(&id)
+                        }
+                    }
+                    self.ivars().controller.set_palette_visible(false);
+                    true
+                }
+                Out::PaletteClosed => {
+                    self.ivars().controller.set_palette_visible(false);
+                    true
+                }
+                Out::SwitcherClosed => {
+                    self.ivars().controller.view_switcher_hide();
+                    true
+                }
+                Out::Nav(id) => {
+                    self.ivars().controller.nav_clicked(id);
+                    self.ivars().controller.view_switcher_hide();
+                    // The switcher hides itself via the nav callback path.
+                    let mut state = self.ivars().state.borrow_mut();
+                    if let Some(st) = state.as_mut() {
+                        if let Some(sw) = st.switcher.as_mut() {
+                            sw.hide_panel();
+                        }
+                    }
+                    true
+                }
+            }
+        }
+
         /// Run an op against the notes vim pane (`PopupWindow.vimPaneKey`).
-        fn perform_vim_op(&self, op: popup::VimOp) -> bool {
-            use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+        fn perform_vim_op(&self, op: popup::VimOp) -> bool {            use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
             let state = self.ivars().state.borrow();
             let Some(pane) = state
                 .as_ref()
@@ -2370,10 +3694,9 @@ mod daemon_ui {
                 popup::VimOp::Save => pane.flush(),
                 popup::VimOp::Search => pane.remote("<C-\\><C-N>/"),
                 popup::VimOp::Close => self.ivars().controller.hide("Cmd+W"),
-                popup::VimOp::OpenPath => self
-                    .ivars()
-                    .controller
-                    .log("vim: open-at-path prompt not modelled yet"),
+                popup::VimOp::OpenPath => {
+                    self.route_open_path_prompt();
+                }
             }
             true
         }
@@ -2412,11 +3735,389 @@ mod daemon_ui {
                 }
                 'w' => self.ivars().controller.view_switcher_show(),
                 't' => self.ivars().controller.toggle_terminal_panel(),
-                'b' => self
-                    .ivars()
-                    .controller
-                    .log("prefix: sidebar rail not modelled yet"),
+                'b' => {
+                    self.route_rail_toggle();
+                }
                 _ => {}
+            }
+        }
+
+        /// Run `f` against the notes surface when it exists.
+        fn notes_surface<R>(&self, f: impl FnOnce(&mut crate::views::notes::NotesSurface) -> R) -> Option<R> {
+            let mut state = self.ivars().state.borrow_mut();
+            state
+                .as_mut()
+                .and_then(|st| st.notes.as_mut())
+                .map(f)
+        }
+
+        /// Run `f` against the files browser when it exists.
+        fn files_surface<R>(&self, f: impl FnOnce(&mut FileBrowser) -> R) -> Option<R> {
+            let mut state = self.ivars().state.borrow_mut();
+            state
+                .as_mut()
+                .and_then(|st| st.files.as_mut())
+                .map(f)
+        }
+
+        // -- list keys (`PopupWindow.listKey` on the focused list) ------------
+
+        fn route_list_move(&self, delta: i64) -> bool {
+            match self.ivars().controller.current() {
+                Some(SlotView::Notes) => self.notes_surface(|s| s.list_move(delta)).is_some(),
+                Some(SlotView::Files) => self
+                    .files_surface(|b| b.list.move_selection(delta))
+                    .is_some(),
+                _ => false,
+            }
+        }
+
+        fn route_list_move_wrap(&self, delta: i64) -> bool {
+            match self.ivars().controller.current() {
+                Some(SlotView::Notes) => {
+                    self.notes_surface(|s| s.list_move_wrap(delta)).is_some()
+                }
+                Some(SlotView::Files) => {
+                    let n = self.files_surface(|b| b.visible_rows().len()).unwrap_or(0);
+                    if n == 0 {
+                        return false;
+                    }
+                    self.files_surface(|b| {
+                        let cur = b.selection() as i64;
+                        b.list.selection = ((cur + delta).rem_euclid(n as i64)) as usize;
+                    });
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        fn route_list_page(&self, page: popup::PageMove) -> bool {
+            match self.ivars().controller.current() {
+                Some(SlotView::Notes) => self.notes_surface(|s| s.list_page(page)).is_some(),
+                Some(SlotView::Files) => {
+                    let n = self.files_surface(|b| b.visible_rows().len()).unwrap_or(0);
+                    if n == 0 {
+                        return false;
+                    }
+                    self.files_surface(|b| {
+                        let cur = b.selection();
+                        b.list.selection = match page {
+                            popup::PageMove::Home => 0,
+                            popup::PageMove::End => n - 1,
+                            popup::PageMove::Up => cur.saturating_sub(10),
+                            popup::PageMove::Down => (cur + 10).min(n - 1),
+                        };
+                    });
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        /// `acceptSelection` — notes: open the tab; files: enter a dir / open
+        /// a file (a directory re-roots the browser and swaps the view tree).
+        fn route_list_accept(&self) -> bool {
+            match self.ivars().controller.current() {
+                Some(SlotView::Notes) => self.notes_surface(|s| s.list_accept()).is_some(),
+                Some(SlotView::Files) => self.files_accept_selected(),
+                _ => false,
+            }
+        }
+
+        fn route_list_toggle(&self) -> bool {
+            match self.ivars().controller.current() {
+                Some(SlotView::Notes) => self.notes_surface(|s| s.list_toggle_selection()).is_some(),
+                Some(SlotView::Files) => {
+                    let n = self.files_surface(|b| b.visible_rows().len()).unwrap_or(0);
+                    if n == 0 {
+                        return false;
+                    }
+                    self.files_surface(|b| {
+                        let i = b.selection();
+                        if b.list.marked.contains(&i) {
+                            b.list.marked.remove(&i);
+                        } else {
+                            b.list.marked.insert(i);
+                        }
+                    });
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        /// `openIndex(_:)` on the files list: descend into a directory (rebuild
+        /// the browser rooted there) or open the file.
+        fn files_accept_selected(&self) -> bool {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let action = self.files_surface(|b| {
+                let rows = b.visible_rows().to_vec();
+                crate::views::files::open_index(&rows, b.selection())
+            });
+            match action {
+                Some(crate::views::files::OpenOutcome::Open(path)) => {
+                    open_path(&path);
+                    true
+                }
+                Some(crate::views::files::OpenOutcome::Cd(dir)) => {
+                    let Some((browser, view)) = build_files_browser_at(mtm, &dir) else {
+                        return false;
+                    };
+                    let mut state = self.ivars().state.borrow_mut();
+                    let Some(st) = state.as_mut() else {
+                        return false;
+                    };
+                    view.setFrame(NSRect::new(
+                        NSPoint::new(0.0, 0.0),
+                        st.content.bounds().size,
+                    ));
+                    view.setAutoresizingMask(mask_fill());
+                    if st.current == Some(SlotView::Files) {
+                        if let Some(old) = st.views.get(&SlotView::Files) {
+                            old.removeFromSuperview();
+                        }
+                        st.content.addSubview(&view);
+                    }
+                    st.views.insert(SlotView::Files, view);
+                    st.files = Some(browser);
+                    true
+                }
+                _ => false,
+            }
+        }
+
+        // -- window geometry (Cmd+± / Cmd+Opt+± / Cmd+0 / Ctrl+Shift+HJKL) ----
+
+        /// Ctrl+Shift+H/J/K/L — the Swift `paneResizeKey` window resize (20 pt
+        /// steps; the drawer-height special cases land with the drawer keys).
+        fn route_resize(&self, dir: popup::Direction) -> bool {
+            let Some(_mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let mut state = self.ivars().state.borrow_mut();
+            let Some(st) = state.as_mut() else {
+                return false;
+            };
+            let mut f = st.window.frame();
+            match dir {
+                popup::Direction::Left => f.size.width = (f.size.width - 20.0).max(120.0),
+                popup::Direction::Right => f.size.width += 20.0,
+                popup::Direction::Up => f.size.height += 20.0,
+                popup::Direction::Down => f.size.height = (f.size.height - 20.0).max(140.0),
+            }
+            clamp_to_screen(&mut f);
+            st.window.setFrame_display(f, true);
+            drop(state);
+            self.sync_window_frame();
+            true
+        }
+
+        /// Cmd+± / Cmd+Opt+± — `resizeBy(80 * sign)`.
+        fn route_resize_by(&self, sign: i32) -> bool {
+            let Some(_mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let mut state = self.ivars().state.borrow_mut();
+            let Some(st) = state.as_mut() else {
+                return false;
+            };
+            let mut f = st.window.frame();
+            let delta = 80.0 * sign as f64;
+            f.size.width = (f.size.width + delta).max(120.0);
+            f.size.height = (f.size.height + delta).max(140.0);
+            clamp_to_screen(&mut f);
+            st.window.setFrame_display(f, true);
+            drop(state);
+            self.sync_window_frame();
+            true
+        }
+
+        /// Cmd+0 — `resetToDefaultSize`: the shared default size, same origin.
+        fn route_reset_size(&self) -> bool {
+            let Some(_mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let settings = self.ivars().controller.settings();
+            let mut state = self.ivars().state.borrow_mut();
+            let Some(st) = state.as_mut() else {
+                return false;
+            };
+            st.window.setContentSize(NSSize::new(
+                settings.shared_width.max(420.0),
+                settings.shared_height.max(260.0),
+            ));
+            let mut f = st.window.frame();
+            clamp_to_screen(&mut f);
+            st.window.setFrame_display(f, true);
+            drop(state);
+            self.sync_window_frame();
+            true
+        }
+
+        /// Mirror the live host frame into `state.views.<view>.frame`.
+        fn sync_window_frame(&self) {
+            let Some(_mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let mut rect = None;
+            {
+                let state = self.ivars().state.borrow();
+                if let Some(st) = state.as_ref() {
+                    let f = st.window.frame();
+                    rect = Some(RectI::new(
+                        f.origin.x,
+                        f.origin.y,
+                        f.size.width,
+                        f.size.height,
+                    ));
+                }
+            }
+            if let (Some(rect), Some(v)) = (rect, self.ivars().controller.current()) {
+                self.ivars().controller.set_member(v, true, true, Some(rect));
+            }
+        }
+
+        // -- notes rail / tabs / find / commit / open-path ---------------------
+
+        fn route_rail_toggle(&self) -> bool {
+            self.notes_surface(|s| s.toggle_rail()).is_some()
+        }
+
+        fn route_cycle_tabs(&self, dir: i32) -> bool {
+            self.notes_surface(|s| s.list_move_wrap(dir as i64)).is_some()
+        }
+
+        fn route_find_toggle(&self) -> bool {
+            self.notes_surface(|s| s.toggle_find()).is_some()
+        }
+
+        fn route_find_step(&self, dir: i32) -> bool {
+            let shown = self
+                .notes_surface(|s| s.find_shown())
+                .unwrap_or(false);
+            if !shown {
+                return false;
+            }
+            self.notes_surface(|s| s.find_step(dir as i64));
+            true
+        }
+
+        fn notes_find_close(&self) {
+            let _ = self.notes_surface(|s| s.close_find());
+        }
+
+        fn route_commit(&self) -> bool {
+            self.notes_surface(|s| s.commit()).unwrap_or(false)
+        }
+
+        /// Cmd+O — `onOpenPathPrompt`: a path sheet on the host window.
+        fn route_open_path_prompt(&self) -> bool {
+            if self.ivars().controller.current() != Some(SlotView::Notes) {
+                return false;
+            }
+            let Some(mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let controller = self.ivars().controller.clone();
+            let state = self.ivars().state.borrow();
+            let Some(st) = state.as_ref() else {
+                return false;
+            };
+            present_path_sheet(mtm, &st.window, Box::new(move |value| {
+                if let Some(path) = value {
+                    controller.set_pending_note_external(path);
+                    controller.log("open file at path");
+                }
+            }));
+            true
+        }
+
+        /// File-browser modified keys (`FilePopup` subset).
+        fn route_file_browser(&self, action: popup::FileBrowserAction) -> bool {
+            if self.ivars().controller.current() != Some(SlotView::Files) {
+                return false;
+            }
+            match action {
+                popup::FileBrowserAction::MoveDown => self.route_list_move(1),
+                popup::FileBrowserAction::MoveUp => self.route_list_move(-1),
+                popup::FileBrowserAction::SelectAll => {
+                    self.files_surface(|b| b.list.select_all()).is_some()
+                }
+                popup::FileBrowserAction::CopyPath => {
+                    let path = self.files_surface(|b| {
+                        b.selected_paths().into_iter().next().unwrap_or_default()
+                    });
+                    match path {
+                        Some(p) if !p.is_empty() => {
+                            copy_text_to_pasteboard(&p);
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+                popup::FileBrowserAction::FocusFilterBar => {
+                    self.files_surface(|_| ()).is_some()
+                }
+                popup::FileBrowserAction::Rename => {
+                    self.ivars()
+                        .controller
+                        .log("file browser rename field not modelled yet");
+                    true
+                }
+                popup::FileBrowserAction::Copy
+                | popup::FileBrowserAction::Paste
+                | popup::FileBrowserAction::Cut
+                | popup::FileBrowserAction::Undo => false,
+            }
+        }
+
+        /// The per-drain notes/files sync: external opens, `views.*` selection
+        /// extras.
+        fn sync_member_states(&self) {
+            if let Some(path) = self.ivars().controller.take_pending_note_external() {
+                let _ = self.notes_surface(|s| s.open_external_path(&path));
+            }
+            let mut notes_state = None;
+            let mut files_state = None;
+            let mut responder = String::new();
+            {
+                let state = self.ivars().state.borrow();
+                if let Some(st) = state.as_ref() {
+                    if let Some(fr) = st.window.firstResponder() {
+                        responder = fr.class().name().to_string_lossy().into_owned();
+                    }
+                    if let Some(s) = st.notes.as_ref() {
+                        notes_state = Some(s.selection_state());
+                    }
+                    if let Some(b) = st.files.as_ref() {
+                        files_state = Some(b.test_state());
+                    }
+                }
+            }
+            if let Some(mut v) = notes_state {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("responder".into(), json!(responder));
+                    let vim_focus = {
+                        let state = self.ivars().state.borrow();
+                        state
+                            .as_ref()
+                            .and_then(|st| st.notes.as_ref())
+                            .map(|s| s.vim_has_focus())
+                            .unwrap_or(false)
+                    };
+                    o.insert("vimFocus".into(), json!(vim_focus));
+                }
+                self.ivars()
+                    .controller
+                    .set_view_state(SlotView::Notes, v);
+            }
+            if let Some(v) = files_state {
+                self.ivars()
+                    .controller
+                    .set_view_state(SlotView::Files, v);
             }
         }
 
@@ -2451,6 +4152,11 @@ mod daemon_ui {
                         if let Some(view) = st.views.get(&prev) {
                             view.removeFromSuperview();
                         }
+                        // `swappedAt`: a focus loss right after a swap is a
+                        // steal to undo, not the user leaving.
+                        if st.window.isVisible() {
+                            self.ivars().focus_watch.borrow_mut().note_swap(now_secs());
+                        }
                     }
                     let bounds = st.content.bounds();
                     if !st.views.contains_key(&v) {
@@ -2463,6 +4169,18 @@ mod daemon_ui {
                                 }
                                 None => placeholder(mtm, v),
                             }
+                        } else if v == SlotView::Files {
+                            match build_files_browser(mtm) {
+                                Some((browser, view)) => {
+                                    st.files = Some(browser);
+                                    view
+                                }
+                                None => placeholder(mtm, v),
+                            }
+                        } else if matches!(v, SlotView::Compare | SlotView::CompareText) {
+                            st.compare
+                                .get_or_insert_with(|| crate::views::compare::CompareSurface::build(mtm))
+                                .content_view()
                         } else {
                             content_for(mtm, v)
                         };
@@ -2492,9 +4210,16 @@ mod daemon_ui {
                     .frontmostApplication()
                     .map(|a| a.processIdentifier())
                     .unwrap_or(0);
+                // Swift `unpark` / `slotShow`: activate first, then key + front.
+                // A view switch inside the already-key window re-raises
+                // nothing: a redundant raise makes AeroSpace jump to the
+                // window's home workspace.
                 let app = NSApplication::sharedApplication(mtm);
-                st.window.makeKeyAndOrderFront(None);
-                app.activate();
+                if !(st.window.isVisible() && st.window.isKeyWindow() && app.isActive()) {
+                    self.ivars().focus_watch.borrow_mut().note_present(now_secs());
+                    activate_app(mtm);
+                    st.window.makeKeyAndOrderFront(None);
+                }
                 let f = st.window.frame();
                 (
                     RectI::new(f.origin.x, f.origin.y, f.size.width, f.size.height),
@@ -2517,6 +4242,7 @@ mod daemon_ui {
                 return;
             };
             let controller = self.ivars().controller.clone();
+            self.ivars().focus_watch.borrow_mut().reset();
             if let Some(st) = self.ivars().state.borrow().as_ref() {
                 if let Some(surface) = st.notes.as_ref() {
                     surface.vim_flush();
@@ -2657,7 +4383,8 @@ mod daemon_ui {
                 )
             };
             close.setBordered(false);
-            close.setFrame(NSRect::new(NSPoint::new(4.0, 4.0), NSSize::new(26.0, 22.0)));
+            let (cx, cy, cw, ch) = super::HEADER_CLOSE_FRAME;
+            close.setFrame(NSRect::new(NSPoint::new(cx, cy), NSSize::new(cw, ch)));
             root.addSubview(&close);
 
             let content = NSView::initWithFrame(
@@ -2679,11 +4406,15 @@ mod daemon_ui {
                 views: HashMap::new(),
                 current: None,
                 notes: None,
+                files: None,
+                compare: None,
                 prefix: popup::PrefixState::new(),
                 palette: None,
                 switcher: None,
                 paths: None,
                 terminal_panel: None,
+                tools: HashMap::new(),
+                tool_opened_at: HashMap::new(),
             }
         }
     }
@@ -2720,6 +4451,149 @@ mod daemon_ui {
         use objc2_app_kit::NSWorkspace;
         let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(path));
         NSWorkspace::sharedWorkspace().openURL(&url);
+    }
+
+    /// Build a `$HOME`-rooted file browser and hand back the model + its view
+    /// (the host keeps the model so list keys stay addressable).
+    fn build_files_browser(
+        mtm: MainThreadMarker,
+    ) -> Option<(FileBrowser, Retained<NSView>)> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        build_files_browser_at(mtm, &home)
+    }
+
+    /// Build a file browser rooted at `dir` (used by the accept-key descent).
+    fn build_files_browser_at(
+        mtm: MainThreadMarker,
+        dir: &str,
+    ) -> Option<(FileBrowser, Retained<NSView>)> {
+        let mut browser = FileBrowser::new(dir);
+        browser.reload();
+        browser.build(mtm);
+        let view = browser.content_view()?;
+        Some((browser, view))
+    }
+
+    /// `clampToScreen`: keep the frame inside the window's screen's visible
+    /// frame (Swift `PopupWindow.clampToScreen`).
+    fn clamp_to_screen(f: &mut NSRect) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm) else {
+            return;
+        };
+        let vf = screen.visibleFrame();
+        let max_w = vf.size.width;
+        let max_h = vf.size.height;
+        if f.size.width > max_w {
+            f.size.width = max_w;
+        }
+        if f.size.height > max_h {
+            f.size.height = max_h;
+        }
+        if f.origin.x < vf.origin.x {
+            f.origin.x = vf.origin.x;
+        }
+        if f.origin.y < vf.origin.y {
+            f.origin.y = vf.origin.y;
+        }
+        if f.origin.x + f.size.width > vf.origin.x + vf.size.width {
+            f.origin.x = vf.origin.x + vf.size.width - f.size.width;
+        }
+        if f.origin.y + f.size.height > vf.origin.y + vf.size.height {
+            f.origin.y = vf.origin.y + vf.size.height - f.size.height;
+        }
+    }
+
+    /// `presentPathSheet`: a small sheet window with a single-line field and
+    /// OK/Cancel; `on_result` runs on the main thread with the typed path.
+    fn present_path_sheet(
+        mtm: MainThreadMarker,
+        parent: &objc2_app_kit::NSWindow,
+        on_result: Box<dyn FnMut(Option<String>)>,
+    ) {
+        use objc2::MainThreadOnly;
+        use objc2_app_kit::{NSButton, NSFont, NSTextField, NSView, NSWindow, NSWindowStyleMask};
+        use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+        let sheet: Retained<NSWindow> = unsafe {
+            let w: Retained<NSWindow> = msg_send![
+                NSWindow::alloc(mtm),
+                initWithContentRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(460.0, 128.0)),
+                styleMask: NSWindowStyleMask::Titled,
+                backing: objc2_app_kit::NSBackingStoreType::Buffered,
+                defer: false
+            ];
+            w
+        };
+        sheet.setTitle(&NSString::from_str("Open file at path"));
+        let content = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(460.0, 128.0)),
+        );
+        let label = NSTextField::labelWithString(
+            &NSString::from_str("Absolute path (or ~/…) to open as a note:"),
+            mtm,
+        );
+        label.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        label.setFrame(NSRect::new(
+            NSPoint::new(16.0, 98.0),
+            NSSize::new(428.0, 18.0),
+        ));
+        let field = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
+        field.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        field.setFrame(NSRect::new(
+            NSPoint::new(16.0, 62.0),
+            NSSize::new(428.0, 24.0),
+        ));
+        let ok = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str("Open"),
+                None,
+                None,
+                mtm,
+            )
+        };
+        ok.setFrame(NSRect::new(
+            NSPoint::new(460.0 - 16.0 - 88.0, 18.0),
+            NSSize::new(88.0, 30.0),
+        ));
+        let cancel = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str("Cancel"),
+                None,
+                None,
+                mtm,
+            )
+        };
+        cancel.setFrame(NSRect::new(
+            NSPoint::new(460.0 - 16.0 - 88.0 - 96.0, 18.0),
+            NSSize::new(88.0, 30.0),
+        ));
+        content.addSubview(&label);
+        content.addSubview(&field);
+        content.addSubview(&ok);
+        content.addSubview(&cancel);
+        sheet.setContentView(Some(&content));
+        sheet.setInitialFirstResponder(Some(&field));
+
+        let handler: Retained<PathSheetHandler> = unsafe {
+            let h = PathSheetHandler::alloc(mtm).set_ivars(PathSheetHandlerIvars {
+                sheet: sheet.clone(),
+                field: field.clone(),
+                on_result: RefCell::new(Some(on_result)),
+            });
+            msg_send![super(h), init]
+        };
+        unsafe {
+            ok.setTarget(Some(as_any(&*handler)));
+            ok.setAction(Some(sel!(ok:)));
+            cancel.setTarget(Some(as_any(&*handler)));
+            cancel.setAction(Some(sel!(cancel:)));
+        }
+        PATH_SHEET_HANDLERS.with(|v| v.borrow_mut().push(handler));
+        parent.beginSheet_completionHandler(&sheet, None);
     }
 
     /// The content surface for a view. View modules expose `build_content`
@@ -3089,6 +4963,50 @@ mod tests {
     }
 
     #[test]
+    fn toggle_and_hotkey_focus_unless_user_in_it() {
+        // `SharedWindow.hideOrFocus`: a shown view the user is not in comes
+        // forward instead of hiding.
+        let c = controller();
+        c.open(SlotView::Notes);
+        let mut inner = c.inner.lock().unwrap();
+        inner.toggle(false);
+        assert_eq!(inner.current, Some(SlotView::Notes));
+        inner.hotkey(SlotView::Notes, false);
+        assert_eq!(inner.current, Some(SlotView::Notes));
+        inner.toggle(true);
+        assert_eq!(inner.current, None);
+    }
+
+    #[test]
+    fn parse_sections_unquotes_values_like_the_codec() {
+        // A quoted list must not keep its quotes on the first/last item
+        // (`buttons = "pencil, …, pin"` lost pencil and pin).
+        let s = parse_sections("[screenshot]\nbuttons = \"pencil, pin\"  # tools\nsize = 3\n");
+        assert_eq!(s["screenshot"]["buttons"], "pencil, pin");
+        assert_eq!(s["screenshot"]["size"], "3");
+    }
+
+    #[test]
+    fn live_focus_overrides_present_time_mirrors() {
+        let c = controller();
+        c.open(SlotView::Notes);
+        c.set_member(SlotView::Notes, true, true, None);
+        c.set_member_wid(SlotView::Notes, 7);
+        c.set_member(SlotView::Files, false, true, None);
+        let mut inner = c.inner.lock().unwrap();
+        // another app is frontmost: nothing of ours is key
+        inner.apply_live_focus(&LiveFocus { active: false, frontmost: 1, ..Default::default() });
+        assert!(!inner.active);
+        assert_eq!(inner.frontmost_pid, 1);
+        assert!(!inner.members[&SlotView::Notes].key);
+        assert!(!inner.members[&SlotView::Files].key);
+        // the host window is key: only the current view reports key
+        inner.apply_live_focus(&LiveFocus { active: true, key_wid: 7, ..Default::default() });
+        assert!(inner.members[&SlotView::Notes].key);
+        assert!(!inner.members[&SlotView::Files].key);
+    }
+
+    #[test]
     fn apply_hotkey_prep_sets_target_screen() {
         let c = controller();
         let prep = HotkeyPrep {
@@ -3106,6 +5024,117 @@ mod tests {
     fn controller_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<SwitcherController>();
+    }
+
+    fn sample(now: f64, key: bool) -> FocusSample {
+        FocusSample {
+            now,
+            shown: true,
+            key,
+            left: !key,
+            any_key: key,
+            app_active: true,
+            clicked_away: false,
+        }
+    }
+
+    #[test]
+    fn focus_loss_hides_after_the_delay_only_when_enabled() {
+        let mut w = FocusWatch::default();
+        assert_eq!(w.tick(sample(0.0, true), true, 0.3), FocusAction::None);
+        // Resign: pending until focusLossDelay elapses.
+        assert_eq!(w.tick(sample(1.0, false), true, 0.3), FocusAction::None);
+        assert_eq!(w.tick(sample(1.2, false), true, 0.3), FocusAction::None);
+        assert_eq!(w.tick(sample(1.31, false), true, 0.3), FocusAction::Hide);
+        // One shot per resign.
+        assert_eq!(w.tick(sample(1.5, false), true, 0.3), FocusAction::None);
+        // Switch off: the check runs but does nothing.
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, true), false, 0.3);
+        w.tick(sample(1.0, false), false, 0.3);
+        assert_eq!(w.tick(sample(2.0, false), false, 0.3), FocusAction::None);
+    }
+
+    #[test]
+    fn focus_loss_cancelled_by_rekey_or_our_other_window() {
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, true), true, 0.3);
+        w.tick(sample(1.0, false), true, 0.3);
+        // Became key again within the delay → focusLossGen bump.
+        w.tick(sample(1.1, true), true, 0.3);
+        assert_eq!(w.tick(sample(2.0, true), true, 0.3), FocusAction::None);
+        // Key moved to one of our panels: didBecomeKey cancels, and
+        // focusLeft is false anyway.
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, true), true, 0.3);
+        let mut s = sample(1.0, false);
+        s.any_key = true;
+        s.left = false;
+        w.tick(s, true, 0.3);
+        s.now = 2.0;
+        assert_eq!(w.tick(s, true, 0.3), FocusAction::None);
+        // Hidden: nothing pending survives.
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, true), true, 0.3);
+        w.tick(sample(1.0, false), true, 0.3);
+        let mut s = sample(1.1, false);
+        s.shown = false;
+        w.tick(s, true, 0.3);
+        assert_eq!(w.tick(sample(2.0, false), true, 0.3), FocusAction::None);
+    }
+
+    #[test]
+    fn focus_stolen_right_after_a_swap_refocuses() {
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, true), false, 0.3);
+        w.note_swap(0.9);
+        w.tick(sample(1.0, false), false, 0.3);
+        assert_eq!(w.tick(sample(1.4, false), false, 0.3), FocusAction::Refocus);
+        // An old swap (> 1 s) is a real focus loss.
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, true), true, 0.3);
+        w.note_swap(0.0);
+        w.tick(sample(1.0, false), true, 0.3);
+        assert_eq!(w.tick(sample(1.4, false), true, 0.3), FocusAction::Hide);
+    }
+
+    #[test]
+    fn key_while_inactive_self_activates_unless_clicked_away_or_ours() {
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, false), true, 0.3);
+        let mut s = sample(1.0, true);
+        s.app_active = false;
+        assert_eq!(w.tick(s, true, 0.3), FocusAction::SelfActivate);
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, false), true, 0.3);
+        s.clicked_away = true;
+        assert_eq!(w.tick(s, true, 0.3), FocusAction::None);
+        // Our own present's key edge is not an AeroSpace focus.
+        let mut w = FocusWatch::default();
+        w.tick(sample(0.0, false), true, 0.3);
+        w.note_present(0.9);
+        s.clicked_away = false;
+        assert_eq!(w.tick(s, true, 0.3), FocusAction::None);
+    }
+
+    #[test]
+    fn focus_bridge_decision() {
+        assert!(focus_bridge_should_activate("4512\n", 4512, 0.2, false));
+        assert!(!focus_bridge_should_activate("4512", 4513, 0.2, false));
+        assert!(!focus_bridge_should_activate("4512", 4512, 1.5, false));
+        assert!(!focus_bridge_should_activate("4512", 4512, 0.2, true));
+        assert!(!focus_bridge_should_activate("", 0, 0.0, false));
+        assert!(!focus_bridge_should_activate("x", 4512, 0.0, false));
+    }
+
+    #[test]
+    fn hide_on_focus_loss_hook_flips_state() {
+        let c = controller();
+        assert_eq!(c.do_action("hide-on-focus-loss:off"), None);
+        assert_eq!(c.state_json()["hideOnFocusLoss"], json!(false));
+        assert_eq!(c.do_action("hide-on-focus-loss:on"), None);
+        assert_eq!(c.state_json()["hideOnFocusLoss"], json!(true));
+        assert!(c.do_action("hide-on-focus-loss:maybe").unwrap().get("error").is_some());
     }
 
     #[test]
@@ -3175,8 +5204,8 @@ enabled = true
         assert!(c.screenshot_controller().is_some(), "screenshot handle held");
 
         assert_eq!(c.do_action("notes:state"), Some(json!({ "available": true })));
-        assert_eq!(c.do_action("compare:start"), Some(Value::Null));
-        assert!(c.do_action("screenshot:close").is_some());
+        assert_eq!(c.do_action("compare:start"), None, "handled: falls through to state");
+        assert_eq!(c.do_action("screenshot:close"), None, "handled: falls through to state");
 
         let mut off = controller();
         off.register_views_from_text("");

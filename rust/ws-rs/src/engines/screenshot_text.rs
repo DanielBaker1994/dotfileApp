@@ -205,6 +205,17 @@ impl ShotOCR {
         ShotOCR::join(lines)
     }
 
+    /// `String(text.prefix(max))` — keep at most `max` Unicode scalars. The
+    /// `lastOutput["text"]` field is capped at 4000 so a giant capture cannot
+    /// balloon the socket `state` JSON.
+    pub fn truncate(s: &str, max: usize) -> String {
+        if s.chars().count() <= max {
+            s.to_string()
+        } else {
+            s.chars().take(max).collect()
+        }
+    }
+
     pub fn summary(s: &str) -> String {
         let n = s.split('\n').filter(|x| !x.is_empty()).count();
         if n > 1 {
@@ -213,6 +224,84 @@ impl ShotOCR {
             format!("{} characters", s.chars().count())
         }
     }
+
+    /// `ShotOCR.warmUp`: draw a small "Warm up text" bitmap with CoreText and
+    /// run a recognition pass over it, returning the elapsed milliseconds.
+    /// `0` when the bitmap context cannot be created. Main-thread callers only
+    /// (see [`crate::views::screenshot::ScreenshotController::prewarm`]).
+    #[cfg(target_os = "macos")]
+    pub fn warm_up(cfg: &ShotOCRConfig) -> i64 {
+        use objc2::runtime::AnyObject;
+        use objc2_core_graphics::CGColor;
+        use objc2_core_text::{
+            kCTFontAttributeName, kCTForegroundColorAttributeName, CTFont, CTLine,
+        };
+        use objc2_foundation::{NSMutableAttributedString, NSRange};
+
+        let start = std::time::Instant::now();
+        let (w, h) = (240i64, 48i64);
+        let Some(space) = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })) else {
+            return 0;
+        };
+        let Some(ctx) = (unsafe {
+            CGBitmapContextCreate(
+                ptr::null_mut(),
+                w as usize,
+                h as usize,
+                8,
+                0,
+                Some(&*space),
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        }) else {
+            return 0;
+        };
+        let white = CGColor::new_srgb(1.0, 1.0, 1.0, 1.0);
+        CGContext::set_fill_color_with_color(Some(&*ctx), Some(&*white));
+        CGContext::fill_rect(
+            Some(&*ctx),
+            NSRect::new(NSPoint::ZERO, NSSize::new(w as f64, h as f64)),
+        );
+        let name = NSString::from_str("Helvetica");
+        let font: Retained<CTFont> =
+            unsafe { CTFont::with_name(ffi_cast(&*name), 24.0, ptr::null()).into() };
+        let text = NSString::from_str("Warm up text");
+        let attr =
+            NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &text);
+        let len = text.len_utf16();
+        let font_obj: &AnyObject = ffi_cast(&*font);
+        unsafe {
+            attr.addAttribute_value_range(
+                ffi_cast::<_, NSString>(kCTFontAttributeName),
+                font_obj,
+                NSRange::new(0, len),
+            );
+        }
+        let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        let color_obj: &AnyObject = ffi_cast(&*black);
+        unsafe {
+            attr.addAttribute_value_range(
+                ffi_cast::<_, NSString>(kCTForegroundColorAttributeName),
+                color_obj,
+                NSRange::new(0, len),
+            );
+        }
+        let line: Retained<CTLine> =
+            unsafe { CTLine::with_attributed_string(ffi_cast(&*attr)).into() };
+        CGContext::set_text_position(Some(&*ctx), 8.0, 14.0);
+        unsafe { line.draw(&ctx) };
+        if let Some(img) = CGBitmapContextCreateImage(Some(&*ctx)) {
+            let _ = Self::recognize(&img, cfg);
+        }
+        start.elapsed().as_millis() as i64
+    }
+}
+
+/// Toll-free reinterpret one CoreFoundation reference as another (mirrors the
+/// `ffi_cast` helper in `views/screenshot.rs`).
+#[cfg(target_os = "macos")]
+fn ffi_cast<T, U>(r: &T) -> &U {
+    unsafe { &*(r as *const T as *const U) }
 }
 
 #[cfg(target_os = "macos")]
@@ -273,6 +362,14 @@ mod tests {
     fn summary_test() {
         assert_eq!(ShotOCR::summary("one line"), "8 characters");
         assert_eq!(ShotOCR::summary("a\nb\nc"), "3 lines");
+    }
+
+    #[test]
+    fn truncate_caps_the_reported_text() {
+        assert_eq!(ShotOCR::truncate("abc", 4000), "abc", "short text untouched");
+        assert_eq!(ShotOCR::truncate("abc", 3), "abc", "exact length kept");
+        assert_eq!(ShotOCR::truncate("abcdef", 3), "abc", "long text clipped");
+        assert_eq!(ShotOCR::truncate("", 0), "", "empty stays empty");
     }
 
     #[test]

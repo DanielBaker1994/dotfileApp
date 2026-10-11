@@ -334,7 +334,7 @@ fn current_environment() -> HashMap<String, String> {
         .collect()
 }
 
-fn expand_tilde(bin: &str) -> String {
+pub(crate) fn expand_tilde(bin: &str) -> String {
     if let Some(rest) = bin.strip_prefix('~') {
         if rest.is_empty() || rest.starts_with('/') {
             let home = std::env::var("HOME").unwrap_or_default();
@@ -344,7 +344,7 @@ fn expand_tilde(bin: &str) -> String {
     bin.to_string()
 }
 
-fn is_executable_file(path: &str) -> bool {
+pub(crate) fn is_executable_file(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(Path::new(path)) {
         Ok(m) => m.is_file() && (m.permissions().mode() & 0o111) != 0,

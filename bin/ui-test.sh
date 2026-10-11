@@ -30,8 +30,8 @@ daemon_pid() {
     lsof -U 2>/dev/null | awk -v s="$WS_SOCK" 'index($0, s) {print $2; exit}'
 }
 
-# AX helpers target OUR daemon by pid: two kitchen-sink stacks (Swift + Rust)
-# can run at once during the port, and `process "kitchen-sink"` is ambiguous.
+# AX helpers target OUR daemon by pid: two kitchen-sink daemons can run at once
+# (e.g. a dev bundle with its own TMPDIR), and `process "kitchen-sink"` is ambiguous.
 ax_scope() {
     local pid; pid="$(daemon_pid)"
     [ -z "$pid" ] && return 1
@@ -117,6 +117,10 @@ send_shortcut() {
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${WS_BIN:-$ROOT/../kitchen-sink.app/Contents/MacOS/kitchen-sink}"
+# Source guards read the app's Rust sources: `src_count PATTERN` = matching
+# lines across rust/ws-rs/src.
+RS_SRC="$ROOT/../rust/ws-rs/src"
+src_count() { find "$RS_SRC" -name '*.rs' -exec cat {} + 2>/dev/null | grep -c "$1" || true; }
 echo "  binary:    $BIN (override with WS_BIN)"
 
 echo "== kitchen-sink UI tests =="
@@ -427,18 +431,20 @@ else
 fi
 
 # Escape from popup when command mode is active
-"$BIN" show >/dev/null 2>&1 &
-sleep 0.5
-# Type "/" to enter command mode
-"$CLICLICK" "t:/" 2>/dev/null
+if [[ "$(ws_state .palette)" != "true" ]]; then
+    "$BIN" show >/dev/null 2>&1 &
+    wait_state '.palette' 3
+fi
+# Type "/" to enter command mode (System Events: cliclick's synthetic keys do
+# not reach other apps from every session)
+osascript -e 'tell application "System Events" to keystroke "/"' 2>/dev/null
 sleep 0.3
-# Escape should drop back to workspace mode, not dismiss
-"$CLICLICK" "kp:esc" 2>/dev/null
+# Escape should clear the query / drop back to workspace mode, not dismiss
+osascript -e 'tell application "System Events" to key code 53' 2>/dev/null
 sleep 0.3
 
-WC_CMD="$(window_count)"
-if [[ "$WC_CMD" -gt 0 ]]; then
-    pass "Escape from command mode drops to workspace view (windows=$WC_CMD)"
+if [[ "$(ws_state .palette)" == "true" ]]; then
+    pass "Escape from command mode drops to workspace view (palette stays)"
 else
     fail "Escape from command mode dismissed popup entirely"
 fi
@@ -849,7 +855,7 @@ TAB_WC_BEFORE="$(window_count)"
 # Tab operations: the app supports tabs via the + pill and X badge.
 # We can't easily click tabs with cliclick, but we can verify the
 # tab-related source code exists and the window survives Cmd+N toggle.
-TAB_SOURCES=$(grep -c 'onAddTab\|onCloseTab\|tabsBar\|selectedTab' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
+TAB_SOURCES=$(src_count 'NotesTabs\|selected_path\|open_external')
 if [[ "$TAB_SOURCES" -ge 3 ]]; then
     pass "Tab management code present (count=$TAB_SOURCES)"
 else
@@ -886,7 +892,7 @@ if window_exists "files" || window_exists "browser" || window_exists "Files"; th
     pass "File browser window appeared"
 else
     # May not be configured; check source instead
-    FB_SOURCES=$(grep -c 'PopupFileBrowser\|FileListPane\|PaneSplitter\|fileBrowser' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
+    FB_SOURCES=$(src_count 'FileBrowser\|file_browser')
     if [[ "$FB_SOURCES" -ge 4 ]]; then
         pass "File browser window not configured but source present (count=$FB_SOURCES)"
     else
@@ -938,7 +944,7 @@ if window_exists "jira" || window_exists "Jira" || window_exists "issues"; then
     pass "List window count: $LIST_WC"
 else
     # May not be configured; check source
-    LIST_SOURCES=$(grep -c 'PopupRowView\|onRowClick\|onRowDoubleClick\|filterBar\|filterPill' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
+    LIST_SOURCES=$(src_count 'list_filter\|ListFilter\|KeyAction::List')
     if [[ "$LIST_SOURCES" -ge 4 ]]; then
         pass "List window not configured but source present (count=$LIST_SOURCES)"
     else
@@ -1288,9 +1294,9 @@ else
 fi
 
 # Source guard: verify the auto-save chain exists
-AUTO_SAVE_CHAIN=$(grep -c 'onEditorClose.*commitSave\|onHide.*onEditorClose\|w\.onEditorClose = commitSave\|saveNote.*to.*currentPath\|saveNote.*to.*fallback' "$ROOT/../kitchen_sink.swift" 2>/dev/null || true)
+AUTO_SAVE_CHAIN=$(src_count 'commitSave\|vim_flush\|silent! wall')
 if [[ "$AUTO_SAVE_CHAIN" -ge 3 ]]; then
-    pass "Auto-save chain verified in source (onEditorClose→commitSave→saveNote, count=$AUTO_SAVE_CHAIN)"
+    pass "Auto-save chain verified in source (commit → vim flush / write, count=$AUTO_SAVE_CHAIN)"
 else
     fail "Auto-save chain incomplete in source (count=$AUTO_SAVE_CHAIN, expected ≥3)"
 fi
@@ -1327,7 +1333,7 @@ if [[ -n "$FB_FRAME" ]]; then
     fi
 else
     # File browser may not be configured
-    FB_SOURCES=$(grep -c 'PopupFileBrowser' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
+    FB_SOURCES=$(src_count 'FileBrowser')
     if [[ "$FB_SOURCES" -ge 1 ]]; then
         pass "File browser not open but source present (count=$FB_SOURCES)"
     else
@@ -1371,7 +1377,7 @@ fi
 pkill -f "$BIN" 2>/dev/null || true
 sleep 0.5
 
-OPEN_CODE=$(grep -c 'func openIndex\|NSWorkspace.*open\|onOpen.*path' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
+OPEN_CODE=$(src_count 'open_index\|NSWorkspace.*open\|open_url')
 if [[ "$OPEN_CODE" -ge 2 ]]; then
     pass "File browser open-in-default-app code present (count=$OPEN_CODE)"
 else
@@ -1391,7 +1397,7 @@ sleep 0.5
 sleep 2
 
 # Check the source for tab management
-TAB_CODE=$(grep -c 'onCloseTab\|onAddTab\|onSelect.*tab\|tab.*select\|tabsBar.*titles' "$ROOT/../PopupWindow.swift" 2>/dev/null || true)
+TAB_CODE=$(src_count 'NotesTabs\|tabs\.close\|selected_path')
 if [[ "$TAB_CODE" -ge 3 ]]; then
     pass "Multi-tab code present (count=$TAB_CODE)"
 else
@@ -1399,7 +1405,7 @@ else
 fi
 
 # Verify the note paths config parsing
-PATHS_CODE=$(grep -c 'cmd\.paths\|\.paths\[' "$ROOT/../kitchen_sink.swift" 2>/dev/null || true)
+PATHS_CODE=$(src_count 'cmd\.paths\|\.paths\b')
 if [[ "$PATHS_CODE" -ge 1 ]]; then
     pass "Note paths config parsing present (count=$PATHS_CODE)"
 else

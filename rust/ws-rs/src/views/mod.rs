@@ -13,3 +13,4 @@ pub mod screenshot;
 pub mod setup;
 pub mod switcher;
 pub mod terminal;
+pub mod tools;

@@ -8,7 +8,7 @@
 Config = `[notifications]` in commands.toml (read with jira_config.read_section,
 same line rules as the app). Per source NAME in `sources`: NAME-enabled,
 NAME-app (bundle id), NAME-count (dock = Dock badge, window = the app's own
-window via helpers/NAME_unread.swift — Webex draws no Dock badge), NAME-tag,
+window via the NAME_unread AX helper — Webex draws no Dock badge), NAME-tag,
 NAME-api. @mentions = the API
 source (webex only for now), shown until the badge drops to 0 or the API says
 the space was read. State: ~/.cache/notifications/state.json, log poll.log.
@@ -77,20 +77,29 @@ def parse_badge(out: str):
     return int(label) if label.isdigit() else "•"
 
 
-HELPERS = os.path.join(HERE, "helpers")
-HELPER_BIN = os.path.expanduser("~/.cache/kitchen-sink/helpers")
+def helper_path(name: str):
+    """The prebuilt AX helper NAME (rust/ws-helpers): $WS_HELPERS_BIN, the app
+    bundle's Resources/helpers-bin (this file lives in Resources/notify), or a
+    checkout's cargo build (bin/build-app.sh); None when none is built."""
+    real = os.path.dirname(os.path.realpath(__file__))
+    dirs = [os.environ.get("WS_HELPERS_BIN") or "",
+            os.path.join(os.path.dirname(real), "helpers-bin"),
+            os.path.join(os.path.dirname(real), ".build", "rust-target", "release")]
+    for d in dirs:
+        exe = os.path.join(d, name) if d else ""
+        if exe and os.access(exe, os.X_OK):
+            return exe
+    return None
 
 
 def helper(name: str, *argv: str):
-    """stdout of helpers/NAME.swift (built into ~/.cache/kitchen-sink/helpers, rebuilt
-    when the source changes); None when it can't run or fails (no
-    Accessibility permission, no swiftc, app not running)."""
-    src, exe = os.path.join(HELPERS, name + ".swift"), os.path.join(HELPER_BIN, name)
+    """stdout of the AX helper NAME; None when it isn't built or fails (no
+    Accessibility permission, app not running)."""
+    exe = helper_path(name)
+    if exe is None:
+        log(f"{name}: helper not built (bin/build-app.sh)")
+        return None
     try:
-        if not os.path.exists(exe) or os.path.getmtime(src) > os.path.getmtime(exe):
-            os.makedirs(HELPER_BIN, exist_ok=True)
-            subprocess.run(["swiftc", "-O", src, "-o", exe], capture_output=True,
-                           timeout=300, check=True)
         r = subprocess.run([exe, *argv], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -103,7 +112,7 @@ def helper(name: str, *argv: str):
 
 def dock_badges():
     """{bundle id: badge text} for every Dock item, read from the Dock itself
-    (helpers/dock_badges.swift); None when the helper can't run."""
+    (the dock_badges AX helper); None when the helper can't run."""
     text = helper("dock_badges")
     if text is None:
         return None
@@ -115,7 +124,7 @@ def dock_badges():
 
 
 def parse_window(text: str):
-    """helpers/webex_unread output → (count, [space titles])."""
+    """webex_unread helper output → (count, [space titles])."""
     count, spaces = 0, []
     for line in text.splitlines():
         kind, _, val = line.partition("\t")

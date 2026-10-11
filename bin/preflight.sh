@@ -187,7 +187,8 @@ else
 fi
 for f in $BREW_FORMULAE; do
     if [[ "$FORMULAE" == *" $f "* ]] || command -v "$f" >/dev/null 2>&1 \
-        || { [ "$f" = ripgrep ] && command -v rg >/dev/null 2>&1; }; then
+        || { [ "$f" = ripgrep ] && command -v rg >/dev/null 2>&1; } \
+        || { [ "$f" = rust ] && command -v cargo >/dev/null 2>&1; }; then
         add "brew-$f" stack warn 1 "$f" "installed"
     else
         add "brew-$f" stack warn 0 "$f" "not installed" "brew install $f" "brew:$f"
@@ -214,10 +215,17 @@ if [ -f "$ROOT/symlinks.sh" ]; then
 fi
 
 if [ "$MODE" = repo ]; then
-    if command -v swiftc >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then
-        add swiftc dev required 1 "Swift compiler" "$(swiftc --version 2>/dev/null | head -1)"
+    if command -v cargo >/dev/null 2>&1; then
+        add cargo dev warn 1 "Rust toolchain" "$(cargo --version 2>/dev/null | head -1)"
     else
-        add swiftc dev required 0 "Swift compiler" "not installed" \
+        add cargo dev warn 0 "Rust toolchain" "not installed" \
+            "The app is built with cargo (INSTALL.sh installs it):  brew install rust" "term:brew install rust"
+    fi
+    # swiftc still compiles the pinned SwiftTerm library + the terminal shim
+    if command -v swiftc >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then
+        add swiftc dev required 1 "Swift compiler (terminal shim)" "$(swiftc --version 2>/dev/null | head -1)"
+    else
+        add swiftc dev required 0 "Swift compiler (terminal shim)" "not installed" \
             "Install the command-line tools:  xcode-select --install"
     fi
     if command -v git >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; then

@@ -43,6 +43,9 @@ public final class WSShim: NSView, LocalProcessTerminalViewDelegate {
 
     @objc(startWithExecutable:args:directory:)
     public func start(executable: String, args: [String], directory: String?) {
+        // A relaunch reuses this view (Swift's `TerminalAutoRestart` restarts
+        // the same `LocalProcessTerminalView`): clear the last exit code.
+        exitCode = -1
         terminal.startProcess(executable: executable, args: args, currentDirectory: directory)
     }
 
@@ -73,7 +76,9 @@ public final class WSShim: NSView, LocalProcessTerminalViewDelegate {
     }
 
     nonisolated public func processTerminated(source: TerminalView, exitCode: Int32?) {
-        let code = exitCode ?? -1
+        // SwiftTerm reports `nil` for a signal death; store 128 so the Rust
+        // side still sees the exit edge (`-1` means running / unknown).
+        let code = exitCode ?? 128
         Task { @MainActor in
             self.exitCode = code
             self.eventDelegate?.shimEvent("exit", value: String(code))

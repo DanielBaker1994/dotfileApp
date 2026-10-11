@@ -1,5 +1,6 @@
 //! App host layer (mirrors `kitchen_sink.swift` top-level + `main.swift`).
 
+pub mod cli;
 pub mod config;
 pub mod hotkey;
 pub mod host;

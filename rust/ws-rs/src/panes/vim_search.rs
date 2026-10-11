@@ -1,5 +1,7 @@
 //! Port of `VimSearch.swift`: case + diacritic insensitive matching, row and
-//! text navigation, and Ctrl+W word dropping.
+//! text navigation with wrap, and Ctrl+W word dropping. Also the search bar's
+//! pure helpers ([`status`], [`one_line`]); the `/`/`?` bar's runtime state
+//! machine and query buffer live in `vim_keys.rs`.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NsRange {
@@ -239,6 +241,22 @@ pub fn drop_word(s: &str) -> String {
     chars.into_iter().collect()
 }
 
+/// `VimSearchBar` status line: `"index/count"` on a hit, `"no match"` when the
+/// query found nothing (Swift's `hit.row == nil ? "no match" : "\(i)/\(n)"`).
+pub fn status(has_hit: bool, index: usize, count: usize) -> String {
+    if has_hit {
+        format!("{index}/{count}")
+    } else {
+        "no match".to_string()
+    }
+}
+
+/// `String.oneLine` (VimKeys.swift): collapse newlines to single spaces, for a
+/// pasted multi-line query.
+pub fn one_line(s: &str) -> String {
+    s.split(|c| c == '\n' || c == '\r').collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +327,20 @@ mod tests {
             10,
             "ranges stop at the limit"
         );
+    }
+
+    #[test]
+    fn status_line_matches_swift() {
+        assert_eq!(status(true, 2, 3), "2/3", "hit shows the position");
+        assert_eq!(status(true, 1, 1), "1/1");
+        assert_eq!(status(false, 0, 0), "no match", "no hit shows the fallback");
+    }
+
+    #[test]
+    fn one_line_collapses_newlines() {
+        assert_eq!(one_line("a\nb\rc"), "a b c", "newlines and returns become spaces");
+        assert_eq!(one_line("a\n\nb"), "a  b", "consecutive newlines are kept as separators");
+        assert_eq!(one_line("a\n"), "a ", "a trailing newline leaves a trailing space");
+        assert_eq!(one_line("plain"), "plain", "no newline is untouched");
     }
 }

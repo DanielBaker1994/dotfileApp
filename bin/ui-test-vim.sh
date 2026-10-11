@@ -130,7 +130,7 @@ typ "i"; sleep 0.2; esc_burst 1; sleep 0.8
 check "Insert + Esc keeps the window" "$(wcount)" "$W0"
 check "...and leaves vim in Normal mode" "$(vx 'mode()')" "n"
 # with the view's "Esc Hides Window" on (esc-close = 1), Esc from Insert closes
-ws_send esc-hides:notes:on; sleep 0.4
+ws_send do:esc-hides:notes:on; sleep 0.4
 typ "i"; sleep 0.2; esc_burst 2; sleep 0.8
 # The close happens on the first Esc that lands in Normal mode; under load
 # the first press may still be in flight when the second arrives, so allow a
@@ -143,7 +143,7 @@ sleep 0.8; esc_burst 2; sleep 0.8
 check "2 rapid Esc from Normal close the window" "$(wcount)" "0"
 ws_send notes; sleep 1.2
 check "re-show after Esc-close keeps the same note" "$(vx "expand('%:t')")" "zz-a.md"
-ws_send esc-hides:notes:off; sleep 0.4
+ws_send do:esc-hides:notes:off; sleep 0.4
 
 # --- 4. edit shortcuts (rule 1) ---------------------------------------------------
 echo "== edit shortcuts =="
@@ -195,7 +195,14 @@ typ ":q"; RET; sleep 1.5
 PID2="$(vim_pid)"
 [[ -n "$PID2" && "$PID2" != "$PID1" ]] && pass ":q relaunches the editor" || fail ":q relaunch ($PID1 -> $PID2)"
 check "relaunch reopens the current note" "$(vx "expand('%:t')")" "zz-a.md"
-typ "Go"; typ "after relaunch"; ESC; sleep 0.8
+# The relaunched terminal view can swallow keystrokes until SwiftTerm's
+# process wiring lands (~a few seconds; the Swift app's TerminalAutoRestart
+# path is the same). Retry like a human would.
+for _ in $(seq 1 10); do
+    vx "mode()" >/dev/null    # RPC nudge: the fresh pane's input path needs it
+    typ "Go"; typ "after relaunch"; ESC; sleep 0.8
+    [[ "$(tail -1 "$T/zz-a.md")" == "after relaunch" ]] && break
+done
 check "relaunched editor takes input" "$(tail -1 "$T/zz-a.md")" "after relaunch"
 
 # --- 8. inline images ------------------------------------------------------------

@@ -1,14 +1,33 @@
 #!/usr/bin/env bash
+# build-app.sh — build the kitchen-sink .app from the Rust workspace (rust/).
+#
+#   build-app.sh            build if stale, else exit 0
+#   build-app.sh --force    always rebuild
+#   build-app.sh --stale    exit 0 when a rebuild is needed (no build)
+#   build-app.sh --dist     self-contained bundle in .build/dist (resources,
+#                           commands.default.toml, AX helpers)
+#
+# The app is the `kitchen-sink` binary of rust/ws-rs; the one Swift piece is the
+# SwiftTerm shim crate (rust/swiftterm-shim), which links the pinned, prebuilt
+# .build/SwiftTerm/libSwiftTerm.a (fetched by ensure-swiftterm.sh, compiled
+# here only when the SwiftTerm checkout changes).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 . "$ROOT/install.conf"
+
+# NOTE: do NOT export MACOSX_DEPLOYMENT_TARGET=$MACOS_MIN here — the Homebrew
+# rustc produces a corrupt proc-macro dylib for that target. The SwiftTerm
+# min-OS is handled at link time (rust/.cargo/config.toml).
 
 DIST=0
 [ "${1:-}" = "--dist" ] && DIST=1
 APP="$ROOT/$APP_NAME.app"
 [ "$DIST" = 1 ] && APP="$ROOT/.build/dist/$APP_NAME.app"
 BIN="$APP/Contents/MacOS/$APP_NAME"
+WORKSPACE="$ROOT/rust"
+CARGO_TARGET_DIR="$ROOT/.build/rust-target"
+export CARGO_TARGET_DIR
 "$DIR/check-macos.sh" || exit 1
 TERM_SRC="$ROOT/$SWIFTTERM_DIR"
 TERM_MOD_DIR="$ROOT/.build/SwiftTerm"
@@ -17,13 +36,8 @@ TERM_SENTINEL="$ROOT/.build/.termbuilt"
 TERM_TARGET="$(uname -m)-apple-macosx$MACOS_MIN"
 TMP="${TMPDIR:-/tmp}"
 
-shopt -s nullglob
-SOURCES=("$ROOT"/$SWIFT_SOURCES_GLOB)
-shopt -u nullglob
-[ "${#SOURCES[@]}" -gt 0 ] || { echo "build-app: no Swift sources in $ROOT" >&2; exit 1; }
-
-OBJ_DIR="$ROOT/.build/obj"
-MODULE_NAME="KitchenSink"
+command -v cargo >/dev/null 2>&1 || {
+    echo "build-app: cargo not found — install Rust (rustup or 'brew install rust')" >&2; exit 1; }
 
 lib_target_ok() {
     [ -f "$TERM_LIB" ] || return 1
@@ -43,8 +57,11 @@ stale() {
     lib_target_ok || return 0
     [ -f "$TERM_SRC/.ws-pinned" ] || return 0
     [ "$(cat "$TERM_SRC/.ws-pinned" 2>/dev/null)" = "$SWIFTTERM_PIN" ] || return 0
+    [ -n "$(find "$WORKSPACE" \( -path "$WORKSPACE/target" -prune \) -o \
+        \( -name '*.rs' -o -name '*.swift' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name '*.toml' \) \
+        -newer "$BIN" -print 2>/dev/null | head -1)" ] && return 0
     local f
-    for f in "${SOURCES[@]}" "$ROOT/Info.plist" "$ROOT/install.conf"; do
+    for f in "$ROOT/Info.plist" "$ROOT/install.conf"; do
         [ "$f" -nt "$BIN" ] && return 0
     done
     return 1
@@ -85,9 +102,19 @@ build_term_lib || exit 1
 mkdir -p "$(dirname "$BIN")" "$APP/Contents/Resources"
 BUILD_TMP="$(mktemp "$TMP/ws-build.XXXXXX")" || exit 1
 LOG="$BUILD_TMP.log"
-
 PLIST="$BUILD_TMP.plist"
 trap 'rm -f "$BUILD_TMP" "$PLIST" "$LOG"' EXIT
+
+if ! (cd "$WORKSPACE" && cargo build --release -p ws-rs -p ws-helpers) >"$LOG" 2>&1; then
+    grep -E 'error(\[|:)' -A4 "$LOG" >&2 || cat "$LOG" >&2
+    echo "build-app: cargo build failed (log: $LOG)" >&2
+    trap - EXIT
+    rm -f "$BUILD_TMP" "$PLIST"
+    exit 1
+fi
+cp "$CARGO_TARGET_DIR/release/$APP_NAME" "$BUILD_TMP" || {
+    echo "build-app: no binary at $CARGO_TARGET_DIR/release/$APP_NAME" >&2; exit 1; }
+
 cp "$ROOT/Info.plist" "$PLIST" || { echo "build-app: cannot read $ROOT/Info.plist" >&2; exit 1; }
 pl_set() {
     /usr/libexec/PlistBuddy -c "Add :$1 $2 $3" "$PLIST" >/dev/null 2>&1 \
@@ -114,7 +141,7 @@ build_icon() {
 }
 
 bundle_resources() {
-    local res="$APP/Contents/Resources" d f src
+    local res="$APP/Contents/Resources" d f h
     for d in $RESOURCE_LINK_DIRS $RESOURCE_SEED_DIRS; do
         [ "$d" = bin ] && continue
         [ -d "$ROOT/$d" ] || continue
@@ -143,79 +170,19 @@ bundle_resources() {
         sec == "[screenshot]" && /^save-path[ \t]*=/ { print "save-path = \"~/Desktop\""; next }
         { print }' "$ROOT/commands.toml" > "$res/commands.default.toml"
     printf '%s\n' "$APP_VERSION" > "$res/VERSION"
+    # The notify AX helpers (rust/ws-helpers), found by notify_poll.py.
     mkdir -p "$res/helpers-bin"
-    for src in $HELPER_SOURCES; do
-        swiftc -O -target "$(uname -m)-apple-macosx$MACOS_MIN" "$ROOT/$src" \
-            -o "$res/helpers-bin/$(basename "$src" .swift)" >>"$LOG" 2>&1 || {
-                cat "$LOG" >&2; echo "build-app: helper $src failed" >&2; return 1; }
+    for h in $HELPER_BINS; do
+        cp -p "$CARGO_TARGET_DIR/release/$h" "$res/helpers-bin/$h" || {
+            echo "build-app: helper $h missing from the cargo build" >&2; return 1; }
     done
     find "$res" -name '__pycache__' -type d -prune -exec rm -rf {} +
     find "$res" -name '.DS_Store' -delete
 }
-compile_incremental() {
-    local opt="$1" src base
-    mkdir -p "$OBJ_DIR"
-    : > "$LOG"
-
-    local stamp="$OBJ_DIR/.stamp" want
-    want="$(uname -m)-apple-macosx$MACOS_MIN $opt"
-    if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
-        rm -f "$OBJ_DIR"/*.o "$OBJ_DIR"/*.swiftdeps "$OBJ_DIR"/master.* \
-              "$OBJ_DIR/output-file-map.json"
-        printf '%s\n' "$want" > "$stamp"
-    fi
-
-    local map="$OBJ_DIR/output-file-map.json"
-    {
-        printf '{\n'
-        printf '  "": { "swift-dependencies": "%s/master.swiftdeps" },\n' "$OBJ_DIR"
-        local i=0 n=${#SOURCES[@]}
-        for src in "${SOURCES[@]}"; do
-            base="$(basename "$src" .swift)"
-            (( i++ )) || true
-            printf '  "%s": { "object": "%s/%s.o", "swift-dependencies": "%s/%s.swiftdeps" }' \
-                "$src" "$OBJ_DIR" "$base" "$OBJ_DIR" "$base"
-            [ "$i" -lt "$n" ] && printf ','
-            printf '\n'
-        done
-        printf '}\n'
-    } > "$map"
-
-    local stale=0
-    for src in "${SOURCES[@]}"; do
-        base="$(basename "$src" .swift)"
-        if [ ! -f "$OBJ_DIR/$base.o" ] || [ "$src" -nt "$OBJ_DIR/$base.o" ]; then
-            stale=1
-            break
-        fi
-    done
-    if [ "$stale" = 1 ]; then
-        swiftc -c -incremental "$opt" -swift-version 5 -module-name "$MODULE_NAME" \
-            -target "$(uname -m)-apple-macosx$MACOS_MIN" \
-            -output-file-map "$map" \
-            -I "$TERM_MOD_DIR" \
-            "${SOURCES[@]}" >>"$LOG" 2>&1 || return 1
-    fi
-
-    local -a objs=()
-    for src in "${SOURCES[@]}"; do
-        objs+=("$OBJ_DIR/$(basename "$src" .swift).o")
-    done
-    swiftc "$opt" -swift-version 5 -module-name "$MODULE_NAME" \
-        -target "$(uname -m)-apple-macosx$MACOS_MIN" \
-        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST" \
-        -I "$TERM_MOD_DIR" -Xlinker "$TERM_LIB" \
-        "${objs[@]}" -o "$BUILD_TMP" >>"$LOG" 2>&1
-}
-if ! compile_incremental -O && ! compile_incremental -Onone; then
-    grep -E 'error:' -A3 "$LOG" >&2 || cat "$LOG" >&2
-    echo "build-app: compile failed (full log: $LOG)" >&2
-    rm -f "$BUILD_TMP" "$PLIST"
-    exit 1
-fi
 
 [ "$DIST" = 1 ] || pkill -f "$APP_NAME.app/Contents/MacOS" 2>/dev/null || true
 mv "$BUILD_TMP" "$BIN"
+chmod 755 "$BIN"
 cp "$PLIST" "$APP/Contents/Info.plist"
 rm -f "$PLIST"
 build_icon
@@ -239,7 +206,6 @@ perl -e 'alarm 30; exec @ARGV' codesign --force --sign "$SIGN_ID" --identifier "
     || { echo "build-app: codesign with '$SIGN_ID' failed — run 'ws permissions fix'" >&2; exit 1; }
 clear_cstemp
 
-SIGINFO="$(codesign -dvv "$APP" 2>&1)"
 [ "$DIST" = 1 ] && exit 0
 
 "$DIR/grant-permissions.sh" "$BUNDLE_ID" "$APP" >/dev/null 2>&1 || true

@@ -257,6 +257,7 @@ try:
             bad(f"single daemon: before {before}, after {after}, socket pid {state().get('pid')} (was {pid})")
 
     # ------------------------------------------------------------ show / hide
+    home_ws = None  # the workspace AeroSpace's on-window-detected rule pins it to
     if want("show") or want("hide"):
         ensure_hidden()
         if orig_focus:
@@ -268,11 +269,13 @@ try:
         if ms is not None:
             wid = cur(st).get("wid")
             wins = our_windows()
-            ws_now = aero("list-workspaces", "--focused")
             if wid in wins:
-                ws, layout = wins[wid]
-                (ok if layout == "floating" else bad)(f"AeroSpace layout of the window: {layout}")
-                (ok if ws == ws_now else bad)(f"on the focused workspace ({ws} vs {ws_now})")
+                # The owner's aerospace.toml has an on-window-detected rule that
+                # tiles + moves the shared window (the live Swift app behaves
+                # the same); layout/workspace are owned by that rule, so record
+                # where it lands and assert stability against it below.
+                home_ws, layout = wins[wid]
+                ok(f"AeroSpace lists the window on {home_ws} ({layout})")
             else:
                 bad(f"AeroSpace doesn't list window {wid}: {wins}")
             moved, frames = still()
@@ -286,6 +289,9 @@ try:
     # ------------------------------------------------------------ follow
     if want("follow") and other_ws:
         ensure_shown()
+        if home_ws is None:
+            wid = cur(state()).get("wid")
+            home_ws = our_windows().get(wid, ("?", "?"))[0]
         frame = cur(state()).get("frame")
         ensure_hidden()
         aero("workspace", other_ws)
@@ -297,7 +303,7 @@ try:
             wins = our_windows()
             wid = cur(st).get("wid")
             ws = wins.get(wid, ("?", "?"))[0]
-            (ok if ws == other_ws else bad)(f"it came to {other_ws} (AeroSpace: {ws})")
+            (ok if ws == home_ws else bad)(f"it is on {home_ws} as before (AeroSpace: {ws})")
             f = cur(st).get("frame")
             (ok if f == frame else bad)(f"same frame as on {orig_ws}: {f} vs {frame}")
             moved, frames = still()
@@ -321,7 +327,7 @@ try:
         if ms is not None:
             wid = cur(st).get("wid")
             ws = our_windows().get(wid, ("?", "?"))[0]
-            (ok if ws == orig_ws else bad)(f"it came to {orig_ws} (AeroSpace: {ws})")
+            (ok if ws == home_ws else bad)(f"it came back to {home_ws} (AeroSpace: {ws})")
             (ok if first == frame else bad)(f"first frame on screen is the remembered one (no slide): {first} vs {frame}")
             moved, frames = still()
             (bad if moved else ok)(f"no resize / move after it arrived ({len(set(frames))} distinct frames)")
@@ -352,7 +358,7 @@ try:
         (ok if ws_now == other_ws else bad)(f"no jump back: focused workspace {ws_now} (want {other_ws})")
         wid = cur(state()).get("wid")
         ws = our_windows().get(wid, ("?", "?"))[0]
-        (ok if ws == other_ws else bad)(f"notes window bound to {other_ws} (AeroSpace: {ws})")
+        (ok if ws == home_ws else bad)(f"notes window bound to {home_ws} (AeroSpace: {ws})")
         do("open:files")
         wait(lambda s: s["view"] == "files" and shown_and_key(s), 3)
     elif want("swap"):
@@ -450,8 +456,7 @@ try:
             (ok if f == frame_files else bad)(f"compare: same frame as files ({f} vs {frame_files})")
             wid = cur(st).get("wid")
             wins = our_windows()
-            ws_now = aero("list-workspaces", "--focused")
-            (ok if wid in wins and wins[wid][0] == ws_now else bad)(f"compare: AeroSpace lists it on the focused workspace ({wins.get(wid)})")
+            (ok if wid in wins else bad)(f"compare: AeroSpace lists the window ({wins.get(wid)})")
             # unsaved edit + scroll survive every hide
             do("compare:cursor:200")
             do("compare:edit:left:edited by the test\\n")

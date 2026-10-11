@@ -18,6 +18,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 # Keys whose values must match when both sides are up. UI-only or
 # implementation-specific keys are excluded (the Rust port is partial).
@@ -102,6 +103,9 @@ def main():
     ap.add_argument("--swift-sock", default=os.path.join(os.environ.get("TMPDIR", "/tmp"), "ws-notes.sock"))
     ap.add_argument("--rust-sock", default=os.environ.get("WS_RUST_SOCK"))
     ap.add_argument("--actions", default="state,do:open:notes,do:open:files,do:hide,do:cycle")
+    ap.add_argument("--settle", type=float, default=0.0,
+                    help="seconds to sleep after each action before reading state "
+                         "(the Swift shared window presents asynchronously)")
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -126,6 +130,10 @@ def main():
     for action in actions:
         swift_state = query(args.swift_sock, action) if swift_up else {}
         rust_state = query(args.rust_sock, action)
+        if args.settle and action != "state":
+            time.sleep(args.settle)
+            swift_state = query(args.swift_sock, "state") if swift_up else {}
+            rust_state = query(args.rust_sock, "state")
         rep = compare(swift_state, rust_state)
         rep["action"] = action
         total_missing += len(rep["missing_keys"])

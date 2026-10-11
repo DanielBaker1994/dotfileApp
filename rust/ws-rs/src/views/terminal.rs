@@ -24,6 +24,27 @@ pub const DEFAULT_FONT_SIZE: f64 = 12.0;
 pub const CORNER_RADIUS: f64 = 12.0;
 pub const NO_EXIT_CODE: i32 = -1;
 
+/// `TerminalPanel.frameKey` — the remembered panel frame (user defaults).
+pub const FRAME_KEY: &str = "terminalPanelFrame";
+
+/// `NSStringFromRect` — `{{x, y}, {w, h}}`.
+pub fn format_ns_rect(f: TerminalFrame) -> String {
+    format!("{{{{{}, {}}}, {{{}, {}}}}}", f.x, f.y, f.width, f.height)
+}
+
+/// `NSRectFromString` for the `{{x, y}, {w, h}}` form (`None` otherwise).
+pub fn parse_ns_rect(s: &str) -> Option<TerminalFrame> {
+    let nums: Vec<f64> = s
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e'))
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    match nums.as_slice() {
+        [x, y, w, h] => Some(TerminalFrame::new(*x, *y, *w, *h)),
+        _ => None,
+    }
+}
+
 /// A floating-panel frame (`NSRect` in points) kept AppKit-free.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalFrame {
@@ -229,6 +250,21 @@ impl TerminalPanel {
         {
             if let Some(mtm) = MainThreadMarker::new() {
                 self.build(mtm);
+                // `show()`: `if !panel.isVisible { place() }`.
+                if let Some(panel) = &self.panel {
+                    if !panel.isVisible() {
+                        if let Some(f) = Self::placed_frame(mtm) {
+                            panel.setFrame_display(
+                                objc2_foundation::NSRect::new(
+                                    objc2_foundation::NSPoint::new(f.x, f.y),
+                                    objc2_foundation::NSSize::new(f.width, f.height),
+                                ),
+                                false,
+                            );
+                            self.config.frame = f;
+                        }
+                    }
+                }
             }
             if let Some(panel) = &self.panel {
                 panel.makeKeyAndOrderFront(None);
@@ -241,6 +277,17 @@ impl TerminalPanel {
     pub fn hide(&mut self) {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel {
+            // `saveFrame()` (Swift saves on move/resize; the frame is the
+            // same by the time the panel hides).
+            if panel.isVisible() {
+                let f = panel.frame();
+                Self::save_frame(TerminalFrame::new(
+                    f.origin.x,
+                    f.origin.y,
+                    f.size.width,
+                    f.size.height,
+                ));
+            }
             panel.orderOut(None);
         }
         self.shown = false;
@@ -279,16 +326,55 @@ impl TerminalPanel {
         }
     }
 
+    /// `place()`'s live inputs: the visible frame of the screen under the
+    /// mouse and the `terminalPanelFrame` user default.
+    #[cfg(target_os = "macos")]
+    fn placed_frame(mtm: MainThreadMarker) -> Option<TerminalFrame> {
+        use objc2_app_kit::{NSEvent, NSScreen};
+        let mouse = NSEvent::mouseLocation();
+        let screens = NSScreen::screens(mtm);
+        let screen = screens
+            .iter()
+            .find(|s| {
+                let f = s.frame();
+                mouse.x >= f.origin.x
+                    && mouse.x < f.origin.x + f.size.width
+                    && mouse.y >= f.origin.y
+                    && mouse.y < f.origin.y + f.size.height
+            })
+            .or_else(|| NSScreen::mainScreen(mtm))?;
+        let vf = screen.visibleFrame();
+        let visible = TerminalFrame::new(vf.origin.x, vf.origin.y, vf.size.width, vf.size.height);
+        Some(Self::place(Self::saved_frame(), visible))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn saved_frame() -> Option<TerminalFrame> {
+        use objc2_foundation::{NSString, NSUserDefaults};
+        let d = NSUserDefaults::standardUserDefaults();
+        let s = d.stringForKey(&NSString::from_str(FRAME_KEY))?;
+        parse_ns_rect(&s.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn save_frame(f: TerminalFrame) {
+        use objc2_foundation::{NSString, NSUserDefaults};
+        let d = NSUserDefaults::standardUserDefaults();
+        let v = NSString::from_str(&format_ns_rect(f));
+        unsafe { d.setObject_forKey(Some(&v), &NSString::from_str(FRAME_KEY)) };
+    }
+
     /// `TerminalPanel.place()`: reuse the saved frame when it still fits the
     /// screen, else clamp its size and center it just below the middle.
     pub fn place(saved: Option<TerminalFrame>, visible: TerminalFrame) -> TerminalFrame {
         let mut frame = TerminalFrame::default();
         if let Some(saved) = saved {
             if saved.width >= MIN_WIDTH && saved.height >= MIN_HEIGHT {
-                let fits = saved.x >= visible.x
-                    && saved.y >= visible.y
-                    && saved.x + saved.width <= visible.x + visible.width
-                    && saved.y + saved.height <= visible.y + visible.height;
+                // Swift: `vf.intersects(saved) && vf.contains(saved.mid)`.
+                let fits = saved.mid_x() >= visible.x
+                    && saved.mid_x() < visible.x + visible.width
+                    && saved.mid_y() >= visible.y
+                    && saved.mid_y() < visible.y + visible.height;
                 if fits {
                     return saved;
                 }
@@ -354,6 +440,17 @@ impl TerminalPanel {
         self.view = Some(view);
     }
 
+    /// `TerminalAutoRestart`: `exit` in the panel's shell starts a new one in
+    /// the same view (Swift restarts in `$HOME`). True when it restarted.
+    #[cfg(target_os = "macos")]
+    pub fn poll_restart(&mut self) -> bool {
+        let Some(shim) = self.shim() else {
+            return false;
+        };
+        let home = std::env::var("HOME").ok();
+        swiftterm_shim::restart_if_exited(&shim, &self.config.shell, &self.config.args, home.as_deref())
+    }
+
     /// The shim handle behind [`Self::view`] (it IS the returned `NSView`).
     #[cfg(target_os = "macos")]
     fn shim(&self) -> Option<Retained<swiftterm_shim::WSShim>> {
@@ -380,8 +477,36 @@ impl TerminalPanel {
         }
     }
 
-    /// The panel `testState()` JSON (socket `terminalPanel`).
+    /// The panel `testState()` JSON (socket `terminalPanel`), read live from
+    /// the `NSPanel` + shim once built (Swift reads `panel.isVisible`,
+    /// `isKeyWindow`, `level`, `windowNumber`, `frame`, `process.running`).
     pub fn test_state(&self) -> Value {
+        let mut doc = self.model_state();
+        #[cfg(target_os = "macos")]
+        if let (Some(panel), Some(o)) = (&self.panel, doc.as_object_mut()) {
+            let f = panel.frame();
+            o.insert("shown".into(), json!(panel.isVisible()));
+            o.insert("key".into(), json!(panel.isKeyWindow()));
+            o.insert("level".into(), json!(panel.level() as i64));
+            o.insert("wid".into(), json!(panel.windowNumber() as i64));
+            o.insert(
+                "frame".into(),
+                json!([
+                    f.origin.x as i64,
+                    f.origin.y as i64,
+                    f.size.width as i64,
+                    f.size.height as i64
+                ]),
+            );
+            if let Some(shim) = self.shim() {
+                o.insert("running".into(), json!(shim.terminal_running()));
+            }
+        }
+        doc
+    }
+
+    /// The mirrored-model half of [`Self::test_state`] (headless tests).
+    fn model_state(&self) -> Value {
         json!({
             "shown": self.shown,
             "key": self.key,
@@ -498,6 +623,22 @@ mod tests {
         assert_eq!(p.config().font_name, "Fira Code");
         assert_eq!(p.config().font_size, MAX_FONT_SIZE);
         assert!(p.view().is_none());
+    }
+
+    #[test]
+    fn ns_rect_strings_round_trip() {
+        let f = TerminalFrame::new(120.0, -40.5, 760.0, 460.0);
+        assert_eq!(format_ns_rect(f), "{{120, -40.5}, {760, 460}}");
+        assert_eq!(parse_ns_rect(&format_ns_rect(f)), Some(f));
+        assert_eq!(parse_ns_rect("garbage"), None);
+    }
+
+    #[test]
+    fn place_reuses_saved_frame_whose_middle_is_on_screen() {
+        // Swift keeps a frame hanging off the edge while its middle is on.
+        let visible = TerminalFrame::new(0.0, 0.0, 1920.0, 1080.0);
+        let saved = TerminalFrame::new(1500.0, 100.0, 800.0, 500.0);
+        assert_eq!(TerminalPanel::place(Some(saved), visible), saved);
     }
 
     #[test]

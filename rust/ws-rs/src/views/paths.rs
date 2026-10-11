@@ -1,15 +1,21 @@
 //! Port of `PathsWindow.swift` — the `/paths` recent-file shelf window.
 //!
-//! The Qt/AppKit surface (window, list view, Quick Look) is `todo!()`; the
-//! shelf model — rows, filtering, the trailing `folder · age · why` text, the
-//! Return action (`file | path | open`), rename and the `do:paths:*` hooks —
-//! is complete and tested.
+//! The shelf model — rows, filtering, the trailing `folder · age · why` text,
+//! the Return action (`file | path | open`), rename and the `do:paths:*` hooks —
+//! is complete and tested. The AppKit surface is real too:
+//! [`PathsWindow::build`] builds the query field, the scrollable row list and
+//! the empty-state label, [`PathsWindow::show_window`] places the standalone
+//! tool panel, and the Quick Look panel is ported via
+//! [`crate::views::files::QuickLook`] ([`PathsWindow::toggle_quick_look`],
+//! [`PathsWindow::key`]). Not yet drawn: the per-row `NSWorkspace` file icons.
 
 use serde_json::{json, Value};
 
 use crate::engines::file_ops::FileOps;
 use crate::engines::path_shelf::{Item, Why};
 use crate::ui::chrome::Rect;
+use crate::ui::popup::KeyInput;
+use crate::views::files::QuickLook;
 
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -38,6 +44,63 @@ impl ReturnAction {
             ReturnAction::Path => "path",
             ReturnAction::Open => "open",
         }
+    }
+}
+
+/// A decoded `PathsWindow.key(_:_:)` intent. The pure [`key_action`] maps a
+/// key event to one of these; [`PathsWindow::key`] applies it (the Quick Look
+/// arm needs the main thread).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathsKey {
+    /// Esc / Cmd+W.
+    Hide,
+    /// Arrow / Ctrl+N / Ctrl+P: `(delta, extend)`.
+    Move(i64, bool),
+    /// Return / keypad Enter.
+    RunDefault,
+    /// Cmd+Shift+C.
+    CopyFiles,
+    /// Cmd+C (with no text selected).
+    CopyPaths,
+    /// Cmd+Y / Space.
+    QuickLook,
+    /// Cmd+O.
+    Open,
+    /// Cmd+R.
+    BeginRename,
+    /// Cmd+Shift+R.
+    Reveal,
+    /// Cmd+Delete.
+    Forget,
+}
+
+/// `PathsWindow.key(_:_:)`'s switch, pure and testable. `query_empty` and
+/// `list_focused` stand in for Swift's `query.isEmpty || firstResponder === list`
+/// Space guard.
+pub fn key_action(
+    key: KeyInput,
+    text_selected: bool,
+    query_empty: bool,
+    list_focused: bool,
+) -> Option<PathsKey> {
+    let (cmd, ctrl, shift) = (key.cmd, key.ctrl, key.shift);
+    match key.key_code {
+        53 => Some(PathsKey::Hide),
+        13 if cmd => Some(PathsKey::Hide),
+        125 => Some(PathsKey::Move(1, shift)),
+        45 if ctrl => Some(PathsKey::Move(1, shift)),
+        126 => Some(PathsKey::Move(-1, shift)),
+        35 if ctrl => Some(PathsKey::Move(-1, shift)),
+        36 | 76 => Some(PathsKey::RunDefault),
+        8 if cmd && shift => Some(PathsKey::CopyFiles),
+        8 if cmd && !text_selected => Some(PathsKey::CopyPaths),
+        16 if cmd => Some(PathsKey::QuickLook),
+        49 if !cmd && !ctrl && (query_empty || list_focused) => Some(PathsKey::QuickLook),
+        31 if cmd => Some(PathsKey::Open),
+        15 if cmd && !shift => Some(PathsKey::BeginRename),
+        15 if cmd && shift => Some(PathsKey::Reveal),
+        51 if cmd => Some(PathsKey::Forget),
+        _ => None,
     }
 }
 
@@ -220,6 +283,8 @@ pub struct PathsWindow {
     /// `InlineRename` target: (old path, in-progress text).
     pub rename: Option<(String, String)>,
     pub rename_editor: Option<String>,
+    /// The Quick Look preview-panel bridge (Swift `QLPreviewPanelDataSource`).
+    pub quick_look: QuickLook,
     /// The built AppKit view tree (`build_macos`).
     #[cfg(target_os = "macos")]
     pub root: Option<Retained<NSView>>,
@@ -245,6 +310,7 @@ impl PathsWindow {
             frame: [0, 0, 680, 0],
             rename: None,
             rename_editor: None,
+            quick_look: QuickLook::new(),
             #[cfg(target_os = "macos")]
             root: None,
             #[cfg(target_os = "macos")]
@@ -307,6 +373,10 @@ impl PathsWindow {
     pub fn hide(&mut self) {
         self.shown = false;
         self.key = false;
+        #[cfg(target_os = "macos")]
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            self.quick_look.dismiss(mtm);
+        }
     }
 
     pub fn is_empty_text(&self) -> String {
@@ -335,6 +405,68 @@ impl PathsWindow {
         }
         let last = self.rows.len() as i64 - 1;
         self.selection = (self.selection as i64 + d).clamp(0, last) as usize;
+    }
+
+    /// Swift `PathsWindow.toggleQuickLook()`.
+    pub fn toggle_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
+        let paths = self.selected_paths();
+        self.quick_look.toggle(mtm, &paths);
+    }
+
+    /// Swift `PathsWindow.refreshQuickLook()` (called when the selection moves).
+    pub fn refresh_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
+        let paths = self.selected_paths();
+        self.quick_look.refresh(mtm, &paths);
+    }
+
+    /// Swift `PathsWindow.key(_:_:)`: decode the event with [`key_action`] and
+    /// apply it. Returns whether the key was consumed. Shift-arrow multi-select
+    /// is not modelled (the shelf is single-selection here), so an extending
+    /// move behaves like a plain move.
+    pub fn key(
+        &mut self,
+        mtm: objc2::MainThreadMarker,
+        key: KeyInput,
+        text_selected: bool,
+        query_empty: bool,
+        list_focused: bool,
+    ) -> bool {
+        let Some(action) = key_action(key, text_selected, query_empty, list_focused) else {
+            return false;
+        };
+        match action {
+            PathsKey::Hide => self.hide(),
+            PathsKey::Move(d, _extend) => {
+                self.move_by(d);
+                self.refresh_quick_look(mtm);
+            }
+            PathsKey::RunDefault => {
+                self.run_default();
+            }
+            PathsKey::CopyFiles => {
+                self.copy_files();
+            }
+            PathsKey::CopyPaths => {
+                self.copy_paths();
+            }
+            PathsKey::QuickLook => self.toggle_quick_look(mtm),
+            PathsKey::Open => {
+                self.open_paths();
+            }
+            PathsKey::BeginRename => {
+                let text = self
+                    .rows
+                    .get(self.selection)
+                    .map(|r| basename(&r.path))
+                    .unwrap_or_default();
+                self.begin_rename(&text);
+            }
+            PathsKey::Reveal => {
+                self.reveal_paths();
+            }
+            PathsKey::Forget => self.forget(),
+        }
+        true
     }
 
     /// `runDefault()`.
@@ -437,17 +569,43 @@ impl PathsWindow {
         self.run_default()
     }
 
+    /// The window fields reported to the socket. Once [`Self::show_window`] has
+    /// built the panel we read them straight from it — Swift's `testState`
+    /// reads `window.isShown` / `isKeyWindow` / `level` / `frame` — so
+    /// `tools.paths.key`/`level`/`frame` track the live panel. Before the panel
+    /// exists we fall back to the model's placeholder values.
+    fn window_state(&self) -> (bool, bool, i64, [i64; 4]) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.window {
+            let f = panel.frame();
+            return (
+                panel.isVisible(),
+                panel.isKeyWindow(),
+                panel.level() as i64,
+                [
+                    f.origin.x.round() as i64,
+                    f.origin.y.round() as i64,
+                    f.size.width.round() as i64,
+                    f.size.height.round() as i64,
+                ],
+            );
+        }
+        (self.shown, self.key, self.level, self.frame)
+    }
+
     pub fn test_state(&self) -> Value {
+        let (shown, key, level, frame) = self.window_state();
         json!({
-            "shown": self.shown,
-            "key": self.key,
-            "level": self.level,
+            "shown": shown,
+            "key": key,
+            "level": level,
             "selection": self.selection,
             "query": self.query,
+            "quickLook": self.quick_look.state(),
             "rows": self.rows.iter().map(|r| json!({
                 "path": r.path, "why": r.why.raw(), "name": r.name, "trailing": r.trailing
             })).collect::<Vec<_>>(),
-            "frame": self.frame,
+            "frame": frame,
         })
     }
 
@@ -1000,5 +1158,75 @@ mod tests {
         assert_eq!(w.rows.len(), 1);
         assert!(w.rows[0].path.ends_with("/b.txt"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn quick_look_state_starts_empty() {
+        let w = PathsWindow::new(ReturnAction::File);
+        assert!(w.quick_look.state().is_empty());
+        let st = w.test_state();
+        assert_eq!(st["quickLook"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn key_action_maps_the_paths_switch() {
+        let mut k = KeyInput::new(53);
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Hide));
+
+        // Cmd+W hides; plain W does not.
+        k = KeyInput::new(13);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Hide));
+        assert_eq!(key_action(KeyInput::new(13), false, true, false), None);
+
+        // Arrows / emacs Ctrl+N,P.
+        k = KeyInput::new(125);
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Move(1, false)));
+        k.shift = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Move(1, true)));
+        k = KeyInput::new(45);
+        k.ctrl = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Move(1, false)));
+        k = KeyInput::new(35);
+        k.ctrl = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Move(-1, false)));
+
+        // Return and keypad Enter run the default action.
+        assert_eq!(key_action(KeyInput::new(36), false, true, false), Some(PathsKey::RunDefault));
+        assert_eq!(key_action(KeyInput::new(76), false, true, false), Some(PathsKey::RunDefault));
+
+        // Copy: Cmd+Shift+C = files, Cmd+C = paths (unless text is selected).
+        k = KeyInput::new(8);
+        k.cmd = true;
+        k.shift = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::CopyFiles));
+        k = KeyInput::new(8);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::CopyPaths));
+        assert_eq!(key_action(k, true, true, false), None, "text selection wins");
+
+        // Quick Look: Cmd+Y always; Space only with an empty query or list focus.
+        k = KeyInput::new(16);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::QuickLook));
+        assert_eq!(key_action(KeyInput::new(49), false, true, false), Some(PathsKey::QuickLook));
+        assert_eq!(key_action(KeyInput::new(49), false, false, true), Some(PathsKey::QuickLook));
+        assert_eq!(key_action(KeyInput::new(49), false, false, false), None);
+        k = KeyInput::new(49);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), None, "Cmd+Space is Spotlight");
+
+        // Cmd+O open, Cmd+R rename, Cmd+Shift+R reveal, Cmd+Delete forget.
+        k = KeyInput::new(31);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Open));
+        k = KeyInput::new(15);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::BeginRename));
+        k.shift = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Reveal));
+        k = KeyInput::new(51);
+        k.cmd = true;
+        assert_eq!(key_action(k, false, true, false), Some(PathsKey::Forget));
     }
 }

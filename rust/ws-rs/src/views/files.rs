@@ -3,8 +3,13 @@
 //! Places/Recent/Arrived lists, rename/duplicate/trash and drop/open actions.
 //!
 //! `FileListPane` lives in `PopupWindow.swift`; it is modelled locally as
-//! [`FileList`] (no AppKit). Deep drawing and the Quick Look panel are
-//! `todo!()`; the model is complete and tested.
+//! [`FileList`] (no AppKit). The AppKit surface is real: [`FileBrowser::build`]
+//! builds the toolbar, the scrollable row list (with selected/marked row
+//! highlighting) and the preview/info pane, and [`QuickLook`] ports the
+//! `QLPreviewPanelDataSource`/`QLPreviewPanelDelegate` pair
+//! ([`FileBrowser::toggle_quick_look`], [`FileBrowser::refresh_quick_look`]).
+//! Not yet ported: drag-and-drop ([`FileList`] carries no drop state) and the
+//! per-row `NSWorkspace` file icons.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +23,17 @@ use crate::ui::chrome::Rect;
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::NSView;
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+#[cfg(target_os = "macos")]
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSEvent, NSEventType, NSView, NSWindowDelegate};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSObjectProtocol, NSString, NSURL};
+#[cfg(target_os = "macos")]
+use objc2_quick_look_ui::{
+    QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource, QLPreviewPanelDelegate,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -771,6 +786,260 @@ pub fn entry_detail(e: &Entry, now: f64) -> String {
     lines.join("\n")
 }
 
+// ---------------------------------------------------------------- quick look
+
+/// The Quick Look preview-panel bridge shared by the file browser and the
+/// paths shelf — the Rust port of Swift's `QLPreviewPanelDataSource` /
+/// `QLPreviewPanelDelegate` pair (`PathsWindow`/`PopupFileBrowser`
+/// `toggleQuickLook()`).
+///
+/// `paths` mirrors Swift's `quickLookPaths`: the items last handed to the
+/// shared panel. Every panel access goes through a [`MainThreadMarker`], so the
+/// panel is never created or mutated off the main thread, and an empty
+/// selection returns early (Swift's `guard !paths.isEmpty else { return }`) —
+/// toggling with nothing selected is safe.
+#[derive(Clone)]
+pub struct QuickLook {
+    /// Swift `quickLookPaths` (empty when the panel is down).
+    pub paths: Vec<String>,
+    /// Whether [`Self::toggle`] last left the panel up.
+    up: bool,
+    #[cfg(target_os = "macos")]
+    source: Option<Retained<QuickLookSource>>,
+}
+
+impl Default for QuickLook {
+    fn default() -> Self {
+        QuickLook {
+            paths: Vec::new(),
+            up: false,
+            #[cfg(target_os = "macos")]
+            source: None,
+        }
+    }
+}
+
+impl QuickLook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The `quickLook` state field: the paths while the panel is up, else `[]`
+    /// (mirrors `CompareFolderView`'s `quickLookUp ? quickLookPaths : []`).
+    pub fn state(&self) -> Vec<String> {
+        #[cfg(target_os = "macos")]
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            if !self.is_up(mtm) {
+                return Vec::new();
+            }
+        }
+        if self.up {
+            self.paths.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Swift `quickLookUp`: the shared panel exists, is visible, and we are its
+    /// data source. `false` off macOS.
+    pub fn is_up(&self, mtm: objc2::MainThreadMarker) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            if !unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
+                return false;
+            }
+            let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else {
+                return false;
+            };
+            if !panel.isVisible() {
+                return false;
+            }
+            let Some(source) = &self.source else { return false };
+            let Some(data_source) = (unsafe { panel.dataSource() }) else {
+                return false;
+            };
+            let ds: &AnyObject = AsRef::<AnyObject>::as_ref(&*data_source);
+            std::ptr::eq(ds, any_object(&**source))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = mtm;
+            self.up
+        }
+    }
+
+    /// Swift `toggleQuickLook()`: order the panel out if it is ours and up,
+    /// otherwise open it over `selected` (no-op when `selected` is empty).
+    pub fn toggle(&mut self, mtm: objc2::MainThreadMarker, selected: &[String]) {
+        #[cfg(target_os = "macos")]
+        {
+            let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else {
+                return;
+            };
+            if self.is_up(mtm) {
+                panel.orderOut(None);
+                self.clear();
+                return;
+            }
+            if selected.is_empty() {
+                self.clear();
+                return;
+            }
+            self.paths = selected.to_vec();
+            let source = match &self.source {
+                Some(s) => s.clone(),
+                None => {
+                    let s = QuickLookSource::new(mtm);
+                    self.source = Some(s.clone());
+                    s
+                }
+            };
+            source.set_paths(&self.paths);
+            let delegate = any_object(&*source);
+            unsafe {
+                panel.setDataSource(Some(ProtocolObject::from_ref(&*source)));
+                panel.setDelegate(Some(delegate));
+                panel.reloadData();
+                panel.setCurrentPreviewItemIndex(0);
+                panel.makeKeyAndOrderFront(None);
+            }
+            self.up = true;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = mtm;
+            self.up = !selected.is_empty();
+            self.paths = if self.up { selected.to_vec() } else { Vec::new() };
+        }
+    }
+
+    /// Swift `refreshQuickLook()`: no-op unless the panel is up.
+    pub fn refresh(&mut self, mtm: objc2::MainThreadMarker, selected: &[String]) {
+        if !self.is_up(mtm) {
+            return;
+        }
+        self.paths = selected.to_vec();
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(source) = &self.source {
+                source.set_paths(&self.paths);
+            }
+            if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+                unsafe { panel.reloadData() };
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = mtm;
+        }
+    }
+
+    /// Order the shared panel out (if we own it) and clear the preview paths.
+    pub fn dismiss(&mut self, mtm: objc2::MainThreadMarker) {
+        #[cfg(target_os = "macos")]
+        {
+            if unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
+                if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+                    panel.orderOut(None);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = mtm;
+        }
+        self.clear();
+    }
+
+    fn clear(&mut self) {
+        self.paths.clear();
+        self.up = false;
+    }
+}
+
+/// Cast any Objective-C object to `&AnyObject` (the identity cast used for the
+/// panel's unretained `delegate`).
+#[cfg(target_os = "macos")]
+fn any_object<T: objc2::Message>(obj: &T) -> &AnyObject {
+    unsafe { &*(obj as *const T as *const AnyObject) }
+}
+
+/// The panel's data source *and* delegate: it hands `NSURL` preview items to
+/// `QLPreviewPanel` and closes the panel on Space/Esc
+/// (`previewPanel(_:handle:)`). One instance is kept alive by [`QuickLook`] for
+/// as long as the shared panel might call back into it.
+#[cfg(target_os = "macos")]
+pub struct QuickLookSourceIvars {
+    paths: std::cell::RefCell<Vec<String>>,
+}
+
+#[cfg(target_os = "macos")]
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "WSQuickLookSource"]
+    #[ivars = QuickLookSourceIvars]
+    pub struct QuickLookSource;
+
+    impl QuickLookSource {
+        /// `numberOfPreviewItems(in:)`.
+        #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
+        fn number_of_items(&self, _panel: Option<&QLPreviewPanel>) -> isize {
+            self.ivars().paths.borrow().len() as isize
+        }
+
+        /// `previewPanel(_:previewItemAt:)` — an `NSURL` is itself a
+        /// `QLPreviewItem`.
+        #[unsafe(method_id(previewPanel:previewItemAtIndex:))]
+        fn item_at(
+            &self,
+            _panel: Option<&QLPreviewPanel>,
+            index: isize,
+        ) -> Option<Retained<ProtocolObject<dyn QLPreviewItem>>> {
+            let paths = self.ivars().paths.borrow();
+            let path = if index >= 0 { paths.get(index as usize) } else { None };
+            path.map(|path| {
+                let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+                ProtocolObject::from_retained(url)
+            })
+        }
+
+        /// `previewPanel(_:handle:)`: Space/Esc close; the panel keeps its own
+        /// arrow-key navigation.
+        #[unsafe(method(previewPanel:handleEvent:))]
+        fn handle_event(&self, panel: Option<&QLPreviewPanel>, event: Option<&NSEvent>) -> bool {
+            let close = event
+                .map(|e| e.r#type() == NSEventType::KeyDown && matches!(e.keyCode(), 49 | 53))
+                .unwrap_or(false);
+            if close {
+                if let Some(panel) = panel {
+                    panel.orderOut(None);
+                }
+            }
+            close
+        }
+    }
+
+    unsafe impl NSObjectProtocol for QuickLookSource {}
+    unsafe impl NSWindowDelegate for QuickLookSource {}
+    unsafe impl QLPreviewPanelDataSource for QuickLookSource {}
+    unsafe impl QLPreviewPanelDelegate for QuickLookSource {}
+);
+
+#[cfg(target_os = "macos")]
+impl QuickLookSource {
+    fn new(mtm: objc2::MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(QuickLookSourceIvars {
+            paths: std::cell::RefCell::new(Vec::new()),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn set_paths(&self, paths: &[String]) {
+        *self.ivars().paths.borrow_mut() = paths.to_vec();
+    }
+}
+
 // ---------------------------------------------------------------- file browser
 
 #[derive(Clone, Debug, PartialEq)]
@@ -796,6 +1065,11 @@ pub struct FileBrowser {
     back: Vec<Place>,
     forward: Vec<Place>,
     travelling: bool,
+    /// The Quick Look preview-panel bridge (Swift `QLPreviewPanelDataSource`).
+    pub quick_look: QuickLook,
+    /// `InlineRename` target: (old path, in-progress text).
+    pub rename: Option<(String, String)>,
+    pub rename_editor: Option<String>,
     /// The built AppKit view tree (`build_macos`).
     #[cfg(target_os = "macos")]
     pub root: Option<Retained<NSView>>,
@@ -817,6 +1091,9 @@ impl FileBrowser {
             back: Vec::new(),
             forward: Vec::new(),
             travelling: false,
+            quick_look: QuickLook::new(),
+            rename: None,
+            rename_editor: None,
             #[cfg(target_os = "macos")]
             root: None,
         }
@@ -1057,6 +1334,63 @@ impl FileBrowser {
         self.refilter();
     }
 
+    /// Swift `PopupFileBrowser.toggleQuickLook()`.
+    pub fn toggle_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
+        let paths = self.selected_paths();
+        self.quick_look.toggle(mtm, &paths);
+    }
+
+    /// Swift `PopupFileBrowser.refreshQuickLook()` (called on selection change).
+    pub fn refresh_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
+        let paths = self.selected_paths();
+        self.quick_look.refresh(mtm, &paths);
+    }
+
+    /// Swift `PopupFileBrowser.beginRename(_:)`: start an inline rename on the
+    /// given row (or the selection). `..` is never renameable.
+    pub fn begin_rename(&mut self, index: Option<usize>) {
+        let i = index.unwrap_or(self.list.selection);
+        if i >= self.list.rows.len() || self.list.rows[i].is_parent() {
+            return;
+        }
+        self.commit_rename();
+        let path = self.list.rows[i].path.clone();
+        self.list.selection = i;
+        let name = basename(&path);
+        self.rename = Some((path, name.clone()));
+        self.rename_editor = Some(name);
+    }
+
+    /// Swift `PopupFileBrowser.cancelRename()`.
+    pub fn cancel_rename(&mut self) {
+        self.rename = None;
+        self.rename_editor = None;
+    }
+
+    /// Swift `PopupFileBrowser.commitRename()`: move the file and reload, or
+    /// return the status message on rejection/failure.
+    pub fn commit_rename(&mut self) -> Option<String> {
+        let (path, text) = self.rename.clone()?;
+        self.rename = None;
+        self.rename_editor = None;
+        let old = basename(&path);
+        let new = text.trim().to_string();
+        if new.is_empty() || new == old {
+            return None;
+        }
+        match rename_into(&path, &new) {
+            Err(msg) => Some(msg),
+            Ok(None) => None,
+            Ok(Some(dst)) => {
+                self.reload();
+                if let Some(i) = self.list.rows.iter().position(|e| e.path == dst) {
+                    self.list.selection = i;
+                }
+                Some(format!("renamed “{old}” to “{new}”"))
+            }
+        }
+    }
+
     /// Build the AppKit browser: the toolbar, the scrollable rows list and the
     /// preview/info pane. No-op off macOS.
     pub fn build(&mut self, mtm: objc2::MainThreadMarker) {
@@ -1074,7 +1408,15 @@ impl FileBrowser {
         let colors = crate::ui::theme::PopupThemeDefaults::colors();
         let where_text = self.where_text();
         let selected = self.list.rows.get(self.list.selection).cloned();
-        let view = macos::build_view(mtm, &where_text, self.visible_rows(), selected.as_ref(), &colors);
+        let view = macos::build_view(
+            mtm,
+            &where_text,
+            self.visible_rows(),
+            self.list.selection,
+            &self.list.marked,
+            selected.as_ref(),
+            &colors,
+        );
         self.root = Some(view);
     }
 
@@ -1091,6 +1433,7 @@ impl FileBrowser {
             "query": self.query,
             "selection": self.list.selection,
             "marked": self.list.marked.iter().copied().collect::<Vec<_>>(),
+            "quickLook": self.quick_look.state(),
             "rows": self.list.rows.iter().map(|e| json!({
                 "name": e.name, "path": e.path, "isDir": e.is_dir
             })).collect::<Vec<_>>(),
@@ -1131,6 +1474,14 @@ pub fn build_content(mtm: objc2::MainThreadMarker) -> Option<Retained<NSView>> {
     browser.content_view()
 }
 
+/// The last path component (Swift `(path as NSString).lastPathComponent`).
+fn basename(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Convenience: a `PathBuf` display helper the ops glue can use.
 pub fn display_path(p: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1155,7 +1506,7 @@ mod macos {
     use super::*;
     use crate::ui::theme::{PopupColors, Rgba};
     use objc2::rc::Retained;
-    use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
+    use objc2::{define_class, msg_send, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSFont, NSLineBreakMode, NSScrollView, NSTextAlignment,
         NSTextField, NSView,
@@ -1166,7 +1517,7 @@ mod macos {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.width, r.height))
     }
 
-    fn label(mtm: MainThreadMarker, s: &str, size: f64, color: Rgba) -> Retained<NSTextField> {
+    fn label(mtm: objc2::MainThreadMarker, s: &str, size: f64, color: Rgba) -> Retained<NSTextField> {
         let l = NSTextField::labelWithString(&NSString::from_str(s), mtm);
         l.setFont(Some(&NSFont::systemFontOfSize(size)));
         l.setTextColor(Some(&color.to_nscolor()));
@@ -1174,7 +1525,7 @@ mod macos {
     }
 
     fn wrapping_label(
-        mtm: MainThreadMarker,
+        mtm: objc2::MainThreadMarker,
         s: &str,
         size: f64,
         color: Rgba,
@@ -1206,7 +1557,7 @@ mod macos {
     );
 
     impl FlippedView {
-        pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        pub fn new(mtm: objc2::MainThreadMarker) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(FlippedViewIvars);
             unsafe {
                 msg_send![
@@ -1224,11 +1575,14 @@ mod macos {
         }
     }
 
-    /// The browser view tree: toolbar, scrollable row list, preview pane.
+    /// The browser view tree: toolbar, scrollable row list (with selected and
+    /// marked rows highlighted), preview pane.
     pub fn build_view(
-        mtm: MainThreadMarker,
+        mtm: objc2::MainThreadMarker,
         where_text: &str,
         rows: &[Entry],
+        selection: usize,
+        marked: &BTreeSet<usize>,
         selected: Option<&Entry>,
         colors: &PopupColors,
     ) -> Retained<NSView> {
@@ -1268,6 +1622,21 @@ mod macos {
                 NSSize::new(row_w, BROWSER_ROW_HEIGHT),
             ));
             row.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+
+            // Selected / marked rows get the pill highlight; the selection also
+            // gets the accent bar (`FileListPane.draw`).
+            if i == selection || marked.contains(&i) {
+                set_background(&row, colors.highlight);
+                if i == selection {
+                    let bar = FlippedView::new(mtm);
+                    bar.setFrame(NSRect::new(
+                        NSPoint::new(0.0, 0.0),
+                        NSSize::new(3.0, BROWSER_ROW_HEIGHT),
+                    ));
+                    set_background(&bar, colors.accent_on());
+                    row.addSubview(&bar);
+                }
+            }
 
             let glyph = label(mtm, row_glyph(e), 12.0, colors.accent_on());
             glyph.setFrame(NSRect::new(NSPoint::new(4.0, 2.0), NSSize::new(18.0, 18.0)));
@@ -1672,5 +2041,62 @@ mod tests {
         let dd = entry_detail(&dir, 0.0);
         assert!(dd.starts_with("Folder"));
         assert!(!dd.contains("Size"), "folders show no size");
+    }
+
+    #[test]
+    fn quick_look_state_starts_empty() {
+        let ql = QuickLook::new();
+        assert!(ql.paths.is_empty());
+        assert!(ql.state().is_empty(), "down panel exposes no quickLook paths");
+        let b = FileBrowser::default();
+        assert_eq!(b.test_state()["quickLook"], json!([]));
+    }
+
+    #[test]
+    fn file_browser_rename_model() {
+        let root = std::env::temp_dir().join(format!("ws-rs-fbrename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let old = root.join("a.txt");
+        std::fs::write(&old, "x").unwrap();
+        let old = old.to_string_lossy().into_owned();
+
+        let mut b = FileBrowser::new(&root.to_string_lossy());
+        b.reload();
+        // Row 0 is `..`, so select the file explicitly.
+        let idx = b.list.rows.iter().position(|e| e.name == "a.txt").unwrap();
+        b.list.selection = idx;
+
+        b.begin_rename(None);
+        assert!(b.rename.is_some());
+        assert_eq!(b.rename_editor.as_deref(), Some("a.txt"));
+
+        // Reject an invalid name; nothing moves.
+        b.rename = Some((old.clone(), "bad/name".to_string()));
+        let msg = b.commit_rename().unwrap();
+        assert!(msg.contains("not a valid name"));
+        assert!(Path::new(&old).exists());
+
+        // A real rename moves the file and re-selects it.
+        b.begin_rename(Some(idx));
+        b.rename = Some((old.clone(), "renamed.txt".to_string()));
+        let msg = b.commit_rename().unwrap();
+        assert_eq!(msg, "renamed “a.txt” to “renamed.txt”");
+        assert!(root.join("renamed.txt").exists());
+        assert_eq!(b.list.rows[b.list.selection].name, "renamed.txt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn file_browser_rename_ignores_parent_row() {
+        let root = std::env::temp_dir().join(format!("ws-rs-fbparent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut b = FileBrowser::new(&root.to_string_lossy());
+        b.reload();
+        let parent = b.list.rows.iter().position(|e| e.is_parent()).unwrap();
+        b.begin_rename(Some(parent));
+        assert!(b.rename.is_none(), "`..` is never renameable");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

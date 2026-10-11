@@ -474,7 +474,9 @@ impl VimPane {
         let cwd = self.launch.cwd.clone().or_else(|| self.note_dir());
         swiftterm_shim::start_process(&shim, &self.vim_bin, &args, cwd.as_deref());
         self.view = Some(view.clone());
-        // We just launched a process; a later `poll_exit` reports its exit.
+        // The shim's `processTerminated` callback is the exit edge; until it
+        // fires the pane counts as running (`terminalRunning` is unreliable:
+        // SwiftTerm assigns its process asynchronously).
         self.was_running = true;
         Some(view)
     }
@@ -482,6 +484,39 @@ impl VimPane {
     #[cfg(not(target_os = "macos"))]
     pub fn build(&mut self, _mtm: MainThreadMarker, _frame: ()) -> Option<()> {
         None
+    }
+
+    /// `startVimIfNeeded()` after `:q` / a crash: restart the editor in the
+    /// **same** terminal view, like Swift's `TerminalAutoRestart`. Dropping the
+    /// old SwiftTerm view and building a new one kills the new child at once
+    /// (the old view's deinit tears down its PTY after the new `forkpty`, and
+    /// the new child dies by signal with no exit code). Clears the stale
+    /// `--listen` socket first. Returns whether the process is running again.
+    #[cfg(target_os = "macos")]
+    pub fn restart(&mut self) -> bool {
+        let Some(shim) = self.shim() else {
+            return false;
+        };
+        if self.shutting_down {
+            return false;
+        }
+        let _ = std::fs::remove_file(&self.launch.sock);
+        if let Some(dir) = std::path::Path::new(&self.launch.sock).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut rpc) = self.rpc.lock() {
+            *rpc = None;
+        }
+        let args = self.launch.args(&self.asset_dir, self.file.as_deref());
+        let cwd = self.launch.cwd.clone().or_else(|| self.note_dir());
+        swiftterm_shim::start_process(&shim, &self.vim_bin, &args, cwd.as_deref());
+        self.was_running = true;
+        shim.terminal_running()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn restart(&mut self) -> bool {
+        false
     }
 
     /// The embedded view once built.
@@ -504,6 +539,24 @@ impl VimPane {
         if let Some(window) = tv.window() {
             window.makeFirstResponder(Some(&tv));
         }
+    }
+
+    /// Whether the inner terminal view is its window's first responder (the
+    /// `:q` relaunch's reclaim check).
+    #[cfg(target_os = "macos")]
+    pub fn has_focus(&self) -> bool {
+        let Some(shim) = self.shim() else { return false };
+        let tv = shim.terminal_view();
+        let Some(window) = tv.window() else { return false };
+        let Some(fr) = window.firstResponder() else { return false };
+        let a = objc2::rc::Retained::as_ptr(&fr) as *const objc2::runtime::AnyObject;
+        let b = &*tv as *const objc2_app_kit::NSView as *const objc2::runtime::AnyObject;
+        a == b
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn has_focus(&self) -> bool {
+        false
     }
 
     /// Send raw PTY keys/text to the editor (shim `sendKeys:`). No `<…>` key
@@ -623,8 +676,24 @@ impl VimPane {
     /// True once, when the process exited since the last call. Does **not**
     /// relaunch — the caller owns that policy (mirrors Swift's
     /// `TerminalAutoRestart`, which relaunches `:q` but not `shutdownVim`).
+    /// Whether the child has terminated: the shim's `processTerminated`
+    /// callback stores an exit code (`-1` until then). This is the reliable
+    /// edge — `terminalRunning` reads through SwiftTerm's process property,
+    /// which is assigned asynchronously after `startProcess`.
+    #[cfg(target_os = "macos")]
+    fn terminated(&self) -> bool {
+        self.shim()
+            .map(|s| s.terminal_exit_code() >= 0)
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn terminated(&self) -> bool {
+        false
+    }
+
     pub fn poll_exit(&mut self) -> bool {
-        let running = self.is_running();
+        let running = !self.terminated();
         let exited = exit_transition(self.was_running, running);
         self.was_running = running;
         if self.shutting_down {

@@ -1,7 +1,7 @@
-//! kitchen-sink — Rust entry point (mirrors Swift `main.swift`).
+//! kitchen-sink — the app's entry point (the former Swift `main.swift`).
 //!
-//! The module tree mirrors the Swift files so parallel work owns disjoint
-//! modules. Behavior is ported module by module behind a parity gate (see
+//! One-shot commands, the install check, the CLI client pass (`app::cli`),
+//! then the daemon. The module tree mirrors the old Swift files (see
 //! `PLAN-rust-port.md`).
 
 #![allow(dead_code)]
@@ -17,20 +17,13 @@ use std::sync::{Arc, Mutex};
 use app::host::SwitcherController;
 use app::paths::Paths;
 use app::python_helper::PythonHelper;
-use app::socket::{self, CommandHandler, CommandServer, DaemonLock};
+use app::socket::{CommandHandler, CommandServer, DaemonLock};
 
 fn main() {
     std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
 
     let args: Vec<String> = std::env::args().collect();
-    // `kitchen-sink toggle` is `show`'s sibling (both flip the palette).
-    let mode = args.get(1).cloned().map(|m| {
-        if m == "toggle" {
-            "show".to_string()
-        } else {
-            m
-        }
-    });
+    let mode = args.get(1).cloned();
 
     // Non-daemon one-shot commands (the ws-settings / CLI fast path).
     if let Some(cmd) = mode.as_deref() {
@@ -71,21 +64,29 @@ fn main() {
 
     configure_helper();
     let paths = Paths::from_env();
+    ensure_home(&paths);
 
-    let sock = paths.notes_socket_path();
-    let lock_path = format!("{sock}.lock");
-
-    match DaemonLock::try_acquire(&lock_path) {
-        None => {
-            // Another daemon owns the lock: forward the request and exit
-            // (mirrors `sendLaunchMessage` / `sendToggle`).
-            let msg = mode.unwrap_or_else(|| "ping".into());
-            let _ = socket::request(&sock, &msg);
-        }
-        Some(_lock) => {
-            run_daemon(sock, mode);
+    // The CLI client pass (`main.swift`): forward to a running daemon, print
+    // replies, or come back holding the daemon lock.
+    match app::cli::run(&args, &paths) {
+        app::cli::Outcome::Exit(code) => std::process::exit(code),
+        app::cli::Outcome::Daemon { mode, lock } => {
+            let _lock: DaemonLock = lock;
+            run_daemon(paths.notes_socket_path(), mode);
         }
     }
+}
+
+/// `AppInstall.ensureHome()`: an installed app (not a repo build, not running
+/// from the disk image) keeps `~/.config/kitchen-sink` set up for its version.
+fn ensure_home(paths: &Paths) {
+    use objc2_foundation::{NSBundle, NSString};
+    let version = NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&NSString::from_str("CFBundleShortVersionString"))
+        .and_then(|v| v.downcast::<NSString>().ok())
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    views::setup::AppInstall::from_paths(paths, version).ensure_home(false);
 }
 
 /// Point the Python helper at the right `pylib` and export the config path
@@ -180,6 +181,10 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
             let _ = controller.do_action("toggle-terminal");
         }
         MenuAction::CloseWindow => controller.hide("menu"),
+        MenuAction::ToggleHideOnFocusLoss => {
+            let (on, _) = controller.focus_loss_settings();
+            controller.set_hide_on_focus_loss(!on, true);
+        }
         MenuAction::SetHeaderStyle(style) => {
             let _ = controller.do_action(&format!("header-style:{}", style.raw_value()));
         }

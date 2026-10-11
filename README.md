@@ -1,8 +1,8 @@
 # kitchen-sink
 
 A macOS app: AeroSpace switcher popup + notes / voice-to-text / Jira windows,
-with a borders focused-window outline. Native AppKit (Swift), no runtime
-dependencies beyond what the installer brings.
+with a borders focused-window outline. Native AppKit app written in Rust
+(objc2; `rust/`), no runtime dependencies beyond what the installer brings.
 
 ## Install (end user — pick one)
 
@@ -85,11 +85,14 @@ menu, or pass a command. `./ws help` lists everything.
 The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
 `bin/fake-*.sh`) still work as thin shims around the same functions.
 
-- `PopupWindow.swift` — reusable AppKit popup framework (windows, chrome,
-  rows, filters, editor, embedded terminal, record meter)
-- `kitchen_sink.swift` — host app: commands.toml parsing, aerospace IPC,
-  icons, voice recorder (AVAudioEngine → SFSpeechRecognizer)
-- `main.swift` — entry point
+- `rust/ws-rs` — the app (`kitchen-sink` binary): `app/` host, socket, CLI
+  client, config, Python helper client; `ui/` popup framework + shared
+  window; `views/` notes, files, jira, confluence, AI, compare, screenshot, …;
+  `engines/` pure logic; `panes/` pane focus + vim keys
+- `rust/swiftterm-shim` — the one Swift piece: a tiny `NSView` wrapper around
+  the pinned SwiftTerm library for the embedded terminal
+- `rust/ws-helpers` — the notify AX helpers (`dock_badges`, `webex_unread`)
+- `bin/build-app.sh` — `cargo build` → the signed `kitchen-sink.app`
 - `commands.toml` — every user-facing string + window definition (the app is
   config-driven; new windows need no code)
 - `bin/kitchen_sink.sh` — hotkey launcher (pings the daemon, launches via

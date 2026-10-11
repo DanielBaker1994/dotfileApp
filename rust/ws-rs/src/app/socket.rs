@@ -24,10 +24,49 @@ use std::time::Duration;
 use serde_json::Value;
 
 const RECV_TIMEOUT_SECS: i64 = 2;
+const SEND_TIMEOUT_SECS: i64 = 5;
 const READ_MAX: usize = 2048;
 const LISTEN_BACKLOG: i32 = 4;
 
-const RAW_VERBS: [&str; 5] = ["reload", "restart", "screenshot", "compare", "pane-shot"];
+const RAW_VERBS: [&str; 6] = [
+    "reload",
+    "restart",
+    "screenshot",
+    "screenshot-permission",
+    "compare",
+    "pane-shot",
+];
+
+/// The reply side of one raw-verb connection: a dup of the client fd that the
+/// handler may answer now or later, from any thread (Swift keeps `cfd` open
+/// for `compare --wait`, screenshot and pane-shot replies). Dropping it
+/// closes the connection.
+pub struct Reply {
+    fd: RawFd,
+}
+
+impl Reply {
+    fn dup(fd: RawFd) -> Option<Reply> {
+        let d = unsafe { libc::dup(fd) };
+        (d >= 0).then_some(Reply { fd: d })
+    }
+
+    /// Write one newline-terminated line, then close.
+    pub fn send(self, line: &str) {
+        write_line(self.fd, line);
+    }
+
+    /// Write raw bytes (screenshot `--raw` PNG / geometry), then close.
+    pub fn send_bytes(self, data: &[u8]) {
+        write_all(self.fd, data);
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.fd) };
+    }
+}
 
 /// The app side of the command protocol. The server calls these from its
 /// accept thread; implementors must be `Send + Sync`.
@@ -39,6 +78,12 @@ pub trait CommandHandler: Send + Sync {
     /// Handle a raw-verb request (`reload`, `screenshot`, `compare`, …).
     /// `None` = the request wants no reply (close silently).
     fn raw_request(&self, verb: &str, rest: &str) -> Option<String>;
+    /// Take a raw verb asynchronously: keep `reply` to answer later (or drop
+    /// it to close with no reply) and return `None`; hand it back to fall
+    /// through to [`Self::raw_request`].
+    fn raw_deferred(&self, _verb: &str, _rest: &str, reply: Reply) -> Option<Reply> {
+        Some(reply)
+    }
     /// Anything else is a launch/hotkey message, delivered with no reply.
     fn launch(&self, message: &str);
 }
@@ -153,6 +198,27 @@ fn accept_loop(listener: Arc<AtomicI32>, handler: Arc<dyn CommandHandler>) {
 }
 
 fn configure_conn(fd: RawFd) {
+    // On macOS an accepted socket inherits the listener's O_NONBLOCK: a reply
+    // larger than the socket buffer (~8 KB — a `state` with compare rows) then
+    // hits EAGAIN and is cut short. Replies are written blocking, bounded by
+    // SO_SNDTIMEO so a stalled client cannot wedge the accept loop.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    }
+    let send_tv = libc::timeval {
+        tv_sec: SEND_TIMEOUT_SECS as libc::time_t,
+        tv_usec: 0,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &send_tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
     let one: libc::c_int = 1;
     unsafe {
         libc::setsockopt(
@@ -212,6 +278,12 @@ fn handle_conn(fd: RawFd, handler: &dyn CommandHandler) {
         None => (query.as_str(), ""),
     };
     if RAW_VERBS.contains(&verb) {
+        if let Some(reply) = Reply::dup(fd) {
+            match handler.raw_deferred(verb, rest, reply) {
+                None => return,
+                Some(unused) => drop(unused),
+            }
+        }
         if let Some(line) = handler.raw_request(verb, rest) {
             write_line(fd, &line);
         }
@@ -471,6 +543,49 @@ mod tests {
             h.seen.lock().unwrap().as_slice(),
             &[("compare".to_string(), "--wait /a /b".to_string())]
         );
+    }
+
+    #[test]
+    fn large_state_reply_is_not_truncated() {
+        // > the ~8 KB unix socket buffer: must arrive whole (accepted fds
+        // inherit the listener's O_NONBLOCK on macOS).
+        let big = "x".repeat(200_000);
+        let h = Arc::new(FakeHandler { state: json!({ "big": big }), ..Default::default() });
+        let (_s, path) = start(h, "big-state");
+        let reply = request(&path, "state").unwrap().unwrap();
+        let v: Value = serde_json::from_str(&reply).expect("whole JSON");
+        assert_eq!(v["big"].as_str().unwrap().len(), 200_000);
+    }
+
+    #[test]
+    fn deferred_raw_reply_answers_from_another_thread() {
+        struct Later;
+        impl CommandHandler for Later {
+            fn state_json(&self) -> Value {
+                json!({})
+            }
+            fn do_action(&self, _action: &str) -> Option<Value> {
+                None
+            }
+            fn raw_request(&self, _verb: &str, _rest: &str) -> Option<String> {
+                Some("sync".to_string())
+            }
+            fn raw_deferred(&self, verb: &str, _rest: &str, reply: Reply) -> Option<Reply> {
+                if verb != "compare" {
+                    return Some(reply);
+                }
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    reply.send("done");
+                });
+                None
+            }
+            fn launch(&self, _message: &str) {}
+        }
+        let path = temp_path("raw-deferred");
+        let _s = CommandServer::start(&path, Arc::new(Later) as Arc<dyn CommandHandler>).unwrap();
+        assert_eq!(request(&path, "compare\t--wait\t/a").unwrap().as_deref(), Some("done"));
+        assert_eq!(request(&path, "reload").unwrap().as_deref(), Some("sync"), "handed back: sync path");
     }
 
     #[test]

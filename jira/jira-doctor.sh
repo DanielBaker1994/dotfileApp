@@ -7,7 +7,6 @@ FIX=0
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$WS_ROOT/install.conf" 2>/dev/null \
     || { printf 'jira-doctor: cannot read %s/install.conf\n' "$WS_ROOT" >&2; exit 1; }
-SWIFTTERM_SRC="$WS_ROOT/${SWIFTTERM_DIR:-../SwiftTerm}"
 WS_APP="$WS_ROOT/kitchen-sink.app"
 WS_BIN="$WS_APP/Contents/MacOS/kitchen-sink"
 CONF_JSON="$HOME/.config/jira/config.json"
@@ -30,7 +29,7 @@ head_() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
 running() { pgrep -x "$1" >/dev/null 2>&1; }
 
 head_ "== dependencies =="
-for b in curl jq python3 aerospace swiftc brew; do
+for b in curl jq python3 aerospace cargo swiftc brew; do
     if command -v "$b" >/dev/null 2>&1; then ok "$b ($(command -v "$b"))"; else bad "$b missing"; fi
 done
 
@@ -82,38 +81,13 @@ fi
 
 head_ "== kitchen-sink daemon =="
 if [ -x "$WS_BIN" ]; then
-    STALE=0
-    for src in "$WS_ROOT/main.swift" "$WS_ROOT/kitchen_sink.swift" "$WS_ROOT/PopupWindow.swift"; do
-        [ "$src" -nt "$WS_BIN" ] && STALE=1
-    done
-    if [ "$STALE" = 1 ]; then
+    if [ -x "$WS_ROOT/bin/build-app.sh" ] && "$WS_ROOT/bin/build-app.sh" --stale; then
         if [ "$FIX" = 1 ]; then
-            "$WS_ROOT/bin/ensure-swiftterm.sh" >/dev/null 2>&1 || true
-            if [ ! -f "$WS_ROOT/.build/SwiftTerm/libSwiftTerm.a" ]; then
-                mkdir -p "$WS_ROOT/.build/SwiftTerm"
-                (cd "$WS_ROOT" && swiftc -O -swift-version 5 -parse-as-library -emit-library -static -module-name SwiftTerm \
-                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/*.swift \
-                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Apple/*.swift \
-                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Apple/Metal/*.swift \
-                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Mac/*.swift \
-                    "$SWIFTTERM_SRC"/Sources/SwiftTerm/Portable/*.swift \
-                    "$SWIFTTERM_SRC"/Generated/*.swift \
-                    -emit-module -emit-module-path .build/SwiftTerm/SwiftTerm.swiftmodule \
-                    -o .build/SwiftTerm/libSwiftTerm.a >/dev/null 2>&1)
-            fi
-            if (mkdir -p "$WS_APP/Contents/MacOS" && cd "$WS_ROOT" && swiftc -O -swift-version 5 -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
-                -I .build/SwiftTerm -Xlinker .build/SwiftTerm/libSwiftTerm.a \
-                PopupWindow.swift kitchen_sink.swift main.swift -o "$WS_BIN" >/dev/null 2>&1); then
-                cp "$WS_ROOT/Info.plist" "$WS_APP/Contents/Info.plist"
-                codesign --force --sign - --identifier dev.danielbaker.kitchen-sink "$WS_APP" >/dev/null 2>&1
+            # the one build path (cargo; re-signs + re-grants TCC itself)
+            if "$WS_ROOT/bin/build-app.sh" --force >/dev/null 2>&1; then
                 ok "binary rebuilt (--fix): $WS_BIN"
-                if "$WS_ROOT/bin/grant-permissions.sh" >/dev/null 2>&1; then
-                    ok "voice permissions re-granted (mic + speech recognition)"
-                else
-                    warn "voice permissions could not be granted — run $WS_ROOT/bin/grant-permissions.sh"
-                fi
             else
-                bad "binary rebuild failed (see swiftc output)"
+                bad "binary rebuild failed (run $WS_ROOT/bin/build-app.sh --force for the log)"
             fi
         else
             warn "binary older than sources — next hotkey rebuilds it (jira-doctor --fix rebuilds now)"

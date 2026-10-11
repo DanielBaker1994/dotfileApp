@@ -1,17 +1,28 @@
-//! Port of `VimKeys.swift` — the pure half: the NORMAL/INSERT key state
-//! machine, the [`VimTarget`] models it drives, and the `pane.vimMode` /
-//! `pane.vimSearch` test state.
+//! Port of `VimKeys.swift` — the NORMAL/INSERT/SEARCH key state machine, the
+//! [`VimTarget`] models it drives, the `/`/`?` search bar (query editing with
+//! undo, incremental matching, `n`/`N` stepping with wrap, and origin
+//! restore), and the `pane.vimMode` / `pane.vimSearch` test state.
 //!
-//! AppKit (`NSView`, `NSTextView`, `WKWebView`, nvim RPC) is out of scope: a
-//! target is a plain scrollable model, and the mode badge's drawing is a
-//! documented `todo!()`. Search *matching* (`VimSearch.swift`) is also out of
-//! scope; `openSearch` / `n` / `N` are reported as actions for the host.
+//! The row/text matching engine is the real port in [`vim_search`]. AppKit
+//! (`NSView`, `NSTextView`, `WKWebView`, nvim RPC) is modelled, not linked: a
+//! target is a plain scrollable model, clipboard paste arrives through
+//! [`VimContext::clipboard`], and copy is reported as [`VimAction::SearchCopy`]
+//! for the host to place on the pasteboard. The `NORMAL`/`INSERT` mode badge is
+//! the `NSView` subclass [`VimModeBadge`] below — on macOS it draws via
+//! `drawRect:` with the same geometry/colors as the pure [`badge_size`] /
+//! [`badge_fill`] / [`badge_origin`] helpers (which stay testable off-AppKit).
+
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::panes::pane_geometry::Rect;
 use crate::panes::pane_nav::RingStyle;
-use crate::ui::popup::{KeyInput, KEY_ESC, KEY_RETURN};
+use crate::panes::vim_search;
+use crate::ui::popup::{
+    KeyInput, KEY_A, KEY_C, KEY_DOWN, KEY_ESC, KEY_H, KEY_N, KEY_P, KEY_RETURN, KEY_UP, KEY_V,
+    KEY_W, KEY_X, KEY_Z,
+};
 use crate::ui::theme::{PopupColors, Rgba};
 
 /// macOS key codes not surfaced by `ui::popup`'s table.
@@ -183,7 +194,7 @@ impl VimTarget {
     }
 }
 
-/// The open `/` / `?` search bar.
+/// The open `/` / `?` search bar (`VimSearchBar` + the socket-facing fields).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchState {
     pub pane: String,
@@ -191,10 +202,32 @@ pub struct SearchState {
     pub status: String,
     pub back: bool,
     pub open: bool,
+    /// Where the bar opened: a row index (rows target) or a UTF-16 location
+    /// (text target). Esc restores the target to here.
+    pub origin: i64,
+    /// `VimSearchBar.undo`: the query history (for `Ctrl+Z` / `Cmd+Z`).
+    pub undo: Vec<String>,
+}
+
+impl SearchState {
+    /// `searchKey`'s `set(_:)`: remember the previous query, then replace it.
+    fn set(&mut self, query: String) {
+        self.undo.push(std::mem::take(&mut self.query));
+        self.query = query;
+    }
+
+    /// `set(String(query.dropLast()))` from Delete / `Ctrl+H`.
+    fn backspace(&mut self) {
+        if self.query.is_empty() {
+            return;
+        }
+        self.undo.push(self.query.clone());
+        self.query.pop();
+    }
 }
 
 /// `handle(_:in:)`'s side effects the host must carry out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VimAction {
     /// Not consumed: the key propagates to the text view / terminal.
     Pass,
@@ -206,8 +239,12 @@ pub enum VimAction {
     ExitToNormal,
     /// Open the `/` (back = false) or `?` (back = true) search bar.
     OpenSearch { back: bool },
-    /// Repeat the last search; `reverse` = `N` vs `n`.
+    /// Repeat the last search; `reverse` = `N` vs `n`. The model has already
+    /// moved the target; the host repaints the highlight.
     RepeatSearch { reverse: bool },
+    /// The host should copy this text to the pasteboard (`Ctrl+C` / `Cmd+C` /
+    /// `Cmd+X` in the search bar).
+    SearchCopy(String),
     /// Esc cleared the active highlight.
     ClearHighlight,
 }
@@ -220,6 +257,9 @@ pub struct VimContext<'a> {
     pub owns_vim: bool,
     pub has_insert: bool,
     pub has_normal: bool,
+    /// The pasteboard string, read on demand for `Ctrl+V` / `Cmd+V` in the
+    /// search bar. `None` means the host has no clipboard to offer.
+    pub clipboard: Option<&'a str>,
 }
 
 impl<'a> VimContext<'a> {
@@ -254,6 +294,8 @@ pub struct VimKeys {
     pub show_badge: bool,
     /// A `g` was pressed and may be the first half of `gg`.
     pub pending_g: bool,
+    /// When the pending `g` was pressed; `gg` only fires within 0.8 s.
+    pending_g_at: Option<Instant>,
     /// An active highlight exists (set by the host); Esc clears it.
     pub highlighting: bool,
     /// A jira-list-style field kept in normal mode (caret hidden).
@@ -278,6 +320,7 @@ impl VimKeys {
             enabled: true,
             show_badge: true,
             pending_g: false,
+            pending_g_at: None,
             highlighting: false,
             field_normal: false,
             last_query: String::new(),
@@ -337,8 +380,14 @@ impl VimKeys {
         VimKeysTestState { mode, pane: self.pane.clone(), search }
     }
 
-    /// `handle(_:in:)`.
+    /// `handle(_:in:)`: seeds the `gg` timeout from the current wall clock.
     pub fn handle(&mut self, key: KeyInput, ctx: &mut VimContext) -> VimAction {
+        self.handle_at(key, ctx, Instant::now())
+    }
+
+    /// `handle(_:in:)` with an explicit clock: the Swift `pendingG` expires
+    /// 0.8 s after the first `g`, so `gg` only fires within that window.
+    pub fn handle_at(&mut self, key: KeyInput, ctx: &mut VimContext, now: Instant) -> VimAction {
         if !self.enabled || ctx.owns_vim {
             return VimAction::Pass;
         }
@@ -350,7 +399,8 @@ impl VimKeys {
             .map(|s| s.open && s.pane == ctx.pane_id)
             .unwrap_or(false);
         if search_open {
-            return self.search_key(key);
+            let clipboard = ctx.clipboard;
+            return self.search_key(key, ctx.t(), clipboard);
         }
 
         let mods_empty = !key.cmd && !key.ctrl && !key.opt && !key.shift;
@@ -358,7 +408,7 @@ impl VimKeys {
 
         if ctx.is_text_input && !self.field_normal {
             if key.key_code == KEY_ESC && mods_empty && ctx.has_normal {
-                self.pending_g = false;
+                self.reset_pending_g();
                 self.mode = VimMode::Normal;
                 return VimAction::ExitToNormal;
             }
@@ -370,7 +420,7 @@ impl VimKeys {
         }
 
         if key.key_code == KEY_ESC && mods_empty && self.highlighting {
-            self.pending_g = false;
+            self.reset_pending_g();
             self.highlighting = false;
             return VimAction::ClearHighlight;
         }
@@ -378,7 +428,7 @@ impl VimKeys {
         if key.ctrl && !key.cmd && !key.opt && !key.shift
             && (key.key_code == KEY_D_CODE || key.key_code == KEY_U_CODE)
         {
-            self.pending_g = false;
+            self.reset_pending_g();
             let down = key.key_code == KEY_D_CODE;
             if let Some(t) = ctx.t() {
                 t.half_page(down);
@@ -389,17 +439,18 @@ impl VimKeys {
         let ch = if mods_shift_only { key.chars } else { None };
 
         if ch == Some('g') {
-            if self.pending_g {
-                self.pending_g = false;
+            if self.pending_g_fresh(now) {
+                self.reset_pending_g();
                 if let Some(t) = ctx.t() {
                     t.edge(false);
                 }
             } else {
                 self.pending_g = true;
+                self.pending_g_at = Some(now);
             }
             return VimAction::Handled;
         }
-        self.pending_g = false;
+        self.reset_pending_g();
 
         match ch {
             Some('j') => {
@@ -428,8 +479,8 @@ impl VimKeys {
                 self.open_search(ctx, true);
                 VimAction::OpenSearch { back: true }
             }
-            Some('n') => VimAction::RepeatSearch { reverse: false },
-            Some('N') => VimAction::RepeatSearch { reverse: true },
+            Some('n') => self.repeat_search(ctx.t(), false),
+            Some('N') => self.repeat_search(ctx.t(), true),
             Some('i') | Some('a') => {
                 if ctx.has_insert {
                     self.mode = VimMode::Insert;
@@ -455,52 +506,259 @@ impl VimKeys {
         }
     }
 
+    fn reset_pending_g(&mut self) {
+        self.pending_g = false;
+        self.pending_g_at = None;
+    }
+
+    fn pending_g_fresh(&self, now: Instant) -> bool {
+        self.pending_g
+            && self
+                .pending_g_at
+                .map(|t| now.saturating_duration_since(t) < Duration::from_millis(800))
+                .unwrap_or(false)
+    }
+
     fn open_search(&mut self, ctx: &VimContext, back: bool) {
+        let origin = match ctx.target.as_deref() {
+            Some(VimTarget::Rows(r)) => r.cursor as i64,
+            Some(VimTarget::Text(t)) => t.cursor as i64,
+            _ => 0,
+        };
         self.search = Some(SearchState {
             pane: ctx.pane_id.to_string(),
             query: String::new(),
             status: String::new(),
             back,
             open: true,
+            origin,
+            undo: Vec::new(),
         });
         self.mode = VimMode::Search;
     }
 
-    /// Reduced `searchKey`: edit the query, Esc cancels, Return accepts.
-    /// Matching/highlighting (`VimSearch`) is out of scope for this cut.
-    fn search_key(&mut self, key: KeyInput) -> VimAction {
+    /// `searchKey(_:_:in:)`: edit the query (with undo + `Ctrl+W` word drop),
+    /// step matches with the arrows, and accept / cancel. Esc restores the
+    /// target to where the bar opened. Clipboard paste comes from
+    /// [`VimContext::clipboard`]; copy is reported as [`VimAction::SearchCopy`].
+    fn search_key(
+        &mut self,
+        key: KeyInput,
+        target: Option<&mut VimTarget>,
+        clipboard: Option<&str>,
+    ) -> VimAction {
         let mut s = match self.search.take() {
             Some(s) => s,
             None => return VimAction::Pass,
         };
-        let mut keep = true;
-        if key.key_code == KEY_ESC && !key.cmd && !key.ctrl && !key.opt {
-            keep = false;
-            self.mode = VimMode::Normal;
-        } else if key.key_code == KEY_RETURN || key.key_code == KEY_ENTER_NUMPAD {
-            keep = false;
-            self.last_query = s.query.clone();
-            self.last_back = s.back;
-            self.mode = VimMode::Normal;
-        } else if key.key_code == KEY_DELETE && !key.cmd && !key.opt {
-            if s.query.is_empty() {
-                keep = false;
+        let cmd = key.cmd;
+        let ctrl = key.ctrl;
+        let opt = key.opt;
+        let mut action = VimAction::Handled;
+
+        match key.key_code {
+            KEY_ESC => {
+                self.restore_origin(&s, target);
+                self.highlighting = false;
                 self.mode = VimMode::Normal;
-            } else {
-                s.query.pop();
+                return VimAction::Handled;
             }
-        } else if !key.cmd && !key.ctrl && !key.opt {
-            if let Some(c) = key.chars {
-                if (c as u32) >= 0x20 && (c as u32) < 0xF700 {
-                    s.query.push(c);
+            KEY_RETURN | KEY_ENTER_NUMPAD => {
+                self.last_query = s.query.clone();
+                self.last_back = s.back;
+                self.highlighting = !s.query.is_empty();
+                self.mode = VimMode::Normal;
+                return VimAction::Handled;
+            }
+            KEY_DELETE if cmd || opt => {
+                let q = vim_search::drop_word(&s.query);
+                s.set(q);
+                self.incremental(&mut s, target);
+            }
+            KEY_DELETE => {
+                if s.query.is_empty() {
+                    self.restore_origin(&s, target);
+                    self.highlighting = false;
+                    self.mode = VimMode::Normal;
+                    return VimAction::Handled;
+                }
+                s.backspace();
+                self.incremental(&mut s, target);
+            }
+            KEY_DOWN => self.step_search(&mut s, target, false),
+            KEY_UP => self.step_search(&mut s, target, true),
+            _ => {
+                if ctrl && !cmd {
+                    match key.key_code {
+                        KEY_N => self.step_search(&mut s, target, false),
+                        KEY_P => self.step_search(&mut s, target, true),
+                        KEY_W => {
+                            let q = vim_search::drop_word(&s.query);
+                            s.set(q);
+                            self.incremental(&mut s, target);
+                        }
+                        KEY_U_CODE => {
+                            s.set(String::new());
+                            self.incremental(&mut s, target);
+                        }
+                        KEY_H => {
+                            s.backspace();
+                            self.incremental(&mut s, target);
+                        }
+                        KEY_V => {
+                            if let Some(c) = clipboard {
+                                let q = format!("{}{}", s.query, vim_search::one_line(c));
+                                s.set(q);
+                                self.incremental(&mut s, target);
+                            }
+                        }
+                        KEY_C => action = VimAction::SearchCopy(s.query.clone()),
+                        _ => {}
+                    }
+                } else if cmd {
+                    match key.key_code {
+                        KEY_V => {
+                            if let Some(c) = clipboard {
+                                let q = format!("{}{}", s.query, vim_search::one_line(c));
+                                s.set(q);
+                                self.incremental(&mut s, target);
+                            }
+                        }
+                        KEY_C => action = VimAction::SearchCopy(s.query.clone()),
+                        KEY_X => {
+                            action = VimAction::SearchCopy(s.query.clone());
+                            s.set(String::new());
+                            self.incremental(&mut s, target);
+                        }
+                        KEY_Z => {
+                            if let Some(prev) = s.undo.pop() {
+                                s.query = prev;
+                                self.incremental(&mut s, target);
+                            }
+                        }
+                        KEY_A => {}
+                        _ => {
+                            self.search = Some(s);
+                            return VimAction::Pass;
+                        }
+                    }
+                } else if let Some(c) = key.chars {
+                    if (c as u32) >= 0x20 && (c as u32) < 0xF700 {
+                        let q = format!("{}{}", s.query, c);
+                        s.set(q);
+                        self.incremental(&mut s, target);
+                    }
                 }
             }
         }
-        if keep {
-            self.search = Some(s);
-        }
-        VimAction::Handled
+        self.search = Some(s);
+        action
     }
+
+    /// `incremental(_:)`: match from the origin as the query is edited.
+    fn incremental(&mut self, s: &mut SearchState, mut target: Option<&mut VimTarget>) {
+        if s.query.is_empty() {
+            s.status.clear();
+            self.highlighting = false;
+            if let Some(VimTarget::Rows(r)) = target.as_deref_mut() {
+                if !r.texts.is_empty() {
+                    let last = r.texts.len() - 1;
+                    r.move_to((s.origin.max(0) as usize).min(last));
+                }
+            }
+            return;
+        }
+        self.highlighting = find_in(s, target, Some(s.origin), s.back, false);
+    }
+
+    /// `find(_:from:reverse:step:)` with `from == nil` (the arrow / `Ctrl+N|P`
+    /// step path): continues from the current target position, skipping it.
+    fn step_search(&mut self, s: &mut SearchState, target: Option<&mut VimTarget>, reverse: bool) {
+        if s.query.is_empty() {
+            return;
+        }
+        self.highlighting = find_in(s, target, None, reverse, true);
+    }
+
+    /// `repeatSearch(_:reverse:pane:in:)`: `n` / `N` after a completed search.
+    fn repeat_search(&mut self, target: Option<&mut VimTarget>, reverse: bool) -> VimAction {
+        if self.last_query.is_empty() {
+            return VimAction::RepeatSearch { reverse };
+        }
+        let query = self.last_query.clone();
+        let back = self.last_back != reverse;
+        match target {
+            Some(VimTarget::Rows(r)) => {
+                let hit = vim_search::rows(&r.texts, &query, r.cursor as i64, back, true);
+                if let Some(i) = hit.0 {
+                    r.move_to(i);
+                }
+            }
+            Some(VimTarget::Text(t)) => {
+                let hit = vim_search::text(&t.content, &query, t.cursor as i64, back, true);
+                if let Some(rg) = hit.0 {
+                    t.cursor = rg.location;
+                }
+            }
+            _ => {}
+        }
+        self.highlighting = true;
+        VimAction::RepeatSearch { reverse }
+    }
+
+    /// `closeSearch(accept: false, ...)`: put the target back where the bar
+    /// opened (rows cursor, or text selection location).
+    fn restore_origin(&self, s: &SearchState, target: Option<&mut VimTarget>) {
+        match target {
+            Some(VimTarget::Rows(r)) => {
+                if !r.texts.is_empty() {
+                    let last = r.texts.len() - 1;
+                    r.move_to((s.origin.max(0) as usize).min(last));
+                }
+            }
+            Some(VimTarget::Text(t)) => t.cursor = s.origin.max(0) as usize,
+            _ => {}
+        }
+    }
+}
+
+/// One `VimSearch` step against a [`VimTarget`]: move the target to the hit and
+/// record the `status`. Returns whether the host should paint a highlight (any
+/// non-empty query does, matching Swift's `defer { highlight(...) }`).
+fn find_in(
+    s: &mut SearchState,
+    target: Option<&mut VimTarget>,
+    from: Option<i64>,
+    reverse: bool,
+    step: bool,
+) -> bool {
+    let query = s.query.clone();
+    if query.is_empty() {
+        s.status.clear();
+        return false;
+    }
+    let skip = step || from.is_none();
+    match target {
+        Some(VimTarget::Rows(r)) => {
+            let start = from.unwrap_or(r.cursor as i64);
+            let hit = vim_search::rows(&r.texts, &query, start, reverse, skip);
+            if let Some(i) = hit.0 {
+                r.move_to(i);
+            }
+            s.status = vim_search::status(hit.0.is_some(), hit.1, hit.2);
+        }
+        Some(VimTarget::Text(t)) => {
+            let start = from.unwrap_or(t.cursor as i64);
+            let hit = vim_search::text(&t.content, &query, start, reverse, skip);
+            if let Some(rg) = hit.0 {
+                t.cursor = rg.location;
+            }
+            s.status = vim_search::status(hit.0.is_some(), hit.1, hit.2);
+        }
+        Some(VimTarget::Web(_)) => s.status = "match".to_string(),
+        None => {}
+    }
+    true
 }
 
 /// `VimModeBadge` (`VimKeys.swift:643`): the bottom-right NORMAL/INSERT chip.
@@ -712,6 +970,7 @@ mod tests {
             owns_vim: false,
             has_insert: true,
             has_normal: true,
+            clipboard: None,
         }
     }
 
@@ -720,11 +979,51 @@ mod tests {
         vim.handle(k, &mut c)
     }
 
+    fn apply_at(
+        vim: &mut VimKeys,
+        target: &mut VimTarget,
+        pane: &str,
+        k: KeyInput,
+        now: Instant,
+    ) -> VimAction {
+        let mut c = ctx(target, pane, false);
+        vim.handle_at(k, &mut c, now)
+    }
+
+    fn apply_clip(vim: &mut VimKeys, target: &mut VimTarget, pane: &str, k: KeyInput, clip: &str) -> VimAction {
+        let mut c = VimContext {
+            pane_id: pane,
+            target: Some(target),
+            is_text_input: false,
+            owns_vim: false,
+            has_insert: true,
+            has_normal: true,
+            clipboard: Some(clip),
+        };
+        vim.handle(k, &mut c)
+    }
+
     fn rows(n: usize) -> VimTarget {
         let texts = (0..n).map(|i| format!("row {i}")).collect();
         let mut r = VimRows::new(texts);
         r.page = 10;
         VimTarget::Rows(r)
+    }
+
+    fn matching_rows() -> VimTarget {
+        let texts = ["alpha", "beta", "gamma", "beta two", "delta"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        VimTarget::Rows(VimRows::new(texts))
+    }
+
+    fn cursor(t: &VimTarget) -> usize {
+        match t {
+            VimTarget::Rows(r) => r.cursor,
+            VimTarget::Text(x) => x.cursor,
+            _ => 0,
+        }
     }
 
     #[test]
@@ -898,6 +1197,7 @@ mod tests {
             owns_vim: true,
             has_insert: false,
             has_normal: false,
+            clipboard: None,
         };
         assert_eq!(vim.mode(&mut c), None);
 
@@ -908,6 +1208,7 @@ mod tests {
             owns_vim: false,
             has_insert: false,
             has_normal: false,
+            clipboard: None,
         };
         assert_eq!(vim.mode(&mut c2), None);
     }
@@ -956,5 +1257,159 @@ mod tests {
         let c = badge_default_ring();
         assert!((c.r - 200.0 / 255.0).abs() < 1e-9);
         assert!((c.a - 140.0 / 255.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gg_requires_a_fresh_pending_g() {
+        let mut vim = VimKeys::new();
+        let mut t = VimTarget::Rows(VimRows::new(vec!["a".into(), "b".into(), "c".into()]));
+        apply(&mut vim, &mut t, "list", false, key(5, Some('G')));
+        assert_eq!(cursor(&t), 2, "G to the bottom");
+        let t0 = Instant::now();
+        apply_at(&mut vim, &mut t, "list", key(5, Some('g')), t0);
+        // A second `g` a second later is a *new* `g`, not `gg`.
+        apply_at(&mut vim, &mut t, "list", key(5, Some('g')), t0 + Duration::from_secs(1));
+        assert_eq!(cursor(&t), 2, "a stale `g` does not fire gg");
+        // Within 0.8 s of that second `g`, `gg` fires.
+        apply_at(&mut vim, &mut t, "list", key(5, Some('g')), t0 + Duration::from_millis(1100));
+        assert_eq!(cursor(&t), 0, "a fresh `g` pair fires gg");
+    }
+
+    #[test]
+    fn search_bar_edits_and_undo() {
+        let mut vim = VimKeys::new();
+        let mut t = matching_rows();
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(44, Some('/'))), VimAction::OpenSearch { back: false });
+        // open at row 0, origin captured
+        assert_eq!(vim.search.as_ref().unwrap().origin, 0);
+        for c in ['b', 'e', 't', 'a'] {
+            apply(&mut vim, &mut t, "list", false, key(0, Some(c)));
+        }
+        assert_eq!(vim.search.as_ref().unwrap().query, "beta");
+        assert_eq!(vim.search.as_ref().unwrap().status, "1/2", "typing advances to the first hit");
+        assert_eq!(cursor(&t), 1, "incremental search moved the cursor to 'beta'");
+        // backspace
+        apply(&mut vim, &mut t, "list", false, key(KEY_DELETE, None));
+        assert_eq!(vim.search.as_ref().unwrap().query, "bet");
+        // Ctrl+W drops the whole (only) word
+        apply(&mut vim, &mut t, "list", false, ctrl(KEY_W));
+        assert_eq!(vim.search.as_ref().unwrap().query, "");
+        assert_eq!(vim.search.as_ref().unwrap().status, "");
+        assert_eq!(cursor(&t), 0, "an empty query snaps back to the origin");
+        // type then Cmd+Z restores the prior query
+        apply(&mut vim, &mut t, "list", false, key(0, Some('b')));
+        apply(&mut vim, &mut t, "list", false, key(0, Some('e')));
+        let cmd_z = KeyInput { key_code: KEY_Z, chars: Some('z'), cmd: true, ctrl: false, opt: false, shift: false, esc_streak: 0 };
+        apply(&mut vim, &mut t, "list", false, cmd_z);
+        assert_eq!(vim.search.as_ref().unwrap().query, "b");
+    }
+
+    #[test]
+    fn search_bar_steps_and_wraps() {
+        let mut vim = VimKeys::new();
+        let mut t = matching_rows();
+        apply(&mut vim, &mut t, "list", false, key(44, Some('/')));
+        for c in ['b', 'e', 't', 'a'] {
+            apply(&mut vim, &mut t, "list", false, key(0, Some(c)));
+        }
+        assert_eq!(cursor(&t), 1);
+        assert_eq!(vim.search.as_ref().unwrap().status, "1/2");
+        // Down steps to the second hit
+        apply(&mut vim, &mut t, "list", false, key(KEY_DOWN, None));
+        assert_eq!(cursor(&t), 3);
+        assert_eq!(vim.search.as_ref().unwrap().status, "2/2");
+        // Down again wraps back to the first
+        apply(&mut vim, &mut t, "list", false, key(KEY_DOWN, None));
+        assert_eq!(cursor(&t), 1);
+        // Up wraps to the last
+        apply(&mut vim, &mut t, "list", false, key(KEY_UP, None));
+        assert_eq!(cursor(&t), 3);
+    }
+
+    #[test]
+    fn search_bar_esc_restores_origin() {
+        let mut vim = VimKeys::new();
+        let mut t = matching_rows();
+        // move to row 4, then open search and type; Esc puts us back at row 4
+        apply(&mut vim, &mut t, "list", false, key(KEY_J, Some('j')));
+        apply(&mut vim, &mut t, "list", false, key(KEY_J, Some('j')));
+        apply(&mut vim, &mut t, "list", false, key(KEY_J, Some('j')));
+        apply(&mut vim, &mut t, "list", false, key(KEY_J, Some('j')));
+        assert_eq!(cursor(&t), 4);
+        apply(&mut vim, &mut t, "list", false, key(44, Some('/')));
+        for c in ['b', 'e', 't', 'a'] {
+            apply(&mut vim, &mut t, "list", false, key(0, Some(c)));
+        }
+        assert_eq!(cursor(&t), 1);
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(KEY_ESC, None)), VimAction::Handled);
+        assert_eq!(cursor(&t), 4, "Esc restores the cursor to where / opened");
+        assert!(vim.search.is_none());
+        assert!(!vim.highlighting);
+    }
+
+    #[test]
+    fn search_bar_accept_remembers_the_query() {
+        let mut vim = VimKeys::new();
+        let mut t = matching_rows();
+        apply(&mut vim, &mut t, "list", false, key(44, Some('/')));
+        for c in ['b', 'e', 't', 'a'] {
+            apply(&mut vim, &mut t, "list", false, key(0, Some(c)));
+        }
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(KEY_RETURN, None)), VimAction::Handled);
+        assert_eq!(vim.last_query, "beta");
+        assert!(!vim.last_back);
+        // n / N now move over the real list
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(KEY_N, Some('n'))), VimAction::RepeatSearch { reverse: false });
+        assert_eq!(cursor(&t), 3, "n skips to the next match");
+        assert_eq!(apply(&mut vim, &mut t, "list", false, key(KEY_N, Some('N'))), VimAction::RepeatSearch { reverse: true });
+        assert_eq!(cursor(&t), 1, "N steps back");
+        assert!(vim.highlighting, "repeat marks the highlight for repaint");
+    }
+
+    #[test]
+    fn search_bar_paste_and_copy_actions() {
+        let mut vim = VimKeys::new();
+        let mut t = matching_rows();
+        apply(&mut vim, &mut t, "list", false, key(44, Some('/')));
+        let cmd_v = KeyInput { key_code: KEY_V, chars: Some('v'), cmd: true, ctrl: false, opt: false, shift: false, esc_streak: 0 };
+        assert_eq!(apply_clip(&mut vim, &mut t, "list", cmd_v, "al\npha"), VimAction::Handled);
+        assert_eq!(vim.search.as_ref().unwrap().query, "al pha", "paste joins lines with spaces");
+        let cmd_c = KeyInput { key_code: KEY_C, chars: Some('c'), cmd: true, ctrl: false, opt: false, shift: false, esc_streak: 0 };
+        assert_eq!(
+            apply_clip(&mut vim, &mut t, "list", cmd_c, ""),
+            VimAction::SearchCopy("al pha".to_string())
+        );
+    }
+
+    #[test]
+    fn search_bar_text_target_uses_utf16_origin() {
+        let mut vim = VimKeys::new();
+        let mut t = VimTarget::Text(VimText::new("beta one two beta", 0, 40.0, 20.0));
+        apply(&mut vim, &mut t, "editor", false, key(44, Some('/')));
+        for c in ['b', 'e', 't', 'a'] {
+            apply(&mut vim, &mut t, "editor", false, key(0, Some(c)));
+        }
+        assert_eq!(cursor(&t), 0, "incremental match at the origin");
+        apply(&mut vim, &mut t, "editor", false, key(KEY_DOWN, None));
+        assert_eq!(cursor(&t), 13, "stepping to the second 'beta'");
+        assert_eq!(apply(&mut vim, &mut t, "editor", false, key(KEY_ESC, None)), VimAction::Handled);
+        assert_eq!(cursor(&t), 0, "Esc restores the text origin");
+    }
+
+    #[test]
+    fn visual_counts_and_edit_ops_are_not_in_vim_keys() {
+        // VimKeys.swift implements no visual mode, numeric counts, or
+        // delete/change/put ops; those live in nvim (the notes vim pane).
+        // Guard the surface so a partial port is noticed: `w`/`d`/`c`/`p`/digits
+        // simply fall through to `Pass` in a non-field normal target.
+        let mut vim = VimKeys::new();
+        let mut t = matching_rows();
+        for (code, c) in [(13u16, 'w'), (2, 'd'), (8, 'c'), (35, 'p'), (29, '0'), (18, '1')] {
+            assert_eq!(
+                apply(&mut vim, &mut t, "list", false, key(code, Some(c))),
+                VimAction::Pass,
+                "'{c}' is not a VimKeys normal-mode motion"
+            );
+        }
     }
 }

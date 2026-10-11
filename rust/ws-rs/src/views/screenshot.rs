@@ -30,9 +30,23 @@
 //! pin into `PinPanel::handle_key`, consuming handled keys and passing the rest
 //! through.
 //!
-//! `todo!()`: the remaining AppKit overlay chrome subviews (`ShotButton` ring,
-//! help card, loupe, wheel, side panel, save-card field, recent panel) and the
-//! OCR image path.
+//! Real: the OCR image path — [`crate::engines::screenshot_text::ShotOCR`] runs
+//! Vision `VNRecognizeTextRequest` over the rendered capture (honouring the
+//! `[screenshot] text-languages` / `text-correction` config), driven from
+//! `deliver_text` and warmed by `prewarm`; a missing permission, an off-main
+//! call or a non-decodable image degrades to the "no text" path, never an error.
+//!
+//! Real: the overlay chrome — the `ShotOverlayView` render pass paints the help
+//! card, the button ring, the right-click colour wheel, the loupe and the save
+//! card alongside the core surface (dim/selection/handles/text draft). The
+//! chrome *layout* is ported as pure, unit-tested models (`ShotWheel`,
+//! `ShotLoupe`, `ShotHelpCard`, `ShotSaveCard`, `ShotSidePanel`,
+//! `ShotRecentButton`, `ShotModePill`, `ShotToolTab`, `ShotSizeIndicator`).
+//!
+//! `todo!()`: the interactive AppKit controls the Swift subviews embed — the
+//! side-panel settings form (sliders/steppers/table) and the editable
+//! save-card field — keep their layout models only; their SF Symbol glyphs and
+//! editable controls are not rebuilt in the Rust overlay.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -632,6 +646,35 @@ extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
+/// `NSScreen.screens` as [`ScreenRef`]s: the `NSScreenNumber` display id, the
+/// AppKit frame (the overlay panels use it as-is) and the backing scale.
+/// Empty off the main thread.
+#[cfg(target_os = "macos")]
+pub fn current_screens() -> Vec<ScreenRef> {
+    use objc2_app_kit::NSScreen;
+    use objc2_foundation::{NSNumber, NSString};
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    let key = NSString::from_str("NSScreenNumber");
+    NSScreen::screens(mtm)
+        .iter()
+        .filter_map(|scr| {
+            let id = scr
+                .deviceDescription()
+                .objectForKey(&key)
+                .and_then(|o| o.downcast::<NSNumber>().ok())?
+                .unsignedIntValue();
+            let f = scr.frame();
+            Some(ScreenRef::new(
+                id,
+                Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height),
+                scr.backingScaleFactor(),
+            ))
+        })
+        .collect()
+}
+
 pub fn screen_capture_permitted() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
@@ -1158,6 +1201,8 @@ pub struct ShotDisplay {
     pub scale: f64,
     pub key: bool,
     pub level: i64,
+    /// The live overlay panel's window number (0 until presented).
+    pub wid: i64,
 }
 
 impl ShotDisplay {
@@ -1167,6 +1212,7 @@ impl ShotDisplay {
             frame,
             scale,
             key: false,
+            wid: 0,
             // NSScreenSaverWindowLevel.
             level: 1000,
         }
@@ -2213,6 +2259,13 @@ impl ShotSession {
     /// `ShotRenderer.render`: crop the frozen image at the display's backing
     /// scale, then draw every object over it in top-left point space.
     pub fn render(&self) -> Option<ShotImage> {
+        self.render_with(true)
+    }
+
+    /// `ShotRenderer.render(objects:)`. Swift's `finish` renders a text capture
+    /// with `objects: false` so OCR reads the raw frozen image rather than the
+    /// annotations drawn on top of it.
+    pub fn render_with(&self, draw_objects: bool) -> Option<ShotImage> {
         let active = self.active?;
         let crop = self.selection?;
         let display = self.displays.get(active)?;
@@ -2223,11 +2276,13 @@ impl ShotSession {
                 objc2_core_graphics::CGImage::width(Some(base)) as i64,
                 display.frame.w,
             );
-            shot_cg::render_shot(base, scale, crop, &self.doc.objects)
+            let empty: [ShotObject; 0] = [];
+            let objects: &[ShotObject] = if draw_objects { &self.doc.objects } else { &empty };
+            shot_cg::render_shot(base, scale, crop, objects)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = display;
+            let _ = (display, draw_objects);
             None
         }
     }
@@ -2263,6 +2318,197 @@ pub fn selection_handle_at(sel: Rect, p: Point, button_size: f64) -> Option<i64>
         .iter()
         .position(|h| ShotGeom::dist(p, *h) <= r)
         .map(|i| i as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Overlay chrome geometry (port of ScreenshotOverlay.swift's subview maths)
+// ---------------------------------------------------------------------------
+//
+// The Rust overlay paints its chrome directly in `ShotOverlayView::render`
+// instead of building AppKit subviews. These models port the pure layout each
+// Swift subview computes (frame origins, hit-tests, content sizes) so the
+// drawing pass and the socket tests share one source of truth.
+
+/// `ShotWheelView` — the right-click colour wheel.
+pub struct ShotWheel;
+
+impl ShotWheel {
+    pub const DOT: f64 = 26.0;
+
+    /// `ShotWheelView.radius(_:)`.
+    pub fn radius(n: usize) -> f64 {
+        56.0f64.max(n as f64 * (Self::DOT + 8.0) / (2.0 * std::f64::consts::PI))
+    }
+
+    /// `ShotWheelView`'s swatch centre: index `i` starts at 12 o'clock and
+    /// walks clockwise.
+    pub fn dot_center(center: Point, i: usize, n: usize) -> Point {
+        let a = -std::f64::consts::PI / 2.0
+            + 2.0 * std::f64::consts::PI * i as f64 / n.max(1) as f64;
+        Point::new(
+            center.x + a.cos() * Self::radius(n),
+            center.y + a.sin() * Self::radius(n),
+        )
+    }
+
+    /// `ShotWheelView.index(at:center:count:)`; `None` for an empty wheel or a
+    /// point that is not within `DOT/2 + 4` of a swatch.
+    pub fn index_at(p: Point, center: Point, n: usize) -> Option<usize> {
+        if n == 0 {
+            return None;
+        }
+        (0..n).find(|&i| ShotGeom::dist(p, Self::dot_center(center, i, n)) <= Self::DOT / 2.0 + 4.0)
+    }
+}
+
+/// `ShotLoupe` — the magnifier.
+pub struct ShotLoupe;
+
+impl ShotLoupe {
+    pub const SIDE: f64 = 132.0;
+    pub const PX: i64 = 15;
+
+    /// The `ShotLoupe.update` origin: 24pt down-right of the pointer, flipped
+    /// to the opposite side when the frame would overflow `bounds`.
+    pub fn origin(p: Point, size: Size, bounds: Rect) -> Point {
+        let mut o = Point::new(p.x + 24.0, p.y + 24.0);
+        if o.x + size.w > bounds.max_x() {
+            o.x = p.x - 24.0 - size.w;
+        }
+        if o.y + size.h > bounds.max_y() {
+            o.y = p.y - 24.0 - size.h;
+        }
+        o
+    }
+}
+
+/// `ShotRecentButton` — the recents button beside the mode pill.
+pub struct ShotRecentButton;
+
+impl ShotRecentButton {
+    pub const SIZE: f64 = 28.0;
+
+    /// `layoutChrome`'s recent-button origin: right of the mode pill and 3pt
+    /// below its top edge (the pill starts at `top + 16`, the button at
+    /// `top + 19`).
+    pub fn origin(mode_pill: Rect) -> Point {
+        Point::new(mode_pill.max_x() + 12.0, mode_pill.y + 3.0)
+    }
+}
+
+/// `ShotModePill` — the Copy Text / Screenshot switch.
+pub struct ShotModePill;
+
+impl ShotModePill {
+    pub const HEIGHT: f64 = 42.0;
+
+    /// `layoutChrome`'s pill x: centred in the display.
+    pub fn origin_x(bounds_width: f64, pill_width: f64) -> f64 {
+        ((bounds_width - pill_width) / 2.0).round()
+    }
+
+    /// The pill's `mouseUp` segment hit test (`x >= 4 + widths[0]` picks the
+    /// second segment).
+    pub fn right_segment(x: f64, first_width: f64) -> bool {
+        x >= 4.0 + first_width
+    }
+}
+
+/// `ShotToolTab` — the vertical "Tool Settings" tab on the left edge.
+pub struct ShotToolTab;
+
+impl ShotToolTab {
+    pub const WIDTH: f64 = 22.0;
+
+    /// Centred vertically in the display.
+    pub fn origin_y(bounds_height: f64, tab_height: f64) -> f64 {
+        ((bounds_height - tab_height) / 2.0).round()
+    }
+}
+
+/// `ShotSizeIndicator` — the transient tool-size readout.
+pub struct ShotSizeIndicator;
+
+impl ShotSizeIndicator {
+    pub const FRAME: Rect = Rect {
+        x: 20.0,
+        y: 20.0,
+        w: 56.0,
+        h: 44.0,
+    };
+}
+
+/// `ShotSaveCard` — the save-as card.
+pub struct ShotSaveCard;
+
+impl ShotSaveCard {
+    pub const WIDTH: f64 = 520.0;
+    pub const HEIGHT: f64 = 96.0;
+    pub const TITLE_RECT: Rect = Rect {
+        x: 16.0,
+        y: 12.0,
+        w: 300.0,
+        h: 18.0,
+    };
+    pub const FIELD_RECT: Rect = Rect {
+        x: 16.0,
+        y: 36.0,
+        w: 488.0,
+        h: 24.0,
+    };
+    pub const HINT_RECT: Rect = Rect {
+        x: 16.0,
+        y: 68.0,
+        w: 488.0,
+        h: 16.0,
+    };
+
+    /// `ShotSaveCard.focus`: the (location, length) of the field selection —
+    /// the file name minus its extension, as UTF-16 units (an `NSRange`).
+    pub fn focus_range(path: &str) -> (usize, usize) {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
+        let path_len = path.encode_utf16().count();
+        let name_len = name.encode_utf16().count();
+        (path_len - name_len, stem.encode_utf16().count())
+    }
+}
+
+/// `ShotHelpCard` — the centred key-hint card.
+pub struct ShotHelpCard;
+
+impl ShotHelpCard {
+    /// The default 14pt system font line height (`ceil(ascender - descender + 6)`).
+    pub const LINE_HEIGHT: f64 = 17.0;
+
+    /// `ShotHelpCard` height: `ceil(lineHeight) * rows + 32`.
+    pub fn height(rows: usize) -> f64 {
+        Self::height_for(rows, Self::LINE_HEIGHT)
+    }
+
+    pub fn height_for(rows: usize, line_height: f64) -> f64 {
+        line_height.ceil() * rows as f64 + 32.0
+    }
+
+    /// `layoutChrome`'s centred origin.
+    pub fn centered_origin(bounds: Rect, size: Size) -> Point {
+        Point::new(
+            ((bounds.w - size.w) / 2.0).round(),
+            ((bounds.h - size.h) / 2.0).round(),
+        )
+    }
+}
+
+/// `ShotSidePanel` — the tool-settings drawer.
+pub struct ShotSidePanel;
+
+impl ShotSidePanel {
+    pub const WIDTH: f64 = 250.0;
+
+    /// `build`'s layer list height: `max(80, bounds.height - y - 50)`.
+    pub fn list_height(bounds_height: f64, y: f64) -> f64 {
+        80.0f64.max(bounds_height - y - 50.0)
+    }
 }
 
 fn expand_tilde(p: &str) -> String {
@@ -2513,6 +2759,22 @@ mod shot_cg {
 
     fn line_width(line: &CTLine) -> f64 {
         unsafe { line.typographic_bounds(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) }
+    }
+
+    /// `(string as NSString).size(withAttributes:).width` for the overlay chrome
+    /// (help-card columns, button badges), via the shared CoreText font path.
+    pub(super) fn measure_text_width(text: &str, point_size: f64, bold: bool) -> f64 {
+        let style = ShotTextStyle {
+            family: String::new(),
+            bold,
+            italic: false,
+            underline: false,
+            strike: false,
+            align: 0,
+        };
+        let font = text_font(&style, point_size);
+        let color = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        line_width(&text_line(text, &font, &color))
     }
 
     fn text_box_size(lines: &[Retained<CTLine>], line_height: f64) -> Size {
@@ -2811,7 +3073,7 @@ mod shot_cg {
         Some(ShotImage::with_png(w, h, png))
     }
 
-    fn encode_png(image: &CGImage) -> Option<Vec<u8>> {
+    pub(super) fn encode_png(image: &CGImage) -> Option<Vec<u8>> {
         let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), image);
         let props: Retained<NSDictionary<NSBitmapImageRepPropertyKey, AnyObject>> =
             NSDictionary::new();
@@ -2873,7 +3135,11 @@ mod overlay {
     use objc2_core_graphics::{CGColor, CGContext, CGPathDrawingMode};
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
-    use super::{selection_handles, shot_cg, Point, Rect, ShotColor, ShotSession};
+    use super::{
+        selection_handles, shot_cg, ButtonRing, Point, Rect, ShotColor, ShotHelpCard, ShotLoupe,
+        ShotObject, ShotSaveCard, ShotSession, ShotTool, ShotWheel,
+    };
+    use crate::engines::screenshot_annotations::ShotText;
 
     /// The blue the Swift overlay uses for text mode (`shotTextBlue`).
     const SHOT_TEXT_BLUE: ShotColor = ShotColor {
@@ -3036,9 +3302,10 @@ mod overlay {
             self.setNeedsDisplay(true);
         }
 
-        /// `ShotOverlayView.draw(_:)`, without the subview chrome (buttons,
-        /// loupe, wheel, side panel, shortcuts card) — those add a lot of
-        /// machinery for little parity value; the core surface is real.
+        /// `ShotOverlayView.draw(_:)`: the frozen capture, the dim mask, the
+        /// selection border + handles, the text draft, then the chrome
+        /// subviews (help card, button ring, colour wheel, loupe, save card)
+        /// via [`Self::render_chrome`].
         fn render(&self) {
             let ptr = self.session_ptr();
             if ptr.is_null() {
@@ -3127,7 +3394,330 @@ mod overlay {
                     shot_cg::draw_text(&ctx, &e.object);
                 }
             }
+
+            // 5. The chrome subviews (help card, button ring, colour wheel,
+            //    loupe, save card), painted into this context.
+            self.render_chrome(session, &ctx, full, d);
         }
+
+        /// The overlay chrome subviews (`ScreenshotOverlay.swift`'s
+        /// `ShotHelpCard` / `ShotButton` ring / `ShotWheelView` / `ShotLoupe` /
+        /// `ShotSaveCard`), painted into the same context instead of as AppKit
+        /// subviews. Layout comes from the pure models in the parent module;
+        /// the side-panel form and the recent button / mode pill stay
+        /// model-only (they are AppKit controls).
+        fn render_chrome(&self, session: &ShotSession, ctx: &CGContext, full: Rect, d: usize) {
+            let cfg = &session.cfg;
+            let mine = if session.active == Some(d) {
+                session.selection
+            } else {
+                None
+            };
+
+            // Help card: centred while nothing is selected.
+            if cfg.show_help && session.selection.is_none() {
+                draw_help_card(ctx, session, full);
+            }
+
+            // Button ring: only around a live selection, not in text mode.
+            if let Some(sel) = mine {
+                if !session.text_mode {
+                    draw_button_ring(ctx, session, d, sel);
+                }
+            }
+
+            // Colour wheel (right-click) on its display.
+            if let Some(w) = &session.wheel {
+                if w.display == d {
+                    draw_wheel(ctx, session, w.center, w.hot);
+                }
+            }
+
+            // Loupe while grabbing or magnifying with a hovered pointer.
+            let want_loupe =
+                session.grabbing.is_some() || (cfg.magnifier && session.selection.is_none());
+            if want_loupe && session.mouse.map(|(md, _)| md) == Some(d) {
+                if let Some((_, p)) = session.mouse {
+                    draw_loupe(ctx, session, full, d, p);
+                }
+            }
+
+            // Save card (the path field is not an editable AppKit field here,
+            // but the card and its value paint).
+            if let Some(card) = &session.save_card {
+                if card.display == d {
+                    draw_save_card(ctx, session, full, &card.field);
+                }
+            }
+        }
+    }
+
+    /// Draw one line of chrome text with its top-left at `(x, y)`, reusing the
+    /// shared CoreText text pass (a synthetic text `ShotObject`).
+    fn draw_text_at(
+        ctx: &CGContext,
+        text: &str,
+        x: f64,
+        y: f64,
+        point_size: f64,
+        color: ShotColor,
+        bold: bool,
+    ) {
+        let size = (point_size - 8.0).round().max(0.0) as i64;
+        let mut o = ShotObject::new(
+            ShotTool::Text,
+            vec![Point::new(x - ShotText::PADDING, y - ShotText::PADDING)],
+            color,
+            size,
+        );
+        o.text = text.to_string();
+        o.style.bold = bold;
+        shot_cg::draw_text(ctx, &o);
+    }
+
+    /// `ShotHelpCard`: a centred rounded card of key/action rows.
+    fn draw_help_card(ctx: &CGContext, session: &ShotSession, full: Rect) {
+        let cfg = &session.cfg;
+        let rows: &[(String, String)] = if session.text_mode {
+            &cfg.help_text_rows
+        } else {
+            &cfg.help_rows
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let ui = if session.text_mode {
+            SHOT_TEXT_BLUE
+        } else {
+            cfg.ui_color
+        };
+        let (point, bold) = (14.0, 14.0);
+        let key_w = rows
+            .iter()
+            .map(|(k, _)| shot_cg::measure_text_width(k, bold, true))
+            .fold(0.0f64, f64::max);
+        let act_w = rows
+            .iter()
+            .map(|(_, a)| shot_cg::measure_text_width(a, point, false))
+            .fold(0.0f64, f64::max);
+        let size = super::Size::new(
+            (key_w + act_w + 18.0 + 48.0).ceil(),
+            ShotHelpCard::height(rows.len()),
+        );
+        let o = ShotHelpCard::centered_origin(full, size);
+        let fg = if ui.is_dark() {
+            ShotColor::WHITE
+        } else {
+            ShotColor::BLACK
+        };
+        set_fill(ctx, ui.with_alpha(0.92));
+        CGContext::fill_rect(Some(ctx), cg_rect(Rect::new(o.x, o.y, size.w, size.h)));
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.45));
+        CGContext::set_line_width(Some(ctx), 1.0);
+        CGContext::stroke_rect(Some(ctx), cg_rect(Rect::new(o.x, o.y, size.w, size.h)));
+        let mut y = o.y + 16.0;
+        for (k, a) in rows {
+            let kw = shot_cg::measure_text_width(k, bold, true);
+            draw_text_at(ctx, k, o.x + 24.0 + key_w - kw, y, bold, fg, true);
+            draw_text_at(ctx, a, o.x + 24.0 + key_w + 18.0, y, point, fg, false);
+            y += ShotHelpCard::LINE_HEIGHT;
+        }
+    }
+
+    /// `ShotButton`'s ring: one filled disc per tool at the `ButtonRing`
+    /// frames, with the active tool highlighted and the size badge labelled.
+    fn draw_button_ring(ctx: &CGContext, session: &ShotSession, d: usize, sel: Rect) {
+        let cfg = &session.cfg;
+        let Some(display) = session.displays.get(d) else {
+            return;
+        };
+        let layout = ButtonRing::layout(sel, display.bounds(), cfg.buttons.len(), cfg.button_size);
+        // A badged text tool uses dark-on-light; the button glyphs themselves
+        // are SF Symbols in AppKit and are not redrawn here.
+        for (t, f) in cfg.buttons.iter().zip(layout.frames.iter()) {
+            let c = Point::new(f.mid_x(), f.mid_y());
+            let r = (f.w / 2.0 - 0.5).max(1.0);
+            let active = session.tool == Some(*t) || (*t == ShotTool::Move && session.move_mode);
+            let fill = if active {
+                cfg.ui_color.mixed(&ShotColor::BLACK, 0.25)
+            } else {
+                cfg.ui_color
+            };
+            set_fill(ctx, fill);
+            CGContext::fill_ellipse_in_rect(
+                Some(ctx),
+                cg_rect(Rect::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r)),
+            );
+            if active {
+                set_stroke(ctx, cfg.contrast_color.mixed(&ShotColor::WHITE, 0.55));
+                CGContext::set_line_width(Some(ctx), 2.0);
+                let rr = (r - 1.0).max(1.0);
+                CGContext::stroke_ellipse_in_rect(
+                    Some(ctx),
+                    cg_rect(Rect::new(c.x - rr, c.y - rr, 2.0 * rr, 2.0 * rr)),
+                );
+            }
+            if *t == ShotTool::Size {
+                let badge = format!("{}\n{}", sel.w.round() as i64, sel.h.round() as i64);
+                let fg = if cfg.ui_color.is_dark() {
+                    ShotColor::WHITE
+                } else {
+                    ShotColor::BLACK
+                };
+                for (i, line) in badge.split('\n').enumerate() {
+                    let w = shot_cg::measure_text_width(line, 10.0, true);
+                    draw_text_at(
+                        ctx,
+                        line,
+                        c.x - w / 2.0,
+                        c.y - 10.0 + i as f64 * 11.0,
+                        10.0,
+                        fg,
+                        true,
+                    );
+                }
+            }
+        }
+    }
+
+    /// `ShotWheelView`: the colour swatches around the current colour hub.
+    fn draw_wheel(ctx: &CGContext, session: &ShotSession, center: Point, hot: Option<i64>) {
+        let cfg = &session.cfg;
+        let colors = &cfg.user_colors;
+        if colors.is_empty() {
+            return;
+        }
+        let r = ShotWheel::radius(colors.len());
+        let dot = ShotWheel::DOT;
+        set_fill(ctx, ShotColor::BLACK.with_alpha(0.35));
+        let outer = r + dot * 0.75;
+        CGContext::fill_ellipse_in_rect(
+            Some(ctx),
+            cg_rect(Rect::new(
+                center.x - outer,
+                center.y - outer,
+                2.0 * outer,
+                2.0 * outer,
+            )),
+        );
+        set_fill(ctx, session.current_color());
+        CGContext::fill_ellipse_in_rect(
+            Some(ctx),
+            cg_rect(Rect::new(center.x - 16.0, center.y - 16.0, 32.0, 32.0)),
+        );
+        set_stroke(ctx, ShotColor::WHITE);
+        CGContext::set_line_width(Some(ctx), 2.0);
+        CGContext::stroke_ellipse_in_rect(
+            Some(ctx),
+            cg_rect(Rect::new(center.x - 16.0, center.y - 16.0, 32.0, 32.0)),
+        );
+        for (i, col) in colors.iter().enumerate() {
+            let q = ShotWheel::dot_center(center, i, colors.len());
+            let is_hot = hot == Some(i as i64);
+            let dd = dot * (if is_hot { 1.3 } else { 1.0 });
+            let rect = Rect::new(q.x - dd / 2.0, q.y - dd / 2.0, dd, dd);
+            match col {
+                Some(c) => {
+                    set_fill(ctx, *c);
+                    CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(rect));
+                }
+                None => {
+                    // The HSV picker swatch (12 wedges); approximated as a
+                    // colour fan is out of scope, so show the current colour.
+                    set_fill(ctx, session.current_color());
+                    CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(rect));
+                }
+            }
+            set_stroke(
+                ctx,
+                if is_hot {
+                    ShotColor::WHITE
+                } else {
+                    ShotColor::WHITE.with_alpha(0.6)
+                },
+            );
+            CGContext::set_line_width(Some(ctx), if is_hot { 2.5 } else { 1.0 });
+            CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(rect));
+        }
+    }
+
+    /// `ShotLoupe`: the magnified crop of the frozen capture.
+    fn draw_loupe(ctx: &CGContext, session: &ShotSession, full: Rect, d: usize, p: Point) {
+        let side = ShotLoupe::SIDE;
+        let size = super::Size::new(side, side + 22.0);
+        let o = ShotLoupe::origin(p, size, full);
+        let circle = Rect::new(o.x, o.y, side, side);
+        let Some(base) = session.base_images.get(d).and_then(|b| b.as_deref()) else {
+            return;
+        };
+        let scale = super::canvas_scale(
+            objc2_core_graphics::CGImage::width(Some(base)) as i64,
+            session.displays.get(d).map(|x| x.frame.w).unwrap_or(0.0),
+        );
+        let cx = p.x * scale;
+        let cy = p.y * scale;
+        let half = (ShotLoupe::PX as f64) / 2.0;
+        if let Some(crop) = objc2_core_graphics::CGImage::with_image_in_rect(
+            Some(base),
+            cg_rect(Rect::new(cx - half, cy - half, ShotLoupe::PX as f64, ShotLoupe::PX as f64)),
+        ) {
+            set_fill(ctx, ShotColor::BLACK);
+            CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(circle));
+            shot_cg::draw_image(ctx, &crop, circle, false);
+        }
+        set_stroke(ctx, cfg_uicolor(session));
+        CGContext::set_line_width(Some(ctx), 2.0);
+        CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(circle));
+    }
+
+    fn cfg_uicolor(session: &ShotSession) -> ShotColor {
+        session.cfg.ui_color
+    }
+
+    /// `ShotSaveCard`: the save-as card frame, title, value and hint.
+    fn draw_save_card(ctx: &CGContext, session: &ShotSession, full: Rect, path: &str) {
+        let cfg = &session.cfg;
+        let size = super::Size::new(ShotSaveCard::WIDTH, ShotSaveCard::HEIGHT);
+        let o = ShotHelpCard::centered_origin(full, size);
+        let card = Rect::new(o.x, o.y, size.w, size.h);
+        set_fill(ctx, ShotColor::new_a(0.08, 0.08, 0.08, 0.95));
+        CGContext::fill_rect(Some(ctx), cg_rect(card));
+        set_stroke(ctx, cfg.ui_color);
+        CGContext::set_line_width(Some(ctx), 1.5);
+        CGContext::stroke_rect(Some(ctx), cg_rect(card));
+        let shift = |r: Rect| Rect::new(o.x + r.x, o.y + r.y, r.w, r.h);
+        draw_text_at(
+            ctx,
+            "Save screenshot as",
+            shift(ShotSaveCard::TITLE_RECT).x,
+            shift(ShotSaveCard::TITLE_RECT).y,
+            13.0,
+            ShotColor::WHITE,
+            true,
+        );
+        let field = shift(ShotSaveCard::FIELD_RECT);
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.7));
+        CGContext::set_line_width(Some(ctx), 1.0);
+        CGContext::stroke_rect(Some(ctx), cg_rect(field));
+        draw_text_at(
+            ctx,
+            path,
+            field.x + 4.0,
+            field.y + 4.0,
+            12.0,
+            ShotColor::WHITE,
+            false,
+        );
+        let hint = shift(ShotSaveCard::HINT_RECT);
+        draw_text_at(
+            ctx,
+            "Return saves (.png / .jpg) \u{b7} Esc goes back",
+            hint.x,
+            hint.y,
+            11.0,
+            ShotColor::new_a(0.7, 0.7, 0.7, 1.0),
+            false,
+        );
     }
 
     pub struct ShotOverlayPanelIvars {
@@ -3142,12 +3732,12 @@ mod overlay {
         pub struct ShotOverlayPanel;
 
         impl ShotOverlayPanel {
-            #[unsafe(method(canBecomeKey))]
+            #[unsafe(method(canBecomeKeyWindow))]
             fn can_become_key(&self) -> bool {
                 true
             }
 
-            #[unsafe(method(canBecomeMain))]
+            #[unsafe(method(canBecomeMainWindow))]
             fn can_become_main(&self) -> bool {
                 false
             }
@@ -3332,12 +3922,12 @@ mod pin_window {
         pub struct WSPinPanel;
 
         impl WSPinPanel {
-            #[unsafe(method(canBecomeKey))]
+            #[unsafe(method(canBecomeKeyWindow))]
             fn can_become_key(&self) -> bool {
                 true
             }
 
-            #[unsafe(method(canBecomeMain))]
+            #[unsafe(method(canBecomeMainWindow))]
             fn can_become_main(&self) -> bool {
                 false
             }
@@ -3707,8 +4297,21 @@ impl ScreenshotController {
 
     pub fn prewarm(&mut self) {
         self.prewarmed = true;
-        if !self.ocr_warm {
-            self.ocr_warm = true;
+        if self.ocr_warm {
+            return;
+        }
+        self.ocr_warm = true;
+        // `ShotOCR.warmUp`: build a small bitmap and run a recognition pass so
+        // the first real OCR does not pay the model-load cost. The AppKit
+        // bitmap context and Vision are main-thread only; off-main this is
+        // skipped (the next `deliver_text` warm-starts lazily).
+        #[cfg(target_os = "macos")]
+        if objc2::MainThreadMarker::new().is_some() {
+            let cfg = crate::engines::screenshot_text::ShotOCRConfig {
+                languages: self.config.ocr.languages.clone(),
+                correction: self.config.ocr.correction,
+            };
+            let _ = crate::engines::screenshot_text::ShotOCR::warm_up(&cfg);
         }
     }
 
@@ -3748,9 +4351,20 @@ impl ScreenshotController {
         }
     }
 
+    /// Mirror the live overlay panels' key status and window numbers into the
+    /// session displays (`testState` reads the real windows). Main thread.
+    #[cfg(target_os = "macos")]
+    pub fn sync_live_overlay(&mut self) {
+        let Some(s) = self.session.as_mut() else { return };
+        for (d, panel) in s.displays.iter_mut().zip(self.overlay_panels.0.iter()) {
+            d.key = panel.isKeyWindow();
+            d.wid = panel.windowNumber() as i64;
+        }
+    }
+
     /// Invalidate every live overlay panel after a model change.
     #[cfg(target_os = "macos")]
-    fn redraw_overlays(&self) {
+    pub(crate) fn redraw_overlays(&self) {
         for panel in &self.overlay_panels.0 {
             panel.redraw();
         }
@@ -3776,6 +4390,11 @@ impl ScreenshotController {
     pub fn trigger(&mut self, args: &ShotArgs) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
+            // The screen list is read fresh per capture (displays come and go).
+            let screens = current_screens();
+            if !screens.is_empty() {
+                self.screens = screens;
+            }
             if screen_capture_permitted() {
                 return self.trigger_with(args, &RealCapture);
             }
@@ -3841,6 +4460,11 @@ impl ScreenshotController {
                 Ok(())
             }
         }
+    }
+
+    /// No overlay up and no capture in flight (a session has finished).
+    pub fn is_idle(&self) -> bool {
+        self.session.is_none() && !self.capturing
     }
 
     /// `ScreenshotController.handle(words:)`.
@@ -3968,16 +4592,19 @@ impl ScreenshotController {
     }
 
     pub fn deliver_text(&mut self, img: &ShotImage, cfg: &ScreenshotConfig, args: &ShotArgs) {
-        // Vision OCR is stubbed (empty), so this always lands on the no-text
-        // toast until objc2-vision lands.
-        let text = crate::engines::screenshot_text::ShotOCR::text(&[]);
+        // Real Vision pass over the rendered capture (Swift `deliverText` →
+        // `ShotOCR.text(img, cfg.ocr)`). Failures (no permission, off-main, a
+        // non-decodable image) degrade to the empty string → the no-text toast.
+        let started = now_millis();
+        let text = ocr_text(img, &cfg.ocr);
+        let ms = (now_millis() - started).max(0);
         let chars = text.chars().count();
         self.last_output = json!({
             "outcome": "text",
             "size": [img.width, img.height],
             "chars": chars,
-            "text": text,
-            "ms": 0,
+            "text": crate::engines::screenshot_text::ShotOCR::truncate(&text, 4000),
+            "ms": ms,
         });
         if text.is_empty() {
             ScreenToast::show(
@@ -4008,12 +4635,15 @@ impl ScreenshotController {
         if !self.session.as_ref().map(|s| s.finished).unwrap_or(false) {
             return;
         }
-        // Swift renders `objects: o != .text`; the model renderer draws every
-        // object, so skip the render only for abort (its image is discarded).
+        // Swift renders `objects: o != .text`: a text capture is rendered
+        // without the annotations so OCR reads the frozen image. Abort renders
+        // nothing (its image is discarded).
         let img = if outcome == ShotOutcome::Abort {
             None
         } else {
-            self.session.as_ref().and_then(|s| s.render())
+            self.session
+                .as_ref()
+                .and_then(|s| s.render_with(outcome != ShotOutcome::Text))
         };
         let screen = self.session.as_ref().and_then(|s| {
             s.active.map(|a| {
@@ -4349,7 +4979,7 @@ impl ScreenshotController {
                     "frame": [f.x as i64, f.y as i64, f.w as i64, f.h as i64],
                     "scale": d.scale,
                     "key": d.key,
-                    "wid": 0,
+                    "wid": d.wid,
                     "visible": true,
                     "level": d.level,
                 })
@@ -4429,6 +5059,39 @@ impl ScreenshotController {
             None => Value::Null,
         };
         st
+    }
+}
+
+/// `ShotOCR.text(img, cfg.ocr)` over a rendered capture: decode the PNG back to
+/// a `CGImage`, run `VNRecognizeTextRequest`, and join the lines.
+///
+/// Never errors. AppKit/Vision run on the main thread only (the macOS image
+/// seam this module shares with `pin_window::decode_png`); off the main
+/// thread, with no Screen Recording permission, or with bytes that are not a
+/// decodable image, this degrades to the empty string — the "no text" path.
+fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if objc2::MainThreadMarker::new().is_none() {
+            return String::new();
+        }
+        let Some(png) = img.png.as_deref() else {
+            return String::new();
+        };
+        let Some(image) = pin_window::decode_png(png) else {
+            return String::new();
+        };
+        let cfg = crate::engines::screenshot_text::ShotOCRConfig {
+            languages: ocr.languages.clone(),
+            correction: ocr.correction,
+        };
+        let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
+        crate::engines::screenshot_text::ShotOCR::text(&lines)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (img, ocr);
+        String::new()
     }
 }
 
@@ -4513,6 +5176,176 @@ pub fn register_controller(reg: &mut Registry, controller: Arc<Mutex<ScreenshotC
         let rest = action.strip_prefix("screenshot:")?;
         Some(controller_test_do(&controller, rest))
     });
+}
+
+
+// ---------------------------------------------------------------------------
+// pane-shot (`ScreenshotController.paneShot`)
+// ---------------------------------------------------------------------------
+
+/// One rendered pane-shot (`PaneShotImage`).
+pub struct PaneShotImage {
+    pub image: ShotImage,
+    pub rows: usize,
+    pub title: String,
+    pub pane: Option<String>,
+}
+
+/// `ScreenshotController.paneShotImage`: read the pane through herdr (or
+/// `--file`), parse the ANSI, render it with the Ghostty theme. Safe off the
+/// main thread (CoreGraphics only).
+#[cfg(target_os = "macos")]
+pub fn pane_shot_image(
+    args: &crate::engines::pane_shot::PaneShotArgs,
+    cfg: &crate::engines::pane_shot::PaneShotConfig,
+    scale: f64,
+) -> Result<PaneShotImage, crate::engines::pane_shot::Failure> {
+    use crate::engines::ansi_render::{AnsiGrid, AnsiRGB, AnsiRender, AnsiTheme};
+    use crate::engines::pane_shot::{self as ps, Failure, Herdr};
+    let (text, title, pane) = if let Some(file) = &args.file {
+        let p = ps::expand_tilde(file);
+        let t = std::fs::read_to_string(&p).map_err(|_| Failure::new(format!("can't read {file}")))?;
+        let name = std::path::Path::new(&p)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.clone());
+        (t, name, None)
+    } else {
+        let p = Herdr::pane(&cfg.herdr_bin, args.pane.as_deref())?;
+        let n = Herdr::lines(p.viewport_rows, args.lines.unwrap_or(cfg.lines), args.all);
+        let t = Herdr::read(&cfg.herdr_bin, &p.id, n)?;
+        (t, p.title, Some(p.id))
+    };
+    let grid = AnsiGrid::parse(&text);
+    if grid.rows.is_empty() {
+        return Err(Failure::new(format!("nothing to capture: {title} is empty")));
+    }
+    let mut theme = AnsiTheme::default();
+    let ghostty = ps::expand_tilde(&cfg.ghostty_bin);
+    if ps::is_executable_file(&ghostty) {
+        if let Ok(r) = crate::app::process_run::run_process(
+            &ghostty,
+            &["+show-config".to_string()],
+            None,
+            None,
+            false,
+        ) {
+            if r.code == 0 {
+                theme = AnsiTheme::ghostty(&r.out);
+            }
+        }
+    }
+    if !cfg.font.is_empty() {
+        theme.font_name = cfg.font.clone();
+    }
+    if cfg.font_size > 0.0 {
+        theme.font_size = cfg.font_size;
+    }
+    if let Some(bg) = AnsiRGB::from_hex(&cfg.background) {
+        theme.background = bg;
+    }
+    let rows = grid.rows.len();
+    let failed = || Failure::new(format!("could not render {rows} rows"));
+    let img = AnsiRender::image(&grid, &theme, cfg.padding, scale).ok_or_else(failed)?;
+    let png = shot_cg::encode_png(img.as_ref()).ok_or_else(failed)?;
+    Ok(PaneShotImage {
+        image: ShotImage::with_png(img.width() as i64, img.height() as i64, png),
+        rows,
+        title,
+        pane,
+    })
+}
+
+impl ScreenshotController {
+    /// `deliverPaneShot`: save and/or copy per `--save`/`--copy` over the
+    /// `[pane-shot]` defaults; returns the socket reply line (the saved path,
+    /// `copied`, or `error: …`). The floating preview is not ported.
+    pub fn deliver_pane_shot(
+        &mut self,
+        shot: &PaneShotImage,
+        args: &crate::engines::pane_shot::PaneShotArgs,
+        cfg: &crate::engines::pane_shot::PaneShotConfig,
+        started_ms: i64,
+    ) -> String {
+        let copy = args.copy.unwrap_or(cfg.copy);
+        let save = args.save.unwrap_or(cfg.save);
+        let toast = cfg
+            .toast
+            .replace("{n}", &shot.rows.to_string())
+            .replace("{pane}", &shot.title);
+        let mut sc = ScreenshotConfig::load();
+        sc.copy_path_after_save = false;
+        sc.filename_pattern = cfg.filename_pattern.clone();
+        sc.save_format = "png".to_string();
+        if !cfg.save_path.is_empty() {
+            sc.save_path = cfg.save_path.clone();
+        }
+        let path = if save {
+            sc.save_toast = if copy { String::new() } else { "Saved {}".to_string() };
+            self.save(&shot.image, &sc, None, None)
+        } else {
+            None
+        };
+        if copy {
+            sc.copy_toast = toast;
+            self.copy(&shot.image, &sc, None);
+        }
+        if cfg.preview {
+            self.note("pane-shot: preview window not ported");
+        }
+        let ms = now_millis() - started_ms;
+        self.pane_shot_last = json!({
+            "pane": shot.pane.clone().unwrap_or_default(),
+            "title": shot.title,
+            "rows": shot.rows,
+            "size": [shot.image.width, shot.image.height],
+            "copied": copy,
+            "path": path.clone().unwrap_or_default(),
+            "ms": ms,
+        });
+        self.note(format!(
+            "pane-shot {}: {} rows, {}×{} px, {} ms",
+            shot.pane.as_deref().unwrap_or("file"),
+            shot.rows,
+            shot.image.width,
+            shot.image.height,
+            ms
+        ));
+        if save && path.is_none() {
+            return "error: could not save".to_string();
+        }
+        path.unwrap_or_else(|| "copied".to_string())
+    }
+
+    /// A pane-shot that failed before delivery (`paneShotLast = ["error": …]`).
+    pub fn pane_shot_failed(&mut self, message: &str) {
+        self.pane_shot_last = json!({ "error": message });
+        self.note(format!("pane-shot: {message}"));
+        ScreenToast::show(&mut self.toast, message.to_string(), "exclamationmark.triangle.fill");
+    }
+}
+
+/// The backing scale of the screen under the mouse (`mouseScreen`), else the
+/// main screen's; 2 off the main thread.
+#[cfg(target_os = "macos")]
+pub fn mouse_screen_scale() -> f64 {
+    use objc2_app_kit::{NSEvent, NSScreen};
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return 2.0;
+    };
+    let p = NSEvent::mouseLocation();
+    let screens = NSScreen::screens(mtm);
+    let hit = screens.iter().find(|s| {
+        let f = s.frame();
+        p.x >= f.origin.x && p.x < f.origin.x + f.size.width && p.y >= f.origin.y && p.y < f.origin.y + f.size.height
+    });
+    hit.or_else(|| NSScreen::mainScreen(mtm))
+        .map(|s| s.backingScaleFactor())
+        .unwrap_or(2.0)
+}
+
+pub(crate) fn epoch_millis() -> i64 {
+    now_millis()
 }
 
 // __PART_G__
@@ -5136,5 +5969,102 @@ mod tests {
         assert!(path.starts_with(dir.to_str().unwrap()), "saved into the chosen dir: {path}");
         assert!(std::path::Path::new(&path).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ocr_degrades_to_no_text() {
+        // Not a decodable image, no bytes, and (off-main) any real image all
+        // degrade to the empty string — never an error or a panic.
+        let bad = ShotImage::with_png(10, 10, b"not-an-image".to_vec());
+        assert_eq!(ocr_text(&bad, &ShotOCRConfigModel::default()), "");
+        let none = ShotImage::new(10, 10);
+        assert_eq!(ocr_text(&none, &ShotOCRConfigModel::default()), "");
+    }
+
+    #[test]
+    fn deliver_text_lands_on_the_no_text_path() {
+        let mut c = ScreenshotController::new();
+        let cfg = ScreenshotConfig::default();
+        let img = ShotImage::with_png(20, 10, b"not-an-image".to_vec());
+        c.deliver_text(&img, &cfg, &ShotArgs::default());
+        assert_eq!(c.last_output["outcome"], "text");
+        assert_eq!(c.last_output["size"], json!([20, 10]));
+        assert_eq!(c.last_output["chars"], 0);
+        assert_eq!(c.last_output["text"], "");
+        assert!(c.last_output["ms"].is_number(), "timing is always present");
+        assert_eq!(c.toast.as_ref().unwrap().text, "No text found");
+        assert_eq!(c.reply, Some(Vec::new()), "non-raw reply is empty");
+    }
+
+    #[test]
+    fn wheel_geometry_and_hit_test() {
+        assert_eq!(ShotWheel::radius(0), 56.0, "empty wheel keeps the minimum");
+        assert_eq!(ShotWheel::radius(8), 56.0, "8 swatches still at the floor");
+        assert!(ShotWheel::radius(20) > 56.0, "20 swatches grow the ring");
+
+        let c = Point::new(100.0, 100.0);
+        let first = ShotWheel::dot_center(c, 0, 4);
+        assert!((first.x - 100.0).abs() < 1e-9, "index 0 is straight up");
+        assert!(first.y < 100.0, "12 o'clock is above the centre");
+        assert_eq!(ShotWheel::index_at(first, c, 4), Some(0), "swatch hits");
+        assert_eq!(ShotWheel::index_at(c, c, 4), None, "the hub is empty");
+        assert_eq!(ShotWheel::index_at(c, c, 0), None, "empty wheel never hits");
+    }
+
+    #[test]
+    fn loupe_origin_flips_at_the_edges() {
+        let size = Size::new(ShotLoupe::SIDE, ShotLoupe::SIDE + 22.0);
+        let bounds = Rect::new(0.0, 0.0, 1000.0, 800.0);
+        let mid = ShotLoupe::origin(Point::new(200.0, 200.0), size, bounds);
+        assert_eq!((mid.x, mid.y), (224.0, 224.0), "clear space: down-right");
+        let right = ShotLoupe::origin(Point::new(950.0, 200.0), size, bounds);
+        assert!(right.x < 950.0, "overflow right flips left");
+        let bottom = ShotLoupe::origin(Point::new(200.0, 780.0), size, bounds);
+        assert!(bottom.y < 780.0, "overflow bottom flips up");
+    }
+
+    #[test]
+    fn chrome_layout_constants() {
+        let pill = Rect::new(100.0, 40.0, 220.0, ShotModePill::HEIGHT);
+        assert_eq!(
+            ShotRecentButton::origin(pill),
+            Point::new(332.0, 43.0),
+            "right of and just below the pill"
+        );
+        assert!(ShotModePill::right_segment(230.0, 200.0), "second segment");
+        assert!(!ShotModePill::right_segment(100.0, 200.0), "first segment");
+        assert_eq!(ShotToolTab::origin_y(900.0, 50.0), 425.0, "centred vertically");
+        assert_eq!(ShotSizeIndicator::FRAME, Rect::new(20.0, 20.0, 56.0, 44.0));
+        assert_eq!(ShotSidePanel::list_height(800.0, 400.0), 350.0);
+        assert_eq!(ShotSidePanel::list_height(100.0, 80.0), 80.0, "floor of 80");
+    }
+
+    #[test]
+    fn help_card_size_and_origin() {
+        assert_eq!(ShotHelpCard::height_for(3, 17.0), 83.0, "17*3 + 32");
+        assert_eq!(ShotHelpCard::height(0), 32.0, "empty card is just padding");
+        assert_eq!(
+            ShotHelpCard::centered_origin(
+                Rect::new(0.0, 0.0, 1000.0, 800.0),
+                Size::new(300.0, 100.0),
+            ),
+            Point::new(350.0, 350.0),
+            "centred"
+        );
+    }
+
+    #[test]
+    fn save_card_focus_selects_the_file_stem() {
+        assert_eq!(
+            ShotSaveCard::focus_range("~/Desktop/shot-1.png"),
+            (10, 6),
+            "selects the name without the extension"
+        );
+        assert_eq!(
+            ShotSaveCard::focus_range("/tmp/a/b/shot-1.jpeg"),
+            (9, 6),
+            "last path component only"
+        );
+        assert_eq!(ShotSaveCard::focus_range("name"), (0, 4), "no extension");
     }
 }

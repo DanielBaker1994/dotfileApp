@@ -700,6 +700,24 @@ mod tests {
     }
 
     #[test]
+    fn prose_fences_highlight_only_when_asked() {
+        // Port of Tests/test_prose_pdf.swift (the pandoc highlight contract).
+        if !RichText::available() || !helper_ready() {
+            eprintln!("pandoc / python helper missing: highlight checks skipped");
+            return;
+        }
+        let fence = "```cpp\n#include <iostream>\nint main(){ std::cout << \"hello\"; }\n```\n";
+        let hl = RichText::pandoc_html(fence, true).unwrap_or_default();
+        assert!(hl.contains("sourceCode cpp"), "prose fence is a sourceCode block: {hl}");
+        assert!(hl.contains("class=\"dt\""), "int is a type token: {hl}");
+        let plain = RichText::pandoc_html(fence, false).unwrap_or_default();
+        assert!(
+            plain.contains("<pre class=\"cpp\"><code>") && !plain.contains("<span"),
+            "pastes stay unhighlighted: {plain}"
+        );
+    }
+
+    #[test]
     fn pane_mode_shape() {
         assert_eq!(PaneMode::Diff.as_str(), "diff");
         assert_eq!(PaneMode::Markdown.title(), "Markdown");

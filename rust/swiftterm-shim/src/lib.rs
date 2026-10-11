@@ -110,6 +110,24 @@ mod present {
         view.start(&exe, &nsarray, dir.as_deref());
     }
 
+    /// Swift's `TerminalAutoRestart` for a shell: once the child has exited
+    /// (`processTerminated` stored an exit code), start it again in the SAME
+    /// view. Never drop the view to restart — a fresh SwiftTerm view started
+    /// while the old one deinits loses its child at once. Returns true when it
+    /// restarted.
+    pub fn restart_if_exited(
+        view: &WSShim,
+        executable: &str,
+        args: &[String],
+        directory: Option<&str>,
+    ) -> bool {
+        if view.terminal_exit_code() < 0 {
+            return false;
+        }
+        start_process(view, executable, args, directory);
+        true
+    }
+
     /// Set the terminal font (`[app] terminal-font` / `terminal-font-size`).
     pub fn set_font(view: &WSShim, name: &str, size: f64) {
         let n = NSString::from_str(name);

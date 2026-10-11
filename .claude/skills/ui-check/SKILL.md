@@ -6,14 +6,15 @@ description: Verify a kitchen-sink UI change in seconds by querying the running 
 # ui-check — verify UI behavior through the daemon socket
 
 The daemon answers two test messages on `$TMPDIR/ws-notes.sock`
-(`[app] notes-socket`), implemented in `SwitcherController.testQuery`
-(kitchen_sink.swift) + `PopupWindow.testState` (PopupWindow.swift):
+(`[app] notes-socket`), implemented in `rust/ws-rs/src/app/host.rs`:
+`SwitcherController::state_json` (→ `ControllerInner::state_with_registry`,
+live focus read on main) and `do_host_action` + the views' registry hooks:
 
 - `state` → one JSON line:
   `view` (visible shared-window view, "" = hidden), `visible`, `active`,
   `keyWindow`, `windows` (visible NSWindows), `palette` (switcher shown),
   `views.<notes|files|jira|detail|releases|config|output|confluence|ai>` →
-  `shown`, `key`, `frame` [x,y,w,h], and for PopupWindow views also
+  `shown`, `key`, `frame` [x,y,w,h], and for the popup views also
   `drawerInset`, `terminal` / `browser` (drawer OPEN), `findBar`,
   `accessory`, `pane`, `tabs`, `selectedTab`, `responder` (class name).
 - `do:ACTION` → runs it, answers the state afterwards. ACTION = `cycle`,
@@ -38,13 +39,14 @@ The daemon answers two test messages on `$TMPDIR/ws-notes.sock`
 3. Assert the specific thing the change should affect. Put things back
    afterwards (toggle drawers back, re-open the view the user was on) —
    this is the user's live app.
-4. If state you need is missing, add it to `testState` / `testQuery`
-   rather than reaching for osascript.
+4. If state you need is missing, add it to `state_with_registry` / the
+   view's `test_state` (and a `do:` verb in `do_host_action`) rather than
+   reaching for osascript.
 
 In bin/ui-test.sh the same is wrapped as `ws_state JQ`, `ws_do ACTION`,
 `wait_state 'JQ_BOOL' [secs]` (50 ms polling — use instead of `sleep`).
 
-Only real keyboard/mouse paths (the key routing in `handleKey`, clicks)
+Only real keyboard/mouse paths (the key routing in `route_key_event`, clicks)
 still need synthetic input; run the full suite at most once (it is slow).
 cliclick's keystrokes may not reach apps from the agent's session —
 `osascript -e 'tell application "System Events" to key code 53'` does.

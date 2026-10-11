@@ -243,6 +243,21 @@ share the same socket contract and be diffed (`state` JSON) during development.
 
 ### Phase 4 — Cutover (gated)
 
+**Status (Oct 10 2026): cut over.** `bin/build-app.sh` is the cargo build of
+`rust/` and writes the repo-root `kitchen-sink.app`; `bin/build-rust-app.sh`
+is gone; `run-tests.sh` runs `cargo test` (module cases) plus the Python suites
+(the Swift test scripts were ported: python helper client + prose highlight
+cases to Rust, snippet render to `Tests/test_snippet_render.py`);
+`notify_poll.py` runs the `rust/ws-helpers` binaries (`helpers-bin/` in the
+bundle, `.build/rust-target/release` in a checkout); `INSTALL.sh` / preflight /
+`jira-doctor.sh` / `install.conf` (`HELPER_BINS`, brew `rust`) no longer build
+Swift. The Rust `main.rs` gained the `main.swift` CLI client (`app/cli.rs`:
+`WS_PING_ONLY`, `reload`/`restart`, `jira-poll`, `screenshot`, `pane-shot`,
+`compare [--wait]`, `term`, cold-start hand-off, lock retry) and
+`AppInstall::ensure_home`. Gate results and the open items (vim `:q`
+relaunch, AeroSpace re-show, hide-on-focus-loss bridge) are in
+`HANDOFF-rust-port-next.md`.
+
 20. Run `ui-test.sh`, `ui-test-vim.sh`, `ui-test-focus.py`, every
     `run-tests.sh` suite and `test_install.sh` against the Rust binary; require
     zero parity diffs and green suites.

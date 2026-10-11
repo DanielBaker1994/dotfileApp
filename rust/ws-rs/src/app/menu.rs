@@ -545,6 +545,15 @@ mod appkit {
             #[unsafe(method(menuAction:))]
             fn menu_action(&self, sender: &NSMenuItem) {
                 if let Some(action) = MenuAction::from_id(sender.tag() as i64) {
+                    // A plain on/off row flips its own checkmark (Swift
+                    // rebuilt the menu with the new `state:`).
+                    if action == MenuAction::ToggleHideOnFocusLoss {
+                        sender.setState(if sender.state() == NSControlStateValueOn {
+                            NSControlStateValueOff
+                        } else {
+                            NSControlStateValueOn
+                        });
+                    }
                     if let Some(cb) = self.ivars().handler.borrow().as_ref() {
                         cb(action);
                     }

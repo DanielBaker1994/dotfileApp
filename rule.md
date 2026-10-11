@@ -12,9 +12,10 @@ field: the notes editor, the search/filter bars, the embedded terminal, and
 - `Cmd+C` / `Cmd+V` / `Cmd+X` / `Cmd+A` / `Cmd+Z` — native macOS.
 - `Ctrl+V` (and `Ctrl+C`) — must paste/copy too, because the embedded
   terminal honors them and users expect the same everywhere.
-- The app is an accessory app with no Edit menu, so do NOT rely on AppKit key
-  equivalents; route edit keys to the active field editor explicitly.
-- `PopupWindow.handleKey` must never swallow an edit shortcut without
+- Do NOT rely on AppKit key equivalents alone (the popup windows' focus is
+  non-standard); route edit keys to the active field editor explicitly.
+- The key router (`route_key_event` in `rust/ws-rs/src/app/host.rs`, deciding
+  through `ui::popup::route_key`) must never swallow an edit shortcut without
   forwarding it to the focused text editor. Sheets (NSAlert) get paste routed
   straight to their field editor; every sheet text field sets
   `alert.window.initialFirstResponder`.
@@ -71,7 +72,6 @@ filters, `JiraMultiPicker`, the search pickers, …):
 - takes keyboard focus the moment it opens — its window is made KEY (not
   just a first responder), so typing filters and `Ctrl+N` / `Ctrl+P` / ↑↓
   move without a click first;
-- closes on `Esc` WITHOUT closing the window under it. While one is up it
-  sets `PopupWindow.transientEscape`; the popup windows' key monitor and
-  `cancelOperation` call that instead of their own Esc handling. Clear it
-  when the overlay closes.
+- closes on `Esc` WITHOUT closing the window under it. While one is up its
+  Esc handler takes precedence (the "transient Esc" the key router consults
+  before the window's own Esc handling); clear it when the overlay closes.
