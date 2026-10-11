@@ -1,6 +1,7 @@
 # ▶ NEXT SESSION START HERE (rewritten Oct 11 2026, second session)
 
-Branch `rust-parity` (off `main`, 20 commits, not merged, not pushed). Read
+Work directly on `main` (the old `rust-parity` branch was merged and deleted;
+don't create feature branches). Not pushed. Read
 this section, then `AGENTS.md` / `rule.md`. `PARITY-shortcuts.md` has
 per-row tables, but its ❌/🟡 marks predate this session; this section wins.
 
