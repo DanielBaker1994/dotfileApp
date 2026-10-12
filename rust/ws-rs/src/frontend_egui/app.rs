@@ -5,12 +5,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use crate::app::host::{MainQueue, SwitcherController, UiCommand, UiQueue, DEFAULT_VIEW};
+use crate::app::host::{MainQueue, PathsCmd, SwitcherController, UiCommand, UiQueue, DEFAULT_VIEW};
 use crate::app::registry::SlotView;
 use crate::ui::popup::{self, KeyAction, PrefixOutcome, PrefixState};
 use crate::ui::theme::{section_colors, PopupColors};
+use crate::views::paths::ReturnAction;
+use crate::views::tools::ToolKind;
 
 use super::ai::AiPane;
 use super::compare::ComparePane;
@@ -19,8 +21,17 @@ use super::files::FilesPane;
 use super::jira::JiraPane;
 use super::keys::key_input;
 use super::notes::NotesPane;
+use super::paths::PathsPane;
 use super::switcher::SwitcherOverlay;
 use super::theme::c;
+use super::tools::ToolsPane;
+
+/// The shared window's default size, used at launch and by `do:reset-size`.
+const DEFAULT_WINDOW_SIZE: [f32; 2] = [1000.0, 700.0];
+
+/// How long a toast pill stays up, and how long its final fade lasts.
+const TOAST_TTL: Duration = Duration::from_millis(2500);
+const TOAST_FADE: Duration = Duration::from_millis(500);
 
 /// The views the sidebar lists (header nav order, minus the unported sub-views).
 const SIDEBAR_VIEWS: [SlotView; 6] = [
@@ -75,6 +86,14 @@ pub struct KsApp {
     panes: HashMap<SlotView, Box<dyn Pane>>,
     /// The switcher / command-palette overlay, drawn last (stub for now).
     palette: SwitcherOverlay,
+    /// The Paths shelf tool window (`do:paths:*`), built lazily on first show.
+    paths: Option<PathsPane>,
+    paths_open: bool,
+    /// The Tools panel window (`do:tool:*`), built lazily on first open.
+    tools: Option<ToolsPane>,
+    tools_open: bool,
+    /// Live toast pills `(text, shown-at)`, oldest first (`do:toast` verbs).
+    toasts: Vec<(String, Instant)>,
     /// The Ctrl+B prefix state (`SharedWindow.prefixKey`).
     prefix: PrefixState,
     /// Consecutive-Esc count + timestamp (the `escStreakCloses` 0.6 s window).
@@ -90,7 +109,7 @@ pub fn run(controller: Arc<SwitcherController>, ui_queue: UiQueue, main_queue: M
     let app = KsApp::new(controller, ui_queue, main_queue);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 700.0])
+            .with_inner_size(DEFAULT_WINDOW_SIZE)
             .with_title("Kitchen Sink"),
         ..Default::default()
     };
@@ -109,6 +128,11 @@ impl KsApp {
             current,
             panes: HashMap::new(),
             palette: SwitcherOverlay::build(),
+            paths: None,
+            paths_open: false,
+            tools: None,
+            tools_open: false,
+            toasts: Vec::new(),
             prefix: PrefixState::new(),
             esc_streak: 0,
             last_esc_at: 0.0,
@@ -159,8 +183,9 @@ impl KsApp {
     }
 
     /// Drain the `UiCommand` queue (the `Present`/`Hide`/… the socket thread
-    /// enqueues) and the main-thread job queues, then repaint.
-    fn drain_queues(&mut self) {
+    /// enqueues) and the main-thread job queues, then repaint. `ctx` is only
+    /// needed for the commands that drive the viewport itself (`ResetSize`).
+    fn drain_queues(&mut self, ctx: &egui::Context) {
         for _ in 0..100 {
             let cmds: Vec<UiCommand> = {
                 let mut q = self.ui_queue.lock().unwrap();
@@ -170,13 +195,7 @@ impl KsApp {
                 q.drain(..).collect()
             };
             for cmd in cmds {
-                match cmd {
-                    UiCommand::Present(v) => {
-                        self.current = v;
-                        self.ensure_panes();
-                    }
-                    other => self.log_unhandled(other),
-                }
+                self.handle_command(cmd, ctx);
             }
         }
         for _ in 0..100 {
@@ -195,6 +214,163 @@ impl KsApp {
         // On macOS it doesn't exist (dispatch2 handles the main queue there).
         #[cfg(not(target_os = "macos"))]
         crate::platform::drain_main_queue();
+    }
+
+    /// Apply one drained [`UiCommand`] (the egui half of `daemon_ui`'s drain
+    /// match). `ctx` is only used by `ResetSize`'s viewport command; the rest
+    /// just mutate the app / controller. Anything not ported logs once.
+    fn handle_command(&mut self, cmd: UiCommand, ctx: &egui::Context) {
+        match cmd {
+            UiCommand::Present(v) => {
+                self.current = v;
+                self.ensure_panes();
+            }
+            // The switcher overlay reads the controller's flags each frame
+            // (`SwitcherOverlay::ui`), so showing/hiding is a flag flip.
+            UiCommand::ShowPalette => self.controller.set_palette_visible(true),
+            UiCommand::HidePalette => self.controller.set_palette_visible(false),
+            UiCommand::ShowSwitcher => self.controller.set_view_switcher(true),
+            UiCommand::HideSwitcher => self.controller.set_view_switcher(false),
+            UiCommand::Paths(cmd) => self.handle_paths(cmd),
+            UiCommand::Tool(kind) => self.open_tool(kind),
+            UiCommand::ToolClose(name) => self.close_tool(&name),
+            UiCommand::ResetSize => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                DEFAULT_WINDOW_SIZE.into(),
+            )),
+            UiCommand::Toast(text, _icon) => self.toasts.push((text, Instant::now())),
+            other => self.log_unhandled(other),
+        }
+    }
+
+    /// The `do:paths:*` commands (`run_paths_cmd`): show/hide the shelf window,
+    /// run its Return action, or move its selection.
+    fn handle_paths(&mut self, cmd: PathsCmd) {
+        match cmd {
+            PathsCmd::Show => {
+                if self.paths.is_none() {
+                    self.paths = Some(PathsPane::build());
+                }
+                self.paths_open = true;
+            }
+            PathsCmd::Hide => self.paths_open = false,
+            PathsCmd::Return => self.paths_return(),
+            PathsCmd::Select(n) => {
+                if let Some(pane) = self.paths.as_mut() {
+                    pane.model.test_select(n);
+                }
+            }
+        }
+    }
+
+    /// `do:paths:return` — the shelf's Return action (`run_paths_cmd`'s Return
+    /// arm). `PathsPane` keeps its side-effecting `run_return` private, so the
+    /// frontend-side pasteboard / open follow-ups run here against the model's
+    /// public methods — the same split `views/paths.rs` documents.
+    fn paths_return(&mut self) {
+        let Some(pane) = self.paths.as_mut() else {
+            return;
+        };
+        match pane.model.return_action {
+            ReturnAction::Open => {
+                for p in pane.model.open_paths() {
+                    let _ = crate::platform::open_path(std::path::Path::new(&p));
+                }
+            }
+            ReturnAction::File | ReturnAction::Path => {
+                let _ = crate::platform::clipboard::set_text(&pane.model.copy_paths_text());
+            }
+        }
+    }
+
+    /// `do:tool:<name>` (`open_tool`): raise the Tools window. `ToolsPane`
+    /// exposes no kind selector (all three panels are tabs it owns), so `kind`
+    /// only tells the window to appear — the user picks the tab.
+    fn open_tool(&mut self, _kind: ToolKind) {
+        if self.tools.is_none() {
+            self.tools = Some(ToolsPane::build());
+        }
+        self.tools_open = true;
+    }
+
+    /// `do:tool-close:<name>` (`close_tool`): order the Tools window out when
+    /// `name` is one of its panels.
+    fn close_tool(&mut self, name: &str) {
+        if ToolKind::is_panel(name) {
+            self.tools_open = false;
+        }
+    }
+
+    /// Draw the Paths shelf window when it is open (`paths_open`), building it
+    /// on the first `Show`. The window's close button clears `paths_open`.
+    fn paths_ui(&mut self, ctx: &egui::Context) {
+        if !self.paths_open {
+            return;
+        }
+        let Some(pane) = self.paths.as_mut() else {
+            return;
+        };
+        let colors = section_colors("paths");
+        let mut open = true;
+        egui::Window::new("Paths")
+            .id(egui::Id::new("Paths"))
+            .resizable(true)
+            .default_size([680.0, 360.0])
+            .open(&mut open)
+            .show(ctx, |ui| pane.ui(ui, &colors));
+        if !open {
+            self.paths_open = false;
+        }
+    }
+
+    /// Draw the Tools window when it is open (`tools_open`), building it on the
+    /// first `Tool`. The window's close button clears `tools_open`.
+    fn tools_ui(&mut self, ctx: &egui::Context) {
+        if !self.tools_open {
+            return;
+        }
+        let Some(pane) = self.tools.as_mut() else {
+            return;
+        };
+        let colors = section_colors(self.current.raw());
+        let mut open = true;
+        egui::Window::new("Tools")
+            .id(egui::Id::new("Tools"))
+            .resizable(true)
+            .default_size([760.0, 520.0])
+            .open(&mut open)
+            .show(ctx, |ui| pane.ui(ui, &colors));
+        if !open {
+            self.tools_open = false;
+        }
+    }
+
+    /// Draw the toast pills (bottom-centre), dropping expired ones first. The
+    /// 30 ms repaint timer animates the fade.
+    fn toasts_ui(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        prune_toasts(&mut self.toasts, now);
+        if self.toasts.is_empty() {
+            return;
+        }
+        let colors = section_colors(self.current.raw());
+        let toasts = &self.toasts;
+        egui::Area::new(egui::Id::new("toasts"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                for (text, at) in toasts {
+                    let alpha = toast_alpha(now.saturating_duration_since(*at));
+                    egui::Frame::popup(&ui.style())
+                        .fill(c(colors.background).gamma_multiply(alpha))
+                        .stroke(egui::Stroke::new(1.0, c(colors.border).gamma_multiply(alpha)))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(text).color(c(colors.text).gamma_multiply(alpha)),
+                            );
+                        });
+                    ui.add_space(6.0);
+                }
+            });
     }
 
     fn log_unhandled(&mut self, cmd: UiCommand) {
@@ -373,7 +549,7 @@ impl KsApp {
 
 impl eframe::App for KsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_queues();
+        self.drain_queues(ctx);
         self.handle_keys(ctx);
 
         let bg = c(section_colors(self.current.raw()).background);
@@ -386,11 +562,33 @@ impl eframe::App for KsApp {
             .frame(egui::Frame::NONE.fill(bg))
             .show(ctx, |ui| self.content(ui));
 
-        // The switcher / palette overlay draws last, over the active pane.
+        // Tool windows float over the active pane; the switcher / palette
+        // overlay draws over them, and toasts on top of everything.
+        self.paths_ui(ctx);
+        self.tools_ui(ctx);
         self.palette.ui(ctx, &self.controller);
+        self.toasts_ui(ctx);
 
         // Mirror the 30 ms AppKit drain timer.
         ctx.request_repaint_after(Duration::from_millis(30));
+    }
+}
+
+/// Drop toast pills older than [`TOAST_TTL`]. Pure; the test drives `now`.
+fn prune_toasts(toasts: &mut Vec<(String, Instant)>, now: Instant) {
+    toasts.retain(|(_, at)| now.saturating_duration_since(*at) < TOAST_TTL);
+}
+
+/// A toast's opacity for its age: full until the fade window, then linear to 0.
+fn toast_alpha(age: Duration) -> f32 {
+    if age >= TOAST_TTL {
+        return 0.0;
+    }
+    let fade_start = TOAST_TTL - TOAST_FADE;
+    if age <= fade_start {
+        1.0
+    } else {
+        (TOAST_TTL - age).as_secs_f32() / TOAST_FADE.as_secs_f32()
     }
 }
 
@@ -399,4 +597,76 @@ fn now_secs() -> f64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn app() -> KsApp {
+        KsApp::new(
+            Arc::new(SwitcherController::new_default()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    }
+
+    #[test]
+    fn prune_toasts_drops_expired_pills() {
+        let now = Instant::now();
+        let mut toasts = vec![
+            ("fresh".to_string(), now),
+            ("stale".to_string(), now - TOAST_TTL - Duration::from_millis(1)),
+        ];
+        prune_toasts(&mut toasts, now);
+        assert_eq!(toasts.len(), 1);
+        assert_eq!(toasts[0].0, "fresh");
+    }
+
+    #[test]
+    fn toast_alpha_fades_only_at_the_end() {
+        assert_eq!(toast_alpha(Duration::ZERO), 1.0);
+        assert_eq!(toast_alpha(TOAST_TTL), 0.0);
+        let mid = toast_alpha(TOAST_TTL - TOAST_FADE / 2);
+        assert!(mid > 0.0 && mid < 1.0, "mid-fade alpha {mid}");
+    }
+
+    /// Feed commands through the pure drain path and assert the state they set
+    /// (no live window / GUI).
+    #[test]
+    fn drains_commands_into_egui_state() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+
+        app.handle_command(UiCommand::Toast("saved".into(), "checkmark"), &ctx);
+        assert_eq!(app.toasts.len(), 1, "toast queued");
+
+        app.handle_command(UiCommand::Paths(PathsCmd::Show), &ctx);
+        assert!(app.paths_open && app.paths.is_some(), "paths shown + built");
+        app.handle_command(UiCommand::Paths(PathsCmd::Select(0)), &ctx);
+        app.handle_command(UiCommand::Paths(PathsCmd::Hide), &ctx);
+        assert!(!app.paths_open, "paths hidden");
+
+        app.handle_command(UiCommand::Tool(ToolKind::Filefast), &ctx);
+        assert!(app.tools_open && app.tools.is_some(), "tools shown + built");
+        app.handle_command(UiCommand::ToolClose(ToolKind::Filefast.name().to_string()), &ctx);
+        assert!(!app.tools_open, "tools closed");
+        // A non-panel name leaves the window up.
+        app.handle_command(UiCommand::Tool(ToolKind::PrettyPrint), &ctx);
+        app.handle_command(UiCommand::ToolClose("bogus".to_string()), &ctx);
+        assert!(app.tools_open, "an unknown tool name is a no-op");
+
+        app.handle_command(UiCommand::ShowSwitcher, &ctx);
+        assert!(app.controller.view_switcher_shown(), "switcher flag set");
+        app.handle_command(UiCommand::HideSwitcher, &ctx);
+        assert!(!app.controller.view_switcher_shown(), "switcher flag cleared");
+        app.handle_command(UiCommand::ShowPalette, &ctx);
+        assert!(app.controller.is_palette_visible(), "palette flag set");
+        app.handle_command(UiCommand::HidePalette, &ctx);
+        assert!(!app.controller.is_palette_visible(), "palette flag cleared");
+
+        // ResetSize only queues a viewport command; must not panic.
+        app.handle_command(UiCommand::ResetSize, &ctx);
+    }
 }

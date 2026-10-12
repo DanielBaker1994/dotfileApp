@@ -14,16 +14,17 @@ mod files;
 mod keys;
 mod theme;
 
-// Wave 5 stub panes — one file per worker, wired in `app::ensure_panes`.
+// Wave 5 stub panes — one file per worker, wired in `app::ensure_panes`
+// (files/notes/jira/confluence/ai/compare) or as floating tool windows in
+// `app.rs` (paths in the Paths window, tools in the Tools window).
 mod ai;
 mod compare;
 mod confluence;
 mod jira;
 mod notes;
-#[allow(dead_code)] // Wave 5 worker owns this; a tool panel, not yet wired into a SlotView.
 mod paths;
 mod switcher;
-#[allow(dead_code)] // Wave 5 worker owns this (Tools + Setup); not yet wired into a SlotView.
+#[allow(dead_code)] // `SetupPane` is not wired into a SlotView yet; `ToolsPane` is (app.rs).
 mod tools;
 
 pub use app::run;
