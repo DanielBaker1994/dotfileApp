@@ -2622,7 +2622,7 @@ mod daemon_ui {
     use objc2_app_kit::{
         NSApplication, NSAutoresizingMaskOptions, NSButton, NSFont, NSEvent, NSTextField,
         NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-        NSVisualEffectView, NSWindowCollectionBehavior, NSWorkspace,
+        NSVisualEffectView, NSWindowCollectionBehavior,
     };
     use objc2_foundation::{NSInteger, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
     use std::cell::{Cell, RefCell};
@@ -2799,10 +2799,7 @@ mod daemon_ui {
             key_title: key.as_ref().map(|w| w.title().to_string()).unwrap_or_default(),
             key_wid: key.as_ref().map_or(0, |w| w.windowNumber() as i64),
             windows: visible_window_count(mtm),
-            frontmost: NSWorkspace::sharedWorkspace()
-                .frontmostApplication()
-                .map(|a| a.processIdentifier())
-                .unwrap_or(0),
+            frontmost: crate::platform::frontmost_app().map_or(0, |a| a.pid),
             main_h: objc2_app_kit::NSScreen::screens(mtm)
                 .firstObject()
                 .map(|s| s.frame().size.height)
@@ -2818,10 +2815,7 @@ mod daemon_ui {
         let key = app.keyWindow().map_or(false, |w| {
             w.isVisible() && (wid == 0 || w.windowNumber() as i64 == wid)
         });
-        let front = NSWorkspace::sharedWorkspace()
-            .frontmostApplication()
-            .map(|a| a.processIdentifier())
-            .unwrap_or(0);
+        let front = crate::platform::frontmost_app().map_or(0, |a| a.pid);
         key && app.isActive() && front == std::process::id() as i32
     }
 
@@ -3437,10 +3431,8 @@ mod daemon_ui {
             let (hide_on_loss, delay) = controller.focus_loss_settings();
             let action = self.ivars().focus_watch.borrow_mut().tick(sample, hide_on_loss, delay);
             let front = || {
-                NSWorkspace::sharedWorkspace()
-                    .frontmostApplication()
-                    .and_then(|a| a.bundleIdentifier())
-                    .map(|b| b.to_string())
+                crate::platform::frontmost_app()
+                    .and_then(|a| a.bundle_id)
                     .unwrap_or_else(|| "?".into())
             };
             match action {
@@ -9105,10 +9097,7 @@ mod daemon_ui {
                 st.chrome.set_nav_on(Some(v.nav_id() as i32));
                 let title = self.ivars().controller.window_title(v);
                 st.window.setTitle(&NSString::from_str(&title));
-                let front_pid = NSWorkspace::sharedWorkspace()
-                    .frontmostApplication()
-                    .map(|a| a.processIdentifier())
-                    .unwrap_or(0);
+                let front_pid = crate::platform::frontmost_app().map_or(0, |a| a.pid);
                 // Swift `unpark` / `slotShow`: activate first, then key + front.
                 // A view switch inside the already-key window re-raises
                 // nothing: a redundant raise makes AeroSpace jump to the

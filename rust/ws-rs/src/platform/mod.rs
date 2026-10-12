@@ -1,6 +1,9 @@
 //! Cross-platform seams. Each function here replaces a direct AppKit call so
 //! the rest of the app stays toolkit-neutral; migrate one entry at a time.
 
+pub mod app;
+pub use app::*;
+
 pub mod clipboard;
 pub use clipboard::*;
 
