@@ -173,6 +173,42 @@ An agent can drive and verify the app over the socket — no computer control:
   entry; unknown `do:` echoes state (typos undetectable); `do:ai:*`/`do:confluence:*` registers are
   dead code. Deferrals in `BACKLOG.md` ("MCP / headless control").
 
+## Linux (experimental)
+
+The same core runs on Linux behind a second, **egui/eframe** frontend: controller,
+socket API, Python helper, engines and view models are shared, and every AppKit half
+is compiled out (`#[cfg(target_os = "macos")]`). macOS keeps AppKit, pixel-identical;
+Linux is functional-first. Plan: `PLAN-cross-platform.md`.
+
+```bash
+bin/linux-check.sh check          # cargo check --workspace --all-targets in Docker
+bin/linux-check.sh test [filter]  # cargo test -p ws-rs + the plain-script Python suites
+bin/linux-check.sh shell          # interactive shell in the pinned image
+./ws test linux                   # same as `bin/linux-check.sh check`
+./ws test linux-headless          # Docker `headless` smoke: state + do:open:files
+```
+
+`bin/linux-check.sh` (Docker, native arm64; `rust/docker/linux.Dockerfile` pins rustc
+1.92 + the X11/GTK/Wayland dev libs) is the truth for compiling and testing. Off macOS
+the daemon always runs the egui frontend; **on macOS the same frontend runs behind
+`cargo run -p ws-rs --features egui` + `WS_FRONTEND=egui`** (the dev switch for
+iterating on the Linux UI on the owner's Mac — use a private `TMPDIR`/`WS_HOME`, never
+the live socket). `bin/build-linux.sh` (dist layout) is not landed yet.
+
+- Works: `kitchen-sink headless` (the full socket API, no AppKit) and the egui panes —
+  files, switcher/palette, paths, jira, confluence, ai (`egui_commonmark`), compare,
+  the notes editor and tools/setup — plus row context menus.
+- Window manager: there is no AeroSpace on Linux. Bind your WM's keys to the existing
+  CLI — `kitchen-sink notes|files|jira|confluence|ai|compare|window` (and `term`,
+  `show`) — which forwards the launch message to the running daemon over
+  `$TMPDIR/ws-notes.sock`; `hotkey_prep` is a no-op off macOS.
+- Unsupported / known gaps: terminal (`egui_term`), the notes nvim pane, screen capture
+  (`xcap`), OCR, QuickLook, and the tray/global menu (Waves 6–7, not started);
+  `python_helper::find_python` skips `/usr/bin` so the Python bridge cannot start on
+  Debian images; `recent_files` rewrites `/tmp`→`/private/tmp`; `status.py` still reads
+  macOS power/mem APIs; "open in notes" is a no-op off macOS; `ToolsPane` cannot
+  pre-select a tool tab. See `PLAN-cross-platform.md` §8.
+
 ## Repo layout / code map
 
 `~/.config/kitchen-sink` **is** this git checkout in repo mode. Repo mode

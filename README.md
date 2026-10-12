@@ -123,6 +123,16 @@ The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
   `jira-doctor.sh`
   (health checks, `/health-checks` window). Tests: `python3 Tests/test_jira_poll.py`
 
+### Linux (experimental)
+
+kitchen-sink also builds and runs on Linux per `PLAN-cross-platform.md`: the daemon
+plus a second **egui/eframe** frontend over the same socket API and view models, with
+AppKit compiled out (macOS stays AppKit, pixel-identical). Compile and test without a
+Linux host, inside Docker: `bin/linux-check.sh check|test`, `./ws test linux` and
+`./ws test linux-headless`. On macOS the same frontend runs for development with
+`--features egui` + `WS_FRONTEND=egui`. See `AGENTS.md` ▸ "Linux (experimental)" for
+what works, the window-manager-key → CLI-mode mapping, and the known gaps.
+
 ### Headless control + MCP
 
 `kitchen-sink headless` runs the daemon with no window, menu or Dock presence
