@@ -34,12 +34,19 @@ pub trait AeroCall: Send + Sync {
     fn call(&self, args: &[String]) -> Option<String>;
 }
 
+#[cfg(unix)]
 fn executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(path) {
         Ok(m) => m.is_file() && (m.permissions().mode() & 0o111) != 0,
         Err(_) => false,
     }
+}
+
+/// Windows twin: no mode bits, so fall back to the shared extension check.
+#[cfg(windows)]
+fn executable(path: &str) -> bool {
+    crate::app::python_helper::is_executable_windows_ext(std::path::Path::new(path))
 }
 
 pub fn discover_aerospace_binary() -> String {

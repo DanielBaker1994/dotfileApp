@@ -154,11 +154,18 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+#[cfg(unix)]
 fn is_executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
         .unwrap_or(false)
+}
+
+/// Windows twin: no mode bits, so fall back to the shared extension check.
+#[cfg(windows)]
+fn is_executable(path: &str) -> bool {
+    crate::app::python_helper::is_executable_windows_ext(Path::new(path))
 }
 
 pub struct RichText;

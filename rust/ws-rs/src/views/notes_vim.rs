@@ -989,7 +989,9 @@ mod tests {
 
     // ---- live, gated on a real nvim (optional, cleaned up) ------------------
 
+    #[cfg(unix)]
     struct ChildGuard(Option<std::process::Child>);
+    #[cfg(unix)]
     impl Drop for ChildGuard {
         fn drop(&mut self) {
             if let Some(c) = self.0.as_mut() {
@@ -999,6 +1001,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn find_nvim() -> Option<String> {
         use std::os::unix::fs::PermissionsExt;
         let mut candidates = vec![
@@ -1019,6 +1022,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn start_nvim(nvim: &str, sock: &str) -> Option<ChildGuard> {
         use std::process::{Command, Stdio};
         let child = Command::new(nvim)
@@ -1038,6 +1042,7 @@ mod tests {
         None
     }
 
+    #[cfg(unix)]
     #[test]
     fn live_open_round_trip() {
         let Some(nvim) = find_nvim() else {

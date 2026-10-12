@@ -344,12 +344,19 @@ pub(crate) fn expand_tilde(bin: &str) -> String {
     bin.to_string()
 }
 
+#[cfg(unix)]
 pub(crate) fn is_executable_file(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(Path::new(path)) {
         Ok(m) => m.is_file() && (m.permissions().mode() & 0o111) != 0,
         Err(_) => false,
     }
+}
+
+/// Windows twin: no mode bits, so fall back to the shared extension check.
+#[cfg(windows)]
+pub(crate) fn is_executable_file(path: &str) -> bool {
+    crate::app::python_helper::is_executable_windows_ext(Path::new(path))
 }
 
 #[cfg(test)]
@@ -484,6 +491,7 @@ mod tests {
         assert!(Herdr::pane_from_json("{\"result\":{}}").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn herdr_stderr_error_surfaces() {
         use std::os::unix::fs::PermissionsExt;
