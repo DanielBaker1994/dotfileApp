@@ -83,7 +83,11 @@ case "$cmd" in
     help|-h|--help) ws_usage ;;
     install)        ws_cmd_install "$@" ;;
     uninstall)      ws_cmd_uninstall "$@" ;;
-    build)          ws_cmd_build "$@" ;;
+    build)          if [ "$(uname -s)" = "Linux" ]; then
+                        exec "$DIR/bin/build-linux.sh" "$@"
+                    else
+                        ws_cmd_build "$@"
+                    fi ;;
     clean)          ws_cmd_clean "$@" ;;
     dmg)            ws_cmd_dmg "$@" ;;
     test)           ws_cmd_test "$@" ;;

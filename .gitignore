@@ -6,6 +6,9 @@ kitchen-sink.app/
 # Linux cross-check (bin/linux-check.sh) cargo target (also covered by .build/)
 .build/linux-target/
 
+# Linux dist layout (bin/build-linux.sh -> dist/kitchen-sink/)
+/dist/
+
 # SwiftTerm (embedded terminal) is fetched at build time by
 # bin/ensure-swiftterm.sh into install.conf SWIFTTERM_DIR (../SwiftTerm, outside
 # this repo) — these catch a stray in-repo checkout so it can never be committed
