@@ -2,6 +2,7 @@
 //! capsule — "≡ Prose | </> nvim" segments, then ◐ (document style) and ⤢
 //! (pop the reading view out into a floating window).
 
+#[cfg(target_os = "macos")]
 use crate::ui::chrome::Rect;
 
 /// Which segment was clicked.

@@ -8,6 +8,7 @@
 //! [`CardNSWindow::create`] / [`create_card_window`] and
 //! [`CardWindowController::themed_root`].
 
+#[cfg(target_os = "macos")]
 use crate::ui::chrome::{ChromeConfig, PopupChrome};
 use crate::ui::popup::{
     CardFrame, KeyInput, KEY_A, KEY_BACKSLASH, KEY_C, KEY_TAB, KEY_V, KEY_W, KEY_X, KEY_Z,

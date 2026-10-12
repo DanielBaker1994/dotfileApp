@@ -4,11 +4,13 @@
 pub mod ansi_text;
 pub mod card;
 pub mod chrome;
+#[cfg(target_os = "macos")]
 pub mod field;
 pub mod inline_rename;
 pub mod jira_setup;
 pub mod list_panel;
 pub mod menu_kit;
+#[cfg(target_os = "macos")]
 pub mod panel_frame;
 pub mod popup;
 pub mod sheet;
