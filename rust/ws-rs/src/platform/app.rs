@@ -35,6 +35,23 @@ pub fn frontmost_app() -> Option<FrontApp> {
     None
 }
 
+/// CFBundleShortVersionString of the running bundle; "" if none.
+#[cfg(target_os = "macos")]
+pub fn bundle_version() -> String {
+    use objc2_foundation::{NSBundle, NSString};
+    NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&NSString::from_str("CFBundleShortVersionString"))
+        .and_then(|v| v.downcast::<NSString>().ok())
+        .map(|v| v.to_string())
+        .unwrap_or_default()
+}
+
+/// The running build's version. Non-macOS: the crate's compile-time version.
+#[cfg(not(target_os = "macos"))]
+pub fn bundle_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

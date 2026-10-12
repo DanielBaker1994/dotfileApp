@@ -12,7 +12,9 @@ mod platform;
 mod ui;
 mod views;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 
 use app::host::SwitcherController;
 use app::paths::Paths;
@@ -47,6 +49,7 @@ fn main() {
             "config-check" => {
                 std::process::exit(config_check(&args[2..]));
             }
+            #[cfg(target_os = "macos")]
             "prose" => {
                 configure_helper();
                 let opts = views::notes::ProseLaunchOptions::parse(&args[2..]);
@@ -88,12 +91,7 @@ fn main() {
 /// `AppInstall.ensureHome()`: an installed app (not a repo build, not running
 /// from the disk image) keeps `~/.config/kitchen-sink` set up for its version.
 fn ensure_home(paths: &Paths) {
-    use objc2_foundation::{NSBundle, NSString};
-    let version = NSBundle::mainBundle()
-        .objectForInfoDictionaryKey(&NSString::from_str("CFBundleShortVersionString"))
-        .and_then(|v| v.downcast::<NSString>().ok())
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+    let version = crate::platform::bundle_version();
     views::setup::AppInstall::from_paths(paths, version).ensure_home(false);
 }
 
@@ -138,40 +136,55 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         }
     }
 
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-    let mtm = MainThreadMarker::new().expect("main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    // The Swift app is a regular app (menu bar + status item), not an
-    // accessory — mirror that so the shared window is launchable.
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    app::menu::install_main_menu(mtm, None);
-    install_status_item(mtm, &controller);
-
-    // The socket thread enqueues UI commands; the main-thread timer drains
-    // them into the shared host window (see `app::host::install_daemon_ui`).
-    let queue: app::host::UiQueue = Arc::new(Mutex::new(Vec::new()));
-    controller.install_ui(queue.clone());
-    let main_queue: app::host::MainQueue = Arc::new(Mutex::new(Vec::new()));
-    controller.install_main_queue(main_queue.clone());
-    let _ui = app::host::install_daemon_ui(mtm, controller.clone(), queue, main_queue);
-
-    // A hotkey/CLI invocation that cold-started the daemon applies its mode
-    // now; a bare start presents the default view so the app is launchable.
-    // (`show` presents the palette only — the shared window stays hidden,
-    // mirroring Swift's `showOnLaunch`.)
-    if let Some(m) = mode {
-        controller.launch_with_prep(&m, None);
-    } else {
-        controller.open(app::host::DEFAULT_VIEW);
+    // Non-macOS targets have no UI toolkit yet: the headless path is the only
+    // one for now (Wave 4 swaps in the egui frontend).
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = &mode;
+        eprintln!("kitchen-sink (rust) headless daemon: socket {sock}");
+        loop {
+            std::thread::park();
+        }
     }
 
-    eprintln!("kitchen-sink (rust) daemon: socket {sock}");
-    app.run();
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        // The Swift app is a regular app (menu bar + status item), not an
+        // accessory — mirror that so the shared window is launchable.
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        app::menu::install_main_menu(mtm, None);
+        install_status_item(mtm, &controller);
+
+        // The socket thread enqueues UI commands; the main-thread timer drains
+        // them into the shared host window (see `app::host::install_daemon_ui`).
+        let queue: app::host::UiQueue = Arc::new(Mutex::new(Vec::new()));
+        controller.install_ui(queue.clone());
+        let main_queue: app::host::MainQueue = Arc::new(Mutex::new(Vec::new()));
+        controller.install_main_queue(main_queue.clone());
+        let _ui = app::host::install_daemon_ui(mtm, controller.clone(), queue, main_queue);
+
+        // A hotkey/CLI invocation that cold-started the daemon applies its mode
+        // now; a bare start presents the default view so the app is launchable.
+        // (`show` presents the palette only — the shared window stays hidden,
+        // mirroring Swift's `showOnLaunch`.)
+        if let Some(m) = mode {
+            controller.launch_with_prep(&m, None);
+        } else {
+            controller.open(app::host::DEFAULT_VIEW);
+        }
+
+        eprintln!("kitchen-sink (rust) daemon: socket {sock}");
+        app.run();
+    }
 }
 
 /// Install the menu-bar status item from the ported menu spec. The handle is
 /// leaked on purpose: the status item lives as long as the process.
+#[cfg(target_os = "macos")]
 fn install_status_item(mtm: objc2::MainThreadMarker, controller: &Arc<SwitcherController>) {
     use app::menu::{build_menu_spec, install_status_item, MenuSettings};
     let settings = controller.settings();
@@ -207,6 +220,7 @@ fn status_menu_action(controller: &Arc<SwitcherController>, action: app::menu::M
         MenuAction::SetHeaderStyle(style) => {
             let _ = controller.do_action(&format!("header-style:{}", style.raw_value()));
         }
+        #[cfg(target_os = "macos")]
         MenuAction::Quit => {
             if let Some(mtm) = objc2::MainThreadMarker::new() {
                 objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None);
