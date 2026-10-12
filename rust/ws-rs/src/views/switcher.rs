@@ -6,6 +6,7 @@
 //! with its search field and row buttons on macOS.
 
 use crate::engines::list_filter::FuzzyIndex;
+use crate::engines::switcher_status::SwitcherStatus;
 use crate::ui::chrome::Rect;
 use serde_json::{json, Value};
 
@@ -766,6 +767,8 @@ pub struct PaletteModel {
     pub split_pane: usize,
     pub selection: usize,
     pub shown: bool,
+    /// The status row's data (`SwitcherController.status`; gathered off-main).
+    pub status: SwitcherStatus,
     /// The last filtered query (`splitQuery` — resets pane + selection).
     last_query: String,
 }
@@ -981,6 +984,158 @@ impl PaletteModel {
             }
             (36, _) | (76, _) => self.accept(),
             _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot / Event contract (Wave 3 frontend contract; pure, no cfg)
+// ---------------------------------------------------------------------------
+
+/// One row a switcher / palette panel draws.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SwitcherRow {
+    /// A view row (the Ctrl+B W switcher, view mode).
+    View(SwitchRow),
+    /// A command row (the Ctrl+B W switcher's `/` command mode).
+    Command { name: String, title: String },
+    /// A split row (the `show` palette: a command cell and/or a workspace cell).
+    Palette(PaletteRow),
+}
+
+/// Everything a switcher / palette panel draws, pushed by the model.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SwitcherSnapshot {
+    /// The rows to draw, in display order.
+    pub rows: Vec<SwitcherRow>,
+    /// The selected row index into [`Self::rows`].
+    pub selection: usize,
+    pub query: String,
+    pub shown: bool,
+    /// The palette's active pane (0 = command, 1 = workspace; switcher 0).
+    pub split_pane: usize,
+    /// True in the switcher's `/` command mode.
+    pub command_mode: bool,
+    /// The palette's status row (the Ctrl+B W switcher has none).
+    pub status: Option<SwitcherStatus>,
+}
+
+/// Clicks / typing / keys reported to the owner.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SwitcherEvent {
+    /// A row was clicked (`row` is a visible index).
+    Click { row: usize },
+    Query(String),
+    /// Return: accept the selected row.
+    Enter,
+    /// Up / Down (or Ctrl+N / Ctrl+P).
+    Move(i64),
+    /// Esc: close (a live palette query clears instead).
+    Escape,
+    /// Tab / left-right: switch the palette's active pane.
+    SwitchPane(usize),
+    /// The status row's fresh data arrived (`SwitcherController.onShow`).
+    Status(SwitcherStatus),
+}
+
+impl ViewSwitcherPanel {
+    /// Everything the panel draws: the filtered rows (view or `/` command
+    /// mode) plus the live query and selection as the lone visible index.
+    pub fn snapshot(&self) -> SwitcherSnapshot {
+        let query = self.live_query();
+        let command_mode = is_command_query(&query);
+        let visible = self.filter(&query);
+        let mut rows: Vec<SwitcherRow> = Vec::new();
+        let mut selection = 0;
+        if command_mode {
+            for i in filter_commands(&self.commands, &query) {
+                let (name, title) = &self.commands[i];
+                rows.push(SwitcherRow::Command { name: name.clone(), title: title.clone() });
+            }
+        } else {
+            selection = visible.iter().position(|i| *i == self.selection).unwrap_or(0);
+            for i in &visible {
+                rows.push(SwitcherRow::View(self.rows[*i].clone()));
+            }
+        }
+        SwitcherSnapshot {
+            rows,
+            selection,
+            query,
+            shown: self.shown,
+            split_pane: 0,
+            command_mode,
+            status: None,
+        }
+    }
+
+    /// Dispatch one frontend event through the panel's own methods (the same
+    /// ones the AppKit half calls today). Accepts are read back through
+    /// [`Self::accept`]; a click selects, it does not pick.
+    pub fn handle(&mut self, ev: SwitcherEvent) {
+        match ev {
+            SwitcherEvent::Query(q) => self.current_query = q,
+            SwitcherEvent::Move(d) => self.move_selection(d),
+            SwitcherEvent::Enter => {
+                if self.accept().is_some() {
+                    self.hide_panel();
+                }
+            }
+            SwitcherEvent::Escape => self.hide_panel(),
+            SwitcherEvent::Click { row } => {
+                if let Some(&i) = self.filter(&self.live_query()).get(row) {
+                    self.selection = i;
+                }
+            }
+            SwitcherEvent::SwitchPane(_) | SwitcherEvent::Status(_) => {}
+        }
+    }
+}
+
+impl PaletteModel {
+    /// Everything the palette draws: the split rows plus the query, the active
+    /// pane, the selection and the status row.
+    pub fn snapshot(&self) -> SwitcherSnapshot {
+        SwitcherSnapshot {
+            rows: self.rows().into_iter().map(SwitcherRow::Palette).collect(),
+            selection: self.selection,
+            query: self.query.clone(),
+            shown: self.shown,
+            split_pane: self.split_pane,
+            command_mode: is_command_query(&self.query),
+            status: (!self.status.is_empty()).then(|| self.status.clone()),
+        }
+    }
+
+    /// Dispatch one frontend event through the palette's own methods (the same
+    /// ones the AppKit half calls today). A click selects the pane through
+    /// [`SwitcherEvent::SwitchPane`]; accepts are read back through
+    /// [`Self::accept`].
+    pub fn handle(&mut self, ev: SwitcherEvent) {
+        match ev {
+            SwitcherEvent::Query(q) => self.set_query(&q),
+            SwitcherEvent::Move(d) => self.move_cursor(d),
+            SwitcherEvent::SwitchPane(p) => self.switch_pane(p),
+            SwitcherEvent::Click { row } => {
+                if row < self.rows().len() {
+                    self.selection = row;
+                }
+            }
+            SwitcherEvent::Enter => {
+                if self.accept().is_some() {
+                    self.shown = false;
+                }
+            }
+            SwitcherEvent::Escape => {
+                if self.query.trim().is_empty() {
+                    self.shown = false;
+                } else {
+                    self.set_query("");
+                    self.selection = 0;
+                    self.split_pane = 0;
+                }
+            }
+            SwitcherEvent::Status(st) => self.status = st,
         }
     }
 }
@@ -2147,5 +2302,63 @@ mod tests {
         assert!(rows[1].focused, "workspace 2 is focused");
         assert_eq!(rows[0].apps.len(), 2);
         assert_eq!(rows[0].apps[0].name, "Safari");
+    }
+
+    // -- the switcher / palette snapshot contract ---------------------------
+
+    #[test]
+    fn switcher_snapshot_and_events() {
+        let mut p = ViewSwitcherPanel::new();
+        p.show(&views(), Some(60), None);
+        let before = p.snapshot();
+        assert!(before.shown && !before.command_mode && before.rows.len() == 3);
+
+        p.handle(SwitcherEvent::Move(1));
+        let moved = p.snapshot();
+        assert_ne!(moved, before, "Move changes the selection");
+        assert_eq!(moved.selection, 1);
+
+        p.handle(SwitcherEvent::Click { row: 2 });
+        assert_eq!(p.snapshot().selection, 2, "a click selects the visible row");
+
+        p.handle(SwitcherEvent::Query("jira".into()));
+        assert_eq!(p.snapshot().rows.len(), 1, "typing filters");
+
+        p.set_commands(commands());
+        p.handle(SwitcherEvent::Query("/ji".into()));
+        assert_eq!(
+            p.snapshot().rows,
+            vec![SwitcherRow::Command { name: "jira".into(), title: "Jira Board".into() }],
+            "`/` mode draws command rows"
+        );
+
+        p.handle(SwitcherEvent::Escape);
+        assert!(!p.snapshot().shown);
+    }
+
+    #[test]
+    fn palette_snapshot_and_events() {
+        let mut p = palette();
+        let before = p.snapshot();
+        assert_eq!(before.rows.len(), 2);
+        assert!(before.status.is_none());
+
+        p.handle(SwitcherEvent::Move(1));
+        assert_eq!(p.snapshot().selection, 1, "Move changes the cursor");
+
+        p.handle(SwitcherEvent::Status(SwitcherStatus { cpu: Some(12), ..Default::default() }));
+        assert_eq!(p.snapshot().status.and_then(|s| s.cpu), Some(12));
+
+        p.handle(SwitcherEvent::SwitchPane(1));
+        assert_eq!(p.snapshot().split_pane, 1);
+
+        p.handle(SwitcherEvent::Query("/ji".into()));
+        assert!(p.snapshot().command_mode);
+
+        p.shown = true;
+        p.handle(SwitcherEvent::Escape);
+        assert_eq!(p.snapshot().query, "", "a live query clears first");
+        p.handle(SwitcherEvent::Escape);
+        assert!(!p.snapshot().shown, "Esc closes an empty-query palette");
     }
 }

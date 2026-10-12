@@ -35,6 +35,11 @@ impl SwitcherStatus {
         out
     }
 
+    /// True when there is nothing to show (no CPU / RAM / battery / chips).
+    pub fn is_empty(&self) -> bool {
+        self.cpu.is_none() && self.ram.is_none() && self.battery.is_none() && self.chips.is_empty()
+    }
+
     pub fn from_json(value: &Value) -> Self {
         let cpu = value.get("cpu").and_then(Value::as_i64);
         let ram = value.get("ram").and_then(Value::as_i64);
@@ -124,6 +129,23 @@ mod tests {
         assert_eq!(s.cpu, None);
         assert!(s.battery.is_none());
         assert!(s.chips.is_empty());
+    }
+
+    #[test]
+    fn empty_only_when_nothing_gathered() {
+        assert!(SwitcherStatus::default().is_empty());
+        let cpu = SwitcherStatus { cpu: Some(1), ..Default::default() };
+        assert!(!cpu.is_empty());
+        let chips = SwitcherStatus {
+            chips: vec![UnreadChip {
+                app: "Webex".into(),
+                count: "1".into(),
+                mentions: 0,
+                warn: false,
+            }],
+            ..Default::default()
+        };
+        assert!(!chips.is_empty());
     }
 
     #[test]
