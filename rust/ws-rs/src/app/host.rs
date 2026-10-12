@@ -4624,7 +4624,7 @@ mod daemon_ui {
         }
 
         /// Run an op against the notes vim pane (`PopupWindow.vimPaneKey`).
-        fn perform_vim_op(&self, op: popup::VimOp) -> bool {            use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+        fn perform_vim_op(&self, op: popup::VimOp) -> bool {
             let state = self.ivars().state.borrow();
             let Some(pane) = state
                 .as_ref()
@@ -4659,11 +4659,7 @@ mod daemon_ui {
                         clip = crate::views::notes_vim::save_pasteboard_image(note)
                             .map(|rel| format!("![]({rel})"));
                     }
-                    let text = clip.or_else(|| {
-                        let pb = NSPasteboard::generalPasteboard();
-                        pb.stringForType(unsafe { NSPasteboardTypeString })
-                            .map(|s| s.to_string())
-                    });
+                    let text = clip.or_else(crate::platform::get_text);
                     if let Some(text) = text {
                         if !text.is_empty() {
                             // `nvim_paste` first, bracketed paste fallback.
@@ -6263,12 +6259,7 @@ mod daemon_ui {
                 })
             });
             let Some(Some(info)) = info else { return };
-            let clip = {
-                use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-                NSPasteboard::generalPasteboard()
-                    .stringForType(unsafe { NSPasteboardTypeString })
-                    .map(|s| s.to_string())
-            };
+            let clip = crate::platform::get_text();
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             let act = |f: Box<dyn FnOnce(&mut crate::views::compare::CompareWindowModel)>| {
                 let w = weak.clone();
@@ -9606,10 +9597,7 @@ mod daemon_ui {
     }
 
     fn copy_text_to_pasteboard(text: &str) {
-        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-        let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        let _ = unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) };
+        let _ = crate::platform::set_text(text);
     }
 
     /// The file URLs on the general pasteboard, as paths.

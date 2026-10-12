@@ -523,9 +523,7 @@ mod appkit {
                         w.set_result(&format!("✗ {}", error_line(&err, &format!("could not build curl (exit {code})"))), Some(false));
                         return;
                     }
-                    let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
-                    pb.clearContents();
-                    let _ = unsafe { pb.setString_forType(&NSString::from_str(cmd), objc2_app_kit::NSPasteboardTypeString) };
+                    let _ = crate::platform::set_text(cmd);
                     w.set_result("curl copied (includes the token) — paste into a terminal to test the login.", None);
                 },
             );

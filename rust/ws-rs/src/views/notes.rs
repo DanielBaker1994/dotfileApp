@@ -2518,10 +2518,7 @@ mod macos {
     }
 
     fn copy_text_to_clipboard(text: &str) {
-        use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-        let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        let _ = unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) };
+        let _ = crate::platform::set_text(text);
     }
 
     /// The "Prose" pop-out control's target. It holds `popOutProse`'s source

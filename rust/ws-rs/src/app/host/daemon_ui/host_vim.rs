@@ -13,7 +13,7 @@ use crate::panes::vim_keys::{
     VimAction, VimContext, VimKeys, VimMode, VimModeBadge, VimRows, VimTarget, VimText, VimWeb,
 };
 use crate::ui::popup::KeyInput;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSTextView, NSWindow, NSWindowOrderingMode};
+use objc2_app_kit::{NSTextView, NSWindow, NSWindowOrderingMode};
 use objc2_web_kit::WKWebView;
 
 /// Where a pane's rows live (`VimRows` conformers).
@@ -253,9 +253,7 @@ impl DaemonUi {
             None => None,
         };
         let before = target.clone();
-        let clip = NSPasteboard::generalPasteboard()
-            .stringForType(unsafe { NSPasteboardTypeString })
-            .map(|s| s.to_string());
+        let clip = crate::platform::get_text();
         let pane_id = pane.id.clone();
         let action = {
             let mut ctx = VimContext {

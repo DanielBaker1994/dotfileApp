@@ -6327,15 +6327,7 @@ impl ScreenshotController {
     }
 
     pub fn copy_text(&mut self, text: &str, cfg: &ScreenshotConfig) {
-        #[cfg(target_os = "macos")]
-        {
-            use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-            let pb = NSPasteboard::generalPasteboard();
-            pb.clearContents();
-            let _ = unsafe {
-                pb.setString_forType(&objc2_foundation::NSString::from_str(text), NSPasteboardTypeString)
-            };
-        }
+        let _ = crate::platform::set_text(text);
         self.last_output["copied"] = json!(true);
         if !cfg.text_toast.is_empty() {
             let summary = crate::engines::screenshot_text::ShotOCR::summary(text);
@@ -6900,20 +6892,11 @@ fn write_image_pasteboard(img: &ShotImage) -> bool {
 /// only, like [`write_image_pasteboard`]; returns `false` off the main thread.
 #[cfg(target_os = "macos")]
 fn write_text_pasteboard(text: &str) -> bool {
-    use objc2_app_kit::NSPasteboard;
-    use objc2_foundation::NSString;
-
+    // Keep the off-main guard: the seam itself is thread-agnostic.
     if objc2::MainThreadMarker::new().is_none() {
         return false;
     }
-    let pb = NSPasteboard::generalPasteboard();
-    pb.clearContents();
-    unsafe {
-        pb.setString_forType(
-            &NSString::from_str(text),
-            objc2_app_kit::NSPasteboardTypeString,
-        )
-    }
+    crate::platform::set_text(text)
 }
 
 /// Decode a PNG and re-encode it as TIFF (the `rep.tiffRepresentation` half of

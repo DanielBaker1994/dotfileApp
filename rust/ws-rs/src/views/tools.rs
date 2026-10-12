@@ -219,11 +219,7 @@ pub fn now_secs() -> i64 {
 
 #[cfg(target_os = "macos")]
 pub fn copy_text(text: &str) {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-    use objc2_foundation::NSString;
-    let pb = NSPasteboard::generalPasteboard();
-    pb.clearContents();
-    let _ = unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) };
+    let _ = crate::platform::set_text(text);
 }
 
 /// `PopupWindow.setStatus(_:isError:)` — the status line's text + tone.

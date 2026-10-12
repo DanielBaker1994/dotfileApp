@@ -1565,8 +1565,8 @@ pub mod macos {
     use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSButton, NSColor, NSFont, NSFontAttributeName,
-        NSForegroundColorAttributeName, NSPasteboard, NSPasteboardTypeString, NSPopUpButton,
-        NSScrollView, NSTextField, NSTextView, NSStringDrawing, NSView,
+        NSForegroundColorAttributeName, NSPopUpButton, NSScrollView, NSTextField, NSTextView,
+        NSStringDrawing, NSView,
     };
     use objc2_foundation::{
         ns_string, NSAttributedStringKey, NSDictionary, NSObject, NSObjectProtocol, NSPoint,
@@ -1915,12 +1915,7 @@ pub mod macos {
                         AITone::Dim,
                     ),
                     CopyPlan::Markdown(md) => {
-                        let pb = NSPasteboard::generalPasteboard();
-                        pb.clearContents();
-                        let ok = pb.setString_forType(
-                            &NSString::from_str(&md),
-                            unsafe { NSPasteboardTypeString },
-                        );
+                        let ok = crate::platform::set_text(&md);
                         if ok {
                             self.set_status(&toast, AITone::Success);
                         }
@@ -1936,9 +1931,7 @@ pub mod macos {
             /// Paste the clipboard into the input field.
             #[unsafe(method(pasteInput:))]
             fn paste_input(&self, _sender: Option<&AnyObject>) {
-                let pb = NSPasteboard::generalPasteboard();
-                if let Some(s) = pb.stringForType(unsafe { NSPasteboardTypeString }) {
-                    let text = s.to_string();
+                if let Some(text) = crate::platform::get_text() {
                     self.ivars().input.setString(&NSString::from_str(&text));
                     self.ivars().model.borrow_mut().input = text;
                 }

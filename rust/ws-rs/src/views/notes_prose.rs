@@ -442,11 +442,7 @@ mod appkit {
                     EXPORTING.store(false, Ordering::SeqCst);
                     match (r.ok, r.out) {
                         (true, Some(out)) => {
-                            let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
-                            pb.clearContents();
-                            pb.setString_forType(&NSString::from_str(&out), unsafe {
-                                objc2_app_kit::NSPasteboardTypeString
-                            });
+                            let _ = crate::platform::set_text(&out);
                             let home = std::env::var("HOME").unwrap_or_default();
                             let tilde = match out.strip_prefix(&home) {
                                 Some(rest) if !home.is_empty() => format!("~{rest}"),
