@@ -6,6 +6,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -76,16 +77,48 @@ fn not_running() -> i32 {
 /// TCC attaches to the bundle) unless launchd started us. Returns only when it
 /// cannot exec.
 fn exec_launcher(paths: &Paths, mode: &str) {
-    if unsafe { libc::getppid() } == 1 {
-        return;
+    #[cfg(target_os = "macos")]
+    {
+        if unsafe { libc::getppid() } == 1 {
+            return;
+        }
+        let script = format!("{}/bin/kitchen_sink.sh", paths.asset_dir());
+        if is_executable(&script) {
+            use std::os::unix::process::CommandExt;
+            let _ = std::process::Command::new(&script).arg(mode).exec();
+        }
     }
-    let script = format!("{}/bin/kitchen_sink.sh", paths.asset_dir());
-    if is_executable(&script) {
-        use std::os::unix::process::CommandExt;
-        let _ = std::process::Command::new(&script).arg(mode).exec();
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No LaunchServices/`open` off macOS: the app re-launches itself,
+        // detached (`setsid`), and becomes the daemon.
+        let _ = paths;
+        let _ = spawn_self_detached(Some(mode));
     }
 }
 
+/// Off macOS a cold start is this binary re-executing itself in a new session
+/// (`setsid`) so it outlives the caller. `mode` is the launch/hotkey argument.
+#[cfg(not(target_os = "macos"))]
+fn spawn_self_detached(mode: Option<&str>) -> bool {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(mode) = mode {
+        cmd.arg(mode);
+    }
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn().is_ok()
+}
+
+#[cfg(target_os = "macos")]
 fn is_executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
@@ -324,11 +357,19 @@ fn compare(sock: &str, paths: &Paths, rest: &[String]) -> i32 {
     };
     let mut ok = deliver();
     if !ok {
-        // Cold start the bundle in the background, then retry for 15 s.
-        if let Some(bundle) = &paths.app_bundle_path {
-            if Path::new(bundle).exists() {
-                let _ = std::process::Command::new("/usr/bin/open").args(["-g", bundle]).status();
+        // Cold start in the background, then retry for 15 s.
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(bundle) = &paths.app_bundle_path {
+                if Path::new(bundle).exists() {
+                    let _ = std::process::Command::new("/usr/bin/open").args(["-g", bundle]).status();
+                }
             }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = paths;
+            let _ = spawn_self_detached(None);
         }
         let deadline = Instant::now() + Duration::from_secs(15);
         while !ok && Instant::now() < deadline {
