@@ -16,6 +16,97 @@ use crate::views::files_view::{FilesEvent, FilesSnapshot, Preview};
 use super::app::Pane;
 use super::theme::c;
 
+/// The actions a row's right-click menu offers (UX rule 2: copy the file, copy
+/// the absolute path, open the file in Notes, reveal it in the app's own Files
+/// view). Shared by the Files and Paths panes through [`row_context_menu`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RowAction {
+    CopyFile,
+    CopyPath,
+    OpenInNotes,
+    RevealInFiles,
+}
+
+impl RowAction {
+    /// Every action, in the order the shared menu draws them.
+    pub(super) const ALL: [RowAction; 4] = [
+        RowAction::CopyFile,
+        RowAction::CopyPath,
+        RowAction::OpenInNotes,
+        RowAction::RevealInFiles,
+    ];
+
+    /// The label the AppKit menus use: `files_row_menu` / paths `RowMenu`
+    /// pluralise the copy items by the number of selected rows (`count == 1` is
+    /// singular); the others never change.
+    pub(super) fn label(self, count: usize) -> &'static str {
+        match self {
+            RowAction::CopyFile => {
+                if count == 1 {
+                    "Copy File"
+                } else {
+                    "Copy Files"
+                }
+            }
+            RowAction::CopyPath => {
+                if count == 1 {
+                    "Copy Absolute Path"
+                } else {
+                    "Copy Absolute Paths"
+                }
+            }
+            RowAction::OpenInNotes => "Open in Notes",
+            RowAction::RevealInFiles => "Reveal in Files",
+        }
+    }
+
+    /// Whether AppKit offers this action for a row: "Open in Notes" is hidden
+    /// for directories (`files_row_menu`'s `is_dir` gate); the rest always show.
+    pub(super) fn enabled(self, is_dir: bool) -> bool {
+        match self {
+            RowAction::OpenInNotes => !is_dir,
+            _ => true,
+        }
+    }
+}
+
+/// Draw the shared rule-2 row menu into `ui` and return the action the user
+/// chose, if any. Mirrors the items the AppKit `files_row_menu` (Files) and
+/// paths `RowMenu` build: copy the file, copy the absolute path, open in Notes
+/// (files only), reveal in the app's Files view.
+pub(super) fn row_context_menu(ui: &mut egui::Ui, path: &str) -> Option<RowAction> {
+    let is_dir = std::path::Path::new(path).is_dir();
+    let mut chosen = None;
+    for action in RowAction::ALL {
+        if !action.enabled(is_dir) {
+            continue;
+        }
+        if ui.button(action.label(1)).clicked() {
+            chosen = Some(action);
+            ui.close();
+        }
+    }
+    chosen
+}
+
+/// Run a chosen [`RowAction`] through the existing seams only. "Copy File" has
+/// no file-clipboard seam off macOS, so it copies the path text like "Copy
+/// Absolute Path"; "Open in Notes" has no cross-platform seam (the AppKit
+/// `daemon_ui::open_in_notes` method is unreachable from here), so it is a
+/// no-op; "Reveal in Files" uses the uniform `reveal_in_files` entry point
+/// (a no-op off macOS by design).
+pub(super) fn apply_row_action(action: RowAction, path: &str) {
+    match action {
+        RowAction::CopyFile | RowAction::CopyPath => {
+            let _ = crate::platform::clipboard::set_text(path);
+        }
+        RowAction::OpenInNotes => {}
+        RowAction::RevealInFiles => {
+            crate::app::host::reveal_in_files(&[path.to_string()]);
+        }
+    }
+}
+
 pub struct FilesPane {
     pub model: FileBrowser,
     /// The filter field's editable buffer (`files_view.rs` `search` NSTextField).
@@ -193,6 +284,14 @@ impl FilesPane {
                                 double: resp.double_clicked(),
                             });
                         }
+                        // UX rule 2: the row's right-click menu.
+                        let mut chosen = None;
+                        resp.context_menu(|ui| {
+                            chosen = row_context_menu(ui, &e.path);
+                        });
+                        if let Some(action) = chosen {
+                            apply_row_action(action, &e.path);
+                        }
                     }
                 });
             });
@@ -242,6 +341,35 @@ impl Pane for FilesPane {
             KeyAction::ListMove(delta) => self.model.handle(FilesEvent::Move(delta as i64)),
             KeyAction::ListAccept => self.model.handle(FilesEvent::Enter),
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_action_labels_match_the_appkit_menus() {
+        assert_eq!(RowAction::CopyFile.label(1), "Copy File");
+        assert_eq!(RowAction::CopyFile.label(2), "Copy Files");
+        assert_eq!(RowAction::CopyPath.label(1), "Copy Absolute Path");
+        assert_eq!(RowAction::CopyPath.label(3), "Copy Absolute Paths");
+        // Neither label depends on the selection count.
+        assert_eq!(RowAction::OpenInNotes.label(1), "Open in Notes");
+        assert_eq!(RowAction::OpenInNotes.label(9), "Open in Notes");
+        assert_eq!(RowAction::RevealInFiles.label(1), "Reveal in Files");
+    }
+
+    #[test]
+    fn only_open_in_notes_is_hidden_for_directories() {
+        for action in RowAction::ALL {
+            assert!(action.enabled(false), "{action:?} is offered for a file");
+            assert_eq!(
+                action.enabled(true),
+                action != RowAction::OpenInNotes,
+                "{action:?} directory visibility",
+            );
         }
     }
 }

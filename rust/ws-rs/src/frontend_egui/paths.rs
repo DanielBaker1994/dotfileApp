@@ -16,6 +16,7 @@ use crate::ui::theme::PopupColors;
 use crate::views::paths::{PathsEvent, PathsSnapshot, PathsWindow, ReturnAction};
 
 use super::app::Pane;
+use super::files::{apply_row_action, row_context_menu};
 use super::theme::c;
 
 /// The Paths shelf panel.
@@ -106,6 +107,14 @@ impl PathsPane {
                 let resp = ui.selectable_label(i == snap.selection, label);
                 if resp.clicked() {
                     events.push(PathsEvent::Click { row: i, double: resp.double_clicked() });
+                }
+                // UX rule 2: the shared row menu (`files::row_context_menu`).
+                let mut chosen = None;
+                resp.context_menu(|ui| {
+                    chosen = row_context_menu(ui, &row.path);
+                });
+                if let Some(action) = chosen {
+                    apply_row_action(action, &row.path);
                 }
             }
         });
