@@ -7,7 +7,8 @@
 //! event contract the AppKit surface reports. Each section below is commented
 //! with the `notes.rs` region it mirrors.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::ui::theme::PopupColors;
 use crate::views::notes::{NotesConfig, NotesEvent, NotesSnapshot, NotesView};
@@ -16,6 +17,7 @@ use crate::views::notes_tree::{NotesTree, TreeRow};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use super::app::Pane;
+use super::terminal::TerminalView;
 use super::theme::c;
 
 pub struct NotesPane {
@@ -29,6 +31,19 @@ pub struct NotesPane {
     prose: bool,
     /// `egui_commonmark`'s per-frame parse/layout cache.
     cache: CommonMarkCache,
+    /// The embedded `nvim` editor (the egui counterpart of the AppKit notes vim
+    /// pane): built on the first "Edit in nvim" click and dropped — killing the
+    /// child — when the mode is turned back off.
+    nvim: Option<TerminalView>,
+    /// The note the running `nvim` was started on (a tab switch restarts it).
+    nvim_path: Option<String>,
+    /// Whether `[notes] vim-bin` resolves to an executable; when false the
+    /// toggle is disabled and the plain editor stays.
+    nvim_available: bool,
+    /// `[notes] vim-bin` (default `"nvim"`), the AppKit setting name.
+    nvim_bin: String,
+    /// The asset dir the pure notes-vim arg builder needs (`…/vim/init.lua`).
+    asset_dir: String,
 }
 
 impl NotesPane {
@@ -69,8 +84,26 @@ impl NotesPane {
             let sel = model.tabs.selected;
             model.handle(NotesEvent::SelectTab(sel));
         }
+        let vim_bin = section
+            .get("vim-bin")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "nvim".to_string());
+        let asset_dir = crate::app::paths::Paths::from_env().asset_dir().to_string();
+        let nvim_available =
+            program_available(&vim_bin, &std::env::var("PATH").unwrap_or_default());
         let editor = model.text.clone();
-        NotesPane { model, editor, prose: false, cache: CommonMarkCache::default() }
+        NotesPane {
+            model,
+            editor,
+            prose: false,
+            cache: CommonMarkCache::default(),
+            nvim: None,
+            nvim_path: None,
+            nvim_available,
+            nvim_bin: vim_bin,
+            asset_dir,
+        }
     }
 
     /// Draw one frame and apply the events it generated. `colors` are the
@@ -161,7 +194,22 @@ impl NotesPane {
                 self.save(events);
             }
             if ui.selectable_label(self.prose, "Prose").clicked() {
-                self.prose = !self.prose;
+                self.set_prose(!self.prose);
+            }
+            // The "Edit in nvim" toggle (the egui counterpart of the AppKit
+            // notes vim pane; AppKit gates it on `[notes] vim-mode` and has no
+            // toggle key, so this is a button only). With no `nvim` on PATH the
+            // label stays and the plain editor does.
+            if self.nvim_available {
+                let label = if self.nvim.is_some() { "Exit nvim" } else { "Edit in nvim" };
+                if ui.add_enabled(snap.path.is_some(), egui::Button::new(label)).clicked() {
+                    self.toggle_vim(snap);
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("nvim not found").color(c(colors.dim)).small(),
+                )
+                .on_hover_text(format!("{} is not on PATH", self.nvim_bin));
             }
         });
     }
@@ -176,7 +224,21 @@ impl NotesPane {
         events: &mut Vec<NotesEvent>,
     ) {
         if snap.path.is_none() {
+            self.stop_vim();
             ui.label(egui::RichText::new("No note open").color(c(colors.dim)));
+            return;
+        }
+        // The embedded `nvim` editor (a `TerminalView`) replaces the plain
+        // editor; a tab switch restarts it on the newly selected note.
+        if self.nvim.is_some() {
+            if let Some(path) = snap.path.as_deref() {
+                if self.nvim_path.as_deref() != Some(path) {
+                    self.start_vim(path);
+                }
+            }
+            if let Some(term) = self.nvim.as_mut() {
+                term.ui(ui);
+            }
             return;
         }
         if self.prose {
@@ -211,6 +273,48 @@ impl NotesPane {
         events.push(NotesEvent::Edit(self.editor.clone()));
         events.push(NotesEvent::Save);
     }
+
+    /// Toggle the prose view; nvim and prose are mutually exclusive (the AppKit
+    /// `ProseModeSwitch`), so turning prose on shuts the editor down.
+    fn set_prose(&mut self, on: bool) {
+        self.prose = on;
+        if on {
+            self.stop_vim();
+        }
+    }
+
+    /// The "Edit in nvim" toggle: start the editor on the selected note, or
+    /// drop it (killing the child) when it is already running.
+    fn toggle_vim(&mut self, snap: &NotesSnapshot) {
+        if self.nvim.is_some() {
+            self.stop_vim();
+        } else if let Some(path) = snap.path.as_deref() {
+            self.start_vim(path);
+        }
+    }
+
+    /// Start `nvim` on `path` in a [`TerminalView`], using the pure notes-vim
+    /// arg/env builder. Needs the `--listen` socket's directory, cleared first
+    /// like `VimPane::restart`.
+    fn start_vim(&mut self, path: &str) {
+        let pid = std::process::id() as i32;
+        let sock = crate::views::notes_vim::socket_path(pid);
+        let _ = std::fs::remove_file(&sock);
+        if let Some(dir) = Path::new(&sock).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let (args, env, cwd) = vim_command_for(&self.asset_dir, path);
+        self.prose = false;
+        self.nvim = Some(TerminalView::new(self.nvim_bin.clone(), args, cwd, env));
+        self.nvim_path = Some(path.to_string());
+    }
+
+    /// Drop the editor; [`TerminalView`]'s `Drop` sends `Msg::Shutdown`, so the
+    /// `nvim` child is killed.
+    fn stop_vim(&mut self) {
+        self.nvim = None;
+        self.nvim_path = None;
+    }
 }
 
 /// One tree row's display label: indent by depth, a `▾`/`▸` marker for folders
@@ -226,6 +330,57 @@ fn tree_label(row: &TreeRow) -> String {
         "  "
     };
     format!("{}{marker}{}", "    ".repeat(row.depth), row.name)
+}
+
+/// Whether `bin` is an executable: an absolute/relative path is checked
+/// directly, a bare name is resolved through the `:`-separated `path_var`
+/// (the same lookup the AppKit notes vim pane does). Pure (testable with an
+/// explicit `path_var`), so the "nvim is not on PATH" case is deterministic.
+fn program_available(bin: &str, path_var: &str) -> bool {
+    if bin.contains('/') {
+        return is_executable(Path::new(bin));
+    }
+    path_var
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .any(|d| is_executable(&Path::new(d).join(bin)))
+}
+
+/// A path is executable when it is a file with any execute bit set.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
+        .unwrap_or(false)
+}
+
+/// The directory to start `nvim` in for the note `file`: its parent, else
+/// `$HOME` (mirrors `VimPane::note_dir`).
+fn note_dir(file: &str) -> Option<String> {
+    if let Some(parent) = Path::new(file).parent() {
+        if !parent.as_os_str().is_empty() {
+            return Some(parent.to_string_lossy().into_owned());
+        }
+    }
+    std::env::var("HOME").ok()
+}
+
+/// The `nvim` args + env + working directory for `file`, built entirely by the
+/// pure builders in [`crate::views::notes_vim`] ([`VimLaunch::args`] /
+/// [`launch_env`]) — never reimplemented here. `asset_dir` supplies
+/// `…/vim/init.lua`.
+///
+/// [`VimLaunch::args`]: crate::views::notes_vim::VimLaunch::args
+fn vim_command_for(
+    asset_dir: &str,
+    file: &str,
+) -> (Vec<String>, HashMap<String, String>, Option<PathBuf>) {
+    let mut launch = crate::views::notes_vim::VimLaunch::for_pid(std::process::id() as i32);
+    launch.cwd = note_dir(file);
+    let args = launch.args(asset_dir, Some(file));
+    let env: HashMap<String, String> = crate::views::notes_vim::launch_env().into_iter().collect();
+    let cwd = launch.cwd.map(PathBuf::from);
+    (args, env, cwd)
 }
 
 impl Pane for NotesPane {
@@ -255,5 +410,53 @@ mod tests {
         assert_eq!(tree_label(&row("work", 1, true, false)), "    ▸ work");
         assert_eq!(tree_label(&row("a.md", 1, false, false)), "      a.md");
         assert_eq!(tree_label(&row("deep.md", 3, false, false)), "              deep.md");
+    }
+
+    #[test]
+    fn program_available_probes_an_explicit_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("ws-notes-nvim-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let bin = dir.join("fakenvim");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+
+        // Present but not executable: not available.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!program_available("fakenvim", dir.to_str().unwrap()));
+
+        // Executable on the explicit PATH: available.
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(program_available("fakenvim", dir.to_str().unwrap()));
+
+        // An absolute path is checked directly (no PATH needed).
+        assert!(program_available(bin.to_str().unwrap(), ""));
+
+        // A missing name is never available.
+        assert!(!program_available("definitely-not-a-real-binary-xyz", dir.to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn note_dir_is_the_parent_else_home() {
+        assert_eq!(note_dir("/notes/a.md").as_deref(), Some("/notes"));
+        assert_eq!(note_dir("/notes/deep/a.md").as_deref(), Some("/notes/deep"));
+        // A bare file name falls back to `$HOME` (whatever it is).
+        assert_eq!(note_dir("a.md"), std::env::var("HOME").ok());
+    }
+
+    #[test]
+    fn vim_command_for_uses_the_notes_vim_builder() {
+        let (args, env, cwd) = vim_command_for("/asset", "/notes/a.md");
+        assert_eq!(args[0], "--listen");
+        assert_eq!(&args[2..4], &["-u", "/asset/vim/init.lua"]);
+        assert!(args.iter().any(|a| a.starts_with("let g:ws_sock=")));
+        assert!(args.iter().any(|a| a.starts_with("let g:ws_img_file=")));
+        assert_eq!(args.last().unwrap(), "/notes/a.md");
+        // The env carries the AppKit notes-vim contract (PATH recovery, TERM).
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert!(env.contains_key("PATH"));
+        assert_eq!(cwd.as_deref(), Some(Path::new("/notes")));
     }
 }
