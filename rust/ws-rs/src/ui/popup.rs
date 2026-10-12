@@ -11,6 +11,7 @@
 //! - [`install_local_monitor`] — the `NSEvent.addLocalMonitorForEvents(matching:
 //!   .keyDown)` guard whose handler routes into [`route_key`].
 
+#[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
 
 // macOS virtual key codes (as used by `NSEvent.keyCode` in the Swift source).
