@@ -12,6 +12,7 @@
 mod app;
 mod files;
 mod keys;
+mod terminal;
 mod theme;
 
 // Wave 5 stub panes — one file per worker, wired in `app::ensure_panes`

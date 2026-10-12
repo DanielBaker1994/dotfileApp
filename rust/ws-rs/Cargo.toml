@@ -13,7 +13,7 @@ path = "src/main.rs"
 # macOS; on macOS it is optional so the AppKit path stays the default build,
 # and `--features egui` turns on the `WS_FRONTEND=egui` dev switch.
 [features]
-egui = ["dep:eframe", "dep:egui_extras", "dep:egui", "dep:egui_commonmark"]
+egui = ["dep:eframe", "dep:egui_extras", "dep:egui", "dep:egui_commonmark", "dep:alacritty_terminal"]
 
 # Portable dependencies (build on every target).
 [dependencies]
@@ -23,6 +23,9 @@ egui = { version = "0.32", default-features = false, features = ["default_fonts"
 # Prose rendering for the egui Notes view (0.21.1 is the release that tracks
 # egui 0.32; `default-features = false` drops the image loaders).
 egui_commonmark = { version = "0.21.1", default-features = false, optional = true }
+# The egui terminal panel (W6-A) drives alacritty_terminal directly: `egui_term`
+# tracks egui 0.31, not the 0.32 this frontend uses.
+alacritty_terminal = { version = "0.26.0", default-features = false, optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -56,6 +59,7 @@ eframe = { version = "0.32", default-features = false, features = ["default_font
 egui_extras = { version = "0.32", default-features = false }
 egui = { version = "0.32", default-features = false, features = ["default_fonts"] }
 egui_commonmark = { version = "0.21.1", default-features = false }
+alacritty_terminal = { version = "0.26.0", default-features = false }
 
 # Non-macOS clipboard (macOS keeps objc2 NSPasteboard; arboard links AppKit
 # there, so it must stay target-gated).
@@ -72,3 +76,9 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 # "yyyy-MM-dd HH:mm:ss" stamps with `NSDateFormatter`; elsewhere `time` parses
 # the same format (the local-time conversion uses libc `mktime`).
 time = { version = "0.3", features = ["parsing"] }
+
+# Non-macOS display capture (platform/capture.rs). macOS keeps the
+# ScreenCaptureKit path in views/screenshot.rs, so this stays target-gated;
+# `xcap` links X11/Wayland through system libs on Linux (see the check image's
+# `libdbus-1-dev`). Pinned exactly so the Linux compile is reproducible.
+xcap = { version = "=0.4.1" }

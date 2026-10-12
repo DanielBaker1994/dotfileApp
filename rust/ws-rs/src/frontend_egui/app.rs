@@ -23,6 +23,7 @@ use super::keys::key_input;
 use super::notes::NotesPane;
 use super::paths::PathsPane;
 use super::switcher::SwitcherOverlay;
+use super::terminal::TerminalView;
 use super::theme::c;
 use super::tools::ToolsPane;
 
@@ -92,6 +93,10 @@ pub struct KsApp {
     /// The Tools panel window (`do:tool:*`), built lazily on first open.
     tools: Option<ToolsPane>,
     tools_open: bool,
+    /// The Terminal tool panel (`do:term` / `toggle-terminal` / Ctrl+B T), built
+    /// lazily on first open and hosting a reusable [`TerminalView`].
+    terminal: Option<TerminalView>,
+    terminal_open: bool,
     /// Live toast pills `(text, shown-at)`, oldest first (`do:toast` verbs).
     toasts: Vec<(String, Instant)>,
     /// The Ctrl+B prefix state (`SharedWindow.prefixKey`).
@@ -132,6 +137,8 @@ impl KsApp {
             paths_open: false,
             tools: None,
             tools_open: false,
+            terminal: None,
+            terminal_open: false,
             toasts: Vec::new(),
             prefix: PrefixState::new(),
             esc_streak: 0,
@@ -234,6 +241,7 @@ impl KsApp {
             UiCommand::Paths(cmd) => self.handle_paths(cmd),
             UiCommand::Tool(kind) => self.open_tool(kind),
             UiCommand::ToolClose(name) => self.close_tool(&name),
+            UiCommand::TerminalPanel => self.toggle_terminal(),
             UiCommand::ResetSize => ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
                 DEFAULT_WINDOW_SIZE.into(),
             )),
@@ -300,6 +308,26 @@ impl KsApp {
         }
     }
 
+    /// `do:term` / `toggle-terminal` / Ctrl+B T: toggle the Terminal tool panel,
+    /// building the [`TerminalView`] (spawning the shell) on first open.
+    fn toggle_terminal(&mut self) {
+        if self.terminal.is_none() {
+            self.terminal = Some(self.build_terminal());
+        }
+        self.terminal_open = !self.terminal_open;
+    }
+
+    /// Build the terminal from the same `[app]` shell/font config the AppKit
+    /// `TerminalPanel` reads (`TerminalConfig::from_settings`).
+    fn build_terminal(&self) -> TerminalView {
+        let mut settings = crate::app::config::AppSettings::default();
+        crate::app::config::apply_app_config_from_disk(&mut settings);
+        let cfg = crate::views::terminal::TerminalConfig::from_settings(&settings);
+        let mut term = TerminalView::new(cfg.shell, cfg.args, None, std::collections::HashMap::new());
+        term.set_font_size(cfg.font_size as f32);
+        term
+    }
+
     /// Draw the Paths shelf window when it is open (`paths_open`), building it
     /// on the first `Show`. The window's close button clears `paths_open`.
     fn paths_ui(&mut self, ctx: &egui::Context) {
@@ -341,6 +369,27 @@ impl KsApp {
             .show(ctx, |ui| pane.ui(ui, &colors));
         if !open {
             self.tools_open = false;
+        }
+    }
+
+    /// Draw the Terminal window when it is open (`terminal_open`). The window's
+    /// close button clears `terminal_open`.
+    fn terminal_ui(&mut self, ctx: &egui::Context) {
+        if !self.terminal_open {
+            return;
+        }
+        let Some(term) = self.terminal.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Terminal")
+            .id(egui::Id::new("Terminal"))
+            .resizable(true)
+            .default_size([760.0, 460.0])
+            .open(&mut open)
+            .show(ctx, |ui| term.ui(ui));
+        if !open {
+            self.terminal_open = false;
         }
     }
 
@@ -518,7 +567,7 @@ impl KsApp {
                     self.controller.view_switcher_show();
                 }
             }
-            't' => self.log_once("terminal panel"),
+            't' => self.toggle_terminal(),
             'b' => self.log_once("sidebar rail"),
             _ => {}
         }
@@ -566,6 +615,7 @@ impl eframe::App for KsApp {
         // overlay draws over them, and toasts on top of everything.
         self.paths_ui(ctx);
         self.tools_ui(ctx);
+        self.terminal_ui(ctx);
         self.palette.ui(ctx, &self.controller);
         self.toasts_ui(ctx);
 
