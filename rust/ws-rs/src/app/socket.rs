@@ -219,16 +219,21 @@ fn configure_conn(fd: RawFd) {
             std::mem::size_of::<libc::timeval>() as libc::socklen_t,
         )
     };
-    let one: libc::c_int = 1;
-    unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_NOSIGPIPE,
-            &one as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
+    // `SO_NOSIGPIPE` does not exist on Linux. Rust std already ignores
+    // SIGPIPE in binaries, so the option is simply skipped elsewhere.
+    #[cfg(target_os = "macos")]
+    {
+        let one: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                &one as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+    }
     let tv = libc::timeval {
         tv_sec: RECV_TIMEOUT_SECS as libc::time_t,
         tv_usec: 0,

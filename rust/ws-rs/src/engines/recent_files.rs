@@ -11,8 +11,11 @@
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::CString;
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::os::raw::c_char;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,14 +40,22 @@ pub const FSEVENT_OWN_EVENT: u32 = 0x0008_0000;
 // extended data, `IgnoreSelf` for self-events, `FileEvents`); the callback
 // forwards into `RecentFiles::handle` exactly as the Swift callback does.
 
+#[cfg(target_os = "macos")]
 const K_FSEVENT_STREAM_CREATE_USE_CF_TYPES: u32 = 0x0000_0001;
+#[cfg(target_os = "macos")]
 const K_FSEVENT_STREAM_CREATE_IGNORE_SELF: u32 = 0x0000_0008;
+#[cfg(target_os = "macos")]
 const K_FSEVENT_STREAM_CREATE_FILE_EVENTS: u32 = 0x0000_0010;
+#[cfg(target_os = "macos")]
 const K_FSEVENT_STREAM_CREATE_USE_EXTENDED_DATA: u32 = 0x0000_0040;
+#[cfg(target_os = "macos")]
 const K_FSEVENT_STREAM_EVENT_ID_SINCE_NOW: u64 = u64::MAX;
+#[cfg(target_os = "macos")]
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[cfg(target_os = "macos")]
 const K_CF_NUMBER_SINT64_TYPE: i64 = 4;
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct FSEventStreamContext {
     version: isize,
@@ -55,6 +66,7 @@ struct FSEventStreamContext {
     copy_description: *const c_void,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct CFArrayCallBacks {
     version: isize,
@@ -64,6 +76,7 @@ struct CFArrayCallBacks {
     equal: *const c_void,
 }
 
+#[cfg(target_os = "macos")]
 type FSEventStreamCallback = unsafe extern "C" fn(
     stream_ref: *const c_void,
     client_info: *mut c_void,
@@ -73,6 +86,7 @@ type FSEventStreamCallback = unsafe extern "C" fn(
     event_ids: *const u64,
 );
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreServices", kind = "framework")]
 extern "C" {
     fn FSEventStreamCreate(
@@ -95,6 +109,7 @@ extern "C" {
     fn FSEventStreamRelease(stream: *mut c_void);
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFArrayCreate(
@@ -126,6 +141,7 @@ extern "C" {
 }
 
 /// The Swift `FSEventStreamCreate` flags, verbatim.
+#[cfg(target_os = "macos")]
 fn create_flags() -> u32 {
     K_FSEVENT_STREAM_CREATE_FILE_EVENTS
         | K_FSEVENT_STREAM_CREATE_USE_CF_TYPES
@@ -133,6 +149,7 @@ fn create_flags() -> u32 {
         | K_FSEVENT_STREAM_CREATE_IGNORE_SELF
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn make_cfstring(s: &str) -> *const c_void {
     let Ok(c) = CString::new(s) else {
         return std::ptr::null();
@@ -140,6 +157,7 @@ unsafe fn make_cfstring(s: &str) -> *const c_void {
     unsafe { CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn cfstring_to_string(s: *const c_void) -> Option<String> {
     if s.is_null() {
         return None;
@@ -165,6 +183,7 @@ unsafe fn cfstring_to_string(s: *const c_void) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..nul]).into_owned())
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn cfnumber_to_u64(n: *const c_void) -> Option<u64> {
     if n.is_null() {
         return None;
@@ -178,6 +197,7 @@ unsafe fn cfnumber_to_u64(n: *const c_void) -> Option<u64> {
     }
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn build_paths_array(roots: &[String]) -> *const c_void {
     let strs: Vec<*const c_void> = roots.iter().map(|r| unsafe { make_cfstring(r) }).collect();
     let array = unsafe {
@@ -195,6 +215,7 @@ unsafe fn build_paths_array(roots: &[String]) -> *const c_void {
 }
 
 /// The `FSEventStreamCallback`: extended-data CFDictionary → `handle`.
+#[cfg(target_os = "macos")]
 unsafe extern "C" fn fsevents_callback(
     _stream: *const c_void,
     info: *mut c_void,
@@ -208,6 +229,7 @@ unsafe extern "C" fn fsevents_callback(
     }));
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn forward_events(info: *mut c_void, count: usize, paths: *mut c_void, flags: *const u32) {
     if info.is_null() || paths.is_null() || flags.is_null() || count == 0 {
         return;
@@ -234,6 +256,7 @@ unsafe fn forward_events(info: *mut c_void, count: usize, paths: *mut c_void, fl
     me.handle(&path_vec, flag_slice, &id_vec);
 }
 
+#[cfg(target_os = "macos")]
 struct StreamHandle {
     stream: *mut c_void,
 }
@@ -483,7 +506,11 @@ fn stamp(p: &str) -> Option<f64> {
     if unsafe { libc::stat(c.as_ptr(), &mut st) } != 0 {
         return None;
     }
-    Some((st.st_birthtime as f64).max(st.st_mtime as f64))
+    #[cfg(target_os = "macos")]
+    let t = (st.st_birthtime as f64).max(st.st_mtime as f64);
+    #[cfg(not(target_os = "macos"))]
+    let t = st.st_mtime as f64;
+    Some(t)
 }
 
 fn run_lines(exe: &str, args: &[String]) -> Vec<String> {
@@ -523,6 +550,7 @@ fn scan_dir(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn xattr_data(p: &str, name: &str) -> Option<Vec<u8>> {
     let cp = CString::new(p).ok()?;
     let cn = CString::new(name).ok()?;
@@ -554,6 +582,13 @@ fn xattr_data(p: &str, name: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(buf)
+}
+
+/// Non-macOS twin: the 6-argument `getxattr` + `XATTR_NOFOLLOW` and the
+/// `com.apple.*` attribute names are macOS-only, so there is never any data.
+#[cfg(not(target_os = "macos"))]
+fn xattr_data(_p: &str, _name: &str) -> Option<Vec<u8>> {
+    None
 }
 
 fn xattr_string(p: &str, name: &str) -> Option<String> {
@@ -592,6 +627,7 @@ pub struct RecentFiles {
     departed: HashMap<u64, Departed>,
     home: String,
     store: String,
+    #[cfg(target_os = "macos")]
     stream: Option<StreamHandle>,
     pub on_kept: Option<Box<dyn FnMut(&str, bool, Option<&str>)>>,
     pub on_renamed: Option<Box<dyn FnMut(&str, &str)>>,
@@ -610,6 +646,7 @@ impl RecentFiles {
             departed: HashMap::new(),
             home: home.to_string(),
             store: store.to_string(),
+            #[cfg(target_os = "macos")]
             stream: None,
             on_kept: None,
             on_renamed: None,
@@ -1038,6 +1075,7 @@ impl RecentFiles {
     ///
     /// Safety: the callback holds a raw pointer to `self`; the owner must not
     /// move or drop it while the stream runs (`stop`/`Drop` tear it down).
+    #[cfg(target_os = "macos")]
     pub fn start(&mut self) {
         if self.stream.is_some() {
             return;
@@ -1091,6 +1129,11 @@ impl RecentFiles {
         self.stream = Some(StreamHandle { stream });
     }
 
+    /// Non-macOS twin: there is no FSEvents watcher to start.
+    #[cfg(not(target_os = "macos"))]
+    pub fn start(&mut self) {}
+
+    #[cfg(target_os = "macos")]
     pub fn stop(&mut self) {
         self.enabled = false;
         if let Some(h) = self.stream.take() {
@@ -1100,6 +1143,12 @@ impl RecentFiles {
                 FSEventStreamRelease(h.stream);
             }
         }
+    }
+
+    /// Non-macOS twin: there is no FSEvents stream to tear down.
+    #[cfg(not(target_os = "macos"))]
+    pub fn stop(&mut self) {
+        self.enabled = false;
     }
 }
 
@@ -1388,6 +1437,7 @@ mod tests {
         check(!RecentFiles::present(&format!("{home}/missing.txt")), "missing absent");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn create_flags_match_fsevents_header() {
         // FileEvents(0x10) | UseCFTypes(0x01) | UseExtendedData(0x40) | IgnoreSelf(0x08)
