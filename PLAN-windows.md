@@ -43,4 +43,4 @@ script must run `rustup run stable cargo` (rustc 1.92.0; target `x86_64-pc-windo
 - **Wave WD:** docs (`AGENTS.md` "Windows (compile-only)" section), plan log.
 
 ## 8. Progress log
-- WW-0: _pending_
+- WW-0 (landed): `bin/windows-check.sh check|errors` (needs `PATH` prepended with rustup's toolchain bin: `rustup run stable cargo` alone still spawns Homebrew rustc). Baseline errors (ws-rs only; swiftterm-shim/ws-helpers/deps compile): socket.rs 43, cli.rs 7, frontend_egui/notes.rs 5, path_shelf.rs 4, pane_shot.rs 4, python_helper.rs 4, recent_files.rs 3, nvim_rpc.rs 3, notes_vim.rs 2, screenshot_annotations.rs 2, ai_format.rs 2, hotkey.rs 2, screenshot.rs 1, jira_view.rs 1, jira_poll.rs 1.

@@ -179,6 +179,12 @@ case "${1:-all}" in
         # AppKit-free `headless` daemon over its socket (Docker required).
         exec "$TESTS/test_linux_headless.sh"
         ;;
+    windows)
+        # Windows compile gate (Wave 0): cargo check for x86_64-pc-windows-gnu
+        # via rustup + mingw-w64. For the per-file error queue, run
+        # `bin/windows-check.sh errors` directly.
+        exec "$ROOT/bin/windows-check.sh" check
+        ;;
     rust)
         rust_test
         ;;
