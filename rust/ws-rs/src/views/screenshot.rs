@@ -5198,7 +5198,7 @@ static LIVE_CONTROLLER: std::sync::Mutex<Option<std::sync::Weak<Mutex<Screenshot
 /// (never inside the event dispatch itself).
 #[cfg(target_os = "macos")]
 fn pump_after_mouse() {
-    dispatch2::DispatchQueue::main().exec_async(|| {
+    crate::platform::run_on_main(|| {
         let Some(ctrl) = LIVE_CONTROLLER.lock().ok().and_then(|g| g.as_ref().and_then(|w| w.upgrade())) else {
             return;
         };

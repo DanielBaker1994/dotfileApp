@@ -531,7 +531,7 @@ mod appkit {
             fn window_did_resign_key(&self, _n: &NSNotification) {
                 // Deferred: never release the panel inside its own delegate
                 // callback (`close()` drops the last reference).
-                dispatch2::DispatchQueue::main().exec_async(close);
+                crate::platform::run_on_main(close);
             }
         }
 
@@ -575,7 +575,7 @@ mod appkit {
                 let Some(mtm) = MainThreadMarker::new() else { return };
                 // Deferred: `cb` closes (and releases) this panel.
                 let bound = dispatch2::MainThreadBound::new(cb, mtm);
-                dispatch2::DispatchQueue::main().exec_async(move || {
+                crate::platform::run_on_main(move || {
                     let Some(mtm) = MainThreadMarker::new() else { return };
                     let cb = bound.get(mtm);
                     cb();

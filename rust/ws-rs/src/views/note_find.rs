@@ -248,7 +248,7 @@ impl NoteFindUi {
             sort_grep(&mut hits, &paths);
             let ms = t0.elapsed().as_millis();
             let n = paths.len();
-            dispatch2::DispatchQueue::main().exec_async(move || {
+            crate::platform::run_on_main(move || {
                 let ui = GREP_UI.with(|g| g.borrow().as_ref().and_then(|w| w.upgrade()));
                 let Some(ui) = ui else { return };
                 if ui.grep_gen.get() != gen {

@@ -220,7 +220,7 @@ mod appkit {
     fn background<R: Send + 'static>(job: impl FnOnce() -> R + Send + 'static, then: impl FnOnce(&JiraSetup, R) + Send + 'static) {
         std::thread::spawn(move || {
             let r = job();
-            dispatch2::DispatchQueue::main().exec_async(move || {
+            crate::platform::run_on_main(move || {
                 if let Some(w) = LIVE.with(|l| l.borrow().clone()) {
                     then(&w, r);
                 }

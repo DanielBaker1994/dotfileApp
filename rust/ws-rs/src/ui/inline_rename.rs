@@ -105,11 +105,11 @@ mod appkit {
                 "insertNewline:" | "insertTab:" | "insertBacktab:" => {
                     let text = field.stringValue().to_string();
                     // Remove the field after AppKit finishes this command.
-                    dispatch2::DispatchQueue::main().exec_async(move || finish(Some(Some(text))));
+                    crate::platform::run_on_main(move || finish(Some(Some(text))));
                     true
                 }
                 "cancelOperation:" => {
-                    dispatch2::DispatchQueue::main().exec_async(|| finish(Some(None)));
+                    crate::platform::run_on_main(|| finish(Some(None)));
                     true
                 }
                 _ => false,

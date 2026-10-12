@@ -2943,7 +2943,7 @@ mod daemon_ui {
 
     /// Run `f` on the main thread against the live daemon UI.
     fn on_ui(f: impl FnOnce(&DaemonUi) + Send + 'static) {
-        dispatch2::DispatchQueue::main().exec_async(move || {
+        crate::platform::run_on_main(move || {
             let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
             if let Some(ui) = ui {
                 f(&ui);

@@ -319,7 +319,7 @@ mod appkit {
 
     pub fn leave_right() {
         // Deferred: the host re-enters AppKit focus, never while a view borrow is held.
-        dispatch2::DispatchQueue::main().exec_async(|| {
+        crate::platform::run_on_main(|| {
             LEAVE_RIGHT.with(|l| {
                 if let Some(f) = l.borrow().as_ref() {
                     f();

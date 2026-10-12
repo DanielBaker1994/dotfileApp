@@ -327,7 +327,7 @@ mod appkit {
             let start = move |prev_y: Option<f64>| {
                 std::thread::spawn(move || {
                     let html = ProseRender::page(&src, &colors, &font, size, width, &cfg);
-                    dispatch2::DispatchQueue::main().exec_async(move || {
+                    crate::platform::run_on_main(move || {
                         let Some(mtm) = MainThreadMarker::new() else { return };
                         let (web, loaded) = bound.get(mtm);
                         if loaded.borrow().gen != gen {
@@ -436,7 +436,7 @@ mod appkit {
             let fmt = if copy_toast.is_empty() { "Copied {} to clipboard".to_string() } else { copy_toast.to_string() };
             std::thread::spawn(move || {
                 let r = ProseRender::export_pdf(&note, &cfg, &colors);
-                dispatch2::DispatchQueue::main().exec_async(move || {
+                crate::platform::run_on_main(move || {
                     EXPORTING.store(false, Ordering::SeqCst);
                     match (r.ok, r.out) {
                         (true, Some(out)) => {
