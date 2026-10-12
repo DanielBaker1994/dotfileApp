@@ -6,3 +6,17 @@
 pub fn open_url(url: &str) -> bool {
     open::that_detached(url).is_ok()
 }
+
+/// Ring the system bell (was `NSBeep`). Best effort; nothing to report.
+/// Callable from any thread (same as the old direct `NSBeep` calls).
+#[cfg(target_os = "macos")]
+pub fn bell() {
+    objc2_app_kit::NSBeep();
+}
+
+/// Ring the system bell. Non-macOS fallback: a plain BEL byte on stderr.
+#[cfg(not(target_os = "macos"))]
+pub fn bell() {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(b"\x07");
+}

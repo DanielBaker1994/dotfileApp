@@ -598,7 +598,7 @@ impl ToolPanel {
         let name = name_field.stringValue().to_string().trim().to_string();
         let contents = paste.string().to_string();
         if name.is_empty() || name.contains('/') {
-            objc2_app_kit::NSBeep();
+            crate::platform::bell();
             if let Some(w) = &self.window {
                 let responder: &objc2_app_kit::NSResponder = &**name_field;
                 w.makeFirstResponder(Some(responder));
@@ -606,7 +606,7 @@ impl ToolPanel {
             return false;
         }
         if contents.is_empty() {
-            objc2_app_kit::NSBeep();
+            crate::platform::bell();
             if let Some(w) = &self.window {
                 let responder: &objc2_app_kit::NSResponder = &**paste;
                 w.makeFirstResponder(Some(responder));
@@ -1093,7 +1093,7 @@ impl ToolPanel {
                             let name = field.stringValue().to_string().trim().to_string();
                             let contents = paste.string().to_string();
                             if name.is_empty() || name.contains('/') || contents.is_empty() {
-                                objc2_app_kit::NSBeep();
+                                crate::platform::bell();
                                 return true;
                             }
                             let _ = spawn_filefast(
@@ -1249,7 +1249,7 @@ impl ToolPanel {
                         self.ff_hide_at =
                             Some(std::time::Instant::now() + std::time::Duration::from_millis(1300));
                     } else {
-                        objc2_app_kit::NSBeep();
+                        crate::platform::bell();
                         self.set_ff_status(Some((last, true)));
                     }
                 }
