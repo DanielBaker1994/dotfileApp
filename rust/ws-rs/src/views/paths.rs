@@ -313,6 +313,19 @@ pub struct PathsWindow {
     pub on_event: Option<std::rc::Rc<dyn Fn(PathsEvent)>>,
 }
 
+/// Everything the view draws, pushed by the model (the X7 frontend contract).
+/// [`PathsWindow::snapshot`] reads existing fields only, so this is callable
+/// with no live AppKit view.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PathsSnapshot {
+    pub rows: Vec<PathRow>,
+    pub selection: usize,
+    pub query: String,
+    /// The empty-state hint the panel draws (`is_empty_text`), or "" once there
+    /// are rows — mirrors `sync_view`'s empty label.
+    pub status: String,
+}
+
 /// Clicks / keys from the live paths panel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PathsEvent {
@@ -360,6 +373,47 @@ impl PathsWindow {
 
     pub fn from_action(return_action: &str) -> Self {
         PathsWindow::new(ReturnAction::from_str(return_action))
+    }
+
+    /// The X7 frontend contract: everything the view draws, read from existing
+    /// fields only. Pure and callable with no live view.
+    pub fn snapshot(&self) -> PathsSnapshot {
+        PathsSnapshot {
+            rows: self.rows.clone(),
+            selection: self.selection,
+            query: self.query.clone(),
+            status: if self.rows.is_empty() {
+                self.is_empty_text()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// The X7 frontend contract: apply a user event by calling the same model
+    /// methods the AppKit half (`SwitcherController::paths_event`) calls today.
+    /// Pure; the view-level follow-ups (pasteboard, Quick Look, file popup,
+    /// menus) stay with the frontend.
+    pub fn handle(&mut self, ev: PathsEvent) {
+        match ev {
+            PathsEvent::Query(q) => self.set_query(&q),
+            PathsEvent::Move(d) => self.move_by(d),
+            PathsEvent::Escape => self.hide(),
+            PathsEvent::Enter => {
+                self.run_default();
+                self.hide();
+            }
+            PathsEvent::Click { row, .. } => {
+                if row < self.rows.len() {
+                    self.selection = row;
+                }
+            }
+            PathsEvent::RowMenu { row, .. } => {
+                if row < self.rows.len() {
+                    self.selection = row;
+                }
+            }
+        }
     }
 
     /// Feed the current shelf snapshot (the app calls this from the shelf's
@@ -1231,6 +1285,52 @@ mod tests {
         assert_eq!(st["shown"], false);
         assert!(w.handle_do("nope").is_none());
         assert!(w.handle_do("paths:select:x").is_none());
+    }
+
+    #[test]
+    fn snapshot_and_handle_contract() {
+        let mut w = PathsWindow::new(ReturnAction::File);
+        w.set_items(vec![
+            item("/tmp/a.txt", 1.0, Why::Clipboard),
+            item("/tmp/b.txt", 2.0, Why::Clipboard),
+        ]);
+        w.show();
+        let before = w.snapshot();
+        assert_eq!(before.rows.len(), 2);
+        assert_eq!(before.selection, 0);
+        assert_eq!(before.query, "");
+        assert_eq!(before.status, "", "no hint while there are rows");
+
+        // Move changes the snapshot's selection.
+        w.handle(PathsEvent::Move(1));
+        let moved = w.snapshot();
+        assert_eq!(moved.selection, 1);
+        assert_ne!(moved, before, "Move changed the snapshot");
+
+        // Query filters the rows.
+        w.handle(PathsEvent::Query("b".to_string()));
+        let filtered = w.snapshot();
+        assert_eq!(filtered.query, "b");
+        assert_eq!(filtered.rows.len(), 1);
+        assert_ne!(filtered, moved, "Query changed the snapshot");
+
+        // Click (and RowMenu) select a row.
+        w.handle(PathsEvent::Query(String::new()));
+        w.handle(PathsEvent::Click { row: 1, double: false });
+        assert_eq!(w.snapshot().selection, 1);
+        w.handle(PathsEvent::RowMenu { row: 0, x: 0.0, y: 0.0 });
+        assert_eq!(w.snapshot().selection, 0);
+
+        // Escape hides.
+        w.handle(PathsEvent::Escape);
+        assert!(!w.shown);
+
+        // An empty list reports the empty-state hint as `status`.
+        let mut empty = PathsWindow::new(ReturnAction::File);
+        empty.show();
+        assert_eq!(empty.snapshot().status, empty.is_empty_text());
+        empty.handle(PathsEvent::Query("zzz".to_string()));
+        assert_eq!(empty.snapshot().status, "No recent file matches “zzz”");
     }
 
     #[test]
