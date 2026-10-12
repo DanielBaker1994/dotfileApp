@@ -347,11 +347,19 @@ fn program_available(bin: &str, path_var: &str) -> bool {
 }
 
 /// A path is executable when it is a file with any execute bit set.
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
         .unwrap_or(false)
+}
+
+/// Windows twin: no mode bits, so reuse the shared extension heuristic (a real
+/// file whose extension is one of the Windows-executable ones).
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    crate::app::python_helper::is_executable_windows_ext(path)
 }
 
 /// The directory to start `nvim` in for the note `file`: its parent, else
@@ -412,6 +420,7 @@ mod tests {
         assert_eq!(tree_label(&row("deep.md", 3, false, false)), "              deep.md");
     }
 
+    #[cfg(unix)]
     #[test]
     fn program_available_probes_an_explicit_path() {
         use std::os::unix::fs::PermissionsExt;

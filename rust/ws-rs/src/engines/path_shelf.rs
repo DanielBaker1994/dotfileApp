@@ -698,6 +698,7 @@ mod tests {
         assert_eq!(MAX_LIMIT, 25);
     }
 
+    #[cfg(unix)]
     #[test]
     fn canonical_normalize_rekey() {
         if !helper_ready() {
@@ -850,6 +851,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[cfg_attr(
         not(target_os = "macos"),

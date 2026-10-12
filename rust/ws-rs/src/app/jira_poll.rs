@@ -164,12 +164,14 @@ pub fn set_enabled(on: bool, keep_polling: bool) {
     sync_launch_agent();
 }
 
+#[cfg(unix)]
 fn launchctl(args: &[&str]) -> i32 {
     Command::new("/bin/launchctl").args(args).output().map(|o| o.status.code().unwrap_or(-1)).unwrap_or(-1)
 }
 
 /// `syncJiraLaunchAgent()`: install/refresh `com.jira.poll.plist` while the
 /// poller is active, boot it out otherwise.
+#[cfg(unix)]
 pub fn sync_launch_agent() {
     // Test daemons (isolated config) must never touch the real LaunchAgents.
     if std::env::var_os("WS_SKIP_LAUNCH_AGENT").is_some() {
@@ -205,6 +207,11 @@ pub fn sync_launch_agent() {
     }
     launchctl(&["bootstrap", &gui, &plist]);
 }
+
+/// Windows: `launchd`/`launchctl` does not exist, so the Jira poller service is
+/// not supported — there is no launch agent to install or boot out.
+#[cfg(windows)]
+pub fn sync_launch_agent() {}
 
 #[cfg(test)]
 mod tests {

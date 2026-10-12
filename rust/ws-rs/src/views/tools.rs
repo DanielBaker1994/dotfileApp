@@ -758,12 +758,26 @@ impl ToolPanel {
                 done.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
-            let mut cmd = Command::new("/bin/bash");
-            cmd.arg("-c")
-                .arg(&script)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            #[cfg(unix)]
+            let mut cmd = {
+                let mut cmd = Command::new("/bin/bash");
+                cmd.arg("-c")
+                    .arg(&script)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                cmd
+            };
+            #[cfg(windows)]
+            let mut cmd = {
+                let mut cmd = Command::new("cmd");
+                cmd.arg("/C")
+                    .arg(&script)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                cmd
+            };
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {

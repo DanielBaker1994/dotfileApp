@@ -5655,6 +5655,7 @@ impl Default for ScreenshotController {
 
 impl ScreenshotController {
     pub fn new() -> Self {
+        #[cfg(not(test))]
         let home = std::env::var("HOME").unwrap_or_default();
         // Unit tests record fake PNGs: keep them out of the real cache dir.
         #[cfg(test)]
