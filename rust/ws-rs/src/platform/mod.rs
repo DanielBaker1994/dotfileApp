@@ -10,6 +10,10 @@ pub use clipboard::*;
 pub mod screens;
 pub use screens::*;
 
+pub mod capture;
+#[allow(unused_imports)] // the seam has no caller yet (W6-C lands the API only).
+pub use capture::*;
+
 pub mod settings;
 pub use settings::*;
 
