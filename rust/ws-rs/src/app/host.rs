@@ -1379,6 +1379,10 @@ impl SwitcherController {
         inner.ui_push(UiCommand::HideSwitcher);
     }
 
+    pub fn view_switcher_shown(&self) -> bool {
+        self.inner.lock().unwrap().view_switcher
+    }
+
     /// `state.viewSwitcher.shown` (the panel's own Esc close path).
     pub fn set_view_switcher(&self, on: bool) {
         self.inner.lock().unwrap().view_switcher = on;
@@ -2915,6 +2919,35 @@ mod daemon_ui {
         static UI_WEAK: RefCell<Option<objc2::rc::Weak<DaemonUi>>> = const { RefCell::new(None) };
     }
 
+    thread_local! {
+        /// Generation of the pending click-to-rename; a double-click or a
+        /// newer click bumps it so the older timer does nothing.
+        static CLICK_RENAME_GEN: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn cancel_click_rename() {
+        CLICK_RENAME_GEN.with(|g| g.set(g.get() + 1));
+    }
+
+    /// Run `f` after the system double-click interval unless a double-click
+    /// (or another click) arrived first — single click renames, double opens.
+    fn schedule_click_rename(f: fn(&DaemonUi)) {
+        cancel_click_rename();
+        let gen = CLICK_RENAME_GEN.with(|g| g.get());
+        let secs = unsafe { objc2_app_kit::NSEvent::doubleClickInterval() }.max(0.2) + 0.05;
+        let Ok(when) = dispatch2::DispatchTime::try_from(std::time::Duration::from_secs_f64(secs)) else {
+            return;
+        };
+        let _ = dispatch2::DispatchQueue::main().after(when, move || {
+            if CLICK_RENAME_GEN.with(|g| g.get()) == gen {
+                let ui = UI_WEAK.with(|w| w.borrow().as_ref().and_then(|w| w.load()));
+                if let Some(ui) = ui {
+                    f(&ui);
+                }
+            }
+        });
+    }
+
     /// Run `f` on the main thread against the live daemon UI.
     fn on_ui(f: impl FnOnce(&DaemonUi) + Send + 'static) {
         dispatch2::DispatchQueue::main().exec_async(move || {
@@ -3562,10 +3595,27 @@ mod daemon_ui {
                     let c = controller.clone();
                     move || {
                         c.set_palette_visible(false);
+                        // Esc inside the field: give focus back to the app
+                        // that was frontmost instead of the main window.
+                        on_ui(|ui| ui.hide_palette());
                     }
                 }),
             );
-            let host = st.window.frame();
+            // Centre on the screen under the mouse, not on the (possibly
+            // hidden / other-Space / stale) main window's frame.
+            let host = objc2_app_kit::NSScreen::screens(mtm)
+                .iter()
+                .find(|s| {
+                    let m = objc2_app_kit::NSEvent::mouseLocation();
+                    let f = s.frame();
+                    m.x >= f.origin.x
+                        && m.x < f.origin.x + f.size.width
+                        && m.y >= f.origin.y
+                        && m.y < f.origin.y + f.size.height
+                })
+                .or_else(|| objc2_app_kit::NSScreen::mainScreen(mtm))
+                .map(|s| s.visibleFrame())
+                .unwrap_or_else(|| st.window.frame());
             panel.present(
                 mtm,
                 Some(SwitchFrame::new(
@@ -3706,8 +3756,8 @@ mod daemon_ui {
             );
             panel.set_on_close(on_close);
             let current = controller.current().map(|v| v.nav_id());
-            // `preselect: slot.previousNav ?? cur`
-            panel.show(&views, current, controller.previous_nav().or(current));
+            // Always start on the first row.
+            panel.show(&views, current, None);
             views.iter().map(|v| format!("{}|{}", v.name, v.location)).collect()
         }
 
@@ -3721,7 +3771,20 @@ mod daemon_ui {
             drop(state);
             self.ivars().controller.set_palette_visible(false);
             if let Some(mtm) = MainThreadMarker::new() {
-                self.ivars().controller.set_window_count(visible_window_count(mtm));
+                let n = visible_window_count(mtm);
+                self.ivars().controller.set_window_count(n);
+                // Nothing of ours left on screen: hand activation back to the
+                // previous app rather than letting macOS raise the main window.
+                let main_visible = self
+                    .ivars()
+                    .state
+                    .borrow()
+                    .as_ref()
+                    .map(|st| st.window.isVisible())
+                    .unwrap_or(false);
+                if !main_visible {
+                    NSApplication::sharedApplication(mtm).deactivate();
+                }
             }
         }
 
@@ -3787,6 +3850,20 @@ mod daemon_ui {
                         }));
                     }
                     win.show_window(mtm);
+                    // Click-off hides the window (and any rename field),
+                    // unless the preview popup took key from a double-click.
+                    if let Some(panel) = &win.window {
+                        panel.set_on_resign(Box::new(|| {
+                            on_ui(|ui| {
+                                if crate::views::file_popup::is_live() {
+                                    return;
+                                }
+                                cancel_click_rename();
+                                crate::ui::inline_rename::cancel();
+                                ui.paths_surface(|w| w.hide_window());
+                            });
+                        }));
+                    }
                 }
                 PathsCmd::Hide => win.hide_window(),
                 PathsCmd::Return => match win.return_action {
@@ -3853,9 +3930,29 @@ mod daemon_ui {
                 }
                 E::Enter => self.paths_return(),
                 E::Click { row, double } => {
-                    self.paths_surface(|w| w.selection = row);
+                    let was_selected = self.paths_surface(|w| {
+                        w.selection = row;
+                        w.last_clicked.replace(row) == Some(row)
+                    });
+                    // Like Finder: clicking a row that is already selected
+                    // renames it once the double-click window passes (a
+                    // first click only selects); a double-click cancels
+                    // that and previews.
                     if double {
-                        self.paths_return();
+                        cancel_click_rename();
+                    } else if was_selected == Some(true) {
+                        schedule_click_rename(|ui| ui.paths_begin_rename());
+                    } else {
+                        cancel_click_rename();
+                    }
+                    // Double-click previews in the dismissable FilePopup (copying
+                    // the path stays on Cmd+C / Return, never a click).
+                    if double {
+                        if let Some(Some(path)) =
+                            self.paths_surface(|w| w.rows.get(row).map(|r| r.path.clone()))
+                        {
+                            crate::views::file_popup::show(&path, None);
+                        }
                     }
                 }
                 E::RowMenu { row, x, y } => {
@@ -4775,10 +4872,16 @@ mod daemon_ui {
                     });
                     c.nav_clicked(id);
                 }
-                // Ctrl+B W opens the same two-pane palette as Hyper+S (`show`):
-                // commands on the left, workspaces/apps on the right. Kept in
-                // step with `do:show` / the `show` verb so both are consistent.
-                'w' => self.ivars().controller.palette_toggle(),
+                // Ctrl+B W: the in-app view switcher (Files / Notes / Confluence
+                // / Jira). Hyper+S keeps the full two-pane palette.
+                'w' => {
+                    let c = &self.ivars().controller;
+                    if c.view_switcher_shown() {
+                        c.view_switcher_hide();
+                    } else {
+                        c.view_switcher_show();
+                    }
+                }
                 't' => {
                     // `toggleProseFromPrefix`: the notes vim pane / reading
                     // view flips prose; anything else gets the terminal.
@@ -4925,6 +5028,7 @@ mod daemon_ui {
             use crate::views::files_view::FilesEvent as E;
             match ev {
                 E::Click { row, cmd, shift, double } => {
+                    let was_selected = self.files_surface(|b| b.list.selection == row && b.list.marked.is_empty()) == Some(true);
                     self.files_surface(|b| {
                         b.status_note = None;
                         if shift {
@@ -4936,10 +5040,33 @@ mod daemon_ui {
                             b.list.selection = row;
                         }
                     });
-                    if double && !cmd && !shift {
+                    // Recent / Arrived files: click renames (after the
+                    // double-click window), double-click previews in the
+                    // dismissable popup.
+                    let recent_file = (!cmd && !shift)
+                        .then(|| {
+                            self.files_surface(|b| {
+                                if !b.in_recent() {
+                                    return None;
+                                }
+                                b.visible_rows().get(row).filter(|e| !e.is_dir && !e.is_parent()).map(|e| e.path.clone())
+                            })
+                            .flatten()
+                        })
+                        .flatten();
+                    self.focus_files_list();
+                    if let Some(path) = recent_file {
+                        if double {
+                            cancel_click_rename();
+                            crate::views::file_popup::show(&path, None);
+                        } else if was_selected {
+                            schedule_click_rename(|ui| ui.files_begin_rename());
+                        } else {
+                            cancel_click_rename();
+                        }
+                    } else if double && !cmd && !shift {
                         self.files_accept_selected();
                     }
-                    self.focus_files_list();
                 }
                 E::RowMenu { row, x, y } => {
                     self.files_surface(|b| {

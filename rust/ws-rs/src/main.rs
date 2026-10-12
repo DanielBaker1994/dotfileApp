@@ -23,6 +23,14 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).cloned();
+    // `headless` / `--headless`, or `WS_HEADLESS=1` when no argv mode is given:
+    // run the daemon without AppKit — socket API only (no window, menu, status
+    // item or Dock presence; `do:` dispatch runs inline on the socket thread).
+    let headless = match mode.as_deref() {
+        Some("headless" | "--headless") => true,
+        Some(_) => false,
+        None => std::env::var("WS_HEADLESS").map(|v| v == "1").unwrap_or(false),
+    };
 
     // Non-daemon one-shot commands (the ws-settings / CLI fast path).
     if let Some(cmd) = mode.as_deref() {
@@ -71,7 +79,7 @@ fn main() {
         app::cli::Outcome::Exit(code) => std::process::exit(code),
         app::cli::Outcome::Daemon { mode, lock } => {
             let _lock: DaemonLock = lock;
-            run_daemon(paths.notes_socket_path(), mode);
+            run_daemon(paths.notes_socket_path(), mode, headless);
         }
     }
 }
@@ -104,7 +112,7 @@ fn configure_helper() {
     PythonHelper::shared().configure(&lib_dir);
 }
 
-fn run_daemon(sock: String, mode: Option<String>) {
+fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
     let mut controller = SwitcherController::new_default();
     controller.reload_config();
     controller.register_views();
@@ -117,6 +125,17 @@ fn run_daemon(sock: String, mode: Option<String>) {
             std::process::exit(1);
         }
     };
+
+    if headless {
+        // No AppKit at all: no NSApplication, menu, status item, UI queues or
+        // launch presentation. `state`/`do:`/raw verbs run inline on the
+        // socket thread; parking keeps `_server` (and the caller's `_lock`)
+        // alive so the process stays the single daemon instance.
+        eprintln!("kitchen-sink (rust) headless daemon: socket {sock}");
+        loop {
+            std::thread::park();
+        }
+    }
 
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
@@ -257,7 +276,7 @@ fn config_check(argv: &[String]) -> i32 {
 
 fn print_usage() {
     println!("kitchen-sink (rust) — port scaffold");
-    println!("usage: kitchen-sink [window|notes|files|jira|confluence|ai|compare|terminal|ping|");
+    println!("usage: kitchen-sink [headless|window|notes|files|jira|confluence|ai|compare|terminal|ping|");
     println!("                     config-check SECTION KEY VALUE | config-schema]");
 }
 

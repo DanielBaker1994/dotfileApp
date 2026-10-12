@@ -18,6 +18,12 @@ pub fn initial_selection(name: &str, is_dir: bool) -> (usize, usize) {
 #[cfg(target_os = "macos")]
 pub use appkit::{active, begin};
 
+/// Cancel any live rename field (its callback gets `None`).
+#[cfg(target_os = "macos")]
+pub fn cancel() {
+    appkit::finish(Some(None));
+}
+
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::initial_selection;
@@ -44,7 +50,7 @@ mod appkit {
     }
 
     /// Drop the field; run its callback with `result` (when one was live).
-    fn finish(result: Option<Option<String>>) {
+    pub(super) fn finish(result: Option<Option<String>>) {
         let live = LIVE.with(|l| l.borrow_mut().take());
         if let Some((f, _, done)) = live {
             f.removeFromSuperview();

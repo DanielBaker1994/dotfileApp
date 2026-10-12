@@ -14,6 +14,7 @@ The repo has a lot of markdown; start here:
 | repo layout, commands, conventions | `AGENTS.md` (`AGENT_CONTEXT.md` / `CLAUDE.md` only point at it) |
 | non-negotiable UX rules | `rule.md` |
 | open bugs / ideas | `BACKLOG.md` |
+| headless control / MCP | `AGENTS.md` "MCP server / headless control" · `bin/ks-mcp-sandbox.sh` · `bin/ks-mcp --list-tools` |
 | a feature spec | its `PRD-<feature>.md` (+ the matching `PLAN-<feature>.md` for build order) |
 | what the product is / how it should look | `PRODUCT.md`, `DESIGN.md` |
 
@@ -121,6 +122,24 @@ The old names (`bin/make-dmg.sh`, `bin/fix-permissions.sh`,
   `[jira] columns` → API `fields=`), `jira_status.py` (status.json);
   `jira-doctor.sh`
   (health checks, `/health-checks` window). Tests: `python3 Tests/test_jira_poll.py`
+
+### Headless control + MCP
+
+`kitchen-sink headless` runs the daemon with no window, menu or Dock presence
+(socket-only), and `bin/ks-mcp-sandbox.sh` runs one against an isolated
+`TMPDIR`/`WS_HOME` under `.build/mcp-sandbox`:
+
+```bash
+bin/ks-mcp-sandbox.sh start          # live-safe cargo build + start
+export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)
+printf 'state\n'      | nc -U -w3 "$KS_SOCKET" | jq .
+echo 'do:open:notes'  | nc -U -w3 "$KS_SOCKET" | jq .views.notes.shown
+bin/ks-mcp-sandbox.sh stop
+```
+
+`bin/ks-mcp` is a thin MCP server over the same socket (`ks_state` / `ks_do` /
+`ks_raw`; `--list-tools`), registered in `opencode.json` — the live entry is
+read-only, the sandbox entry is disabled until wanted.
 
 ### Jira poller at a glance
 

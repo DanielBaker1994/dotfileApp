@@ -165,6 +165,10 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" "$TESTS/test_doc_templates.py"
         ;;
+    mcp)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" -B "$TESTS/test_ks_mcp.py"
+        ;;
     rust)
         rust_test
         ;;

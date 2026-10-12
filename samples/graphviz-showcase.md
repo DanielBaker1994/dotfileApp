@@ -4,7 +4,7 @@
 
 Themed `dot` fences: **no colors, fonts or sizes** — the style marker on line 1
 does that. For a fully styled standalone version (colors, HTML tables, records,
-ports, clusters, legend) see `graphviz-showcase.dot` next to this file.
+pots, clusters, legend) see `graphviz-showcase.dot` next to this file.
 
 Render the standalone file anywhere:
 
@@ -122,7 +122,7 @@ graph G {
 
 | Feature | Syntax |
 |---|---|
-| Direction | `rankdir=LR` (also TB, BT, RL) |
+|fDirection | `rankdir=LR` (also TB, BT, RL) |
 | Group | `subgraph cluster_x { label="X"; ... }` |
 | Same row/column | `{ rank=same; a; b; }` |
 | Edge between clusters | `compound=true` + `lhead=cluster_x` / `ltail=` |
@@ -130,3 +130,4 @@ graph G {
 | Port on record/HTML | `a:port -> b:port` |
 | Invisible spacer | `a -> b [style=invis]` |
 | Other efgines | `layout=neato / fdp / circo / twopi` |
+

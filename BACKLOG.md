@@ -6,6 +6,50 @@ what a fix probably looks like.
 
 ---
 
+## MCP / headless control
+
+### Full MCP catalog deferred — thin v1 shipped (`bin/ks-mcp`)
+v1 exposes `ks_state` / `ks_do` / `ks_raw` (allow-listed raw verbs) only. The
+expensive, drift-prone part was left out on purpose — the 150-method
+`ks_helper` registry, `ks_jira`, `ks_confluence`, `ks_notify`, `ks_settings`,
+`ks_launch`/`ks_reload`/`ks_restart`; agents shell out to those CLIs today.
+Also deferred: the L1 sandbox + L2 data suites (`Tests/test_ks_mcp_sandbox.py`,
+`Tests/test_ks_mcp_data.py`) and modern MCP protocol support (`protocol: auto`,
+`2026-07-28`). Locked by `bin/ks-mcp.py` + `Tests/test_ks_mcp.py` (`./ws test mcp`).
+
+### Headless daemons never drain `pending_note_open`
+A GUI daemon drains a queued `open:<path>` when notes presents (`host.rs`); the
+headless daemon leaves it queued, so `do:open:PATH` on the sandbox is a no-op.
+Route-around: helper `fileops` / notes data. Fix: drain
+`take_pending_note_open` in the headless path.
+
+### jira `board:*` has no `do:` entry
+`do:board:*` errors ("unhandled action", `host.rs`); jira registers a palette
+row only. Route-around: the jira CLI (`--board-*`, `--pin-*`,
+`--import-filters`). Fix: register a jira `test_do` for the board verbs.
+
+### `do:ai:*` / `do:confluence:*` are dead code
+`views/ai.rs` and `views/confluence.rs` have `register()` functions that are
+never called, so those namespaces cannot be dispatched (MCP or otherwise).
+Wire them into `register_views` or delete them.
+
+### Screenshot recents grid has no state field or verb
+`state.screenshot` carries `modePill` but nothing for the recents grid; only
+`key:tab` touches it and `do:key:` is record-only. Add a `screenshot:recents*`
+verb plus a state field if an agent should drive it.
+
+### Key-only surfaces have no headless entry
+`do:key:SPEC` records `last_key` only, so Cmd+K action pickers, Cmd+/ sheets,
+find bars and right-click menus cannot be driven headless. Extend with
+per-surface `do:` verbs where needed.
+
+### Jira direct spawns may ignore `WS_PYTHON`
+`jira_poll.rs` tries brew pythons before `WS_PYTHON` for its direct spawns, so
+a pinned interpreter can silently not apply (the helper and confluence already
+prefer `WS_PYTHON`). Align the discovery order.
+
+---
+
 ## Build & tooling
 
 ### Every build recompiles the whole app — make it incremental

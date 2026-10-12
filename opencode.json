@@ -13,5 +13,23 @@
     "todowrite": "allow",
     "skill": "allow",
     "external_directory": { "*": "allow" }
+  },
+  "mcp": {
+    "servers": {
+      "kitchen-sink": {
+        "type": "local",
+        "command": ["/Users/danielbaker/.config/kitchen-sink/bin/ks-mcp"],
+        "environment": { "KS_MCP_READ_ONLY": "1" },
+        "disabled": false
+      },
+      "kitchen-sink-sandbox": {
+        "type": "local",
+        "command": ["/Users/danielbaker/.config/kitchen-sink/bin/ks-mcp"],
+        "environment": {
+          "KS_SOCKET": "/Users/danielbaker/.config/kitchen-sink/.build/mcp-sandbox/tmp/ws-notes.sock"
+        },
+        "disabled": true
+      }
+    }
   }
 }

@@ -101,6 +101,17 @@ pub fn show(path: &str, over: Option<&objc2_app_kit::NSWindow>) {
     appkit::show(path, over);
 }
 
+/// Whether the preview popup is up.
+#[cfg(target_os = "macos")]
+pub fn is_live() -> bool {
+    appkit::is_live()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_live() -> bool {
+    false
+}
+
 /// No popup off macOS.
 #[cfg(not(target_os = "macos"))]
 pub fn show(_path: &str, _over: Option<&()>) {}
@@ -144,6 +155,10 @@ mod appkit {
 
     thread_local! {
         static LIVE: RefCell<Option<LivePopup>> = const { RefCell::new(None) };
+    }
+
+    pub fn is_live() -> bool {
+        LIVE.with(|l| l.borrow().as_ref().is_some_and(|p| p.panel.isVisible()))
     }
 
     /// `FilePopup.close()` — order out the live popup, if any.

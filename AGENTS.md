@@ -137,6 +137,42 @@ Build/test gotchas:
   non-dist bundle (no Resources payload) at a checkout's `pylib/`/`vim/`;
   `WS_HELPERS_BIN` overrides where `notify_poll.py` finds the AX helpers.
 
+## MCP server / headless control
+
+An agent can drive and verify the app over the socket — no computer control:
+
+- **`kitchen-sink headless`** (also `WS_HEADLESS=1` with no argv mode): the daemon binds the socket
+  and runs `state`/`do:`/raw verbs inline on the socket thread with **no AppKit at all** — no
+  `NSApplication`, window, menu, status item or Dock presence. Screenshot verbs capture (CG is
+  thread-safe) but overlays no-op (`present_overlay` is `MainThreadMarker`-guarded).
+- **`bin/ks-mcp-sandbox.sh start|stop|status|sock|reset`**: an isolated headless daemon under
+  `.build/mcp-sandbox` (its own `TMPDIR`/`WS_HOME`/`WS_COMMANDS_CONF` copy + jira/notify cache env;
+  live-safe cargo build; killed only by pidfile/`lsof -t` on its own socket). Drive it with
+  `export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)` then `printf 'state\n' | nc -U -w3 "$KS_SOCKET"`.
+- **`bin/ks-mcp-sandbox.sh start --gui`** (verified 2026-10-12): launches the real windowed app,
+  isolated like the headless sandbox, via `open -n -g --env … kitchen-sink.app --args show`
+  (LaunchServices, so the bundle's TCC grants apply). **It runs `aerospace enable off` for the
+  duration** (the `on-window-detected` rule moves/tiles the shared window and breaks capture and
+  geometry checks); `stop` runs `aerospace enable on` (marker file `.build/mcp-sandbox/aerospace-disabled`).
+  If a run dies uncleanly, run `stop` or `aerospace enable on`. Proven path: `do:open:notes` returns
+  real state (windows, `views.*.shown`), and `pane-shot` (raw socket or `ks_raw`) writes a real PNG
+  of a live window (path under `/private/tmp`; Read it to see the pane).
+  **The GUI sandbox pops UI onto the owner's screen:** `open -g` does not stop the app activating
+  itself; a bare start opens+activates the notes window, `show` presents the palette (`run_daemon`
+  in `main.rs`). Script uses `show` (less intrusive). A true quiet launch needs a code change (a
+  skip-launch-UI env); a first attempt made `state` stop answering, so it was reverted. Raw-exec
+  of the binary (not `open`) never answers the socket — always launch via `open`. Use `pane-shot` for captures;
+  bare `screenshot`/`-r` may raise the interactive overlay, so `ks_raw` stays disallowed in read-only mode
+  except `screenshot-permission`.
+- **`bin/ks-mcp`** (+ `bin/ks-mcp.py`): legacy stdio MCP bridge, registered in `opencode.json`
+  (`kitchen-sink` live = `KS_MCP_READ_ONLY=1`; `kitchen-sink-sandbox` disabled). Tools: `ks_state`,
+  `ks_do` (hidden in read-only), `ks_raw` (`screenshot` | `screenshot-permission` | `compare` |
+  `pane-shot`); `--list-tools` debugs; tests in `Tests/test_ks_mcp.py` (`./ws test mcp`).
+- Limits: headless proves model/state, **not rendering** — verify visuals with `screenshot -r` /
+  `pane-shot`; `do:key:` is record-only, so Cmd+K, Cmd+/, find bars and jira `board:*` have no
+  entry; unknown `do:` echoes state (typos undetectable); `do:ai:*`/`do:confluence:*` registers are
+  dead code. Deferrals in `BACKLOG.md` ("MCP / headless control").
+
 ## Repo layout / code map
 
 `~/.config/kitchen-sink` **is** this git checkout in repo mode. Repo mode

@@ -293,6 +293,9 @@ pub struct PathsWindow {
     /// The standalone tool panel once [`Self::show_window`] has run.
     #[cfg(target_os = "macos")]
     pub window: Option<Retained<crate::ui::popup::PopupPanel>>,
+    /// The row last clicked (click-to-rename arms on a second click there);
+    /// reset when the window is shown.
+    pub last_clicked: Option<usize>,
     /// The query field, kept so `show_window` can make it first responder.
     #[cfg(target_os = "macos")]
     pub search: Option<Retained<NSTextField>>,
@@ -340,6 +343,7 @@ impl PathsWindow {
             root: None,
             #[cfg(target_os = "macos")]
             window: None,
+            last_clicked: None,
             #[cfg(target_os = "macos")]
             search: None,
             #[cfg(target_os = "macos")]
@@ -834,6 +838,7 @@ impl PathsWindow {
     /// query field. Mirrors `PathsWindow.show()` (`showPersistent` + `place`).
     /// No-op off macOS.
     pub fn show_window(&mut self, mtm: objc2::MainThreadMarker) {
+        self.last_clicked = None;
         #[cfg(target_os = "macos")]
         self.show_window_macos(mtm);
         #[cfg(not(target_os = "macos"))]

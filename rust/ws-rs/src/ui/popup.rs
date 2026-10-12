@@ -784,6 +784,8 @@ mod appkit {
 
     pub struct PopupPanelIvars {
         corner_radius: f64,
+        /// Runs when the panel stops being key (click-off); see `set_on_resign`.
+        on_resign: std::cell::RefCell<Option<Box<dyn Fn()>>>,
     }
 
     define_class!(
@@ -798,12 +800,25 @@ mod appkit {
             fn _corner_radius(&self) -> f64 {
                 self.ivars().corner_radius
             }
+
+            #[unsafe(method(resignKeyWindow))]
+            fn resign_key_window(&self) {
+                let _: () = unsafe { msg_send![super(self), resignKeyWindow] };
+                if let Some(f) = self.ivars().on_resign.borrow().as_ref() {
+                    f();
+                }
+            }
         }
 
         unsafe impl NSObjectProtocol for PopupPanel {}
     );
 
     impl PopupPanel {
+        /// Call `f` when the panel loses key (the user clicked elsewhere).
+        pub fn set_on_resign(&self, f: Box<dyn Fn()>) {
+            *self.ivars().on_resign.borrow_mut() = Some(f);
+        }
+
         pub fn create(mtm: MainThreadMarker, config: &PopupConfig) -> Retained<PopupPanel> {
             let frame = NSRect::new(
                 NSPoint::new(config.frame.x, config.frame.y),
@@ -821,6 +836,7 @@ mod appkit {
 
             let this = PopupPanel::alloc(mtm).set_ivars(PopupPanelIvars {
                 corner_radius: config.corner_radius,
+                on_resign: std::cell::RefCell::new(None),
             });
             let panel: Retained<PopupPanel> = unsafe {
                 msg_send![

@@ -69,6 +69,19 @@ two sessions; this section wins.
   Save & Enable.** Do that first, in an isolated daemon with every Jira env
   override (see the gotcha above), against `jira/fake_jira.py` on :8766.
 
+## Agent control plane (new, Oct 12 2026)
+
+- `bin/ks-mcp-sandbox.sh start|stop|status|sock|reset` runs the daemon in the
+  new Rust `headless` mode (`kitchen-sink headless`) against an isolated
+  `TMPDIR`/`WS_HOME` under `.build/mcp-sandbox` — real `state`/`do:` semantics,
+  zero GUI objects, and `./ws build` no longer needs to be involved for agent
+  checks. `export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)`, then `nc -U`.
+- `bin/ks-mcp` (+ `bin/ks-mcp.py`) is a thin MCP server (`ks_state`, `ks_do`,
+  `ks_raw`) registered in `opencode.json`: live entry read-only, sandbox entry
+  disabled. `./ws test mcp` runs its suite. Deferrals + headless blind spots
+  (Cmd+K/Cmd+/, find bars, jira `board:*`, `pending_note_open`) are listed
+  under "MCP / headless control" in `BACKLOG.md`; full notes in `AGENTS.md`.
+
 ## Still open (priority order)
 
 1. Finish verifying the Jira setup window (see above). Its header text is

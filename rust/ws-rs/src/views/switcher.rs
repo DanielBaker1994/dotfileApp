@@ -505,6 +505,22 @@ mod switch_ui {
                 callbacks,
                 colors,
             });
+            // Click-off closes the switcher (like Esc).
+            let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
+            ui.panel.set_on_resign(Box::new(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if !ui.panel.isVisible() {
+                    return;
+                }
+                ui.panel.orderOut(None);
+                // `on_close` may already be borrowed (a pick in flight).
+                let guard = ui.callbacks.try_borrow_mut();
+                if let Ok(mut cb) = guard {
+                    if let Some(f) = cb.on_close.as_mut() {
+                        f();
+                    }
+                }
+            }));
             let weak: Weak<SwitchUi> = Rc::downgrade(&ui);
             ui.list.set_drawer(Box::new(move |r, i, sel, _hover| {
                 if let Some(ui) = weak.upgrade() {
@@ -595,7 +611,17 @@ mod switch_ui {
             self.resize(n);
         }
 
+        /// Minimalist width: the longest view name + the number column and
+        /// padding (no icon / location / "here" mark).
+        fn fit_width(&self) -> f64 {
+            let font = style::system_font(13.0, Weight::Medium);
+            let m = self.model.borrow();
+            let longest = m.rows.iter().map(|r| style::text_size(&r.name, &font).0).fold(0.0, f64::max);
+            (longest.ceil() + 64.0).max(150.0)
+        }
+
         fn resize(&self, n: usize) {
+            let w = self.fit_width();
             let h = self.list.height(n, MAX_ROWS);
             let f = self.panel.frame();
             // Keep the top edge put (AppKit frames grow from the bottom).
@@ -603,7 +629,7 @@ mod switch_ui {
             self.panel.setFrame_display(
                 objc2_foundation::NSRect::new(
                     objc2_foundation::NSPoint::new(f.origin.x, top - h),
-                    objc2_foundation::NSSize::new(PANEL_WIDTH, h),
+                    objc2_foundation::NSSize::new(w, h),
                 ),
                 true,
             );
@@ -664,30 +690,13 @@ mod switch_ui {
             let r = &m.rows[i];
             let num = if r.number > 0 { r.number.to_string() } else { " ".into() };
             style::draw_text_left(&num, band(x, 14.0), &mono, c.dim);
-            x += 18.0;
-            if let Some(img) = self.icons.borrow().get(&r.nav_id) {
-                style::draw_image(img, Rect::new(x, inner.mid_y() - 9.0, 18.0, 18.0), 1.0);
-            }
-            x += 26.0;
-            let mark_w = 64.0;
-            let name_w = style::draw_text_left(&r.name, band(x, 110.0), &style::system_font(13.0, Weight::Medium), c.text);
-            x += name_w.max(96.0) + 10.0;
-            if !r.location.is_empty() {
-                style::draw_text_left(
-                    &r.location,
-                    band(x, inner.max_x() - mark_w - x - 8.0),
-                    &style::system_font(12.0, Weight::Regular),
-                    c.dim,
-                );
-            }
-            if r.is_current {
-                style::draw_text_right(
-                    "● here",
-                    band(inner.max_x() - 12.0 - mark_w, mark_w),
-                    &style::system_font(11.0, Weight::Medium),
-                    c.accent,
-                );
-            }
+            x += 22.0;
+            style::draw_text_left(
+                &r.name,
+                band(x, inner.max_x() - x - 6.0),
+                &style::system_font(13.0, Weight::Medium),
+                c.text,
+            );
         }
     }
 }
