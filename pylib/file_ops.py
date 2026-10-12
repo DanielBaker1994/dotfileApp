@@ -128,6 +128,8 @@ def duplicate(paths: list, handle) -> dict:
 def _trash(paths: list) -> dict:
     out = {"changes": [], "failed": None}
     trash_dir = os.path.expanduser("~/.Trash")
+    # macOS always has ~/.Trash; Linux (and bare containers) may not.
+    os.makedirs(trash_dir, exist_ok=True)
     for p in paths:
         try:
             target = free_url(os.path.basename(p), trash_dir)

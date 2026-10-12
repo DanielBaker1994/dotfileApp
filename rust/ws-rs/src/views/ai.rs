@@ -2312,6 +2312,16 @@ mod tests {
         dir
     }
 
+    fn helper_ready() -> bool {
+        let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
+        if !crate::app::python_helper::lib_has_helper(&lib) {
+            return false;
+        }
+        let h = crate::app::python_helper::PythonHelper::shared();
+        h.configure(&lib);
+        h.call_default("ping", json!({})).is_ok()
+    }
+
     #[test]
     fn config_parse_defaults_and_overrides() {
         let empty = AIConfig::default();
@@ -2396,6 +2406,9 @@ mod tests {
 
     #[test]
     fn config_from_config_text_reads_only_the_ai_section() {
+        if !helper_ready() {
+            return;
+        }
         let text = "[app]\nfoo = 1\n\n[ai]\nenabled = yes\nwidth = 800\nrules-dir = ~/myrules\n\n[files]\nwidth = 12\n";
         let c = AIConfig::from_config_text(text);
         assert!(c.enabled(), "yes is truthy");

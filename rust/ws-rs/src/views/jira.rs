@@ -3510,6 +3510,16 @@ mod tests {
         base.to_string_lossy().into_owned()
     }
 
+    /// Write `body` and stamp the file with an explicit, distinct mtime so the
+    /// in-process `COMMENTS_CACHE` (keyed on path+mtime) refreshes even on
+    /// filesystems with 1-second mtime granularity (Docker overlayfs).
+    fn write_cache(path: &str, body: &str, secs: u64) {
+        std::fs::write(path, body).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
     // -------------------------------------------------------- jira_fields
 
     #[test]
@@ -3695,26 +3705,26 @@ mod tests {
     fn comments_cache_and_parsing() {
         let dir = tmpdir("comments");
         let path = format!("{dir}/issues.json");
-        std::fs::write(&path, r#"{"A-1":{"comments":[{"author":"ada","body":"hi","created":"2026-01-01T00:00:00Z"},{"author":"bob","body":"yo","created":"2026-01-02T00:00:00Z"}]},"A-2":{"comments":[{"author":"x","body":"y","created":"z"}]}}"#).unwrap();
+        write_cache(&path, r#"{"A-1":{"comments":[{"author":"ada","body":"hi","created":"2026-01-01T00:00:00Z"},{"author":"bob","body":"yo","created":"2026-01-02T00:00:00Z"}]},"A-2":{"comments":[{"author":"x","body":"y","created":"z"}]}}"#, 1_700_000_000);
         let out = comments(&path, "A-1");
         assert!(out.stamp > 0.0);
         assert_eq!(out.comments[0].author, "ada");
         assert_eq!(out.comments[1].author, "bob");
         assert_eq!(comments(&path, "A-2").comments[0].author, "x");
 
-        std::fs::write(&path, r#"{"A-1":{"comments":[]},"A-2":{},"A-3":"not a dict"}"#).unwrap();
+        write_cache(&path, r#"{"A-1":{"comments":[]},"A-2":{},"A-3":"not a dict"}"#, 1_700_000_001);
         assert!(comments(&path, "A-1").comments.is_empty());
         assert!(comments(&path, "A-2").comments.is_empty());
         assert!(comments(&path, "nope").comments.is_empty());
 
-        std::fs::write(&path, r#"{"A-1":{"comments":[{"author":7,"body":null,"created":["x"]}]}}"#).unwrap();
+        write_cache(&path, r#"{"A-1":{"comments":[{"author":7,"body":null,"created":["x"]}]}}"#, 1_700_000_002);
         let c = &comments(&path, "A-1").comments[0];
         assert_eq!((c.author.as_str(), c.body.as_str(), c.created.as_str()), ("", "", ""));
 
-        std::fs::write(&path, r#"{"A-1":{"comments":["nope"]}}"#).unwrap();
+        write_cache(&path, r#"{"A-1":{"comments":["nope"]}}"#, 1_700_000_003);
         assert!(comments(&path, "A-1").comments.is_empty());
 
-        std::fs::write(&path, "{nope").unwrap();
+        write_cache(&path, "{nope", 1_700_000_004);
         assert!(comments(&path, "A-1").comments.is_empty());
 
         let missing = format!("{dir}/none.json");

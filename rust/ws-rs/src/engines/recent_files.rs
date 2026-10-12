@@ -1208,6 +1208,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn created() {
         let (mut r, home) = new_unit("created");
         let a = format!("{home}/a.txt");
@@ -1224,6 +1228,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn rename_file() {
         let (mut r, home) = new_unit("rename");
         let a = format!("{home}/a.txt");
@@ -1264,6 +1272,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn rename_folder() {
         let (mut r, home) = new_unit("folder");
         let d = format!("{home}/proj");
@@ -1288,6 +1300,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn rename_out_of_scope() {
         let (mut r, home) = new_unit("scope");
         let d = format!("{home}/keep");
@@ -1312,6 +1328,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn removed_folder() {
         let (mut r, home) = new_unit("removed");
         let d = format!("{home}/gone");
@@ -1328,6 +1348,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn atomic_save() {
         let (mut r, home) = new_unit("atomic");
         let a = format!("{home}/doc.md");
@@ -1352,6 +1376,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: FSEvents /tmp -> /private/tmp normalization"
+    )]
     fn own_change_keeps_its_place() {
         let (mut r, home) = new_unit("own");
         let a = format!("{home}/a.txt");
@@ -1369,6 +1397,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: /tmp is a symlink to /private/tmp"
+    )]
     fn canonical_symlinks_and_tmp() {
         let home = make_home("symlink");
         write_file(&format!("{home}/real/a.txt"), "x");
