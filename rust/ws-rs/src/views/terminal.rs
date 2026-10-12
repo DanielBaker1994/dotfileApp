@@ -341,18 +341,12 @@ impl TerminalPanel {
 
     #[cfg(target_os = "macos")]
     fn saved_frame() -> Option<TerminalFrame> {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        let d = NSUserDefaults::standardUserDefaults();
-        let s = d.stringForKey(&NSString::from_str(FRAME_KEY))?;
-        parse_ns_rect(&s.to_string())
+        parse_ns_rect(&crate::platform::get_string(FRAME_KEY)?)
     }
 
     #[cfg(target_os = "macos")]
     fn save_frame(f: TerminalFrame) {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        let d = NSUserDefaults::standardUserDefaults();
-        let v = NSString::from_str(&format_ns_rect(f));
-        unsafe { d.setObject_forKey(Some(&v), &NSString::from_str(FRAME_KEY)) };
+        crate::platform::set_string(FRAME_KEY, &format_ns_rect(f));
     }
 
     /// `TerminalPanel.place()`: reuse the saved frame when it still fits the

@@ -159,32 +159,16 @@ pub fn decode_expanded(s: &str) -> BTreeSet<String> {
 
 const DEFAULTS_KEY: &str = "notesTree.expanded";
 
-/// Expanded folders restored at launch (UI state, kept in `NSUserDefaults`
+/// Expanded folders restored at launch (UI state, kept in the app's settings
 /// beside the rail-collapsed flag rather than rewriting `commands.toml`).
 pub fn load_expanded() -> BTreeSet<String> {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        let d = NSUserDefaults::standardUserDefaults();
-        return d
-            .stringForKey(&NSString::from_str(DEFAULTS_KEY))
-            .map(|s| decode_expanded(&s.to_string()))
-            .unwrap_or_default();
-    }
-    #[allow(unreachable_code)]
-    BTreeSet::new()
+    crate::platform::get_string(DEFAULTS_KEY)
+        .map(|s| decode_expanded(&s))
+        .unwrap_or_default()
 }
 
 pub fn save_expanded(set: &BTreeSet<String>) {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        let d = NSUserDefaults::standardUserDefaults();
-        let value = NSString::from_str(&encode_expanded(set));
-        unsafe { d.setObject_forKey(Some(&value), &NSString::from_str(DEFAULTS_KEY)) };
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = set;
+    crate::platform::set_string(DEFAULTS_KEY, &encode_expanded(set));
 }
 
 /// The tree never takes more than this share of the rail; the Open list keeps the rest.
@@ -194,23 +178,11 @@ const COLLAPSED_KEY: &str = "notesTree.collapsed";
 
 /// Whether the whole tree card is collapsed to its header (persisted).
 pub fn load_tree_collapsed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        return NSUserDefaults::standardUserDefaults().boolForKey(&NSString::from_str(COLLAPSED_KEY));
-    }
-    #[allow(unreachable_code)]
-    false
+    crate::platform::get_bool(COLLAPSED_KEY)
 }
 
 pub fn save_tree_collapsed(on: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        NSUserDefaults::standardUserDefaults().setBool_forKey(on, &NSString::from_str(COLLAPSED_KEY));
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = on;
+    crate::platform::set_bool(COLLAPSED_KEY, on);
 }
 
 /// Heights `(tree, open_list)` for the rail column. The tree is only as tall

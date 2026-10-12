@@ -9376,18 +9376,15 @@ mod daemon_ui {
     const AI_RULE_TEMPLATE: &str = "---\nname: {name}\n# diff = show what changed vs your text · plain = just the answer\noutput: plain\ngreedy: true\n# guardrails: permissive-content-transformations\n# placeholder: hint shown in the empty input pane\n# prompt: a line put before your text, e.g. \"Summarize this text:\"\n# then: another-rule.md   (runs next, on this rule's answer)\n---\nDescribe what the model should do with the text it is given.\nReturn ONLY the result — no commentary, no preamble.\n";
 
     fn defaults_string(key: &str) -> Option<String> {
-        let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
-        d.stringForKey(&NSString::from_str(key)).map(|s| s.to_string())
+        crate::platform::get_string(key)
     }
 
     fn defaults_set_string(key: &str, value: &str) {
-        let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
-        unsafe { d.setObject_forKey(Some(&NSString::from_str(value)), &NSString::from_str(key)) };
+        crate::platform::set_string(key, value);
     }
 
     fn defaults_remove(key: &str) {
-        let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
-        d.removeObjectForKey(&NSString::from_str(key));
+        crate::platform::remove_key(key);
     }
 
     /// `setReady()`.

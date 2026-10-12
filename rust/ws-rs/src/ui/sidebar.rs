@@ -1012,30 +1012,13 @@ mod appkit {
     }
 }
 
-/// The rail state per `collapseKey` (`UserDefaults "sidebarRail.<key>"`).
+/// The rail state per `collapseKey` (`settings "sidebarRail.<key>"`).
 pub fn rail_default(key: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        let d = NSUserDefaults::standardUserDefaults();
-        return d.boolForKey(&NSString::from_str(&format!("sidebarRail.{key}")));
-    }
-    #[allow(unreachable_code)]
-    {
-        let _ = key;
-        false
-    }
+    crate::platform::get_bool(&format!("sidebarRail.{key}"))
 }
 
 pub fn set_rail_default(key: &str, on: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSString, NSUserDefaults};
-        let d = NSUserDefaults::standardUserDefaults();
-        d.setBool_forKey(on, &NSString::from_str(&format!("sidebarRail.{key}")));
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (key, on);
+    crate::platform::set_bool(&format!("sidebarRail.{key}"), on);
 }
 
 #[cfg(test)]

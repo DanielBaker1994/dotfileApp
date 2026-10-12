@@ -221,8 +221,7 @@ mod appkit {
                 NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
             );
             web.setHidden(true);
-            let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
-            let z = d.doubleForKey(&NSString::from_str(ZOOM_KEY));
+            let z = crate::platform::get_f64(ZOOM_KEY);
             let mut state = ProseViewState::new();
             if z > 0.0 {
                 let z = state.apply_zoom(z);
@@ -397,8 +396,7 @@ mod appkit {
         }
 
         fn save_zoom(&self) {
-            let d = objc2_foundation::NSUserDefaults::standardUserDefaults();
-            d.setDouble_forKey(self.state.zoom, &NSString::from_str(ZOOM_KEY));
+            crate::platform::set_f64(ZOOM_KEY, self.state.zoom);
         }
 
         /// `searchKey(code:mods:)` → the web view action; `None` = not handled.
