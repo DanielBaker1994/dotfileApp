@@ -174,6 +174,11 @@ case "${1:-all}" in
         # Linux case yet. The Linux test run lands with Wave 2.
         exec "$ROOT/bin/linux-check.sh" check
         ;;
+    linux-headless)
+        # Wave 2: build ws-rs in the pinned Linux image and smoke the
+        # AppKit-free `headless` daemon over its socket (Docker required).
+        exec "$TESTS/test_linux_headless.sh"
+        ;;
     rust)
         rust_test
         ;;
