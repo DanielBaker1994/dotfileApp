@@ -1,21 +1,25 @@
 # PLAN — AppKit seams: WP9 scout findings
 
-Produced 2026-10-12 by the six WP9 scouts (S1–S6) after wave 1 of
-`PLAN-appkit-seams.md`. Read-only reconnaissance; line numbers are
+Produced 2026-10-12 by the six WP9 scouts (S1–S6); updated after executing
+WP1–WP8 of `PLAN-appkit-seams.md`. Read-only reconnaissance; line numbers are
 approximate (the tree moves).
 
-## State when written
+## State (final, after WP1–WP8)
 
-- Wave 1 landed on `main`: `76d5edc platform: bell seam`, `5f6c936 platform:
-  open_path + remaining openURL sites`, `2350616 platform: clipboard text
-  seam` (baseline `b62c2cd`).
-- `grep -rn "openURL\|NSBeep" rust/ws-rs/src` → only `platform/` (doc
-  comments + the bell backend). DoD line met.
-- `cargo build -p ws-rs` = 20 warnings (baseline, none new);
-  `cargo test -p ws-rs` = 724 passed, 1 ignored.
-- `objc2_app_kit`-touching files: 52 = 50 app/UI + 2 `platform/` backends
-  (mod.rs, clipboard.rs). From here the metric **includes the seam
-  backends by design**; watch the non-platform count for the real trend.
+- Executed 2026-10-12; all of WP1–WP8 landed on `main`: `76d5edc` bell,
+  `5f6c936` open_path, `2350616` clipboard, `31e0a39` frontmost-app,
+  `ee9c1cc` screens, `6cac346` settings, `4238929` file-dialog, `8a375a1`
+  main-thread dispatch (baseline `b62c2cd`).
+- Final: `grep -rn "openURL\|NSBeep" rust/ws-rs/src` → only `platform/`
+  (doc comments + the bell backend). `cargo build -p ws-rs` = 20 warnings
+  (baseline, none new); `cargo test -p ws-rs` = 727 passed, 0 failed,
+  4 ignored.
+- `objc2_app_kit`-touching files: 55 = 50 app/UI + 5 `platform/` backends
+  (mod, clipboard, app, screens, dialog). The metric **includes the seam
+  backends by design** and did not drop: each migrated leaf call was a small
+  slice of its file's AppKit use, so the honest progress signal is the
+  per-API greps, not this count. `cfg(target_os)` forks: 20 in `platform/`
+  of 451 in the crate (the rest are pre-existing).
 
 ## S1 — Images (`NSImage` 81/13 files, `NSBitmapImageRep` 17/3, `iconForFile` 3)
 
@@ -189,3 +193,25 @@ reader; `ws-helpers` links full `objc2-app-kit` solely for
 **Stay out of scope** (per plan §0): NSImage display/decode paths, the
 drawing layer (`NSBezierPath`/clips/attr-dict rendering), `NSApplication`
 lifecycle, status item/main menu, AX helpers, TCC.
+
+## Leftovers after executing WP1–WP8 (candidates for a follow-up wave)
+
+- WP5 screens follow-up: `views/file_popup.rs` (2 sites need the live
+  `window.screen()` — the plan's explicit leave case), `views/note_find.rs`
+  + `views/tools.rs` (same shapes as the migrated sites; were outside the
+  WP's file scope), `ui/shared_window.rs` (already pure index math).
+- WP8 dispatch follow-up: the after-delay shape (7 sites: chrome 1, toast 1,
+  host 4, screenshot 1) is a ready `platform::after(Duration, F)` candidate,
+  deliberately not migrated; `MainThreadBound` constructions (4 sites) stay
+  at call sites; 2 run-loop `NSTimer`s (host `drain:`, ai `pollStream:`)
+  are audit-only. A pre-existing sync `ControllerInner::run_on_main`
+  (host.rs, channel+timeout) is distinct from the new async seam.
+- WP6 follow-up: `ui/sheet.rs` (NSAlert) — at most extract the pure confirm
+  dialog into `platform::confirm(title, msg, buttons) -> usize`.
+- WP1/WP4: `switcher.rs`/`host.rs` icon lookups (`NSImage`) stay — S1.
+- WP2: file-url pasteboards, `ai_format` HTML/RTF, image pasteboards left
+  (separate seams / later).
+- WP7: all 22 `NSUserDefaults` hits migrated, nothing left.
+- Non-macOS branches added (arboard, rfd, JSON prefs, FIFO dispatch) are
+  cfg'd out on macOS and therefore compile-unverified here; they were kept
+  trivially correct per plan rule 4.
