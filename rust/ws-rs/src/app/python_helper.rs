@@ -226,6 +226,18 @@ fn is_executable(path: &str) -> bool {
     }
 }
 
+/// True when a PATH entry should be skipped during python discovery.
+///
+/// macOS `/usr/bin/python3` is the system 3.9, so the system directories are
+/// skipped there; elsewhere a `/usr/bin/python3` that passes `python_runs_311`
+/// is a perfectly good candidate.
+fn skip_path_dir(dir: &str) -> bool {
+    if dir.is_empty() {
+        return true;
+    }
+    cfg!(target_os = "macos") && (dir == "/usr/bin" || dir == "/bin")
+}
+
 fn find_python(lib: &str) -> Option<String> {
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(own) = std::env::var("WS_PYTHON") {
@@ -237,7 +249,7 @@ fn find_python(lib: &str) -> Option<String> {
     candidates.push("/usr/local/bin/python3".into());
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':') {
-            if dir.is_empty() || dir == "/usr/bin" || dir == "/bin" {
+            if skip_path_dir(dir) {
                 continue;
             }
             candidates.push(format!("{dir}/python3"));
@@ -299,6 +311,16 @@ mod tests {
     fn discovery_is_bounded() {
         // Must not hang; returns Some on a dev machine with brew python.
         let _ = find_python(&repo_pylib());
+    }
+
+    #[test]
+    fn system_path_dirs_skipped_only_on_macos() {
+        assert!(skip_path_dir(""));
+        assert!(!skip_path_dir("/opt/homebrew/bin"));
+        assert!(!skip_path_dir("/usr/local/bin"));
+        let macos = cfg!(target_os = "macos");
+        assert_eq!(skip_path_dir("/usr/bin"), macos);
+        assert_eq!(skip_path_dir("/bin"), macos);
     }
 
     #[test]
