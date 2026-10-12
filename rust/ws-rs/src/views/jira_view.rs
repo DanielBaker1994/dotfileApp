@@ -10,7 +10,7 @@
 //! favourite releases / labels) and BOARDS (catalog + pinned boards).
 
 use crate::app::paths::JiraPaths;
-use crate::ui::sidebar::{SidebarModel, SidebarPin, SidebarRow};
+use crate::ui::sidebar::{SidebarEvent, SidebarModel, SidebarPin, SidebarRow};
 use crate::ui::theme::PopupTone;
 use crate::app::config::ListColumn;
 use crate::views::jira::{base_field_label, parse_columns, style_rules, CellStyle, StyleRules};
@@ -954,7 +954,7 @@ pub fn fit_column_pcts(need: &[f64], usable: f64) -> Vec<f64> {
 }
 
 /// Everything the view draws.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct JiraSnapshot {
     pub columns: Vec<ListColumn>,
     pub rows: Vec<Record>,
@@ -996,6 +996,77 @@ impl JiraList {
                 "No matches.".into()
             },
             rules: self.rules.clone(),
+        }
+    }
+
+    /// Apply a user event to the model — the pure half of the macOS
+    /// `DaemonUi::jira_event` dispatch (`app/host.rs`). Every model mutation
+    /// the AppKit half performs for an event is here; UI-only effects (opening
+    /// URLs, context menus, focus, logging, relayout) stay with the frontend.
+    pub fn handle(&mut self, ev: JiraEvent) {
+        match ev {
+            JiraEvent::Click { row, double } => {
+                self.selection = row;
+                if double {
+                    self.handle(JiraEvent::OpenDetail);
+                }
+            }
+            JiraEvent::Check(row) => {
+                if let Some(k) = self.row(row).and_then(|r| r.get("key")).cloned() {
+                    if !self.checked.remove(&k) {
+                        self.checked.insert(k);
+                    }
+                }
+            }
+            JiraEvent::Star(row) => {
+                if let Some(k) = self.row(row).and_then(|r| r.get("key")).cloned() {
+                    if !self.favs.remove(&k) {
+                        self.favs.insert(k);
+                    }
+                }
+            }
+            JiraEvent::Sort(i) => self.sort_by(i),
+            // The Fit Columns menu is a UI action.
+            JiraEvent::HeaderMenu { .. } => {}
+            JiraEvent::Query(q) => {
+                self.query = q;
+                self.selection = 0;
+                self.refilter();
+            }
+            JiraEvent::Move(d) => {
+                let n = self.rows.len() as i64;
+                if n > 0 {
+                    self.selection = (self.selection as i64 + d).clamp(0, n - 1) as usize;
+                }
+            }
+            JiraEvent::Escape => {
+                self.query.clear();
+                self.refilter();
+            }
+            // A board row opens its board; an issue row opens a URL (UI).
+            JiraEvent::Enter | JiraEvent::OpenDetail => {
+                let board = self.selected().and_then(|r| {
+                    r.get("boardId")
+                        .filter(|_| r.get("key").is_some_and(|k| k.starts_with(BOARD_PREFIX)))
+                        .cloned()
+                });
+                if let Some(id) = board {
+                    let _ = self.open_board(&id);
+                }
+            }
+            // The context menu is a UI action; selecting the row is model state.
+            JiraEvent::RowMenu { row, .. } => self.selection = row,
+            JiraEvent::Sidebar(SidebarEvent::Select(i)) => self.select_tab(i),
+            JiraEvent::Sidebar(SidebarEvent::Pinned(key)) => {
+                if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
+                    let _ = self.open_my_work(id);
+                } else if key == BOARD_LIST_KEY {
+                    self.show_board_list();
+                } else if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
+                    let _ = self.open_board(id);
+                }
+            }
+            JiraEvent::Sidebar(_) => {}
         }
     }
 }
@@ -1943,6 +2014,47 @@ mod tests {
         l.query = "alp".into();
         l.refilter();
         assert_eq!(l.rows.len(), 1);
+    }
+
+    #[test]
+    fn handle_applies_user_events_to_the_model() {
+        let mut l = JiraList::default();
+        l.columns = vec![col("key", 50.0), col("title", 50.0)];
+        l.section.insert("filter".into(), "key,title".into());
+        for (k, t) in [("A-2", "beta"), ("A-1", "alpha")] {
+            let mut r = Record::new();
+            r.insert("key".into(), k.into());
+            r.insert("title".into(), t.into());
+            l.all.push(r);
+        }
+        l.refilter();
+        let before = l.snapshot();
+
+        l.handle(JiraEvent::Click { row: 1, double: false });
+        assert_eq!(l.snapshot().selection, 1);
+        assert_ne!(l.snapshot(), before, "Click moves the selection");
+
+        l.handle(JiraEvent::Star(1));
+        assert!(l.favs.contains("A-1"));
+
+        l.handle(JiraEvent::Query("alp".into()));
+        assert_eq!(l.snapshot().rows.len(), 1);
+
+        let filtered = l.snapshot();
+        l.handle(JiraEvent::Escape);
+        assert!(l.query.is_empty());
+        assert_ne!(l.snapshot(), filtered, "Escape clears the query");
+
+        // Two rows again after Escape; a big step clamps to the last row.
+        l.handle(JiraEvent::Move(5));
+        assert_eq!(l.snapshot().selection, 1);
+
+        let unsorted = l.snapshot();
+        l.handle(JiraEvent::Sort(0));
+        assert_ne!(l.snapshot(), unsorted, "Sort reorders the rows");
+
+        l.handle(JiraEvent::RowMenu { row: 0, x: 0.0, y: 0.0 });
+        assert_eq!(l.snapshot().selection, 0);
     }
 
     #[test]
