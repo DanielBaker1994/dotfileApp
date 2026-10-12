@@ -13,13 +13,16 @@ path = "src/main.rs"
 # macOS; on macOS it is optional so the AppKit path stays the default build,
 # and `--features egui` turns on the `WS_FRONTEND=egui` dev switch.
 [features]
-egui = ["dep:eframe", "dep:egui_extras", "dep:egui"]
+egui = ["dep:eframe", "dep:egui_extras", "dep:egui", "dep:egui_commonmark"]
 
 # Portable dependencies (build on every target).
 [dependencies]
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
 egui_extras = { version = "0.32", default-features = false, optional = true }
 egui = { version = "0.32", default-features = false, features = ["default_fonts"], optional = true }
+# Prose rendering for the egui Notes view (0.21.1 is the release that tracks
+# egui 0.32; `default-features = false` drops the image loaders).
+egui_commonmark = { version = "0.21.1", default-features = false, optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,6 +55,7 @@ swiftterm-shim = { path = "../swiftterm-shim" }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 egui_extras = { version = "0.32", default-features = false }
 egui = { version = "0.32", default-features = false, features = ["default_fonts"] }
+egui_commonmark = { version = "0.21.1", default-features = false }
 
 # Non-macOS clipboard (macOS keeps objc2 NSPasteboard; arboard links AppKit
 # there, so it must stay target-gated).
