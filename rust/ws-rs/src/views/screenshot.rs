@@ -684,6 +684,7 @@ mod sck {
     }
 }
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
@@ -708,12 +709,22 @@ pub fn current_screens() -> Vec<ScreenRef> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 pub fn screen_capture_permitted() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
+#[cfg(not(target_os = "macos"))]
+pub fn screen_capture_permitted() -> bool {
+    false
+}
 
+#[cfg(target_os = "macos")]
 pub fn request_screen_capture_access() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn request_screen_capture_access() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -2585,6 +2596,159 @@ impl ShotSession {
         {
             let _ = (display, draw_objects, crop);
             None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShotSnapshot / ShotEvent — the pure view contract (Wave 3, example X7)
+// ---------------------------------------------------------------------------
+
+/// Everything the overlay draws, pushed by the model. Reads existing
+/// [`ShotSession`] fields only (capture itself arrives in Wave 6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShotSnapshot {
+    pub displays: Vec<ShotDisplay>,
+    pub active: Option<usize>,
+    pub selection: Option<Rect>,
+    pub objects: Vec<ShotObject>,
+    pub selected: Option<usize>,
+    pub drawing: Option<ShotObject>,
+    pub editing: Option<TextEditState>,
+    pub wheel: Option<WheelState>,
+    pub save_card: Option<SaveCardState>,
+    pub tool: Option<ShotTool>,
+    pub color: ShotColor,
+    pub move_mode: bool,
+    pub text_mode: bool,
+    pub side_panel_open: bool,
+    pub grabbing: Option<ShotColor>,
+    pub shortcuts_shown: bool,
+    /// The recents grid (the pill's third stop) is open.
+    pub recent_open: bool,
+    /// A recents-grid open was requested and is not yet serviced.
+    pub recent_requested: bool,
+    /// The pill's current stop (0 Copy Text, 1 Screenshot, 2 Recent).
+    pub stop: usize,
+    pub finished: bool,
+    pub outcome: Option<ShotOutcome>,
+}
+
+impl Default for ShotSnapshot {
+    fn default() -> Self {
+        ShotSnapshot {
+            displays: Vec::new(),
+            active: None,
+            selection: None,
+            objects: Vec::new(),
+            selected: None,
+            drawing: None,
+            editing: None,
+            wheel: None,
+            save_card: None,
+            tool: None,
+            color: ShotColor::BLACK,
+            move_mode: false,
+            text_mode: false,
+            side_panel_open: false,
+            grabbing: None,
+            shortcuts_shown: false,
+            recent_open: false,
+            recent_requested: false,
+            stop: 1,
+            finished: false,
+            outcome: None,
+        }
+    }
+}
+
+/// User actions reported to the model. Each maps to the [`ShotSession`] method
+/// the AppKit overlay calls for that action today (the `ShotOverlayView`
+/// mouse/scroll passthroughs, the key monitor's `handle_key`, and the button
+/// ring / mode pill).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShotEvent {
+    Moved { display: usize, point: Point },
+    Down { display: usize, point: Point, click_count: i64, shift: bool, cmd: bool },
+    Dragged { display: usize, point: Point, shift: bool, cmd: bool },
+    Up { display: usize, point: Point, shift: bool, cmd: bool },
+    RightDown { display: usize, point: Point },
+    RightDragged { display: usize, point: Point },
+    RightUp { display: usize, point: Point },
+    /// Mouse wheel: the active tool size, or contrast opacity with Cmd.
+    Scroll { delta_y: f64, precise: bool, cmd: bool },
+    /// A keyDown routed into the session (`ShotSession::handle_key`).
+    Key(KeyInput),
+    /// A button-ring tool tap (`pressed(_:)`).
+    Pressed(ShotTool),
+    /// The pill moved to a stop / toggled the recents grid.
+    GotoStop(usize),
+    /// Tab / Shift+Tab through the pill stops.
+    CycleStop { back: bool },
+    Undo,
+    Redo,
+    SelectAll,
+    Escape,
+}
+
+impl ShotSession {
+    /// Everything the overlay draws, read from the existing model fields.
+    pub fn snapshot(&self) -> ShotSnapshot {
+        ShotSnapshot {
+            displays: self.displays.clone(),
+            active: self.active,
+            selection: self.selection,
+            objects: self.doc.objects.clone(),
+            selected: self.doc.selected,
+            drawing: self.drawing(),
+            editing: self.editing.clone(),
+            wheel: self.wheel.clone(),
+            save_card: self.save_card.clone(),
+            tool: self.tool,
+            color: self.color,
+            move_mode: self.move_mode,
+            text_mode: self.text_mode,
+            side_panel_open: self.side_panel_open,
+            grabbing: self.grabbing,
+            shortcuts_shown: self.shortcuts_shown,
+            recent_open: self.recent_open,
+            recent_requested: self.recent_requested,
+            stop: self.stop(),
+            finished: self.finished,
+            outcome: self.outcome,
+        }
+    }
+
+    /// Apply a user action, calling the same model methods the AppKit half
+    /// calls for it (mouse passthrough → [`ShotSession::mouse_*`]/`right_*`,
+    /// keys → [`ShotSession::handle_key`], ring/pill → [`ShotSession::pressed`]
+    /// / [`ShotSession::goto_stop`]).
+    pub fn handle(&mut self, ev: ShotEvent) {
+        match ev {
+            ShotEvent::Moved { display, point } => self.mouse_moved(display, point),
+            ShotEvent::Down { display, point, click_count, shift, cmd } => {
+                self.mouse_down(display, point, click_count, shift, cmd)
+            }
+            ShotEvent::Dragged { display, point, shift, cmd } => {
+                self.mouse_dragged(display, point, shift, cmd)
+            }
+            ShotEvent::Up { display, point, shift, cmd } => {
+                self.mouse_up(display, point, shift, cmd)
+            }
+            ShotEvent::RightDown { display, point } => self.right_down(display, point),
+            ShotEvent::RightDragged { display, point } => self.right_dragged(display, point),
+            ShotEvent::RightUp { display, point } => self.right_up(display, point),
+            ShotEvent::Scroll { delta_y, precise, cmd } => self.scroll(delta_y, precise, cmd),
+            ShotEvent::Key(k) => {
+                let _ = self.handle_key(&k);
+            }
+            ShotEvent::Pressed(t) => self.pressed(t),
+            ShotEvent::GotoStop(n) => self.goto_stop(n),
+            ShotEvent::CycleStop { back } => self.cycle_stop(back),
+            ShotEvent::Undo => self.undo(),
+            ShotEvent::Redo => self.redo(),
+            ShotEvent::SelectAll => self.select_all(),
+            ShotEvent::Escape => self.escape(),
         }
     }
 }
@@ -7157,6 +7321,21 @@ mod tests {
             2.0,
         ));
         s
+    }
+
+    #[test]
+    fn snapshot_reflects_handled_events() {
+        let mut s = session();
+        let before = s.snapshot();
+        // A button-ring tool tap selects the drawing tool…
+        s.handle(ShotEvent::Pressed(ShotTool::Rectangle));
+        let after = s.snapshot();
+        assert_ne!(before, after, "handling an event changed the snapshot");
+        assert_eq!(after.tool, Some(ShotTool::Rectangle));
+        // …and reaching the recents stop raises the grid request.
+        assert_eq!(after.stop, 1);
+        s.handle(ShotEvent::GotoStop(2));
+        assert!(s.snapshot().recent_requested, "the recents grid was requested");
     }
 
     #[test]
