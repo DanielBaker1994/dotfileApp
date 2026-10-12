@@ -294,6 +294,7 @@ pub fn ws_cell_rects(widths: &[f64], min_x: f64, ws_right: f64, header_h: f64) -
 
 /// A nav icon model (`navIcons` entries); the image is optional so the model
 /// stays usable in tests.
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct NavIcon {
     pub id: i32,

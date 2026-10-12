@@ -958,7 +958,7 @@ mod appkit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
 
     #[derive(Default)]

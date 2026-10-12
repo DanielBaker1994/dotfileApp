@@ -83,6 +83,7 @@ impl TreeGeometry {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub use appkit::TreeView;
 
 #[cfg(target_os = "macos")]
