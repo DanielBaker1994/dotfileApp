@@ -186,9 +186,7 @@ mod appkit {
     }
 
     fn open_in_workspace(path: &str) {
-        use objc2_foundation::NSURL;
-        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
-        objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+        crate::platform::open_path(std::path::Path::new(path));
     }
 
     fn load_image(path: &str) -> Option<Retained<NSImage>> {

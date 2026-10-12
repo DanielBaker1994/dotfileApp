@@ -9675,9 +9675,7 @@ mod daemon_ui {
     }
 
     fn open_path(path: &str) {
-        use objc2_app_kit::NSWorkspace;
-        let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(path));
-        NSWorkspace::sharedWorkspace().openURL(&url);
+        crate::platform::open_path(std::path::Path::new(path));
     }
 
     /// Build a `$HOME`-rooted file browser and hand back the model + its view

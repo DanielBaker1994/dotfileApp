@@ -5379,8 +5379,7 @@ fn recent_image(path: &str) -> Option<ShotImage> {
 
 #[cfg(target_os = "macos")]
 fn open_in_workspace(path: &str) {
-    let url = objc2_foundation::NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(path));
-    objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+    crate::platform::open_path(std::path::Path::new(path));
 }
 
 #[cfg(target_os = "macos")]
@@ -5715,12 +5714,9 @@ impl ScreenshotController {
         // promise is real.
         #[cfg(target_os = "macos")]
         {
-            use objc2_foundation::{NSURL, NSString};
-            if let Some(u) = NSURL::URLWithString(&NSString::from_str(
+            crate::platform::open_url(
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-            )) {
-                objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&u);
-            }
+            );
         }
         self.note("screenshot: no Screen Recording permission");
         false

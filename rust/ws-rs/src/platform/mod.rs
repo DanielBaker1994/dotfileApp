@@ -7,6 +7,12 @@ pub fn open_url(url: &str) -> bool {
     open::that_detached(url).is_ok()
 }
 
+/// Open `path` with its default application (was `NSWorkspace.openURL` with a
+/// `fileURLWithPath` URL). Returns whether the OS accepted the request.
+pub fn open_path(path: &std::path::Path) -> bool {
+    open::that_detached(path).is_ok()
+}
+
 /// Ring the system bell (was `NSBeep`). Best effort; nothing to report.
 /// Callable from any thread (same as the old direct `NSBeep` calls).
 #[cfg(target_os = "macos")]

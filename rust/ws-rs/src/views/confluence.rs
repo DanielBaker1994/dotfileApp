@@ -1471,7 +1471,7 @@ pub mod macos {
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSButton, NSControlSize, NSFont, NSLineBreakMode,
         NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView, NSTextAlignment, NSTextField,
-        NSView, NSWorkspace,
+        NSView,
     };
     use objc2_foundation::{
         ns_string, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSNumber,
@@ -1507,9 +1507,7 @@ pub mod macos {
     }
 
     fn open_external(url: &str) {
-        if let Some(ns) = NSURL::URLWithString(&NSString::from_str(url)) {
-            NSWorkspace::sharedWorkspace().openURL(&ns);
-        }
+        crate::platform::open_url(url);
     }
 
     fn dict_str(dict: &NSDictionary<AnyObject, AnyObject>, key: &str) -> Option<String> {

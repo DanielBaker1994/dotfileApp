@@ -1566,11 +1566,11 @@ pub mod macos {
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSButton, NSColor, NSFont, NSFontAttributeName,
         NSForegroundColorAttributeName, NSPasteboard, NSPasteboardTypeString, NSPopUpButton,
-        NSScrollView, NSTextField, NSTextView, NSStringDrawing, NSView, NSWorkspace,
+        NSScrollView, NSTextField, NSTextView, NSStringDrawing, NSView,
     };
     use objc2_foundation::{
         ns_string, NSAttributedStringKey, NSDictionary, NSObject, NSObjectProtocol, NSPoint,
-        NSRect, NSSize, NSURL, NSString, NSTimer,
+        NSRect, NSSize, NSString, NSTimer,
     };
     use objc2_web_kit::{
         WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKUserScript,
@@ -1583,9 +1583,7 @@ pub mod macos {
     }
 
     fn open_external(url: &str) {
-        if let Some(ns) = NSURL::URLWithString(&NSString::from_str(url)) {
-            NSWorkspace::sharedWorkspace().openURL(&ns);
-        }
+        crate::platform::open_url(url);
     }
 
     pub struct LinkHandlerIvars;
