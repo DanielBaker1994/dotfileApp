@@ -9,8 +9,18 @@ license = "MIT"
 name = "kitchen-sink"
 path = "src/main.rs"
 
+# The egui frontend is the non-macOS UI (Wave 4+). It is always enabled off
+# macOS; on macOS it is optional so the AppKit path stays the default build,
+# and `--features egui` turns on the `WS_FRONTEND=egui` dev switch.
+[features]
+egui = ["dep:eframe", "dep:egui_extras", "dep:egui"]
+
 # Portable dependencies (build on every target).
 [dependencies]
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
+egui_extras = { version = "0.32", default-features = false, optional = true }
+egui = { version = "0.32", default-features = false, features = ["default_fonts"], optional = true }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -36,9 +46,15 @@ objc2-screen-capture-kit = "0.3.2"
 objc2-quick-look-ui = "0.3.2"
 swiftterm-shim = { path = "../swiftterm-shim" }
 
+# The egui frontend is the non-macOS UI (always on off macOS; the `[features]
+# egui` switch above makes it optional for macOS dev runs only).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+egui_extras = { version = "0.32", default-features = false }
+egui = { version = "0.32", default-features = false, features = ["default_fonts"] }
+
 # Non-macOS clipboard (macOS keeps objc2 NSPasteboard; arboard links AppKit
 # there, so it must stay target-gated).
-[target.'cfg(not(target_os = "macos"))'.dependencies]
 arboard = { version = "3", default-features = false }
 
 # Non-macOS file pickers (macOS keeps the objc2 NSOpenPanel code; rfd's own

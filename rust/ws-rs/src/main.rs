@@ -12,8 +12,12 @@ mod platform;
 mod ui;
 mod views;
 
+// The egui frontend: always on off macOS; on macOS only when built with
+// `--features egui` (the `WS_FRONTEND=egui` dev switch).
+#[cfg(any(not(target_os = "macos"), feature = "egui"))]
+mod frontend_egui;
+
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
 use app::host::SwitcherController;
@@ -136,14 +140,20 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         }
     }
 
-    // Non-macOS targets have no UI toolkit yet: the headless path is the only
-    // one for now (Wave 4 swaps in the egui frontend).
+    // The egui frontend is the UI on non-macOS targets (Wave 4+).
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = &mode;
-        eprintln!("kitchen-sink (rust) headless daemon: socket {sock}");
-        loop {
-            std::thread::park();
+        run_egui_frontend(controller, mode.as_deref(), &sock);
+    }
+
+    // macOS dev switch: `--features egui` + `WS_FRONTEND=egui` runs the egui
+    // frontend instead of AppKit (for iterating on the cross-platform UI). The
+    // AppKit path below is otherwise untouched.
+    #[cfg(all(target_os = "macos", feature = "egui"))]
+    {
+        if std::env::var("WS_FRONTEND").map(|v| v == "egui").unwrap_or(false) {
+            run_egui_frontend(controller.clone(), mode.as_deref(), &sock);
+            return;
         }
     }
 
@@ -180,6 +190,28 @@ fn run_daemon(sock: String, mode: Option<String>, headless: bool) {
         eprintln!("kitchen-sink (rust) daemon: socket {sock}");
         app.run();
     }
+}
+
+/// Install the command queues on the controller (exactly like the AppKit
+/// `daemon_ui` path does) and hand off to the egui frontend's event loop.
+/// This never returns until the egui window closes.
+#[cfg(any(not(target_os = "macos"), feature = "egui"))]
+fn run_egui_frontend(controller: Arc<SwitcherController>, mode: Option<&str>, sock: &str) {
+    let queue: app::host::UiQueue = Arc::new(Mutex::new(Vec::new()));
+    controller.install_ui(queue.clone());
+    let main_queue: app::host::MainQueue = Arc::new(Mutex::new(Vec::new()));
+    controller.install_main_queue(main_queue.clone());
+
+    // A hotkey/CLI invocation that cold-started the daemon applies its mode
+    // now; a bare start presents the default view (mirrors the AppKit path).
+    if let Some(m) = mode {
+        controller.launch_with_prep(m, None);
+    } else {
+        controller.open(app::host::DEFAULT_VIEW);
+    }
+
+    eprintln!("kitchen-sink (rust) daemon (egui): socket {sock}");
+    frontend_egui::run(controller, queue, main_queue);
 }
 
 /// Install the menu-bar status item from the ported menu spec. The handle is
