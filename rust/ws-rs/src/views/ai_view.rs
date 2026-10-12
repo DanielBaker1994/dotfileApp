@@ -4,7 +4,6 @@
 //! segments + "⧉ Copy for …", and the footer (Run ⌃↩ · status · tokens).
 //! The model stays in [`super::ai::AIWindowModel`].
 
-use crate::ui::chrome::Rect;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel};
 
 pub const CMD_H: f64 = 22.0;
@@ -70,6 +69,7 @@ pub use appkit::AIView;
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
+    use crate::ui::chrome::Rect;
     use crate::ui::sidebar::SidebarView;
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};

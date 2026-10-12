@@ -47,3 +47,8 @@ arboard = { version = "3", default-features = false }
 # enables zbus/async-io, so zbus hard-errors on Linux. It is a feature of the
 # named dep, not a new dependency (and avoids tokio).
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+
+# Non-macOS Jira status stamps: macOS parses the poller's local
+# "yyyy-MM-dd HH:mm:ss" stamps with `NSDateFormatter`; elsewhere `time` parses
+# the same format (the local-time conversion uses libc `mktime`).
+time = { version = "0.3", features = ["parsing"] }

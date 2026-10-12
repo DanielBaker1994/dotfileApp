@@ -7,7 +7,6 @@
 //! pushes a [`ConfSnapshot`] and handles [`ConfEvent`]s.
 
 use super::confluence::{ConfluenceRow, StatusTone};
-use crate::ui::chrome::Rect;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel};
 
 pub const STRIP_ROW_H: f64 = 26.0;
@@ -128,6 +127,7 @@ pub use appkit::ConfluenceView;
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
+    use crate::ui::chrome::Rect;
     use crate::ui::sidebar::SidebarView;
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};

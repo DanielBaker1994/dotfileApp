@@ -10,7 +10,6 @@
 //! favourite releases / labels) and BOARDS (catalog + pinned boards).
 
 use crate::app::paths::JiraPaths;
-use crate::ui::chrome::Rect;
 use crate::ui::sidebar::{SidebarModel, SidebarPin, SidebarRow};
 use crate::ui::theme::PopupTone;
 use crate::app::config::ListColumn;
@@ -221,11 +220,44 @@ pub fn parse_stamp(s: &str) -> Option<f64> {
         f.setDateFormat(Some(&NSString::from_str("yyyy-MM-dd HH:mm:ss")));
         return f.dateFromString(&NSString::from_str(s)).map(|d| d.timeIntervalSince1970());
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(target_os = "macos"))]
     {
-        let _ = s;
-        None
+        parse_stamp_local(s)
     }
+}
+
+/// Non-macOS [`parse_stamp`] — `time` parses the formatter's `dateFormat`
+/// "yyyy-MM-dd HH:mm:ss" and libc resolves it in the system zone (`time`'s
+/// sound local-offset API refuses to read the zone in a multi-threaded
+/// process like this daemon).
+#[cfg(not(target_os = "macos"))]
+fn parse_stamp_local(s: &str) -> Option<f64> {
+    let pdt = parse_stamp_fields(s)?;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_sec = pdt.second() as i32;
+    tm.tm_min = pdt.minute() as i32;
+    tm.tm_hour = pdt.hour() as i32;
+    tm.tm_mday = pdt.day() as i32;
+    tm.tm_mon = u8::from(pdt.month()) as i32 - 1;
+    tm.tm_year = pdt.year() - 1900;
+    tm.tm_isdst = -1;
+    let epoch = unsafe { libc::mktime(&mut tm) };
+    if epoch == -1 {
+        None
+    } else {
+        Some(epoch as f64)
+    }
+}
+
+/// Parse the `NSDateFormatter` format "yyyy-MM-dd HH:mm:ss" into its
+/// wall-clock fields (the pure half of [`parse_stamp_local`]).
+#[cfg(not(target_os = "macos"))]
+fn parse_stamp_fields(s: &str) -> Option<time::PrimitiveDateTime> {
+    let format = time::format_description::parse_borrowed::<3>(
+        "[year]-[month]-[day] [hour]:[minute]:[second]",
+    )
+    .ok()?;
+    time::PrimitiveDateTime::parse(s, &format).ok()
 }
 
 fn now() -> f64 {
@@ -974,6 +1006,7 @@ pub use appkit::{draw_wrapped, JiraView};
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
+    use crate::ui::chrome::Rect;
     use crate::ui::sidebar::SidebarView;
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, Rgba};
@@ -1917,5 +1950,23 @@ mod tests {
         let r = record_of(&serde_json::json!({"key": "K-1", "labels": ["a", "b"], "n": 3})).unwrap();
         assert_eq!(r["labels"], "a, b");
         assert_eq!(r["n"], "3");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn parse_stamp_fields_matches_the_formatter_format() {
+        let dt = parse_stamp_fields("2026-10-10 23:35:09").expect("valid stamp");
+        assert_eq!((dt.year(), u8::from(dt.month()), dt.day()), (2026, 10, 10));
+        assert_eq!((dt.hour(), dt.minute(), dt.second()), (23, 35, 9));
+        assert!(parse_stamp_fields("").is_none());
+        assert!(parse_stamp_fields("2026-10-10T23:35:09").is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn parse_stamp_local_parses_and_rejects() {
+        assert!(parse_stamp_local("2026-10-10 23:35:09").is_some());
+        assert!(parse_stamp_local("").is_none());
+        assert!(parse_stamp_local("nope").is_none());
     }
 }
