@@ -10,18 +10,30 @@
 //!   -> one raw line when requested.
 //! - anything else -> `launch`, no reply.
 
-use std::ffi::CString;
 use std::io::{self, Read, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::RawFd;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::Value;
+
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+#[cfg(windows)]
+use std::sync::atomic::AtomicBool;
+
+#[cfg(windows)]
+use crate::platform::ipc;
 
 const RECV_TIMEOUT_SECS: i64 = 2;
 const SEND_TIMEOUT_SECS: i64 = 5;
@@ -41,10 +53,12 @@ const RAW_VERBS: [&str; 6] = [
 /// handler may answer now or later, from any thread (Swift keeps `cfd` open
 /// for `compare --wait`, screenshot and pane-shot replies). Dropping it
 /// closes the connection.
+#[cfg(unix)]
 pub struct Reply {
     fd: RawFd,
 }
 
+#[cfg(unix)]
 impl Reply {
     fn dup(fd: RawFd) -> Option<Reply> {
         let d = unsafe { libc::dup(fd) };
@@ -62,9 +76,37 @@ impl Reply {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Reply {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
+    }
+}
+
+/// The Windows reply side: a shared, clonable handle to the connection so a
+/// deferred handler can answer from any thread. Dropping the last handle
+/// closes the pipe.
+#[cfg(windows)]
+pub struct Reply {
+    stream: Arc<ipc::Stream>,
+}
+
+#[cfg(windows)]
+impl Reply {
+    fn from_stream(stream: &Arc<ipc::Stream>) -> Reply {
+        Reply {
+            stream: Arc::clone(stream),
+        }
+    }
+
+    /// Write one newline-terminated line, then close.
+    pub fn send(self, line: &str) {
+        write_line(self.stream.as_ref(), line);
+    }
+
+    /// Write raw bytes (screenshot `--raw` PNG / geometry), then close.
+    pub fn send_bytes(self, data: &[u8]) {
+        write_all(self.stream.as_ref(), data);
     }
 }
 
@@ -91,10 +133,14 @@ pub trait CommandHandler: Send + Sync {
 /// A bound listener + its accept loop on a background thread.
 pub struct CommandServer {
     path: PathBuf,
+    #[cfg(unix)]
     fd: Arc<AtomicI32>,
+    #[cfg(windows)]
+    stopping: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[cfg(unix)]
 impl CommandServer {
     /// Bind `path` (a stale socket file is removed first) and start accepting.
     pub fn start<P: AsRef<Path>>(
@@ -130,12 +176,46 @@ impl CommandServer {
     }
 }
 
+#[cfg(windows)]
+impl CommandServer {
+    /// Bind a named pipe for `path` and start accepting.
+    pub fn start<P: AsRef<Path>>(
+        path: P,
+        handler: Arc<dyn CommandHandler>,
+    ) -> io::Result<CommandServer> {
+        let path = path.as_ref().to_path_buf();
+        let listener = bind_listener(&path)?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let thread_stopping = Arc::clone(&stopping);
+        let handle = thread::spawn(move || accept_loop(listener, thread_stopping, handler));
+        Ok(CommandServer {
+            path,
+            stopping,
+            handle: Mutex::new(Some(handle)),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Signal the accept loop to stop and join it. Named pipes are reclaimed
+    /// by the OS when the last handle closes; nothing to unlink.
+    pub fn stop(&mut self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
+}
+
 impl Drop for CommandServer {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
+#[cfg(unix)]
 fn bind_listener(path: &Path) -> io::Result<RawFd> {
     // A crashed daemon leaves the socket file behind; unlink before bind.
     let _ = std::fs::remove_file(path);
@@ -174,6 +254,7 @@ fn bind_listener(path: &Path) -> io::Result<RawFd> {
     Ok(fd)
 }
 
+#[cfg(unix)]
 fn accept_loop(listener: Arc<AtomicI32>, handler: Arc<dyn CommandHandler>) {
     loop {
         let fd = listener.load(Ordering::SeqCst);
@@ -197,6 +278,7 @@ fn accept_loop(listener: Arc<AtomicI32>, handler: Arc<dyn CommandHandler>) {
     }
 }
 
+#[cfg(unix)]
 fn configure_conn(fd: RawFd) {
     // On macOS an accepted socket inherits the listener's O_NONBLOCK: a reply
     // larger than the socket buffer (~8 KB — a `state` with compare rows) then
@@ -249,6 +331,7 @@ fn configure_conn(fd: RawFd) {
     };
 }
 
+#[cfg(unix)]
 fn handle_conn(fd: RawFd, handler: &dyn CommandHandler) {
     let mut buf = [0u8; READ_MAX];
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -300,11 +383,13 @@ fn handle_conn(fd: RawFd, handler: &dyn CommandHandler) {
     }
 }
 
+#[cfg(unix)]
 fn write_json(fd: RawFd, value: &Value) {
     let s = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
     write_line(fd, &s);
 }
 
+#[cfg(unix)]
 fn write_line(fd: RawFd, s: &str) {
     let mut data = Vec::with_capacity(s.len() + 1);
     data.extend_from_slice(s.as_bytes());
@@ -312,6 +397,7 @@ fn write_line(fd: RawFd, s: &str) {
     write_all(fd, &data);
 }
 
+#[cfg(unix)]
 fn write_all(fd: RawFd, mut data: &[u8]) {
     while !data.is_empty() {
         let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
@@ -328,11 +414,125 @@ fn write_all(fd: RawFd, mut data: &[u8]) {
     }
 }
 
+#[cfg(windows)]
+fn bind_listener(path: &Path) -> io::Result<ipc::Listener> {
+    ipc::bind(&path.to_string_lossy())
+}
+
+#[cfg(windows)]
+fn accept_loop(
+    listener: ipc::Listener,
+    stopping: Arc<AtomicBool>,
+    handler: Arc<dyn CommandHandler>,
+) {
+    use interprocess::local_socket::traits::Listener as _;
+    use interprocess::local_socket::ListenerNonblockingMode;
+    // Nonblocking accept so the stop flag can be checked between connections.
+    let _ = listener.set_nonblocking(ListenerNonblockingMode::Accept);
+    while !stopping.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok(stream) => {
+                ipc::configure(&stream);
+                let shared = Arc::new(stream);
+                handle_conn(&shared, handler.as_ref());
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn handle_conn(shared: &Arc<ipc::Stream>, handler: &dyn CommandHandler) {
+    // `&Stream: Read`/`&Stream: Write` (interprocess concurrent I/O) so the
+    // shared handle can be read/written through an immutable `&Stream`.
+    let mut stream = shared.as_ref();
+    let mut buf = [0u8; READ_MAX];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let had_bytes = n > 0;
+    let query = if had_bytes {
+        String::from_utf8_lossy(&buf[..n])
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    if query == "ping" {
+        return;
+    }
+
+    if query == "state" {
+        write_json(stream, &handler.state_json());
+        return;
+    }
+
+    if let Some(action) = query.strip_prefix("do:") {
+        let reply = handler
+            .do_action(action)
+            .unwrap_or_else(|| handler.state_json());
+        write_json(stream, &reply);
+        return;
+    }
+
+    let (verb, rest) = match query.split_once('\t') {
+        Some((v, r)) => (v, r),
+        None => (query.as_str(), ""),
+    };
+    if RAW_VERBS.contains(&verb) {
+        let reply = Reply::from_stream(shared);
+        match handler.raw_deferred(verb, rest, reply) {
+            None => return,
+            Some(unused) => drop(unused),
+        }
+        if let Some(line) = handler.raw_request(verb, rest) {
+            write_line(stream, &line);
+        }
+        return;
+    }
+
+    if had_bytes {
+        handler.launch(&query);
+    }
+}
+
+#[cfg(windows)]
+fn write_json(stream: &ipc::Stream, value: &Value) {
+    let s = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    write_line(stream, &s);
+}
+
+#[cfg(windows)]
+fn write_line(stream: &ipc::Stream, s: &str) {
+    let mut data = Vec::with_capacity(s.len() + 1);
+    data.extend_from_slice(s.as_bytes());
+    data.push(b'\n');
+    write_all(stream, &data);
+}
+
+#[cfg(windows)]
+fn write_all(mut stream: &ipc::Stream, mut data: &[u8]) {
+    while !data.is_empty() {
+        match stream.write(data) {
+            Ok(0) => return,
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 /// An exclusive daemon lock on `<socket>.lock`, held until dropped.
+#[cfg(unix)]
 pub struct DaemonLock {
     fd: RawFd,
 }
 
+#[cfg(unix)]
 impl DaemonLock {
     /// `flock(LOCK_EX | LOCK_NB)`; `None` if the lock is held elsewhere.
     pub fn try_acquire<P: AsRef<Path>>(path: P) -> Option<DaemonLock> {
@@ -355,19 +555,33 @@ impl DaemonLock {
     }
 }
 
+#[cfg(unix)]
 impl Drop for DaemonLock {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
     }
 }
 
+// The Windows `DaemonLock` lives in `platform/lock.rs` (`LockFileEx` via fs4);
+// re-export it so `app::socket::DaemonLock` resolves on every platform.
+#[cfg(windows)]
+pub use crate::platform::lock::DaemonLock;
+
 /// Connect to a command server.
+#[cfg(unix)]
 pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
+/// Connect to a command server (named pipe on Windows).
+#[cfg(windows)]
+pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<ipc::Stream> {
+    ipc::connect(&path.as_ref().to_string_lossy())
+}
+
 /// Send one request line (the caller's message plus `\n`). Written in a single
 /// syscall so a server that closes right after reading can't race our newline.
+#[cfg(unix)]
 pub fn send_line(stream: &mut UnixStream, line: &str) -> io::Result<()> {
     let mut data = Vec::with_capacity(line.len() + 1);
     data.extend_from_slice(line.as_bytes());
@@ -375,7 +589,17 @@ pub fn send_line(stream: &mut UnixStream, line: &str) -> io::Result<()> {
     stream.write_all(&data)
 }
 
+/// Send one request line over a named pipe.
+#[cfg(windows)]
+pub fn send_line(stream: &mut ipc::Stream, line: &str) -> io::Result<()> {
+    let mut data = Vec::with_capacity(line.len() + 1);
+    data.extend_from_slice(line.as_bytes());
+    data.push(b'\n');
+    stream.write_all(&data)
+}
+
 /// Read one reply line. `None` = EOF with no bytes (e.g. `ping`).
+#[cfg(unix)]
 pub fn read_line(stream: &mut UnixStream) -> io::Result<Option<String>> {
     let mut out = Vec::new();
     let mut saw = false;
@@ -401,7 +625,43 @@ pub fn read_line(stream: &mut UnixStream) -> io::Result<Option<String>> {
     }
 }
 
+/// Read one reply line over a named pipe.
+#[cfg(windows)]
+pub fn read_line(stream: &mut ipc::Stream) -> io::Result<Option<String>> {
+    let mut out = Vec::new();
+    let mut saw = false;
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                saw = true;
+                if byte[0] == b'\n' {
+                    break;
+                }
+                out.push(byte[0]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    if !saw {
+        Ok(None)
+    } else {
+        Ok(Some(String::from_utf8_lossy(&out).into_owned()))
+    }
+}
+
 /// One-shot client: connect, send `msg`, read one reply line (or `None`).
+#[cfg(unix)]
+pub fn request<P: AsRef<Path>>(path: P, msg: &str) -> io::Result<Option<String>> {
+    let mut stream = connect(path)?;
+    send_line(&mut stream, msg)?;
+    read_line(&mut stream)
+}
+
+/// One-shot client over a named pipe.
+#[cfg(windows)]
 pub fn request<P: AsRef<Path>>(path: P, msg: &str) -> io::Result<Option<String>> {
     let mut stream = connect(path)?;
     send_line(&mut stream, msg)?;

@@ -74,11 +74,21 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 
 # Non-macOS Jira status stamps: macOS parses the poller's local
 # "yyyy-MM-dd HH:mm:ss" stamps with `NSDateFormatter`; elsewhere `time` parses
-# the same format (the local-time conversion uses libc `mktime`).
-time = { version = "0.3", features = ["parsing"] }
+# the same format (the local-time conversion uses libc `mktime` on Unix and
+# `time`'s `local-offset` API on Windows).
+time = { version = "0.3", features = ["parsing", "local-offset"] }
 
 # Non-macOS display capture (platform/capture.rs). macOS keeps the
 # ScreenCaptureKit path in views/screenshot.rs, so this stays target-gated;
 # `xcap` links X11/Wayland through system libs on Linux (see the check image's
 # `libdbus-1-dev`). Pinned exactly so the Linux compile is reproducible.
 xcap = { version = "=0.4.1" }
+
+# Windows IPC + daemon lock (WA-1). `interprocess` supplies local sockets as
+# named pipes on Windows; `fs4` maps the daemon `flock` to `LockFileEx`. Both
+# are pinned exactly: interprocess 2.4.5 (MSRV 1.75) compiles for
+# x86_64-pc-windows-gnu on rustc 1.92; fs4 0.13.1 keeps the `try_lock_exclusive`
+# name the Unix `flock` body replaces.
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "=2.4.5", default-features = false }
+fs4 = { version = "=0.13.1" }

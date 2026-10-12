@@ -5,8 +5,12 @@
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+#[cfg(windows)]
+use crate::platform::ipc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -66,10 +70,12 @@ pub trait Connector: Send + Sync {
     fn connect(&self, path: &str) -> io::Result<Arc<dyn Transport>>;
 }
 
+#[cfg(unix)]
 pub struct UnixTransport {
     stream: UnixStream,
 }
 
+#[cfg(unix)]
 impl UnixTransport {
     pub fn connect(path: &str) -> io::Result<Self> {
         Ok(Self {
@@ -78,6 +84,7 @@ impl UnixTransport {
     }
 }
 
+#[cfg(unix)]
 impl Transport for UnixTransport {
     fn write_all(&self, data: &[u8]) -> io::Result<()> {
         (&self.stream).write_all(data)
@@ -92,8 +99,44 @@ impl Transport for UnixTransport {
     }
 }
 
+/// Windows transport: a shared handle to a named pipe (nvim's `--listen` on
+/// Windows is a named pipe). `Arc` so `&self` read/write works across the
+/// reader thread and the write path, like `UnixStream`.
+#[cfg(windows)]
+pub struct WinTransport {
+    stream: Arc<ipc::Stream>,
+}
+
+#[cfg(windows)]
+impl WinTransport {
+    pub fn connect(path: &str) -> io::Result<Self> {
+        Ok(Self {
+            stream: Arc::new(ipc::connect(path)?),
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Transport for WinTransport {
+    fn write_all(&self, data: &[u8]) -> io::Result<()> {
+        let mut stream = &*self.stream;
+        stream.write_all(data)
+    }
+
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut stream = &*self.stream;
+        stream.read(buf)
+    }
+
+    fn shutdown(&self) {
+        // Named pipes have no portable half-close; dropping the last `Arc`
+        // closes the pipe and unblocks the reader when the peer closes.
+    }
+}
+
 pub struct UnixConnector;
 
+#[cfg(unix)]
 impl Connector for UnixConnector {
     fn connect(&self, path: &str) -> io::Result<Arc<dyn Transport>> {
         // `NvimRPC.connect` checks fileExists first so a missing socket fails
@@ -102,6 +145,14 @@ impl Connector for UnixConnector {
             return Err(io::Error::new(io::ErrorKind::NotFound, "socket not found"));
         }
         Ok(Arc::new(UnixTransport::connect(path)?))
+    }
+}
+
+#[cfg(windows)]
+impl Connector for UnixConnector {
+    fn connect(&self, path: &str) -> io::Result<Arc<dyn Transport>> {
+        // Named pipes are not files: no existence check, connect fails fast.
+        Ok(Arc::new(WinTransport::connect(path)?))
     }
 }
 
@@ -889,7 +940,9 @@ mod tests {
 
     // ---- live, gated on a real nvim -----------------------------------------
 
+    #[cfg(unix)]
     struct ChildGuard(Option<std::process::Child>);
+    #[cfg(unix)]
     impl Drop for ChildGuard {
         fn drop(&mut self) {
             if let Some(c) = self.0.as_mut() {
@@ -899,6 +952,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn find_nvim() -> Option<String> {
         use std::os::unix::fs::PermissionsExt;
         let mut candidates = vec![
@@ -919,6 +973,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn start_nvim(nvim: &str, sock: &str) -> Option<ChildGuard> {
         use std::process::{Command, Stdio};
         let child = Command::new(nvim)
@@ -939,6 +994,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn live_nvim_round_trip() {
         let Some(nvim) = find_nvim() else {
             eprintln!("skipping live nvim test: no nvim executable");

@@ -5,10 +5,14 @@
 //! loop that keeps a second daemon from starting.
 
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(target_os = "macos")]
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use crate::platform::ipc::{self, Stream};
 
 use crate::app::hotkey;
 use crate::app::paths::Paths;
@@ -41,6 +45,7 @@ pub fn send_launch_message(sock: &str, name: &str) -> bool {
 
 /// `sendRequest`: write `msg\n` and read the whole reply until EOF (or the
 /// timeout). `None` when no daemon answers the connect.
+#[cfg(unix)]
 pub fn send_request(sock: &str, msg: &str, timeout: Duration) -> Option<Vec<u8>> {
     let mut s = UnixStream::connect(sock).ok()?;
     let _ = s.set_read_timeout(Some(timeout));
@@ -60,12 +65,40 @@ pub fn send_request(sock: &str, msg: &str, timeout: Duration) -> Option<Vec<u8>>
     Some(out)
 }
 
+/// Windows: same shape, over a named pipe (recv timeout bounds the read).
+#[cfg(windows)]
+pub fn send_request(sock: &str, msg: &str, timeout: Duration) -> Option<Vec<u8>> {
+    let mut s = ipc::connect_with_timeouts(sock, Some(timeout), None).ok()?;
+    let mut line = msg.as_bytes().to_vec();
+    line.push(b'\n');
+    s.write_all(&line).ok()?;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    Some(out)
+}
+
+#[cfg(unix)]
 fn connect_bounded(sock: &str) -> std::io::Result<UnixStream> {
     // A unix-socket connect either succeeds or fails at once; the only wait is
     // a full backlog, which the write timeout bounds.
     let s = UnixStream::connect(sock)?;
     let _ = s.set_write_timeout(Some(IPC_TIMEOUT));
     Ok(s)
+}
+
+#[cfg(windows)]
+fn connect_bounded(sock: &str) -> std::io::Result<Stream> {
+    // A named-pipe connect either succeeds or fails at once; the only wait is
+    // a full backlog, which the send timeout bounds.
+    ipc::connect_with_timeouts(sock, None, Some(IPC_TIMEOUT))
 }
 
 fn not_running() -> i32 {
@@ -99,7 +132,7 @@ fn exec_launcher(paths: &Paths, mode: &str) {
 
 /// Off macOS a cold start is this binary re-executing itself in a new session
 /// (`setsid`) so it outlives the caller. `mode` is the launch/hotkey argument.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_self_detached(mode: Option<&str>) -> bool {
     use std::os::unix::process::CommandExt;
     let Ok(exe) = std::env::current_exe() else {
@@ -115,6 +148,26 @@ fn spawn_self_detached(mode: Option<&str>) -> bool {
             Ok(())
         });
     }
+    cmd.spawn().is_ok()
+}
+
+/// Windows: the same detached re-exec, via `DETACHED_PROCESS |
+/// CREATE_NEW_PROCESS_GROUP` (the `setsid` counterpart — no console, outlives
+/// the caller). `mode` is the launch/hotkey argument.
+#[cfg(windows)]
+fn spawn_self_detached(mode: Option<&str>) -> bool {
+    use std::os::windows::process::CommandExt;
+    // winbase.h: DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(mode) = mode {
+        cmd.arg(mode);
+    }
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     cmd.spawn().is_ok()
 }
 
@@ -409,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn launch_and_request_against_a_live_socket() {
         use std::os::unix::net::UnixListener;
         let path = std::env::temp_dir().join(format!("ws-cli-{}.sock", std::process::id()));

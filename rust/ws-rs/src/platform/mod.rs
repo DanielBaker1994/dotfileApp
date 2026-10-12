@@ -23,6 +23,14 @@ pub use dialog::*;
 pub mod dispatch;
 pub use dispatch::*;
 
+pub mod ipc;
+#[allow(unused_imports)] // pipe_name's only external use is via the `ipc` module path.
+pub use ipc::*;
+
+pub mod lock;
+#[allow(unused_imports)] // Windows-only: the `DaemonLock` re-export has no Unix caller.
+pub use lock::*;
+
 /// Open `url` in the user's default browser (was `NSWorkspace.openURL`).
 /// Returns whether the OS accepted the request.
 pub fn open_url(url: &str) -> bool {
