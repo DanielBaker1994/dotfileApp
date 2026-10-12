@@ -26,7 +26,7 @@ pub enum StepState {
 /// One output run: `(kind, text)` with kind -1 deleted, 0 same, 1 inserted.
 pub type OutRun = (i8, String);
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AISnapshot {
     pub sidebar: SidebarModel,
     pub command: String,

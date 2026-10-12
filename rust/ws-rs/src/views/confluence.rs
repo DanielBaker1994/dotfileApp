@@ -638,6 +638,114 @@ impl ConfluenceModel {
         }
     }
 
+    /// The X7 frontend contract: everything the view draws, read from existing
+    /// model fields only. Pure and callable with no live view (macOS still
+    /// builds the full snapshot in `host::conf_snapshot`, untouched). The
+    /// preview pane is view state (`ConfState.pstate`), not model state, so it
+    /// defaults here.
+    pub fn snapshot(&self) -> crate::views::confluence_view::ConfSnapshot {
+        use crate::ui::sidebar::{SidebarModel, SidebarRow};
+        use crate::views::confluence_view::{title_for, ConfSnapshot, MODIFIED, SORTS, TYPES};
+        let picker_text = |p: &PickerModel| -> String {
+            if p.is_all() {
+                p.all_title.clone()
+            } else if p.selected.is_empty() {
+                p.placeholder.clone()
+            } else {
+                p.selected.join(", ")
+            }
+        };
+        let empty = if !self.configured {
+            String::new()
+        } else if self.showing_favorites {
+            self.favorites_empty_hint()
+        } else if self.has_criteria() && !self.searching {
+            String::new()
+        } else {
+            format!(
+                "Type to search {}, then Return.\n\u{2605} Favorites keeps the pages you open often.",
+                if self.site.is_empty() { "Confluence" } else { self.site.as_str() }
+            )
+        };
+        ConfSnapshot {
+            sidebar: SidebarModel {
+                section_title: "Confluence".into(),
+                rows: vec![SidebarRow::new("Search", "magnifyingglass"), SidebarRow::new("Favorites", "star")],
+                selected: Some(if self.scope == Scope::Favorites { 1 } else { 0 }),
+                ..Default::default()
+            },
+            mode: self.mode_index,
+            title_only: self.title_only,
+            query: self.query.clone(),
+            spaces: picker_text(&self.spaces),
+            spaces_all: self.spaces.is_all(),
+            people: picker_text(&self.contributors),
+            people_all: self.contributors.is_all(),
+            type_label: format!("Type: {}", title_for(&TYPES, &self.type_choice)),
+            mod_label: format!("Modified: {}", title_for(&MODIFIED, &self.modified)),
+            sort_label: format!("Sort: {}", title_for(&SORTS, &self.sort)),
+            rows: self.rows.clone(),
+            selection: (!self.rows.is_empty()).then_some(self.selection),
+            empty,
+            status: self.status.clone(),
+            tone: Some(self.status_tone),
+            searching: self.searching,
+            can_more: !self.next_link.is_empty(),
+            has_cql: !self.last_cql.is_empty(),
+            has_curl: !self.last_curl.is_empty(),
+            preview: Default::default(),
+            favorites_scope: self.scope == Scope::Favorites,
+        }
+    }
+
+    /// The X7 frontend contract: apply a user event by calling the same model
+    /// methods the AppKit dispatch (`host::conf_event`) calls today. Pure; the
+    /// API search, chip popups, clipboard, browser and web-view work stay with
+    /// the frontend.
+    pub fn handle(&mut self, ev: crate::views::confluence_view::ConfEvent) {
+        use crate::ui::sidebar::SidebarEvent;
+        use crate::views::confluence_view::ConfEvent as E;
+        let now = now_secs();
+        match ev {
+            E::Sidebar(SidebarEvent::Select(i)) => {
+                self.set_scope(if i == 0 { Scope::Search } else { Scope::Favorites }, now);
+            }
+            E::Query(q) => {
+                self.query = q;
+                if self.scope == Scope::Favorites {
+                    self.show_favorites(false, now);
+                }
+            }
+            E::Escape => {
+                self.escape();
+            }
+            E::Move(d) => {
+                let n = self.rows.len() as i64;
+                if n > 0 {
+                    self.selection = (self.selection as i64 + d).clamp(0, n - 1) as usize;
+                }
+            }
+            E::Mode(i) => self.mode_index = i,
+            E::TitleOnly(on) => self.title_only = on,
+            E::Select { row, .. } => {
+                if row < self.rows.len() {
+                    self.selection = row;
+                }
+            }
+            E::Star(row) => {
+                let _ = self.toggle_favorite(row);
+            }
+            E::PreviewStar => {
+                let i = self.selection;
+                let _ = self.toggle_favorite(i);
+            }
+            // Enter / Search / Chip / RowMenu / LoadMore / CopyCql / CopyCurl /
+            // Setup / Open / CopyLink / PrevHit / NextHit drive the API, popups,
+            // the clipboard, the browser or the web view — the frontend's job.
+            _ => {}
+        }
+    }
+
     /// `var hasCriteria`.
     pub fn has_criteria(&self) -> bool {
         !self.query.trim().is_empty()
@@ -2806,5 +2914,40 @@ mod tests {
         assert!(html.contains("A &amp; B &lt;x&gt;"), "title is escaped");
         assert!(html.contains("<p class=dim>hi</p>"), "body is trusted markup");
         assert!(html.contains("rgba("), "colors are inlined");
+    }
+
+    #[test]
+    fn confluence_handle_contract() {
+        use crate::views::confluence_view::ConfEvent;
+        let mut m = ConfluenceModel::default();
+        m.configured = true;
+        let before = m.snapshot();
+
+        // Query changes the snapshot.
+        m.handle(ConfEvent::Query("roadmap".into()));
+        let after = m.snapshot();
+        assert_ne!(after, before, "Query changed the snapshot");
+        assert_eq!(after.query, "roadmap");
+
+        // Mode / TitleOnly are plain model fields.
+        m.handle(ConfEvent::Mode(1));
+        m.handle(ConfEvent::TitleOnly(true));
+        let configured = m.snapshot();
+        assert_eq!(configured.mode, 1);
+        assert!(configured.title_only);
+
+        // Move / Star / Select act on the rows.
+        m.rows = vec![
+            ConfluenceRow { id: "1".into(), title: "a".into(), ..Default::default() },
+            ConfluenceRow { id: "2".into(), title: "b".into(), ..Default::default() },
+        ];
+        m.handle(ConfEvent::Move(1));
+        assert_eq!(m.snapshot().selection, Some(1));
+        m.handle(ConfEvent::Star(0));
+        assert!(m.snapshot().rows[0].favorite);
+
+        // Escape clears the query.
+        m.handle(ConfEvent::Escape);
+        assert!(m.snapshot().query.is_empty());
     }
 }

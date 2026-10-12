@@ -1488,6 +1488,127 @@ impl AIWindowModel {
             })).collect::<Vec<_>>(),
         })
     }
+
+    /// The X7 frontend contract: everything the view draws, read from existing
+    /// model fields only. Pure and callable with no live view (macOS still
+    /// builds the full snapshot in `host::ai_snapshot`, untouched). The command
+    /// line, token count and pending input live in view state (`AIState`), and
+    /// the sidebar's mtime meta is formatted with `NSDateFormatter` on macOS, so
+    /// those fields default / stay empty here.
+    pub fn snapshot(&self) -> crate::views::ai_view::AISnapshot {
+        use crate::ui::sidebar::{SidebarModel, SidebarRow};
+        use crate::views::ai_view::{AISnapshot, StepState};
+        let rule = self.rule();
+        let rows: Vec<SidebarRow> = self
+            .rules
+            .iter()
+            .map(|r| SidebarRow {
+                title: r.name.clone(),
+                icon: "wand.and.stars".into(),
+                tip: r.path.replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1),
+                ..Default::default()
+            })
+            .collect();
+        let chain = rule.map(AIRule::chain).unwrap_or_default();
+        let running = self.is_running();
+        let steps = chain
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let st = if running {
+                    if i < self.run.step_index {
+                        StepState::Done
+                    } else if i == self.run.step_index {
+                        StepState::Running
+                    } else {
+                        StepState::Waiting
+                    }
+                } else if !self.run.answer.is_empty() {
+                    if self.status_tone == AITone::Danger {
+                        StepState::Failed
+                    } else {
+                        StepState::Done
+                    }
+                } else {
+                    StepState::Waiting
+                };
+                (r.name.clone(), st)
+            })
+            .collect();
+        let modes = self.modes();
+        let output = if self.mode.target().is_some() {
+            None
+        } else if running {
+            Some(vec![(0, self.run.so_far().0)])
+        } else if self.run.answer.is_empty() {
+            Some(Vec::new())
+        } else if self.run.answer_diff && self.mode == PaneMode::Diff {
+            Some(diff_ops(&self.run.answer_input, &self.run.answer))
+        } else {
+            Some(vec![(0, self.run.answer.clone())])
+        };
+        AISnapshot {
+            sidebar: SidebarModel {
+                section_title: "Rules".into(),
+                rows,
+                selected: (!self.rules.is_empty()).then_some(self.selected),
+                add_button: true,
+                ..Default::default()
+            },
+            command: rule.map(|r| r.file()).unwrap_or_default(),
+            warning: rule.map(|r| r.warnings.join(", ")).unwrap_or_default(),
+            steps,
+            right_title: if rule.is_some_and(|r| r.diff()) { "Changes".into() } else { "Answer".into() },
+            mode: modes.iter().position(|x| *x == self.mode).unwrap_or(0),
+            modes: modes.iter().map(|x| x.title()).collect(),
+            copy_title: self.copy_title(),
+            placeholder: rule
+                .map(|r| if r.placeholder.is_empty() { "Type or paste your text \u{2014} Ctrl+Enter runs it".to_string() } else { r.placeholder.clone() })
+                .unwrap_or_default(),
+            output,
+            running,
+            status: self.status.clone(),
+            tone: match self.status_tone {
+                AITone::Dim => 0,
+                AITone::Success => 1,
+                AITone::Warning => 2,
+                AITone::Danger => 3,
+            },
+            tokens: String::new(),
+            tokens_warn: false,
+            set_input: None,
+        }
+    }
+
+    /// The X7 frontend contract: apply a user event by calling the same model
+    /// methods the AppKit dispatch (`host::ai_event`) calls today. Pure; the
+    /// rule sheet, context menu, pasteboard and `fm` command line stay with the
+    /// frontend.
+    pub fn handle(&mut self, ev: crate::views::ai_view::AIEvent) {
+        use crate::ui::sidebar::SidebarEvent;
+        use crate::views::ai_view::AIEvent as E;
+        match ev {
+            E::Sidebar(SidebarEvent::Select(i)) => self.select(i),
+            E::InputChanged(text) => self.input = text,
+            E::Mode(i) => {
+                if let Some(m) = self.modes().get(i).copied() {
+                    self.set_mode(m);
+                }
+            }
+            E::Run => {
+                if self.is_running() {
+                    self.cancel_run();
+                } else {
+                    let text = self.input.clone();
+                    let _ = self.start_run(&text);
+                    self.render_answer();
+                }
+            }
+            // Sidebar Add / MenuRow / Rail are UI actions; Copy / CopyCommand
+            // touch the pasteboard and the command line.
+            E::Sidebar(_) | E::Copy | E::CopyCommand => {}
+        }
+    }
 }
 
 impl Drop for AIWindowModel {
@@ -2692,5 +2813,32 @@ mod tests {
         pending.push(0xA9);
         assert_eq!(drain_utf8(&mut pending), "\u{e9}");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn ai_handle_contract() {
+        use crate::views::ai_view::AIEvent;
+        let mut m = AIWindowModel::default();
+        let before = m.snapshot();
+
+        // InputChanged writes the model's input.
+        m.handle(AIEvent::InputChanged("draft".into()));
+        assert_eq!(m.input, "draft");
+
+        // Mode moves the segmented control.
+        assert!(m.modes().len() > 2);
+        m.handle(AIEvent::Mode(2));
+        let after = m.snapshot();
+        assert_ne!(after, before, "Mode changed the snapshot");
+        assert_eq!(after.mode, 2);
+
+        // Copy is the frontend's pasteboard job; the model is untouched.
+        let copied = m.snapshot();
+        m.handle(AIEvent::Copy);
+        assert_eq!(m.snapshot(), copied);
+
+        // Run with no rules fails validation without spawning anything.
+        m.handle(AIEvent::Run);
+        assert!(!m.is_running());
     }
 }

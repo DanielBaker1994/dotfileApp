@@ -54,7 +54,7 @@ pub struct ConfPreviewState {
     pub web: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConfSnapshot {
     pub sidebar: SidebarModel,
     pub mode: usize,
