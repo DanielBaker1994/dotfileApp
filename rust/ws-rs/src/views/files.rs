@@ -1391,6 +1391,104 @@ impl FileBrowser {
         }
     }
 
+    /// The pure event contract (X7): apply a click / keystroke a frontend
+    /// reports to the model. It mirrors the model-side effects of the AppKit
+    /// dispatcher (`host::files_event`, which is left untouched): selection /
+    /// marked, query, history and sidebar navigation, sort order and pinning.
+    /// Platform actions (opening a file with the OS, Quick Look, popups, focus,
+    /// the Recent click-rename window) are the frontend's job, so they are not
+    /// modelled here — a directory descent is, because [`Self::cd`] is model.
+    pub fn handle(&mut self, ev: crate::views::files_view::FilesEvent) {
+        use crate::ui::sidebar::SidebarEvent;
+        use crate::views::files_view::{FilesEvent as E, Preview};
+        match ev {
+            E::Click { row, cmd, shift, double } => {
+                self.status_note = None;
+                if shift {
+                    self.list.extend_selection(row);
+                } else if cmd {
+                    self.list.command_click(row);
+                } else {
+                    self.list.marked.clear();
+                    self.list.selection = row;
+                }
+                // The model half of `files_accept_selected` for a plain
+                // double-click: a directory descends; a file is the OS's job.
+                if double && !cmd && !shift {
+                    let rows = self.visible_rows().to_vec();
+                    if let OpenOutcome::Cd(dir) = open_index(&rows, self.selection()) {
+                        self.cd(&dir);
+                    }
+                }
+            }
+            E::RowMenu { row, .. } => {
+                if !self.list.marked.contains(&row) {
+                    self.list.marked.clear();
+                    self.list.selection = row;
+                }
+            }
+            E::PreviewOpen(i) => {
+                let target = match self.preview().1 {
+                    Preview::Folder(rows) => rows.get(i).cloned(),
+                    _ => None,
+                };
+                if let Some(e) = target {
+                    if e.is_dir {
+                        self.cd(&e.path);
+                    }
+                }
+            }
+            E::Parent => self.cd_parent(),
+            E::TogglePin => self.toggle_pin(),
+            E::ToggleOrder => self.toggle_order(),
+            // The sort popup (and its `set_sort` callback) is the frontend's.
+            E::SortMenu { .. } => {}
+            E::Query(q) => {
+                self.status_note = None;
+                self.list.selection = 0;
+                self.set_query(&q);
+            }
+            E::Enter => {
+                // The query is a literal path: descend into an existing
+                // directory (opening a file is the frontend's job).
+                let q = self.query.trim().to_string();
+                if (q.contains('/') || q.starts_with('~')) && !has_glob(&q) {
+                    let p = resolve_path(&q, &self.cwd);
+                    if Path::new(&p).is_dir() {
+                        self.cd(&p);
+                        return;
+                    }
+                }
+                let rows = self.visible_rows().to_vec();
+                if let OpenOutcome::Cd(dir) = open_index(&rows, self.selection()) {
+                    self.cd(&dir);
+                }
+            }
+            E::Move(d) => self.list.move_selection(d),
+            E::Escape => {
+                if !self.query.is_empty() {
+                    self.set_query("");
+                }
+            }
+            E::Sidebar(SidebarEvent::Select(i)) => {
+                self.status_note = None;
+                let home = std::env::var("HOME").unwrap_or_default();
+                let places = places(&home);
+                if i < 2 {
+                    self.show_virtual(i);
+                } else if let Some(p) = places.get(i - 2) {
+                    self.cd(&p.path);
+                }
+            }
+            E::Sidebar(SidebarEvent::Pinned(path)) => {
+                if Path::new(&path).is_dir() {
+                    self.cd(&path);
+                }
+            }
+            E::Sidebar(_) => {}
+        }
+    }
+
     pub fn in_recent(&self) -> bool {
         self.virtual_index.is_some()
     }
@@ -2464,5 +2562,64 @@ mod tests {
         b.begin_rename(Some(parent));
         assert!(b.rename.is_none(), "`..` is never renameable");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn files_handle_contract() {
+        use crate::views::files_view::FilesEvent;
+        let mut b = FileBrowser::new("/tmp");
+        b.set_all(vec![
+            Entry::new("..", "/", true, 0),
+            Entry::new("a.txt", "/tmp/a.txt", false, 1),
+            Entry::new("b.md", "/tmp/b.md", false, 2),
+        ]);
+
+        // A query narrows the rows and resets the selection.
+        let before = b.snapshot();
+        b.handle(FilesEvent::Query("b".into()));
+        let after = b.snapshot();
+        assert_ne!(after, before);
+        assert_eq!(after.query, "b");
+        assert_eq!(after.rows.len(), 1);
+        assert_eq!(after.rows[0].name, "b.md");
+
+        // Move walks the visible rows.
+        b.handle(FilesEvent::Query(String::new()));
+        b.handle(FilesEvent::Move(2));
+        assert_eq!(b.snapshot().selection, 2);
+
+        // Cmd-click extends the marked set from the current selection.
+        b.handle(FilesEvent::Click { row: 1, cmd: true, shift: false, double: false });
+        assert_eq!(
+            b.snapshot().marked.iter().copied().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // Escape clears a non-empty query.
+        b.handle(FilesEvent::Query("z".into()));
+        assert_eq!(b.snapshot().query, "z");
+        b.handle(FilesEvent::Escape);
+        assert!(b.snapshot().query.is_empty());
+    }
+
+    #[test]
+    fn files_handle_pin_and_sidebar() {
+        use crate::ui::sidebar::SidebarEvent;
+        use crate::views::files_view::FilesEvent;
+        let fav = std::env::temp_dir().join(format!("ws-rs-filesfav-{}", std::process::id()));
+        let _ = std::fs::remove_file(&fav);
+        let mut b = FileBrowser::new("/tmp");
+        b.favorites_file = fav.to_string_lossy().into_owned();
+        b.set_all(Vec::new());
+        assert!(!b.snapshot().pinned_on);
+        b.handle(FilesEvent::TogglePin);
+        assert!(b.snapshot().pinned_on, "pinning /tmp flips pinned_on");
+        b.handle(FilesEvent::TogglePin);
+        assert!(!b.snapshot().pinned_on);
+        let _ = std::fs::remove_file(&fav);
+
+        // Selecting the first virtual list switches into Recent.
+        b.handle(FilesEvent::Sidebar(SidebarEvent::Select(0)));
+        assert!(b.in_recent());
     }
 }
