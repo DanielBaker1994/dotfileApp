@@ -175,6 +175,8 @@ An agent can drive and verify the app over the socket — no computer control:
 
 ## Linux (experimental)
 
+**Current functional state of the Linux and Windows ports: `PORTS-STATUS.md` (keep it updated).**
+
 The same core runs on Linux behind a second, **egui/eframe** frontend: controller,
 socket API, Python helper, engines and view models are shared, and every AppKit half
 is compiled out (`#[cfg(target_os = "macos")]`). macOS keeps AppKit, pixel-identical;
