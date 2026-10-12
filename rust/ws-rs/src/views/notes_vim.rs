@@ -498,11 +498,6 @@ impl VimPane {
         Some(view)
     }
 
-    #[cfg(not(target_os = "macos"))]
-    pub fn build(&mut self, _mtm: MainThreadMarker, _frame: ()) -> Option<()> {
-        None
-    }
-
     /// `startVimIfNeeded()` after `:q` / a crash: restart the editor in the
     /// **same** terminal view, like Swift's `TerminalAutoRestart`. Dropping the
     /// old SwiftTerm view and building a new one kills the new child at once
