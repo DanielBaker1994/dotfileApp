@@ -626,11 +626,9 @@ impl SetupWindow {
 
     /// Build the AppKit window: the scrollable checks list, the hidden log, the
     /// status line and the recheck / stack / done buttons.
+    #[cfg(target_os = "macos")]
     pub fn build(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.build_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]

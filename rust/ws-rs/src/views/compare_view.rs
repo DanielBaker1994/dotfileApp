@@ -7,6 +7,7 @@
 //! segments, the summary, the tool buttons) + status line.
 
 use super::compare::CompareRecentEntry;
+#[cfg(target_os = "macos")]
 use crate::ui::chrome::Rect;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel};
 

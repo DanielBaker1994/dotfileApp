@@ -2583,7 +2583,7 @@ impl ShotSession {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (display, draw_objects);
+            let _ = (display, draw_objects, crop);
             None
         }
     }
@@ -5986,6 +5986,8 @@ impl ScreenshotController {
         {
             let _ = write_image_pasteboard(img);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = img;
         self.last_output["copied"] = json!(true);
         ScreenToast::show(&mut self.toast, cfg.copy_toast.clone(), "checkmark.circle.fill");
     }
@@ -6262,6 +6264,8 @@ impl ScreenshotController {
             );
             return Some(ShotImage::with_png(pw, ph, png));
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = i;
         #[allow(unreachable_code)]
         None
     }
@@ -6719,7 +6723,10 @@ impl ScreenshotController {
                     .map(|p| p.isVisible())
                     .unwrap_or(false);
                 #[cfg(not(target_os = "macos"))]
-                let visible = true;
+                let visible = {
+                    let _ = i;
+                    true
+                };
                 json!({
                     "id": d.id as i64,
                     "frame": [f.x as i64, f.y as i64, f.w as i64, f.h as i64],

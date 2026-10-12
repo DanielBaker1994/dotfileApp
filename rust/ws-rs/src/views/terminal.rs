@@ -5,6 +5,7 @@
 //! [`TerminalPanel::build`] constructs the real `PopupPanel` + the SwiftTerm
 //! shim view on macOS (a no-op elsewhere).
 
+#[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
 use serde_json::{json, Value};
 
@@ -373,12 +374,9 @@ impl TerminalPanel {
     }
 
     /// Build the AppKit panel and the SwiftTerm shim view, then start the shell.
-    /// No-op off macOS.
+    #[cfg(target_os = "macos")]
     pub fn build(&mut self, mtm: MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.build_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]
@@ -508,6 +506,7 @@ impl TerminalPanel {
     /// the `NSPanel` + shim once built (Swift reads `panel.isVisible`,
     /// `isKeyWindow`, `level`, `windowNumber`, `frame`, `process.running`).
     pub fn test_state(&self) -> Value {
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut doc = self.model_state();
         #[cfg(target_os = "macos")]
         if let (Some(panel), Some(o)) = (&self.panel, doc.as_object_mut()) {

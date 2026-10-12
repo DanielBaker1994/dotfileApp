@@ -399,11 +399,9 @@ impl ViewSwitcherPanel {
     }
 
     /// Build the AppKit panel (search line + drawn rows).
+    #[cfg(target_os = "macos")]
     pub fn build(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.ensure_ui(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]
