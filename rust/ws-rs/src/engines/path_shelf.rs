@@ -851,6 +851,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: pylib/shelf.py normalize() rewrites /tmp -> /private/tmp"
+    )]
     fn shelf_model() {
         if !helper_ready() {
             eprintln!("skipping: no python 3.11+ or pylib/helper not found");

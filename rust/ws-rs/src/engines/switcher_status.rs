@@ -149,6 +149,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "macOS-only: status.py uses pmset/sysctl/vm_stat"
+    )]
     fn gather_when_helper_present() {
         if !helper_ready() {
             eprintln!("skipping: no python 3.11+ or pylib/helper not found");
