@@ -176,6 +176,7 @@ pub struct HotkeyPrep {
     pub cache_cleared: bool,
 }
 
+#[cfg(target_os = "macos")]
 pub fn hotkey_prep(
     ipc: &dyn AeroCall,
     focus_file_path: &str,
@@ -187,6 +188,18 @@ pub fn hotkey_prep(
         switcher_window_name,
         std::process::id() as i32,
     )
+}
+
+/// Non-macOS twin: AeroSpace is absent, so prep is a no-op returning the
+/// empty/default `HotkeyPrep` without consulting the injected IPC.
+#[cfg(not(target_os = "macos"))]
+pub fn hotkey_prep(
+    ipc: &dyn AeroCall,
+    focus_file_path: &str,
+    switcher_window_name: &str,
+) -> HotkeyPrep {
+    let _ = (ipc, focus_file_path, switcher_window_name);
+    HotkeyPrep::default()
 }
 
 pub fn hotkey_prep_with_pid(
@@ -456,5 +469,19 @@ mod tests {
         assert!(!prep.cache_cleared);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Off macOS AeroSpace does not exist: `hotkey_prep` must be a no-op and
+    /// must not consult the injected IPC at all.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn hotkey_prep_is_a_noop_off_macos() {
+        let ipc = RecordingIpc::new();
+        let prep = hotkey_prep(&ipc, "/nonexistent/kitchen-sink-focus", "kitchen-sink");
+        assert_eq!(prep, HotkeyPrep::default());
+        assert!(
+            ipc.calls().is_empty(),
+            "off macOS prep must not call AeroSpace"
+        );
     }
 }
