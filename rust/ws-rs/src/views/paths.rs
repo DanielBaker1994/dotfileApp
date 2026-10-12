@@ -446,12 +446,14 @@ impl PathsWindow {
     }
 
     /// Swift `PathsWindow.toggleQuickLook()`.
+    #[cfg(target_os = "macos")]
     pub fn toggle_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
         let paths = self.selected_paths();
         self.quick_look.toggle(mtm, &paths);
     }
 
     /// Swift `PathsWindow.refreshQuickLook()` (called when the selection moves).
+    #[cfg(target_os = "macos")]
     pub fn refresh_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
         let paths = self.selected_paths();
         self.quick_look.refresh(mtm, &paths);
@@ -461,6 +463,7 @@ impl PathsWindow {
     /// apply it. Returns whether the key was consumed. Shift-arrow multi-select
     /// is not modelled (the shelf is single-selection here), so an extending
     /// move behaves like a plain move.
+    #[cfg(target_os = "macos")]
     pub fn key(
         &mut self,
         mtm: objc2::MainThreadMarker,
@@ -676,11 +679,9 @@ impl PathsWindow {
     }
 
     /// Build the window + list. No-op off macOS.
+    #[cfg(target_os = "macos")]
     pub fn build(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.build_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]
@@ -837,12 +838,10 @@ impl PathsWindow {
     /// Build (once) the standalone tool panel and order it front, focusing the
     /// query field. Mirrors `PathsWindow.show()` (`showPersistent` + `place`).
     /// No-op off macOS.
+    #[cfg(target_os = "macos")]
     pub fn show_window(&mut self, mtm: objc2::MainThreadMarker) {
         self.last_clicked = None;
-        #[cfg(target_os = "macos")]
         self.show_window_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]

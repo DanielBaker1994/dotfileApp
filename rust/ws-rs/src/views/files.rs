@@ -842,115 +842,89 @@ impl QuickLook {
 
     /// Swift `quickLookUp`: the shared panel exists, is visible, and we are its
     /// data source. `false` off macOS.
+    #[cfg(target_os = "macos")]
     pub fn is_up(&self, mtm: objc2::MainThreadMarker) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            if !unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
-                return false;
-            }
-            let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else {
-                return false;
-            };
-            if !panel.isVisible() {
-                return false;
-            }
-            let Some(source) = &self.source else { return false };
-            let Some(data_source) = (unsafe { panel.dataSource() }) else {
-                return false;
-            };
-            let ds: &AnyObject = AsRef::<AnyObject>::as_ref(&*data_source);
-            std::ptr::eq(ds, any_object(&**source))
+        if !unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
+            return false;
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = mtm;
-            self.up
+        let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else {
+            return false;
+        };
+        if !panel.isVisible() {
+            return false;
         }
+        let Some(source) = &self.source else { return false };
+        let Some(data_source) = (unsafe { panel.dataSource() }) else {
+            return false;
+        };
+        let ds: &AnyObject = AsRef::<AnyObject>::as_ref(&*data_source);
+        std::ptr::eq(ds, any_object(&**source))
     }
 
     /// Swift `toggleQuickLook()`: order the panel out if it is ours and up,
     /// otherwise open it over `selected` (no-op when `selected` is empty).
+    #[cfg(target_os = "macos")]
     pub fn toggle(&mut self, mtm: objc2::MainThreadMarker, selected: &[String]) {
-        #[cfg(target_os = "macos")]
-        {
-            let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else {
-                return;
-            };
-            if self.is_up(mtm) {
-                panel.orderOut(None);
-                self.clear();
-                return;
-            }
-            if selected.is_empty() {
-                self.clear();
-                return;
-            }
-            self.paths = selected.to_vec();
-            let source = match &self.source {
-                Some(s) => s.clone(),
-                None => {
-                    let s = QuickLookSource::new(mtm);
-                    self.source = Some(s.clone());
-                    s
-                }
-            };
-            source.set_paths(&self.paths);
-            let delegate = any_object(&*source);
-            unsafe {
-                panel.setDataSource(Some(ProtocolObject::from_ref(&*source)));
-                panel.setDelegate(Some(delegate));
-                panel.reloadData();
-                panel.setCurrentPreviewItemIndex(0);
-                panel.makeKeyAndOrderFront(None);
-            }
-            self.up = true;
+        let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else {
+            return;
+        };
+        if self.is_up(mtm) {
+            panel.orderOut(None);
+            self.clear();
+            return;
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = mtm;
-            self.up = !selected.is_empty();
-            self.paths = if self.up { selected.to_vec() } else { Vec::new() };
+        if selected.is_empty() {
+            self.clear();
+            return;
         }
+        self.paths = selected.to_vec();
+        let source = match &self.source {
+            Some(s) => s.clone(),
+            None => {
+                let s = QuickLookSource::new(mtm);
+                self.source = Some(s.clone());
+                s
+            }
+        };
+        source.set_paths(&self.paths);
+        let delegate = any_object(&*source);
+        unsafe {
+            panel.setDataSource(Some(ProtocolObject::from_ref(&*source)));
+            panel.setDelegate(Some(delegate));
+            panel.reloadData();
+            panel.setCurrentPreviewItemIndex(0);
+            panel.makeKeyAndOrderFront(None);
+        }
+        self.up = true;
     }
 
     /// Swift `refreshQuickLook()`: no-op unless the panel is up.
+    #[cfg(target_os = "macos")]
     pub fn refresh(&mut self, mtm: objc2::MainThreadMarker, selected: &[String]) {
         if !self.is_up(mtm) {
             return;
         }
         self.paths = selected.to_vec();
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(source) = &self.source {
-                source.set_paths(&self.paths);
-            }
-            if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
-                unsafe { panel.reloadData() };
-            }
+        if let Some(source) = &self.source {
+            source.set_paths(&self.paths);
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = mtm;
+        if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+            unsafe { panel.reloadData() };
         }
     }
 
     /// Order the shared panel out (if we own it) and clear the preview paths.
+    #[cfg(target_os = "macos")]
     pub fn dismiss(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
-        {
-            if unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
-                if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
-                    panel.orderOut(None);
-                }
+        if unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
+            if let Some(panel) = unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+                panel.orderOut(None);
             }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = mtm;
         }
         self.clear();
     }
 
+    #[cfg(target_os = "macos")]
     fn clear(&mut self) {
         self.paths.clear();
         self.up = false;
@@ -1654,12 +1628,14 @@ impl FileBrowser {
     }
 
     /// Swift `PopupFileBrowser.toggleQuickLook()`.
+    #[cfg(target_os = "macos")]
     pub fn toggle_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
         let paths = self.selected_paths();
         self.quick_look.toggle(mtm, &paths);
     }
 
     /// Swift `PopupFileBrowser.refreshQuickLook()` (called on selection change).
+    #[cfg(target_os = "macos")]
     pub fn refresh_quick_look(&mut self, mtm: objc2::MainThreadMarker) {
         let paths = self.selected_paths();
         self.quick_look.refresh(mtm, &paths);
@@ -1712,11 +1688,9 @@ impl FileBrowser {
 
     /// Build the AppKit browser: the toolbar, the scrollable rows list and the
     /// preview/info pane. No-op off macOS.
+    #[cfg(target_os = "macos")]
     pub fn build(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.build_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]
@@ -1857,6 +1831,7 @@ pub fn recent_snapshot(arrived: bool) -> Vec<crate::engines::recent_files::Entry
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn build_content(mtm: objc2::MainThreadMarker) -> Option<Retained<NSView>> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let mut browser = FileBrowser::new(&home);

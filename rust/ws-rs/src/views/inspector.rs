@@ -245,11 +245,9 @@ impl PopupInspector {
 
     /// Build the AppKit view. The panel is a flipped `NSView` holding a
     /// scrollable `NSTextView`, the "Open full detail" button and the hint.
+    #[cfg(target_os = "macos")]
     pub fn build_view(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.build_view_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
     }
 
     #[cfg(target_os = "macos")]

@@ -517,11 +517,9 @@ impl ToolPanel {
 
     /// Build (once) the panel and order it front with the keyboard, without
     /// activating the app (`raiseToolPanel` + `reclaimToolKey`).
+    #[cfg(target_os = "macos")]
     pub fn show(&mut self, mtm: objc2::MainThreadMarker) {
-        #[cfg(target_os = "macos")]
         self.show_macos(mtm);
-        #[cfg(not(target_os = "macos"))]
-        let _ = mtm;
         // A fresh raise cancels any pending filefast auto-hide.
         self.ff_hide_at = None;
         self.shown = true;
