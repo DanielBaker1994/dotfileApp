@@ -23,8 +23,8 @@ field: the notes editor, the search/filter bars, the embedded terminal, and
 ## 2. Right-click menus must offer obvious actions
 
 File browsers and the embedded terminal must have right-click menus with the
-actions users expect: copy the absolute path, open the file in the notes app,
-open in default app, reveal in Finder.
+actions users expect: copy the file, copy the absolute path, open the file in
+the notes app, and reveal it in the app's own Files view (`Reveal in Files`).
 
 ## 3. Config over code
 

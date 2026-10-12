@@ -8,6 +8,7 @@
 mod app;
 mod engines;
 mod panes;
+mod platform;
 mod ui;
 mod views;
 

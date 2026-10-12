@@ -28,3 +28,4 @@ libc = "0.2"
 rmpv = "1"
 swiftterm-shim = { path = "../swiftterm-shim" }
 objc2-quick-look-ui = "0.3.2"
+open = "5"

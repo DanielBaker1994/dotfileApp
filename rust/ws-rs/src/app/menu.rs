@@ -1,7 +1,7 @@
 //! Menu-bar menu, ported from `kitchen_sink.swift`
 //! (`AppDelegate.installStatusMenus` / `installMainMenu`, `MenuTarget`,
 //! `menuNeedsUpdate`, `SwitcherController.addGlobalWindowItems`, the
-//! `globalGroupTag` / `configIssuesTag` markers, `headerStyleMenuItem`,
+//! `globalGroupTag` marker, `headerStyleMenuItem`,
 //! `showJiraDashboard`, `toggleJiraPoll`).
 //!
 //! The structure is a plain [`MenuSpec`] so it can be checked without AppKit.
@@ -14,35 +14,21 @@
 
 use crate::ui::theme::HeaderStyle;
 
-/// Swift `MenuTarget.configIssuesTag`.
-pub const CONFIG_ISSUES_TAG: i64 = 7401;
 /// Swift `MenuTarget.globalGroupTag` — the dynamic insertion marker.
 pub const GLOBAL_GROUP_TAG: i64 = 7402;
 
 /// The stable, testable id of every menu item (mirrors the Swift selector).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
-    ShowConfigIssues,
     ToggleHideOnFocusLoss,
     SetHeaderStyle(HeaderStyle),
     ResetWindowSize,
-    ResetWindowColors,
     CloseWindow,
     Quit,
-    OpenSetup,
     ToggleTerminal,
     ToggleNotes,
-    ToggleHealthChecks,
-    ToggleJiraPoll,
     ToggleJiraWindow,
-    OpenJiraDashboard,
-    OpenConfluence,
-    OpenConfluenceSetup,
-    OpenAi,
-    OpenCompare,
     OpenWindow,
-    ToggleVimMode,
-    ResetSettings,
 }
 
 impl MenuAction {
@@ -51,26 +37,14 @@ impl MenuAction {
 
     pub fn id(self) -> i64 {
         match self {
-            MenuAction::ShowConfigIssues => 1,
-            MenuAction::ToggleHideOnFocusLoss => 2,
-            MenuAction::ResetWindowSize => 3,
-            MenuAction::ResetWindowColors => 4,
-            MenuAction::CloseWindow => 5,
-            MenuAction::Quit => 6,
-            MenuAction::OpenSetup => 7,
-            MenuAction::ToggleTerminal => 8,
-            MenuAction::ToggleNotes => 9,
-            MenuAction::ToggleHealthChecks => 10,
-            MenuAction::ToggleJiraPoll => 11,
-            MenuAction::ToggleJiraWindow => 12,
-            MenuAction::OpenJiraDashboard => 13,
-            MenuAction::OpenConfluence => 14,
-            MenuAction::OpenConfluenceSetup => 15,
-            MenuAction::OpenAi => 16,
-            MenuAction::OpenCompare => 17,
-            MenuAction::OpenWindow => 18,
-            MenuAction::ToggleVimMode => 19,
-            MenuAction::ResetSettings => 20,
+            MenuAction::ToggleHideOnFocusLoss => 1,
+            MenuAction::ResetWindowSize => 2,
+            MenuAction::CloseWindow => 3,
+            MenuAction::Quit => 4,
+            MenuAction::ToggleTerminal => 5,
+            MenuAction::ToggleNotes => 6,
+            MenuAction::ToggleJiraWindow => 7,
+            MenuAction::OpenWindow => 8,
             MenuAction::SetHeaderStyle(style) => {
                 let idx = HeaderStyle::ALL.iter().position(|s| *s == style).unwrap_or(0);
                 Self::HEADER_STYLE_BASE + idx as i64
@@ -80,26 +54,14 @@ impl MenuAction {
 
     pub fn from_id(id: i64) -> Option<MenuAction> {
         Some(match id {
-            1 => MenuAction::ShowConfigIssues,
-            2 => MenuAction::ToggleHideOnFocusLoss,
-            3 => MenuAction::ResetWindowSize,
-            4 => MenuAction::ResetWindowColors,
-            5 => MenuAction::CloseWindow,
-            6 => MenuAction::Quit,
-            7 => MenuAction::OpenSetup,
-            8 => MenuAction::ToggleTerminal,
-            9 => MenuAction::ToggleNotes,
-            10 => MenuAction::ToggleHealthChecks,
-            11 => MenuAction::ToggleJiraPoll,
-            12 => MenuAction::ToggleJiraWindow,
-            13 => MenuAction::OpenJiraDashboard,
-            14 => MenuAction::OpenConfluence,
-            15 => MenuAction::OpenConfluenceSetup,
-            16 => MenuAction::OpenAi,
-            17 => MenuAction::OpenCompare,
-            18 => MenuAction::OpenWindow,
-            19 => MenuAction::ToggleVimMode,
-            20 => MenuAction::ResetSettings,
+            1 => MenuAction::ToggleHideOnFocusLoss,
+            2 => MenuAction::ResetWindowSize,
+            3 => MenuAction::CloseWindow,
+            4 => MenuAction::Quit,
+            5 => MenuAction::ToggleTerminal,
+            6 => MenuAction::ToggleNotes,
+            7 => MenuAction::ToggleJiraWindow,
+            8 => MenuAction::OpenWindow,
             i if i >= Self::HEADER_STYLE_BASE => {
                 let idx = (i - Self::HEADER_STYLE_BASE) as usize;
                 MenuAction::SetHeaderStyle(*HeaderStyle::ALL.get(idx)?)
@@ -267,24 +229,15 @@ impl MenuSpec {
 
 /// The live values the menu reflects (mirrors the globals `menuNeedsUpdate`
 /// reads: `settings.hideOnFocusLoss`, `HeaderStyle.current`,
-/// `jiraEnabledInConfig()`, `confluenceEnabled()`, `aiEnabled()`,
-/// `compareEnabled()`, `vimModeEnabled`, `configIssues`).
+/// `jiraEnabledInConfig()`, and the window shown flags).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuSettings {
     pub hide_on_focus_loss: bool,
     pub header_style: HeaderStyle,
-    pub config_issues: usize,
-    pub config_using_backup: bool,
     pub jira_enabled: bool,
-    pub confluence_enabled: bool,
-    pub ai_enabled: bool,
-    pub compare_enabled: bool,
-    pub has_notes: bool,
     pub terminal_shown: bool,
     pub notes_shown: bool,
     pub jira_shown: bool,
-    pub health_checks_shown: bool,
-    pub vim_mode: bool,
 }
 
 impl Default for MenuSettings {
@@ -292,29 +245,11 @@ impl Default for MenuSettings {
         MenuSettings {
             hide_on_focus_loss: true,
             header_style: HeaderStyle::Flat,
-            config_issues: 0,
-            config_using_backup: false,
             jira_enabled: true,
-            confluence_enabled: true,
-            ai_enabled: true,
-            compare_enabled: true,
-            has_notes: true,
             terminal_shown: false,
             notes_shown: false,
             jira_shown: false,
-            health_checks_shown: false,
-            vim_mode: false,
         }
-    }
-}
-
-fn config_issues_title(settings: &MenuSettings) -> String {
-    if settings.config_using_backup {
-        "⚠ Config Invalid — Using Backup…".to_string()
-    } else if settings.config_issues > 0 {
-        format!("⚠ Config Warnings ({})…", settings.config_issues)
-    } else {
-        "Config Issues…".to_string()
     }
 }
 
@@ -356,72 +291,23 @@ fn global_window_options(settings: &MenuSettings) -> SubmenuSpec {
     }
 }
 
-/// Swift `installStatusMenus`'s "Settings ▸" submenu.
-fn settings_submenu(settings: &MenuSettings) -> SubmenuSpec {
-    let mut items = Vec::new();
-    if settings.has_notes {
-        items.push(MenuNode::Item(
-            MenuItemSpec::action(MenuAction::ToggleVimMode, "Vim Mode (Notes)")
-                .checked(settings.vim_mode),
-        ));
-    }
-    items.push(MenuNode::Separator);
-    items.push(MenuNode::Item(MenuItemSpec::action(
-        MenuAction::ResetSettings,
-        "Reset Settings to Defaults",
-    )));
-    SubmenuSpec {
-        title: "Settings".to_string(),
-        tag: None,
-        items,
-    }
-}
-
 /// Build the menu-bar menu (`installStatusMenus` + `addGlobalWindowItems`).
 ///
-/// Order follows the task's App menu: the Jira trio, Setup, Compare, Kitchen
-/// Sink, Quit last; the remaining `installStatusMenus` rows keep their
-/// relative order (terminal, notes/health, confluence/ai, reset/close).
+/// Only the rows whose actions are actually wired (`main.rs::status_menu_action`)
+/// are kept — the Swift menu's dead placeholder rows (Setup, Compare,
+/// Confluence, AI, Health Checks, Reset Defaults, Vim Mode, Config Issues,
+/// Jira poll/dashboard) are gone; the palette covers those features.
 pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
     let mut items = Vec::new();
-
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::ShowConfigIssues, config_issues_title(settings))
-            .tag(CONFIG_ISSUES_TAG)
-            .hidden(settings.config_issues == 0 && !settings.config_using_backup),
-    ));
 
     items.push(MenuNode::Submenu(global_window_options(settings)));
     items.push(MenuNode::Separator);
 
-    items.push(MenuNode::Item(MenuItemSpec::action(
-        MenuAction::ToggleJiraPoll,
-        if settings.jira_enabled {
-            "Disable Jira"
-        } else {
-            "Enable Jira"
-        },
-    )));
     items.push(MenuNode::Item(
         MenuItemSpec::action(MenuAction::ToggleJiraWindow, "Toggle Jira Window")
             .key("j", Modifiers::CMD)
             .checked(settings.jira_shown)
             .hidden(!settings.jira_enabled),
-    ));
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::OpenJiraDashboard, "Open Jira Config Window")
-            .hidden(!settings.jira_enabled),
-    ));
-    items.push(MenuNode::Separator);
-
-    items.push(MenuNode::Item(MenuItemSpec::action(
-        MenuAction::OpenSetup,
-        "Setup & Health Check…",
-    )));
-    items.push(MenuNode::Separator);
-
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::OpenCompare, "Compare…").hidden(!settings.compare_enabled),
     ));
     items.push(MenuNode::Separator);
 
@@ -430,53 +316,20 @@ pub fn build_menu_spec(settings: &MenuSettings) -> MenuSpec {
             .key("t", Modifiers::CMD_OPT)
             .checked(settings.terminal_shown),
     ));
-    items.push(MenuNode::Separator);
-
     items.push(MenuNode::Item(
         MenuItemSpec::action(MenuAction::ToggleNotes, "Toggle Notes")
             .key("n", Modifiers::CMD)
             .checked(settings.notes_shown),
     ));
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::ToggleHealthChecks, "Toggle Health Checks")
-            .key("h", Modifiers::CMD)
-            .checked(settings.health_checks_shown),
-    ));
     items.push(MenuNode::Separator);
 
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::OpenConfluence, "Confluence Search")
-            .hidden(!settings.confluence_enabled),
-    ));
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::OpenConfluenceSetup, "Confluence Setup…")
-            .hidden(!settings.confluence_enabled),
-    ));
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::OpenAi, "AI (Grammar Check…)").hidden(!settings.ai_enabled),
-    ));
-    items.push(MenuNode::Separator);
-
-    items.push(MenuNode::Item(
-        MenuItemSpec::action(MenuAction::ResetWindowSize, "Reset Default Size").key("0", Modifiers::CMD),
-    ));
-    items.push(MenuNode::Item(MenuItemSpec::action(
-        MenuAction::ResetWindowColors,
-        "Reset Default Colors",
-    )));
     items.push(MenuNode::Item(
         MenuItemSpec::action(MenuAction::CloseWindow, "Close Window").key("w", Modifiers::CMD),
     ));
     items.push(MenuNode::Separator);
 
     // The app's own window (the Hyper+S palette's last row, "Kitchen Sink").
-    items.push(MenuNode::Item(MenuItemSpec::action(
-        MenuAction::OpenWindow,
-        "Kitchen Sink",
-    )));
-    items.push(MenuNode::Separator);
-
-    items.push(MenuNode::Submenu(settings_submenu(settings)));
+    items.push(MenuNode::Item(MenuItemSpec::action(MenuAction::OpenWindow, "Kitchen Sink")));
     items.push(MenuNode::Separator);
 
     items.push(MenuNode::Item(
@@ -785,8 +638,6 @@ mod appkit {
         let window_item = NSMenuItem::new(mtm);
         let window_menu = NSMenu::new(mtm);
         window_menu.setTitle(ns_string!("Window"));
-        add_reset_size(mtm, &window_menu, target);
-        window_menu.addItem(&NSMenuItem::separatorItem(mtm));
         add_leaf(mtm, &window_menu, "Minimize", Some(sel!(performMiniaturize:)), "m");
         window_item.setSubmenu(Some(&window_menu));
         main_menu.addItem(&window_item);
@@ -802,26 +653,14 @@ mod tests {
     #[test]
     fn action_ids_round_trip() {
         let actions = [
-            MenuAction::ShowConfigIssues,
             MenuAction::ToggleHideOnFocusLoss,
             MenuAction::ResetWindowSize,
-            MenuAction::ResetWindowColors,
             MenuAction::CloseWindow,
             MenuAction::Quit,
-            MenuAction::OpenSetup,
             MenuAction::ToggleTerminal,
             MenuAction::ToggleNotes,
-            MenuAction::ToggleHealthChecks,
-            MenuAction::ToggleJiraPoll,
             MenuAction::ToggleJiraWindow,
-            MenuAction::OpenJiraDashboard,
-            MenuAction::OpenConfluence,
-            MenuAction::OpenConfluenceSetup,
-            MenuAction::OpenAi,
-            MenuAction::OpenCompare,
             MenuAction::OpenWindow,
-            MenuAction::ToggleVimMode,
-            MenuAction::ResetSettings,
         ];
         let mut seen = std::collections::HashSet::new();
         for action in actions {
@@ -843,68 +682,47 @@ mod tests {
     }
 
     #[test]
-    fn spec_contains_documented_items_in_order() {
+    fn spec_contains_the_ported_items_in_order() {
         let spec = build_menu_spec(&MenuSettings::default());
         assert_eq!(
             spec.top_titles(),
             vec![
-                "Config Issues…",
                 "Global Window Options",
                 "—",
-                "Disable Jira",
                 "Toggle Jira Window",
-                "Open Jira Config Window",
-                "—",
-                "Setup & Health Check…",
-                "—",
-                "Compare…",
                 "—",
                 "Toggle Terminal",
-                "—",
                 "Toggle Notes",
-                "Toggle Health Checks",
                 "—",
-                "Confluence Search",
-                "Confluence Setup…",
-                "AI (Grammar Check…)",
-                "—",
-                "Reset Default Size",
-                "Reset Default Colors",
                 "Close Window",
                 "—",
                 "Kitchen Sink",
-                "—",
-                "Settings",
                 "—",
                 "Quit",
             ]
         );
 
-        // The task's documented actions are all present...
+        // Every row is actionable and wired to a handler in `main.rs`.
         let actions: Vec<MenuAction> = spec.flatten().iter().map(|item| item.action).collect();
         for required in [
-            MenuAction::ToggleJiraPoll,
             MenuAction::ToggleJiraWindow,
-            MenuAction::OpenJiraDashboard,
-            MenuAction::OpenSetup,
-            MenuAction::OpenCompare,
+            MenuAction::ToggleTerminal,
+            MenuAction::ToggleNotes,
+            MenuAction::CloseWindow,
             MenuAction::OpenWindow,
             MenuAction::Quit,
         ] {
             assert!(actions.contains(&required), "missing {required:?}");
         }
-        // ...and the two documented submenus exist (Header Style nested).
+        // The two documented submenus exist (Header Style nested).
         assert!(spec.find_submenu("Global Window Options").is_some());
         assert!(spec.find_submenu("Header Style").is_some());
 
-        // Relative order among the required rows (the task's App menu:
-        // Jira trio, Setup, Compare, Kitchen Sink, Quit last).
         let pos = |a: MenuAction| actions.iter().position(|x| *x == a).unwrap();
-        assert!(pos(MenuAction::ToggleJiraPoll) < pos(MenuAction::ToggleJiraWindow));
-        assert!(pos(MenuAction::ToggleJiraWindow) < pos(MenuAction::OpenJiraDashboard));
-        assert!(pos(MenuAction::OpenJiraDashboard) < pos(MenuAction::OpenSetup));
-        assert!(pos(MenuAction::OpenSetup) < pos(MenuAction::OpenCompare));
-        assert!(pos(MenuAction::OpenCompare) < pos(MenuAction::OpenWindow));
+        assert!(pos(MenuAction::ToggleJiraWindow) < pos(MenuAction::ToggleTerminal));
+        assert!(pos(MenuAction::ToggleTerminal) < pos(MenuAction::ToggleNotes));
+        assert!(pos(MenuAction::ToggleNotes) < pos(MenuAction::CloseWindow));
+        assert!(pos(MenuAction::CloseWindow) < pos(MenuAction::OpenWindow));
         assert!(pos(MenuAction::OpenWindow) < pos(MenuAction::Quit));
     }
 
@@ -948,11 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn jira_titles_and_visibility_follow_settings() {
-        let off = build_menu_spec(&MenuSettings {
-            jira_enabled: false,
-            ..MenuSettings::default()
-        });
+    fn jira_row_visibility_follows_settings() {
         let by_action = |spec: &MenuSpec, action: MenuAction| -> MenuItemSpec {
             spec.flatten()
                 .into_iter()
@@ -960,87 +774,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {action:?}"))
                 .clone()
         };
-        let toggle = by_action(&off, MenuAction::ToggleJiraPoll);
-        assert_eq!(toggle.title, "Enable Jira");
+        let off = build_menu_spec(&MenuSettings {
+            jira_enabled: false,
+            ..MenuSettings::default()
+        });
         assert!(by_action(&off, MenuAction::ToggleJiraWindow).hidden);
-        assert!(by_action(&off, MenuAction::OpenJiraDashboard).hidden);
 
         let on = build_menu_spec(&MenuSettings {
             jira_enabled: true,
             ..MenuSettings::default()
         });
-        let toggle = by_action(&on, MenuAction::ToggleJiraPoll);
-        assert_eq!(toggle.title, "Disable Jira");
         assert!(!by_action(&on, MenuAction::ToggleJiraWindow).hidden);
-        assert!(!by_action(&on, MenuAction::OpenJiraDashboard).hidden);
-    }
-
-    #[test]
-    fn feature_items_hide_when_disabled() {
-        let spec = build_menu_spec(&MenuSettings {
-            confluence_enabled: false,
-            ai_enabled: false,
-            compare_enabled: false,
-            ..MenuSettings::default()
-        });
-        for action in [
-            MenuAction::OpenConfluence,
-            MenuAction::OpenConfluenceSetup,
-            MenuAction::OpenAi,
-            MenuAction::OpenCompare,
-        ] {
-            let item = spec
-                .flatten()
-                .into_iter()
-                .find(|item| item.action == action)
-                .unwrap();
-            assert!(item.hidden, "{action:?} should be hidden");
-        }
-    }
-
-    #[test]
-    fn config_issues_row_reflects_state() {
-        let spec = build_menu_spec(&MenuSettings {
-            config_issues: 3,
-            ..MenuSettings::default()
-        });
-        let item = spec
-            .flatten()
-            .into_iter()
-            .find(|item| item.action == MenuAction::ShowConfigIssues)
-            .unwrap();
-        assert_eq!(item.title, "⚠ Config Warnings (3)…");
-        assert_eq!(item.tag, Some(CONFIG_ISSUES_TAG));
-        assert!(!item.hidden);
-
-        let backup = build_menu_spec(&MenuSettings {
-            config_using_backup: true,
-            ..MenuSettings::default()
-        });
-        let item = backup
-            .flatten()
-            .into_iter()
-            .find(|item| item.action == MenuAction::ShowConfigIssues)
-            .unwrap();
-        assert_eq!(item.title, "⚠ Config Invalid — Using Backup…");
-        assert!(!item.hidden);
-    }
-
-    #[test]
-    fn settings_submenu_follows_has_notes() {
-        let with_notes = build_menu_spec(&MenuSettings::default());
-        let settings = with_notes.find_submenu("Settings").unwrap();
-        assert!(matches!(settings.items[0], MenuNode::Item(ref i) if i.action == MenuAction::ToggleVimMode));
-
-        let without = build_menu_spec(&MenuSettings {
-            has_notes: false,
-            ..MenuSettings::default()
-        });
-        let settings = without.find_submenu("Settings").unwrap();
-        assert!(!settings
-            .items
-            .iter()
-            .any(|n| matches!(n, MenuNode::Item(i) if i.action == MenuAction::ToggleVimMode)));
     }
 
     #[cfg(target_os = "macos")]

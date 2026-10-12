@@ -2461,7 +2461,6 @@ mod macos {
         let p2 = path.to_string();
         let p3 = path.to_string();
         let p4 = path.to_string();
-        let p5 = path.to_string();
         let t = tilde.clone();
         popup_context(
             vec![
@@ -2476,13 +2475,8 @@ mod macos {
                 MenuEntry::item("Copy Image", move || {
                     copy_image_file_to_pasteboard(&p3);
                 }),
-                MenuEntry::item("Reveal in Finder", move || {
+                MenuEntry::item("Reveal in Files", move || {
                     crate::app::host::reveal_in_files(&[p4.clone()]);
-                }),
-                MenuEntry::item("Open in Default App", move || {
-                    use objc2_foundation::NSURL;
-                    let url = NSURL::fileURLWithPath(&NSString::from_str(&p5));
-                    objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
                 }),
             ],
             view,

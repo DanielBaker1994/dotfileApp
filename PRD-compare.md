@@ -341,7 +341,7 @@ against BC's own menus (§10).
 | Copy to Right / Left / Other Side | ✅ | `FileOps.transfer`, undoable; clash = sheet (Replace · Keep both · Skip, "apply to all") |
 | Move to Other Side | ✅ | Cmd+Opt+R / L |
 | Delete (to the Trash), Rename, New Folder | ✅ | `FileOps.trash`, `InlineRename`, file browser keys |
-| Quick Look, Reveal in Finder, Copy Path, Open in Notes, Open in Default App | ✅ | rule 2 right-click menu |
+| Quick Look, Reveal in Files, Copy Absolute Path, Open in Notes | ✅ | rule 2 right-click menu |
 | Touch, Attributes, Exchange, Copy / Move to Folder | ⏭ | |
 | Synchronize ▸ Update Right / Left / Both, Mirror to Right / Left | phase 3 | always through a preview sheet (counts + list); mirror deletes = Trash |
 | **Out of scope** | ❌ | Hex, Media / MP3, Picture, Table / Data, Registry, Version compare; Text / Folder **Merge** (3-way); remote folders (FTP / SFTP / cloud); archives as folders; snapshots; reports; scripting; source control commands |
@@ -436,11 +436,11 @@ through `handleKey` / `JiraEditKeys.route`.
 #### 7.2.5 Right-click menus (rule 2)
 
 - **Text pane:** Copy · Copy to Other Side · Copy Line to Other Side · Paste
-  Clipboard Here · Select Section · Find… · Copy Path · Reveal in Finder ·
-  Open in Notes · Open in Default App.
+  Clipboard Here · Select Section · Copy Absolute Path · Reveal in Files ·
+  Open in Notes.
 - **Folder row:** Open (Compare) · Copy to Other Side · Move to Other Side ·
-  Quick Look · Rename… · Move to Trash · New Folder · Copy Path · Reveal in
-  Finder · Open in Notes · Open in Default App · Set as Left / Right Base
+  Quick Look · Rename… · Move to Trash · New Folder · Copy Absolute Path ·
+  Reveal in Files · Open in Notes · Set as Left / Right Base
   Folder · Exclude "NAME" (adds to the session's filter).
 - **File browser / `/paths` rows (new items):** Select for Compare ·
   Compare to "NAME" (after a pick) · Compare (exactly two marked).

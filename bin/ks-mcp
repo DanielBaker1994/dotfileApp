@@ -1,0 +1,30 @@
+#!/bin/bash
+# ks-mcp — minimal MCP server (legacy stdio JSON-RPC) over the kitchen-sink
+# daemon socket. Registered in opencode.json under `mcp.servers`; also usable
+# by hand:
+#
+#   bin/ks-mcp --list-tools
+#   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | bin/ks-mcp
+#
+# Socket: --socket PATH > $KS_SOCKET > $TMPDIR/ws-notes.sock. Read-only:
+# --read-only or KS_MCP_READ_ONLY=1 (hides ks_do, restricts ks_raw).
+# For a disposable daemon: bin/ks-mcp-sandbox.sh start && export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)
+#
+# Needs python ≥ 3.11 (the repo baseline). AeroSpace / GUI launchers start with
+# a bare PATH where `python3` may be the CLT 3.9, so look further.
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+py=""
+for c in "${WS_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] || continue
+    if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        py="$c"; break
+    fi
+done
+if [ -z "$py" ]; then
+    echo "ks-mcp: needs python 3.11 or newer (brew install python, or set WS_PYTHON)" >&2
+    exit 1
+fi
+# a __pycache__ inside the signed app bundle breaks its signature
+export PYTHONDONTWRITEBYTECODE=1
+exec "$py" -B "$here/ks-mcp.py" "$@"

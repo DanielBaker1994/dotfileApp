@@ -3963,9 +3963,8 @@ mod daemon_ui {
                     }) else {
                         return;
                     };
-                    let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p2, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
-                    let w1 = weak.clone();
+                    let w1 = objc2::rc::Weak::from_retained(&self.retain());
+                    let (p1, p2, p3, p4) = (path.clone(), path.clone(), path.clone(), path.clone());
                     popup(
                         vec![
                             MenuEntry::item("Copy File", move || { copy_files_toast(&[p1]); }),
@@ -3976,22 +3975,7 @@ mod daemon_ui {
                                     ui.open_in_notes(&p3);
                                 }
                             }),
-                            MenuEntry::item("Open in Default App", move || open_path(&p4)),
-                            MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p5])),
-                            MenuEntry::Separator,
-                            MenuEntry::item("Forget", move || {
-                                SHELF.with(|s| {
-                                    if let Some(sh) = s.borrow().as_ref() {
-                                        sh.borrow_mut().remove(&[path.clone()]);
-                                    }
-                                });
-                                if let Some(ui) = weak.load() {
-                                    ui.paths_surface(|w| {
-                                        w.set_items(shelf_entries());
-                                        w.reload(true);
-                                    });
-                                }
-                            }),
+                            MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p4])),
                         ],
                         None,
                         x,
@@ -5194,8 +5178,8 @@ mod daemon_ui {
                                 ui.files_surface(|b| b.cd(&p1));
                             }
                         }),
-                        MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p2])),
-                        MenuEntry::item("Copy Path", move || copy_text_to_pasteboard(&p3)),
+                        MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p2])),
+                        MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p3)),
                     ];
                     if pinned {
                         entries.push(MenuEntry::Separator);
@@ -5331,7 +5315,7 @@ mod daemon_ui {
                     c.set_pending_note_external(conf.to_string_lossy().into_owned());
                     c.open(SlotView::Notes);
                 }),
-                MenuEntry::item("Keyboard Shortcuts   ⌘/", move || {
+                MenuEntry::item("Keyboard Shortcuts  ⌘/", move || {
                     if let Some(ui) = w3.load() {
                         ui.show_shortcuts();
                     }
@@ -5581,7 +5565,7 @@ mod daemon_ui {
                 popup(vec![MenuEntry::disabled("Document styles unavailable (python helper)")], None, mouse.x, mouse.y);
                 return;
             };
-            let mut entries = vec![MenuEntry::disabled("Document style")];
+            let mut entries = vec![MenuEntry::Header("Document style".to_string())];
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             entries.push(MenuEntry::checked("Plain (no style)", current.is_none(), move || {
                 if let Some(ui) = weak.load() {
@@ -5638,8 +5622,8 @@ mod daemon_ui {
         }
 
         /// The notes pinned-folder tree: clicks toggle folders / open files;
-        /// the right-click menu follows the file-browser rule (copy path, open
-        /// in default app, reveal in the app's own Files view).
+        /// the right-click menu follows the file-browser rule (copy absolute
+        /// path, copy file, open in notes, reveal in the app's own Files view).
         fn notes_tree_event(&self, ev: crate::ui::tree_view::TreeEvent) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             use crate::ui::tree_view::TreeEvent as E;
@@ -5652,7 +5636,7 @@ mod daemon_ui {
                 }
                 E::Menu { path, is_dir, is_root, x, y } => {
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p2, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
+                    let (p1, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone());
                     let mut entries = Vec::new();
                     if is_dir {
                         let w = weak.clone();
@@ -5670,7 +5654,7 @@ mod daemon_ui {
                         entries.push(MenuEntry::Separator);
                     } else {
                         let w = weak.clone();
-                        entries.push(MenuEntry::item("Open", move || {
+                        entries.push(MenuEntry::item("Open in Notes", move || {
                             if let Some(ui) = w.load() {
                                 ui.notes_surface(|s| s.tree_click(&p4, false));
                             }
@@ -5695,10 +5679,7 @@ mod daemon_ui {
                         }));
                     }
                     entries.push(MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)));
-                    if !is_dir || is_root {
-                        entries.push(MenuEntry::item("Open in Default App", move || open_path(&p2)));
-                    }
-                    entries.push(MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p3])));
+                    entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])));
                     if !is_root {
                         entries.push(MenuEntry::Separator);
                         let (w, pt) = (weak.clone(), path.clone());
@@ -5755,12 +5736,11 @@ mod daemon_ui {
                     use crate::ui::menu_kit::{popup, MenuEntry};
                     let Some(Some(path)) = self.notes_surface(|s| s.tab_path(i)) else { return };
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
+                    let (p1, p3) = (path.clone(), path.clone());
                     popup(
                         vec![
                             MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)),
-                            MenuEntry::item("Open in Default App", move || open_path(&p2)),
-                            MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p3])),
+                            MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])),
                             MenuEntry::Separator,
                             MenuEntry::item("Close", move || {
                                 if let Some(ui) = weak.load() {
@@ -5839,7 +5819,7 @@ mod daemon_ui {
                         let Some(p) = p else { continue };
                         let p2 = p.clone();
                         e.push(MenuEntry::item(&format!("Copy {name} Path"), move || copy_text_to_pasteboard(&p)));
-                        e.push(MenuEntry::item(&format!("Reveal {name} in Finder"), move || reveal_in_files(&[p2])));
+                        e.push(MenuEntry::item(&format!("Reveal {name} in Files"), move || reveal_in_files(&[p2])));
                     }
                     popup(e, None, x, y);
                 }
@@ -5981,9 +5961,9 @@ mod daemon_ui {
                                     }
                                 }
                             }),
-                            MenuEntry::item("Reveal Left in Finder", move || reveal_in_files(&[l2])),
-                            MenuEntry::item("Reveal Right in Finder", move || reveal_in_files(&[r2])),
-                            MenuEntry::item("Copy Paths", move || copy_text_to_pasteboard(&format!("{l}\n{r}"))),
+                            MenuEntry::item("Reveal Left in Files", move || reveal_in_files(&[l2])),
+                            MenuEntry::item("Reveal Right in Files", move || reveal_in_files(&[r2])),
+                            MenuEntry::item("Copy Absolute Paths", move || copy_text_to_pasteboard(&format!("{l}\n{r}"))),
                             MenuEntry::Separator,
                             MenuEntry::item("Remove from Recent", move || {
                                 if let Some(ui) = w2.load() {
@@ -6161,7 +6141,7 @@ mod daemon_ui {
             }));
             e.push(item("Move to Trash  ⌘⌫", on_side, Box::new(act(Box::new(|m| m.folder_page.trash_selection())))));
             e.push(MenuEntry::Separator);
-            e.push(item("Copy Path", on_side, Box::new(act(Box::new(|m| {
+            e.push(item("Copy Absolute Path", on_side, Box::new(act(Box::new(|m| {
                 let paths = m.folder_page.target_paths();
                 if paths.is_empty() {
                     return;
@@ -6175,8 +6155,8 @@ mod daemon_ui {
                 crate::ui::toast::show(&msg, "doc.on.clipboard");
             })))));
             let p = t.path.clone().unwrap_or_default();
-            let (p1, p2, p3) = (p.clone(), p.clone(), p);
-            e.push(item("Reveal in Finder", on_side, Box::new(move || reveal_in_files(&[p1]))));
+            let (p1, p2) = (p.clone(), p.clone());
+            e.push(item("Reveal in Files", on_side, Box::new(move || reveal_in_files(&[p1]))));
             if !t.is_folder {
                 let w = weak.clone();
                 e.push(item("Open in Notes", on_side, Box::new(move || {
@@ -6185,7 +6165,6 @@ mod daemon_ui {
                     }
                 })));
             }
-            e.push(item("Open in Default App", on_side, Box::new(move || open_path(&p3))));
             let w = weak.clone();
             e.push(item("Quick Look  Space", t.has_left || t.has_right, Box::new(move || {
                 let Some(ui) = w.load() else { return };
@@ -6339,13 +6318,7 @@ mod daemon_ui {
                     }
                 }),
             ));
-            e.push(item(
-                "Edit Section  (⏎)",
-                info.has_rows,
-                Box::new(|| crate::ui::toast::not_ported("Compare Edit Section")),
-            ));
             e.push(item("Select Section", info.in_section, Box::new(act(Box::new(|m| m.select_section())))));
-            e.push(MenuEntry::item("Find…  (⌘F)", || crate::ui::toast::not_ported("Compare Find")));
             e.push(MenuEntry::Separator);
             let line = info.line;
             match info.pick {
@@ -6387,9 +6360,9 @@ mod daemon_ui {
             let path = info.path.clone();
             let has_path = path.is_some();
             let p = path.clone().unwrap_or_default();
-            let (p1, p2, p3, p4) = (p.clone(), p.clone(), p.clone(), p);
-            e.push(item("Copy Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
-            e.push(item("Reveal in Finder", has_path, Box::new(move || reveal_in_files(&[p2]))));
+            let (p1, p2, p3) = (p.clone(), p.clone(), p.clone());
+            e.push(item("Copy Absolute Path", has_path, Box::new(move || copy_text_to_pasteboard(&p1))));
+            e.push(item("Reveal in Files", has_path, Box::new(move || reveal_in_files(&[p2]))));
             let w = weak.clone();
             e.push(item(
                 "Open in Notes",
@@ -6400,7 +6373,6 @@ mod daemon_ui {
                     }
                 }),
             ));
-            e.push(item("Open in Default App", has_path, Box::new(move || open_path(&p4))));
             let w = weak.clone();
             e.push(MenuEntry::item("Open File into This Side…  (⌘O)", move || {
                 let Some(mtm) = MainThreadMarker::new() else { return };
@@ -6640,19 +6612,18 @@ mod daemon_ui {
             use crate::ui::menu_kit::{popup, MenuEntry};
             let Some(Some(r)) = self.ai_surface(|a| a.model.rules.get(i).cloned()) else { return };
             let weak = objc2::rc::Weak::from_retained(&self.retain());
-            let (p1, p2, p3, p4) = (r.path.clone(), r.path.clone(), r.path.clone(), r.path.clone());
+            let (p1, p3, p4) = (r.path.clone(), r.path.clone(), r.path.clone());
             let (w1, w2, w3) = (weak.clone(), weak.clone(), weak.clone());
             let (r2, r3) = (r.clone(), r.clone());
             popup(
                 vec![
-                    MenuEntry::item("Edit in Notes", move || {
+                    MenuEntry::item("Open in Notes", move || {
                         if let Some(ui) = w1.load() {
                             ui.open_in_notes(&p1);
                         }
                     }),
-                    MenuEntry::item("Open in Default App", move || open_path(&p2)),
-                    MenuEntry::item("Reveal in Finder", move || reveal_in_files(&[p3])),
-                    MenuEntry::item("Copy Path", move || copy_text_to_pasteboard(&p4)),
+                    MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])),
+                    MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p4)),
                     MenuEntry::Separator,
                     MenuEntry::item("Duplicate…", move || {
                         if let Some(ui) = w2.load() {
@@ -7433,13 +7404,12 @@ mod daemon_ui {
                 E::RowMenu { row, x, y } => {
                     let Some(Some(r)) = self.conf_surface(|cs| cs.model.rows.get(row).cloned()) else { return };
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (u1, u2, t) = (r.url.clone(), r.url.clone(), r.title.clone());
+                    let (u1, u2) = (r.url.clone(), r.url.clone());
                     let w = weak.clone();
                     popup(
                         vec![
                             MenuEntry::item("Open in Browser", move || open_url(&u1)),
                             MenuEntry::item("Copy Link", move || copy_text_to_pasteboard(&u2)),
-                            MenuEntry::item("Copy Title", move || copy_text_to_pasteboard(&t)),
                             MenuEntry::Separator,
                             MenuEntry::item(if r.favorite { "Remove from Favorites" } else { "Add to Favorites" }, move || {
                                 if let Some(ui) = w.load() {
@@ -7599,20 +7569,15 @@ mod daemon_ui {
                     self.jira_surface(|l| l.sort_by(i));
                 }
                 E::HeaderMenu { x, y } => {
-                    // `PopupTableHeader.rightMouseDown`: Fit Columns to
-                    // Content, then the list's extra items (Group By).
+                    // `PopupTableHeader.rightMouseDown`: Fit Columns to Content.
                     use crate::ui::menu_kit::{popup, MenuEntry};
                     let w1 = objc2::rc::Weak::from_retained(&self.retain());
                     popup(
-                        vec![
-                            MenuEntry::item("Fit Columns to Content", move || {
-                                if let Some(ui) = w1.load() {
-                                    ui.jira_fit_columns();
-                                }
-                            }),
-                            MenuEntry::Separator,
-                            MenuEntry::item("Group By…", || crate::ui::toast::not_ported("Jira Group By")),
-                        ],
+                        vec![MenuEntry::item("Fit Columns to Content", move || {
+                            if let Some(ui) = w1.load() {
+                                ui.jira_fit_columns();
+                            }
+                        })],
                         None,
                         x,
                         y,
@@ -7660,17 +7625,16 @@ mod daemon_ui {
                     use crate::ui::menu_kit::{popup, MenuEntry};
                     let info = self.jira_surface(|l| {
                         l.selection = row;
-                        l.selected().map(|r| (r.get("key").cloned().unwrap_or_default(), r.get("title").cloned().unwrap_or_default(), l.site()))
+                        l.selected().map(|r| (r.get("key").cloned().unwrap_or_default(), l.site()))
                     });
-                    if let Some(Some((key, title, site))) = info {
+                    if let Some(Some((key, site))) = info {
                         let url = format!("{site}/browse/{key}");
-                        let (u1, u2, k1, kt) = (url.clone(), url, key.clone(), format!("{key} {title}"));
+                        let (u1, u2, k1) = (url.clone(), url, key.clone());
                         popup(
                             vec![
                                 MenuEntry::item("Open in Browser", move || open_url(&u1)),
                                 MenuEntry::Separator,
                                 MenuEntry::item("Copy Key", move || copy_text_to_pasteboard(&k1)),
-                                MenuEntry::item("Copy Key + Title", move || copy_text_to_pasteboard(&kt)),
                                 MenuEntry::item("Copy Link", move || copy_text_to_pasteboard(&u2)),
                             ],
                             None,
@@ -8114,9 +8078,9 @@ mod daemon_ui {
             }
         }
 
-        /// The rule-2 file context menu: open, open in notes, open with the
-        /// default app, reveal in Finder, copy the absolute path, Quick Look,
-        /// rename, new terminal here, trash.
+        /// The rule-2 file context menu: open in notes, reveal in the app's
+        /// own Files view, copy the absolute path, copy the file, Quick Look,
+        /// trash.
         fn files_row_menu(&self, x: f64, y: f64) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             let Some(paths) = self.files_surface(|b| b.selected_paths()) else {
@@ -8129,14 +8093,6 @@ mod daemon_ui {
             let first = paths[0].clone();
             let is_dir = std::path::Path::new(&first).is_dir();
             let mut entries = Vec::new();
-            {
-                let w = weak.clone();
-                entries.push(MenuEntry::item("Open", move || {
-                    if let Some(ui) = w.load() {
-                        ui.files_accept_selected();
-                    }
-                }));
-            }
             if !is_dir {
                 let w = weak.clone();
                 let p = first.clone();
@@ -8148,15 +8104,7 @@ mod daemon_ui {
             }
             {
                 let ps = paths.clone();
-                entries.push(MenuEntry::item("Open in Default App", move || {
-                    for p in &ps {
-                        open_path(p);
-                    }
-                }));
-            }
-            {
-                let ps = paths.clone();
-                entries.push(MenuEntry::item("Reveal in Finder", move || reveal_in_files(&ps)));
+                entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&ps)));
             }
             entries.push(MenuEntry::Separator);
             {
@@ -8169,7 +8117,11 @@ mod daemon_ui {
             }
             {
                 let ps = paths.clone();
-                entries.push(MenuEntry::item("Copy", move || { copy_files_toast(&ps); }));
+                let n = paths.len();
+                entries.push(MenuEntry::item(
+                    if n == 1 { "Copy File" } else { "Copy Files" },
+                    move || { copy_files_toast(&ps); },
+                ));
             }
             entries.push(MenuEntry::Separator);
             {
@@ -8529,8 +8481,8 @@ mod daemon_ui {
         }
 
         /// `PopupTextView.menu(for:)`: the plain notes editor's right-click.
-        /// On an image link: Open Full Size and copy image path; then Copy
-        /// File Path and Open file at path….
+        /// On an image link: Open Full Size and Copy Image Path; then Copy
+        /// Absolute Path (the note) and Open file at path….
         fn notes_editor_menu(&self, idx: usize) {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
             let Some((image, note, view)) = self.notes_surface(|s| {
@@ -8548,14 +8500,14 @@ mod daemon_ui {
                         ui.notes_open_image(p);
                     }
                 }));
-                e.push(MenuEntry::item("copy image path", move || {
+                e.push(MenuEntry::item("Copy Image Path", move || {
                     copy_text_to_pasteboard(&path);
                     crate::ui::toast::show(&format!("Copied {}", tilde_path(&path)), "doc.on.clipboard");
                 }));
                 e.push(MenuEntry::Separator);
             }
             if let Some(note) = note {
-                e.push(MenuEntry::item("Copy File Path", move || {
+                e.push(MenuEntry::item("Copy Absolute Path", move || {
                     copy_text_to_pasteboard(&note);
                     crate::ui::toast::show(&format!("Copied {}", tilde_path(&note)), "doc.on.clipboard");
                 }));
@@ -9636,14 +9588,11 @@ mod daemon_ui {
     }
 
     fn open_url(url: &str) {
-        use objc2_app_kit::NSWorkspace;
-        if let Some(u) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) {
-            NSWorkspace::sharedWorkspace().openURL(&u);
-        }
+        crate::platform::open_url(url);
     }
 
     /// Show `paths` in the app's own file browser (`SlotView::Files`) — the
-    /// uniform replacement for every "Reveal in Finder" action. Looks the live
+    /// uniform replacement for every "Reveal in Files" action. Looks the live
     /// UI up through [`UI_WEAK`] (callers are main-thread menu/key handlers
     /// that hold no `&DaemonUi`).
     pub(crate) fn reveal_in_files(paths: &[String]) {

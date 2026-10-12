@@ -990,21 +990,6 @@ impl PinPanel {
         }
         PinKeyAction::Ignored
     }
-
-    /// The right-click menu titles (mirrors `PinPanel.menu`).
-    pub fn menu_titles() -> Vec<&'static str> {
-        vec![
-            "Copy to clipboard",
-            "Save to file",
-            "-",
-            "Rotate Right",
-            "Rotate Left",
-            "Increase Opacity",
-            "Decrease Opacity",
-            "-",
-            "Close",
-        ]
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6174,9 +6159,9 @@ impl ScreenshotController {
         let weak_grid = objc2::rc::Weak::from_retained(&grid);
         *grid.ivars().on_menu.borrow_mut() = Some(Rc::new(move |e: ShotRecentEntry| {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
-            let (w1, w2, w3, w4, w5) = (w.clone(), w.clone(), w.clone(), w.clone(), w.clone());
-            let (p1, p2, p3, p4, p5, p6) = (
-                e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(),
+            let (w1, w2, w3, w4) = (w.clone(), w.clone(), w.clone(), w.clone());
+            let (p1, p2, p3, p4, p5) = (
+                e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(), e.path.clone(),
             );
             let g = weak_grid.clone();
             let parent = popup_parent.clone();
@@ -6192,20 +6177,16 @@ impl ScreenshotController {
                         }))
                     }),
                     MenuEntry::item("Open in Popup", move || {
-                        w5(Box::new(move |c| {
+                        w3(Box::new(move |c| {
                             // The grid goes away; the overlay stays live under
                             // the popup and takes the keyboard back on close.
                             c.close_recent();
                             c.redraw_overlays();
                             let parent_ns = parent.as_ref().map(|w| &**w);
-                            crate::views::file_popup::show(&p6, parent_ns);
+                            crate::views::file_popup::show(&p3, parent_ns);
                         }));
                     }),
-                    MenuEntry::item("Open in Preview", move || {
-                        w3(Box::new(|c| c.abort_session()));
-                        open_in_workspace(&p3);
-                    }),
-                    MenuEntry::item("Reveal in Finder", move || {
+                    MenuEntry::item("Reveal in Files", move || {
                         w4(Box::new(|c| c.abort_session()));
                         reveal_in_workspace(&p4);
                     }),
