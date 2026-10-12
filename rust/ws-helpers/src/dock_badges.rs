@@ -3,7 +3,12 @@
 //! stdout: one `<bundle id>\t<badge label>\n` line per Dock item exposing an
 //! `AXURL` that resolves to a bundle identifier. Exit 1 when the Dock is not
 //! running, 2 without Accessibility permission (stderr note, like Swift).
+//!
+//! macOS-only (Accessibility + AppKit): the implementation is compiled under
+//! `target_os = "macos"`; other targets build a stub `main` (PLAN §3 X2).
 
+#[cfg(target_os = "macos")]
+mod imp {
 use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::ptr::null_mut;
@@ -88,7 +93,7 @@ fn badge_line(id: &str, label: &str) -> String {
     format!("{id}\t{label}\n")
 }
 
-fn main() {
+pub fn main() {
     unsafe {
         let dock_bundle = NSString::from_str("com.apple.dock");
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&dock_bundle);
@@ -130,4 +135,16 @@ mod tests {
     fn empty_label_keeps_the_empty_field() {
         assert_eq!(badge_line("com.apple.mail", ""), "com.apple.mail\t\n");
     }
+}
+} // mod imp
+
+#[cfg(target_os = "macos")]
+fn main() {
+    imp::main();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("macOS only");
+    std::process::exit(1);
 }

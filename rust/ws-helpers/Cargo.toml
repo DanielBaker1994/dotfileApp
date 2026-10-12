@@ -12,10 +12,16 @@ path = "src/dock_badges.rs"
 name = "webex_unread"
 path = "src/webex_unread.rs"
 
+# Portable dependencies (build on every target).
 [dependencies]
+serde_json = "1"
+libc = "0.2"
+
+# AppKit / Objective-C bindings: the AX helpers are macOS-only (X2). Gating them
+# keeps a Linux `cargo check` from pulling the ObjC crates; each src/*.rs binary
+# compiles to a stub `main` off macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
 objc2-core-foundation = "0.3.2"
-serde_json = "1"
-libc = "0.2"

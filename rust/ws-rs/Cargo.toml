@@ -9,7 +9,19 @@ license = "MIT"
 name = "kitchen-sink"
 path = "src/main.rs"
 
+# Portable dependencies (build on every target).
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+libc = "0.2"
+rmpv = "1"
+open = "5"
+
+# AppKit / Objective-C bindings: macOS only. Target-gating them here is what
+# makes `cargo check` on Linux surface the AppKit leaks Wave 1 gates (the Linux
+# frontend replaces these crates). macOS still resolves them identically.
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
@@ -21,14 +33,8 @@ objc2-core-text = "0.3.2"
 objc2-web-kit = "0.3.2"
 objc2-vision = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-libc = "0.2"
-rmpv = "1"
-swiftterm-shim = { path = "../swiftterm-shim" }
 objc2-quick-look-ui = "0.3.2"
-open = "5"
+swiftterm-shim = { path = "../swiftterm-shim" }
 
 # Non-macOS clipboard (macOS keeps objc2 NSPasteboard; arboard links AppKit
 # there, so it must stay target-gated).
@@ -37,4 +43,7 @@ arboard = { version = "3", default-features = false }
 
 # Non-macOS file pickers (macOS keeps the objc2 NSOpenPanel code; rfd's own
 # macOS backend would link AppKit, so it must stay target-gated too).
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }
+# `async-std` is required: xdg-portal pulls ashpd, and without it ashpd never
+# enables zbus/async-io, so zbus hard-errors on Linux. It is a feature of the
+# named dep, not a new dependency (and avoids tokio).
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }

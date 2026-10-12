@@ -169,6 +169,11 @@ case "${1:-all}" in
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
         "$py" -B "$TESTS/test_ks_mcp.py"
         ;;
+    linux)
+        # Linux compile gate in Docker (Wave 0); run-tests.sh has no other
+        # Linux case yet. The Linux test run lands with Wave 2.
+        exec "$ROOT/bin/linux-check.sh" check
+        ;;
     rust)
         rust_test
         ;;

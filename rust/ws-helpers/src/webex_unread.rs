@@ -4,7 +4,12 @@
 //! stdout: `count\t<AXValue of the messaging hub badge>\n` followed by one
 //! `space\t<title>\n` per unread space row. Exit 2 without Accessibility
 //! permission, 3 when Webex (or its main window) is not available.
+//!
+//! macOS-only (Accessibility + AppKit): the implementation is compiled under
+//! `target_os = "macos"`; other targets build a stub `main` (PLAN §3 X2).
 
+#[cfg(target_os = "macos")]
+mod imp {
 use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::ptr::null_mut;
@@ -125,7 +130,7 @@ fn qualifies(title: &str, desc: &str) -> bool {
     !title.is_empty() && title != "Recommended messages" && desc.contains(&(title.to_string() + ", "))
 }
 
-fn main() {
+pub fn main() {
     let bundle = std::env::args().nth(1).unwrap_or_else(|| "Cisco-Systems.Spark".to_string());
 
     unsafe {
@@ -209,4 +214,16 @@ mod tests {
         assert!(!qualifies("Team Chat", "no suffix here"));
         assert!(!qualifies("Team Chat", "Team Chat without comma"));
     }
+}
+} // mod imp
+
+#[cfg(target_os = "macos")]
+fn main() {
+    imp::main();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("macOS only");
+    std::process::exit(1);
 }

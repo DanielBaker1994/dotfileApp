@@ -24,6 +24,11 @@ fn read_conf(repo: &Path, key: &str, default: &str) -> String {
 }
 
 fn main() {
+    // swiftc and the SwiftTerm module are macOS-only. Skip the whole script off
+    // macOS so a Linux `cargo check` never looks for a checkout or runs swiftc.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=shim/WSShim.swift");
     println!("cargo:rerun-if-env-changed=SWIFTTERM_DIR");

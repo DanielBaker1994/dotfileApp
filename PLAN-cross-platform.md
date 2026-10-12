@@ -516,3 +516,14 @@ Linux frontend with macOS.
 
 ## 8. Progress log (orchestrator appends)
 - Wave 0 error table: _pending_
+- Wave 0 (landed): `bin/linux-check.sh` + `rust/docker/linux.Dockerfile` (Colima, arm64). Extra gating beyond card: `swiftterm-shim/Cargo.toml` + `build.rs`; X0 `rfd` needs `features = ["xdg-portal", "async-std"]` (zbus hard-errors otherwise). macOS: 20 warnings. Linux: 64 ws-rs errors (resolution phase; later phases likely masked, so re-derive after W1).
+  | errors | file |
+  |---:|---|
+  | 14 | main.rs |
+  | 12 | views/files.rs |
+  | 9 | ui/shared_window.rs |
+  | 7 | engines/recent_files.rs |
+  | 6 | engines/ansi_render.rs |
+  | 5 | views/paths.rs |
+  | 2 | ui/chrome.rs |
+  | 1 each | ui/card.rs, ui/popup.rs, ui/tree_view.rs, app/socket.rs, views/{terminal,notes_vim,inspector,setup,switcher,tools,screenshot}.rs |

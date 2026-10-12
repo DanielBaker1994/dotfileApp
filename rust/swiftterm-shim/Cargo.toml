@@ -5,7 +5,11 @@ edition = "2021"
 description = "Thin Swift shim bridging SwiftTerm's terminal NSView to Rust (kitchen-sink port)"
 build = "build.rs"
 
-[dependencies]
+# macOS-only: the shim wraps SwiftTerm's AppKit NSView (src/lib.rs is
+# `#![cfg(target_os = "macos")]`). Gating the ObjC deps keeps a Linux
+# `cargo check --workspace` from compiling them (objc2 hard-errors off Apple),
+# which would otherwise abort before ws-rs's own errors surface.
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
