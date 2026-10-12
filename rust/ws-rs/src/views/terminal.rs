@@ -253,7 +253,7 @@ impl TerminalPanel {
                 // `show()`: `if !panel.isVisible { place() }`.
                 if let Some(panel) = &self.panel {
                     if !panel.isVisible() {
-                        if let Some(f) = Self::placed_frame(mtm) {
+                        if let Some(f) = Self::placed_frame() {
                             panel.setFrame_display(
                                 objc2_foundation::NSRect::new(
                                     objc2_foundation::NSPoint::new(f.x, f.y),
@@ -329,22 +329,13 @@ impl TerminalPanel {
     /// `place()`'s live inputs: the visible frame of the screen under the
     /// mouse and the `terminalPanelFrame` user default.
     #[cfg(target_os = "macos")]
-    fn placed_frame(mtm: MainThreadMarker) -> Option<TerminalFrame> {
-        use objc2_app_kit::{NSEvent, NSScreen};
+    fn placed_frame() -> Option<TerminalFrame> {
+        use objc2_app_kit::NSEvent;
         let mouse = NSEvent::mouseLocation();
-        let screens = NSScreen::screens(mtm);
-        let screen = screens
-            .iter()
-            .find(|s| {
-                let f = s.frame();
-                mouse.x >= f.origin.x
-                    && mouse.x < f.origin.x + f.size.width
-                    && mouse.y >= f.origin.y
-                    && mouse.y < f.origin.y + f.size.height
-            })
-            .or_else(|| NSScreen::mainScreen(mtm))?;
-        let vf = screen.visibleFrame();
-        let visible = TerminalFrame::new(vf.origin.x, vf.origin.y, vf.size.width, vf.size.height);
+        let vf = crate::platform::screen_containing(mouse.x, mouse.y)
+            .or_else(crate::platform::main_screen)?
+            .visible;
+        let visible = TerminalFrame::new(vf.x, vf.y, vf.w, vf.h);
         Some(Self::place(Self::saved_frame(), visible))
     }
 

@@ -7,6 +7,9 @@ pub use app::*;
 pub mod clipboard;
 pub use clipboard::*;
 
+pub mod screens;
+pub use screens::*;
+
 /// Open `url` in the user's default browser (was `NSWorkspace.openURL`).
 /// Returns whether the OS accepted the request.
 pub fn open_url(url: &str) -> bool {

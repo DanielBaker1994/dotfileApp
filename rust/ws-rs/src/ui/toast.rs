@@ -31,8 +31,8 @@ mod appkit {
     use objc2::rc::Retained;
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSBackingStoreType, NSColor, NSImageView, NSLineBreakMode, NSPanel, NSScreen, NSTextField,
-        NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSBackingStoreType, NSColor, NSImageView, NSLineBreakMode, NSPanel, NSTextField, NSView,
+        NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
     use std::cell::RefCell;
@@ -48,14 +48,15 @@ mod appkit {
         if text.is_empty() {
             return;
         }
-        let Some(scr) = NSScreen::mainScreen(mtm) else { return };
+        let Some(scr) = crate::platform::main_screen() else { return };
         PANEL.with(|p| {
             if let Some(old) = p.borrow_mut().take() {
                 old.orderOut(None);
             }
         });
         let c = PopupThemeDefaults::colors();
-        let sf = scr.frame();
+        let f = scr.frame;
+        let sf = NSRect::new(NSPoint::new(f.x, f.y), NSSize::new(f.w, f.h));
 
         let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
         label.setFont(Some(&style::system_font(12.5, Weight::Medium)));

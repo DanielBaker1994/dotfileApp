@@ -1746,7 +1746,7 @@ mod macos {
     use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBackingStoreType, NSDraggingInfo, NSFont, NSImage,
-        NSImageScaling, NSImageView, NSNormalWindowLevel, NSPasteboard, NSScreen, NSScrollView,
+        NSImageScaling, NSImageView, NSNormalWindowLevel, NSPasteboard, NSScrollView,
         NSTextAttachment, NSTextField, NSTextView, NSView, NSWindow, NSWindowButton,
         NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
     };
@@ -2613,16 +2613,13 @@ mod macos {
         let src = ProseSource::new(markdown, opts.path.clone());
         let html = ProseRender::page(&src, &opts.colors, &opts.font, opts.size, opts.width, &cfg);
 
-        let vf = NSScreen::mainScreen(mtm)
-            .map(|s| s.visibleFrame())
-            .unwrap_or(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1400.0, 900.0)));
-        let w = (vf.size.width * 0.6).min(opts.width + 160.0).max(320.0);
-        let h = (vf.size.height * 0.8).max(240.0);
+        let vf = crate::platform::main_screen()
+            .map(|s| s.visible)
+            .unwrap_or(crate::platform::screens::Rect::new(0.0, 0.0, 1400.0, 900.0));
+        let w = (vf.w * 0.6).min(opts.width + 160.0).max(320.0);
+        let h = (vf.h * 0.8).max(240.0);
         let frame = NSRect::new(
-            NSPoint::new(
-                vf.origin.x + (vf.size.width - w) / 2.0,
-                vf.origin.y + (vf.size.height - h) / 2.0,
-            ),
+            NSPoint::new(vf.x + (vf.w - w) / 2.0, vf.y + (vf.h - h) / 2.0),
             NSSize::new(w, h),
         );
         let mask = NSWindowStyleMask::Titled

@@ -694,28 +694,16 @@ extern "C" {
 /// Empty off the main thread.
 #[cfg(target_os = "macos")]
 pub fn current_screens() -> Vec<ScreenRef> {
-    use objc2_app_kit::NSScreen;
-    use objc2_foundation::{NSNumber, NSString};
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return Vec::new();
-    };
-    let key = NSString::from_str("NSScreenNumber");
-    NSScreen::screens(mtm)
-        .iter()
-        .filter_map(|scr| {
-            let id = scr
-                .deviceDescription()
-                .objectForKey(&key)
-                .and_then(|o| o.downcast::<NSNumber>().ok())?
-                .unsignedIntValue();
-            let f = scr.frame();
+    crate::platform::screens()
+        .into_iter()
+        .map(|s| {
             let mut r = ScreenRef::new(
-                id,
-                Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height),
-                scr.backingScaleFactor(),
+                s.id,
+                Rect::new(s.frame.x, s.frame.y, s.frame.w, s.frame.h),
+                s.scale,
             );
-            r.top_inset = f.origin.y + f.size.height - (scr.visibleFrame().origin.y + scr.visibleFrame().size.height);
-            Some(r)
+            r.top_inset = s.frame.y + s.frame.h - (s.visible.y + s.visible.h);
+            r
         })
         .collect()
 }
@@ -5390,14 +5378,17 @@ fn reveal_in_workspace(path: &str) {
 
 /// The frame of the screen under the mouse (`mouseScreen`).
 #[cfg(target_os = "macos")]
-fn mouse_screen_frame(mtm: objc2::MainThreadMarker) -> Option<objc2_foundation::NSRect> {
+fn mouse_screen_frame() -> Option<objc2_foundation::NSRect> {
     let m = objc2_app_kit::NSEvent::mouseLocation();
-    let screens = objc2_app_kit::NSScreen::screens(mtm);
-    screens
-        .iter()
-        .map(|s| s.frame())
-        .find(|f| m.x >= f.origin.x && m.x < f.origin.x + f.size.width && m.y >= f.origin.y && m.y < f.origin.y + f.size.height)
-        .or_else(|| objc2_app_kit::NSScreen::mainScreen(mtm).map(|s| s.frame()))
+    crate::platform::screen_containing(m.x, m.y)
+        .or_else(crate::platform::main_screen)
+        .map(|s| {
+            let f = s.frame;
+            objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(f.x, f.y),
+                objc2_foundation::NSSize::new(f.w, f.h),
+            )
+        })
 }
 
 /// `PinPanel.menu()`: the pin window's right-click menu. The controller is
@@ -6197,7 +6188,7 @@ impl ScreenshotController {
                 &view,
             );
         }));
-        if let Some(f) = mouse_screen_frame(mtm) {
+        if let Some(f) = mouse_screen_frame() {
             let sz = panel.frame().size;
             panel.setFrameOrigin(objc2_foundation::NSPoint::new(
                 (f.origin.x + f.size.width / 2.0 - sz.width / 2.0).round(),
@@ -6247,10 +6238,10 @@ impl ScreenshotController {
     pub fn reopen_recent_as_pin(&mut self, path: &str) {
         let Some(img) = recent_image(path) else { return };
         self.abort_session();
-        let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+        let Some(_mtm) = objc2::MainThreadMarker::new() else { return };
         let scale = 2.0;
         let (w, h) = (img.width as f64 / scale, img.height as f64 / scale);
-        let frame = mouse_screen_frame(mtm).map(|f| {
+        let frame = mouse_screen_frame().map(|f| {
             Rect::new(f.origin.x + f.size.width / 2.0 - w / 2.0, f.origin.y + f.size.height / 2.0 - h / 2.0, w, h)
         });
         self.pin(&img, frame, None);
@@ -7101,19 +7092,10 @@ impl ScreenshotController {
 /// main screen's; 2 off the main thread.
 #[cfg(target_os = "macos")]
 pub fn mouse_screen_scale() -> f64 {
-    use objc2_app_kit::{NSEvent, NSScreen};
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return 2.0;
-    };
-    let p = NSEvent::mouseLocation();
-    let screens = NSScreen::screens(mtm);
-    let hit = screens.iter().find(|s| {
-        let f = s.frame();
-        p.x >= f.origin.x && p.x < f.origin.x + f.size.width && p.y >= f.origin.y && p.y < f.origin.y + f.size.height
-    });
-    hit.or_else(|| NSScreen::mainScreen(mtm))
-        .map(|s| s.backingScaleFactor())
-        .unwrap_or(2.0)
+    let p = objc2_app_kit::NSEvent::mouseLocation();
+    crate::platform::screen_containing(p.x, p.y)
+        .or_else(crate::platform::main_screen)
+        .map_or(2.0, |s| s.scale)
 }
 
 pub(crate) fn epoch_millis() -> i64 {

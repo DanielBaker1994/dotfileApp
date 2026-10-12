@@ -2800,10 +2800,9 @@ mod daemon_ui {
             key_wid: key.as_ref().map_or(0, |w| w.windowNumber() as i64),
             windows: visible_window_count(mtm),
             frontmost: crate::platform::frontmost_app().map_or(0, |a| a.pid),
-            main_h: objc2_app_kit::NSScreen::screens(mtm)
-                .firstObject()
-                .map(|s| s.frame().size.height)
-                .unwrap_or(0.0),
+            main_h: crate::platform::screens()
+                .first()
+                .map_or(0.0, |s| s.frame.h),
         })
     }
 
@@ -3595,18 +3594,11 @@ mod daemon_ui {
             );
             // Centre on the screen under the mouse, not on the (possibly
             // hidden / other-Space / stale) main window's frame.
-            let host = objc2_app_kit::NSScreen::screens(mtm)
-                .iter()
-                .find(|s| {
-                    let m = objc2_app_kit::NSEvent::mouseLocation();
-                    let f = s.frame();
-                    m.x >= f.origin.x
-                        && m.x < f.origin.x + f.size.width
-                        && m.y >= f.origin.y
-                        && m.y < f.origin.y + f.size.height
-                })
-                .or_else(|| objc2_app_kit::NSScreen::mainScreen(mtm))
-                .map(|s| s.visibleFrame())
+            let m = objc2_app_kit::NSEvent::mouseLocation();
+            let host = crate::platform::screen_containing(m.x, m.y)
+                .or_else(crate::platform::main_screen)
+                .map(|s| s.visible)
+                .map(|v| NSRect::new(NSPoint::new(v.x, v.y), NSSize::new(v.w, v.h)))
                 .unwrap_or_else(|| st.window.frame());
             panel.present(
                 mtm,
@@ -9679,13 +9671,12 @@ mod daemon_ui {
     /// `clampToScreen`: keep the frame inside the window's screen's visible
     /// frame (Swift `PopupWindow.clampToScreen`).
     fn clamp_to_screen(f: &mut NSRect) {
-        let Some(mtm) = MainThreadMarker::new() else {
+        let Some(vf) = crate::platform::main_screen().map(|s| {
+            let v = s.visible;
+            NSRect::new(NSPoint::new(v.x, v.y), NSSize::new(v.w, v.h))
+        }) else {
             return;
         };
-        let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm) else {
-            return;
-        };
-        let vf = screen.visibleFrame();
         let max_w = vf.size.width;
         let max_h = vf.size.height;
         if f.size.width > max_w {

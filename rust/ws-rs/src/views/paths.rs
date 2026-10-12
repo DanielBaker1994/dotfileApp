@@ -848,8 +848,8 @@ impl PathsWindow {
     #[cfg(target_os = "macos")]
     fn show_window_macos(&mut self, mtm: objc2::MainThreadMarker) {
         use crate::ui::popup::{CardFrame, PopupConfig, PopupPanel};
-        use objc2_app_kit::{NSResponder, NSScreen};
-        use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+        use objc2_app_kit::NSResponder;
+        use objc2_foundation::{NSPoint, NSString};
 
         if self.root.is_none() {
             self.build_macos(mtm);
@@ -877,17 +877,14 @@ impl PathsWindow {
         }
 
         if let Some(panel) = &self.window {
-            let vf = NSScreen::mainScreen(mtm)
-                .map(|s| s.visibleFrame())
-                .unwrap_or(NSRect::new(
-                    NSPoint::new(0.0, 0.0),
-                    NSSize::new(1440.0, 900.0),
-                ));
+            let vf = crate::platform::main_screen()
+                .map(|s| s.visible)
+                .unwrap_or(crate::platform::screens::Rect::new(0.0, 0.0, 1440.0, 900.0));
             let (x, y) = place_origin(
-                vf.origin.x,
-                vf.origin.y,
-                vf.size.width,
-                vf.size.height,
+                vf.x,
+                vf.y,
+                vf.w,
+                vf.h,
                 PATHS_DEFAULT_WIDTH,
                 PATHS_MAX_HEIGHT,
             );
