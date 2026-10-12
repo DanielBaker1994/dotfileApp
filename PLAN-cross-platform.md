@@ -527,3 +527,4 @@ Linux frontend with macOS.
   | 5 | views/paths.rs |
   | 2 | ui/chrome.rs |
   | 1 each | ui/card.rs, ui/popup.rs, ui/tree_view.rs, app/socket.rs, views/{terminal,notes_vim,inspector,setup,switcher,tools,screenshot}.rs |
+- Wave 1 (landed, commits be7eb60..d70b43c): W1-A..K + W1-L follow-up (recent_files FSEvents/CF FFI gating). Many cards were no-ops (gating already existed from the seams work); W1-K needed no edits. Gates: `bin/linux-check.sh check` exit 0 (0 errors; 6 bin / 8 test warnings); macOS build 20 warnings; macOS `cargo test -p ws-rs` 727 passed / 4 ignored. Added `time = "0.3"` (non-macOS) for `jira_view::parse_stamp`. Process note: orchestrator once ran `git stash` by mistake and popped it immediately (no loss).
