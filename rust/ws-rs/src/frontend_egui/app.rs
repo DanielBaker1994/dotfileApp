@@ -387,7 +387,7 @@ impl eframe::App for KsApp {
             .show(ctx, |ui| self.content(ui));
 
         // The switcher / palette overlay draws last, over the active pane.
-        self.palette.ui(ctx);
+        self.palette.ui(ctx, &self.controller);
 
         // Mirror the 30 ms AppKit drain timer.
         ctx.request_repaint_after(Duration::from_millis(30));
