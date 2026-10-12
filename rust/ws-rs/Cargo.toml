@@ -34,3 +34,7 @@ open = "5"
 # there, so it must stay target-gated).
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 arboard = { version = "3", default-features = false }
+
+# Non-macOS file pickers (macOS keeps the objc2 NSOpenPanel code; rfd's own
+# macOS backend would link AppKit, so it must stay target-gated too).
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }

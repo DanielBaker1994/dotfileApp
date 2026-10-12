@@ -5827,19 +5827,15 @@ mod daemon_ui {
                     self.compare_with(|m| m.start_pasted());
                 }
                 E::Browse { right } => {
-                    let mtm = MainThreadMarker::new().unwrap();
-                    let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
-                    panel.setCanChooseFiles(true);
-                    panel.setCanChooseDirectories(true);
-                    panel.setAllowsMultipleSelection(false);
-                    if panel.runModal() == objc2_app_kit::NSModalResponseOK {
-                        if let Some(url) = panel.URLs().firstObject() {
-                            if let Some(p) = url.path() {
-                                if let Some(st) = self.ivars().state.borrow().as_ref() {
-                                    if let Some(s) = st.compare.as_ref() {
-                                        s.chrome().set_side_text(right, &p.to_string());
-                                    }
-                                }
+                    let opts = crate::platform::PickOpts {
+                        files: true,
+                        dirs: true,
+                        multiple: false,
+                    };
+                    if let Some(p) = crate::platform::pick_path(&opts) {
+                        if let Some(st) = self.ivars().state.borrow().as_ref() {
+                            if let Some(s) = st.compare.as_ref() {
+                                s.chrome().set_side_text(right, &p.to_string_lossy());
                             }
                         }
                     }
@@ -6350,16 +6346,13 @@ mod daemon_ui {
             ));
             let w = weak.clone();
             e.push(MenuEntry::item("Open File into This Side…  (⌘O)", move || {
-                let Some(mtm) = MainThreadMarker::new() else { return };
-                let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
-                panel.setCanChooseFiles(true);
-                panel.setCanChooseDirectories(false);
-                panel.setAllowsMultipleSelection(false);
-                if panel.runModal() != objc2_app_kit::NSModalResponseOK {
-                    return;
-                }
-                let Some(p) = panel.URLs().firstObject().and_then(|u| u.path()) else { return };
-                let p = p.to_string();
+                let opts = crate::platform::PickOpts {
+                    files: true,
+                    dirs: false,
+                    multiple: false,
+                };
+                let Some(p) = crate::platform::pick_path(&opts) else { return };
+                let p = p.to_string_lossy().into_owned();
                 if let Some(ui) = w.load() {
                     ui.compare_with(|m| m.open_file_into(side, &p));
                 }
