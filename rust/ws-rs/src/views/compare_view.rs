@@ -6,7 +6,7 @@
 //! `CompareRecentList` rows) and the text toolbar (`buildText`: the filter
 //! segments, the summary, the tool buttons) + status line.
 
-use super::compare::CompareRecentEntry;
+use super::compare::{CompareFilter, CompareRecentEntry, PaneModel};
 #[cfg(target_os = "macos")]
 use crate::ui::chrome::Rect;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel};
@@ -59,6 +59,35 @@ pub struct CompareSnap {
     pub summary: String,
     pub identical: bool,
     pub status: String,
+}
+
+/// Everything the Compare view draws, pushed by the model: the diff body
+/// (rows of the existing diff model — [`PaneModel`], built from the current
+/// `TextCompare`), the chrome around it, and whether a folder session's tree
+/// is showing instead.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompareSnapshot {
+    /// The diff pane (rows + both sides' line text); empty on the start page
+    /// and for a folder session.
+    pub pane: PaneModel,
+    pub on_start: bool,
+    pub folder: bool,
+    pub filter: CompareFilter,
+    pub summary: String,
+    pub status: String,
+}
+
+impl Default for CompareSnapshot {
+    fn default() -> Self {
+        CompareSnapshot {
+            pane: PaneModel::empty(),
+            on_start: true,
+            folder: false,
+            filter: CompareFilter::All,
+            summary: String::new(),
+            status: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

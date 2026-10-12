@@ -3328,6 +3328,85 @@ impl CompareWindowModel {
         h.finish()
     }
 
+    /// Everything the Compare view draws, read from the model only (no backend
+    /// calls). The diff pane is empty on the start page and for a folder
+    /// session (the folder tree keeps its own model).
+    pub fn snapshot(&self) -> crate::views::compare_view::CompareSnapshot {
+        let on_start = self.on_start_page();
+        let folder = self.current_is_folder();
+        let (filter, summary, status) = match self.current() {
+            Some(s) => (s.filter, s.summary(&self.config), s.status.clone()),
+            None => (CompareFilter::All, String::new(), String::new()),
+        };
+        let pane = if folder {
+            PaneModel::empty()
+        } else {
+            self.current().map(PaneModel::from_session).unwrap_or_default()
+        };
+        crate::views::compare_view::CompareSnapshot {
+            pane,
+            on_start,
+            folder,
+            filter,
+            summary,
+            status,
+        }
+    }
+
+    /// Pure dispatch of the view's reported events, calling the same model
+    /// methods the AppKit half (`host::compare_event`) calls today. Events that
+    /// need AppKit or view-held state — the file pickers, the right-click menus,
+    /// the recent filter and the Clear sheets — are left to the macOS half.
+    pub fn handle(&mut self, ev: crate::views::compare_view::CompareEvent) {
+        use crate::ui::sidebar::SidebarEvent;
+        use crate::views::compare_view::CompareEvent as E;
+        match ev {
+            E::Sidebar(SidebarEvent::Select(i)) => self.select(i),
+            E::Sidebar(SidebarEvent::Close(i)) => self.close_session(i),
+            E::Sidebar(SidebarEvent::Pinned(k)) => {
+                if k == "home" {
+                    self.show_start_page();
+                } else {
+                    self.start_pasted();
+                }
+            }
+            E::Sidebar(_) => {}
+            E::Compare { left, right } => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let exp = |p: &str| match p.trim().strip_prefix('~') {
+                    Some(rest) => format!("{home}{rest}"),
+                    None => p.trim().to_string(),
+                };
+                let (l, r) = (exp(&left), exp(&right));
+                if l.is_empty() && r.is_empty() {
+                    return;
+                }
+                if Path::new(&l).is_dir() && Path::new(&r).is_dir() {
+                    self.open_folders(&l, &r);
+                } else {
+                    self.open_pair(
+                        (!l.is_empty()).then_some(l.as_str()),
+                        (!r.is_empty()).then_some(r.as_str()),
+                    );
+                }
+            }
+            E::NewText => self.start_pasted(),
+            E::Filter(i) => self.set_filter(CompareFilter::ALL[i.min(3)]),
+            E::Tool(i) => match i {
+                0 => self.jump_section(-1),
+                1 => self.jump_section(1),
+                2 => self.swap_sides(),
+                3 => {
+                    let _ = self.test_do("reload");
+                }
+                _ => {}
+            },
+            // Browse / OpenRecent / RemoveRecent / *Menu / Clear* / RecentFilter
+            // are the macOS half's (file pickers, menus, view-held recent state).
+            _ => {}
+        }
+    }
+
     fn load_side(&self, path: Option<&str>) -> (TextSide, Option<Vec<u8>>, bool) {
         let Some(p) = path else {
             return (TextSide::default(), None, false);
@@ -4527,7 +4606,7 @@ pub fn thumbnail_levels(
 
 /// The drawing model handed to [`macos::ComparePaneView`] — built from a
 /// [`CompareSession`] or [`TextCompare`], never by calling the backend.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PaneModel {
     pub rows: Vec<CompareRow>,
     pub left_lines: Vec<String>,
@@ -6351,6 +6430,39 @@ mod tests {
 
         let st = model.test_state();
         assert_eq!(st["startPage"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn window_snapshot_event_contract() {
+        // W3-F: model → snapshot() → handle(event) → the snapshot changed.
+        use crate::ui::sidebar::SidebarEvent;
+        use crate::views::compare_view::CompareEvent as E;
+        let stub = Stub::new();
+        stub.push("compare.new", new_snapshot());
+        let dir = temp_dir("snap-contract");
+        let mut model = CompareWindowModel::with_backend(
+            stub.clone(),
+            CompareConfig::default(),
+            CompareRecent::new(&dir),
+        );
+
+        let start = model.snapshot();
+        assert!(start.on_start && start.pane.rows.is_empty());
+
+        // New Text Compare opens a pasted session → diff rows appear.
+        model.handle(E::NewText);
+        let open = model.snapshot();
+        assert_ne!(start, open);
+        assert!(!open.on_start && open.pane.rows.len() == 2);
+        assert_eq!(open.pane.left_lines, vec!["a".to_string(), "b".to_string()]);
+
+        // A filter event and the sidebar's Home pin also reach the model.
+        model.handle(E::Filter(1));
+        assert_eq!(model.snapshot().filter, CompareFilter::Diffs);
+        model.handle(E::Sidebar(SidebarEvent::Pinned("home".to_string())));
+        assert!(model.snapshot().on_start);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
