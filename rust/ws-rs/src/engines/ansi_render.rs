@@ -6,23 +6,32 @@
 //! suite), so the parser + theme logic is testable without the helper. The
 //! CoreText glyph-drawing half uses `objc2-core-text` / `objc2-core-graphics`.
 
+#[cfg(target_os = "macos")]
 use core::ffi::c_void;
+#[cfg(target_os = "macos")]
 use core::ptr::{self, NonNull};
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 
+#[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
 use objc2::AnyThread;
+#[cfg(target_os = "macos")]
 use objc2_core_graphics::{
     kCGColorSpaceDisplayP3, kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapContextCreateImage,
     CGAffineTransformIdentity, CGColor, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     CGGlyph,
 };
+#[cfg(target_os = "macos")]
 use objc2_core_text::{
     kCTFontAttributeName, kCTForegroundColorAttributeName, CTFont, CTFontOrientation,
     CTFontSymbolicTraits, CTLine,
 };
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize, NSString};
 
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRetain(cf: *const c_void) -> *const c_void;
@@ -32,6 +41,7 @@ extern "C" {
 /// Reinterpret one opaque CF reference as another (toll-free bridged) CF
 /// type; keeps the underlying `objc2-core-foundation` type names out of this
 /// file, which cannot depend on that crate directly.
+#[cfg(target_os = "macos")]
 fn ffi_cast<T, U>(r: &T) -> &U {
     unsafe { &*(r as *const T as *const U) }
 }
@@ -587,10 +597,12 @@ pub struct AnsiMetrics {
 
 /// An owned `CTFont` (retained; released on drop). Held as a raw pointer
 /// because `CFRetained` lives in a crate this module cannot name.
+#[cfg(target_os = "macos")]
 pub struct AnsiCoreFont {
     ptr: NonNull<CTFont>,
 }
 
+#[cfg(target_os = "macos")]
 impl AnsiCoreFont {
     pub fn as_ref(&self) -> &CTFont {
         unsafe { self.ptr.as_ref() }
@@ -602,6 +614,7 @@ impl AnsiCoreFont {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for AnsiCoreFont {
     fn drop(&mut self) {
         unsafe { CFRelease(self.ptr.as_ptr() as *const c_void) };
@@ -609,10 +622,12 @@ impl Drop for AnsiCoreFont {
 }
 
 /// An owned `CGImage` (retained; released on drop).
+#[cfg(target_os = "macos")]
 pub struct AnsiCoreImage {
     ptr: NonNull<CGImage>,
 }
 
+#[cfg(target_os = "macos")]
 impl AnsiCoreImage {
     pub fn as_ref(&self) -> &CGImage {
         unsafe { self.ptr.as_ref() }
@@ -627,6 +642,7 @@ impl AnsiCoreImage {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for AnsiCoreImage {
     fn drop(&mut self) {
         unsafe { CFRelease(self.ptr.as_ptr() as *const c_void) };
@@ -635,18 +651,21 @@ impl Drop for AnsiCoreImage {
 
 /// Take ownership of a `CFRetained<T>` without naming its type: leak the
 /// wrapper (its +1 retain is kept) and rebuild the handle over the raw pointer.
+#[cfg(target_os = "macos")]
 fn take_font<F: std::ops::Deref<Target = CTFont>>(owner: F) -> AnsiCoreFont {
     let ptr = NonNull::from(&*owner);
     std::mem::forget(owner);
     AnsiCoreFont { ptr }
 }
 
+#[cfg(target_os = "macos")]
 fn take_image<F: std::ops::Deref<Target = CGImage>>(owner: F) -> AnsiCoreImage {
     let ptr = NonNull::from(&*owner);
     std::mem::forget(owner);
     AnsiCoreImage { ptr }
 }
 
+#[cfg(target_os = "macos")]
 fn font_named(name: &str, size: f64) -> AnsiCoreFont {
     let ns = NSString::from_str(name);
     let cf = ffi_cast(&*ns);
@@ -656,6 +675,7 @@ fn font_named(name: &str, size: f64) -> AnsiCoreFont {
 pub struct AnsiRender;
 
 impl AnsiRender {
+    #[cfg(target_os = "macos")]
     pub fn font(t: &AnsiTheme) -> AnsiCoreFont {
         let f = font_named(&t.font_name, t.font_size);
         let mono = unsafe { f.as_ref().symbolic_traits() }
@@ -668,6 +688,7 @@ impl AnsiRender {
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub fn metrics(f: &AnsiCoreFont) -> AnsiMetrics {
         let font = f.as_ref();
         let mut ch: u16 = 0x4D;
@@ -720,6 +741,7 @@ impl AnsiRender {
         text.chars().count() == 1
     }
 
+    #[cfg(target_os = "macos")]
     pub fn image(
         grid: &AnsiGrid,
         t: &AnsiTheme,
