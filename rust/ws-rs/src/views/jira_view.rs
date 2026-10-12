@@ -226,11 +226,11 @@ pub fn parse_stamp(s: &str) -> Option<f64> {
     }
 }
 
-/// Non-macOS [`parse_stamp`] — `time` parses the formatter's `dateFormat`
+/// Non-macOS Unix [`parse_stamp`] — `time` parses the formatter's `dateFormat`
 /// "yyyy-MM-dd HH:mm:ss" and libc resolves it in the system zone (`time`'s
 /// sound local-offset API refuses to read the zone in a multi-threaded
 /// process like this daemon).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn parse_stamp_local(s: &str) -> Option<f64> {
     let pdt = parse_stamp_fields(s)?;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -247,6 +247,16 @@ fn parse_stamp_local(s: &str) -> Option<f64> {
     } else {
         Some(epoch as f64)
     }
+}
+
+/// Windows [`parse_stamp`] — the same `time` field parse, resolved in the
+/// system zone with `time`'s local-offset API (falling back to UTC if the zone
+/// cannot be read).
+#[cfg(windows)]
+fn parse_stamp_local(s: &str) -> Option<f64> {
+    let pdt = parse_stamp_fields(s)?;
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    Some(pdt.assume_offset(offset).unix_timestamp() as f64)
 }
 
 /// Parse the `NSDateFormatter` format "yyyy-MM-dd HH:mm:ss" into its

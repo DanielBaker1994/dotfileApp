@@ -1464,6 +1464,7 @@ pub struct ShotDate {
 
 impl ShotDate {
     pub fn from_unix_local(secs: i64) -> ShotDate {
+        #[cfg(unix)]
         unsafe {
             let t = secs as libc::time_t;
             let mut tm: libc::tm = std::mem::zeroed();
@@ -1475,6 +1476,22 @@ impl ShotDate {
                 hour: tm.tm_hour as u32,
                 minute: tm.tm_min as u32,
                 second: tm.tm_sec as u32,
+            }
+        }
+        #[cfg(windows)]
+        {
+            let offset =
+                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let dt = time::OffsetDateTime::from_unix_timestamp(secs)
+                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+                .to_offset(offset);
+            ShotDate {
+                year: dt.year() as i64,
+                month: dt.month() as u32,
+                day: dt.day() as u32,
+                hour: dt.hour() as u32,
+                minute: dt.minute() as u32,
+                second: dt.second() as u32,
             }
         }
     }
@@ -2327,6 +2344,7 @@ mod tests {
     }
 
     fn local_epoch(year: i64, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
+        #[cfg(unix)]
         unsafe {
             let mut tm: libc::tm = std::mem::zeroed();
             tm.tm_year = (year - 1900) as i32;
@@ -2337,6 +2355,21 @@ mod tests {
             tm.tm_sec = second as i32;
             tm.tm_isdst = -1;
             libc::mktime(&mut tm)
+        }
+        #[cfg(windows)]
+        {
+            let offset =
+                time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let month = time::Month::try_from(month as u8).unwrap_or(time::Month::January);
+            let Ok(date) = time::Date::from_calendar_date(year as i32, month, day as u8) else {
+                return 0;
+            };
+            let Ok(t) = time::Time::from_hms(hour as u8, minute as u8, second as u8) else {
+                return 0;
+            };
+            time::PrimitiveDateTime::new(date, t)
+                .assume_offset(offset)
+                .unix_timestamp()
         }
     }
 

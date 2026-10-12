@@ -398,10 +398,129 @@ fn expand_tilde(p: &str) -> String {
 }
 
 fn fnmatch_str(pattern: &str, name: &str) -> bool {
-    let (Ok(cp), Ok(cn)) = (CString::new(pattern), CString::new(name)) else {
-        return false;
-    };
-    unsafe { libc::fnmatch(cp.as_ptr(), cn.as_ptr(), 0) == 0 }
+    #[cfg(unix)]
+    {
+        let (Ok(cp), Ok(cn)) = (CString::new(pattern), CString::new(name)) else {
+            return false;
+        };
+        unsafe { libc::fnmatch(cp.as_ptr(), cn.as_ptr(), 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        glob_match(pattern, name)
+    }
+}
+
+/// Minimal, portable stand-in for `fnmatch(3)` with flags 0 (the Windows CRT
+/// has no `fnmatch`): `*` matches any run of characters (including `/`, as the
+/// flags-0 libc call does), `?` one character, `[...]`/`[!...]` a character
+/// class with `a-z` ranges and a literal `]` when first, `\x` a literal `x`,
+/// everything else literal. Compiled on every platform so the unit tests run
+/// everywhere; the Unix build uses libc's `fnmatch` (see [`fnmatch_str`]).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = name.chars().collect();
+    glob_rec(&pat, &txt)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn glob_rec(pat: &[char], txt: &[char]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    while pi < pat.len() {
+        match pat[pi] {
+            '*' => {
+                while pi < pat.len() && pat[pi] == '*' {
+                    pi += 1;
+                }
+                if pi == pat.len() {
+                    return true;
+                }
+                for k in ti..=txt.len() {
+                    if glob_rec(&pat[pi..], &txt[k..]) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            '?' => {
+                if ti >= txt.len() {
+                    return false;
+                }
+                pi += 1;
+                ti += 1;
+            }
+            '[' => {
+                if ti >= txt.len() {
+                    return false;
+                }
+                match glob_class(pat, pi, txt[ti]) {
+                    Some((matched, next)) => {
+                        if !matched {
+                            return false;
+                        }
+                        pi = next;
+                        ti += 1;
+                    }
+                    None => {
+                        // Unterminated class: `[` is a literal.
+                        if txt[ti] != '[' {
+                            return false;
+                        }
+                        pi += 1;
+                        ti += 1;
+                    }
+                }
+            }
+            '\\' if pi + 1 < pat.len() => {
+                if ti >= txt.len() || txt[ti] != pat[pi + 1] {
+                    return false;
+                }
+                pi += 2;
+                ti += 1;
+            }
+            c => {
+                if ti >= txt.len() || txt[ti] != c {
+                    return false;
+                }
+                pi += 1;
+                ti += 1;
+            }
+        }
+    }
+    ti == txt.len()
+}
+
+/// Parse a `[...]` class whose `[` is at `pat[open]`. Returns whether `c`
+/// matched and the index just past the closing `]`, or `None` when unterminated.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn glob_class(pat: &[char], open: usize, c: char) -> Option<(bool, usize)> {
+    let mut i = open + 1;
+    let negate = i < pat.len() && (pat[i] == '!' || pat[i] == '^');
+    if negate {
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < pat.len() {
+        if pat[i] == ']' && !first {
+            return Some((if negate { !matched } else { matched }, i + 1));
+        }
+        first = false;
+        if i + 2 < pat.len() && pat[i + 1] == '-' && pat[i + 2] != ']' {
+            if pat[i] <= c && c <= pat[i + 2] {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if pat[i] == c {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    None
 }
 
 fn in_scope(home: &str, everywhere: bool, p: &str) -> bool {
@@ -1373,6 +1492,7 @@ mod tests {
         check(paths(&r).iter().position(|p| p == &b) == Some(at), "the row keeps its place");
     }
 
+    #[cfg(unix)]
     #[test]
     #[cfg_attr(
         not(target_os = "macos"),
@@ -1393,6 +1513,7 @@ mod tests {
         check(RecentFiles::canonical("/tmp/x") == "/private/tmp/x", "/tmp → /private/tmp");
     }
 
+    #[cfg(unix)]
     #[test]
     fn stored_entries_load_and_canonicalize() {
         let home = make_home("symlink2");
@@ -1432,6 +1553,57 @@ mod tests {
             !keep(home, false, &["*.log".into()], &format!("{home}/a.log")),
             "exclude glob",
         );
+    }
+
+    #[test]
+    fn glob_match_patterns() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("*.log", "a.log", true),
+            ("*.log", "a.txt", false),
+            ("a?c", "abc", true),
+            ("a?c", "ac", false),
+            ("a*c", "a/b/c", true), // flags-0 `*` crosses `/`
+            ("[abc]x", "bx", true),
+            ("[abc]x", "dx", false),
+            ("[!abc]x", "dx", true),
+            ("[^abc]x", "bx", false),
+            ("[a-c]x", "bx", true),
+            ("[a-c]x", "dx", false),
+            ("/Users/*/x", "/Users/bob/x", true),
+            ("*", "anything/at/all", true),
+            ("a\\*b", "a*b", true),
+            ("a\\*b", "axb", false),
+            ("anything", "anything", true),
+            ("anything", "other", false),
+            ("", "", true),
+            ("", "x", false),
+            ("x[", "x[", true), // unterminated class → literal `[`
+            ("x[", "xa", false),
+        ];
+        for (pat, name, want) in cases {
+            assert_eq!(glob_match(pat, name), *want, "{pat} vs {name}");
+        }
+    }
+
+    /// The portable matcher must agree with the libc `fnmatch` the Unix body
+    /// calls, on a table of patterns/names (`s` is optional: `cargo test` may
+    /// be run on macOS or Linux).
+    #[cfg(unix)]
+    #[test]
+    fn glob_match_agrees_with_libc() {
+        let patterns = [
+            "*.log", "a?c", "[abc]x", "[!abc]x", "[a-c]x", "/Users/*/x", "*", "a*b*c",
+            "file[0-9].txt", "^lit", "", "**", "a?*[b-d]",
+        ];
+        let names = [
+            "a.log", "abc", "axc", "bx", "dx", "/Users/bob/x", "a/b/c", "file7.txt", "^lit", "",
+            "other", "fileX.txt",
+        ];
+        for p in patterns {
+            for n in names {
+                assert_eq!(glob_match(p, n), fnmatch_str(p, n), "{p} vs {n}");
+            }
+        }
     }
 
     #[test]
