@@ -552,6 +552,34 @@ pub const DEFAULT_TITLE: &str = "kitchen-sink — Setup & Health Check";
 pub const DEFAULT_WIDTH: f64 = 640.0;
 pub const DEFAULT_HEIGHT: f64 = 620.0;
 
+/// Everything the setup window draws, pulled by the owner each frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SetupSnapshot {
+    pub checks: Vec<SetupCheck>,
+    pub summary: Option<SetupSummary>,
+    pub log: String,
+    pub shown: bool,
+    pub busy: bool,
+}
+
+/// User actions reported by the owner (the window's buttons and the streamed
+/// preflight result).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SetupEvent {
+    /// `Check Again`.
+    Recheck,
+    /// `Set Up Hotkeys & Borders…`.
+    Stack,
+    /// A row's fix button (`fix:` tag = the check index).
+    Fix(usize),
+    /// `Done` — order the window out.
+    Done,
+    /// The preflight result arrived (`runChecks`).
+    Checks(Vec<SetupCheck>),
+    /// A line of streaming log output.
+    Log(String),
+}
+
 /// `SetupWindow` — the model behind the view.
 #[derive(Default)]
 pub struct SetupWindow {
@@ -671,6 +699,45 @@ impl SetupWindow {
     fn append_log_macos(&mut self, s: &str) {
         if let Some(handler) = &self.handler {
             handler.append_log(s);
+        }
+    }
+}
+
+impl SetupWindow {
+    /// The window's drawable state.
+    pub fn snapshot(&self) -> SetupSnapshot {
+        SetupSnapshot {
+            checks: self.checks.clone(),
+            summary: self.summary.clone(),
+            log: self.log.clone(),
+            shown: self.shown,
+            busy: self.busy,
+        }
+    }
+
+    /// Apply a user action — the same model calls the AppKit handler makes.
+    pub fn handle(&mut self, ev: SetupEvent) {
+        match ev {
+            // `SetupHandler::recheck:` / `stack:` / `fix:` just call the
+            // model's callbacks; the host owns the work.
+            SetupEvent::Recheck => {
+                if let Some(cb) = self.on_recheck.as_mut() {
+                    cb();
+                }
+            }
+            SetupEvent::Stack => {
+                if let Some(cb) = self.on_stack.as_mut() {
+                    cb();
+                }
+            }
+            SetupEvent::Fix(i) => {
+                if let Some(cb) = self.on_fix.as_mut() {
+                    cb(i);
+                }
+            }
+            SetupEvent::Done => self.close(),
+            SetupEvent::Checks(checks) => self.set_checks(checks),
+            SetupEvent::Log(s) => self.append_log(&s),
         }
     }
 }
@@ -1458,5 +1525,40 @@ mod tests {
     fn fix_button_width_scales_with_title() {
         assert!(fix_button_width("Fix") >= 52.0);
         assert!(fix_button_width("Move to Applications") > fix_button_width("Fix"));
+    }
+
+    #[test]
+    fn snapshot_changes_on_log_checks_and_done() {
+        let mut w = SetupWindow::new();
+        let before = w.snapshot();
+        w.handle(SetupEvent::Log("hello".into()));
+        let after = w.snapshot();
+        assert_ne!(before, after, "log must change the snapshot");
+        assert_eq!(after.log, "hello");
+        assert!(after.summary.is_none());
+
+        w.handle(SetupEvent::Checks(vec![SetupCheck::from_json(&check(json!({})))]));
+        let s = w.snapshot();
+        assert_eq!(s.checks.len(), 1);
+        assert_eq!(
+            s.summary.as_ref().map(|x| x.message.as_str()),
+            Some("Everything is in place.")
+        );
+
+        w.shown = true;
+        let shown = w.snapshot();
+        w.handle(SetupEvent::Done);
+        assert_ne!(shown, w.snapshot(), "done must change the snapshot");
+        assert!(!w.snapshot().shown);
+    }
+
+    #[test]
+    fn recheck_runs_the_host_callback() {
+        let mut w = SetupWindow::new();
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        w.on_recheck = Some(Box::new(move || f.set(true)));
+        w.handle(SetupEvent::Recheck);
+        assert!(fired.get(), "recheck forwards to the host callback");
     }
 }

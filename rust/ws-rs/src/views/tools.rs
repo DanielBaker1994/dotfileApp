@@ -27,8 +27,9 @@ use objc2::rc::Retained;
 type FfOut = std::sync::Arc<std::sync::Mutex<Option<(bool, String)>>>;
 
 /// The three panels `openTool` maps onto this module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToolKind {
+    #[default]
     PrettyPrint,
     Filefast,
     HealthChecks,
@@ -359,6 +360,39 @@ fn spawn_filefast(
         pending.store(false, std::sync::atomic::Ordering::Relaxed);
     });
     true
+}
+
+/// Everything a tool panel draws, pulled by the owner each frame (the pure
+/// half of `test_state` plus the panel's text and status line).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToolsSnapshot {
+    pub kind: ToolKind,
+    pub shown: bool,
+    /// The prettyprint editor / filefast paste box / health-checks output.
+    pub text: String,
+    /// The prettyprint or filefast status line `(message, is_error)`.
+    pub status: Option<(String, bool)>,
+    /// Health-checks: a run is in flight.
+    pub running: bool,
+    pub frame: [f64; 4],
+}
+
+/// User actions reported by the owner (header buttons, the filefast key
+/// monitor, the prettyprint debounce, the health run).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolsEvent {
+    /// Order the panel out (`header_click`'s ✕, the filefast Esc, auto-hide).
+    Close,
+    /// Prettyprint: the editor text settled — capture it (the debounce start).
+    Edit(String),
+    /// Prettyprint: run the debounce's `format_prettyprint` now.
+    Format,
+    /// Prettyprint: the header's "save file" button (id 10).
+    Save,
+    /// Health-checks: (re)start the streaming run.
+    HealthRun,
+    /// Filefast: the Return / Cmd+Return save.
+    FilefastSave,
 }
 
 /// One live tool panel (model + window handle; the window only exists on
@@ -853,6 +887,61 @@ impl ToolPanel {
             match &status {
                 Some((msg, is_err)) => set_status_label(label, msg, *is_err),
                 None => label.setStringValue(&NSString::from_str("")),
+            }
+        }
+    }
+}
+
+impl ToolPanel {
+    /// The panel's drawable state (the pure half of `test_state`).
+    pub fn snapshot(&self) -> ToolsSnapshot {
+        let (status, running) = match self.kind {
+            ToolKind::PrettyPrint => (self.pp_status.clone(), false),
+            ToolKind::Filefast => (self.ff_status.clone(), false),
+            ToolKind::HealthChecks => (
+                None,
+                !self.health_done.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        };
+        ToolsSnapshot {
+            kind: self.kind,
+            shown: self.shown,
+            text: self.buffer_text(),
+            status,
+            running,
+            frame: self.frame,
+        }
+    }
+
+    /// Apply a user action — the same model calls the AppKit half makes inline.
+    pub fn handle(&mut self, ev: ToolsEvent) {
+        match ev {
+            ToolsEvent::Close => self.hide(),
+            // `onEditorTextChange`: capture the edit and restart the debounce
+            // (`poll_macos`'s first half; the format lands on a later tick).
+            ToolsEvent::Edit(text) => {
+                if self.kind == ToolKind::PrettyPrint && text != self.pp_last_seen {
+                    self.pp_last_seen = text;
+                    self.pp_last_change = Some(std::time::Instant::now());
+                }
+            }
+            ToolsEvent::Format => self.format_prettyprint(),
+            // `pp_handler::save_clicked`, but the contents come from the model
+            // (the AppKit half reads its own editor).
+            ToolsEvent::Save => {
+                let contents = self.buffer_text();
+                if contents.is_empty() {
+                    return;
+                }
+                self.pp_status =
+                    Some(match save_prettyprint_at(&contents, &self.spec.save_dir, now_secs()) {
+                        Ok(path) => (format!("saved: {path}"), false),
+                        Err(e) => (format!("save failed: {e}"), true),
+                    });
+            }
+            ToolsEvent::HealthRun => self.run_health(),
+            ToolsEvent::FilefastSave => {
+                self.save_filefast();
             }
         }
     }
@@ -1360,5 +1449,32 @@ mod tests {
         assert!(path.ends_with("prettyprint-19700101-000000.json"), "{path}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_changes_on_edit_and_close() {
+        let mut p = ToolPanel::new(ToolKind::PrettyPrint, &AppSettings::default());
+        let before = p.snapshot();
+        p.handle(ToolsEvent::Edit("{\"a\":1}".into()));
+        let after = p.snapshot();
+        assert_ne!(before, after, "edit must change the snapshot");
+        assert_eq!(after.text, "{\"a\":1}");
+        assert_eq!(after.kind, ToolKind::PrettyPrint);
+        assert!(!after.shown);
+
+        p.shown = true;
+        let shown = p.snapshot();
+        p.handle(ToolsEvent::Close);
+        assert_ne!(shown, p.snapshot(), "close must change the snapshot");
+        assert!(!p.snapshot().shown);
+    }
+
+    #[test]
+    fn health_snapshot_reports_running() {
+        let p = ToolPanel::new(ToolKind::HealthChecks, &AppSettings::default());
+        let snap = p.snapshot();
+        assert_eq!(snap.kind, ToolKind::HealthChecks);
+        assert!(snap.running, "a fresh health panel has not finished a run");
+        assert!(snap.text.is_empty());
     }
 }
