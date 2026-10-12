@@ -14,4 +14,16 @@ mod files;
 mod keys;
 mod theme;
 
+// Wave 5 stub panes — one file per worker, wired in `app::ensure_panes`.
+mod ai;
+mod compare;
+mod confluence;
+mod jira;
+mod notes;
+#[allow(dead_code)] // Wave 5 worker owns this; a tool panel, not yet wired into a SlotView.
+mod paths;
+mod switcher;
+#[allow(dead_code)] // Wave 5 worker owns this (Tools + Setup); not yet wired into a SlotView.
+mod tools;
+
 pub use app::run;

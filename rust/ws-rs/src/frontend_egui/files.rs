@@ -7,11 +7,13 @@
 //! exact same event contract the AppKit surface reports. Each section below is
 //! commented with the `files_view.rs` region it mirrors.
 
+use crate::ui::popup::KeyAction;
 use crate::ui::sidebar::SidebarEvent;
 use crate::ui::theme::PopupColors;
 use crate::views::files::FileBrowser;
 use crate::views::files_view::{FilesEvent, FilesSnapshot, Preview};
 
+use super::app::Pane;
 use super::theme::c;
 
 pub struct FilesPane {
@@ -223,5 +225,23 @@ impl FilesPane {
                 }
             });
         });
+    }
+}
+
+impl Pane for FilesPane {
+    fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
+        FilesPane::ui(self, ui, colors);
+    }
+
+    /// The resolved key actions the Files pane's model consumes (the same
+    /// three `handle_action` routed to `self.model` before the registry
+    /// refactor: Escape, list up/down, and Enter).
+    fn handle_key(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::Escape(_) => self.model.handle(FilesEvent::Escape),
+            KeyAction::ListMove(delta) => self.model.handle(FilesEvent::Move(delta as i64)),
+            KeyAction::ListAccept => self.model.handle(FilesEvent::Enter),
+            _ => {}
+        }
     }
 }

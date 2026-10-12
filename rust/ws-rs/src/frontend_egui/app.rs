@@ -3,18 +3,23 @@
 //! on the controller exactly like `daemon_ui::install_daemon_ui` does, so the
 //! socket thread's `UiCommand`s and main-thread jobs flow into `update()`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::app::host::{MainQueue, SwitcherController, UiCommand, UiQueue, DEFAULT_VIEW};
 use crate::app::registry::SlotView;
 use crate::ui::popup::{self, KeyAction, PrefixOutcome, PrefixState};
-use crate::ui::theme::section_colors;
-use crate::views::files_view::FilesEvent;
+use crate::ui::theme::{section_colors, PopupColors};
 
+use super::ai::AiPane;
+use super::compare::ComparePane;
+use super::confluence::ConfluencePane;
 use super::files::FilesPane;
+use super::jira::JiraPane;
 use super::keys::key_input;
+use super::notes::NotesPane;
+use super::switcher::SwitcherOverlay;
 use super::theme::c;
 
 /// The views the sidebar lists (header nav order, minus the unported sub-views).
@@ -27,13 +32,49 @@ const SIDEBAR_VIEWS: [SlotView; 6] = [
     SlotView::Compare,
 ];
 
+/// One content pane. Each view (`SlotView`) renders through one of these; the
+/// host builds them lazily in [`KsApp::ensure_panes`] and routes resolved key
+/// actions back through [`Pane::handle_key`] so the pane's model sees the same
+/// events the AppKit surface reports (kept object-safe so the host can hold a
+/// `Box<dyn Pane>` registry).
+pub(super) trait Pane {
+    /// Draw one frame and apply any events the widgets generated.
+    fn ui(&mut self, ui: &mut egui::Ui, colors: &PopupColors);
+    /// Called when this pane becomes the current view.
+    fn on_enter(&mut self) {}
+    /// Route a resolved key action into the pane's model; default ignores it.
+    fn handle_key(&mut self, _action: KeyAction) {}
+}
+
+/// A stand-in for views with no egui port yet (the sub-views: Detail, Releases,
+/// Config, Output, CompareText). Renders the same "not ported" label the stub
+/// panes do.
+struct Placeholder {
+    view: SlotView,
+}
+
+impl Placeholder {
+    fn new(view: SlotView) -> Self {
+        Placeholder { view }
+    }
+}
+
+impl Pane for Placeholder {
+    fn ui(&mut self, ui: &mut egui::Ui, _colors: &PopupColors) {
+        ui.label(format!("{} — not ported yet", self.view.title()));
+    }
+}
+
 pub struct KsApp {
     controller: Arc<SwitcherController>,
     ui_queue: UiQueue,
     main_queue: MainQueue,
     current: SlotView,
-    /// The ported panes (Wave 4: Files only; other views render a placeholder).
-    files: Option<FilesPane>,
+    /// The ported panes, built lazily per view (Wave 4: Files; the rest are
+    /// stubs or the shared [`Placeholder`]).
+    panes: HashMap<SlotView, Box<dyn Pane>>,
+    /// The switcher / command-palette overlay, drawn last (stub for now).
+    palette: SwitcherOverlay,
     /// The Ctrl+B prefix state (`SharedWindow.prefixKey`).
     prefix: PrefixState,
     /// Consecutive-Esc count + timestamp (the `escStreakCloses` 0.6 s window).
@@ -66,7 +107,8 @@ impl KsApp {
             ui_queue,
             main_queue,
             current,
-            files: None,
+            panes: HashMap::new(),
+            palette: SwitcherOverlay::build(),
             prefix: PrefixState::new(),
             esc_streak: 0,
             last_esc_at: 0.0,
@@ -82,9 +124,24 @@ impl KsApp {
 
     /// Build a view's pane lazily, like `daemon_ui::content_for`.
     fn ensure_panes(&mut self) {
-        if self.current == SlotView::Files && self.files.is_none() {
-            self.files = Some(FilesPane::build());
+        if self.panes.contains_key(&self.current) {
+            return;
         }
+        let pane: Box<dyn Pane> = match self.current {
+            SlotView::Notes => Box::new(NotesPane::build()),
+            SlotView::Files => Box::new(FilesPane::build()),
+            SlotView::Jira => Box::new(JiraPane::build()),
+            SlotView::Confluence => Box::new(ConfluencePane::build()),
+            SlotView::Ai => Box::new(AiPane::build()),
+            SlotView::Compare => Box::new(ComparePane::build()),
+            // Sub-views without an egui port yet.
+            SlotView::Detail
+            | SlotView::Releases
+            | SlotView::Config
+            | SlotView::Output
+            | SlotView::CompareText => Box::new(Placeholder::new(self.current)),
+        };
+        self.panes.insert(self.current, pane);
     }
 
     /// The `PopupConfig` `route_key` reads (mirrors the daemon UI's per-frame
@@ -224,29 +281,23 @@ impl KsApp {
 
     fn handle_action(&mut self, action: KeyAction) {
         match action {
-            KeyAction::Escape(_) => {
+            KeyAction::Escape(outcome) => {
                 let cfg = self.popup_config();
                 if popup::esc_streak_closes(self.esc_streak, cfg.esc_close_count) {
                     self.controller.hide("Esc");
-                } else if self.current == SlotView::Files {
-                    if let Some(f) = &mut self.files {
-                        f.model.handle(FilesEvent::Escape);
-                    }
+                } else if let Some(pane) = self.panes.get_mut(&self.current) {
+                    pane.handle_key(KeyAction::Escape(outcome));
                 }
             }
             KeyAction::CycleView(dir) => self.controller.cycle(dir),
             KeyAction::ListMove(delta) => {
-                if self.current == SlotView::Files {
-                    if let Some(f) = &mut self.files {
-                        f.model.handle(FilesEvent::Move(delta as i64));
-                    }
+                if let Some(pane) = self.panes.get_mut(&self.current) {
+                    pane.handle_key(KeyAction::ListMove(delta));
                 }
             }
             KeyAction::ListAccept => {
-                if self.current == SlotView::Files {
-                    if let Some(f) = &mut self.files {
-                        f.model.handle(FilesEvent::Enter);
-                    }
+                if let Some(pane) = self.panes.get_mut(&self.current) {
+                    pane.handle_key(KeyAction::ListAccept);
                 }
             }
             KeyAction::CycleTabs(_) => self.log_once("CycleTabs"),
@@ -311,18 +362,11 @@ impl KsApp {
     }
 
     fn content(&mut self, ui: &mut egui::Ui) {
-        match self.current {
-            SlotView::Files => {
-                let colors = section_colors("files");
-                if let Some(f) = &mut self.files {
-                    f.ui(ui, &colors);
-                } else {
-                    ui.label("Files view not built");
-                }
-            }
-            other => {
-                ui.label(format!("{} view is not ported yet", other.title()));
-            }
+        let colors = section_colors(self.current.raw());
+        if let Some(pane) = self.panes.get_mut(&self.current) {
+            pane.ui(ui, &colors);
+        } else {
+            ui.label(format!("{} view is not ported yet", self.current.title()));
         }
     }
 }
@@ -341,6 +385,9 @@ impl eframe::App for KsApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(bg))
             .show(ctx, |ui| self.content(ui));
+
+        // The switcher / palette overlay draws last, over the active pane.
+        self.palette.ui(ctx);
 
         // Mirror the 30 ms AppKit drain timer.
         ctx.request_repaint_after(Duration::from_millis(30));
