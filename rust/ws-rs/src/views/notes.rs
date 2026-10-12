@@ -15,6 +15,7 @@
 use crate::app::registry::{PaletteCommand, RectI, Registry, SlotMember, SlotView};
 use crate::ui::popup::{KEY_ESC, KEY_F, KEY_N, KEY_SLASH};
 use crate::ui::theme::{PopupColors, PopupPalette, PopupTone, Rgba};
+use crate::views::notes_tree::{NotesTree, TreeRow};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -4668,11 +4669,50 @@ pub fn doc_template_names(configured: Option<&str>) -> Vec<String> {
 // Notes view (SlotMember) + palette registration
 // ---------------------------------------------------------------------------
 
+/// Everything the notes view draws, pushed by the model: the pinned-folder
+/// tree (from `notes_tree.rs`), the open-note tabs, and the editor's file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NotesSnapshot {
+    /// The flattened tree rows (`NotesTree::rows()`): roots + expanded children.
+    pub tree: Vec<TreeRow>,
+    /// The tree path highlighted as "the open file" (or a selected folder).
+    pub tree_selected: Option<String>,
+    /// The open note tabs, in tab order.
+    pub tabs: Vec<NoteTab>,
+    /// The selected tab index.
+    pub selected: usize,
+    /// The file the editor is showing (`None` when no tab is open).
+    pub path: Option<String>,
+    /// The editor's current text (unsaved edits live here until `Save`).
+    pub text: String,
+}
+
+/// Clicks / typing the frontend reports back to [`NotesView`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum NotesEvent {
+    /// A click in the pinned-folder tree: folders toggle, files open a tab.
+    TreeClick { path: String, is_dir: bool },
+    /// Select an open tab (`select_row`).
+    SelectTab(usize),
+    /// Close an open tab by index (`close_tab`).
+    CloseTab(usize),
+    /// The editor text changed.
+    Edit(String),
+    /// Write the current text back to the selected file (`commitSave`).
+    Save,
+}
+
 pub struct NotesView {
     pub config: NotesConfig,
     pub tabs: NotesTabs,
     pub sidebar: NotesSidebar,
     pub prose: ProseViewState,
+    /// The pinned-folder tree (the rail's top card); empty until roots are set.
+    pub tree: NotesTree,
+    /// The file the editor is showing (mirrors the selected tab).
+    pub path: Option<String>,
+    /// The editor's text (unsaved edits until `Save`).
+    pub text: String,
     shown: bool,
     key: bool,
 }
@@ -4685,6 +4725,9 @@ impl NotesView {
             tabs: NotesTabs::new(),
             sidebar,
             prose: ProseViewState::new(),
+            tree: NotesTree::default(),
+            path: None,
+            text: String::new(),
             shown: false,
             key: false,
         }
@@ -4697,6 +4740,85 @@ impl NotesView {
 
     pub fn set_key(&mut self, key: bool) {
         self.key = key;
+    }
+
+    /// The full view state for a frontend to draw.
+    pub fn snapshot(&self) -> NotesSnapshot {
+        NotesSnapshot {
+            tree: self.tree.rows(),
+            tree_selected: self.tree.selected.clone(),
+            tabs: self.tabs.tabs.clone(),
+            selected: self.tabs.selected,
+            path: self.path.clone(),
+            text: self.text.clone(),
+        }
+    }
+
+    /// Apply one user action, calling the same model operations the AppKit half
+    /// calls (`tree_click` / `select_row` / `close_tab` / `commitSave`).
+    pub fn handle(&mut self, ev: NotesEvent) {
+        match ev {
+            NotesEvent::TreeClick { path, is_dir } => {
+                if is_dir {
+                    self.tree.toggle(&path);
+                } else {
+                    self.open_path(&path);
+                }
+            }
+            NotesEvent::SelectTab(i) => {
+                if i < self.tabs.tabs.len() {
+                    self.tabs.selected = i;
+                    self.load_selected();
+                }
+            }
+            NotesEvent::CloseTab(i) => {
+                if self.tabs.close(i).is_some() {
+                    let n = self.tabs.tabs.len();
+                    if n == 0 {
+                        self.path = None;
+                        self.text.clear();
+                    } else {
+                        self.tabs.selected = self.tabs.selected.min(n - 1);
+                        self.load_selected();
+                    }
+                }
+            }
+            NotesEvent::Edit(text) => self.text = text,
+            NotesEvent::Save => {
+                if let Some(p) = &self.path {
+                    if std::fs::write(p, &self.text).is_ok() {
+                        self.refresh_sidebar(now_secs());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open a file from the tree (or an existing tab): reveal its ancestors,
+    /// select it and load its text (`openExternalPath` + `openNote`).
+    fn open_path(&mut self, path: &str) {
+        if !Path::new(path).exists() {
+            return;
+        }
+        match self.tabs.tabs.iter().position(|t| t.path == path) {
+            Some(i) => self.tabs.selected = i,
+            None => {
+                self.tabs.append(path);
+            }
+        }
+        self.tree.reveal(path);
+        self.refresh_sidebar(now_secs());
+        self.load_selected();
+    }
+
+    /// Point the editor at the selected tab and read its file (`set_note_text`).
+    fn load_selected(&mut self) {
+        self.path = self.tabs.selected_path().map(str::to_string);
+        self.text = self
+            .path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
     }
 }
 
@@ -5395,6 +5517,35 @@ mod tests {
         assert_eq!(s["sidebar"]["label"], NOTES_LABEL);
         assert_eq!(s["sidebar"]["rows"][0]["title"], "A.md");
         assert_eq!(s["prose"]["zoom"], 1.0);
+    }
+
+    #[test]
+    fn notes_snapshot_handle_contract() {
+        let dir = std::env::temp_dir().join(format!("ws-notes-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("A.md"), "alpha").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let file = format!("{root}/A.md");
+
+        let mut v = NotesView::new(NotesConfig::default());
+        v.tree = NotesTree::new(vec![root.clone()], std::collections::BTreeSet::new(), false);
+
+        // A tree click expands the folder: the snapshot's rows change.
+        let before = v.snapshot();
+        v.handle(NotesEvent::TreeClick { path: root.clone(), is_dir: true });
+        assert_ne!(before, v.snapshot());
+        assert!(v.snapshot().tree[0].expanded);
+
+        // A file click opens a tab and loads its text; Edit + Save writes it.
+        v.handle(NotesEvent::TreeClick { path: file.clone(), is_dir: false });
+        assert_eq!(v.snapshot().path.as_deref(), Some(file.as_str()));
+        assert_eq!(v.snapshot().text, "alpha");
+        v.handle(NotesEvent::Edit("beta".into()));
+        v.handle(NotesEvent::Save);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "beta");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
