@@ -193,20 +193,26 @@ bin/linux-check.sh shell          # interactive shell in the pinned image
 the daemon always runs the egui frontend; **on macOS the same frontend runs behind
 `cargo run -p ws-rs --features egui` + `WS_FRONTEND=egui`** (the dev switch for
 iterating on the Linux UI on the owner's Mac — use a private `TMPDIR`/`WS_HOME`, never
-the live socket). `bin/build-linux.sh` (dist layout) is not landed yet.
+the live socket). `bin/build-linux.sh` lays out a self-contained dist at
+`dist/kitchen-sink/` (a generated `commands.default.toml` + a `run.sh` that exports
+`WS_RS_ASSET_DIR` and execs the binary, so `dist/kitchen-sink/run.sh headless` binds
+the socket with no checkout); build natively on a Linux host or in the pinned image
+with `--docker`, and on Linux `./ws build` runs it.
 
 - Works: `kitchen-sink headless` (the full socket API, no AppKit) and the egui panes —
   files, switcher/palette, paths, jira, confluence, ai (`egui_commonmark`), compare,
   the notes editor and tools/setup — plus row context menus.
+- Wave 6 landed: the egui terminal panel (`frontend_egui/terminal.rs`, driven by
+  `alacritty_terminal` 0.26 directly, not `egui_term`), the `platform::capture` seam
+  (`xcap` 0.4.1; no egui overlay or capture UI yet), and OCR via the `tesseract` CLI
+  when it is on `PATH`.
 - Window manager: there is no AeroSpace on Linux. Bind your WM's keys to the existing
   CLI — `kitchen-sink notes|files|jira|confluence|ai|compare|window` (and `term`,
   `show`) — which forwards the launch message to the running daemon over
   `$TMPDIR/ws-notes.sock`; `hotkey_prep` is a no-op off macOS.
-- Unsupported / known gaps: terminal (`egui_term`), the notes nvim pane, screen capture
-  (`xcap`), OCR, QuickLook, and the tray/global menu (Waves 6–7, not started);
-  `python_helper::find_python` skips `/usr/bin` so the Python bridge cannot start on
-  Debian images; `recent_files` rewrites `/tmp`→`/private/tmp`; `status.py` still reads
-  macOS power/mem APIs; "open in notes" is a no-op off macOS; `ToolsPane` cannot
+- Unsupported / known gaps: QuickLook and the tray/global menu (not started); no Linux
+  screenshot capture/annotation UI yet (only the `platform::capture` seam); `status.py` still
+  reads macOS power/mem APIs; "open in notes" is a no-op off macOS; `ToolsPane` cannot
   pre-select a tool tab. See `PLAN-cross-platform.md` §8.
 
 ## Repo layout / code map
