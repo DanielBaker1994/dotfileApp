@@ -174,3 +174,20 @@ Proposed split, to be refined by the planner:
   (build once with `cd rust && CARGO_TARGET_DIR=../.build/rust-target cargo build --release -p ws-rs -p ws-helpers`).
 - Unit tests: `python3 -B Tests/test_ks_mcp.py`; Rust: `cd rust/ws-rs && CARGO_TARGET_DIR=/tmp/ks-w2-target cargo test --bin kitchen-sink`.
 - Dispatch: `node ~/.claude/skills/opencode-delegate/scripts/relay.mjs --brief B --model opencode-go/deepseek-v4.1-flash --cd REPO --timeout 90m --out-dir D`.
+
+## 9. Re-target (2026-10-13, owner): test the APP, not the plumbing
+
+Owner: "I want to test the actual app and see if we can detect real bugs." Swift/Rust parity is
+dropped as a goal (the two may have drifted; comparing is not worth it). Waves 1-3 found bugs only in
+the bridge and socket layer because §1 scoped features out and most runs were headless.
+
+New lanes (DeepSeek runs them; Claude only reads flagged screenshots):
+- **Oracles:** crash/hang/log (panic in `daemon.log`, socket stops answering, error lines); ground
+  truth outside the app (disk contents, `ls`, `difflib`, config after reload); a feature-flow table
+  `Tests/app_flows.json` whose every expectation cites docs or code; screenshots at checkpoints,
+  triaged by `deepseek-v4-flash-vision-exp`.
+- **Real input:** `bin/ks-input` (CGEvent keys, text, mouse, `screencapture -l`), refusing every
+  event unless the sandbox app is frontmost, so it never types into the owner's apps.
+- **Flow lane:** the table, run in the GUI sandbox. **Monkey lane:** random real input with the
+  crash/hang/log oracles.
+- Real-input lanes take keyboard focus: run them when the owner is away from the machine.
