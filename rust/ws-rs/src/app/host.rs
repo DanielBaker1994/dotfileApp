@@ -4678,6 +4678,18 @@ mod daemon_ui {
 
             match popup::route_key(&cfg, key) {
                 KeyAction::Escape(_) => {
+                    if current == Some(SlotView::Files) {
+                        let had = self
+                            .files_surface(|b| {
+                                let had = !b.list.marked.is_empty();
+                                b.list.marked.clear();
+                                had
+                            })
+                            .unwrap_or(false);
+                        if had {
+                            return true;
+                        }
+                    }
                     if current == Some(SlotView::CompareText) {
                         // PRD-compare KR6: Esc in compareText steps back to the
                         // compare view (Swift `slot.back(esc: true)`), it never
@@ -4718,6 +4730,17 @@ mod daemon_ui {
                 KeyAction::Edit(popup::EditOp::Find) => self.route_find_toggle(),
                 KeyAction::Edit(op) | KeyAction::SheetEdit(op) | KeyAction::Terminal(op) => {
                     self.perform_edit_op(op)
+                }
+                KeyAction::ListMove(delta) if key.shift && current == Some(SlotView::Files) => {
+                    // Shift+↑/↓ grows the marked range from the anchor.
+                    self.files_surface(|b| {
+                        let n = b.list.rows.len() as i64;
+                        if n > 0 {
+                            let to = (b.list.selection as i64 + delta as i64).clamp(0, n - 1);
+                            b.list.extend_selection(to as usize);
+                        }
+                    });
+                    true
                 }
                 KeyAction::ListMove(delta) => self.route_list_move(delta as i64),
                 KeyAction::ListMoveWrap(delta) => self.route_list_move_wrap(delta as i64),
@@ -5460,6 +5483,9 @@ mod daemon_ui {
                 }
                 E::Move(d) => {
                     self.files_surface(|b| b.list.move_selection(d));
+                }
+                E::DragEnded => {
+                    self.files_surface(|b| b.reload());
                 }
                 E::Escape => {
                     self.files_surface(|b| {

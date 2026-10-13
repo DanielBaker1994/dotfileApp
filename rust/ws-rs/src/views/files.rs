@@ -1469,6 +1469,7 @@ impl FileBrowser {
                 }
             }
             E::Move(d) => self.list.move_selection(d),
+            E::DragEnded => self.reload(),
             E::Escape => {
                 if !self.query.is_empty() {
                     self.set_query("");

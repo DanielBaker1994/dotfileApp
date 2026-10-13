@@ -63,6 +63,9 @@ pub enum FilesEvent {
     Move(i64),
     Escape,
     Sidebar(SidebarEvent),
+    /// A drag that started in the list ended (the target may have moved the
+    /// files away), so the listing needs a reload.
+    DragEnded,
 }
 
 /// Toolbar hit ids.
@@ -114,12 +117,14 @@ mod appkit {
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSControlTextEditingDelegate, NSEvent,
-        NSEventModifierFlags, NSFocusRingType, NSFont, NSGraphicsContext, NSImage, NSImageScaling,
+        NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource,
+        NSEventModifierFlags, NSFocusRingType, NSFont, NSPasteboardWriting, NSGraphicsContext, NSImage, NSImageScaling,
         NSImageView, NSLineBreakMode, NSScrollView, NSTextAlignment, NSTextField,
         NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWorkspace,
     };
     use objc2_foundation::{
-        NSAttributedString, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+        NSArray, NSAttributedString, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
+        NSString, NSURL,
     };
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
@@ -183,6 +188,12 @@ mod appkit {
         /// The preview-pane list reports `PreviewOpen` instead of clicks.
         preview: Cell<bool>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+        /// Mouse-down point (window coords) + row, armed until the drag
+        /// threshold is crossed or the button goes up.
+        drag_origin: Cell<Option<(NSPoint, usize)>>,
+        /// A plain click on an already-marked row is held back until mouse-up
+        /// so dragging a multi-selection does not collapse it first.
+        pending_click: Cell<Option<(usize, bool)>>,
     }
 
     define_class!(
@@ -261,12 +272,45 @@ mod appkit {
                     }
                     return;
                 }
+                let plain = !mods.contains(NSEventModifierFlags::Command)
+                    && !mods.contains(NSEventModifierFlags::Shift);
+                self.ivars().drag_origin.set(Some((e.locationInWindow(), row)));
+                let in_multi = {
+                    let m = self.ivars().marked.borrow();
+                    m.len() > 1 && m.contains(&row)
+                };
+                if plain && !double && in_multi {
+                    self.ivars().pending_click.set(Some((row, double)));
+                    return;
+                }
                 self.emit(FilesEvent::Click {
                     row,
                     cmd: mods.contains(NSEventModifierFlags::Command),
                     shift: mods.contains(NSEventModifierFlags::Shift),
                     double,
                 });
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, _e: &NSEvent) {
+                self.ivars().drag_origin.set(None);
+                if let Some((row, double)) = self.ivars().pending_click.take() {
+                    self.emit(FilesEvent::Click { row, cmd: false, shift: false, double });
+                }
+            }
+
+            #[unsafe(method(mouseDragged:))]
+            fn mouse_dragged(&self, e: &NSEvent) {
+                let Some((origin, row)) = self.ivars().drag_origin.get() else { return };
+                let now = e.locationInWindow();
+                if (now.x - origin.x).hypot(now.y - origin.y) < 4.0 {
+                    return;
+                }
+                self.ivars().drag_origin.set(None);
+                // Dragging a marked row drags every marked row; any other row
+                // drags just itself (Finder semantics).
+                self.ivars().pending_click.set(None);
+                self.begin_drag(e, row);
             }
 
             #[unsafe(method(rightMouseDown:))]
@@ -291,6 +335,24 @@ mod appkit {
         }
 
         unsafe impl NSObjectProtocol for FileListView {}
+
+        unsafe impl NSDraggingSource for FileListView {
+            #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+            fn drag_mask(&self, _s: &NSDraggingSession, ctx: NSDraggingContext) -> NSDragOperation {
+                if ctx == NSDraggingContext::OutsideApplication {
+                    NSDragOperation::Copy | NSDragOperation::Generic | NSDragOperation::Move
+                } else {
+                    NSDragOperation::Copy | NSDragOperation::Move
+                }
+            }
+
+            #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+            fn drag_ended(&self, _s: &NSDraggingSession, _p: NSPoint, op: NSDragOperation) {
+                if op.contains(NSDragOperation::Move) {
+                    self.emit(FilesEvent::DragEnded);
+                }
+            }
+        }
     );
 
     impl FileListView {
@@ -305,8 +367,54 @@ mod appkit {
                 on_event: RefCell::new(None),
                 preview: Cell::new(preview),
                 tracking: RefCell::new(None),
+                drag_origin: Cell::new(None),
+                pending_click: Cell::new(None),
             });
             unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        /// Start a real file drag (`NSURL` writers) so the rows can be dropped
+        /// into Finder, a terminal, mail, another app's window…
+        fn begin_drag(&self, e: &NSEvent, row: usize) {
+            let paths: Vec<String> = {
+                let rows = self.ivars().rows.borrow();
+                let marked = self.ivars().marked.borrow();
+                let idx: Vec<usize> = if marked.contains(&row) {
+                    marked.iter().copied().collect()
+                } else {
+                    vec![row]
+                };
+                idx.into_iter()
+                    .filter_map(|i| rows.get(i))
+                    .filter(|r| !r.is_parent())
+                    .map(|r| r.path.clone())
+                    .collect()
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let at = self.convertPoint_fromView(e.locationInWindow(), None);
+            let items: Vec<Retained<NSDraggingItem>> = paths
+                .iter()
+                .enumerate()
+                .map(|(n, p)| {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(p));
+                    let writer: Retained<ProtocolObject<dyn NSPasteboardWriting>> =
+                        ProtocolObject::from_retained(url);
+                    let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), &writer);
+                    let off = (n.min(5) as f64) * 4.0;
+                    let frame = NSRect::new(
+                        NSPoint::new(at.x - 16.0 + off, at.y - 16.0 + off),
+                        NSSize::new(32.0, 32.0),
+                    );
+                    let icon = file_icon(p);
+                    unsafe { item.setDraggingFrame_contents(frame, Some(as_any(&*icon))) };
+                    item
+                })
+                .collect();
+            let arr = NSArray::from_retained_slice(&items);
+            let src = ProtocolObject::from_ref(self);
+            self.beginDraggingSessionWithItems_event_source(&arr, e, src);
         }
 
         pub fn set_on_event(&self, cb: Box<dyn Fn(FilesEvent)>) {
