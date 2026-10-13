@@ -3336,6 +3336,16 @@ mod appkit {
     }
 
     impl JiraView {
+        /// The header view and column `col`'s chevron rect in it (the filter
+        /// picker's anchor).
+        pub fn filter_anchor(&self, col: usize) -> Option<(Retained<NSView>, Rect)> {
+            let h = self.ivars().header.clone();
+            let (frames, _) = h.frames();
+            let (fx, fw) = *frames.get(col)?;
+            let r = filter_rect(fx, fw, h.bounds().size.height);
+            Some((Retained::into_super(h), r))
+        }
+
         /// The rail (`sidebarJumpItems` / `do:jira-jump`).
         pub fn sidebar(&self) -> Retained<SidebarView> {
             self.ivars().sidebar.clone()

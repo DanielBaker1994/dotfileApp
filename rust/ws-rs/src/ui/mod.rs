@@ -10,6 +10,7 @@ pub mod inline_rename;
 pub mod jira_setup;
 pub mod list_panel;
 pub mod menu_kit;
+pub mod multi_picker;
 #[cfg(target_os = "macos")]
 pub mod panel_frame;
 pub mod popup;

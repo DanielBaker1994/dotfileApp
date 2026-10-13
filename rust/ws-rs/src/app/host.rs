@@ -4684,6 +4684,10 @@ mod daemon_ui {
             if crate::ui::inline_rename::active() {
                 return false;
             }
+            // An open multi-picker popover owns its keys (↑↓ / Return / Esc).
+            if crate::ui::multi_picker::appkit::is_open() {
+                return false;
+            }
             // Esc / Space close Quick Look even when the panel is not key.
             {
                 use objc2_app_kit::NSEventModifierFlags as F;
@@ -8539,94 +8543,112 @@ mod daemon_ui {
             crate::ui::toast::show("Columns fitted to their content", "arrow.left.and.right");
         }
 
-        /// `showFilterPicker`: a column's values with their row counts, each
-        /// a checkbox. Ticked values build that column's `IN (…)` filter; the
-        /// menu re-opens after every tick so several can be picked in a row.
-        /// Sort ↑ / ↓ and Clear sit on top (Swift's `extraButtons`).
-        fn jira_filter_picker(&self, col: usize, x: f64, y: f64) {
-            use crate::ui::menu_kit::{popup_at, MenuEntry};
+        /// `showFilterPicker`: the column's values (row counts) in the
+        /// searchable multi-picker; ticked values build that column's
+        /// `IN (…)` filter live. Status groups by category, labels fold their
+        /// tail and offer Pin to Sidebar, sortable columns get Sort ↑ / ↓.
+        fn jira_filter_picker(&self, col: usize, _x: f64, _y: f64) {
+            use crate::ui::multi_picker::{appkit, fold_tail, MultiPickerModel, PickOption};
             use crate::views::jira_view::EMPTY_VALUE;
-            enum Pick {
-                Toggle(String),
-                Sort(bool),
-                Clear,
+            let view = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone()));
+            let Some(view) = view else { return };
+            let Some((anchor, rect)) = view.filter_anchor(col) else { return };
+            let Some(Some((c, opts, picked))) = self.jira_surface(|l| {
+                l.refresh_directory();
+                let c = l.columns.get(col)?.clone();
+                let picked: Vec<String> = l.col_filters.get(&c.field).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+                let opts: Vec<PickOption> = l
+                    .filter_options(&c.field)
+                    .into_iter()
+                    .map(|o| {
+                        let rows = format!("{} row{}", o.count, if o.count == 1 { "" } else { "s" });
+                        let group = if c.field == "status" && o.id != EMPTY_VALUE {
+                            crate::views::jira::CATEGORY_NAMES[l.status_category(&o.id)].to_string()
+                        } else {
+                            String::new()
+                        };
+                        PickOption { id: o.id, title: o.title, detail: rows, group, unused: false }
+                    })
+                    .collect();
+                Some((c, opts, picked))
+            }) else {
+                return;
+            };
+            let mut m = MultiPickerModel::new(&c.title.to_lowercase(), None);
+            if c.field == "status" {
+                m.group_order = crate::views::jira::CATEGORY_NAMES.iter().map(|s| s.to_string()).collect();
+                let mut rows: HashMap<String, usize> = HashMap::new();
+                for o in &opts {
+                    let n: usize = o.detail.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                    *rows.entry(o.group.clone()).or_default() += n;
+                }
+                m.group_detail = rows.into_iter().map(|(g, n)| (g, format!("{n} row{}", if n == 1 { "" } else { "s" }))).collect();
             }
-            loop {
-                let info = self.jira_surface(|l| {
-                    l.refresh_directory();
-                    let c = l.columns.get(col)?.clone();
-                    let picked = l.col_filters.get(&c.field).cloned().unwrap_or_default();
-                    let sort = l.sort.as_ref().filter(|(f, _)| *f == c.field).map(|(_, asc)| *asc);
-                    let mut opts: Vec<(crate::views::jira_view::FilterOption, Option<usize>)> = l
-                        .filter_options(&c.field)
-                        .into_iter()
-                        .map(|o| {
-                            // Status values sit under their category (To Do / …).
-                            let cat = (c.field == "status" && o.id != EMPTY_VALUE).then(|| l.status_category(&o.id));
-                            (o, cat)
-                        })
-                        .collect();
-                    opts.sort_by_key(|(_, cat)| cat.unwrap_or(9));
-                    Some((c, opts, picked, sort))
-                });
-                let Some(Some((c, opts, picked, sort))) = info else { return };
-                let chosen: Rc<RefCell<Option<Pick>>> = Rc::new(RefCell::new(None));
-                let pick = |p: Pick| {
-                    let ch = chosen.clone();
-                    move || *ch.borrow_mut() = Some(p)
-                };
-                let mut entries = vec![MenuEntry::Header(c.title.clone())];
-                if c.sortable {
-                    entries.push(MenuEntry::checked("Sort ↑", sort == Some(true), pick(Pick::Sort(true))));
-                    entries.push(MenuEntry::checked("Sort ↓", sort == Some(false), pick(Pick::Sort(false))));
-                    entries.push(MenuEntry::Separator);
-                }
-                if !picked.is_empty() {
-                    entries.push(MenuEntry::item(&format!("Clear Filter ({} selected)", picked.len()), pick(Pick::Clear)));
-                    entries.push(MenuEntry::Separator);
-                }
-                if opts.is_empty() {
-                    entries.push(MenuEntry::disabled("No values in this list"));
-                }
-                let mut last_cat: Option<usize> = None;
-                for (o, cat) in &opts {
-                    if let Some(cat) = cat {
-                        if last_cat != Some(*cat) {
-                            last_cat = Some(*cat);
-                            let n: usize = opts.iter().filter(|(_, c2)| c2 == &Some(*cat)).map(|(o2, _)| o2.count).sum();
-                            entries.push(MenuEntry::Header(format!(
-                                "{} · {n} row{}",
-                                crate::views::jira::CATEGORY_NAMES[*cat],
-                                if n == 1 { "" } else { "s" }
-                            )));
+            let labels = c.field == "labels";
+            let opts = if labels {
+                let n = opts.len();
+                m.fold_title = Some(format!("Show all {n} labels"));
+                fold_tail(opts)
+            } else {
+                opts
+            };
+            m.set_options(opts);
+            m.set(picked, false);
+            let model = Rc::new(RefCell::new(m));
+            let field = c.field.clone();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let (m2, f2, w2) = (model.clone(), field.clone(), weak.clone());
+            let on_change: appkit::Callback = Rc::new(move || {
+                let sel: std::collections::BTreeSet<String> = m2.borrow().selected.iter().cloned().collect();
+                if let Some(ui) = w2.load() {
+                    ui.jira_surface(|l| {
+                        if sel.is_empty() {
+                            l.col_filters.remove(&f2);
+                        } else {
+                            l.col_filters.insert(f2.clone(), sel.clone());
                         }
-                    }
-                    let rows = format!("{} row{}", o.count, if o.count == 1 { "" } else { "s" });
-                    let title = format!("{}   ·  {rows}", o.title);
-                    entries.push(MenuEntry::checked(&title, picked.contains(&o.id), pick(Pick::Toggle(o.id.clone()))));
+                        l.selection = 0;
+                        l.visible_offset = 0;
+                        l.refilter();
+                    });
                 }
-                // A value ticked earlier that no row carries any more stays
-                // listed so it can still be unticked.
-                for v in picked.iter().filter(|v| !opts.iter().any(|(o, _)| &o.id == *v)) {
-                    let t = if v == EMPTY_VALUE { "(empty)" } else { v.as_str() };
-                    entries.push(MenuEntry::checked(&format!("{t}   ·  0 rows"), true, pick(Pick::Toggle(v.clone()))));
-                }
-                popup_at(entries, x, y);
-                let Some(p) = chosen.borrow_mut().take() else { return };
-                match p {
-                    Pick::Toggle(v) => {
-                        self.jira_surface(|l| l.toggle_filter(&c.field, &v));
-                    }
-                    Pick::Sort(asc) => {
-                        self.jira_surface(|l| l.set_sort(&c.field, asc));
-                        return;
-                    }
-                    Pick::Clear => {
-                        self.jira_surface(|l| l.clear_filter(&c.field));
-                        return;
-                    }
+            });
+            let mut extras: Vec<(String, appkit::Callback)> = Vec::new();
+            if c.sortable {
+                for (t, asc) in [("Sort ↑", true), ("Sort ↓", false)] {
+                    let (w, f) = (weak.clone(), field.clone());
+                    extras.push((
+                        t.to_string(),
+                        Rc::new(move || {
+                            if let Some(ui) = w.load() {
+                                ui.jira_surface(|l| l.set_sort(&f, asc));
+                            }
+                            appkit::close_open();
+                        }),
+                    ));
                 }
             }
+            if labels {
+                let (w, m3) = (weak.clone(), model.clone());
+                extras.push((
+                    "Pin to Sidebar".to_string(),
+                    Rc::new(move || {
+                        let picked: Vec<String> = m3.borrow().selected.iter().filter(|v| *v != EMPTY_VALUE).cloned().collect();
+                        if picked.is_empty() {
+                            crate::ui::toast::show("Tick the labels to pin first", "tag");
+                            return;
+                        }
+                        if let Some(ui) = w.load() {
+                            ui.jira_surface(|l| l.set_pinned_labels(&picked, true));
+                        }
+                        let s = if picked.len() == 1 { picked[0].clone() } else { format!("{} labels", picked.len()) };
+                        crate::ui::toast::show(&format!("Pinned {s} to the sidebar"), "tag.fill");
+                        appkit::close_open();
+                    }),
+                ));
+            }
+            let colors = crate::ui::theme::section_colors("jira");
+            appkit::show(&anchor, rect, model, colors, extras, on_change, None);
         }
 
         /// `groupMenuItems`: the Group By submenu (None, the choices, and
