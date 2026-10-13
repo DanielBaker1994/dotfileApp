@@ -324,7 +324,8 @@ impl PrefixState {
     }
 
     fn pane_dir(key: &PrefixKey) -> Option<Direction> {
-        if !(key.ctrl && !key.cmd && !key.opt) {
+        // Ctrl+Shift+H/J/K/L is the window resize (`pane_resize_key`).
+        if !(key.ctrl && !key.cmd && !key.opt && !key.shift) {
             return None;
         }
         match key.key_code {
@@ -1132,6 +1133,22 @@ mod tests {
         assert_eq!(s.handle(&b, 1.0), PrefixOutcome::Consumed);
         b.is_repeat = false;
         assert_eq!(s.handle(&b, 1.05), PrefixOutcome::Passthrough, "non-repeat clears + double-pass");
+    }
+
+    #[test]
+    fn ctrl_shift_hjkl_is_window_resize_not_a_pane_move() {
+        // The prefix machine must leave Ctrl+Shift+H/J/K/L to `pane_resize_key`.
+        let mut s = PrefixState::new();
+        let mut h = prefix_key(KEY_H, true, None);
+        h.shift = true;
+        assert_eq!(s.handle(&h, 7.0), PrefixOutcome::Passthrough);
+        let mut k = key(KEY_K);
+        k.ctrl = true;
+        k.shift = true;
+        assert_eq!(
+            pane_resize_key(&PopupConfig::default(), k),
+            Some(KeyAction::PaneResize(Direction::Up))
+        );
     }
 
     #[test]

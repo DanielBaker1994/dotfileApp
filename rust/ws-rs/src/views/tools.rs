@@ -851,7 +851,14 @@ impl ToolPanel {
     /// safe to call every drain.
     pub fn poll(&mut self) {
         #[cfg(target_os = "macos")]
-        self.poll_macos();
+        {
+            self.poll_macos();
+            // A key handler can `orderOut` the panel itself (filefast's Esc);
+            // keep `shown` (state.tools, `is_shown`) honest.
+            if self.shown && self.window.as_ref().is_some_and(|w| !w.isVisible()) {
+                self.shown = false;
+            }
+        }
         if self.kind == ToolKind::TextTable {
             self.poll_table();
         }

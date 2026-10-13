@@ -6,6 +6,46 @@ what a fix probably looks like.
 
 ---
 
+## UI test pass (2026-10-12) — open items
+
+Full write-up, repros and the fixed list: `UI-TEST-FINDINGS.md`.
+
+### Terminal drawer has no right-click menu (rule 2)
+Right-clicking the notes terminal drawer does nothing. `rule.md` §2 wants copy
+file / copy absolute path / open in notes / reveal in Files for a path under the
+cursor. No terminal menu exists in the Rust port (`MenuEntry` menus exist for
+paths / files / notes tree / compare only). Fix: a context-menu hook in the
+SwiftTerm shim (`rust/swiftterm-shim`) that resolves the clicked word to a path,
+then reuse `reveal_in_files` / `copy_text_to_pasteboard` from `host.rs`.
+
+### Terminal drawer: top border clips the first row; no resize handle
+The drawer's top border overlaps its first text row, and dragging its top edge
+does nothing (height is fixed at `drawerInset` 200). Fix: inset the terminal
+view by the border width; add a drag handle (or document the keyboard route).
+
+### Palette: no "No results" row
+A filter that matches nothing collapses the panel to the search box with no
+message. Fix: draw one disabled row (and make `accept()` a no-op on it) in
+`views/switcher.rs`.
+
+### Palette: workspace badges read as part of the command rows
+The right pane (workspace id chips + app icons) lines up with the command rows,
+so a badge looks like it belongs to the row beside it (worse when filtered).
+By design (two panes, Tab switches) but unlabeled. Fix: a faint column header
+or a stronger divider.
+
+### Notes polish
+- nvim gutter: two-digit line numbers touch the pane's left border.
+- Sidebar right-click menu opens with "Open in Notes" pre-highlighted.
+
+### Window-resize shortcuts are untestable under AeroSpace
+This app's window is tiled (`layout tiling` in `config/aerospace/aerospace.toml`),
+so AeroSpace snaps Ctrl+Shift+HJKL / Cmd+Opt+± resizes back. Verify them with
+`aerospace layout floating` on the window, or document that they only apply when
+the window floats.
+
+---
+
 ## MCP / headless control
 
 ### Full MCP catalog deferred — thin v1 shipped (`bin/ks-mcp`)

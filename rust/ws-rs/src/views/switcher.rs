@@ -1466,7 +1466,8 @@ mod macos {
         (width * 0.46).round()
     }
 
-    pub const PALETTE_SEARCH_PLACEHOLDER: &str = "";
+    /// Shown while the filter is empty (was blank: an unlabeled box).
+    pub const PALETTE_SEARCH_PLACEHOLDER: &str = "Search commands and windows";
 
     pub struct PaletteHandlerIvars {
         pub model: RefCell<PaletteModel>,
@@ -1844,6 +1845,13 @@ mod macos {
         pub fn hide_panel(&mut self) {
             self.shown = false;
             if let Some(w) = &self.window {
+                // A click-pick runs `orderOut` inside the click's mouse-down;
+                // the window server kept drawing the panel (AppKit already
+                // said `isVisible == false`, so a second `orderOut` is a
+                // no-op) — under the tool it opened, back when that closed.
+                // Make it invisible and click-through as well.
+                w.setAlphaValue(0.0);
+                w.setIgnoresMouseEvents(true);
                 w.orderOut(None);
             }
         }
@@ -1874,6 +1882,8 @@ mod macos {
                     let (x, y) = panel_origin(host, (w, h));
                     panel.setFrameOrigin(NSPoint::new(x, y));
                 }
+                panel.setAlphaValue(1.0);
+                panel.setIgnoresMouseEvents(false);
                 panel.makeKeyAndOrderFront(None);
                 if let Some(handler) = &self.handler {
                     let responder: &objc2_app_kit::NSResponder = &handler.ivars().search;

@@ -3629,7 +3629,13 @@ mod daemon_ui {
                         if let Some(mtm) = MainThreadMarker::new() {
                             palette_pick_focus(mtm, &action);
                         }
-                        on_ui(|ui| ui.end_palette(false));
+                        // Deferred so it runs after the click handler returns:
+                        // a click-pick left the palette window on screen
+                        // (under the tool it opened) until the tool closed.
+                        on_ui(|ui| {
+                            ui.hide_palette_panel();
+                            ui.end_palette(false);
+                        });
                         match action {
                             PaletteAction::Command(name) => c.run_palette_command(&name),
                             PaletteAction::Workspace(id) => c.switch_workspace(&id),
@@ -3813,6 +3819,14 @@ mod daemon_ui {
             // Always start on the first row.
             panel.show(&views, current, None);
             views.iter().map(|v| format!("{}|{}", v.name, v.location)).collect()
+        }
+
+        /// Order the palette window out (a click-pick; `hide_palette` minus the
+        /// focus hand-back, which `palette_pick_focus` already did).
+        fn hide_palette_panel(&self) {
+            if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
+                p.hide_panel();
+            }
         }
 
         fn hide_palette(&self) {
@@ -4664,14 +4678,13 @@ mod daemon_ui {
                             }
                         } else if matches!(
                             code,
-                            popup::KEY_DOWN
-                                | popup::KEY_UP
-                                | popup::KEY_TAB
-                                | 45
-                                | 35
-                                | 123
-                                | 124
-                        ) {
+                            popup::KEY_DOWN | popup::KEY_UP | popup::KEY_TAB
+                        ) || (matches!(code, 45 | 35) && ctrl)
+                            // Left/Right switch panes only on an empty query;
+                            // otherwise they move the caret in the filter field.
+                            || (matches!(code, 123 | 124)
+                                && p.live_query().trim().is_empty())
+                        {
                             p.key(code, ctrl, shift, cmd, opt);
                             Out::Consumed
                         } else {

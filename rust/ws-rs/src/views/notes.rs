@@ -1008,7 +1008,7 @@ impl ProseRender {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         let mut override_html = format!(
-            "<base href=\"file://{}/\">\n<style>\nbody {{ max-width: {}px !important; }}\n</style>",
+            "<base href=\"file://{}/\">\n<style>\nbody {{ max-width: {}px !important; margin: 0 auto !important; padding: 28px 40px 56px !important; box-sizing: border-box !important; }}\n</style>",
             dir,
             width as i64
         );
@@ -1078,7 +1078,7 @@ impl ProseRender {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         let mut s = format!(
-            "<base href=\"file://{}/\">\n<style>\nbody {{ max-width: {}px !important; }}\n</style>",
+            "<base href=\"file://{}/\">\n<style>\nbody {{ max-width: {}px !important; margin: 0 auto !important; padding: 28px 40px 56px !important; box-sizing: border-box !important; }}\n</style>",
             dir,
             width as i64
         );
@@ -3432,10 +3432,12 @@ mod macos {
             if plan.write().is_err() {
                 return;
             }
-            let i = self.model.tabs.append(&plan.path);
-            self.select_row(i);
+            // `append` already selects the new tab, so `select_row` would see
+            // no change and never load it: the editor (and prose page) kept the
+            // previous note and typing / paste went into (and saved) that file.
+            self.model.tabs.append(&plan.path);
             self.repaint_rows();
-            self.focus_editor();
+            self.open_note(&plan.path);
         }
 
         /// The sidebar ✕ on tab `i` (`onCloseTab`).
