@@ -57,6 +57,12 @@ Also deferred: the L1 sandbox + L2 data suites (`Tests/test_ks_mcp_sandbox.py`,
 `Tests/test_ks_mcp_data.py`) and modern MCP protocol support (`protocol: auto`,
 `2026-07-28`). Locked by `bin/ks-mcp.py` + `Tests/test_ks_mcp.py` (`./ws test mcp`).
 
+### MCP wave-2 leads not yet fixed (see `MCP-TEST-FINDINGS.md` §7)
+`ks_do` advertises `board:<sub>` but it always errors; `tool-close:<unknown>`, `key:<garbage>` and
+`compare:select:99999` succeed silently; `back` goes home, not to the previous view; no `show` to pair
+`hide`; no state schema / verb-list tool for agents; Windows/Linux `Reply::peer_closed` is untested
+(Windows is a stub returning false).
+
 ### Headless daemons never drain `pending_note_open`
 A GUI daemon drains a queued `open:<path>` when notes presents (`host.rs`); the
 headless daemon leaves it queued, so `do:open:PATH` on the sandbox is a no-op.

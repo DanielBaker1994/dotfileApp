@@ -143,10 +143,13 @@ An agent can drive and verify the app over the socket — no computer control:
 
 - **`kitchen-sink headless`** (also `WS_HEADLESS=1` with no argv mode): the daemon binds the socket
   and runs `state`/`do:`/raw verbs inline on the socket thread with **no AppKit at all** — no
-  `NSApplication`, window, menu, status item or Dock presence. Screenshot verbs capture (CG is
-  thread-safe) but overlays no-op (`present_overlay` is `MainThreadMarker`-guarded).
+  `NSApplication`, window, menu, status item or Dock presence. `screenshot` and `pane-shot` are
+  **refused** (`error: <verb> unavailable in headless mode`, since d21d2b1) so a headless daemon can
+  never capture the owner's real screen; capture needs `start --gui`. Headless = `main_queue` never
+  installed (`SwitcherController::is_headless`).
 - **`bin/ks-mcp-sandbox.sh start|stop|status|sock|reset`**: an isolated headless daemon under
-  `.build/mcp-sandbox` (its own `TMPDIR`/`WS_HOME`/`WS_COMMANDS_CONF` copy + jira/notify cache env;
+  `.build/mcp-sandbox` (its own `TMPDIR`/`WS_HOME`/`WS_COMMANDS_CONF` copy + jira/notify cache env,
+  and `HOME`/`XDG_*` redirected under the sandbox root so nothing lands in the real `~/.cache`;
   live-safe cargo build; killed only by pidfile/`lsof -t` on its own socket). Drive it with
   `export KS_SOCKET=$(bin/ks-mcp-sandbox.sh sock)` then `printf 'state\n' | nc -U -w3 "$KS_SOCKET"`.
 - **`bin/ks-mcp-sandbox.sh start --gui`** (verified 2026-10-12): launches the real windowed app,
@@ -170,8 +173,12 @@ An agent can drive and verify the app over the socket — no computer control:
   `pane-shot`); `--list-tools` debugs; tests in `Tests/test_ks_mcp.py` (`./ws test mcp`).
 - Limits: headless proves model/state, **not rendering** — verify visuals with `screenshot -r` /
   `pane-shot`; `do:key:` is record-only, so Cmd+K, Cmd+/, find bars and jira `board:*` have no
-  entry; unknown `do:` echoes state (typos undetectable); `do:ai:*`/`do:confluence:*` registers are
-  dead code. Deferrals in `BACKLOG.md` ("MCP / headless control").
+  entry; `do:ai:*`/`do:confluence:*` registers are dead code. Unknown `do:` verbs, `tool:<unknown>` and
+  bad `paths:select:` now return `{"error":…}` (→ `isError` in `ks_do`); still silent no-ops:
+  `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty, `compare:select:<out of range>`. Headless
+  still reports `shown: true` for panels/tools that cannot exist without AppKit (F0-7, undecided).
+  Requests over 2048 bytes are refused (`request too long`), not truncated. Test status and open
+  findings: `MCP-TEST-FINDINGS.md`, plan for the next wave: `PLAN-mcp-wave3.md`. Deferrals in `BACKLOG.md` ("MCP / headless control").
 
 ## Linux (experimental)
 
