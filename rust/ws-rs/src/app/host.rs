@@ -574,7 +574,7 @@ impl ControllerInner {
 /// Mirrors `SwitcherController`: owns the registry, the shared-window state,
 /// the `[app]` settings and the pane/vim models.
 pub struct SwitcherController {
-    inner: Mutex<ControllerInner>,
+    inner: Arc<Mutex<ControllerInner>>,
     registry: Registry,
     /// Handles the view registrations close over, so `do:compare:*` /
     /// `do:screenshot:*` reach the same model the host holds.
@@ -652,7 +652,7 @@ impl SwitcherController {
             compare_model: None,
         };
         SwitcherController {
-            inner: Mutex::new(inner),
+            inner: Arc::new(Mutex::new(inner)),
             registry: Registry::new(),
             compare_model: None,
             screenshot_controller: None,
@@ -2134,6 +2134,79 @@ impl SwitcherController {
         }
     }
 
+    /// `window-shot[\tWORDS]`: present the view (if `--view`), then capture the
+    /// shared window's own content straight to a PNG on the main thread — no
+    /// overlay, no activation beyond the present. Replies with the saved path or
+    /// `error: …`.
+    fn window_shot_message(&self, rest: &str, reply: Reply) {
+        use crate::views::screenshot::WindowShotArgs;
+        let words: Vec<String> =
+            rest.split('\t').filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let args = match WindowShotArgs::parse(&words) {
+            Ok(a) => a,
+            Err(e) => {
+                reply.send(&format!("error: {}", e.0));
+                return;
+            }
+        };
+        #[cfg(target_os = "macos")]
+        {
+            use crate::views::screenshot::{screen_capture_permitted, window_shot_image};
+            if !screen_capture_permitted() {
+                reply.send("error: screen capture not permitted");
+                return;
+            }
+            let target = match args.view.as_deref() {
+                Some(name) => match SlotView::from_raw(name) {
+                    Some(v) => Some(v),
+                    None => {
+                        reply.send(&format!("error: unknown view {name}"));
+                        return;
+                    }
+                },
+                None => self.current(),
+            };
+            // Always present: the capture needs the shared window on screen with
+            // a live window number, and `open` is what a `do:open:<view>` would do.
+            let view = target.unwrap_or(SlotView::Notes);
+            self.open(view);
+            // The `Present` command is drained before this `run_on_main` job, so
+            // the member's `wid` is set by the time the closure runs.
+            let inner = self.inner.clone();
+            let out = crate::engines::pane_shot::expand_tilde(
+                &args.out.clone().unwrap_or_else(default_window_shot_path),
+            );
+            let scale = args.scale;
+            let result = self.run_on_main(
+                move || {
+                    let wid = {
+                        let guard = inner.lock().unwrap();
+                        guard.members.get(&view).map_or(0, |m| m.wid)
+                    };
+                    if wid == 0 {
+                        return Err("no shared window to capture".to_string());
+                    }
+                    let shot = window_shot_image(wid as u32, scale).map_err(|e| e.0)?;
+                    let bytes = shot.png.ok_or_else(|| "could not encode PNG".to_string())?;
+                    std::fs::write(&out, &bytes)
+                        .map_err(|e| format!("could not write {out}: {e}"))?;
+                    Ok(out)
+                },
+                std::time::Duration::from_secs(20),
+            );
+            match result {
+                Some(Ok(path)) => reply.send(&path),
+                Some(Err(e)) => reply.send(&format!("error: {e}")),
+                None => reply.send("error: window-shot timed out"),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = args;
+            reply.send("error: window-shot needs macOS");
+        }
+    }
+
     /// `do:compare:open[:sub]:LEFT|RIGHT` — `showCompare` + `openPair` (Swift
     /// `compareTestDo`): present the compare view (pushing the compareText
     /// sub-view for `open-sub`) and load the pair into the shared model.
@@ -2175,6 +2248,13 @@ impl SwitcherController {
         }
         None
     }
+}
+
+/// Default `--out` for `window-shot`: a unique PNG under the process's temp
+/// dir, so callers always get a fresh file without naming one.
+fn default_window_shot_path() -> String {
+    let name = format!("window-shot-{}.png", crate::views::screenshot::epoch_millis());
+    std::env::temp_dir().join(name).to_string_lossy().into_owned()
 }
 
 /// `[section] esc-close` / `vim-esc-close` and `[app] esc-close` from the raw
@@ -2676,7 +2756,7 @@ impl CommandHandler for SwitcherController {
     fn raw_deferred(&self, verb: &str, rest: &str, reply: Reply) -> Option<Reply> {
         // A headless daemon has no window to capture; refuse instead of
         // reading the real screen (F0-3).
-        if matches!(verb, "screenshot" | "pane-shot") && self.is_headless() {
+        if matches!(verb, "screenshot" | "pane-shot" | "window-shot") && self.is_headless() {
             reply.send(&format!("error: {verb} unavailable in headless mode"));
             return None;
         }
@@ -2691,6 +2771,7 @@ impl CommandHandler for SwitcherController {
             "screenshot" => self.screenshot_message(rest, reply),
             "compare" => self.compare_message(rest, reply),
             "pane-shot" => self.pane_shot_message(rest, reply),
+            "window-shot" => self.window_shot_message(rest, reply),
             _ => return Some(reply),
         }
         None

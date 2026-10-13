@@ -32,7 +32,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KS_MCP = os.path.join(ROOT, "bin", "ks-mcp.py")
 
 LATEST_PROTOCOL = "2025-11-25"
-RAW_VERBS = ["screenshot", "screenshot-permission", "compare", "pane-shot"]
+RAW_VERBS = ["screenshot", "screenshot-permission", "compare", "pane-shot", "window-shot"]
 
 # Canned daemon state: enough shape to prove the JSON survived the round trip.
 STATE = {
@@ -75,6 +75,10 @@ class FakeDaemon:
             return "granted"
         if line.split("\t", 1)[0] == "screenshot":
             return "error: screenshot unavailable in headless mode"
+        if line.split("\t", 1)[0] == "window-shot":
+            if "nope" in line:
+                return "error: unknown view nope"
+            return "/tmp/ks-window-shot.png"
         return json.dumps(STATE, separators=(",", ":"))
 
     def _serve(self):
@@ -296,6 +300,7 @@ class Handshake(McpTestCase):
         raw_desc = tools["ks_raw"]["description"]
         self.assertIn("WARNING", raw_desc)
         self.assertIn("pane-shot", raw_desc)
+        self.assertIn("window-shot", raw_desc)
         self.assertIn("capture the real screen", raw_desc)
 
         self.assertEqual(
@@ -358,6 +363,24 @@ class Tools(McpTestCase):
             res = self.call_tool(1, "ks_raw", {"verb": "screenshot", "args": args})["result"]
             self.assertTrue(res["isError"], args)
             self.assertIn("headless", res["content"][0]["text"])
+
+    def test_ks_raw_window_shot_returns_the_path(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        res = self.call_tool(
+            1, "ks_raw", {"verb": "window-shot", "args": ["--view", "files"]}
+        )["result"]
+        self.assertNotIn("isError", res)
+        self.assertEqual(res["content"][0]["text"], "/tmp/ks-window-shot.png")
+
+    def test_ks_raw_window_shot_error_is_an_error_result(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        res = self.call_tool(
+            1, "ks_raw", {"verb": "window-shot", "args": ["--view", "nope"]}
+        )["result"]
+        self.assertTrue(res["isError"])
+        self.assertIn("unknown view nope", res["content"][0]["text"])
 
     def test_ks_help_returns_the_guide(self):
         self.start_daemon()
@@ -492,7 +515,7 @@ class ReadOnly(McpTestCase):
 
     def test_mutating_raw_verbs_are_blocked(self):
         self._ro()
-        for i, verb in enumerate(("screenshot", "pane-shot", "compare")):
+        for i, verb in enumerate(("screenshot", "pane-shot", "window-shot", "compare")):
             r = self.call_tool(10 + i, "ks_raw", {"verb": verb})
             self.assertEqual(r["error"]["code"], -32602, verb)
             self.assertIn("disabled", r["error"]["message"], verb)

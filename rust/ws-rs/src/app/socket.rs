@@ -6,8 +6,8 @@
 //! - `ping` -> close, no reply.
 //! - `state` -> state JSON + `\n`.
 //! - `do:ACTION` -> the action's JSON reply, or (no error) the full state JSON.
-//! - `reload` / `restart` / `screenshot\t…` / `compare\t…` / `pane-shot\t…`
-//!   -> one raw line when requested.
+//! - `reload` / `restart` / `screenshot\t…` / `compare\t…` / `pane-shot\t…` /
+//!   `window-shot\t…` -> one raw line when requested.
 //! - anything else -> `launch`, no reply.
 
 use std::io::{self, Read, Write};
@@ -40,13 +40,14 @@ const SEND_TIMEOUT_SECS: i64 = 5;
 const READ_MAX: usize = 2048;
 const LISTEN_BACKLOG: i32 = 64;
 
-const RAW_VERBS: [&str; 6] = [
+const RAW_VERBS: [&str; 7] = [
     "reload",
     "restart",
     "screenshot",
     "screenshot-permission",
     "compare",
     "pane-shot",
+    "window-shot",
 ];
 
 /// The reply side of one raw-verb connection: a dup of the client fd that the

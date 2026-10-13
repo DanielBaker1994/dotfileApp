@@ -170,9 +170,10 @@ An agent can drive and verify the app over the socket — no computer control:
 - **`bin/ks-mcp`** (+ `bin/ks-mcp.py`): legacy stdio MCP bridge, registered in `opencode.json`
   (`kitchen-sink` live = `KS_MCP_READ_ONLY=1`; `kitchen-sink-sandbox` disabled). Tools: `ks_state`,
   `ks_do` (hidden in read-only), `ks_raw` (`screenshot` | `screenshot-permission` | `compare` |
-  `pane-shot`); `--list-tools` debugs; tests in `Tests/test_ks_mcp.py` (`./ws test mcp`).
+  `pane-shot` | `window-shot`); `--list-tools` debugs; tests in `Tests/test_ks_mcp.py` (`./ws test mcp`).
 - Limits: headless proves model/state, **not rendering** — verify visuals with `screenshot -r` /
-  `pane-shot`; `do:key:` is record-only, so Cmd+K, Cmd+/, find bars and jira `board:*` have no
+  `pane-shot` / `window-shot` (the daemon's own shared window straight to a PNG, no overlay);
+  `do:key:` is record-only, so Cmd+K, Cmd+/, find bars and jira `board:*` have no
   entry; `do:ai:*`/`do:confluence:*` registers are dead code. Unknown `do:` verbs, `tool:<unknown>` and
   bad `paths:select:` now return `{"error":…}` (→ `isError` in `ks_do`); still silent no-ops:
   `key:<garbage>`, `tool-close:<unknown>`, `hide` when empty, `compare:select:<out of range>`. Headless

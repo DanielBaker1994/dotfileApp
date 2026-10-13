@@ -7,7 +7,7 @@ Thin v1 surface (deliberately small; the Python cold path stays out):
     ks_state   read the daemon's full state JSON
     ks_do      run a `do:<action>` verb (mutating; hidden in read-only mode)
     ks_raw     allow-listed raw verbs:
-               screenshot | screenshot-permission | compare | pane-shot
+               screenshot | screenshot-permission | compare | pane-shot | window-shot
     ks_help    offline guide (do: actions, raw verbs, state fields); no daemon
 
 Point it at the live app (read-only recommended) or at an isolated headless
@@ -42,7 +42,7 @@ SERVER_VERSION = "1.0.0"
 SUPPORTED_PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 LATEST_PROTOCOL = "2025-11-25"
 
-RAW_VERBS = ("screenshot", "screenshot-permission", "compare", "pane-shot")
+RAW_VERBS = ("screenshot", "screenshot-permission", "compare", "pane-shot", "window-shot")
 READ_ONLY_RAW_VERBS = ("screenshot-permission",)
 
 # The `do:` action grammar. It lives in one constant because clients that render
@@ -84,11 +84,15 @@ RAW_HELP = (
     "geometry, `-r`/`--raw` for a raw PNG; interactive forms come up in the app.\n"
     "- `pane-shot` — capture a live window/pane to a PNG on disk (args per "
     "`kitchen-sink pane-shot --help`).\n"
+    "- `window-shot` — capture the daemon's own shared window to a PNG with no "
+    "overlay: args `--view <view>` (open it first), `--out <path.png>` (default "
+    "a temp file), `--scale 1|2`. Replies the saved path.\n"
     "- `compare` — the compare tool; args `--wait`, `--title1 T`, `--title2 T`, "
     "then 1-2 paths.\n"
     "- `screenshot-permission` — reports `granted`/`denied`.\n"
-    "WARNING: `screenshot` and `pane-shot` capture the real screen. A headless "
-    "sandbox refuses them (`error: <verb> unavailable in headless mode`) — never "
+    "WARNING: `screenshot` and `pane-shot` capture the real screen. "
+    "`window-shot` captures only the daemon's own window. A headless sandbox "
+    "refuses all three (`error: <verb> unavailable in headless mode`) — never "
     "point them at the owner's machine. In read-only mode only "
     "`screenshot-permission` is allowed."
 )
@@ -117,7 +121,8 @@ HEADLESS_HELP = (
     "Headless mode runs no AppKit: window-only verbs are refused (see "
     "`needs_window` in host.rs): `paths:show`, `switcher`, `toggle-terminal`, "
     "`toggle-browser`, `term`, `notes-find`, `notes-grep`, `jira-jump`, "
-    "`reset-size`, `tool:<name>`. `screenshot`/`pane-shot` are refused too. "
+    "`reset-size`, `tool:<name>`. `screenshot`/`pane-shot`/`window-shot` are "
+    "refused too. "
     "`state` still reports `shown: true` for panels that cannot exist without a "
     "window."
 )
@@ -126,6 +131,7 @@ SOCKET_TIMEOUT = 5.0
 SCREENSHOT_RAW_TIMEOUT = 60.0
 COMPARE_WAIT_TIMEOUT = 300.0
 PANE_SHOT_TIMEOUT = 60.0
+WINDOW_SHOT_TIMEOUT = 60.0
 
 JSONRPC_ERRORS = {
     "parse": -32700,
@@ -313,6 +319,15 @@ class Server:
             if wait and not text:
                 return error_result(f"compare --wait: no reply within {timeout:.0f} s")
             return self.raw_text_result(text or "ok")
+        if verb == "window-shot":
+            data, timed_out = send_and_read(self.sock, payload, WINDOW_SHOT_TIMEOUT, "line")
+            text = data.decode("utf-8", "replace").strip()
+            if not text:
+                why = "timed out" if timed_out else "no answer"
+                return error_result(f"window-shot: {why}")
+            if text.startswith("error: "):
+                return error_result(text[7:])
+            return text_result(text)
         # pane-shot
         data, timed_out = send_and_read(self.sock, payload, PANE_SHOT_TIMEOUT, "line")
         text = data.decode("utf-8", "replace").strip()
@@ -407,13 +422,16 @@ class Server:
             },
         )
         raw_desc = (
-            "Raw socket verb (screenshot, pane-shot, compare...). WARNING: captures the real screen.\n"
+            "Raw socket verb (screenshot, window-shot, compare...). WARNING: screen capture.\n"
             "Send an allow-listed raw socket verb: `screenshot` (args like `-g` "
             "for geometry or `-r` for a raw PNG; interactive forms come up in the "
             "app), `screenshot-permission` (granted/denied), `compare` (args "
             "`--wait`, `--title1 T`, `--title2 T`, then 1-2 paths), `pane-shot` "
-            "(args per `kitchen-sink pane-shot --help`). WARNING: `screenshot` "
-            "and `pane-shot` capture the real screen; they are refused in "
+            "(args per `kitchen-sink pane-shot --help`), `window-shot` (capture "
+            "the daemon's own shared window: `--view <view>`, `--out <path.png>`, "
+            "`--scale 1|2`; replies the saved path). WARNING: `screenshot` "
+            "and `pane-shot` capture the real screen; `window-shot` captures only "
+            "the daemon's own window. All three are refused in "
             "headless sandbox mode — never point them at one."
         )
         if self.read_only:

@@ -748,6 +748,52 @@ mod sck {
         }
         Ok(out)
     }
+
+    /// Capture a single on-screen window by its `CGWindowID` (the AppKit
+    /// `windowNumber`) through `SCContentFilter::initWithDesktopIndependentWindow`.
+    /// The output is the window's own content at `scale` × its point size — no
+    /// crop, no shadow, no overlay. Safe to call off the main thread.
+    pub fn capture_window(window_id: u32, scale: f64) -> Result<CapturedImage, CaptureError> {
+        let content = fetch_shareable_content()?;
+        let windows = unsafe { content.windows() };
+        let window = windows
+            .iter()
+            .find(|w| unsafe { w.windowID() } == window_id)
+            .ok_or_else(|| CaptureError::new(format!("window {window_id} not found")))?;
+        let filter = unsafe {
+            SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
+        };
+        let config = unsafe { SCStreamConfiguration::new() };
+        let frame = unsafe { window.frame() };
+        let width = (frame.size.width * scale).round().max(1.0) as usize;
+        let height = (frame.size.height * scale).round().max(1.0) as usize;
+        unsafe {
+            config.setWidth(width);
+            config.setHeight(height);
+            config.setShowsCursor(false);
+            config.setCaptureResolution(SCCaptureResolutionType::Best);
+        }
+        let (block, rx) = capture_block();
+        unsafe {
+            SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                &filter,
+                &config,
+                Some(&block),
+            );
+        }
+        let image = match rx.recv_timeout(TIMEOUT) {
+            Ok(Ok(image)) => image,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(CaptureError::new("window-shot: capture timed out")),
+        };
+        Ok(CapturedImage {
+            display: window_id,
+            width: CGImage::width(Some(&image)) as i64,
+            height: CGImage::height(Some(&image)) as i64,
+            scale,
+            image: Some(image),
+        })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -791,6 +837,94 @@ pub fn request_screen_capture_access() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn request_screen_capture_access() -> bool {
     false
+}
+
+// ---------------------------------------------------------------------------
+// window-shot — non-interactive capture of the daemon's own shared window
+// ---------------------------------------------------------------------------
+
+pub const WINDOW_SHOT_USAGE: &str =
+    "window-shot [--view VIEW] [--out PATH.png] [--scale 1|2]";
+
+/// `window-shot` arguments, tab-separated like `pane-shot`:
+/// `--view <view>` (open it first), `--out <path.png>` (default a temp file),
+/// `--scale 1|2` (default 2, the retina backing scale). Pure so the parser is
+/// unit-testable without a GUI or capture permission.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowShotArgs {
+    pub view: Option<String>,
+    pub out: Option<String>,
+    pub scale: f64,
+}
+
+impl Default for WindowShotArgs {
+    fn default() -> Self {
+        WindowShotArgs {
+            view: None,
+            out: None,
+            scale: 2.0,
+        }
+    }
+}
+
+impl WindowShotArgs {
+    pub fn parse(words: &[String]) -> Result<WindowShotArgs, CaptureError> {
+        let mut a = WindowShotArgs::default();
+        let mut i = 0usize;
+        while i < words.len() {
+            let w = words[i].as_str();
+            match w {
+                "--view" | "-v" => a.view = Some(ws_value(words, &mut i, w)?),
+                "--out" | "-o" => a.out = Some(ws_value(words, &mut i, w)?),
+                "--scale" | "-s" => {
+                    let v = ws_value(words, &mut i, w)?;
+                    match v.as_str() {
+                        "1" => a.scale = 1.0,
+                        "2" => a.scale = 2.0,
+                        other => {
+                            return Err(CaptureError::new(format!(
+                                "--scale is 1 or 2, not {other}"
+                            )))
+                        }
+                    }
+                }
+                "-h" | "--help" => {
+                    return Err(CaptureError::new(format!(
+                        "usage: kitchen-sink {WINDOW_SHOT_USAGE}"
+                    )))
+                }
+                _ => {
+                    return Err(CaptureError::new(format!(
+                        "unknown argument {w}\nusage: kitchen-sink {WINDOW_SHOT_USAGE}"
+                    )))
+                }
+            }
+            i += 1;
+        }
+        Ok(a)
+    }
+}
+
+fn ws_value(words: &[String], i: &mut usize, flag: &str) -> Result<String, CaptureError> {
+    *i += 1;
+    if *i >= words.len() || words[*i].is_empty() {
+        return Err(CaptureError::new(format!("{flag} needs a value")));
+    }
+    Ok(words[*i].clone())
+}
+
+/// Capture one window by its `CGWindowID` via ScreenCaptureKit's
+/// desktop-independent window filter, at the requested backing scale, encoded
+/// as a PNG. Used by the `window-shot` socket verb — no overlay, no activation.
+#[cfg(target_os = "macos")]
+pub fn window_shot_image(window_id: u32, scale: f64) -> Result<ShotImage, CaptureError> {
+    let captured = sck::capture_window(window_id, scale)?;
+    let image = captured
+        .image
+        .as_ref()
+        .ok_or_else(|| CaptureError::new("window-shot: no image captured"))?;
+    encode_shot_image(image)
+        .ok_or_else(|| CaptureError::new("window-shot: could not encode PNG"))
 }
 
 // ---------------------------------------------------------------------------
@@ -8509,6 +8643,56 @@ pub(crate) fn epoch_millis() -> i64 {
 mod tests {
     use super::*;
 
+    fn ws_words(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn window_shot_args_parse_defaults() {
+        let a = WindowShotArgs::parse(&ws_words(&[])).unwrap();
+        assert_eq!(a, WindowShotArgs::default());
+        assert_eq!(a.scale, 2.0);
+        assert_eq!(a.view, None);
+        assert_eq!(a.out, None);
+    }
+
+    #[test]
+    fn window_shot_args_parse_full() {
+        let a = WindowShotArgs::parse(&ws_words(&[
+            "--view", "files", "--out", "/tmp/x.png", "--scale", "1",
+        ]))
+        .unwrap();
+        assert_eq!(a.view.as_deref(), Some("files"));
+        assert_eq!(a.out.as_deref(), Some("/tmp/x.png"));
+        assert_eq!(a.scale, 1.0);
+    }
+
+    #[test]
+    fn window_shot_args_parse_short_flags() {
+        let a = WindowShotArgs::parse(&ws_words(&["-v", "ai", "-o", "out.png", "-s", "2"])).unwrap();
+        assert_eq!(a.view.as_deref(), Some("ai"));
+        assert_eq!(a.out.as_deref(), Some("out.png"));
+        assert_eq!(a.scale, 2.0);
+    }
+
+    #[test]
+    fn window_shot_args_reject_bad_scale() {
+        let e = WindowShotArgs::parse(&ws_words(&["--scale", "3"])).unwrap_err();
+        assert!(e.0.contains("--scale is 1 or 2"), "{}", e.0);
+    }
+
+    #[test]
+    fn window_shot_args_reject_missing_value() {
+        let e = WindowShotArgs::parse(&ws_words(&["--view"])).unwrap_err();
+        assert!(e.0.contains("--view needs a value"), "{}", e.0);
+    }
+
+    #[test]
+    fn window_shot_args_reject_unknown_flag() {
+        let e = WindowShotArgs::parse(&ws_words(&["--bogus"])).unwrap_err();
+        assert!(e.0.contains("unknown argument --bogus"), "{}", e.0);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn recent_grid_size_and_age() {
@@ -8534,7 +8718,12 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("ws-shot-{}-{name}", std::process::id()));
+        // Unique per call: tests run in parallel, and a shared dir let one
+        // test's persisted state leak into another (flaky `side_panel_grid_and_tab`).
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("ws-shot-{}-{name}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         format!("{}/state.json", dir.to_string_lossy())
     }
