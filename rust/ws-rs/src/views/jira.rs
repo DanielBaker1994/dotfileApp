@@ -2405,6 +2405,19 @@ pub fn helper_filter_kinds(catalog: &[Value]) -> Result<Vec<FilterKind>, String>
         .collect())
 }
 
+/// `JiraDirectory.fetchOptions` → `jira.options`: picker rows
+/// `{id, title, detail, group, unused}` for a kind (`project`, `user`,
+/// `status`, `label`, `version`, `value`).
+pub fn helper_options(params: Value) -> Result<Vec<Value>, String> {
+    let out = helper_call("jira.options", params, 60)?;
+    Ok(out.get("options").and_then(Value::as_array).cloned().unwrap_or_default())
+}
+
+/// `JiraDirectory.load()` → `jira.directory` (the parsed directory.json).
+pub fn helper_directory(path: &str) -> Result<Value, String> {
+    helper_call("jira.directory", json!({"path": path}), 60)
+}
+
 pub fn helper_criteria(params: &Value) -> Result<Value, String> {
     helper_call("jira.criteria", params.clone(), 30)
 }

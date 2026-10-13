@@ -3255,6 +3255,8 @@ mod appkit {
         sink: RefCell<Option<Sink>>,
         sidebar_w: Cell<f64>,
         inspector_w: Cell<f64>,
+        /// The Cmd+F live-search bar, attached above the list when open.
+        search_bar: RefCell<Option<Retained<crate::views::jira_search_bar::JiraSearchBar>>>,
     }
 
     define_class!(
@@ -3336,6 +3338,22 @@ mod appkit {
     }
 
     impl JiraView {
+        /// Attach (`Some`) or detach (`None`) the live-search bar.
+        pub fn set_search_bar(&self, bar: Option<Retained<crate::views::jira_search_bar::JiraSearchBar>>) {
+            if let Some(old) = self.ivars().search_bar.borrow_mut().take() {
+                old.removeFromSuperview();
+            }
+            if let Some(b) = &bar {
+                self.addSubview(b);
+            }
+            *self.ivars().search_bar.borrow_mut() = bar;
+            self.layout_panes();
+        }
+
+        pub fn search_bar(&self) -> Option<Retained<crate::views::jira_search_bar::JiraSearchBar>> {
+            self.ivars().search_bar.borrow().clone()
+        }
+
         /// The header view and column `col`'s chevron rect in it (the filter
         /// picker's anchor).
         pub fn filter_anchor(&self, col: usize) -> Option<(Retained<NSView>, Rect)> {
@@ -3396,6 +3414,7 @@ mod appkit {
                 sink: RefCell::new(None),
                 sidebar_w: Cell::new(sidebar_w),
                 inspector_w: Cell::new(inspector_w),
+                search_bar: RefCell::new(None),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
@@ -3465,9 +3484,18 @@ mod appkit {
             iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, h)));
             let x0 = sw + 4.0;
             let mw = (w - insp - x0).max(100.0);
-            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, 9.0, (mw * 0.9 - 22.0).max(80.0), 28.0)));
-            iv.header.setFrame(ns(Rect::new(x0, 50.0, mw, HEADER_H)));
-            let ty = 50.0 + HEADER_H + 2.0;
+            // The live-search bar (Cmd+F) sits on top and pushes the list down.
+            let bar_h = match iv.search_bar.borrow().as_ref() {
+                Some(bar) => {
+                    let bh = bar.wanted_height(h);
+                    bar.setFrame(ns(Rect::new(x0, 0.0, mw, bh)));
+                    bh
+                }
+                None => 0.0,
+            };
+            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, bar_h + 9.0, (mw * 0.9 - 22.0).max(80.0), 28.0)));
+            iv.header.setFrame(ns(Rect::new(x0, bar_h + 50.0, mw, HEADER_H)));
+            let ty = bar_h + 50.0 + HEADER_H + 2.0;
             iv.scroll.setFrame(ns(Rect::new(x0, ty, mw, (h - ty).max(0.0))));
             let n = iv.snap.borrow().rows.len();
             let doc_h = (n as f64 * row_h()).max(h - ty);

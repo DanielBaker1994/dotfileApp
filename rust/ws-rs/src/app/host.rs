@@ -3370,6 +3370,71 @@ mod daemon_ui {
         });
     }
 
+    /// `JiraSearchPanel`'s live state: the bar, its pickers' models, the
+    /// describe payload and the last search's JQL / curl.
+    pub struct JiraSearchState {
+        bar: Retained<crate::views::jira_search_bar::JiraSearchBar>,
+        projects: crate::ui::multi_picker::appkit::Shared,
+        kinds: Vec<crate::views::jira::FilterKind>,
+        info: serde_json::Value,
+        rows: HashMap<String, crate::ui::multi_picker::appkit::Shared>,
+        last_jql: String,
+        last_curl: String,
+        searching: bool,
+        restored: bool,
+    }
+
+    /// Run `jira_poll.py` / `jira_config.py` ARGS and parse its JSON stdout
+    /// even on failure (`{ok:false, error|problems}`), with stderr's last
+    /// line as the fallback error.
+    fn jira_script_json(script: &str, args: &[&str], stdin: Option<&[u8]>) -> (bool, serde_json::Value, String) {
+        let Some(python) = crate::views::jira::find_python3() else {
+            return (false, serde_json::Value::Null, "python 3.11+ not found".into());
+        };
+        let base = crate::views::jira::jira_script();
+        let path = if script == "jira_poll.py" {
+            base
+        } else {
+            std::path::Path::new(&base).with_file_name(script).to_string_lossy().into_owned()
+        };
+        let mut argv = vec![path];
+        argv.extend(args.iter().map(|a| a.to_string()));
+        match crate::app::process_run::run_process(&python, &argv, stdin, None, false) {
+            Err(e) => (false, serde_json::Value::Null, e.to_string()),
+            Ok(out) => {
+                let j: serde_json::Value = serde_json::from_str(out.out.trim()).unwrap_or(serde_json::Value::Null);
+                let err = out
+                    .err
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| {
+                        let l = l.trim();
+                        ["jira-api: ", "jira-poll: ", "jira-config: "].iter().fold(l.to_string(), |a, p| a.strip_prefix(p).map(str::to_string).unwrap_or(a))
+                    })
+                    .unwrap_or_else(|| format!("exit {}", out.code));
+                (out.code == 0, j, err)
+            }
+        }
+    }
+
+    /// `jira.options` rows → picker options.
+    fn picker_options(opts: &[serde_json::Value]) -> Vec<crate::ui::multi_picker::PickOption> {
+        opts.iter()
+            .filter_map(|o| {
+                let g = |k: &str| o.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let id = o.get("id")?.as_str()?.to_string();
+                Some(crate::ui::multi_picker::PickOption {
+                    title: o.get("title").and_then(serde_json::Value::as_str).unwrap_or(&id).to_string(),
+                    id,
+                    detail: g("detail"),
+                    group: g("group"),
+                    unused: o.get("unused").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect()
+    }
+
     pub struct DaemonUiIvars {
         /// Header workspace strip: the background gather's latest result,
         /// whether one is running, when it last ran, the drawn signature and
@@ -3431,6 +3496,8 @@ mod daemon_ui {
         pane_find: RefCell<Option<Rc<crate::views::note_find::PaneFindUi>>>,
         /// The Cmd+K action picker while it is up.
         action_picker: RefCell<Option<Retained<crate::ui::action_picker::ActionPicker>>>,
+        /// The Jira live-search bar's state (Cmd+F).
+        jira_search: RefCell<Option<JiraSearchState>>,
     }
 
     define_class!(
@@ -3518,6 +3585,7 @@ mod daemon_ui {
             sidebar_jump: RefCell::new(None),
             pane_find: RefCell::new(None),
             action_picker: RefCell::new(None),
+            jira_search: RefCell::new(None),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
@@ -8688,9 +8756,538 @@ mod daemon_ui {
             Some(MenuEntry::submenu("Group By", sub))
         }
 
-        /// Cmd+F: the live-search bar (phase 3 builds it; until then a toast).
+        /// Cmd+F (`JiraSearchPanel.toggle`): attach the live-search bar, or
+        /// focus it, or (when it already has focus) close it.
         fn jira_toggle_search(&self) {
-            crate::ui::toast::not_ported("Jira live search (Cmd+F)");
+            let Some(view) = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone())) else {
+                return;
+            };
+            if let Some(bar) = view.search_bar() {
+                if bar.has_focus() {
+                    self.jira_search_close();
+                } else if let Some(w) = bar.window() {
+                    w.makeFirstResponder(Some(&bar.text_field()));
+                }
+                return;
+            }
+            if self.ivars().jira_search.borrow().is_none() {
+                let Some(mtm) = MainThreadMarker::new() else { return };
+                use crate::ui::multi_picker::MultiPickerModel;
+                let colors = crate::ui::theme::section_colors("jira");
+                let mut pm = MultiPickerModel::new("project", Some("All projects"));
+                pm.placeholder = "Projects…".into();
+                let projects = Rc::new(RefCell::new(pm));
+                let bar = crate::views::jira_search_bar::JiraSearchBar::new(mtm, colors, projects.clone());
+                let weak = objc2::rc::Weak::from_retained(&self.retain());
+                bar.set_on_event(Box::new(move |ev| {
+                    if let Some(ui) = weak.load() {
+                        ui.jira_search_event(ev);
+                    }
+                }));
+                let section = self.jira_section();
+                bar.set_max(
+                    crate::views::jira_search_bar::max_choices(section.get("search-max-choices").map(String::as_str))
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                );
+                *self.ivars().jira_search.borrow_mut() = Some(JiraSearchState {
+                    bar,
+                    projects,
+                    kinds: crate::views::jira::filter_kinds(&[]),
+                    info: serde_json::Value::Null,
+                    rows: HashMap::new(),
+                    last_jql: String::new(),
+                    last_curl: String::new(),
+                    searching: false,
+                    restored: false,
+                });
+            }
+            let Some(bar) = self.ivars().jira_search.borrow().as_ref().map(|s| s.bar.clone()) else { return };
+            bar.set_colors(crate::ui::theme::section_colors("jira"));
+            view.set_search_bar(Some(bar.clone()));
+            if let Some(w) = bar.window() {
+                w.makeFirstResponder(Some(&bar.text_field()));
+            }
+            self.jira_search_reload_lists();
+            self.jira_search_load_info();
+        }
+
+        fn jira_section(&self) -> HashMap<String, String> {
+            let text = crate::app::config::read_config_text().unwrap_or_default();
+            super::parse_sections(&text).get("jira").cloned().unwrap_or_default()
+        }
+
+        fn jira_search_close(&self) {
+            self.jira_search_save_state();
+            crate::ui::multi_picker::appkit::close_open();
+            if let Some(view) = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone())) {
+                view.set_search_bar(None);
+            }
+            self.focus_jira_table();
+        }
+
+        fn jira_search_relayout(&self) {
+            if let Some(view) = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone())) {
+                view.layout_panes();
+            }
+        }
+
+        fn jira_directory_path(&self) -> Option<String> {
+            self.jira_surface(|l| l.paths.as_ref().map(|p| p.cache_file("directory"))).flatten()
+        }
+
+        /// `reloadLists`: project options, every row's options, the
+        /// empty-directory hint + Fetch button, and the saved state once.
+        fn jira_search_reload_lists(&self) {
+            let Some(path) = self.jira_directory_path() else { return };
+            let scope: Vec<String> = self
+                .ivars()
+                .jira_search
+                .borrow()
+                .as_ref()
+                .and_then(|s| s.info.get("projectKeys").and_then(serde_json::Value::as_array).cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            std::thread::spawn(move || {
+                let dir = crate::views::jira::helper_directory(&path).unwrap_or(serde_json::Value::Null);
+                let projects = crate::views::jira::helper_options(serde_json::json!({"kind": "project", "path": path, "scope": scope})).unwrap_or_default();
+                on_ui(move |ui| {
+                    let empty = dir.get("fetchedAt").and_then(serde_json::Value::as_str).unwrap_or("").is_empty();
+                    let no_versions = dir.get("versions").and_then(serde_json::Value::as_array).is_none_or(|a| a.is_empty());
+                    let first = {
+                        let mut st = ui.ivars().jira_search.borrow_mut();
+                        let Some(st) = st.as_mut() else { return };
+                        st.projects.borrow_mut().set_options(picker_options(&projects));
+                        st.bar.projects().refresh();
+                        st.bar.set_fetch_shown(empty || no_versions);
+                        if empty {
+                            st.bar.set_status(
+                                "Nothing cached yet — the pickers fill after the weekly directory job runs (or Fetch from Jira now).",
+                                crate::ui::theme::PopupTone::Dim,
+                            );
+                        }
+                        let first = !st.restored;
+                        st.restored = true;
+                        first
+                    };
+                    if first {
+                        ui.jira_search_restore_state();
+                    }
+                    let keys = ui.ivars().jira_search.borrow().as_ref().map(|s| s.bar.row_keys()).unwrap_or_default();
+                    for k in keys {
+                        ui.jira_search_fill_row(&k);
+                    }
+                });
+            });
+        }
+
+        /// `loadInfo`: `jira_poll.py --describe` → project keys, the field
+        /// catalog (filter kinds) and liveSearch.maxResults.
+        fn jira_search_load_info(&self) {
+            std::thread::spawn(|| {
+                let (_, d, _) = jira_script_json("jira_poll.py", &["--describe"], None);
+                on_ui(move |ui| {
+                    if !d.is_object() {
+                        return;
+                    }
+                    let saved = crate::platform::get_string("jiraLiveSearch.state").is_some();
+                    {
+                        let mut st = ui.ivars().jira_search.borrow_mut();
+                        let Some(st) = st.as_mut() else { return };
+                        let catalog: Vec<serde_json::Value> = d.get("catalog").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+                        st.kinds = crate::views::jira::helper_filter_kinds(&catalog).unwrap_or_else(|_| crate::views::jira::filter_kinds(&catalog));
+                        st.bar.relabel(&st.kinds);
+                        let pk: Vec<String> = d
+                            .get("projectKeys")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                            .unwrap_or_default();
+                        let mut p = st.projects.borrow_mut();
+                        if p.selected.is_empty() && !p.is_all && !saved {
+                            let all = pk.is_empty();
+                            p.set(pk, all);
+                        }
+                        drop(p);
+                        st.bar.projects().refresh();
+                        if let Some(m) = d.get("liveSearch").and_then(|l| l.get("maxResults")).and_then(serde_json::Value::as_i64) {
+                            st.bar.set_max(&m.to_string());
+                        }
+                        st.info = d;
+                    }
+                    ui.jira_search_reload_lists();
+                });
+            });
+        }
+
+        /// `fillOptions`: a picker row's options from the directory.
+        fn jira_search_fill_row(&self, key: &str) {
+            let Some(path) = self.jira_directory_path() else { return };
+            let Some((model, scope)) = self.ivars().jira_search.borrow().as_ref().and_then(|st| {
+                let m = st.rows.get(key)?.clone();
+                let p = st.projects.borrow();
+                let scope = if p.is_all || p.selected.is_empty() { None } else { Some(p.selected.clone()) };
+                Some((m, scope))
+            }) else {
+                return;
+            };
+            let cats: Vec<String> = crate::views::jira::CATEGORY_NAMES.iter().map(|s| s.to_string()).collect();
+            let words = self
+                .jira_surface(|l| l.rules.as_ref().map(|r| serde_json::to_value(&r.words).unwrap_or_default()))
+                .flatten()
+                .unwrap_or_default();
+            let params = match key {
+                "assignee" | "reporter" => Some(serde_json::json!({"kind": "user", "path": path})),
+                "status" => {
+                    model.borrow_mut().group_order = cats.clone();
+                    Some(serde_json::json!({"kind": "status", "path": path, "words": words, "categoryNames": cats}))
+                }
+                "statusCategory" => Some(serde_json::json!({"kind": "value", "values": cats})),
+                "labels" => {
+                    model.borrow_mut().fold_title = Some("Show all {n} labels".into());
+                    Some(serde_json::json!({"kind": "label", "path": path, "scope": scope}))
+                }
+                "fixVersion" => Some(serde_json::json!({"kind": "version", "path": path, "scope": scope})),
+                "issuetype" | "priority" => None,
+                _ => return,
+            };
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                let opts = match params {
+                    Some(p) => crate::views::jira::helper_options(p).unwrap_or_default(),
+                    None => {
+                        let d = crate::views::jira::helper_directory(&path).unwrap_or_default();
+                        let field = if key == "issuetype" { "issueTypes" } else { "priorities" };
+                        let vals: Vec<serde_json::Value> = d.get(field).and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+                        vals.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|v| serde_json::json!({"id": v, "title": v}))
+                            .collect()
+                    }
+                };
+                on_ui(move |ui| {
+                    let st = ui.ivars().jira_search.borrow();
+                    let Some(st) = st.as_ref() else { return };
+                    if let Some(m) = st.rows.get(&key) {
+                        m.borrow_mut().set_options(picker_options(&opts));
+                    }
+                    if let Some(c) = st.bar.row_chip(&key) {
+                        c.refresh();
+                    }
+                    drop(st);
+                    crate::ui::multi_picker::appkit::refresh_open();
+                });
+            });
+        }
+
+        fn jira_search_event(&self, ev: crate::views::jira_search_bar::SearchEvent) {
+            use crate::ui::menu_kit::{popup_at, MenuEntry};
+            use crate::views::jira_search_bar::{date_ranges, date_title, max_choices, SearchEvent as E};
+            match ev {
+                E::Run => self.jira_search_run(),
+                E::Close => self.jira_search_close(),
+                E::Changed => self.jira_search_save_state(),
+                E::ProjectsChanged => {
+                    let keys = self.ivars().jira_search.borrow().as_ref().map(|s| s.bar.row_keys()).unwrap_or_default();
+                    for k in keys.iter().filter(|k| *k == "labels" || *k == "fixVersion") {
+                        self.jira_search_fill_row(k);
+                    }
+                    self.jira_search_save_state();
+                }
+                E::AddFilter { x, y } => {
+                    let Some((kinds, have)) = self.ivars().jira_search.borrow().as_ref().map(|s| (s.kinds.clone(), s.bar.row_keys())) else {
+                        return;
+                    };
+                    let mut entries = Vec::new();
+                    for k in kinds {
+                        if have.contains(&k.key) {
+                            entries.push(MenuEntry::disabled(&k.title));
+                            continue;
+                        }
+                        let weak = objc2::rc::Weak::from_retained(&self.retain());
+                        let title = k.title.clone();
+                        entries.push(MenuEntry::item(&title, move || {
+                            if let Some(ui) = weak.load() {
+                                ui.jira_search_add_row(k.clone(), true);
+                            }
+                        }));
+                    }
+                    popup_at(entries, x, y);
+                }
+                E::RemoveRow(key) => {
+                    if let Some(st) = self.ivars().jira_search.borrow_mut().as_mut() {
+                        st.bar.remove_row(&key);
+                        st.rows.remove(&key);
+                    }
+                    self.jira_search_relayout();
+                    self.jira_search_save_state();
+                }
+                E::DateMenu { key, x, y } => {
+                    let section = self.jira_section();
+                    let mut entries = Vec::new();
+                    for r in date_ranges(section.get("search-date-ranges").map(String::as_str)) {
+                        let weak = objc2::rc::Weak::from_retained(&self.retain());
+                        let k = key.clone();
+                        entries.push(MenuEntry::item(&date_title(&r), move || {
+                            if let Some(ui) = weak.load() {
+                                if let Some(st) = ui.ivars().jira_search.borrow().as_ref() {
+                                    st.bar.set_row_date(&k, &r);
+                                }
+                                ui.jira_search_save_state();
+                            }
+                        }));
+                    }
+                    popup_at(entries, x, y);
+                }
+                E::MaxMenu { x, y } => {
+                    let section = self.jira_section();
+                    let cur = self.ivars().jira_search.borrow().as_ref().map(|s| s.bar.max()).unwrap_or_default();
+                    let mut choices = max_choices(section.get("search-max-choices").map(String::as_str));
+                    if !cur.is_empty() && !choices.contains(&cur) {
+                        choices.push(cur.clone());
+                    }
+                    let mut entries = Vec::new();
+                    for m in choices {
+                        let weak = objc2::rc::Weak::from_retained(&self.retain());
+                        let on = m == cur;
+                        entries.push(MenuEntry::checked(&m.clone(), on, move || {
+                            if let Some(ui) = weak.load() {
+                                if let Some(st) = ui.ivars().jira_search.borrow().as_ref() {
+                                    st.bar.set_max(&m);
+                                }
+                                // `maxChanged`: liveSearch.maxResults in config.json.
+                                if let Ok(n) = m.parse::<i64>() {
+                                    if n > 0 && n <= 1000 {
+                                        std::thread::spawn(move || {
+                                            let body = format!("{{\"maxResults\": {n}}}");
+                                            let _ = jira_script_json("jira_config.py", &["--set-live-search"], Some(body.as_bytes()));
+                                        });
+                                    }
+                                }
+                            }
+                        }));
+                    }
+                    popup_at(entries, x, y);
+                }
+                E::Fetch => self.jira_search_fetch_directory(),
+                E::CopyJql | E::CopyCurl => {
+                    let jql = matches!(ev, E::CopyJql);
+                    let Some((text, bar)) = self
+                        .ivars()
+                        .jira_search
+                        .borrow()
+                        .as_ref()
+                        .map(|s| (if jql { s.last_jql.clone() } else { s.last_curl.clone() }, s.bar.clone()))
+                    else {
+                        return;
+                    };
+                    if text.is_empty() {
+                        bar.set_status("Run a search first.", crate::ui::theme::PopupTone::Dim);
+                    } else {
+                        copy_text_to_pasteboard(&text);
+                        bar.set_status(if jql { "Copied JQL." } else { "Copied curl (includes the token)." }, crate::ui::theme::PopupTone::Dim);
+                    }
+                }
+            }
+        }
+
+        /// `addRow` (+ `addFilterPicked`: open its picker / focus its field).
+        fn jira_search_add_row(&self, kind: crate::views::jira::FilterKind, interactive: bool) {
+            use crate::views::jira::ValueKind;
+            let section = self.jira_section();
+            let ranges = crate::views::jira_search_bar::date_ranges(section.get("search-date-ranges").map(String::as_str));
+            let default_date = ranges.get(2.min(ranges.len().saturating_sub(1))).cloned().unwrap_or_default();
+            let key = kind.key.clone();
+            let vk = kind.kind;
+            {
+                let mut st = self.ivars().jira_search.borrow_mut();
+                let Some(st) = st.as_mut() else { return };
+                if st.bar.row_keys().contains(&key) {
+                    return;
+                }
+                if let Some(m) = st.bar.add_row(kind, &default_date) {
+                    st.rows.insert(key.clone(), m);
+                }
+            }
+            self.jira_search_relayout();
+            self.jira_search_fill_row(&key);
+            if interactive {
+                let bar = self.ivars().jira_search.borrow().as_ref().map(|s| s.bar.clone());
+                if let Some(bar) = bar {
+                    match vk {
+                        ValueKind::Users | ValueKind::List => {
+                            if let Some(chip) = bar.row_chip(&key) {
+                                chip.open();
+                            }
+                        }
+                        ValueKind::Text => {
+                            if let (Some(f), Some(w)) = (bar.row_field(&key), bar.window()) {
+                                w.makeFirstResponder(Some(&f));
+                            }
+                        }
+                        ValueKind::Date => {}
+                    }
+                }
+                self.jira_search_save_state();
+            }
+        }
+
+        /// The bar's current criteria inputs as a [`JiraSearchPanel`].
+        fn jira_search_panel(&self) -> Option<crate::views::jira::JiraSearchPanel> {
+            let st = self.ivars().jira_search.borrow();
+            let st = st.as_ref()?;
+            let p = st.projects.borrow();
+            Some(crate::views::jira::JiraSearchPanel {
+                text: st.bar.text(),
+                projects: p.selected.clone(),
+                projects_all: p.is_all,
+                rows: crate::views::jira_search_bar::search_rows(&st.bar.values()),
+                max_results: st.bar.max(),
+                ..Default::default()
+            })
+        }
+
+        fn jira_search_save_state(&self) {
+            if let Some(p) = self.jira_search_panel() {
+                crate::platform::set_string("jiraLiveSearch.state", &p.state().to_string());
+            }
+        }
+
+        /// `restoreState`: text, projects and every saved row.
+        fn jira_search_restore_state(&self) {
+            let Some(raw) = crate::platform::get_string("jiraLiveSearch.state") else { return };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+            let saved = crate::views::jira::JiraSearchPanel::from_state(&v);
+            let kinds = {
+                let st = self.ivars().jira_search.borrow();
+                let Some(st) = st.as_ref() else { return };
+                st.bar.set_text(&saved.text);
+                let all = saved.projects_all;
+                st.projects.borrow_mut().set(saved.projects.clone(), all);
+                st.bar.projects().refresh();
+                st.kinds.clone()
+            };
+            for r in &saved.rows {
+                let Some(k) = kinds.iter().find(|k| k.key == r.key).cloned().or_else(|| crate::views::jira_search_bar::fallback_kind(&r.key)) else {
+                    continue;
+                };
+                self.jira_search_add_row(k, false);
+                let st = self.ivars().jira_search.borrow();
+                let Some(st) = st.as_ref() else { return };
+                if let Some(m) = st.rows.get(&r.key) {
+                    m.borrow_mut().set(r.selected.clone(), false);
+                    if let Some(c) = st.bar.row_chip(&r.key) {
+                        c.refresh();
+                    }
+                }
+                if let Some(v) = &r.value {
+                    st.bar.set_row_date(&r.key, v);
+                }
+                if !r.text.is_empty() {
+                    st.bar.set_row_text(&r.key, &r.text);
+                }
+            }
+        }
+
+        /// `run` + `performSearch`: criteria (python) → `--live-search` →
+        /// status "✓ N of M results · JQL" and the search.json tab.
+        fn jira_search_run(&self) {
+            use crate::ui::theme::PopupTone;
+            let Some(panel) = self.jira_search_panel() else { return };
+            let bar = {
+                let mut st = self.ivars().jira_search.borrow_mut();
+                let Some(st) = st.as_mut() else { return };
+                if st.searching {
+                    return;
+                }
+                st.searching = true;
+                st.bar.clone()
+            };
+            self.jira_search_save_state();
+            bar.set_searching(true);
+            bar.set_status("Searching…", PopupTone::Dim);
+            let params = panel.params();
+            std::thread::spawn(move || {
+                let crit = crate::views::jira::helper_criteria(&params).unwrap_or_else(|_| crate::views::jira::criteria(&params));
+                let data = serde_json::to_vec(&crit).unwrap_or_default();
+                let (_, r, err) = jira_script_json("jira_poll.py", &["--live-search"], Some(&data));
+                on_ui(move |ui| {
+                    let file = {
+                        let mut st = ui.ivars().jira_search.borrow_mut();
+                        let Some(st) = st.as_mut() else { return };
+                        st.searching = false;
+                        st.bar.set_searching(false);
+                        if let Some(j) = r.get("jql").and_then(serde_json::Value::as_str) {
+                            st.last_jql = j.to_string();
+                        }
+                        if let Some(c) = r.get("curl").and_then(serde_json::Value::as_str) {
+                            st.last_curl = c.to_string();
+                        }
+                        if r.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                            let e = r.get("error").and_then(serde_json::Value::as_str).map(str::to_string).unwrap_or(err);
+                            st.bar.set_status(&format!("✗ {e}"), PopupTone::Danger);
+                            return;
+                        }
+                        let n = r.get("count").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                        let of = match r.get("total").and_then(serde_json::Value::as_i64) {
+                            Some(t) => format!(" of {t}"),
+                            None if r.get("more").and_then(serde_json::Value::as_bool) == Some(true) => "+".into(),
+                            None => String::new(),
+                        };
+                        st.bar.set_status(
+                            &format!("✓ {n}{of} result{} · {}", if n == 1 { "" } else { "s" }, st.last_jql),
+                            if n == 0 { PopupTone::Dim } else { PopupTone::Text },
+                        );
+                        ui.ivars().controller.log(&format!("jira: live search {n} result(s): {}", st.last_jql));
+                        r.get("file").and_then(serde_json::Value::as_str).map(|f| {
+                            std::path::Path::new(f).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                        })
+                    };
+                    ui.jira_surface(|l| {
+                        l.reload_meta();
+                        let want = file.clone().or_else(|| l.paths.as_ref().and_then(|p| p.tabs.get("liveSearch").cloned()));
+                        if let Some(i) = want.and_then(|f| l.tabs.iter().position(|t| t.file == f)) {
+                            l.select_tab(i);
+                        }
+                    });
+                    let bar = ui.ivars().jira_search.borrow().as_ref().map(|s| s.bar.clone());
+                    if let Some(bar) = bar {
+                        if let Some(w) = bar.window() {
+                            w.makeFirstResponder(Some(&bar.text_field()));
+                        }
+                    }
+                });
+            });
+        }
+
+        /// `fetchDirectory`: `jira_poll.py --directory --quiet`.
+        fn jira_search_fetch_directory(&self) {
+            use crate::ui::theme::PopupTone;
+            let Some(bar) = self.ivars().jira_search.borrow().as_ref().map(|s| s.bar.clone()) else { return };
+            bar.set_searching(true);
+            bar.set_status("Fetching projects, users, statuses, releases, labels… (a few calls per project)", PopupTone::Dim);
+            let path = self.jira_directory_path();
+            std::thread::spawn(move || {
+                let (ok, _, err) = jira_script_json("jira_poll.py", &["--directory", "--quiet"], None);
+                let dir = path.and_then(|p| crate::views::jira::helper_directory(&p).ok()).unwrap_or_default();
+                on_ui(move |ui| {
+                    let bar = ui.ivars().jira_search.borrow().as_ref().map(|s| s.bar.clone());
+                    let Some(bar) = bar else { return };
+                    bar.set_searching(false);
+                    if ok {
+                        let n = |k: &str| dir.get(k).and_then(serde_json::Value::as_array).map_or(0, |a| a.len());
+                        bar.set_status(
+                            &format!("✓ {} users · {} projects · {} releases · {} labels cached", n("users"), n("projects"), n("versions"), n("labels")),
+                            PopupTone::Dim,
+                        );
+                        ui.jira_search_reload_lists();
+                    } else {
+                        bar.set_status(&format!("✗ {err}"), PopupTone::Danger);
+                    }
+                });
+            });
         }
 
         /// `importFilters`: the user's favourite Jira filters become poll jobs.

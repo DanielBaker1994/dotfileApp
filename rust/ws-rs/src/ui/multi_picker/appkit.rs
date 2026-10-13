@@ -36,6 +36,35 @@ pub fn close_open() {
     }
 }
 
+/// The open popover's model changed underneath it (options arrived): refilter,
+/// redraw, and grow / shrink the list to fit (4–14 rows).
+pub fn refresh_open() {
+    let open = OPEN.with(|o| o.borrow().as_ref().map(|(p, l)| (p.clone(), l.clone())));
+    let Some((pop, list)) = open else { return };
+    list.ivars().model.borrow_mut().refilter();
+    let n = list.ivars().model.borrow().shown.len();
+    let list_h = (n.clamp(4, 14) as f64) * ROW_H + 4.0;
+    let Some(scroll) = list.ivars().scroll.borrow().clone() else { return };
+    let old = scroll.frame().size.height;
+    if (old - list_h).abs() > 0.5 {
+        let size = pop.contentSize();
+        let h = size.height - old + list_h;
+        pop.setContentSize(NSSize::new(size.width, h));
+        if let Some(content) = unsafe { scroll.superview() } {
+            content.setFrameSize(NSSize::new(size.width, h));
+            for sub in content.subviews().iter() {
+                // The filter box rides the top edge (unflipped content view).
+                let f = sub.frame();
+                if f.origin.y > scroll.frame().origin.y + old - 1.0 {
+                    sub.setFrameOrigin(NSPoint::new(f.origin.x, f.origin.y - old + list_h));
+                }
+            }
+        }
+        scroll.setFrameSize(NSSize::new(scroll.frame().size.width, list_h));
+    }
+    list.reload();
+}
+
 pub fn is_open() -> bool {
     OPEN.with(|o| o.borrow().is_some())
 }

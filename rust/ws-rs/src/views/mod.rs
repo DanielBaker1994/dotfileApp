@@ -12,6 +12,7 @@ pub mod files_view;
 pub mod inspector;
 pub mod jira;
 pub mod jira_view;
+pub mod jira_search_bar;
 pub mod note_find;
 pub mod notes;
 pub mod notes_prose;

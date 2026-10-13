@@ -1208,6 +1208,8 @@ doubted the Swift reading).
 
 ### F-01 — Live search panel (Cmd+F top accessory) (jira)
 
+- **Status (2026-10-13): fixed — Cmd+F attaches the live-search bar above the list (focus if open, close when it has focus; × / Esc close). It lives with the Jira view, so hiding the window keeps it (no 3 s park needed).**
+
 - **Swift did:** Cmd+F in the Jira window toggles a live-search bar attached as the window's top accessory; if the bar already has focus it hides, otherwise it focuses the search text field. The panel detaches when the window hides and re-attaches if reopened within 3 s.
 - **Reader says Rust:** `missing` — Cmd+F is bound but only shows a toast: not_ported("Jira live search (Cmd+F)"). Searches run for topAccessory / accessory / JiraSearchPanel wiring found no panel, no attach/detach/unpark/reattach and no accessory host. The JiraSearchPanel model exists (views/jira.rs:854-933) but nothing renders it.
 - **User impact:** Pressing Cmd+F no longer opens the Jira search bar — you just get a 'not ported' toast.
@@ -1218,6 +1220,8 @@ doubted the Swift reading).
   - Rust search: app/host.rs:8408-8411 binds Cmd+F only to crate::ui::toast::not_ported("Jira live search (Cmd+F)"). No JiraSearchPanel UI, no topAccessory/attach/detach anywhere (grep topAccessory/attach/detach in jira files: none).
 
 ### F-02 — Multi-picker popover interaction (jira)
+
+- **Status (2026-10-13): fixed — `ui::multi_picker` (type-to-filter, ↑↓ / Ctrl+N/P, Return toggles, Esc clears then closes, Clear / Done, 'N selected · M shown (ORed)').**
 
 - **Swift did:** JiraMultiPicker opens a transient popover with type-to-filter, ↑↓ and Ctrl+N/Ctrl+P to move the highlight, Return to toggle a row, Esc to clear the filter then close, Clear/Done buttons, and a footer count 'N selected · M shown (ORed)'.
 - **Reader says Rust:** `missing` — Searches for popover, MultiPicker, NSPopover, togglePopover, Ctrl+N across rust/ws-rs/src returned only the Confluence picker (views/confluence.rs:486) and comments; no Jira picker popover exists.
@@ -1230,6 +1234,8 @@ doubted the Swift reading).
 
 ### F-03 — Picker grouped rows, unused fold, All option, cache-missing options (jira)
 
+- **Status (2026-10-13): fixed — grouped headers with 'N of M' (pick a whole group), 'Show N unused' / 'Show all N labels' fold, All projects row, stale picks shown as 'not in the directory cache'.**
+
 - **Swift did:** The picker groups options under headers with 'N of M' counts, folds the tail behind 'Show N unused', offers an 'All projects' row, and appends ids missing from the directory as 'not in the directory cache'; selection survives a reload.
 - **Reader says Rust:** `missing` — Searches for groupOrder, foldTail, 'Show', allID, 'not in the directory cache' found nothing in the Rust tree (foldTail is not ported).
 - **User impact:** Large option lists are no longer grouped/folded, and stale picks aren't surfaced.
@@ -1241,6 +1247,8 @@ doubted the Swift reading).
 
 ### F-04 — Picker focus keys (jira)
 
+- **Status (2026-10-13): fixed — PickerChip takes focus and opens on Space / Return / ↓.**
+
 - **Swift did:** When the picker itself has focus, Space / Return / Right-arrow opens the popover (becomeFirstResponder re-draws the focus ring).
 - **Reader says Rust:** `missing` — No Jira picker view exists in the port, so its acceptsFirstResponder/keyDown handling is absent.
 - **User impact:** Keyboard-only opening of the picker is gone.
@@ -1251,6 +1259,8 @@ doubted the Swift reading).
   - Rust search: No Jira picker view exists (see F-02); no acceptsFirstResponder/keyDown handling for a picker in views/jira.rs or views/jira_view.rs.
 
 ### F-05 — Quick filter + per-column filter dropdowns (jira)
+
+- **Status (2026-10-13, update): column dropdowns now use the ported picker (status categories, labels fold + Pin to Sidebar, Sort ↑/↓). Board quick-filter picker still open (lands with the board bar, F-10).**
 
 - **Status (2026-10-13): per-column part fixed** — chevron click opens a checkable value menu (row counts, Sort ↑/↓, Clear); ticked values are an IN per column, ANDed across columns (`JiraList::col_filters`, `host.rs jira_filter_picker`). Still missing: the board quick-filter picker, the `[jira] filters` bar dims, status-category grouping, labels fold / Pin to Sidebar, people display names from the directory.
 
@@ -1265,6 +1275,8 @@ doubted the Swift reading).
 
 ### F-06 — Live-search state persistence (jira)
 
+- **Status (2026-10-13): fixed — text, projects and every row persist (`jiraLiveSearch.state`) and restore on the next open, across restarts.**
+
 - **Swift did:** The live-search bar persists text, projects/projectsAll and every filter row in UserDefaults (key jiraLiveSearch.state) and restores them on the next open; a freshly parked panel re-attaches within 3 s.
 - **Reader says Rust:** `differs` — The JiraSearchPanel model has state()/from_state() and load/save_last_criteria (a JSON file instead of UserDefaults), but grep shows no caller — no UI loads or saves it, and there is no 3 s re-attach handshake.
 - **User impact:** Search criteria are not remembered between opens.
@@ -1275,6 +1287,8 @@ doubted the Swift reading).
   - Rust search: views/jira.rs:891-933 JiraSearchPanel::state/from_state and load/save_last_criteria (JSON file) exist, but their only callers are unit tests (jira.rs:3861-3862). JiraViewController (which owns the panel) is never instantiated in production and build() is never called.
 
 ### F-07 — Run live search → search.json tab (jira)
+
+- **Status (2026-10-13): fixed — Return / Search builds criteria (jira.criteria) → `--live-search` → '✓ N of M results · JQL' and selects the Search results tab.**
 
 - **Swift did:** Return (or Cmd+Return) runs the search via jira_poll.py --live-search, then shows the resulting search.json tab and re-focuses the text field; status shows '✓ N of M results · <JQL>'.
 - **Reader says Rust:** `missing` — run_live_search() exists but has no caller in the AppKit UI (grep for run_live_search / --live-search found only the definition and tests).
@@ -1287,6 +1301,8 @@ doubted the Swift reading).
 
 ### F-08 — Copy JQL / Copy curl (search footer) (jira)
 
+- **Status (2026-10-13): fixed — footer Copy JQL / Copy curl (includes the token); 'Run a search first.' when empty.**
+
 - **Swift did:** Footer buttons copy the last search's JQL and its curl (including the token), with a status confirmation; 'Run a search first' when empty.
 - **Reader says Rust:** `missing` — Searches for Copy JQL / lastJQL / copy JQL found only the Confluence 'Copy CQL/Copy curl' footer (views/confluence_view.rs:824-840) and the JiraSetup login curl; no live-search JQL/curl copy exists.
 - **User impact:** You cannot copy the JQL or request for the current search.
@@ -1297,6 +1313,8 @@ doubted the Swift reading).
   - Rust search: No Jira JQL/curl copy exists; the only curl copies are Confluence (views/confluence.rs:565 last_curl; views/confluence_view.rs; frontend_egui/confluence.rs:291-306) and the Jira setup login curl (ui/jira_setup.rs:507-530). grep 'JQL' shows only describe/draft model fields, no copy action.
 
 ### F-09 — Search date ranges / max-results choices config (jira)
+
+- **Status (2026-10-13): fixed — `[jira] search-date-ranges` / `search-max-choices` feed the date and Max menus; picking a max writes liveSearch.maxResults (`jira_config.py --set-live-search`).**
 
 - **Swift did:** The date filter offers configurable ranges (jira.search-date-ranges, default today,2d,7d,14d,30d,90d) and the max-results picker offers configurable values (jira.search-max-choices); picking a max writes it to the live-search config.
 - **Reader says Rust:** `missing` — config.rs validates only dashboard-width/height/refresh for [jira]; grep found no search-date-ranges / search-max-choices in the Rust config validation, commands.toml, or any Rust reader.
@@ -1474,6 +1492,8 @@ doubted the Swift reading).
 
 ### F-26 — Fetch from Jira now (directory job) (jira)
 
+- **Status (2026-10-13): fixed in the search bar — 'Fetch from Jira' (empty directory / no releases) runs `--directory --quiet` and reports the cached counts. (The dashboard's Definitions button comes with F-19.)**
+
 - **Swift did:** A Definitions button runs jira_poll.py --directory --quiet and reports '✓ N users · M projects · F fields cached'.
 - **Reader says Rust:** `missing` — No caller of --directory exists in Rust (grep for --directory / defFetch found nothing).
 - **User impact:** You cannot trigger a directory refresh from the app.
@@ -1506,6 +1526,8 @@ doubted the Swift reading).
   - Rust search: views/jira_view.rs has only row hover (1572-1588) and inspector button hover (1966-1974); grep setToolTip/toolTip in views/jira.rs and views/jira_view.rs returns nothing. No Jira dashboard/search UI to carry those tips.
 
 ### F-29 — Empty states (jira)
+
+- **Status (2026-10-13): search part fixed — 'Nothing cached yet — the pickers fill after the weekly directory job runs (or Fetch from Jira now).' and '(no Xs cached)' in pickers. Dashboard hint comes with the dashboard.**
 
 - **Swift did:** The live search shows 'Nothing cached yet — the pickers fill after the weekly directory job runs' when the directory is empty; the picker shows '(no <noun>s cached)'; the dashboard editor shows a 'New poll job…' hint.
 - **Reader says Rust:** `differs` — The JiraList has its own empty messages ('No synced Jira lists yet…', 'Nothing in this list.', 'No matches.') but the search/dashboard empty states do not exist because those surfaces are unported.
