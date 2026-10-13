@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ks-input — send real keyboard/mouse input to one named app.
+#
+# Builds Tests/tools/ks_input.swift with `swiftc -O` into
+# .build/ks-input/ks-input the first time (or when the source is newer) and
+# execs it. See `ks-input help` for the commands; every command that sends
+# input requires --pid P and refuses (exit 3) unless P is frontmost.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$DIR/.." && pwd)"
+SRC="$ROOT/Tests/tools/ks_input.swift"
+OUTDIR="$ROOT/.build/ks-input"
+BIN="$OUTDIR/ks-input"
+
+if [ ! -f "$SRC" ]; then
+    echo "ks-input: missing $SRC" >&2
+    exit 5
+fi
+
+if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+    if ! command -v swiftc >/dev/null 2>&1; then
+        echo "ks-input: swiftc not found (install the Xcode command line tools)" >&2
+        exit 5
+    fi
+    mkdir -p "$OUTDIR"
+    tmp="$BIN.tmp.$$"
+    if ! swiftc -O -swift-version 5 "$SRC" -o "$tmp"; then
+        rm -f "$tmp"
+        echo "ks-input: swiftc failed" >&2
+        exit 5
+    fi
+    mv -f "$tmp" "$BIN"
+fi
+
+exec "$BIN" "$@"
