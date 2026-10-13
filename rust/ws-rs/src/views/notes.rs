@@ -3114,6 +3114,7 @@ mod macos {
             selected: (!model.tabs.tabs.is_empty()).then_some(model.tabs.selected),
             add_button: true,
             closable: true,
+            join_top: has_tree,
             ..Default::default()
         }
     }
@@ -4231,6 +4232,12 @@ mod macos {
             let wanted = self.tree.wanted_height();
             let (tree_h, open_h) = crate::views::notes_tree::rail_split(full.height, show_tree, wanted);
             self.tree.setHidden(!show_tree);
+            // The Open card only joins the tree card above while the tree shows.
+            let mut sm = self.sidebar.model();
+            if sm.join_top != show_tree {
+                sm.join_top = show_tree;
+                self.sidebar.set_model(sm);
+            }
             self.tree.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, tree_h)));
             self.sidebar
                 .setFrame(NSRect::new(NSPoint::new(0.0, tree_h), NSSize::new(w, open_h)));

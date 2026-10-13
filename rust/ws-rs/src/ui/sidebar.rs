@@ -60,6 +60,9 @@ pub struct SidebarModel {
     pub closable: bool,
     /// The status dot + text beside the rail toggle (`statusLine`).
     pub status: Option<(String, PopupTone)>,
+    /// The card continues a card above it (notes: one pane, two sections):
+    /// no top margin, square top corners.
+    pub join_top: bool,
 }
 
 /// What a click asks the owner to do.
@@ -174,7 +177,8 @@ pub struct SidebarGeometry {
 
 impl SidebarGeometry {
     pub fn new(width: f64, height: f64, m: &SidebarModel, collapsed: bool) -> Self {
-        let card = Rect::new(8.0, 6.0, (width - 8.0).max(0.0), (height - 14.0).max(0.0));
+        let top_inset = if m.join_top { 0.0 } else { 6.0 };
+        let card = Rect::new(8.0, top_inset, (width - 8.0).max(0.0), (height - 8.0 - top_inset).max(0.0));
         let mut pinned_heads = Vec::new();
         let mut pinned_rows = Vec::new();
         if !m.pinned.is_empty() {
@@ -847,9 +851,12 @@ mod appkit {
                 return;
             }
             let collapsed = g.collapsed;
-            style::fill_rounded(card, 12.0, c.mantle());
-            let radius = 4.0;
             let m = self.ivars().model.borrow();
+            // Joined to a card above: draw it taller than the view so the
+            // clipped top corners are square and the two read as one pane.
+            let fill = if m.join_top { Rect::new(card.x, card.y - 20.0, card.width, card.height + 20.0) } else { card };
+            style::fill_rounded(fill, 12.0, c.mantle());
+            let radius = 4.0;
             let hover = self.ivars().hover.get();
             for (r, title) in &g.pinned_heads {
                 if collapsed { self.rail_rule(*r, &c) } else { self.section_label(title, *r, &c) }
