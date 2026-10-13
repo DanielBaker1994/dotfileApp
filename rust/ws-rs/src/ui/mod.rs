@@ -21,6 +21,8 @@ pub mod shortcuts;
 pub mod prose_switch;
 #[cfg(target_os = "macos")]
 pub mod quiet_web;
+#[cfg(target_os = "macos")]
+pub mod web_pane;
 pub mod sidebar;
 pub mod style;
 pub mod theme;
