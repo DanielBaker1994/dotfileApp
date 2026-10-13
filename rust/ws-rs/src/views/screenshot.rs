@@ -43,8 +43,12 @@
 //! `ShotLoupe`, `ShotHelpCard`, `ShotSaveCard`, `ShotSidePanel`,
 //! `ShotRecentButton`, `ShotModePill`, `ShotToolTab`, `ShotSizeIndicator`).
 //!
-//! `todo!()`: the side-panel settings form (sliders/steppers/table) keeps its
-//! layout model only — its AppKit controls are not rebuilt in the Rust overlay.
+//! Real: the side panel (Space / the Tool Settings tab) — Flameshot's sidebar
+//! painted into the overlay context like the rest of the chrome: tool size
+//! (label + spin box + slider), active colour, Grab Color, a hue/saturation
+//! wheel, the hex field (edited through the key router) and Display grid.
+//! Layout, hit-test and value mapping live in `ShotSidePanel`. Not yet: text
+//! options (G3) and the layers list (G5) — see `PRD-screenshot-gaps.md`.
 //! The save-card field is edited through the key router (no AppKit control) and
 //! the ring buttons' SF Symbols are drawn by `draw_symbol`.
 
@@ -195,6 +199,30 @@ impl Default for ShotOCRConfigModel {
     }
 }
 
+/// The side panel's user-facing strings (`[screenshot] side-panel-*`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PanelLabels {
+    pub size: String,
+    pub color: String,
+    pub grab: String,
+    pub grid: String,
+    pub no_tool: String,
+    pub tab: String,
+}
+
+impl Default for PanelLabels {
+    fn default() -> Self {
+        PanelLabels {
+            size: "Active tool size:".to_string(),
+            color: "Active Color:".to_string(),
+            grab: "Grab Color".to_string(),
+            grid: "Display grid".to_string(),
+            no_tool: "Pick a tool".to_string(),
+            tab: "Tool Settings".to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScreenshotConfig {
     pub enabled: bool,
@@ -207,6 +235,14 @@ pub struct ScreenshotConfig {
     pub button_size: f64,
     pub show_help: bool,
     pub show_side_panel_button: bool,
+    /// `[screenshot] side-panel-width` (Flameshot's sidebar is 250pt).
+    pub side_panel_width: f64,
+    /// Side-panel labels: size, colour, grab, grid, no-tool hint, tab.
+    pub panel_labels: PanelLabels,
+    /// `draw-thickness` / `draw-font-size`: the starting size for line tools
+    /// and the text tool until a per-tool size is remembered (0 = built-in).
+    pub draw_thickness: i64,
+    pub draw_font_size: i64,
     pub magnifier: bool,
     pub square_magnifier: bool,
     pub copy_on_double_click: bool,
@@ -254,6 +290,10 @@ impl Default for ScreenshotConfig {
             button_size: 34.0,
             show_help: true,
             show_side_panel_button: true,
+            side_panel_width: ShotSidePanel::WIDTH,
+            panel_labels: PanelLabels::default(),
+            draw_thickness: 0,
+            draw_font_size: 0,
             magnifier: false,
             square_magnifier: false,
             copy_on_double_click: false,
@@ -372,6 +412,17 @@ impl ScreenshotConfig {
         };
         c.show_help = b("show-help", true);
         c.show_side_panel_button = b("show-side-panel-button", true);
+        c.side_panel_width = i("side-panel-width", ShotSidePanel::WIDTH as i64, 180, 480) as f64;
+        c.panel_labels = PanelLabels {
+            size: s("side-panel-size-label", &d.panel_labels.size),
+            color: s("side-panel-color-label", &d.panel_labels.color),
+            grab: s("side-panel-grab-label", &d.panel_labels.grab),
+            grid: s("side-panel-grid-label", &d.panel_labels.grid),
+            no_tool: s("side-panel-no-tool", &d.panel_labels.no_tool),
+            tab: s("side-panel-tab-label", &d.panel_labels.tab),
+        };
+        c.draw_thickness = i("draw-thickness", 0, 0, 100);
+        c.draw_font_size = i("draw-font-size", 0, 0, 100);
         c.magnifier = b("magnifier", false);
         c.square_magnifier = b("square-magnifier", false);
         c.copy_on_double_click = b("copy-on-double-click", false);
@@ -1319,6 +1370,14 @@ enum Drag {
     },
 }
 
+/// The side panel's hex field buffer. `replace` = the whole text is
+/// selected (on focus / Cmd+A), so the next typed character replaces it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HexEdit {
+    pub text: String,
+    pub replace: bool,
+}
+
 pub struct ShotSession {
     pub cfg: ScreenshotConfig,
     pub args: ShotArgs,
@@ -1337,6 +1396,13 @@ pub struct ShotSession {
     pub counter_offset: i64,
     pub side_panel_open: bool,
     pub grabbing: Option<ShotColor>,
+    /// The grab was started from the panel's Grab Color button: the panel
+    /// hides for the grab and comes back when it ends (pick or cancel).
+    grab_from_panel: bool,
+    /// The side panel's hex field while it has the keyboard.
+    pub hex_edit: Option<HexEdit>,
+    /// The colour under a live drag on the panel's wheel (applied on up).
+    panel_wheel: Option<ShotColor>,
     pub editing: Option<TextEditState>,
     pub wheel: Option<WheelState>,
     pub shortcuts_shown: bool,
@@ -1384,6 +1450,9 @@ impl ShotSession {
             counter_offset: 0,
             side_panel_open: false,
             grabbing: None,
+            grab_from_panel: false,
+            hex_edit: None,
+            panel_wheel: None,
             editing: None,
             wheel: None,
             shortcuts_shown: false,
@@ -1430,7 +1499,22 @@ impl ShotSession {
     }
 
     pub fn size(&self, t: ShotTool) -> i64 {
-        self.state.size(t)
+        if let Some(v) = self.state.sizes.get(t.raw_value()) {
+            return *v;
+        }
+        let configured = if t == ShotTool::Text {
+            self.cfg.draw_font_size
+        } else if t.default_size() == 3 {
+            self.cfg.draw_thickness
+        } else {
+            0
+        };
+        if configured > 0 {
+            let (lo, hi) = t.size_range();
+            configured.clamp(lo, hi)
+        } else {
+            t.default_size()
+        }
     }
     pub fn active_size(&self) -> Option<i64> {
         self.tool.map(|t| self.size(t))
@@ -1533,6 +1617,7 @@ impl ShotSession {
             self.color = prev;
             self.grabbing = None;
         }
+        self.grab_from_panel = false;
         if self.side_panel_open {
             self.toggle_side_panel(Some(false));
         }
@@ -1727,12 +1812,172 @@ impl ShotSession {
     // -- side panel / shortcuts / grab / wheel ----------------------------
 
     pub fn toggle_side_panel(&mut self, open: Option<bool>) {
-        let Some(d) = self.active.or(self.mouse_display()) else {
+        if self.panel_display().is_none() {
             return;
-        };
-        let _ = d;
+        }
         let want = open.unwrap_or(!self.side_panel_open);
+        if !want {
+            self.hex_edit = None;
+            self.panel_wheel = None;
+        }
         self.side_panel_open = want;
+    }
+
+    /// The display the panel (and its tab) lives on: the one holding the
+    /// selection, else the one under the pointer.
+    pub fn panel_display(&self) -> Option<usize> {
+        self.active.or(self.mouse_display())
+    }
+
+    /// The panel layout on display `d` while it is open there.
+    pub fn panel_layout(&self, d: usize) -> Option<PanelLayout> {
+        if !self.side_panel_open || self.text_mode || self.panel_display() != Some(d) {
+            return None;
+        }
+        let disp = self.displays.get(d)?;
+        Some(ShotSidePanel::layout(disp.bounds(), disp.top_inset, self.cfg.side_panel_width))
+    }
+
+    /// The Tool Settings tab on display `d` while the panel is closed.
+    pub fn tool_tab_rect(&self, d: usize) -> Option<Rect> {
+        if !self.cfg.show_side_panel_button
+            || self.side_panel_open
+            || self.text_mode
+            || self.grabbing.is_some()
+            || self.panel_display() != Some(d)
+        {
+            return None;
+        }
+        Some(ShotSidePanel::tab_rect(self.displays.get(d)?.bounds()))
+    }
+
+    /// The size the panel's size control edits: the selected object's, else
+    /// the active tool's, as `(value, lo, hi)`; `None` with neither.
+    pub fn panel_size(&self) -> Option<(i64, i64, i64)> {
+        let t = match self.doc.selected {
+            Some(i) if i < self.doc.objects.len() => {
+                let o = &self.doc.objects[i];
+                let (lo, hi) = o.tool.size_range();
+                return Some((o.size, lo, hi));
+            }
+            _ => self.tool?,
+        };
+        let (lo, hi) = t.size_range();
+        Some((self.size(t), lo, hi))
+    }
+
+    pub fn set_grid(&mut self, on: bool) {
+        self.state.grid = on;
+        self.save_state();
+    }
+
+    pub fn set_grid_size(&mut self, v: i64) {
+        self.state.grid_size = v.clamp(ShotSidePanel::GRID_MIN, ShotSidePanel::GRID_MAX);
+        self.save_state();
+    }
+
+    /// The Grab Color button: hide the panel, grab, re-show afterwards.
+    pub fn grab_from_panel(&mut self) {
+        self.hex_edit = None;
+        self.start_grab();
+        self.grab_from_panel = true;
+        self.side_panel_open = false;
+    }
+
+    fn end_grab(&mut self) {
+        self.grabbing = None;
+        if std::mem::take(&mut self.grab_from_panel) {
+            self.side_panel_open = true;
+        }
+    }
+
+    /// Commit the hex field (valid applies, invalid reverts) and leave it.
+    pub fn commit_hex(&mut self) {
+        let Some(h) = self.hex_edit.take() else { return };
+        let cur = self.current_color();
+        let c = ShotSidePanel::hex_commit(&h.text, cur);
+        if c != cur {
+            self.set_color(c);
+        }
+    }
+
+    /// A press inside the panel. Returns `false` when `p` is outside it.
+    fn panel_press(&mut self, d: usize, p: Point) -> bool {
+        let Some(l) = self.panel_layout(d) else { return false };
+        let Some(hit) = ShotSidePanel::hit(&l, p) else {
+            return false;
+        };
+        if hit != PanelHit::Hex {
+            self.commit_hex();
+        }
+        match hit {
+            PanelHit::SizeDown => self.change_size(-1),
+            PanelHit::SizeUp => self.change_size(1),
+            PanelHit::Slider => {
+                if let Some((_, lo, hi)) = self.panel_size() {
+                    self.set_size(ShotSidePanel::slider_value(l.slider, p.x, lo, hi));
+                }
+            }
+            PanelHit::Grab => self.grab_from_panel(),
+            PanelHit::Wheel => {
+                let c = ShotSidePanel::wheel_color_clamped(l.wheel, p);
+                self.preview_panel_color(c);
+            }
+            PanelHit::Hex => {
+                if self.hex_edit.is_none() {
+                    self.commit_text();
+                    self.hex_edit = Some(HexEdit {
+                        text: self.current_color().hex(),
+                        replace: true,
+                    });
+                }
+            }
+            PanelHit::Grid => self.set_grid(!self.state.grid),
+            PanelHit::GridDown => {
+                self.set_grid_size(ShotSidePanel::grid_step(self.state.grid_size, -1))
+            }
+            PanelHit::GridUp => {
+                self.set_grid_size(ShotSidePanel::grid_step(self.state.grid_size, 1))
+            }
+            PanelHit::Swatch | PanelHit::Body => {}
+        }
+        self.chrome_press = Some(ChromePress::Panel(hit));
+        true
+    }
+
+    /// A drag that started on the panel's slider or wheel.
+    fn panel_drag(&mut self, d: usize, p: Point, hit: PanelHit) {
+        let Some(l) = self.panel_layout(d) else { return };
+        match hit {
+            PanelHit::Slider => {
+                if let Some((_, lo, hi)) = self.panel_size() {
+                    self.set_size(ShotSidePanel::slider_value(l.slider, p.x, lo, hi));
+                }
+            }
+            PanelHit::Wheel => {
+                self.preview_panel_color(ShotSidePanel::wheel_color_clamped(l.wheel, p))
+            }
+            _ => {}
+        }
+    }
+
+    /// The wheel's live colour: shown at once, persisted on release.
+    fn preview_panel_color(&mut self, c: ShotColor) {
+        self.panel_wheel = Some(c);
+        if self.doc.selected.is_none() {
+            self.color = c;
+        }
+    }
+
+    /// Test/socket entry: a full click (down + up) at `p` on the panel display.
+    pub fn panel_click(&mut self, p: Point) -> bool {
+        let Some(d) = self.panel_display() else { return false };
+        if self.panel_layout(d).is_none() && self.tool_tab_rect(d).is_none() {
+            return false;
+        }
+        self.mouse_down(d, p, 1, false, false);
+        self.mouse_up(d, p, false, false);
+        true
     }
     pub fn show_shortcuts(&mut self) {
         if self.mouse_display().is_none() {
@@ -1751,7 +1996,7 @@ impl ShotSession {
         if let Some(prev) = self.grabbing {
             self.color = prev;
         }
-        self.grabbing = None;
+        self.end_grab();
     }
     pub fn close_wheel(&mut self) {
         self.wheel = None;
@@ -1914,6 +2159,9 @@ impl ShotSession {
         let ch = k.chars.map(|c| c.to_ascii_lowercase());
         let code = k.key_code;
         let is_esc = code == KEY_ESC;
+        if self.hex_edit.is_some() {
+            return self.hex_key(k, ch, code);
+        }
         let text_responder = self.editing.is_some() || self.save_card.is_some();
 
         if text_responder {
@@ -2108,11 +2356,90 @@ impl ShotSession {
         true
     }
 
+    /// Keys while the panel's hex field has focus. Esc leaves the field only
+    /// (rule 6); edit shortcuts work with Cmd or Ctrl (rule 1).
+    fn hex_key(&mut self, k: &KeyInput, ch: Option<char>, code: u16) -> bool {
+        if code == KEY_ESC {
+            self.hex_edit = None;
+            return true;
+        }
+        if code == KEY_RETURN || code == KEY_ENTER || code == KEY_TAB {
+            self.commit_hex();
+            return true;
+        }
+        if k.cmd && ch == Some('q') {
+            self.finish(ShotOutcome::Abort);
+            return true;
+        }
+        let cur_hex = self.current_color().hex();
+        let Some(h) = self.hex_edit.as_mut() else { return false };
+        let edit = k.cmd || k.ctrl;
+        match ch {
+            Some('v') if edit => {
+                if let Some(t) = crate::platform::clipboard::get_text() {
+                    let t: String = t.trim().chars().filter(|c| ShotSidePanel::hex_char_ok(*c)).collect();
+                    if h.replace {
+                        h.text.clear();
+                    }
+                    h.text.push_str(&t);
+                    h.text.truncate(7);
+                    h.replace = false;
+                }
+                return true;
+            }
+            Some('c') if edit => {
+                crate::platform::clipboard::set_text(&h.text);
+                return true;
+            }
+            Some('x') if edit => {
+                crate::platform::clipboard::set_text(&h.text);
+                h.text.clear();
+                h.replace = false;
+                return true;
+            }
+            Some('a') if edit => {
+                h.replace = true;
+                return true;
+            }
+            Some('z') if edit => {
+                h.text = cur_hex;
+                h.replace = true;
+                return true;
+            }
+            _ => {}
+        }
+        if code == KEY_DELETE || code == KEY_FORWARD_DELETE {
+            if h.replace {
+                h.text.clear();
+            } else {
+                h.text.pop();
+            }
+            h.replace = false;
+            return true;
+        }
+        if !k.cmd && !k.ctrl && !k.opt {
+            if let Some(c) = k.chars.filter(|c| ShotSidePanel::hex_char_ok(*c)) {
+                if h.replace {
+                    h.text.clear();
+                    h.replace = false;
+                }
+                if h.text.chars().count() < 7 {
+                    h.text.push(c);
+                }
+            }
+        }
+        true
+    }
+
     /// The Esc chain (Swift `ShotSession.escape`): save card → text → shortcuts
     /// → color wheel → grab → side panel → selected object → tool → close.
     pub fn escape(&mut self) {
         if self.save_card.is_some() {
             self.close_save_card();
+            return;
+        }
+        if self.hex_edit.is_some() {
+            self.hex_edit = None;
             return;
         }
         if self.editing.is_some() {
@@ -2258,6 +2585,14 @@ impl ShotSession {
     /// `mouseMoved(_:_:)`: track the pointer (loupe, cursor, mode pill).
     pub fn mouse_moved(&mut self, d: usize, p: Point) {
         self.mouse = Some((d, p));
+        // Flameshot's grab previews the colour under the pointer live; Esc
+        // (`cancel_grab`) restores the colour saved in `grabbing`.
+        #[cfg(target_os = "macos")]
+        if self.grabbing.is_some() && self.doc.selected.is_none() {
+            if let Some(c) = self.sample_color_at(d, p) {
+                self.color = c;
+            }
+        }
         // `mouseMoved`: a live wheel follows the pointer's nearest swatch.
         if let Some(w) = self.wheel.as_ref() {
             if w.display == d {
@@ -2296,6 +2631,18 @@ impl ShotSession {
             self.hide_shortcuts();
             return;
         }
+        // The side panel and its Tool Settings tab sit above the selection.
+        if !self.is_dragging() {
+            if self.tool_tab_rect(d).is_some_and(|r| r.contains_point(p)) {
+                self.chrome_press = Some(ChromePress::Tab);
+                return;
+            }
+            if self.panel_press(d, p) {
+                return;
+            }
+        }
+        // Any other click leaves the hex field (Flameshot: focus out commits).
+        self.commit_hex();
         // `ShotButton` subviews take the click before the session state
         // machine: a press on a ring disc is remembered and resolved on up.
         if let Some(i) = self.ring_press_at(d, p) {
@@ -2318,9 +2665,14 @@ impl ShotSession {
             // pointer (the loupe shows it), then apply it as the draw colour.
             #[cfg(target_os = "macos")]
             if let Some(c) = self.sample_color_at(d, p) {
+                // Undo the live preview first so a selected object, not the
+                // draw colour, takes the pick.
+                if let Some(prev) = self.grabbing {
+                    self.color = prev;
+                }
                 self.set_color(c);
             }
-            self.grabbing = None;
+            self.end_grab();
             return;
         }
         if self.editing.is_some() {
@@ -2407,6 +2759,10 @@ impl ShotSession {
 
     pub fn mouse_dragged(&mut self, d: usize, p: Point, shift: bool, cmd: bool) {
         self.mouse = Some((d, p));
+        if let Some(ChromePress::Panel(hit)) = self.chrome_press {
+            self.panel_drag(d, p, hit);
+            return;
+        }
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         match drag {
             Drag::None => {}
@@ -2493,6 +2849,18 @@ impl ShotSession {
                     if let Some(t) = self.cfg.buttons.get(i).copied() {
                         self.pressed(t);
                     }
+                }
+                return;
+            }
+            if let ChromePress::Panel(_) = press {
+                if let Some(c) = self.panel_wheel.take() {
+                    self.set_color(c);
+                }
+                return;
+            }
+            if press == ChromePress::Tab {
+                if self.tool_tab_rect(d).is_some_and(|r| r.contains_point(p)) {
+                    self.toggle_side_panel(Some(true));
                 }
                 return;
             }
@@ -2886,6 +3254,10 @@ enum ChromePress {
     Ring(usize),
     /// A press on the pill's padding or divider: swallowed, does nothing.
     Dead,
+    /// A side-panel control (sliders and the wheel keep tracking on drag).
+    Panel(PanelHit),
+    /// The Tool Settings tab on the left edge.
+    Tab,
 }
 
 /// `ShotRecentButton` — the recents button beside the mode pill.
@@ -3005,15 +3377,235 @@ impl ShotHelpCard {
     }
 }
 
-/// `ShotSidePanel` — the tool-settings drawer.
+/// What a press inside the side panel landed on (Flameshot's
+/// `SidePanelWidget` controls, in top-to-bottom order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelHit {
+    SizeDown,
+    SizeUp,
+    Slider,
+    Swatch,
+    Grab,
+    Wheel,
+    Hex,
+    Grid,
+    GridDown,
+    GridUp,
+    /// Panel background: swallowed so it never reaches the selection.
+    Body,
+}
+
+/// The side panel's control rects in overlay (display) points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelLayout {
+    pub panel: Rect,
+    pub size_label: Rect,
+    pub size_down: Rect,
+    pub size_value: Rect,
+    pub size_up: Rect,
+    pub slider: Rect,
+    pub color_label: Rect,
+    pub swatch: Rect,
+    pub grab: Rect,
+    pub wheel: Rect,
+    pub hex: Rect,
+    pub grid_box: Rect,
+    pub grid_down: Rect,
+    pub grid_value: Rect,
+    pub grid_up: Rect,
+}
+
+impl PanelLayout {
+    /// The rects as `{name: [x, y, w, h]}` (socket state, for `panel-click`).
+    pub fn to_json(&self) -> Value {
+        let r = |r: Rect| json!([r.x, r.y, r.w, r.h]);
+        json!({
+            "panel": r(self.panel), "sizeDown": r(self.size_down), "sizeUp": r(self.size_up),
+            "slider": r(self.slider), "swatch": r(self.swatch), "grab": r(self.grab),
+            "wheel": r(self.wheel), "hex": r(self.hex), "grid": r(self.grid_box),
+            "gridDown": r(self.grid_down), "gridUp": r(self.grid_up),
+        })
+    }
+}
+
+/// `ShotSidePanel` — the tool-settings drawer (Space / the Tool Settings tab).
+/// Pure layout + value mapping; `overlay::draw_side_panel` paints it.
 pub struct ShotSidePanel;
 
 impl ShotSidePanel {
     pub const WIDTH: f64 = 250.0;
+    pub const PAD: f64 = 16.0;
+    pub const GRID_MIN: i64 = 5;
+    pub const GRID_MAX: i64 = 50;
+    pub const GRID_STEP: i64 = 5;
+    /// The tool-tab height on the left edge.
+    pub const TAB_HEIGHT: f64 = 130.0;
 
     /// `build`'s layer list height: `max(80, bounds.height - y - 50)`.
     pub fn list_height(bounds_height: f64, y: f64) -> f64 {
         80.0f64.max(bounds_height - y - 50.0)
+    }
+
+    /// The control layout for a full-height panel `width` wide on the left
+    /// edge of `bounds`, starting below `top` (the display's menu-bar inset).
+    pub fn layout(bounds: Rect, top: f64, width: f64) -> PanelLayout {
+        let p = Self::PAD;
+        let iw = width - 2.0 * p;
+        let x0 = bounds.x;
+        let mut y = bounds.y + top + 20.0;
+        let at = |x: f64, y: f64, w: f64, h: f64| Rect::new(x0 + x, y, w, h);
+        let size_label = at(p, y, iw, 18.0);
+        y += 24.0;
+        let size_down = at(p, y, 28.0, 26.0);
+        let size_value = at(p + 32.0, y, iw - 64.0, 26.0);
+        let size_up = at(width - p - 28.0, y, 28.0, 26.0);
+        y += 36.0;
+        let slider = at(p, y, iw, 20.0);
+        y += 36.0;
+        let color_label = at(p, y, iw - 44.0, 24.0);
+        let swatch = at(width - p - 36.0, y, 36.0, 24.0);
+        y += 36.0;
+        let grab = at(p, y, iw, 28.0);
+        y += 42.0;
+        let side = iw.min(200.0);
+        let wheel = at((width - side) / 2.0, y, side, side);
+        y += side + 14.0;
+        let hex = at(p + (iw - 120.0) / 2.0, y, 120.0, 26.0);
+        y += 44.0;
+        let grid_box = at(p, y, iw, 20.0);
+        y += 28.0;
+        let grid_down = at(p, y, 28.0, 26.0);
+        let grid_value = at(p + 32.0, y, iw - 64.0, 26.0);
+        let grid_up = at(width - p - 28.0, y, 28.0, 26.0);
+        PanelLayout {
+            panel: Rect::new(x0, bounds.y, width, bounds.h),
+            size_label,
+            size_down,
+            size_value,
+            size_up,
+            slider,
+            color_label,
+            swatch,
+            grab,
+            wheel,
+            hex,
+            grid_box,
+            grid_down,
+            grid_value,
+            grid_up,
+        }
+    }
+
+    /// The control under `p`; `None` outside the panel, `Body` on padding.
+    pub fn hit(l: &PanelLayout, p: Point) -> Option<PanelHit> {
+        if !l.panel.contains_point(p) {
+            return None;
+        }
+        let controls = [
+            (l.size_down, PanelHit::SizeDown),
+            (l.size_up, PanelHit::SizeUp),
+            (l.slider, PanelHit::Slider),
+            (l.swatch, PanelHit::Swatch),
+            (l.grab, PanelHit::Grab),
+            (l.hex, PanelHit::Hex),
+            (l.grid_box, PanelHit::Grid),
+            (l.grid_down, PanelHit::GridDown),
+            (l.grid_up, PanelHit::GridUp),
+        ];
+        if let Some((_, h)) = controls.iter().find(|(r, _)| r.contains_point(p)) {
+            return Some(*h);
+        }
+        if Self::wheel_color(l.wheel, p).is_some() {
+            return Some(PanelHit::Wheel);
+        }
+        Some(PanelHit::Body)
+    }
+
+    /// The slider value at x (`lo…hi`, clamped to the track).
+    pub fn slider_value(track: Rect, x: f64, lo: i64, hi: i64) -> i64 {
+        if track.w <= 0.0 || hi <= lo {
+            return lo;
+        }
+        let t = ((x - track.x) / track.w).clamp(0.0, 1.0);
+        lo + round_half_away(t * (hi - lo) as f64) as i64
+    }
+
+    /// The thumb centre x for `v` on the track.
+    pub fn slider_x(track: Rect, v: i64, lo: i64, hi: i64) -> f64 {
+        if hi <= lo {
+            return track.x;
+        }
+        let t = ((v - lo) as f64 / (hi - lo) as f64).clamp(0.0, 1.0);
+        track.x + t * track.w
+    }
+
+    /// The hue/saturation wheel colour at `p` (value = 1); `None` beyond the
+    /// rim (a 6pt grace ring clamps to full saturation).
+    pub fn wheel_color(wheel: Rect, p: Point) -> Option<ShotColor> {
+        let r = wheel.w.min(wheel.h) / 2.0;
+        if r <= 0.0 {
+            return None;
+        }
+        let (dx, dy) = (p.x - wheel.mid_x(), p.y - wheel.mid_y());
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist > r + 6.0 {
+            return None;
+        }
+        Some(Self::wheel_at(dx, dy, r))
+    }
+
+    /// `wheel_color` without the rim cut-off (drags outside keep tracking).
+    pub fn wheel_color_clamped(wheel: Rect, p: Point) -> ShotColor {
+        let r = (wheel.w.min(wheel.h) / 2.0).max(1.0);
+        Self::wheel_at(p.x - wheel.mid_x(), p.y - wheel.mid_y(), r)
+    }
+
+    fn wheel_at(dx: f64, dy: f64, r: f64) -> ShotColor {
+        let dist = (dx * dx + dy * dy).sqrt();
+        let mut h = dy.atan2(dx) / (2.0 * std::f64::consts::PI);
+        if h < 0.0 {
+            h += 1.0;
+        }
+        ShotColor::from_hsv(h, (dist / r).min(1.0), 1.0)
+    }
+
+    /// Where `c` sits on the wheel (its hue angle and saturation radius).
+    pub fn wheel_point(wheel: Rect, c: ShotColor) -> Point {
+        let (h, s, _) = c.hsv();
+        let r = wheel.w.min(wheel.h) / 2.0 * s;
+        let a = h * 2.0 * std::f64::consts::PI;
+        Point::new(wheel.mid_x() + a.cos() * r, wheel.mid_y() + a.sin() * r)
+    }
+
+    /// Flameshot's hex field: valid input applies, anything else reverts.
+    pub fn hex_commit(typed: &str, current: ShotColor) -> ShotColor {
+        let t = typed.trim();
+        if t.len() == 6 || t.len() == 7 {
+            ShotColor::from_hex(t).unwrap_or(current)
+        } else {
+            current
+        }
+    }
+
+    /// Characters the hex field accepts.
+    pub fn hex_char_ok(c: char) -> bool {
+        c == '#' || c.is_ascii_hexdigit()
+    }
+
+    /// Grid size `cur` moved `steps` spin-box steps (5…50, step 5).
+    pub fn grid_step(cur: i64, steps: i64) -> i64 {
+        let snapped = (cur / Self::GRID_STEP) * Self::GRID_STEP;
+        (snapped + steps * Self::GRID_STEP).clamp(Self::GRID_MIN, Self::GRID_MAX)
+    }
+
+    /// The vertical Tool Settings tab on the left edge of `bounds`.
+    pub fn tab_rect(bounds: Rect) -> Rect {
+        Rect::new(
+            bounds.x,
+            bounds.y + ShotToolTab::origin_y(bounds.h, Self::TAB_HEIGHT),
+            ShotToolTab::WIDTH,
+            Self::TAB_HEIGHT,
+        )
     }
 }
 
@@ -3735,8 +4327,9 @@ mod overlay {
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
     use super::{
-        selection_handles, shot_cg, ButtonRing, Point, Rect, ShotColor, ShotHelpCard, ShotLoupe,
-        ShotObject, ShotSaveCard, ShotSession, ShotTool, ShotWheel,
+        selection_handles, shot_cg, ButtonRing, PanelLayout, Point, Rect, ShotColor,
+        ShotHelpCard, ShotLoupe, ShotObject, ShotSaveCard, ShotSession, ShotSidePanel, ShotTool,
+        ShotWheel,
     };
     use crate::engines::screenshot_annotations::ShotText;
 
@@ -4096,6 +4689,14 @@ mod overlay {
                 }
             }
 
+            // 3b. Display grid (panel option): overlay-only guide lines inside
+            //     the selection every `grid_size` points; never rendered out.
+            if let Some(sel) = mine {
+                if session.state.grid && !session.text_mode && sel.w > 0.0 && sel.h > 0.0 {
+                    draw_grid(&ctx, sel, session.state.grid_size as f64);
+                }
+            }
+
             // 4. The text draft while a text object is being edited (the one
             //    annotation the model exposes without the full renderer).
             if let Some(e) = &session.editing {
@@ -4112,9 +4713,7 @@ mod overlay {
         /// The overlay chrome subviews (`ScreenshotOverlay.swift`'s
         /// `ShotHelpCard` / `ShotButton` ring / `ShotWheelView` / `ShotLoupe` /
         /// `ShotSaveCard`), painted into the same context instead of as AppKit
-        /// subviews. Layout comes from the pure models in the parent module;
-        /// only the side-panel settings form stays a model (its AppKit controls
-        /// are not rebuilt).
+        /// subviews. Layout comes from the pure models in the parent module.
         fn render_chrome(&self, session: &ShotSession, ctx: &CGContext, full: Rect, d: usize) {
             let cfg = &session.cfg;
             let mine = if session.active == Some(d) {
@@ -4131,6 +4730,14 @@ mod overlay {
             // Mode pill (Copy Text | Screenshot) + the recents button beside
             // it, on the display the pointer is on.
             draw_mode_chrome(ctx, session, full, d);
+
+            // Side panel (above the selection, below the ring) or, while it
+            // is closed, the Tool Settings tab that opens it.
+            if let Some(l) = session.panel_layout(d) {
+                draw_side_panel(ctx, session, &l);
+            } else if let Some(tab) = session.tool_tab_rect(d) {
+                draw_tool_tab(ctx, session, tab);
+            }
 
             // Button ring: only around a live selection, not in text mode.
             if let Some(sel) = mine {
@@ -4516,6 +5123,204 @@ mod overlay {
 
     fn cfg_uicolor(session: &ShotSession) -> ShotColor {
         session.cfg.ui_color
+    }
+
+    fn round_path(ctx: &CGContext, r: Rect, rad: f64) {
+        unsafe {
+            let path = CGPath::with_rounded_rect(cg_rect(r), rad, rad, std::ptr::null());
+            CGContext::add_path(Some(ctx), Some(&*path));
+        }
+    }
+
+    fn fill_round(ctx: &CGContext, r: Rect, rad: f64, c: ShotColor) {
+        set_fill(ctx, c);
+        round_path(ctx, r, rad);
+        CGContext::fill_path(Some(ctx));
+    }
+
+    fn stroke_round(ctx: &CGContext, r: Rect, rad: f64, c: ShotColor, width: f64) {
+        set_stroke(ctx, c);
+        CGContext::set_line_width(Some(ctx), width);
+        round_path(ctx, Rect::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), rad);
+        CGContext::stroke_path(Some(ctx));
+    }
+
+    /// Text centred in `r` (one line).
+    fn draw_text_centered(ctx: &CGContext, text: &str, r: Rect, point: f64, c: ShotColor, bold: bool) {
+        let w = shot_cg::measure_text_width(text, point, bold);
+        draw_text_at(ctx, text, r.mid_x() - w / 2.0, r.mid_y() - point * 0.62, point, c, bold);
+    }
+
+    /// The display grid: hairlines every `step` points across `sel`.
+    fn draw_grid(ctx: &CGContext, sel: Rect, step: f64) {
+        if step < 1.0 {
+            return;
+        }
+        CGContext::save_g_state(Some(ctx));
+        CGContext::clip_to_rect(Some(ctx), cg_rect(sel));
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.28));
+        CGContext::set_line_width(Some(ctx), 1.0);
+        let mut x = sel.x + step;
+        while x < sel.max_x() {
+            CGContext::move_to_point(Some(ctx), x.floor() + 0.5, sel.y);
+            CGContext::add_line_to_point(Some(ctx), x.floor() + 0.5, sel.max_y());
+            x += step;
+        }
+        let mut y = sel.y + step;
+        while y < sel.max_y() {
+            CGContext::move_to_point(Some(ctx), sel.x, y.floor() + 0.5);
+            CGContext::add_line_to_point(Some(ctx), sel.max_x(), y.floor() + 0.5);
+            y += step;
+        }
+        CGContext::stroke_path(Some(ctx));
+        CGContext::restore_g_state(Some(ctx));
+    }
+
+    /// The vertical "Tool Settings" tab hugging the left edge.
+    fn draw_tool_tab(ctx: &CGContext, session: &ShotSession, tab: Rect) {
+        let cfg = &session.cfg;
+        let hover = session.mouse.is_some_and(|(_, p)| tab.contains_point(p));
+        let fill = if hover { cfg.ui_color.mixed(&ShotColor::WHITE, 0.18) } else { cfg.ui_color };
+        // Square on the screen edge, rounded on the inner side.
+        fill_round(ctx, Rect::new(tab.x - 8.0, tab.y, tab.w + 8.0, tab.h), 7.0, fill.with_alpha(0.94));
+        let fg = if cfg.ui_color.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK };
+        let label = &cfg.panel_labels.tab;
+        let point = 12.0;
+        let w = shot_cg::measure_text_width(label, point, true);
+        // Rotate -90° so the label reads bottom-to-top along the tab.
+        CGContext::save_g_state(Some(ctx));
+        CGContext::translate_ctm(Some(ctx), tab.x + 3.0, tab.mid_y() + w / 2.0);
+        CGContext::rotate_ctm(Some(ctx), -std::f64::consts::FRAC_PI_2);
+        draw_text_at(ctx, label, 0.0, 0.0, point, fg, true);
+        CGContext::restore_g_state(Some(ctx));
+    }
+
+    /// A `[-] value [+]` spin box.
+    fn draw_spinner(ctx: &CGContext, session: &ShotSession, down: Rect, value: Rect, up: Rect, text: &str, enabled: bool) {
+        let ui = session.cfg.ui_color;
+        let a = if enabled { 1.0 } else { 0.35 };
+        for (r, glyph) in [(down, "\u{2212}"), (up, "+")] {
+            let hover = enabled && session.mouse.is_some_and(|(_, p)| r.contains_point(p));
+            let fill = if hover { ui.mixed(&ShotColor::WHITE, 0.18) } else { ui };
+            fill_round(ctx, r, 6.0, fill.with_alpha(a));
+            draw_text_centered(ctx, glyph, r, 16.0, ShotColor::WHITE.with_alpha(a), true);
+        }
+        fill_round(ctx, value, 6.0, ShotColor::BLACK.with_alpha(0.35));
+        stroke_round(ctx, value, 6.0, ShotColor::WHITE.with_alpha(0.25 * a), 1.0);
+        draw_text_centered(ctx, text, value, 13.0, ShotColor::WHITE.with_alpha(a), true);
+    }
+
+    /// The hue/saturation disc: rings of wedges, outer (saturated) first.
+    fn draw_hs_wheel(ctx: &CGContext, wheel: Rect) {
+        let r = wheel.w.min(wheel.h) / 2.0;
+        let (cx, cy) = (wheel.mid_x(), wheel.mid_y());
+        let wedges = 60;
+        let rings = 10;
+        let tau = 2.0 * std::f64::consts::PI;
+        for ring in (1..=rings).rev() {
+            let rr = r * ring as f64 / rings as f64;
+            let sat = ring as f64 / rings as f64;
+            for w in 0..wedges {
+                let a0 = tau * w as f64 / wedges as f64;
+                let a1 = tau * (w + 1) as f64 / wedges as f64 + 0.01;
+                let h = (w as f64 + 0.5) / wedges as f64;
+                set_fill(ctx, ShotColor::from_hsv(h, sat, 1.0));
+                CGContext::move_to_point(Some(ctx), cx, cy);
+                CGContext::add_arc(Some(ctx), cx, cy, rr, a0, a1, 0);
+                CGContext::close_path(Some(ctx));
+                CGContext::fill_path(Some(ctx));
+            }
+        }
+        set_fill(ctx, ShotColor::WHITE);
+        let c = r / rings as f64;
+        CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(cx - c, cy - c, 2.0 * c, 2.0 * c)));
+        set_stroke(ctx, ShotColor::WHITE.with_alpha(0.5));
+        CGContext::set_line_width(Some(ctx), 1.0);
+        CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r)));
+    }
+
+    /// Flameshot's sidebar: size (label + spin box + slider), active colour,
+    /// Grab Color, the colour wheel, the hex field and Display grid.
+    fn draw_side_panel(ctx: &CGContext, session: &ShotSession, l: &PanelLayout) {
+        let cfg = &session.cfg;
+        let labels = &cfg.panel_labels;
+        let ui = cfg.ui_color;
+        let fg = ShotColor::WHITE;
+        // Body: the contrast colour, darkened, nearly opaque; a ui-colour edge.
+        fill_rect(ctx, l.panel, cfg.contrast_color.mixed(&ShotColor::BLACK, 0.45).with_alpha(0.95));
+        fill_rect(ctx, Rect::new(l.panel.max_x() - 1.0, l.panel.y, 1.0, l.panel.h), ui);
+
+        // Active tool size.
+        let size = session.panel_size();
+        let size_text = match size {
+            Some((v, _, _)) => format!("{} {v}", labels.size),
+            None => format!("{} \u{2014}", labels.size),
+        };
+        draw_text_at(ctx, &size_text, l.size_label.x, l.size_label.y, 13.0, fg, true);
+        let value = size.map(|(v, _, _)| v.to_string()).unwrap_or_else(|| labels.no_tool.clone());
+        draw_spinner(ctx, session, l.size_down, l.size_value, l.size_up, &value, size.is_some());
+        let track = Rect::new(l.slider.x, l.slider.mid_y() - 2.0, l.slider.w, 4.0);
+        fill_round(ctx, track, 2.0, ShotColor::WHITE.with_alpha(0.22));
+        if let Some((v, lo, hi)) = size {
+            let x = ShotSidePanel::slider_x(l.slider, v, lo, hi);
+            fill_round(ctx, Rect::new(track.x, track.y, x - track.x, track.h), 2.0, ui.mixed(&ShotColor::WHITE, 0.2));
+            set_fill(ctx, ShotColor::WHITE);
+            CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(x - 7.0, l.slider.mid_y() - 7.0, 14.0, 14.0)));
+            set_stroke(ctx, ui);
+            CGContext::set_line_width(Some(ctx), 2.0);
+            CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(x - 6.0, l.slider.mid_y() - 6.0, 12.0, 12.0)));
+        }
+
+        // Active colour.
+        let cur = session.current_color();
+        draw_text_at(ctx, &labels.color, l.color_label.x, l.color_label.y + 3.0, 13.0, fg, true);
+        fill_round(ctx, l.swatch, 5.0, cur);
+        stroke_round(ctx, l.swatch, 5.0, ShotColor::WHITE.with_alpha(0.8), 1.0);
+
+        // Grab Color.
+        let hover = session.mouse.is_some_and(|(_, p)| l.grab.contains_point(p));
+        fill_round(ctx, l.grab, 7.0, if hover { ui.mixed(&ShotColor::WHITE, 0.18) } else { ui });
+        draw_text_centered(ctx, &labels.grab, l.grab, 13.0, fg, true);
+
+        // Wheel + the current colour's marker.
+        draw_hs_wheel(ctx, l.wheel);
+        let m = ShotSidePanel::wheel_point(l.wheel, cur);
+        set_fill(ctx, cur);
+        CGContext::fill_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(m.x - 6.0, m.y - 6.0, 12.0, 12.0)));
+        set_stroke(ctx, if cur.is_dark() { ShotColor::WHITE } else { ShotColor::BLACK });
+        CGContext::set_line_width(Some(ctx), 2.0);
+        CGContext::stroke_ellipse_in_rect(Some(ctx), cg_rect(Rect::new(m.x - 6.0, m.y - 6.0, 12.0, 12.0)));
+
+        // Hex field: focused = ui-colour ring, selected text highlighted.
+        let editing = session.hex_edit.as_ref();
+        fill_round(ctx, l.hex, 6.0, ShotColor::BLACK.with_alpha(0.45));
+        match editing {
+            Some(_) => stroke_round(ctx, l.hex, 6.0, ui.mixed(&ShotColor::WHITE, 0.3), 2.0),
+            None => stroke_round(ctx, l.hex, 6.0, ShotColor::WHITE.with_alpha(0.3), 1.0),
+        }
+        let text = editing.map(|h| h.text.clone()).unwrap_or_else(|| cur.hex());
+        if editing.is_some_and(|h| h.replace) && !text.is_empty() {
+            let w = shot_cg::measure_text_width(&text, 13.0, false);
+            fill_round(ctx, Rect::new(l.hex.mid_x() - w / 2.0 - 2.0, l.hex.y + 4.0, w + 4.0, l.hex.h - 8.0), 3.0, ui.with_alpha(0.7));
+        }
+        draw_text_centered(ctx, &text, l.hex, 13.0, fg, false);
+        if editing.is_some_and(|h| !h.replace) {
+            let w = shot_cg::measure_text_width(&text, 13.0, false);
+            fill_rect(ctx, Rect::new(l.hex.mid_x() + w / 2.0 + 1.0, l.hex.y + 5.0, 1.5, l.hex.h - 10.0), fg);
+        }
+
+        // Display grid: checkbox + label, then the size spin box.
+        let on = session.state.grid;
+        let bx = Rect::new(l.grid_box.x, l.grid_box.y + 1.0, 18.0, 18.0);
+        if on {
+            fill_round(ctx, bx, 4.0, ui);
+            draw_text_centered(ctx, "\u{2713}", bx, 13.0, fg, true);
+        } else {
+            stroke_round(ctx, bx, 4.0, ShotColor::WHITE.with_alpha(0.7), 1.5);
+        }
+        draw_text_at(ctx, &labels.grid, bx.max_x() + 8.0, l.grid_box.y + 1.0, 13.0, fg, true);
+        let gs = session.state.grid_size.to_string();
+        draw_spinner(ctx, session, l.grid_down, l.grid_value, l.grid_up, &gs, on);
     }
 
     /// `ShotSaveCard`: the save-as card frame, title, value and hint.
@@ -6844,10 +7649,23 @@ impl ScreenshotController {
                 }
                 Ok(())
             }
+            // `panel-click:X,Y` — a click on the side panel / Tool Settings tab
+            // (coordinates from `sidePanelLayout` / `toolTab` in the state).
+            "panel-click" => {
+                let nums: Vec<f64> = arg.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                let [x, y] = nums[..] else {
+                    return Err("panel-click:X,Y".to_string());
+                };
+                match self.session.as_mut().map(|s| s.panel_click(Point::new(x, y))) {
+                    Some(true) => Ok(()),
+                    Some(false) => Err("side panel / tab not shown".to_string()),
+                    None => Err("no session".to_string()),
+                }
+            }
             _ => Err(
                 "show[:MS] | show-text[:MS] | mode:text|screenshot | text | select:X,Y,W,H | \
                  tool:NAME | draw:X1,Y1,X2,Y2 | key:SPEC | copy | accept | save:PATH | save-ok \
-                 | pin | unpin | close | side-panel"
+                 | pin | unpin | close | side-panel | panel-click:X,Y"
                     .to_string(),
             ),
         }
@@ -6982,6 +7800,24 @@ impl ScreenshotController {
         st["canUndo"] = json!(s.doc.can_undo());
         st["canRedo"] = json!(s.doc.can_redo());
         st["sidePanel"] = json!(s.side_panel_open);
+        st["toolSize"] = match s.panel_size() {
+            Some((v, _, _)) => json!(v),
+            None => Value::Null,
+        };
+        st["color"] = json!(s.current_color().hex());
+        st["grid"] = json!({"on": s.state.grid, "size": s.state.grid_size});
+        st["hexEdit"] = match &s.hex_edit {
+            Some(h) => json!(h.text),
+            None => Value::Null,
+        };
+        st["sidePanelLayout"] = match s.panel_display().and_then(|d| s.panel_layout(d)) {
+            Some(l) => l.to_json(),
+            None => Value::Null,
+        };
+        st["toolTab"] = match s.panel_display().and_then(|d| s.tool_tab_rect(d)) {
+            Some(r) => json!([r.x, r.y, r.w, r.h]),
+            None => Value::Null,
+        };
         st["helpShown"] = json!(s.cfg.show_help && s.selection.is_none());
         st["editingText"] = json!(s.editing.is_some());
         st["wheel"] = json!(s.wheel.is_some());
@@ -7465,6 +8301,258 @@ mod tests {
             p.handle_key(&PinKey { key_code: 8, ch: Some('c'), cmd: false }),
             PinKeyAction::Ignored
         );
+    }
+
+    fn ki(code: u16, c: Option<char>, cmd: bool, ctrl: bool) -> KeyInput {
+        KeyInput { key_code: code, chars: c, cmd, ctrl, shift: false, opt: false, esc_streak: 0 }
+    }
+
+    fn panel_session() -> (ShotSession, PanelLayout) {
+        let mut s = session();
+        s.test_select(Rect::new(400.0, 200.0, 600.0, 400.0), Some(0));
+        s.toggle_side_panel(Some(true));
+        let l = s.panel_layout(0).expect("panel open on the active display");
+        (s, l)
+    }
+
+    fn mid(r: Rect) -> Point {
+        Point::new(r.mid_x(), r.mid_y())
+    }
+
+    #[test]
+    fn side_panel_layout_stacks_controls_inside_the_panel() {
+        let b = Rect::new(0.0, 0.0, 1440.0, 900.0);
+        let l = ShotSidePanel::layout(b, 24.0, 250.0);
+        assert_eq!(l.panel, Rect::new(0.0, 0.0, 250.0, 900.0));
+        let order = [
+            l.size_label, l.size_value, l.slider, l.color_label, l.grab, l.wheel, l.hex,
+            l.grid_box, l.grid_value,
+        ];
+        for w in order.windows(2) {
+            assert!(w[0].max_y() <= w[1].y, "{:?} overlaps {:?}", w[0], w[1]);
+        }
+        for r in order {
+            assert!(r.x >= 16.0 && r.max_x() <= 234.0, "{r:?} inside the padding");
+        }
+        assert!(l.grid_up.max_y() < 900.0, "everything fits a 900pt display");
+        assert_eq!(l.wheel.w, 200.0, "wheel capped at 200");
+    }
+
+    #[test]
+    fn side_panel_hit_test_maps_every_control() {
+        let l = ShotSidePanel::layout(Rect::new(0.0, 0.0, 1440.0, 900.0), 24.0, 250.0);
+        let h = |r: Rect| ShotSidePanel::hit(&l, mid(r));
+        assert_eq!(h(l.size_down), Some(PanelHit::SizeDown));
+        assert_eq!(h(l.size_up), Some(PanelHit::SizeUp));
+        assert_eq!(h(l.slider), Some(PanelHit::Slider));
+        assert_eq!(h(l.swatch), Some(PanelHit::Swatch));
+        assert_eq!(h(l.grab), Some(PanelHit::Grab));
+        assert_eq!(h(l.wheel), Some(PanelHit::Wheel));
+        assert_eq!(h(l.hex), Some(PanelHit::Hex));
+        assert_eq!(h(l.grid_box), Some(PanelHit::Grid));
+        assert_eq!(h(l.grid_down), Some(PanelHit::GridDown));
+        assert_eq!(h(l.grid_up), Some(PanelHit::GridUp));
+        assert_eq!(ShotSidePanel::hit(&l, Point::new(240.0, 880.0)), Some(PanelHit::Body));
+        assert_eq!(ShotSidePanel::hit(&l, Point::new(251.0, 100.0)), None, "outside");
+        // A wheel-rect corner is outside the disc: background, not a colour.
+        let corner = Point::new(l.wheel.x + 1.0, l.wheel.y + 1.0);
+        assert_eq!(ShotSidePanel::hit(&l, corner), Some(PanelHit::Body));
+    }
+
+    #[test]
+    fn side_panel_value_mapping() {
+        let t = Rect::new(16.0, 0.0, 200.0, 20.0);
+        assert_eq!(ShotSidePanel::slider_value(t, 16.0, 1, 100), 1);
+        assert_eq!(ShotSidePanel::slider_value(t, 216.0, 1, 100), 100);
+        assert_eq!(ShotSidePanel::slider_value(t, -50.0, 1, 100), 1, "clamped left");
+        assert_eq!(ShotSidePanel::slider_value(t, 999.0, 0, 100), 100, "clamped right");
+        for v in [1, 17, 50, 100] {
+            let x = ShotSidePanel::slider_x(t, v, 1, 100);
+            assert_eq!(ShotSidePanel::slider_value(t, x, 1, 100), v, "round trip {v}");
+        }
+        // Grid spin box: 5…50 step 5, off-step values snap down first.
+        assert_eq!(ShotSidePanel::grid_step(10, 1), 15);
+        assert_eq!(ShotSidePanel::grid_step(5, -1), 5);
+        assert_eq!(ShotSidePanel::grid_step(50, 1), 50);
+        assert_eq!(ShotSidePanel::grid_step(12, 1), 15);
+        // Hex: valid applies, anything else reverts.
+        let cur = ShotColor::new(1.0, 0.0, 0.0);
+        assert_eq!(ShotSidePanel::hex_commit("#00ff00", cur), ShotColor::new(0.0, 1.0, 0.0));
+        assert_eq!(ShotSidePanel::hex_commit("0000ff", cur), ShotColor::new(0.0, 0.0, 1.0));
+        assert_eq!(ShotSidePanel::hex_commit("#0f0", cur), cur);
+        assert_eq!(ShotSidePanel::hex_commit("zzzzzz", cur), cur);
+        assert_eq!(ShotSidePanel::hex_commit("", cur), cur);
+        // Wheel: centre = white, rim at angle 0 = pure red; the marker
+        // lands back on the colour it was picked from.
+        let w = Rect::new(0.0, 0.0, 200.0, 200.0);
+        assert_eq!(ShotSidePanel::wheel_color(w, Point::new(100.0, 100.0)), Some(ShotColor::WHITE));
+        assert_eq!(ShotSidePanel::wheel_color(w, Point::new(200.0, 100.0)).map(|c| c.hex()), Some("#ff0000".into()));
+        assert_eq!(ShotSidePanel::wheel_color(w, Point::new(100.0, 400.0)), None);
+        let c = ShotSidePanel::wheel_color(w, Point::new(140.0, 160.0)).unwrap();
+        let m = ShotSidePanel::wheel_point(w, c);
+        assert!((m.x - 140.0).abs() < 1.0 && (m.y - 160.0).abs() < 1.0, "{m:?}");
+    }
+
+    #[test]
+    fn side_panel_size_controls_drive_the_next_stroke() {
+        let (mut s, l) = panel_session();
+        assert_eq!(s.panel_size(), None, "no tool: the size control is idle");
+        assert!(s.panel_click(mid(l.size_up)), "click swallowed by the panel");
+        assert_eq!(s.panel_size(), None);
+        s.set_tool(Some(ShotTool::Pencil));
+        assert_eq!(s.panel_size(), Some((3, 1, 100)));
+        s.panel_click(mid(l.size_up));
+        s.panel_click(mid(l.size_up));
+        s.panel_click(mid(l.size_down));
+        assert_eq!(s.size(ShotTool::Pencil), 4);
+        // Slider: drag from the left end to the right end.
+        s.mouse_down(0, Point::new(l.slider.x, l.slider.mid_y()), 1, false, false);
+        assert_eq!(s.size(ShotTool::Pencil), 1);
+        s.mouse_dragged(0, Point::new(l.slider.max_x() + 40.0, l.slider.mid_y()), false, false);
+        s.mouse_up(0, Point::new(l.slider.max_x() + 40.0, l.slider.mid_y()), false, false);
+        assert_eq!(s.size(ShotTool::Pencil), 100);
+        assert!(s.selection.is_some(), "the drag never touched the selection");
+        assert_eq!(s.selection.unwrap().x, 400.0);
+        // Per-tool memory: another tool keeps its own size.
+        s.set_tool(Some(ShotTool::Marker));
+        assert_eq!(s.panel_size().map(|v| v.0), Some(5));
+        s.set_tool(Some(ShotTool::Pencil));
+        s.test_draw(Point::new(500.0, 300.0), Point::new(600.0, 350.0));
+        assert_eq!(s.doc.objects.last().map(|o| o.size), Some(100));
+    }
+
+    #[test]
+    fn side_panel_wheel_and_hex_change_the_colour() {
+        let (mut s, l) = panel_session();
+        let rim = Point::new(l.wheel.max_x(), l.wheel.mid_y());
+        s.mouse_down(0, rim, 1, false, false);
+        assert_eq!(s.color.hex(), "#ff0000", "live while dragging");
+        s.mouse_up(0, rim, false, false);
+        assert_eq!(s.state.color.as_deref(), Some("#ff0000"), "persisted on release");
+
+        // Hex: focus selects all, typing replaces, Return applies.
+        s.panel_click(mid(l.hex));
+        assert_eq!(s.hex_edit.as_ref().map(|h| h.replace), Some(true));
+        for c in "00ff00".chars() {
+            assert!(s.handle_key(&ki(0, Some(c), false, false)));
+        }
+        assert_eq!(s.hex_edit.as_ref().map(|h| h.text.as_str()), Some("00ff00"));
+        s.handle_key(&ki(KEY_RETURN, None, false, false));
+        assert!(s.hex_edit.is_none());
+        assert_eq!(s.color.hex(), "#00ff00");
+
+        // Invalid input reverts; tool letters typed in the field stay there.
+        s.panel_click(mid(l.hex));
+        s.handle_key(&ki(0, Some('p'), false, false));
+        assert_eq!(s.tool, None, "a letter in the field never picks a tool");
+        s.handle_key(&ki(0, Some('a'), false, false));
+        s.handle_key(&ki(KEY_RETURN, None, false, false));
+        assert_eq!(s.color.hex(), "#00ff00", "'a' is not a colour: reverted");
+
+        // Esc inside the field leaves the field only (rule 6).
+        s.panel_click(mid(l.hex));
+        s.handle_key(&ki(KEY_ESC, None, false, false));
+        assert!(s.hex_edit.is_none());
+        assert!(s.side_panel_open, "panel still open");
+        assert!(!s.finished, "overlay still open");
+        s.handle_key(&ki(KEY_ESC, None, false, false));
+        assert!(!s.side_panel_open, "next Esc closes the panel");
+        assert!(!s.finished);
+    }
+
+    #[test]
+    fn side_panel_hex_field_honours_edit_shortcuts() {
+        let (mut s, l) = panel_session();
+        s.panel_click(mid(l.hex));
+        // Cmd+X empties (and copies), Ctrl+Z restores, Backspace edits.
+        s.handle_key(&ki(KEY_DELETE, None, false, false));
+        assert_eq!(s.hex_edit.as_ref().unwrap().text, "", "select-all + delete clears");
+        s.handle_key(&ki(0, Some('z'), false, true));
+        assert_eq!(s.hex_edit.as_ref().unwrap().text, s.current_color().hex());
+        s.handle_key(&ki(0, Some('a'), true, false));
+        assert!(s.hex_edit.as_ref().unwrap().replace, "Cmd+A selects all");
+        // Typing past 7 characters is ignored.
+        for c in "#1234567".chars() {
+            s.handle_key(&ki(0, Some(c), false, false));
+        }
+        assert_eq!(s.hex_edit.as_ref().unwrap().text, "#123456");
+        s.handle_key(&ki(KEY_DELETE, None, false, false));
+        assert_eq!(s.hex_edit.as_ref().unwrap().text, "#12345");
+        // Clicking elsewhere commits (focus-out).
+        s.handle_key(&ki(0, Some('6'), false, false));
+        s.mouse_down(0, Point::new(700.0, 400.0), 1, false, false);
+        s.mouse_up(0, Point::new(700.0, 400.0), false, false);
+        assert!(s.hex_edit.is_none());
+        assert_eq!(s.color.hex(), "#123456");
+    }
+
+    #[test]
+    fn side_panel_grab_hides_and_returns() {
+        let (mut s, l) = panel_session();
+        let before = s.color;
+        s.panel_click(mid(l.grab));
+        assert!(s.grabbing.is_some(), "grab started");
+        assert!(!s.side_panel_open, "panel hidden during the grab");
+        assert!(s.tool_tab_rect(0).is_none(), "no tab during the grab either");
+        s.color = ShotColor::new(0.1, 0.2, 0.3); // a live preview
+        s.escape();
+        assert!(s.grabbing.is_none());
+        assert_eq!(s.color, before, "Esc restores the previous colour");
+        assert!(s.side_panel_open, "panel comes back after the grab");
+        // A grab from the G key (not the panel) leaves the panel alone.
+        s.toggle_side_panel(Some(false));
+        s.start_grab();
+        s.escape();
+        assert!(!s.side_panel_open);
+    }
+
+    #[test]
+    fn side_panel_grid_and_tab() {
+        let mut s = session();
+        s.test_select(Rect::new(400.0, 200.0, 600.0, 400.0), Some(0));
+        let tab = s.tool_tab_rect(0).expect("tab shown while the panel is closed");
+        assert_eq!(tab.x, 0.0);
+        assert!(s.panel_click(mid(tab)));
+        assert!(s.side_panel_open, "the tab opens the panel");
+        assert!(s.tool_tab_rect(0).is_none());
+        let l = s.panel_layout(0).unwrap();
+        assert!(!s.state.grid);
+        s.panel_click(mid(l.grid_box));
+        assert!(s.state.grid);
+        s.panel_click(mid(l.grid_up));
+        assert_eq!(s.state.grid_size, 15);
+        for _ in 0..20 {
+            s.panel_click(mid(l.grid_down));
+        }
+        assert_eq!(s.state.grid_size, 5);
+        assert_eq!(ShotState::load(&s.state_path).grid_size, 5, "persisted");
+        // Text mode hides both the panel and the tab.
+        s.toggle_text_mode();
+        assert!(s.panel_layout(0).is_none() && s.tool_tab_rect(0).is_none());
+        let mut cfg = ScreenshotConfig::default();
+        cfg.show_side_panel_button = false;
+        let mut t = ShotSession::new(cfg, ShotArgs::default(), temp_path("tab"));
+        t.add_display(ShotDisplay::new(1, Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0));
+        assert!(t.tool_tab_rect(0).is_none(), "show-side-panel-button = false");
+    }
+
+    #[test]
+    fn side_panel_config_keys() {
+        let mut e = HashMap::new();
+        e.insert("side-panel-width".to_string(), "300".to_string());
+        e.insert("side-panel-grab-label".to_string(), "Pick".to_string());
+        e.insert("draw-thickness".to_string(), "7".to_string());
+        e.insert("draw-font-size".to_string(), "20".to_string());
+        let c = ScreenshotConfig::from_entries(&e);
+        assert_eq!(c.side_panel_width, 300.0);
+        assert_eq!(c.panel_labels.grab, "Pick");
+        assert_eq!(c.panel_labels.size, "Active tool size:");
+        let mut s = ShotSession::new(c, ShotArgs::default(), temp_path("cfgsz"));
+        assert_eq!(s.size(ShotTool::Line), 7, "draw-thickness seeds line tools");
+        assert_eq!(s.size(ShotTool::Text), 20, "draw-font-size seeds text");
+        assert_eq!(s.size(ShotTool::Marker), 5, "marker keeps its own default");
+        s.state.sizes.insert("line".to_string(), 2);
+        assert_eq!(s.size(ShotTool::Line), 2, "a remembered size wins");
     }
 
     #[test]
