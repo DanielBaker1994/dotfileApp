@@ -234,6 +234,18 @@ impl TerminalPanel {
         self.key
     }
 
+    /// `reclaimToolKey` for the terminal: a shown panel that lost the
+    /// keyboard right after opening (the palette handed activation back to
+    /// the user's app and that landed late) takes it back once.
+    pub fn reclaim_key(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.panel {
+            if self.shown && panel.isVisible() && !panel.isKeyWindow() {
+                panel.makeKeyAndOrderFront(None);
+            }
+        }
+    }
+
     pub fn frame(&self) -> TerminalFrame {
         self.config.frame
     }

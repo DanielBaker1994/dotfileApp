@@ -35,6 +35,23 @@ pub fn frontmost_app() -> Option<FrontApp> {
     None
 }
 
+/// Bring the app with process id `pid` forward (hand focus back to it).
+/// `false` when no such app is running or the activation was refused.
+#[cfg(target_os = "macos")]
+pub fn activate_pid(pid: i32) -> bool {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    match NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        Some(app) => app.activateWithOptions(NSApplicationActivationOptions::empty()),
+        None => false,
+    }
+}
+
+/// Non-macOS: nothing to activate.
+#[cfg(not(target_os = "macos"))]
+pub fn activate_pid(_pid: i32) -> bool {
+    false
+}
+
 /// CFBundleShortVersionString of the running bundle; "" if none.
 #[cfg(target_os = "macos")]
 pub fn bundle_version() -> String {

@@ -1085,7 +1085,7 @@ impl SwitcherController {
             "terminal" => self.toggle_terminal_panel(),
             "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
             | "compare" | "prettyprint" | "filefast" | "health" | "health-checks"
-            | "notes-find" | "notes-grep" => {
+            | "text-table" | "notes-find" | "notes-grep" => {
                 self.toggle_command(name)
             }
             _ => {
@@ -1467,7 +1467,7 @@ impl SwitcherController {
                     let _ = self.do_host_action("paths:show");
                 }
             }
-            "health" | "health-checks" | "prettyprint" | "filefast" => {
+            "health" | "health-checks" | "prettyprint" | "filefast" | "text-table" => {
                 self.toggle_tool(name);
             }
             // `startCommandServer`'s fall-through: the notes vim pane's
@@ -2655,6 +2655,54 @@ mod daemon_ui {
     /// `NSApp.activate(ignoringOtherApps: true)` — the exact Swift call.
     /// The non-deprecated `activate()` does not take focus for a
     /// background-launched process on this OS.
+    thread_local! {
+        /// The app that was frontmost when Hyper+S opened the palette from
+        /// outside (`None` = the user was already in kitchen-sink). Main
+        /// thread only; the palette's own callbacks read it synchronously.
+        static PALETTE_RETURN: Cell<Option<i32>> = const { Cell::new(None) };
+        /// That app + when, kept after a pick for the tool panel it opens.
+        static PICK_RETURN: Cell<Option<(i32, std::time::Instant)>> = const { Cell::new(None) };
+    }
+
+    /// Picks that are *meant* to bring kitchen-sink forward: "Kitchen Sink"
+    /// and the shared window's views. Every other pick — every popup (tool
+    /// panels, terminal, paths, screenshot, the notes finders), all
+    /// non-activating and taking the keyboard without activating us — and
+    /// workspaces leave the user's app focused.
+    fn pick_keeps_app(action: &PaletteAction) -> bool {
+        match action {
+            PaletteAction::Command(name) => matches!(
+                name.as_str(),
+                "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
+            ),
+            PaletteAction::Workspace(_) => false,
+        }
+    }
+
+    /// Re-activate the app Hyper+S was pressed over, *before* the palette is
+    /// ordered out: while we are active with no palette on screen, macOS
+    /// makes the shared window key and AeroSpace follows it to its
+    /// workspace. Returns whether there was an app to go back to.
+    fn palette_hand_back(mtm: MainThreadMarker) -> bool {
+        let Some(pid) = PALETTE_RETURN.with(|c| c.take()) else { return false };
+        PICK_RETURN.with(|c| c.set(Some((pid, std::time::Instant::now()))));
+        if !crate::platform::activate_pid(pid) {
+            NSApplication::sharedApplication(mtm).deactivate();
+        }
+        true
+    }
+
+    /// A pick: hand focus back unless the command wants kitchen-sink.
+    fn palette_pick_focus(mtm: MainThreadMarker, action: &PaletteAction) {
+        if pick_keeps_app(action) {
+            if let Some(pid) = PALETTE_RETURN.with(|c| c.take()) {
+                PICK_RETURN.with(|c| c.set(Some((pid, std::time::Instant::now()))));
+            }
+        } else {
+            palette_hand_back(mtm);
+        }
+    }
+
     #[allow(deprecated)]
     fn activate_app(mtm: MainThreadMarker) {
         NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
@@ -2780,6 +2828,8 @@ mod daemon_ui {
         tools: HashMap<String, ToolPanel>,
         /// When each tool panel was opened (the `reclaimToolKey` window).
         tool_opened_at: HashMap<String, f64>,
+        /// When the terminal popup was last shown (its one reclaim check).
+        terminal_opened_at: Option<std::time::Instant>,
     }
 
     /// Every visible `NSWindow` of this app (`state.windows` mirror).
@@ -3575,6 +3625,11 @@ mod daemon_ui {
                 Box::new({
                     let c = controller.clone();
                     move |action: PaletteAction| {
+                        // Runs before the click path orders the palette out.
+                        if let Some(mtm) = MainThreadMarker::new() {
+                            palette_pick_focus(mtm, &action);
+                        }
+                        on_ui(|ui| ui.end_palette(false));
                         match action {
                             PaletteAction::Command(name) => c.run_palette_command(&name),
                             PaletteAction::Workspace(id) => c.switch_workspace(&id),
@@ -3588,6 +3643,9 @@ mod daemon_ui {
                         c.set_palette_visible(false);
                         // Esc inside the field: give focus back to the app
                         // that was frontmost instead of the main window.
+                        if let Some(mtm) = MainThreadMarker::new() {
+                            palette_hand_back(mtm);
+                        }
                         on_ui(|ui| ui.hide_palette());
                     }
                 }),
@@ -3610,10 +3668,22 @@ mod daemon_ui {
                 )),
             );
             st.palette = Some(panel);
+            // Opened from another app (Hyper+S): remember it so a cancel
+            // gives focus back there. We are frontmost = the user was in our
+            // window, and a cancel just leaves them in it.
+            // Ask the frontmost app, not `isActive`: the launch path has
+            // already requested activation by now, so `isActive` reads true
+            // while the user's app is still frontmost.
+            let own = std::process::id() as i32;
+            let front = crate::platform::frontmost_app().map(|a| a.pid).filter(|p| *p != own);
+            PALETTE_RETURN.with(|c| c.set(front));
             drop(state);
-            // `c.show()` on launch brings the app forward (the suite drives
-            // the palette with real keys immediately after).
-            activate_app(mtm);
+            // No `activate_app` here: the palette is a non-activating panel
+            // (`tool_panel`) and takes the keyboard on its own. Activating
+            // kitchen-sink made it the focused app, so dismissing the
+            // palette or opening any popup from it let macOS raise the
+            // shared window and AeroSpace jump to its workspace. Only a pick
+            // that opens the shared window activates (its `present`).
             controller.set_window_count(visible_window_count(mtm));
         }
 
@@ -3746,6 +3816,10 @@ mod daemon_ui {
         }
 
         fn hide_palette(&self) {
+            // Hand focus back first (see `palette_hand_back`), then hide.
+            if let Some(mtm) = MainThreadMarker::new() {
+                palette_hand_back(mtm);
+            }
             let mut state = self.ivars().state.borrow_mut();
             if let Some(st) = state.as_mut() {
                 if let Some(panel) = st.palette.as_mut() {
@@ -3754,21 +3828,31 @@ mod daemon_ui {
             }
             drop(state);
             self.ivars().controller.set_palette_visible(false);
-            if let Some(mtm) = MainThreadMarker::new() {
-                let n = visible_window_count(mtm);
-                self.ivars().controller.set_window_count(n);
-                // Nothing of ours left on screen: hand activation back to the
-                // previous app rather than letting macOS raise the main window.
-                let main_visible = self
-                    .ivars()
-                    .state
-                    .borrow()
-                    .as_ref()
-                    .map(|st| st.window.isVisible())
-                    .unwrap_or(false);
-                if !main_visible {
-                    NSApplication::sharedApplication(mtm).deactivate();
-                }
+            self.end_palette(true);
+        }
+
+        /// The palette closed. The focus hand-back already happened before it
+        /// was ordered out (`palette_hand_back` / `palette_pick_focus`); this
+        /// is the bookkeeping, plus — for a cancel of a palette opened from
+        /// inside the app — handing activation back when nothing of ours is
+        /// left on screen. (The window's `isVisible` can't decide the outside
+        /// case: AeroSpace parks it on another workspace while it still
+        /// reports visible.)
+        fn end_palette(&self, cancelled: bool) {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            self.ivars().controller.set_window_count(visible_window_count(mtm));
+            if !cancelled || palette_hand_back(mtm) {
+                return;
+            }
+            let main_visible = self
+                .ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .map(|st| st.window.isVisible())
+                .unwrap_or(false);
+            if !main_visible {
+                NSApplication::sharedApplication(mtm).deactivate();
             }
         }
 
@@ -3983,8 +4067,10 @@ mod daemon_ui {
             });
             if panel.is_shown() {
                 panel.hide();
+                st.terminal_opened_at = None;
             } else {
                 panel.show();
+                st.terminal_opened_at = Some(std::time::Instant::now());
             }
             st.terminal_panel = Some(panel);
         }
@@ -4001,6 +4087,15 @@ mod daemon_ui {
                 .tools
                 .remove(kind.name())
                 .unwrap_or_else(|| ToolPanel::new(kind, &settings));
+            // Opened by a palette pick just now: its close hands focus back
+            // to the app Hyper+S was pressed over.
+            let picked = PICK_RETURN
+                .with(|c| c.take())
+                .filter(|(_, at)| at.elapsed().as_secs_f64() < 2.0)
+                .map(|(pid, _)| pid);
+            if picked.is_some() {
+                panel.set_return_pid(picked);
+            }
             panel.show(mtm);
             let doc = panel.test_state();
             st.tools.insert(kind.name().to_string(), panel);
@@ -4057,18 +4152,18 @@ mod daemon_ui {
                         .unwrap_or(0);
                     for (name, panel) in st.tools.iter_mut() {
                         // `reclaimToolKey`: one check 0.25 s after opening — if
-                        // another of our windows took the keyboard, take it
-                        // back once (a later hotkey to the shared window wins).
+                        // another window took the keyboard, take it back once
+                        // (a later hotkey to the shared window wins).
                         if let (Some(mtm), Some(opened)) = (
                             mtm,
                             st.tool_opened_at.get(name).copied(),
                         ) {
                             if now - opened >= 0.25 {
                                 st.tool_opened_at.remove(name);
-                                if !panel.has_key()
-                                    && key_wid != 0
-                                    && key_wid != panel.window_number()
-                                {
+                                // `key_wid == 0`: no window of ours is key — a palette
+                                // pick handed activation back to the user's app and
+                                // that activation landed after the panel took key.
+                                if !panel.has_key() && key_wid != panel.window_number() {
                                     panel.show(mtm);
                                 }
                             }
@@ -4081,6 +4176,14 @@ mod daemon_ui {
             for (name, doc) in docs {
                 self.ivars().controller.set_tool_state(&name, doc);
             }
+            if let Some(st) = self.ivars().state.borrow_mut().as_mut() {
+                if st.terminal_opened_at.is_some_and(|t| t.elapsed().as_secs_f64() >= 0.25) {
+                    st.terminal_opened_at = None;
+                    if let Some(tp) = st.terminal_panel.as_ref() {
+                        tp.reclaim_key();
+                    }
+                }
+            }
             let term_doc = self
                 .ivars()
                 .state
@@ -4090,6 +4193,54 @@ mod daemon_ui {
             if let Some(doc) = term_doc {
                 self.ivars().controller.set_terminal_panel_state(doc);
             }
+        }
+
+        /// Cmd+A/X/C/V/Z (+ Cmd+Shift+Z) for a popup's text input while
+        /// another app is frontmost. Popups are non-activating panels — Hyper+S
+        /// never activates kitchen-sink — and AppKit only routes Cmd edit keys
+        /// through the Edit menu of the *active* app, so without this they did
+        /// nothing in the Create File paste box, Text to Table, the palette
+        /// search, … (rule 1). Sent straight to the first responder: any
+        /// `NSText` (fields, text views), or the terminal popup's view.
+        fn cmd_edit_in_popup(&self, event: &NSEvent) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let Some(mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let flags = event.modifierFlags();
+            if !flags.contains(F::Command) || flags.contains(F::Control) || flags.contains(F::Option) {
+                return false;
+            }
+            let shift = flags.contains(F::Shift);
+            let selector = match (event.keyCode(), shift) {
+                (0, false) => sel!(selectAll:),
+                (7, false) => sel!(cut:),
+                (8, false) => sel!(copy:),
+                (9, false) => sel!(paste:),
+                (6, false) => sel!(undo:),
+                (6, true) => sel!(redo:),
+                _ => return false,
+            };
+            // We are the frontmost app: the Edit menu works, leave it be.
+            let own = std::process::id() as i32;
+            if crate::platform::frontmost_app().map_or(true, |a| a.pid == own) {
+                return false;
+            }
+            let app = NSApplication::sharedApplication(mtm);
+            let Some(window) = app.keyWindow() else {
+                return false;
+            };
+            let Some(r) = window.firstResponder() else {
+                return false;
+            };
+            let is_text = as_any(&*r).downcast_ref::<objc2_app_kit::NSText>().is_some();
+            let is_terminal = window.title().to_string() == "terminal";
+            let target: &AnyObject = as_any(&*r);
+            let responds: bool = unsafe { msg_send![target, respondsToSelector: selector] };
+            if !(is_text || is_terminal) || !responds {
+                return false;
+            }
+            unsafe { app.sendAction_to_from(selector, Some(target), None) }
         }
 
         /// `TextEditKeys.killWordBackward` for any editable `NSText` first
@@ -4136,6 +4287,9 @@ mod daemon_ui {
             // Ctrl+W deletes the previous word in every text input (window
             // fields, panel search boxes, sheets, inline rename).
             if self.kill_word_in_text_input(event) {
+                return true;
+            }
+            if self.cmd_edit_in_popup(event) {
                 return true;
             }
             if crate::ui::inline_rename::active() {
@@ -4458,6 +4612,14 @@ mod daemon_ui {
         /// typing still reaches their search fields.
         fn route_overlay_key(&self, event: &NSEvent) -> bool {
             use objc2_app_kit::NSEventModifierFlags;
+            // The Create File panel owns its own keys (Tab flips name <->
+            // paste). A palette/switcher that still believes it has the key
+            // must not eat Tab out from under it.
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                if event.window(mtm).is_some_and(|w| w.title().to_string() == "filefast") {
+                    return false;
+                }
+            }
             if self.note_find_key(event) || self.paths_key(event) {
                 return true;
             }
@@ -4487,7 +4649,7 @@ mod daemon_ui {
                     if p.has_key() {
                         if code == popup::KEY_ESC {
                             if p.live_query().trim().is_empty() {
-                                p.hide_panel();
+                                // Hidden in the arm below, after the hand-back.
                                 Out::PaletteClosed
                             } else {
                                 // `SwitcherController.handleEscape`: a live
@@ -4568,11 +4730,16 @@ mod daemon_ui {
                 Out::NotHandled => false,
                 Out::Consumed => true,
                 Out::Palette(action) => {
-                    // Return accepted from the key monitor: close the panel
-                    // like a click does (it used to linger after Enter).
+                    // Return accepted from the key monitor: decide focus while
+                    // the palette is still up, then close it like a click does
+                    // (it used to linger after Enter).
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        palette_pick_focus(mtm, &action);
+                    }
                     if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
                         p.hide_panel();
                     }
+                    self.end_palette(false);
                     match action {
                         PaletteAction::Command(name) => {
                             self.ivars().controller.run_palette_command(&name)
@@ -4585,7 +4752,16 @@ mod daemon_ui {
                     true
                 }
                 Out::PaletteClosed => {
+                    // Esc on an empty query: the usual cancel. This path used
+                    // to only hide the panel, leaving the app active.
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        palette_hand_back(mtm);
+                    }
+                    if let Some(p) = self.ivars().state.borrow_mut().as_mut().and_then(|st| st.palette.as_mut()) {
+                        p.hide_panel();
+                    }
                     self.ivars().controller.set_palette_visible(false);
+                    self.end_palette(true);
                     true
                 }
                 Out::SwitcherClosed => {
@@ -9299,6 +9475,7 @@ mod daemon_ui {
                 terminal_panel: None,
                 tools: HashMap::new(),
                 tool_opened_at: HashMap::new(),
+                terminal_opened_at: None,
                 shortcuts: None,
             }
         }

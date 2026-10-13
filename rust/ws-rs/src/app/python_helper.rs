@@ -381,6 +381,18 @@ fn python_runs_311(path: &str, lib: &str) -> bool {
     }
 }
 
+/// The helper's interpreter (≥ 3.11, same discovery as the worker), cached
+/// after the first successful lookup — for running `pylib` CLIs directly
+/// (`python3 -m text_table …`) instead of through the JSON-lines protocol.
+pub fn python_bin(lib: &str) -> Option<String> {
+    static FOUND: OnceLock<String> = OnceLock::new();
+    if let Some(p) = FOUND.get() {
+        return Some(p.clone());
+    }
+    let p = find_python(lib)?;
+    Some(FOUND.get_or_init(|| p).clone())
+}
+
 /// True when `lib` looks like a `pylib` directory with the helper package.
 pub fn lib_has_helper(lib: &str) -> bool {
     Path::new(lib).join("helper").join("__main__.py").is_file()

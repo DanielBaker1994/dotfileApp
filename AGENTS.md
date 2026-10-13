@@ -267,7 +267,11 @@ Stable anchors: `SwitcherController`, `ControllerInner`, `state_with_registry`,
   `config_text.py` (the commands.toml codec), `compare_*`, `file_ops`,
   `ai_format`, `ansi`, `shot_model`, `paneshot`, `shelf`, `prose_pdf`,
   `doc_templates`, `status`, `ignore_rules`, `jira_*` / `confluence_*` glue,
-  plus the shipped JSON homes.
+  plus the shipped JSON homes. `text_table/` is standalone (no helper protocol):
+  `python3 -m text_table IN OUT --format outlook --fallback-out FB --meta M` —
+  OCR/pasted text → table (parse = delimiter detection, formats = registry).
+  The palette's "Text to Table" panel (`views/tools.rs` `ToolKind::TextTable`,
+  `[text-table]`) and `bin/text-table` (clipboard → clipboard, Neovim) call it.
 - `jira/` (poller CLI + API + fake server + `com.jira.poll` launchd agent),
   `confluence/` (API/CLI), `notify/` (unread counts; uses the Rust AX helpers),
   `settings_hub/` (`ws-settings` CLI/TUI; edits commands.toml
@@ -345,7 +349,16 @@ JSON**; errors are `{"error": …}`. `state` keys include: `view`, `visible`,
 `voice`, `jira`, `files`, `confluence`, `ai`, `compare`) run `hotkey_prep`
 (AeroSpace IPC: focused window → focus file, focused workspace/screen, move
 stray windows) before the toggle. Tool-panel hotkeys (Hyper+X screenshot) are
-not in that list.
+not in that list. `[screenshot] text-column-gap` (× line height; 0 = off) makes
+Copy Text join wide-gapped blocks on a row with a tab so tables keep columns.
+**Hyper+S never activates kitchen-sink.** The palette and every popup it opens
+(tool panels, terminal, paths, screenshot, note finders) are non-activating
+panels that take the keyboard without activating the app; only a pick of
+"Kitchen Sink" or a view activates (via the view's `present`). Never add
+`activate_app` to a popup path: an active kitchen-sink with no window up lets
+macOS raise the shared window and AeroSpace jumps to its workspace. As a
+backstop the palette remembers the frontmost app (`PALETTE_RETURN`) and hands
+focus back on cancel / popup picks (`palette_hand_back`, `pick_keeps_app`).
 
 ### Keyboard / focus
 

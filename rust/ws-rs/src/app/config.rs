@@ -296,6 +296,7 @@ impl Default for AppSettings {
             palette_first: vec![
                 "filefast".to_string(),
                 "paths".to_string(),
+                "text-table".to_string(),
                 "prettyprint".to_string(),
             ],
             shell: "/opt/homebrew/bin/bash".to_string(),

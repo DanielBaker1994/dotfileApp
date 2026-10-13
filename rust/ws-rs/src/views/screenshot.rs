@@ -180,6 +180,9 @@ fn tri(s: Option<&str>) -> Option<bool> {
 pub struct ShotOCRConfigModel {
     pub languages: Vec<String>,
     pub correction: bool,
+    /// `[screenshot] text-column-gap`: blocks on one row further apart than
+    /// this × the line height are joined with a tab (0 = a space).
+    pub column_gap: f64,
 }
 
 impl Default for ShotOCRConfigModel {
@@ -187,6 +190,7 @@ impl Default for ShotOCRConfigModel {
         ShotOCRConfigModel {
             languages: Vec::new(),
             correction: true,
+            column_gap: 0.0,
         }
     }
 }
@@ -422,6 +426,11 @@ impl ScreenshotConfig {
             .filter(|p| !p.is_empty())
             .collect();
         c.ocr.correction = b("text-correction", true);
+        c.ocr.column_gap = e
+            .get("text-column-gap")
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|g| g.is_finite() && *g >= 0.0)
+            .unwrap_or(0.0);
         if let Some(v) = e.get("text-toast") {
             c.text_toast = v.clone();
         }
@@ -7009,7 +7018,7 @@ fn ocr_text(img: &ShotImage, ocr: &ShotOCRConfigModel) -> String {
             correction: ocr.correction,
         };
         let lines = crate::engines::screenshot_text::ShotOCR::recognize(&image, &cfg);
-        crate::engines::screenshot_text::ShotOCR::text(&lines)
+        crate::engines::screenshot_text::ShotOCR::join_columns(&lines, ocr.column_gap)
     }
     #[cfg(not(target_os = "macos"))]
     {

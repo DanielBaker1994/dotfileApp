@@ -173,6 +173,14 @@ impl ShotOCR {
     }
 
     pub fn join(lines: &[ShotOCRLine]) -> String {
+        ShotOCR::join_columns(lines, 0.0)
+    }
+
+    /// [`ShotOCR::join`], but two blocks on one row whose horizontal gap is
+    /// wider than `column_gap` × the line height are joined with a tab
+    /// instead of a space — table columns survive the copy (`[screenshot]
+    /// text-column-gap`; `0` = always a space, the Swift behavior).
+    pub fn join_columns(lines: &[ShotOCRLine], column_gap: f64) -> String {
         let mut sorted = lines.to_vec();
         sorted.sort_by(|a, b| {
             a.bounding_box
@@ -219,12 +227,17 @@ impl ShotOCR {
                     out.push('\n');
                 }
             }
-            let joined = row
-                .iter()
-                .map(|l| l.text.trim().to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push_str(&joined);
+            let mut prev_cell: Option<Rect> = None;
+            for l in &row {
+                if let Some(p) = prev_cell {
+                    let gap = l.bounding_box.min_x() - p.max_x();
+                    let lh = p.h.min(l.bounding_box.h);
+                    let tab = column_gap > 0.0 && lh > 0.0 && gap > column_gap * lh;
+                    out.push(if tab { '\t' } else { ' ' });
+                }
+                out.push_str(l.text.trim());
+                prev_cell = Some(l.bounding_box);
+            }
             prev = Some(b);
         }
         out.trim().to_string()
@@ -454,6 +467,15 @@ mod tests {
             "a tall gap = a paragraph"
         );
         assert_eq!(ShotOCR::join(&[line("  pad  ", 0.0, 0.0)]), "pad", "trimmed");
+    }
+
+    #[test]
+    fn join_columns_tabs_wide_gaps_only() {
+        // Boxes are 100 wide, 20 tall: x=110 is a 10 pt gap, x=300 a 100 pt one.
+        let row = [line("Name", 0.0, 0.0), line("In", 110.0, 0.0), line("Owner", 300.0, 0.0)];
+        assert_eq!(ShotOCR::join_columns(&row, 1.5), "Name In\tOwner", "only the wide gap tabs");
+        assert_eq!(ShotOCR::join_columns(&row, 0.0), "Name In Owner", "0 = the old join");
+        assert_eq!(ShotOCR::join(&row), ShotOCR::join_columns(&row, 0.0));
     }
 
     #[test]

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# text-table — clipboard (or a file) -> table -> clipboard.
+#
+# The integration half of pylib/text_table (which only reads and writes
+# files): temp files, the Python call, then the clipboard. Rich formats
+# (outlook, html) go on the pasteboard as public.html with the plain-text
+# fallback beside it, so Outlook / Teams / Word paste a real table and a
+# terminal pastes Markdown; plain formats use pbcopy.
+#
+#   text-table [-f FORMAT] [--no-header] [--print] [FILE]
+#   text-table --list
+#
+# FILE defaults to the clipboard (pbpaste) — e.g. right after Hyper+X's
+# Copy Text. --print also writes the result to stdout.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$DIR/.." && pwd)"
+PYLIB="${TEXT_TABLE_PYLIB:-$ROOT/pylib}"
+PY="${WS_PYTHON:-}"
+for c in "$PY" /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+    [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
+done
+export PYTHONPATH="$PYLIB" PYTHONDONTWRITEBYTECODE=1
+
+FORMAT=outlook PRINT=0 SRC="" EXTRA=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f|--format) FORMAT="$2"; shift 2 ;;
+        --no-header) EXTRA+=(--no-header); shift ;;
+        --print) PRINT=1; shift ;;
+        --list) exec "$PY" -m text_table --list-formats ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) SRC="$1"; shift ;;
+    esac
+done
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/text-table.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+IN="$WORK/in.txt" OUT="$WORK/out" FB="$WORK/fallback.txt" META="$WORK/meta.json"
+if [ -n "$SRC" ]; then cp "$SRC" "$IN"; else pbpaste > "$IN"; fi
+
+set +e
+"$PY" -m text_table "$IN" "$OUT" --format "$FORMAT" --fallback-out "$FB" --meta "$META" ${EXTRA[@]+"${EXTRA[@]}"}
+rc=$?
+set -e
+[ $rc -eq 2 ] && exit 2
+if [ $rc -ne 0 ]; then echo "text-table: no table found in the input" >&2; exit 1; fi
+
+MIME="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["mime"])' "$META")"
+if [ "$MIME" = "text/html" ]; then
+    # Two flavors in one pasteboard write (JXA + AppKit; pbcopy is text-only).
+    osascript -l JavaScript - "$OUT" "$FB" <<'JXA' >/dev/null
+ObjC.import('AppKit');
+function run(argv) {
+  const read = p => $.NSString.stringWithContentsOfFileEncodingError(p, $.NSUTF8StringEncoding, null);
+  const pb = $.NSPasteboard.generalPasteboard;
+  pb.clearContents;
+  pb.setStringForType(read(argv[0]), 'public.html');
+  pb.setStringForType(read(argv[1]), 'public.utf8-plain-text');
+}
+JXA
+else
+    cat "$OUT" | pbcopy
+fi
+
+"$PY" -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+w = ("  (" + "; ".join(m["warnings"]) + ")") if m["warnings"] else ""
+print("copied %s: %d columns x %d rows, delimiter %s%s"
+      % (m["format"], m["columns"], m["rows"], m["delimiterLabel"], w), file=sys.stderr)
+' "$META"
+[ "$PRINT" = 1 ] && cat "$OUT"
+exit 0

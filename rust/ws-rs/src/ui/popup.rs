@@ -703,12 +703,25 @@ impl Drop for MonitorHandle {
 /// decision (plus the caller's transientEsc / edit-key forwarding) and executes
 /// the resulting action. Call on the main thread.
 #[cfg(target_os = "macos")]
-pub fn install_local_monitor<F>(_mtm: MainThreadMarker, handler: F) -> MonitorHandle
+pub fn install_local_monitor<F>(mtm: MainThreadMarker, handler: F) -> MonitorHandle
+where
+    F: Fn(&objc2_app_kit::NSEvent) -> bool + 'static,
+{
+    install_local_monitor_mask(mtm, objc2_app_kit::NSEventMask::KeyDown, handler)
+}
+
+/// [`install_local_monitor`] for an arbitrary event mask (e.g. LeftMouseDown).
+#[cfg(target_os = "macos")]
+pub fn install_local_monitor_mask<F>(
+    _mtm: MainThreadMarker,
+    mask: objc2_app_kit::NSEventMask,
+    handler: F,
+) -> MonitorHandle
 where
     F: Fn(&objc2_app_kit::NSEvent) -> bool + 'static,
 {
     use block2::RcBlock;
-    use objc2_app_kit::{NSEvent, NSEventMask};
+    use objc2_app_kit::NSEvent;
     use std::ptr::NonNull;
 
     let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
@@ -719,7 +732,7 @@ where
         }
     });
     let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block)
     };
     MonitorHandle { monitor }
 }

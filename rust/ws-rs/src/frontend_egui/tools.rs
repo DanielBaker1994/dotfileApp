@@ -1,4 +1,4 @@
-//! The Tools panels (prettyprint / filefast / health-checks) and the Setup
+//! The Tools panels (prettyprint / filefast / health-checks / text-table) and the Setup
 //! view — the Wave 5 egui panes.
 //!
 //! Both drive the same pure models the AppKit half uses, mirroring `files.rs`'s
@@ -16,16 +16,16 @@ use crate::views::tools::{ToolKind, ToolPanel, ToolsEvent};
 use super::app::Pane;
 use super::theme::c;
 
-/// The three tool panels in tab order.
-const KINDS: [ToolKind; 3] = [ToolKind::PrettyPrint, ToolKind::Filefast, ToolKind::HealthChecks];
+/// The tool panels in tab order.
+const KINDS: [ToolKind; 4] = [ToolKind::PrettyPrint, ToolKind::Filefast, ToolKind::HealthChecks, ToolKind::TextTable];
 
 /// The Tools panel host (`views/tools.rs`): one tab per [`ToolKind`], each
 /// rendering that panel's [`ToolPanel`] snapshot. The AppKit half opens one
 /// floating `PopupPanel` per kind; the egui frontend keeps them as tabs in the
 /// shared window (functional-first, no pixel parity).
 pub struct ToolsPane {
-    /// The three panel models (the host's `tools` map).
-    panels: [ToolPanel; 3],
+    /// The panel models (the host's `tools` map).
+    panels: [ToolPanel; 4],
     /// The visible tab (`openTool`'s per-kind window).
     selected: ToolKind,
     /// The prettyprint editor buffer — the editable text lives in the frontend
@@ -38,6 +38,8 @@ pub struct ToolsPane {
     /// The health run was kicked off once for this pane (`show_macos` calls
     /// `run_health`).
     health_started: bool,
+    /// The text-table input buffer (the model mirrors it via `Edit`).
+    tt_text: String,
 }
 
 impl ToolsPane {
@@ -52,6 +54,7 @@ impl ToolsPane {
             ff_name: String::new(),
             ff_paste: String::new(),
             health_started: false,
+            tt_text: String::new(),
         }
     }
 
@@ -76,6 +79,7 @@ impl ToolsPane {
             ToolKind::PrettyPrint => self.prettyprint(ui, colors),
             ToolKind::Filefast => self.filefast(ui, colors),
             ToolKind::HealthChecks => self.health(ui, colors),
+            ToolKind::TextTable => self.text_table(ui, colors),
         }
 
         // Apply each panel's background work (`ToolPanel::poll`, the AppKit
@@ -196,6 +200,64 @@ impl ToolsPane {
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.monospace(text);
         });
+    }
+}
+
+impl ToolsPane {
+    /// The text-table body: input, format picker + copy, the preview and the
+    /// status line (`show_macos`'s split; the model debounces and runs).
+    fn text_table(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
+        let i = Self::index(ToolKind::TextTable);
+        let snap = self.panels[i].snapshot();
+        let formats = self.panels[i].spec().formats.clone();
+        let mut events: Vec<ToolsEvent> = Vec::new();
+
+        ui.horizontal(|ui| {
+            if ui.button("from clipboard").clicked() {
+                if let Some(clip) = crate::platform::get_text() {
+                    self.tt_text = clip;
+                    events.push(ToolsEvent::Edit(self.tt_text.clone()));
+                }
+            }
+            egui::ComboBox::from_id_salt("tools-tt-format")
+                .selected_text(crate::views::tools::table_format_label(&snap.format))
+                .show_ui(ui, |ui| {
+                    for (n, f) in formats.iter().enumerate() {
+                        let label = crate::views::tools::table_format_label(f);
+                        if ui.selectable_label(*f == snap.format, label).clicked() {
+                            events.push(ToolsEvent::TableFormat(n));
+                        }
+                    }
+                });
+            if ui.button("copy table").clicked() {
+                events.push(ToolsEvent::TableCopy);
+            }
+        });
+        let half = ((ui.available_height() - 30.0) / 2.0).max(60.0);
+        let resp = ui.add_sized(
+            [ui.available_width(), half],
+            egui::TextEdit::multiline(&mut self.tt_text)
+                .code_editor()
+                .hint_text("rows from OCR or paste — first row = header"),
+        );
+        if resp.changed() {
+            events.push(ToolsEvent::Edit(self.tt_text.clone()));
+        }
+        egui::ScrollArea::both()
+            .id_salt("tools-tt-preview")
+            .max_height(half)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.monospace(&snap.preview);
+            });
+        if let Some((msg, is_err)) = &snap.status {
+            let tone = if *is_err { colors.tone(PopupTone::Danger) } else { colors.dim };
+            ui.label(egui::RichText::new(msg).color(c(tone)).small());
+        }
+
+        for ev in events {
+            self.panels[i].handle(ev);
+        }
     }
 }
 

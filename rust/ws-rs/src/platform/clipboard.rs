@@ -26,6 +26,29 @@ pub fn set_text(text: &str) -> bool {
     unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) }
 }
 
+/// Replace the general pasteboard with a rich `html` flavor (`public.html`,
+/// what Outlook / Teams / Word paste as a real table) plus its plain `text`
+/// twin for plain-text targets. Returns whether both writes were accepted.
+#[cfg(target_os = "macos")]
+pub fn set_html(html: &str, text: &str) -> bool {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
+    use objc2_foundation::NSString;
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    unsafe {
+        pb.setString_forType(&NSString::from_str(html), NSPasteboardTypeHTML)
+            & pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString)
+    }
+}
+
+/// Rich + plain clipboard write (`arboard`'s HTML flavor with a text twin).
+#[cfg(not(target_os = "macos"))]
+pub fn set_html(html: &str, text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_html(html.to_owned(), Some(text.to_owned())))
+        .is_ok()
+}
+
 /// The system clipboard's text, if it holds any.
 #[cfg(not(target_os = "macos"))]
 pub fn get_text() -> Option<String> {

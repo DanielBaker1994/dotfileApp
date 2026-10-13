@@ -1587,10 +1587,13 @@ mod macos {
                 m.accept()
             };
             if let Some(action) = action {
-                self.ivars().panel.orderOut(None);
+                // The callback first: it hands focus back to the user's app
+                // while the palette is still up (ordering out first left us
+                // active with no window, and macOS raised the shared window).
                 if let Some(cb) = self.ivars().on_action.borrow_mut().as_mut() {
                     cb(action);
                 }
+                self.ivars().panel.orderOut(None);
             }
         }
 
@@ -1935,10 +1938,11 @@ mod macos {
                     // monitor first; this covers a click-focused field.
                     let Some(h) = w2.load() else { return false };
                     if cmd == "cancelOperation:" {
-                        h.ivars().panel.orderOut(None);
+                        // Callback (focus hand-back) before ordering out.
                         if let Some(cb) = h.ivars().on_close.borrow_mut().as_mut() {
                             cb();
                         }
+                        h.ivars().panel.orderOut(None);
                         return true;
                     }
                     false
