@@ -310,6 +310,8 @@ doubted the Swift reading).
 
 ### B-05 — Table column drag-resize and drag-reorder (main popup/notes/files window (second half))
 
+- **Status (2026-10-13): fixed — divider drag resizes (3 % min), header drag reorders with a drop marker, cursor rects; sort/filter now fire on mouse-up.**
+
 - **Swift did:** Dragging a column divider resized the two neighbouring columns (3% minimum each), and dragging a column header reordered the columns; the tail of the header carried a Fit-Columns glyph.
 - **Reader says Rust:** `missing` — Rust's JiraHeaderView implements only `mouseDown:` (sort) and `rightMouseDown:` (header menu); there is no `mouseDragged:`/`mouseUp:` reorder or divider-resize, no cursor rects, and the Rust JiraEvent enum has only Sort/HeaderMenu. Searches for `reorder`, `onReorder`, `onResize`, `onTableColumnsReordered`, `onTableColumnsResized` in rust/ws-rs/src: only unrelated compare/screenshot hits.
 - **User impact:** Users cannot widen, narrow or reorder the Jira table columns by dragging.
@@ -321,6 +323,8 @@ doubted the Swift reading).
 
 ### B-06 — Per-column filter chevron in the table header (main popup/notes/files window (second half))
 
+- **Status (2026-10-13): fixed** — the chevron opens the column's value picker (see F-05).
+
 - **Swift did:** A filterable column drew a small chevron in its header; clicking that chevron opened that column's filter popover (separate from clicking the title, which sorted).
 - **Reader says Rust:** `differs` — Rust draws the same chevron glyph (jira_view.rs:1910-1911) but `mouseDown:` emits `JiraEvent::Sort(i)` for any x inside the column, including the chevron hit zone; there is no filter popover event (grep `onTableFilter`, `filterRect`, `tableFilterActive` in rust/ws-rs/src: no matches).
 - **User impact:** Clicking the column filter chevron sorts the column instead of opening a filter.
@@ -331,6 +335,8 @@ doubted the Swift reading).
   - Rust search: views/jira_view.rs:1900-1912 draws the chevron at `fr = fx+fw-21..fx+fw-5` when `col.filterable`; mouse_down (1848-1856) takes the first column frame containing p.x and emits `JiraEvent::Sort(i)` with no chevron hit-test. No onTableFilter/filterRect/tableFilterActive/on_filter in the tree.
 
 ### B-07 — Fit Columns persists the new widths (main popup/notes/files window (second half))
+
+- **Status (2026-10-13): fixed — Fit, resize and reorder save the spec (`jira_config.py --set-columns` for the owning job, else `[jira] columns`).**
 
 - **Swift did:** Fit Columns to Content resized the columns and then persisted the resulting percentage widths back to the list config (columnsResized → config write) so they survived a reload.
 - **Reader says Rust:** `differs` — `jira_fit_columns` computes and applies the percentages in memory but tells the user in a toast that 'saving the widths: not ported yet'; no config write happens.
@@ -695,6 +701,8 @@ doubted the Swift reading).
 
 ### D-10 — Jira favorite star persistence (app core (second half), startup)
 
+- **Status (2026-10-13): fixed — stars (issues + releases) write through `jira_poll.py --favorite/--favorite-release`, revert + toast on failure; board/view/label pins persist too.**
+
 - **Swift did:** Clicking a row's star added/removed the key from favorites by running jira_poll.py --favorite add/remove; on failure it reverted the star and showed a 'Favorites not saved' toast, and switched to the favorites tab.
 - **Reader says Rust:** `differs` — JiraEvent::Star only toggles an in-memory `favs` set (jira_view.rs:1405-1411; duplicated in host.rs:8110-8118). No jira_poll.py --favorite call, no revert-on-failure, no toast. jira_view.rs:330-333 documents 'the port pins in memory; persisting through jira_poll.py --pin-* is not ported'.
 - **User impact:** Starring issues looks like it works but is lost on the next poll/restart and never reaches Jira favorites.
@@ -705,6 +713,8 @@ doubted the Swift reading).
   - Rust search: host.rs:8110-8118 and jira_view.rs:1405-1411 Star only toggle in-memory l.favs. No --favorite call (grep run_jira_poll shows only --release-view/--label-view/--my-work; the --favorite at host.rs:7564 is Confluence). jira_view.rs:330-333 documents in-memory-only ('--pin-* is not ported').
 
 ### D-11 — Jira list Esc layering (app core (second half), startup)
+
+- **Status (2026-10-13): fixed — Esc clears the query, then board → All boards, then pinned list → last tab, then the window's Esc policy.**
 
 - **Swift did:** Esc in the Jira list cleared the search query first; then backed out of the board list, then left a pinned list, then finally backed the slot out (host.slot.back(esc:true)).
 - **Reader says Rust:** `differs` — Rust E::Escape only does `l.query.clear(); l.refilter(); self.focus_jira_table()` (jira_view.rs:1426-1429 / host.rs:8168-8174). There is no board-list / pin-view / slot-back escalation, so once the query is empty Esc no longer leaves a pinned list or the view.
@@ -717,6 +727,8 @@ doubted the Swift reading).
 
 ### D-12 — list 'load N more…' pagination (app core (second half), startup)
 
+- **Status (2026-10-13): fixed — `[jira] page-size` adds a 'load N more…' row (click / Return).**
+
 - **Swift did:** With [section] page-size set, long lists showed a synthetic 'load <n> more…' row; clicking/Enter-ing it bumped visibleOffset by pageSize and re-rendered.
 - **Reader says Rust:** `missing` — page-size is parsed into ListConfig.page_size (config.rs:714/938) but grep for loadmore / load_more / visible_offset / page_size usage shows no consumer; JiraView.refilter builds only real rows, so the load-more row and the incremental paging never happen.
 - **User impact:** Configured page-size is ignored; very long lists render in one shot with no 'load more' control.
@@ -728,6 +740,8 @@ doubted the Swift reading).
 
 ### D-13 — Jira 'Group By' with collapse/expand (app core (second half), startup)
 
+- **Status (2026-10-13): fixed — Group By on the header right-click and icon menus (incl. Board column on boards), header rows toggle, Collapse/Expand All, persisted per list.**
+
 - **Swift did:** A header menu offered Group By (Status category, Status, Assignee, Priority, Release, Labels, Epic, Components, Project, Board column) with Collapse All / Expand All; group headers toggled on click and the choice persisted per list name in UserDefaults.
 - **Reader says Rust:** `missing` — Grep groupBy, grouped_rows, groupMenuItems, Group By, toggle_group, collapsedGroups across rust/ws-rs/src found only unrelated sidebar/tree collapse and a comment 'Group headings render bold' (views/jira.rs:2609). JiraView has no grouping model; the header menu only offers Fit Columns (host.rs:8122-8135).
 - **User impact:** Jira lists can no longer be grouped by status/assignee/etc., and group collapse is gone.
@@ -738,6 +752,8 @@ doubted the Swift reading).
   - Rust search: grep group_by|groupBy|grouped_rows|toggle_group|collapsed|Group By -> only sidebar/tree collapse (ui/tree_view.rs, ui/sidebar.rs) and a dead comment jira.rs:2609 'Group headings render bold'. Jira header menu = only 'Fit Columns to Content' (host.rs:8122-8135). JiraEvent has no group variant.
 
 ### D-14 — Jira table column resize/reorder persistence (app core (second half), startup)
+
+- **Status (2026-10-13): fixed — see B-05 / B-07.**
 
 - **Swift did:** Dragging column dividers (debounced 0.6 s, 0.05 s on drop) and reordering columns wrote the new spec back to commands.toml (or jira_config.py --set-columns for Jira-owned lists).
 - **Reader says Rust:** `missing` — host.rs:8072 states 'widths (columnsResized -> jira_config.py --set-columns) is not [ported]'. Only Fit Columns exists (jira_view.rs:2145, host.rs:8074-8087). Grep reorder/columns_reordered shows no list-column reorder handling (only screenshot layer reorder).
@@ -793,6 +809,8 @@ doubted the Swift reading).
   - Rust search: host.rs:6212-6214 SidebarEvent::Select -> notes.rs:3768-3771 click_row = select_row + focus_editor only. Copy path only in the row context menu (host.rs:6231 'Copy Absolute Path'). No chrome-title copy handler for notes.
 
 ### D-20 — Jira Cmd+K action-picker contents (app core (second half), startup)
+
+- **Status (2026-10-13): fixed — Pin labels, Show release issues, Favorite/Unfavorite release, Blacklist/Restore release; release URLs via the jiraBrowseURL port.**
 
 - **Swift did:** Cmd+K on selected rows opened an action picker with: Open in browser, Copy URL and title, Copy to clipboard, Add/Remove favorites, Pin labels to sidebar, Show release issues, Favorite/Unfavorite release, Blacklist/Restore release (release rows only).
 - **Reader says Rust:** `differs` — The Rust jira_actions picker only builds Open in browser, Copy URL and title, Copy to clipboard and Add/Remove favorites (host.rs:8553-8564). Pin-labels, Show release issues, Favorite/Unfavorite release and Blacklist/Restore release are absent, and URLs are built as `{site}/browse/{key}` rather than via the jiraBrowseURL helper.
@@ -1233,6 +1251,8 @@ doubted the Swift reading).
   - Rust search: No Jira picker view exists (see F-02); no acceptsFirstResponder/keyDown handling for a picker in views/jira.rs or views/jira_view.rs.
 
 ### F-05 — Quick filter + per-column filter dropdowns (jira)
+
+- **Status (2026-10-13): per-column part fixed** — chevron click opens a checkable value menu (row counts, Sort ↑/↓, Clear); ticked values are an IN per column, ANDed across columns (`JiraList::col_filters`, `host.rs jira_filter_picker`). Still missing: the board quick-filter picker, the `[jira] filters` bar dims, status-category grouping, labels fold / Pin to Sidebar, people display names from the directory.
 
 - **Swift did:** The list window has a 'quick filter' JiraMultiPicker and a JiraMultiPicker dropdown on every filterable column header (filterOptions fed from the directory), applying filters immediately.
 - **Reader says Rust:** `missing` — The header still draws a chevron for filterable columns (1900-1912) but HeaderView.mouseDown only emits Sort; right-click emits only 'Fit Columns'. The [jira] config key `filters` (commands.toml) is never read in Rust. No filter popover or quick-filter picker exists.

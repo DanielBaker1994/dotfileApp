@@ -3321,6 +3321,55 @@ mod daemon_ui {
         });
     }
 
+    /// Run one queued `jira_poll.py` config write off the main thread. A
+    /// failure re-reads config.json (undoing the optimistic edit) and toasts
+    /// the reason; success re-reads it too, so republished tabs show up.
+    fn jira_poll_write(w: crate::views::jira_view::PollWrite) {
+        std::thread::spawn(move || {
+            let res = (|| -> Result<(), String> {
+                let python = crate::views::jira::find_python3().ok_or("python 3.11+ not found")?;
+                let script = crate::views::jira::jira_script();
+                let script = if w.script == "jira_poll.py" {
+                    script
+                } else {
+                    std::path::Path::new(&script).with_file_name(&w.script).to_string_lossy().into_owned()
+                };
+                let mut argv = vec![script];
+                argv.extend(w.args.iter().cloned());
+                let out = crate::app::process_run::run_process(&python, &argv, w.stdin.as_deref().map(str::as_bytes), None, false)
+                    .map_err(|e| e.to_string())?;
+                if out.code == 0 {
+                    return Ok(());
+                }
+                // The edit commands print {ok:false, problems:[…]} on stdout.
+                let j: serde_json::Value = serde_json::from_str(out.out.trim()).unwrap_or_default();
+                let p = j
+                    .get("problems")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|a| a.first())
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let last = out.err.lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string());
+                Err(p.or(last).unwrap_or_else(|| format!("exit {}", out.code)))
+            })();
+            on_ui(move |ui| {
+                let label = w.args.join(" ");
+                match &res {
+                    Ok(()) => ui.ivars().controller.log(&format!("jira: {label} (ok)")),
+                    Err(e) => {
+                        ui.ivars().controller.log(&format!("jira: {label} failed: {e}"));
+                        crate::ui::toast::show(&format!("{}: {e}", w.err_prefix), "exclamationmark.triangle");
+                    }
+                }
+                ui.jira_surface(|l| {
+                    l.pins_dirty = false;
+                    l.reload_meta();
+                    l.refilter();
+                });
+            });
+        });
+    }
+
     pub struct DaemonUiIvars {
         /// Header workspace strip: the background gather's latest result,
         /// whether one is running, when it last ran, the drawn signature and
@@ -4904,6 +4953,10 @@ mod daemon_ui {
                             return true;
                         }
                     }
+                    if current == Some(SlotView::Jira) && self.jira_surface(|l| l.escape_step()) == Some(true) {
+                        // `onEscape`: query → board list → pinned list first.
+                        return true;
+                    }
                     if current == Some(SlotView::CompareText) {
                         // PRD-compare KR6: Esc in compareText steps back to the
                         // compare view (Swift `slot.back(esc: true)`), it never
@@ -4976,7 +5029,16 @@ mod daemon_ui {
                         self.files_text_zoom(sign);
                         true
                     } else if current.is_some_and(|v| v.is_jira()) {
-                        crate::ui::toast::not_ported("Jira list text zoom");
+                        // The table's text zoom (rows + header scale together).
+                        use crate::views::jira_view::{set_zoom, zoom};
+                        let z = (((zoom() + 0.1 * sign as f64) * 100.0).round() / 100.0).clamp(0.6, 3.0);
+                        set_zoom(z);
+                        defaults_set_string("textZoom.jira", &z.to_string());
+                        self.jira_surface(|_| ());
+                        if let Some((_, v)) = self.ivars().state.borrow().as_ref().and_then(|s| s.jira.as_ref()) {
+                            v.layout_panes();
+                        }
+                        crate::ui::toast::show(&format!("Text {}%", (z * 100.0).round()), "textformat.size");
                         true
                     } else {
                         self.route_resize_by(sign)
@@ -5899,7 +5961,8 @@ mod daemon_ui {
             let w3 = objc2::rc::Weak::from_retained(&self.retain());
             let conf = self.ivars().controller.settings().commands_conf_path();
             let c = self.ivars().controller.clone();
-            let entries = vec![
+            let mut entries = self.view_icon_entries(v);
+            entries.extend(vec![
                 MenuEntry::submenu("Theme", theme).with_preview_restore({
                     let wk = objc2::rc::Weak::from_retained(&self.retain());
                     move || {
@@ -5934,7 +5997,7 @@ mod daemon_ui {
                     let view = view.retain();
                     move || crate::app::menu::pop_status_menu(&view, x, y)
                 }),
-            ];
+            ]);
             popup(entries, Some(view), x, y);
         }
 
@@ -8215,6 +8278,11 @@ mod daemon_ui {
             let (list, view) = state.as_mut().and_then(|st| st.jira.as_mut())?;
             let r = f(list);
             view.apply(list.snapshot());
+            let writes = std::mem::take(&mut list.pending_writes);
+            drop(state);
+            for w in writes {
+                jira_poll_write(w);
+            }
             Some(r)
         }
 
@@ -8324,23 +8392,224 @@ mod daemon_ui {
             (list, view)
         }
 
-        /// `onTableFit`: size the columns to their content. Saving the new
-        /// widths (`columnsResized` → `jira_config.py --set-columns`) is not
-        /// ported, so the fit lasts until the list reloads its columns.
+        /// `columnsResized(final: true)`: persist the column spec — the
+        /// owning config.json job (`jira_config.py --set-columns`) or
+        /// `[jira] columns` in commands.toml.
+        fn jira_save_columns(&self) {
+            if let Some(Some(spec)) = self.jira_surface(|l| l.save_columns()) {
+                crate::app::config::save_config_values("jira", &[("columns".to_string(), Some(spec.clone()))]);
+                self.ivars().controller.log(&format!("list 'jira': columns -> {spec}"));
+            }
+        }
+
+        /// `onTableFit`: size the columns to their content, then save them.
         fn jira_fit_columns(&self) {
             let view = self.ivars().state.borrow().as_ref().and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone()));
             let Some(view) = view else { return };
             self.jira_surface(|l| {
-                let rows: Vec<_> = l.rows.iter().filter_map(|&i| l.all.get(i).cloned()).collect();
+                let rows = l.shown_records();
                 let pcts = view.fit_columns(&l.columns, &rows, 400);
                 for (c, p) in l.columns.iter_mut().zip(pcts) {
                     c.width = p;
                 }
             });
-            crate::ui::toast::show(
-                "Columns fitted to their content · saving the widths: not ported yet",
-                "arrow.left.and.right",
-            );
+            self.jira_save_columns();
+            crate::ui::toast::show("Columns fitted to their content", "arrow.left.and.right");
+        }
+
+        /// `showFilterPicker`: a column's values with their row counts, each
+        /// a checkbox. Ticked values build that column's `IN (…)` filter; the
+        /// menu re-opens after every tick so several can be picked in a row.
+        /// Sort ↑ / ↓ and Clear sit on top (Swift's `extraButtons`).
+        fn jira_filter_picker(&self, col: usize, x: f64, y: f64) {
+            use crate::ui::menu_kit::{popup_at, MenuEntry};
+            use crate::views::jira_view::EMPTY_VALUE;
+            enum Pick {
+                Toggle(String),
+                Sort(bool),
+                Clear,
+            }
+            loop {
+                let info = self.jira_surface(|l| {
+                    l.refresh_directory();
+                    let c = l.columns.get(col)?.clone();
+                    let picked = l.col_filters.get(&c.field).cloned().unwrap_or_default();
+                    let sort = l.sort.as_ref().filter(|(f, _)| *f == c.field).map(|(_, asc)| *asc);
+                    let mut opts: Vec<(crate::views::jira_view::FilterOption, Option<usize>)> = l
+                        .filter_options(&c.field)
+                        .into_iter()
+                        .map(|o| {
+                            // Status values sit under their category (To Do / …).
+                            let cat = (c.field == "status" && o.id != EMPTY_VALUE).then(|| l.status_category(&o.id));
+                            (o, cat)
+                        })
+                        .collect();
+                    opts.sort_by_key(|(_, cat)| cat.unwrap_or(9));
+                    Some((c, opts, picked, sort))
+                });
+                let Some(Some((c, opts, picked, sort))) = info else { return };
+                let chosen: Rc<RefCell<Option<Pick>>> = Rc::new(RefCell::new(None));
+                let pick = |p: Pick| {
+                    let ch = chosen.clone();
+                    move || *ch.borrow_mut() = Some(p)
+                };
+                let mut entries = vec![MenuEntry::Header(c.title.clone())];
+                if c.sortable {
+                    entries.push(MenuEntry::checked("Sort ↑", sort == Some(true), pick(Pick::Sort(true))));
+                    entries.push(MenuEntry::checked("Sort ↓", sort == Some(false), pick(Pick::Sort(false))));
+                    entries.push(MenuEntry::Separator);
+                }
+                if !picked.is_empty() {
+                    entries.push(MenuEntry::item(&format!("Clear Filter ({} selected)", picked.len()), pick(Pick::Clear)));
+                    entries.push(MenuEntry::Separator);
+                }
+                if opts.is_empty() {
+                    entries.push(MenuEntry::disabled("No values in this list"));
+                }
+                let mut last_cat: Option<usize> = None;
+                for (o, cat) in &opts {
+                    if let Some(cat) = cat {
+                        if last_cat != Some(*cat) {
+                            last_cat = Some(*cat);
+                            let n: usize = opts.iter().filter(|(_, c2)| c2 == &Some(*cat)).map(|(o2, _)| o2.count).sum();
+                            entries.push(MenuEntry::Header(format!(
+                                "{} · {n} row{}",
+                                crate::views::jira::CATEGORY_NAMES[*cat],
+                                if n == 1 { "" } else { "s" }
+                            )));
+                        }
+                    }
+                    let rows = format!("{} row{}", o.count, if o.count == 1 { "" } else { "s" });
+                    let title = format!("{}   ·  {rows}", o.title);
+                    entries.push(MenuEntry::checked(&title, picked.contains(&o.id), pick(Pick::Toggle(o.id.clone()))));
+                }
+                // A value ticked earlier that no row carries any more stays
+                // listed so it can still be unticked.
+                for v in picked.iter().filter(|v| !opts.iter().any(|(o, _)| &o.id == *v)) {
+                    let t = if v == EMPTY_VALUE { "(empty)" } else { v.as_str() };
+                    entries.push(MenuEntry::checked(&format!("{t}   ·  0 rows"), true, pick(Pick::Toggle(v.clone()))));
+                }
+                popup_at(entries, x, y);
+                let Some(p) = chosen.borrow_mut().take() else { return };
+                match p {
+                    Pick::Toggle(v) => {
+                        self.jira_surface(|l| l.toggle_filter(&c.field, &v));
+                    }
+                    Pick::Sort(asc) => {
+                        self.jira_surface(|l| l.set_sort(&c.field, asc));
+                        return;
+                    }
+                    Pick::Clear => {
+                        self.jira_surface(|l| l.clear_filter(&c.field));
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// `groupMenuItems`: the Group By submenu (None, the choices, and
+        /// Collapse All / Expand All while grouped).
+        fn jira_group_menu(&self) -> Option<crate::ui::menu_kit::MenuEntry> {
+            use crate::ui::menu_kit::MenuEntry;
+            let (cur, choices) = self.jira_surface(|l| (l.effective_group_by(), l.group_choices()))?;
+            let on_list = self.jira_surface(|l| l.on_board_list()).unwrap_or(false);
+            if on_list {
+                return None;
+            }
+            let set = |g: Option<String>, title: String| {
+                let weak = objc2::rc::Weak::from_retained(&self.retain());
+                move || {
+                    if let Some(ui) = weak.load() {
+                        ui.jira_surface(|l| l.set_group_by(g.clone()));
+                        let t = if g.is_some() { format!("Grouped by {title}") } else { "Not grouped".into() };
+                        crate::ui::toast::show(&t, "rectangle.grid.1x2");
+                    }
+                }
+            };
+            let mut sub = vec![MenuEntry::checked("None", cur.is_none(), set(None, String::new())), MenuEntry::Separator];
+            for (t, f) in choices {
+                sub.push(MenuEntry::checked(&t, cur.as_deref() == Some(f.as_str()), set(Some(f), t.clone())));
+            }
+            if cur.is_some() {
+                sub.push(MenuEntry::Separator);
+                for (t, collapse) in [("Collapse All", true), ("Expand All", false)] {
+                    let weak = objc2::rc::Weak::from_retained(&self.retain());
+                    sub.push(MenuEntry::item(t, move || {
+                        if let Some(ui) = weak.load() {
+                            ui.jira_surface(|l| l.toggle_all_groups(collapse));
+                        }
+                    }));
+                }
+            }
+            Some(MenuEntry::submenu("Group By", sub))
+        }
+
+        /// Cmd+F: the live-search bar (phase 3 builds it; until then a toast).
+        fn jira_toggle_search(&self) {
+            crate::ui::toast::not_ported("Jira live search (Cmd+F)");
+        }
+
+        /// `importFilters`: the user's favourite Jira filters become poll jobs.
+        fn jira_import_filters(&self) {
+            crate::ui::toast::show("Importing your favourite filters…", "line.3.horizontal.decrease.circle");
+            std::thread::spawn(|| {
+                let res = crate::views::jira::run_jira_poll(&["--import-filters"], None);
+                on_ui(move |ui| match res {
+                    Err(e) => crate::ui::toast::show(&format!("Import failed: {e}"), "exclamationmark.triangle"),
+                    Ok(d) => {
+                        let n = d.get("filters").and_then(serde_json::Value::as_array).map_or(0, |a| a.len());
+                        let added = d.get("added").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                        let t = if n == 0 {
+                            "No favourite filters on Jira".to_string()
+                        } else {
+                            format!("{n} filter(s): {added} new tab(s) on the next poll")
+                        };
+                        crate::ui::toast::show(&t, "line.3.horizontal.decrease.circle");
+                        if added > 0 {
+                            std::thread::spawn(|| {
+                                let _ = crate::views::jira::run_jira_poll(&["--force", "--quiet"], None);
+                            });
+                        }
+                        ui.jira_surface(|l| {
+                            l.reload_meta();
+                            l.refilter();
+                        });
+                    }
+                });
+            });
+        }
+
+        /// The view's own items atop the header icon menu (`showIconMenu`).
+        fn view_icon_entries(&self, v: SlotView) -> Vec<crate::ui::menu_kit::MenuEntry> {
+            use crate::ui::menu_kit::MenuEntry;
+            let mut out = Vec::new();
+            if v == SlotView::Jira {
+                let w1 = objc2::rc::Weak::from_retained(&self.retain());
+                out.push(MenuEntry::item("Search Jira…  ⌘F", move || {
+                    if let Some(ui) = w1.load() {
+                        ui.jira_toggle_search();
+                    }
+                }));
+                if let Some(g) = self.jira_group_menu() {
+                    out.push(g);
+                }
+                out.push(MenuEntry::Separator);
+                let w2 = objc2::rc::Weak::from_retained(&self.retain());
+                out.push(MenuEntry::item("Import Favourite Filters", move || {
+                    if let Some(ui) = w2.load() {
+                        ui.jira_import_filters();
+                    }
+                }));
+                let ctrl = self.ivars().controller.clone();
+                out.push(MenuEntry::item("Open Jira Config Window", move || {
+                    let c2 = ctrl.clone();
+                    crate::ui::jira_setup::show(None, Box::new(move || c2.jira_enable_result(true, "")));
+                }));
+            }
+            if !out.is_empty() {
+                out.push(MenuEntry::Separator);
+            }
+            out
         }
 
         fn jira_event(&self, ev: crate::views::jira_view::JiraEvent) {
@@ -8348,9 +8617,15 @@ mod daemon_ui {
             use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, LABEL_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
             match ev {
                 E::Click { row, double } => {
-                    self.jira_surface(|l| l.selection = row);
+                    // A group header toggles, "load N more…" pages in.
+                    let synthetic = self
+                        .jira_surface(|l| {
+                            l.selection = row;
+                            l.activate_synthetic(row)
+                        })
+                        .unwrap_or(false);
                     self.focus_jira_table();
-                    if double {
+                    if double && !synthetic {
                         self.jira_event(E::OpenDetail);
                     }
                 }
@@ -8364,43 +8639,64 @@ mod daemon_ui {
                     });
                 }
                 E::Star(row) => {
-                    self.jira_surface(|l| {
-                        if let Some(k) = l.row(row).and_then(|r| r.get("key")).cloned() {
-                            if !l.favs.remove(&k) {
-                                l.favs.insert(k);
-                            }
-                        }
+                    let msg = self.jira_surface(|l| {
+                        let r = l.row(row)?.clone();
+                        let k = r.get("key").filter(|k| !k.is_empty())?.clone();
+                        l.toggle_star(row);
+                        let on = l.favs.contains(&k) || l.favorite_releases().contains(&k);
+                        Some(match (crate::views::jira_view::is_release_row(&r), on) {
+                            (false, true) => (format!("Pinned {k} to favorites"), "star.fill"),
+                            (false, false) => (format!("Unpinned {k}"), "star"),
+                            (true, true) => (format!("Starred {k}"), "star.fill"),
+                            (true, false) => (format!("Unstarred {k}"), "star"),
+                        })
                     });
+                    if let Some(Some((t, sym))) = msg {
+                        crate::ui::toast::show(&t, sym);
+                    }
                 }
                 E::Sort(i) => {
                     self.jira_surface(|l| l.sort_by(i));
                 }
+                E::Filter { col, x, y } => self.jira_filter_picker(col, x, y),
+                E::ColumnsResized { pcts, done } => {
+                    self.jira_surface(|l| l.set_column_widths(&pcts));
+                    if done {
+                        self.jira_save_columns();
+                    }
+                }
+                E::ColumnsReordered { from, to } => {
+                    self.jira_surface(|l| l.move_column(from, to));
+                    self.jira_save_columns();
+                }
+                E::FitColumns => self.jira_fit_columns(),
                 E::HeaderMenu { x, y } => {
-                    // `PopupTableHeader.rightMouseDown`: Fit Columns to Content.
+                    // `PopupTableHeader.rightMouseDown`: Fit Columns to Content
+                    // (+ the list's Group By, as on the icon menu).
                     use crate::ui::menu_kit::{popup, MenuEntry};
                     let w1 = objc2::rc::Weak::from_retained(&self.retain());
-                    popup(
-                        vec![MenuEntry::item("Fit Columns to Content", move || {
-                            if let Some(ui) = w1.load() {
-                                ui.jira_fit_columns();
-                            }
-                        })],
-                        None,
-                        x,
-                        y,
-                    );
+                    let mut entries = vec![MenuEntry::item("Fit Columns to Content", move || {
+                        if let Some(ui) = w1.load() {
+                            ui.jira_fit_columns();
+                        }
+                    })];
+                    if let Some(g) = self.jira_group_menu() {
+                        entries.push(MenuEntry::Separator);
+                        entries.push(g);
+                    }
+                    popup(entries, None, x, y);
                 }
                 E::Query(q) => {
-                    self.jira_surface(|l| {
-                        l.query = q;
-                        l.selection = 0;
-                        l.refilter();
-                    });
+                    self.jira_surface(|l| l.handle(E::Query(q)));
                 }
                 E::Move(d) => {
                     self.jira_surface(|l| jira_move(l, d));
                 }
                 E::Enter | E::OpenDetail => {
+                    let sel = self.jira_surface(|l| l.selection).unwrap_or(0);
+                    if self.jira_surface(|l| l.activate_synthetic(sel)) == Some(true) {
+                        return;
+                    }
                     let target = self.jira_surface(|l| {
                         let r = l.selected()?;
                         if let Some(b) = r.get("boardId").filter(|_| r.get("key").is_some_and(|k| k.starts_with(BOARD_PREFIX))) {
@@ -8422,10 +8718,10 @@ mod daemon_ui {
                     }
                 }
                 E::Escape => {
-                    self.jira_surface(|l| {
-                        l.query.clear();
-                        l.refilter();
-                    });
+                    // `onEscape`: query → board list → pinned list → slot back.
+                    // (From the search field; the table's Esc goes through
+                    // the key router, which then applies the hide policy.)
+                    self.jira_surface(|l| l.escape_step());
                     self.focus_jira_table();
                 }
                 E::RowMenu { row, x, y } => {
@@ -8748,7 +9044,7 @@ mod daemon_ui {
                     true
                 }
                 3 if key.cmd && !key.ctrl && !key.shift => {
-                    crate::ui::toast::not_ported("Jira live search (Cmd+F)");
+                    self.jira_toggle_search();
                     true
                 }
                 49 if key.ctrl && !key.cmd => {
@@ -8864,50 +9160,104 @@ mod daemon_ui {
         /// `showActions()` for the Jira list: the highlighted row plus every
         /// ticked row.
         fn jira_actions(&self) {
+            use crate::views::jira_view::{browse_url, is_release_row, issue_labels};
             let Some(mtm) = MainThreadMarker::new() else { return };
-            let Some(Some((rows, site, favs))) = self.jira_surface(|l| {
+            struct Ctx {
+                rows: Vec<crate::views::jira_view::Record>,
+                site: String,
+                favs: std::collections::BTreeSet<String>,
+                fav_releases: Vec<String>,
+                pinned_labels: Vec<String>,
+                blacklist_tab: bool,
+                copy_keys: Vec<String>,
+            }
+            let Some(Some(cx)) = self.jira_surface(|l| {
                 let mut keys: Vec<String> = l.checked.iter().cloned().collect();
                 if let Some(k) = l.selected().and_then(|r| r.get("key")).cloned() {
                     if !keys.contains(&k) {
                         keys.insert(0, k);
                     }
                 }
-                let rows: Vec<(String, String)> = keys
+                let rows: Vec<_> = keys
                     .iter()
                     .filter(|k| !k.is_empty())
-                    .map(|k| {
-                        let title = l
-                            .all
-                            .iter()
-                            .find(|r| r.get("key") == Some(k))
-                            .and_then(|r| r.get("title").or_else(|| r.get("summary")).cloned())
-                            .unwrap_or_default();
-                        (k.clone(), title.trim().to_string())
-                    })
+                    .filter_map(|k| l.all.iter().find(|r| r.get("key") == Some(k)).cloned())
                     .collect();
-                (!rows.is_empty()).then(|| (rows, l.site(), l.favs.clone()))
+                let copy_keys: Vec<String> = l
+                    .section
+                    .get("copy")
+                    .map(|c| c.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                    .unwrap_or_else(|| vec!["key".into(), "title".into()]);
+                (!rows.is_empty()).then(|| Ctx {
+                    rows,
+                    site: l.site(),
+                    favs: l.favs.clone(),
+                    fav_releases: l.favorite_releases(),
+                    pinned_labels: l.pinned_labels(),
+                    blacklist_tab: l.on_blacklist_tab(),
+                    copy_keys,
+                })
             }) else {
                 return;
             };
-            let n = rows.len();
-            let what = if n == 1 { rows[0].0.clone() } else { format!("{n} rows") };
-            let s = if n == 1 { "" } else { "s" };
+            let key = |r: &crate::views::jira_view::Record| r.get("key").cloned().unwrap_or_default();
+            let title = |r: &crate::views::jira_view::Record| {
+                r.get("title").or_else(|| r.get("summary")).or_else(|| r.get("name")).cloned().unwrap_or_default().trim().to_string()
+            };
+            let n = cx.rows.len();
+            let what = if n == 1 { key(&cx.rows[0]) } else { format!("{n} rows") };
+            let issues: Vec<_> = cx.rows.iter().filter(|r| !is_release_row(r)).cloned().collect();
+            let releases: Vec<_> = cx.rows.iter().filter(|r| is_release_row(r)).cloned().collect();
+            let urls: Vec<(String, String, String)> =
+                cx.rows.iter().filter_map(|r| browse_url(r, &cx.site).map(|u| (key(r), u, title(r)))).collect();
+            let s = if urls.len() == 1 { "" } else { "s" };
+            let noun = if releases.is_empty() { "issue" } else if issues.is_empty() { "release" } else { "item" };
             let mut items: Vec<(String, String)> = Vec::new();
-            if !site.is_empty() {
-                items.push(("Open in browser".into(), format!("opens {n} issue{s} · the highlighted row + ticked rows")));
-                items.push(("Copy URL and title".into(), format!("{n} issue{s} · one “URL Title” line each")));
+            if !urls.is_empty() {
+                items.push(("Open in browser".into(), format!("opens {} {noun}{s} · the highlighted row + ticked rows", urls.len())));
+                items.push(("Copy URL and title".into(), format!("{} {noun}{s} · one “URL Title” line each", urls.len())));
             }
-            items.push(("Copy to clipboard".into(), format!("{what} · key, title")));
-            let all_fav = rows.iter().all(|(k, _)| favs.contains(k));
-            items.push(if all_fav {
-                ("Remove from favorites".into(), format!("unpin {what}"))
-            } else {
-                ("Add to favorites".into(), format!("pin {what} · re-polled every run"))
-            });
+            items.push(("Copy to clipboard".into(), format!("{what} · {}", cx.copy_keys.join(", "))));
+            let issue_keys: Vec<String> = issues.iter().map(key).collect();
+            let release_keys: Vec<String> = releases.iter().map(key).collect();
+            let new_labels: Vec<String> =
+                issue_labels(issues.iter()).into_iter().filter(|l| !cx.pinned_labels.contains(l)).collect();
+            let all_fav = !issues.is_empty() && issue_keys.iter().all(|k| cx.favs.contains(k));
+            if !issues.is_empty() {
+                let k = if issues.len() == 1 { issue_keys[0].clone() } else { format!("{} issues", issues.len()) };
+                items.push(if all_fav {
+                    ("Remove from favorites".into(), format!("unpin {k}"))
+                } else {
+                    ("Add to favorites".into(), format!("pin {k} · re-polled every run"))
+                });
+                if !new_labels.is_empty() {
+                    let more = if new_labels.len() > 4 { format!(" +{}", new_labels.len() - 4) } else { String::new() };
+                    items.push(("Pin labels to sidebar".into(), format!("{}{more}", new_labels.iter().take(4).cloned().collect::<Vec<_>>().join(", "))));
+                }
+            }
+            if releases.len() == 1 {
+                items.push(("Show release issues".into(), format!("every issue in {}", title(&releases[0]))));
+            }
+            let all_starred = !releases.is_empty() && release_keys.iter().all(|k| cx.fav_releases.contains(k));
+            if !releases.is_empty() {
+                let k = if releases.len() == 1 { title(&releases[0]) } else { format!("{} releases", releases.len()) };
+                items.push(if all_starred {
+                    ("Unfavorite release".into(), format!("remove {k} from the sidebar"))
+                } else {
+                    ("Favorite release".into(), format!("pin {k} in the sidebar · a click lists its issues"))
+                });
+                items.push(if cx.blacklist_tab {
+                    ("Restore release".into(), format!("show {k} in the releases tab again"))
+                } else {
+                    ("Blacklist release".into(), format!("hide {k} from the releases tab"))
+                });
+            }
             let Some(root) = self.ivars().state.borrow().as_ref().and_then(|st| st.window.contentView()) else { return };
             let titles: Vec<String> = items.iter().map(|i| i.0.clone()).collect();
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             let colors = crate::ui::theme::section_colors("jira");
+            let rows = cx.rows.clone();
+            let copy_keys = cx.copy_keys.clone();
             let picker = crate::ui::action_picker::ActionPicker::show(
                 mtm,
                 &root,
@@ -8916,40 +9266,63 @@ mod daemon_ui {
                 colors,
                 Box::new(move |i| {
                     let Some(ui) = weak.load() else { return };
-                    let url = |k: &str| format!("{site}/browse/{k}");
+                    let rs = if releases.len() == 1 { "release".to_string() } else { format!("{} releases", releases.len()) };
                     match titles.get(i).map(String::as_str) {
                         Some("Open in browser") => {
-                            for (k, _) in &rows {
-                                open_url(&url(k));
+                            for (_, u, _) in &urls {
+                                open_url(u);
                             }
-                            let lines: Vec<String> = rows.iter().map(|(k, _)| format!("{k}\t{}", url(k))).collect();
+                            let lines: Vec<String> = urls.iter().map(|(k, u, _)| format!("{k}\t{u}")).collect();
                             copy_text_to_pasteboard(&lines.join("\n"));
-                            crate::ui::toast::show(&format!("Opened {n} · copied keys + URLs"), "safari");
+                            crate::ui::toast::show(&format!("Opened {} · copied keys + URLs", urls.len()), "safari");
                         }
                         Some("Copy URL and title") => {
-                            let lines: Vec<String> = rows
-                                .iter()
-                                .map(|(k, t)| if t.is_empty() { url(k) } else { format!("{} {t}", url(k)) })
-                                .collect();
+                            let lines: Vec<String> =
+                                urls.iter().map(|(_, u, t)| if t.is_empty() { u.clone() } else { format!("{u} {t}") }).collect();
                             copy_text_to_pasteboard(&lines.join("\n"));
-                            crate::ui::toast::show(&format!("Copied {n} URL{s} + title{s}"), "link");
+                            crate::ui::toast::show(&format!("Copied {} URL{s} + title{s}", urls.len()), "link");
                         }
                         Some("Copy to clipboard") => {
-                            let lines: Vec<String> = rows.iter().map(|(k, t)| format!("{k}\t{t}")).collect();
+                            let lines: Vec<String> = rows
+                                .iter()
+                                .map(|r| copy_keys.iter().map(|f| r.get(f).cloned().unwrap_or_default()).collect::<Vec<_>>().join("\t"))
+                                .collect();
                             copy_text_to_pasteboard(&lines.join("\n"));
                             crate::ui::toast::show(&format!("Copied {what}"), "doc.on.clipboard");
                         }
-                        Some("Add to favorites") | Some("Remove from favorites") => {
-                            let add = !all_fav;
+                        Some(t @ ("Add to favorites" | "Remove from favorites")) => {
+                            let on = t == "Add to favorites";
+                            ui.jira_surface(|l| l.set_favorite(&issue_keys, on));
+                            let k = if issue_keys.len() == 1 { issue_keys[0].clone() } else { format!("{} issues", issue_keys.len()) };
+                            crate::ui::toast::show(
+                                &if on { format!("Pinned {k} to favorites") } else { format!("Unpinned {k}") },
+                                if on { "star.fill" } else { "star" },
+                            );
+                        }
+                        Some("Pin labels to sidebar") => {
+                            ui.jira_surface(|l| l.set_pinned_labels(&new_labels, true));
+                            let k = if new_labels.len() == 1 { new_labels[0].clone() } else { format!("{} labels", new_labels.len()) };
+                            crate::ui::toast::show(&format!("Pinned {k} to the sidebar"), "tag.fill");
+                        }
+                        Some("Show release issues") => {
+                            let k = release_keys[0].clone();
+                            if let Some(Err(e)) = ui.jira_surface(|l| l.open_release(&k)) {
+                                ui.ivars().controller.log(&format!("jira: {e}"));
+                                crate::ui::toast::show(&format!("No issues found for {k}"), "exclamationmark.triangle");
+                            }
+                        }
+                        Some(t @ ("Favorite release" | "Unfavorite release")) => {
+                            let on = t == "Favorite release";
+                            ui.jira_surface(|l| l.set_release_favorite(&release_keys, on));
+                            crate::ui::toast::show(&if on { format!("Starred {rs}") } else { format!("Unstarred {rs}") }, if on { "star.fill" } else { "star" });
+                        }
+                        Some(t @ ("Blacklist release" | "Restore release")) => {
+                            let on = t == "Blacklist release";
                             ui.jira_surface(|l| {
-                                for (k, _) in &rows {
-                                    if add {
-                                        l.favs.insert(k.clone());
-                                    } else {
-                                        l.favs.remove(k);
-                                    }
-                                }
+                                l.set_blacklisted(&release_keys, on);
+                                l.checked.clear();
                             });
+                            crate::ui::toast::show(&if on { format!("Hid {rs}") } else { format!("Restored {rs}") }, if on { "eye.slash" } else { "eye" });
                         }
                         _ => {}
                     }

@@ -299,6 +299,18 @@ fn str_list(v: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// One queued `jira_poll.py` write (`setFavorite`, `setPinnedLabels`, …).
+/// On failure the host re-reads config.json (the revert) and toasts
+/// `err_prefix: <reason>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PollWrite {
+    pub args: Vec<String>,
+    pub stdin: Option<String>,
+    pub err_prefix: String,
+    /// The script beside `jira_poll.py` to run (`jira_config.py` for columns).
+    pub script: String,
+}
+
 /// The list model.
 #[derive(Clone, Debug, Default)]
 pub struct JiraList {
@@ -311,6 +323,9 @@ pub struct JiraList {
     pub columns: Vec<ListColumn>,
     pub query: String,
     pub sort: Option<(String, bool)>,
+    /// `colFilters`: field -> the picked values (an `IN (…)` per column,
+    /// ANDed across columns). [`EMPTY_VALUE`] stands for a blank cell.
+    pub col_filters: BTreeMap<String, BTreeSet<String>>,
     /// Indices into `all`, filtered + sorted.
     pub rows: Vec<usize>,
     pub selection: usize,
@@ -332,6 +347,28 @@ pub struct JiraList {
     /// user's fresh pins with the on-disk config (the port pins in memory;
     /// persisting through `jira_poll.py --pin-*` is not ported).
     pub pins_dirty: bool,
+    /// `jira_poll.py` config writes the model queued (stars, pins,
+    /// blacklist); the host drains and runs them off the main thread.
+    pub pending_writes: Vec<PollWrite>,
+    /// `backToBoardList`: the open board came from "All boards", so Esc
+    /// returns there.
+    pub back_to_board_list: bool,
+    /// The last synced tab shown, where Esc out of a pinned list lands.
+    pub last_tab: usize,
+    /// Synthetic rows (group headers, "load N more…"): a `rows` index at or
+    /// past `all.len()` points here (`all.len() + i`).
+    pub synth: Vec<Record>,
+    /// `groupBy` for lists (persisted per list) and `boardGroupBy` for a board.
+    pub group_by: Option<String>,
+    pub board_group_by: Option<String>,
+    /// Collapsed group names (`collapsedGroups`).
+    pub collapsed: BTreeSet<String>,
+    /// `[jira] page-size` and how many extra pages are shown (`visibleOffset`).
+    pub page_size: usize,
+    pub visible_offset: usize,
+    /// The Jira directory (`directory.json`), read once per mtime.
+    pub directory: Value,
+    pub directory_mtime: Option<std::time::SystemTime>,
     pub status_line: Option<(String, PopupTone)>,
     pub note: Option<String>,
     pub inspector: bool,
@@ -354,6 +391,8 @@ impl JiraList {
             let (f, d) = s.split_once(':').unwrap_or((s.as_str(), "asc"));
             (!f.trim().is_empty()).then(|| (f.trim().to_string(), d.trim().to_lowercase() != "desc"))
         });
+        l.page_size = l.section.get("page-size").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        l.group_by = crate::platform::get_string("listGroupBy.jira").filter(|g| !g.is_empty());
         l.reload_meta();
         l
     }
@@ -596,7 +635,7 @@ impl JiraList {
         self.all = load_records(&self.shown_path);
         self.refilter();
         if let Some(k) = keep {
-            if let Some(i) = self.rows.iter().position(|&j| self.all[j].get("key") == Some(&k)) {
+            if let Some(i) = self.rows.iter().position(|&j| self.rec(j).and_then(|r| r.get("key")) == Some(&k)) {
                 self.selection = i;
             }
         }
@@ -615,6 +654,10 @@ impl JiraList {
     pub fn select_tab(&mut self, i: usize) {
         let Some(t) = self.tabs.get(i).cloned() else { return };
         self.place = Some(JiraPlace::Tab(i));
+        self.last_tab = i;
+        self.back_to_board_list = false;
+        self.col_filters.clear();
+        self.visible_offset = 0;
         self.columns = t.columns.clone();
         self.all = load_records(&t.path);
         self.shown_path = t.path.clone();
@@ -627,6 +670,8 @@ impl JiraList {
     /// Show a pinned list (`showPinFile`).
     pub fn show_pin_file(&mut self, key: &str, path: &str, columns: Vec<ListColumn>) {
         self.place = Some(JiraPlace::Pin(key.to_string()));
+        self.col_filters.clear();
+        self.visible_offset = 0;
         self.columns = columns;
         self.all = load_records(path);
         self.shown_path = path.to_string();
@@ -671,8 +716,8 @@ impl JiraList {
     fn default_columns(&self) -> Vec<ListColumn> {
         let mut cols = parse_columns(self.section.get("columns").map(String::as_str).unwrap_or(""));
         for c in cols.iter_mut() {
-            if c.title.is_empty() {
-                c.title = c.field.clone();
+            if c.title.is_empty() || c.title == c.field {
+                c.title = base_field_label(&c.field).map(str::to_string).unwrap_or_else(|| c.field.clone());
             }
         }
         cols
@@ -693,6 +738,7 @@ impl JiraList {
         }
         // `openBoard` pins a board that is not pinned yet (the sidebar's
         // "Boards" rows), then shows its cached issues.
+        let from_list = self.on_board_list();
         self.pin_board(id);
         let cols = self.default_columns();
         self.show_pin_file(&format!("{BOARD_PREFIX}{id}"), &path, cols);
@@ -700,7 +746,30 @@ impl JiraList {
         self.board_sprint.entry(id.to_string()).or_insert(default_sprint);
         self.board_mode.entry(id.to_string()).or_insert_with(|| "columns".to_string());
         self.compute_board_columns();
+        self.back_to_board_list = from_list;
         true
+    }
+
+    /// One Esc in the list (`onEscape`): clear the query, else go back from
+    /// a board to "All boards", else leave a pinned list for the last tab.
+    /// `false` when there was nothing to undo (the host backs the slot out).
+    pub fn escape_step(&mut self) -> bool {
+        if !self.query.is_empty() {
+            self.query.clear();
+            self.selection = 0;
+            self.refilter();
+            return true;
+        }
+        if self.back_to_board_list && self.on_board().is_some() {
+            self.back_to_board_list = false;
+            self.show_board_list();
+            return true;
+        }
+        if matches!(self.place, Some(JiraPlace::Pin(_))) && !self.tabs.is_empty() {
+            self.select_tab(self.last_tab.min(self.tabs.len() - 1));
+            return true;
+        }
+        false
     }
 
     /// The board shown when the list place is a `board:<id>` pin.
@@ -852,6 +921,8 @@ impl JiraList {
         } else {
             self.boards.push((id.to_string(), self.board_name(id)));
         }
+        let on = self.boards.iter().any(|(bid, _)| bid == id);
+        self.queue_write(&["--pin-board", if on { "add" } else { "remove" }, id], None, "Board pin not saved");
         self.pins_dirty = true;
         true
     }
@@ -861,6 +932,7 @@ impl JiraList {
     pub fn pin_board(&mut self, id: &str) {
         if !self.boards.iter().any(|(bid, _)| bid == id) {
             self.boards.push((id.to_string(), self.board_name(id)));
+            self.queue_write(&["--pin-board", "add", id], None, "Board pin not saved");
             self.pins_dirty = true;
         }
     }
@@ -872,8 +944,141 @@ impl JiraList {
         } else {
             self.pinned_views.push(spec.to_string());
         }
+        let on = self.pinned_views.iter().any(|v| v == spec);
+        self.queue_write(&["--pin-view", if on { "add" } else { "remove" }, spec], None, "View pin not saved");
         self.pins_dirty = true;
         true
+    }
+
+    fn queue_write(&mut self, args: &[&str], stdin: Option<String>, err_prefix: &str) {
+        self.pending_writes.push(PollWrite {
+            args: args.iter().map(|a| a.to_string()).collect(),
+            stdin,
+            err_prefix: err_prefix.into(),
+            script: "jira_poll.py".into(),
+        });
+    }
+
+    /// Edit one string list in the in-memory config.json (the optimistic half
+    /// of a pin write; a failed write re-reads the file).
+    fn config_list_edit(&mut self, key: &str, items: &[String], on: bool) {
+        let mut cur = str_list(&self.config, key);
+        if on {
+            let mut new: Vec<String> = items.iter().filter(|k| !cur.contains(k)).cloned().collect();
+            new.append(&mut cur);
+            cur = new;
+        } else {
+            cur.retain(|k| !items.contains(k));
+        }
+        if !self.config.is_object() {
+            self.config = Value::Object(Default::default());
+        }
+        self.config[key] = Value::Array(cur.into_iter().map(Value::String).collect());
+    }
+
+    /// `setFavorite` — star / unstar issues (`--favorite`); the shown rows go
+    /// on stdin for keys the issue cache does not hold.
+    pub fn set_favorite(&mut self, keys: &[String], on: bool) {
+        let keys: Vec<String> = keys.iter().filter(|k| !k.is_empty()).cloned().collect();
+        if keys.is_empty() {
+            return;
+        }
+        for k in &keys {
+            if on {
+                self.favs.insert(k.clone());
+            } else {
+                self.favs.remove(k);
+            }
+        }
+        self.config_list_edit("favorites", &keys, on);
+        let rows: Vec<Value> = keys
+            .iter()
+            .filter_map(|k| self.all.iter().find(|r| r.get("key") == Some(k)))
+            .map(|r| {
+                Value::Object(
+                    r.iter()
+                        .filter(|(k, _)| !k.starts_with("__"))
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut args = vec!["--favorite", if on { "add" } else { "remove" }];
+        args.extend(keys.iter().map(String::as_str));
+        let stdin = on.then(|| Value::Array(rows).to_string());
+        self.queue_write(&args, stdin, "Favorites not saved");
+    }
+
+    /// The row's ☆: a release row stars the release, an issue row the issue.
+    pub fn toggle_star(&mut self, row: usize) {
+        let Some(r) = self.row(row).cloned() else { return };
+        let Some(k) = r.get("key").filter(|k| !k.is_empty()).cloned() else { return };
+        if is_release_row(&r) {
+            let on = !self.favorite_releases().contains(&k);
+            self.set_release_favorite(&[k], on);
+        } else {
+            let on = !self.favs.contains(&k);
+            self.set_favorite(&[k], on);
+        }
+    }
+
+    /// `setReleaseFavoriteKeys` — the sidebar's starred releases.
+    pub fn set_release_favorite(&mut self, keys: &[String], on: bool) {
+        if keys.is_empty() {
+            return;
+        }
+        self.config_list_edit("favoriteReleases", keys, on);
+        let mut args = vec!["--favorite-release", if on { "add" } else { "remove" }];
+        args.extend(keys.iter().map(String::as_str));
+        self.queue_write(&args, None, "Release star not saved");
+    }
+
+    /// `setBlacklisted` — hide / restore releases (`--blacklist-release`).
+    pub fn set_blacklisted(&mut self, keys: &[String], on: bool) {
+        if keys.is_empty() {
+            return;
+        }
+        self.config_list_edit("releaseBlacklist", keys, on);
+        let mut args = vec!["--blacklist-release", if on { "add" } else { "remove" }];
+        args.extend(keys.iter().map(String::as_str));
+        self.queue_write(&args, None, "Not saved");
+    }
+
+    /// `setPinnedLabels` — the sidebar's pinned labels (`--pin-label`).
+    pub fn set_pinned_labels(&mut self, names: &[String], on: bool) {
+        if names.is_empty() {
+            return;
+        }
+        let mut cur = str_list(&self.config, "pinnedLabels");
+        if on {
+            cur.extend(names.iter().filter(|n| !cur.contains(n)).cloned().collect::<Vec<_>>());
+        } else {
+            cur.retain(|n| !names.contains(n));
+        }
+        if !self.config.is_object() {
+            self.config = Value::Object(Default::default());
+        }
+        self.config["pinnedLabels"] = Value::Array(cur.into_iter().map(Value::String).collect());
+        let mut args = vec!["--pin-label", if on { "add" } else { "remove" }];
+        args.extend(names.iter().map(String::as_str));
+        self.queue_write(&args, None, "Label pin not saved");
+    }
+
+    pub fn pinned_labels(&self) -> Vec<String> {
+        str_list(&self.config, "pinnedLabels")
+    }
+
+    pub fn favorite_releases(&self) -> Vec<String> {
+        str_list(&self.config, "favoriteReleases")
+    }
+
+    /// Is the shown list the hidden-releases (blacklist) tab?
+    pub fn on_blacklist_tab(&self) -> bool {
+        let bl = self.paths.as_ref().and_then(|p| p.tabs.get("blacklistRelease")).cloned();
+        match (&self.place, bl) {
+            (Some(JiraPlace::Tab(i)), Some(f)) => self.tabs.get(*i).is_some_and(|t| t.file == f),
+            _ => false,
+        }
     }
 
     /// `currentViewSpec` — `board|sprint|mode` for the open board.
@@ -946,6 +1151,9 @@ impl JiraList {
             "rowCount": self.rows.len(),
             "selection": self.selection,
             "query": self.query,
+            "columns": self.columns.iter().map(|c| format!("{}:{}", c.field, c.width)).collect::<Vec<_>>(),
+            "groupBy": self.effective_group_by(),
+            "filters": self.col_filters.iter().map(|(k, v)| (k.clone(), v.iter().cloned().collect::<Vec<_>>())).collect::<BTreeMap<_, _>>(),
         })
     }
 
@@ -993,6 +1201,7 @@ impl JiraList {
             checked: self.checked.clone(),
             favs: self.favs.clone(),
             sort: None,
+            filter_active: BTreeSet::new(),
             sidebar: self.sidebar_model(),
             inspector: None,
             show_inspector: false,
@@ -1048,15 +1257,181 @@ impl JiraList {
             .unwrap_or_else(|| vec!["key".into(), "title".into()])
     }
 
+    /// `cellValues`: the filter values of one cell — multi-valued fields split
+    /// on commas, a blank cell is [`EMPTY_VALUE`].
+    pub fn cell_values(field: &str, r: &Record) -> Vec<String> {
+        let v = r.get(field).map(|s| s.trim()).unwrap_or("");
+        if v.is_empty() {
+            return vec![EMPTY_VALUE.into()];
+        }
+        if !MULTI_VALUED.contains(&field) {
+            return vec![v.to_string()];
+        }
+        let parts: Vec<String> = v.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            vec![EMPTY_VALUE.into()]
+        } else {
+            parts
+        }
+    }
+
+    /// `filterOptions`: every value of `field` in the shown list with its row
+    /// count, most rows first (ties by name), the blank value last.
+    pub fn filter_options(&self, field: &str) -> Vec<FilterOption> {
+        let people = if PERSON_FIELDS.contains(&field) { self.people_by_value() } else { HashMap::new() };
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for r in &self.all {
+            for v in Self::cell_values(field, r) {
+                let n = counts.entry(v.clone()).or_insert(0);
+                if *n == 0 {
+                    order.push(v);
+                }
+                *n += 1;
+            }
+        }
+        order.sort_by(|a, b| {
+            let (ea, eb) = (a == EMPTY_VALUE, b == EMPTY_VALUE);
+            ea.cmp(&eb)
+                .then(counts[b].cmp(&counts[a]))
+                .then_with(|| crate::engines::list_filter::localized_standard_compare(a, b))
+        });
+        order
+            .into_iter()
+            .map(|v| {
+                let title = if v != EMPTY_VALUE {
+                    people.get(&v).map(|p| p.0.clone()).unwrap_or_else(|| v.clone())
+                } else if field == "assignee" {
+                    "(unassigned)".into()
+                } else {
+                    "(empty)".into()
+                };
+                FilterOption { count: counts[&v], id: v, title }
+            })
+            .collect()
+    }
+
+    /// Tick / untick one value of `field`'s filter.
+    pub fn toggle_filter(&mut self, field: &str, value: &str) {
+        let set = self.col_filters.entry(field.to_string()).or_default();
+        if !set.remove(value) {
+            set.insert(value.to_string());
+        }
+        if set.is_empty() {
+            self.col_filters.remove(field);
+        }
+        self.selection = 0;
+        self.visible_offset = 0;
+        self.refilter();
+    }
+
+    pub fn clear_filter(&mut self, field: &str) {
+        if self.col_filters.remove(field).is_some() {
+            self.selection = 0;
+            self.refilter();
+        }
+    }
+
+    pub fn set_column_widths(&mut self, pcts: &[f64]) {
+        for (c, p) in self.columns.iter_mut().zip(pcts) {
+            c.width = *p;
+        }
+    }
+
+    pub fn move_column(&mut self, from: usize, to: usize) {
+        if from < self.columns.len() && to < self.columns.len() && from != to {
+            let c = self.columns.remove(from);
+            self.columns.insert(to, c);
+        }
+    }
+
+    /// `JiraPoll.owner(ofTab:)`: the config.json job whose columns the shown
+    /// list uses — `("live", "search")` or `("endpoint", NAME)`.
+    pub fn columns_owner(&self) -> Option<(String, String)> {
+        let file = Path::new(&self.shown_path).file_name()?.to_string_lossy().into_owned();
+        if let Some(p) = &self.paths {
+            if p.tabs.get("liveSearch") == Some(&file) {
+                return Some(("live".into(), "search".into()));
+            }
+        }
+        let eps = self.endpoints();
+        let borrowed = match &self.place {
+            Some(JiraPlace::Pin(k)) => {
+                k.starts_with(LABEL_PREFIX) || k.starts_with(MY_WORK_PREFIX) || str_list(&self.config, "favoriteReleases").contains(k)
+                    || (!k.starts_with(BOARD_PREFIX) && !k.starts_with(VIEW_PREFIX) && k != BOARD_LIST_KEY)
+            }
+            _ => false,
+        };
+        if borrowed {
+            // Release / label / my-work views borrow the plain issues job.
+            let plain: Vec<&Value> = eps
+                .iter()
+                .filter(|e| {
+                    e.get("type").and_then(Value::as_str).unwrap_or("issues") == "issues"
+                        && e.get("jql").and_then(Value::as_str).unwrap_or("").is_empty()
+                })
+                .collect();
+            let e = plain.iter().find(|e| e.get("name").and_then(Value::as_str) == Some("all")).or(plain.first())?;
+            return Some(("endpoint".into(), e.get("name")?.as_str()?.to_string()));
+        }
+        eps.iter().find_map(|e| {
+            let name = e.get("name").and_then(Value::as_str)?;
+            if e.get("type").and_then(Value::as_str) == Some("directory") {
+                return None;
+            }
+            let f = e.get("file").and_then(Value::as_str).map(str::to_string).unwrap_or(format!("{name}.json"));
+            (f == file).then(|| ("endpoint".to_string(), name.to_string()))
+        })
+    }
+
+    /// `columnsResized` (final): queue the column spec save. Jira-owned
+    /// lists go through `jira_config.py --set-columns`; `None` means the
+    /// `[jira] columns` key in commands.toml owns them (spec returned).
+    pub fn save_columns(&mut self) -> Option<String> {
+        if self.on_board_list() || self.board_snapshot().is_some() {
+            return None;
+        }
+        let spec = crate::views::jira::serialize_columns(&self.columns, false);
+        match self.columns_owner() {
+            Some((kind, name)) => {
+                self.pending_writes.push(PollWrite {
+                    args: vec!["--set-columns".into(), kind, name, spec],
+                    stdin: None,
+                    err_prefix: "Columns not saved".into(),
+                    script: "jira_config.py".into(),
+                });
+                None
+            }
+            None => Some(spec),
+        }
+    }
+
+    /// Set the sort explicitly (the filter picker's Sort ↑ / Sort ↓).
+    pub fn set_sort(&mut self, field: &str, asc: bool) {
+        self.sort = Some((field.to_string(), asc));
+        self.refilter();
+    }
+
     pub fn refilter(&mut self) {
+        // A filter on a column the shown list does not have would hide rows
+        // with no visible way to clear it (Swift drops those too).
+        let cols = &self.columns;
+        self.col_filters.retain(|f, v| !v.is_empty() && cols.iter().any(|c| &c.field == f));
         let fields = self.filter_fields();
         let words: Vec<String> = self.query.to_lowercase().split_whitespace().map(str::to_string).collect();
         let mut idx: Vec<usize> = (0..self.all.len())
             .filter(|&i| {
+                let r = &self.all[i];
+                let picked_ok = self
+                    .col_filters
+                    .iter()
+                    .all(|(f, picked)| Self::cell_values(f, r).iter().any(|v| picked.contains(v)));
+                if !picked_ok {
+                    return false;
+                }
                 if words.is_empty() {
                     return true;
                 }
-                let r = &self.all[i];
                 let hay: String = fields
                     .iter()
                     .chain(["name".to_string()].iter())
@@ -1075,6 +1450,20 @@ impl JiraList {
                     let o = crate::engines::list_filter::localized_standard_compare(x, y);
                     if *asc { o } else { o.reverse() }
                 });
+            }
+        }
+        self.synth.clear();
+        if let Some(g) = self.effective_group_by() {
+            self.refresh_directory();
+            idx = self.group_rows(&idx, &g);
+        } else if self.page_size > 0 && idx.len() > self.page_size && self.query.is_empty() {
+            let take = (self.page_size + self.visible_offset).min(idx.len());
+            if take < idx.len() {
+                let mut more = Record::new();
+                more.insert("__loadmore".into(), format!("load {} more…", idx.len() - take));
+                idx.truncate(take);
+                idx.push(self.all.len());
+                self.synth.push(more);
             }
         }
         self.rows = idx;
@@ -1097,13 +1486,241 @@ impl JiraList {
         self.refilter();
     }
 
+    /// A `rows` entry: an issue in `all`, or a synthetic row past it.
+    pub fn rec(&self, j: usize) -> Option<&Record> {
+        if j < self.all.len() {
+            self.all.get(j)
+        } else {
+            self.synth.get(j - self.all.len())
+        }
+    }
+
     pub fn selected(&self) -> Option<&Record> {
-        self.rows.get(self.selection).and_then(|&i| self.all.get(i))
+        self.rows.get(self.selection).and_then(|&i| self.rec(i))
     }
 
     pub fn row(&self, i: usize) -> Option<&Record> {
-        self.rows.get(i).and_then(|&j| self.all.get(j))
+        self.rows.get(i).and_then(|&j| self.rec(j))
     }
+
+    /// The real (non-synthetic) shown rows.
+    pub fn shown_records(&self) -> Vec<Record> {
+        self.rows.iter().filter(|&&i| i < self.all.len()).filter_map(|&i| self.all.get(i).cloned()).collect()
+    }
+
+    /// The directory cache, re-read when its file changed.
+    pub fn refresh_directory(&mut self) {
+        let Some(p) = &self.paths else { return };
+        let mut path = p.cache_file("directory");
+        if !Path::new(&path).exists() && Path::new(&format!("{path}.json")).exists() {
+            path = format!("{path}.json");
+        }
+        let m = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if m != self.directory_mtime {
+            self.directory_mtime = m;
+            self.directory = read_json(&path);
+        }
+    }
+
+    /// `peopleByValue`: username / name / id -> (display title, handle).
+    pub fn people_by_value(&self) -> HashMap<String, (String, String)> {
+        let mut out: HashMap<String, (String, String)> = HashMap::new();
+        for u in self.directory.get("users").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let g = |k: &str| u.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let (username, name, id, email) = (g("username"), g("name"), g("id"), g("email"));
+            for k in [&username, &name, &id] {
+                if k.is_empty() || out.contains_key(k) {
+                    continue;
+                }
+                let handle: Vec<String> =
+                    [&username, &email].iter().filter(|h| !h.is_empty() && **h != &name && **h != k).map(|h| h.to_string()).collect();
+                let title = if k == &name { name.clone() } else if name.is_empty() { k.clone() } else { format!("{name} ({k})") };
+                out.insert(k.clone(), (title, handle.join(" · ")));
+            }
+        }
+        out
+    }
+
+    /// Status -> 0 To Do / 1 In Progress / 2 Done (directory first, then words).
+    pub fn status_category(&self, status: &str) -> usize {
+        let cats = self.directory.get("statusCategories").and_then(Value::as_object).cloned().unwrap_or_default();
+        let words = self.rules.as_ref().map(|r| r.words.clone()).unwrap_or_default();
+        crate::views::jira::category(status, &cats, &words).clamp(0, 2) as usize
+    }
+
+    /// `effectiveGroupBy`.
+    pub fn effective_group_by(&self) -> Option<String> {
+        if self.on_board_list() {
+            return None;
+        }
+        if self.on_board().is_some() {
+            return self.board_group_by.clone();
+        }
+        self.group_by.clone().filter(|g| g != "boardColumn")
+    }
+
+    /// `groupChoices`: (title, field).
+    pub fn group_choices(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = [
+            ("Status category", "statusCategory"),
+            ("Status", "status"),
+            ("Assignee", "assignee"),
+            ("Priority", "priority"),
+            ("Release", "release"),
+            ("Labels", "labels"),
+            ("Epic / parent", "epic"),
+            ("Components", "components"),
+            ("Project", "project"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        const SKIP: &[&str] = &["key", "title", "updated", "created", "description", "releaseLabel", "releaseDate"];
+        for c in &self.columns {
+            if c.filterable && !SKIP.contains(&c.field.as_str()) && !out.iter().any(|(_, f)| f == &c.field) {
+                out.push((c.title.clone(), c.field.clone()));
+            }
+        }
+        if self.on_board().is_some() {
+            out.insert(0, ("Board column".into(), "boardColumn".into()));
+        }
+        out
+    }
+
+    /// `setGroupBy` — lists remember it (`listGroupBy.jira`), boards don't.
+    pub fn set_group_by(&mut self, g: Option<String>) {
+        self.collapsed.clear();
+        if self.on_board().is_some() {
+            self.board_group_by = g;
+        } else {
+            crate::platform::set_string("listGroupBy.jira", g.as_deref().unwrap_or(""));
+            self.group_by = g;
+        }
+        self.selection = 0;
+        self.refilter();
+    }
+
+    pub fn toggle_group(&mut self, name: &str) {
+        if !self.collapsed.remove(name) {
+            self.collapsed.insert(name.to_string());
+        }
+        self.refilter();
+    }
+
+    pub fn toggle_all_groups(&mut self, collapse: bool) {
+        self.collapsed = if collapse {
+            self.synth.iter().filter_map(|r| r.get("__group").cloned()).collect()
+        } else {
+            BTreeSet::new()
+        };
+        self.refilter();
+    }
+
+    /// Activate a synthetic row (header click / Return): toggle the group or
+    /// show the next page. `false` for a real issue row.
+    pub fn activate_synthetic(&mut self, row: usize) -> bool {
+        let Some(r) = self.row(row).cloned() else { return false };
+        if let Some(g) = r.get("__group") {
+            self.toggle_group(g);
+            return true;
+        }
+        if r.contains_key("__loadmore") {
+            self.visible_offset += self.page_size;
+            self.refilter();
+            return true;
+        }
+        false
+    }
+
+    /// `groupedRows`: headers + member rows for the filtered/sorted `order`.
+    fn group_rows(&mut self, order: &[usize], g: &str) -> Vec<usize> {
+        const NONE: &str = "(none)";
+        let mut fixed: Vec<String> = Vec::new();
+        let people = if PERSON_FIELDS.contains(&g) { self.people_by_value() } else { HashMap::new() };
+        let mut board_col: HashMap<String, String> = HashMap::new();
+        match g {
+            "statusCategory" => fixed = crate::views::jira::CATEGORY_NAMES.iter().map(|s| s.to_string()).collect(),
+            "boardColumn" => {
+                if let Some(id) = self.on_board() {
+                    for c in self.board_column_spec(&id) {
+                        let name = c.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                        for st in c.get("statuses").and_then(Value::as_array).cloned().unwrap_or_default() {
+                            if let Some(st) = st.as_str() {
+                                board_col.entry(st.to_string()).or_insert_with(|| name.clone());
+                            }
+                        }
+                        fixed.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let key_of = |l: &JiraList, r: &Record| -> Vec<String> {
+            match g {
+                "statusCategory" => {
+                    let st = r.get("status").map(String::as_str).unwrap_or("");
+                    if st.is_empty() {
+                        vec![NONE.into()]
+                    } else {
+                        vec![crate::views::jira::CATEGORY_NAMES[l.status_category(st)].to_string()]
+                    }
+                }
+                "boardColumn" => {
+                    let st = r.get("status").map(String::as_str).unwrap_or("");
+                    vec![board_col.get(st).cloned().unwrap_or_else(|| "Not on the board".into())]
+                }
+                _ => Self::cell_values(g, r)
+                    .into_iter()
+                    .map(|v| {
+                        if v == EMPTY_VALUE {
+                            if g == "assignee" { "Unassigned".into() } else { NONE.into() }
+                        } else {
+                            people.get(&v).map(|p| p.0.clone()).unwrap_or(v)
+                        }
+                    })
+                    .collect(),
+            }
+        };
+        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut seen: Vec<String> = Vec::new();
+        for &i in order {
+            for k in key_of(self, &self.all[i]) {
+                let e = groups.entry(k.clone()).or_default();
+                if e.is_empty() {
+                    seen.push(k);
+                }
+                e.push(i);
+            }
+        }
+        let tail = [NONE, "Unassigned", "Not on the board"];
+        let mut rest: Vec<String> = seen.into_iter().filter(|k| !fixed.contains(k)).collect();
+        rest.sort_by(|a, b| {
+            let (ta, tb) = (tail.contains(&a.as_str()), tail.contains(&b.as_str()));
+            ta.cmp(&tb)
+                .then(groups[b].len().cmp(&groups[a].len()))
+                .then_with(|| crate::engines::list_filter::localized_standard_compare(a, b))
+        });
+        let mut out = Vec::new();
+        let names: Vec<String> = fixed.into_iter().filter(|f| groups.contains_key(f)).chain(rest).collect();
+        for name in names {
+            let idx = groups.remove(&name).unwrap_or_default();
+            let shut = self.collapsed.contains(&name);
+            let mut h = Record::new();
+            h.insert("__group".into(), name.clone());
+            h.insert("__count".into(), idx.len().to_string());
+            if shut {
+                h.insert("__collapsed".into(), "1".into());
+            }
+            out.push(self.all.len() + self.synth.len());
+            self.synth.push(h);
+            if !shut {
+                out.extend(idx);
+            }
+        }
+        out
+    }
+
+    /// `cellValues`: the filter values of one cell — multi-valued fields split
 
     pub fn site(&self) -> String {
         self.config.get("site").and_then(Value::as_str).unwrap_or("").trim_end_matches('/').to_string()
@@ -1247,7 +1864,7 @@ impl JiraList {
     /// The inspector content (`inspectorContent`): key, title, chips from
     /// `[jira] trailing`, body, fields from `detail` + project / updated.
     pub fn inspector_content(&self) -> Option<InspectorContent> {
-        let r = self.selected()?;
+        let r = self.selected().filter(|r| !is_synthetic(r))?;
         let key = r.get("key").cloned().unwrap_or_default();
         let title = r.get("title").or_else(|| r.get("name")).cloned().unwrap_or_default();
         let rules = self.rules.clone().unwrap_or_else(|| style_rules(&Value::Null));
@@ -1293,6 +1910,80 @@ pub struct InspectorContent {
     pub body: String,
 }
 
+/// A group header or the "load N more…" row (not an issue).
+pub fn is_synthetic(r: &Record) -> bool {
+    r.contains_key("__group") || r.contains_key("__loadmore")
+}
+
+/// `jiraIsReleaseRow`: a releases-tab row (not an issue).
+pub fn is_release_row(r: &Record) -> bool {
+    if r.contains_key("versionId") {
+        return true;
+    }
+    let rel = r.get("release").map(String::as_str).unwrap_or("");
+    let proj = r.get("project").map(String::as_str).unwrap_or("");
+    let title = r.get("title").or_else(|| r.get("name")).map(String::as_str).unwrap_or("");
+    !rel.is_empty() && !proj.is_empty() && r.get("key").map(String::as_str) == Some(&format!("{proj}-{rel}")) && title == rel
+}
+
+/// `jiraBrowseURL`: the issue page, or for a release its version page (or a
+/// fixVersion JQL search when the version id is unknown).
+pub fn browse_url(r: &Record, site: &str) -> Option<String> {
+    let key = r.get("key").filter(|k| !k.is_empty())?;
+    if site.is_empty() {
+        return None;
+    }
+    if !is_release_row(r) {
+        return Some(format!("{site}/browse/{key}"));
+    }
+    let proj = r.get("project").cloned().unwrap_or_default();
+    let name = r.get("release").or_else(|| r.get("title")).cloned().unwrap_or_default();
+    let id = r.get("versionId").cloned().unwrap_or_default();
+    if !id.is_empty() {
+        let tab = if site.contains(".atlassian.net") { "/tab/release-report-all-issues" } else { "" };
+        return Some(format!("{site}/projects/{proj}/versions/{id}{tab}"));
+    }
+    let jql = format!("project = \"{proj}\" AND fixVersion = \"{name}\"");
+    let enc: String = jql
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    Some(format!("{site}/issues/?jql={enc}"))
+}
+
+/// `issueLabels`: the distinct labels of `rows`, first-seen order.
+pub fn issue_labels<'a>(rows: impl IntoIterator<Item = &'a Record>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in rows {
+        for l in r.get("labels").map(String::as_str).unwrap_or("").split(',').map(str::trim) {
+            if !l.is_empty() && !out.iter().any(|o| o == l) {
+                out.push(l.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `ListSession.emptyValue`: the filter value of a blank cell.
+pub const EMPTY_VALUE: &str = "\u{0}none";
+
+/// `ListSession.personFields`.
+pub const PERSON_FIELDS: &[&str] = &["assignee", "reporter", "creator"];
+
+/// `ListSession.multiValued`: fields whose cell is a comma list.
+pub const MULTI_VALUED: &[&str] = &["labels", "release", "releaseLabel", "releaseDate", "components", "fixVersions"];
+
+/// One row of a column's filter picker (`JiraMultiPicker.Option`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterOption {
+    pub id: String,
+    pub title: String,
+    pub count: usize,
+}
+
 /// What the view reports.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JiraEvent {
@@ -1300,6 +1991,9 @@ pub enum JiraEvent {
     Check(usize),
     Star(usize),
     Sort(usize),
+    /// Click on a filterable column's chevron (`onTableFilter`); `x`/`y` is
+    /// the screen point under the chevron to drop the picker from.
+    Filter { col: usize, x: f64, y: f64 },
     Query(String),
     Enter,
     Move(i64),
@@ -1308,6 +2002,12 @@ pub enum JiraEvent {
     RowMenu { row: usize, x: f64, y: f64 },
     /// Right-click on the column header (`PopupTableHeader.rightMouseDown`).
     HeaderMenu { x: f64, y: f64 },
+    /// A divider drag (`onResize`): new percentage widths; `done` on mouse-up.
+    ColumnsResized { pcts: Vec<f64>, done: bool },
+    /// A header drag (`onReorder`): move column `from` to `to`.
+    ColumnsReordered { from: usize, to: usize },
+    /// The lead gutter's ↔ glyph (`onFit`).
+    FitColumns,
     Sidebar(crate::ui::sidebar::SidebarEvent),
 }
 
@@ -1343,6 +2043,8 @@ pub struct JiraSnapshot {
     pub checked: BTreeSet<String>,
     pub favs: BTreeSet<String>,
     pub sort: Option<(usize, bool)>,
+    /// Columns with a filter set (`tableFilterActive`): their chevron tints.
+    pub filter_active: BTreeSet<usize>,
     pub sidebar: SidebarModel,
     pub inspector: Option<InspectorContent>,
     pub show_inspector: bool,
@@ -1356,7 +2058,7 @@ impl JiraList {
         if let Some(board) = self.board_snapshot() {
             return board;
         }
-        let rows: Vec<Record> = self.rows.iter().filter_map(|&i| self.all.get(i).cloned()).collect();
+        let rows: Vec<Record> = self.rows.iter().filter_map(|&i| self.rec(i).cloned()).collect();
         let sort = self
             .sort
             .as_ref()
@@ -1366,8 +2068,15 @@ impl JiraList {
             rows,
             selection: self.selection,
             checked: self.checked.clone(),
-            favs: self.favs.clone(),
+            favs: self.favs.iter().cloned().chain(self.favorite_releases()).collect(),
             sort,
+            filter_active: self
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| self.col_filters.contains_key(&c.field))
+                .map(|(i, _)| i)
+                .collect(),
             sidebar: self.sidebar_model(),
             inspector: self.inspector_content(),
             show_inspector: self.inspector,
@@ -1402,19 +2111,16 @@ impl JiraList {
                     }
                 }
             }
-            JiraEvent::Star(row) => {
-                if let Some(k) = self.row(row).and_then(|r| r.get("key")).cloned() {
-                    if !self.favs.remove(&k) {
-                        self.favs.insert(k);
-                    }
-                }
-            }
+            JiraEvent::Star(row) => self.toggle_star(row),
             JiraEvent::Sort(i) => self.sort_by(i),
-            // The Fit Columns menu is a UI action.
-            JiraEvent::HeaderMenu { .. } => {}
+            // The Fit Columns menu and the filter picker are UI actions.
+            JiraEvent::HeaderMenu { .. } | JiraEvent::Filter { .. } | JiraEvent::FitColumns => {}
+            JiraEvent::ColumnsResized { pcts, .. } => self.set_column_widths(&pcts),
+            JiraEvent::ColumnsReordered { from, to } => self.move_column(from, to),
             JiraEvent::Query(q) => {
                 self.query = q;
                 self.selection = 0;
+                self.visible_offset = 0;
                 self.refilter();
             }
             JiraEvent::Move(d) => {
@@ -1424,8 +2130,7 @@ impl JiraList {
                 }
             }
             JiraEvent::Escape => {
-                self.query.clear();
-                self.refilter();
+                self.escape_step();
             }
             // A board row opens its board; an issue row opens a URL (UI).
             JiraEvent::Enter | JiraEvent::OpenDetail => {
@@ -1462,7 +2167,7 @@ impl JiraList {
 }
 
 #[cfg(target_os = "macos")]
-pub use appkit::{draw_wrapped, JiraView};
+pub use appkit::{draw_wrapped, set_zoom, zoom, JiraView};
 
 #[cfg(target_os = "macos")]
 mod appkit {
@@ -1532,6 +2237,25 @@ mod appkit {
 
     // ------------------------------------------------------------- table
 
+    thread_local! {
+        /// The list's text zoom (Cmd +/−, `textZoom.jira`).
+        static ZOOM: Cell<f64> = Cell::new(
+            crate::platform::get_string("textZoom.jira").and_then(|v| v.parse().ok()).unwrap_or(1.0)
+        );
+    }
+
+    pub fn zoom() -> f64 {
+        ZOOM.with(|z| z.get())
+    }
+
+    pub fn set_zoom(z: f64) {
+        ZOOM.with(|c| c.set(z));
+    }
+
+    fn row_h() -> f64 {
+        (ROW_H * zoom()).round()
+    }
+
     pub struct TableIvars {
         snap: Rc<RefCell<JiraSnapshot>>,
         colors: Cell<PopupColors>,
@@ -1573,7 +2297,7 @@ mod appkit {
             fn mouse_moved(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 let n = self.ivars().snap.borrow().rows.len();
-                let i = (p.y / ROW_H).floor();
+                let i = (p.y / row_h()).floor();
                 let h = (i >= 0.0 && (i as usize) < n).then_some(i as usize);
                 if h != self.ivars().hover.get() {
                     self.ivars().hover.set(h);
@@ -1591,13 +2315,16 @@ mod appkit {
             fn mouse_down(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 let n = self.ivars().snap.borrow().rows.len();
-                let i = (p.y / ROW_H).floor();
+                let i = (p.y / row_h()).floor();
                 if i < 0.0 || i as usize >= n {
                     return;
                 }
                 let row = i as usize;
-                let band = Rect::new(0.0, row as f64 * ROW_H, self.bounds().size.width, ROW_H);
-                let ev = if check_rect(band).inset_by(-4.0, -6.0).contains(p.x, p.y) {
+                let band = Rect::new(0.0, row as f64 * row_h(), self.bounds().size.width, row_h());
+                let synthetic = self.ivars().snap.borrow().rows.get(row).is_some_and(is_synthetic);
+                let ev = if synthetic {
+                    JiraEvent::Click { row, double: false }
+                } else if check_rect(band).inset_by(-4.0, -6.0).contains(p.x, p.y) {
                     JiraEvent::Check(row)
                 } else if star_rect(band).inset_by(-3.0, -6.0).contains(p.x, p.y) {
                     JiraEvent::Star(row)
@@ -1611,7 +2338,7 @@ mod appkit {
             fn right_mouse_down(&self, e: &NSEvent) {
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
                 let n = self.ivars().snap.borrow().rows.len();
-                let i = (p.y / ROW_H).floor();
+                let i = (p.y / row_h()).floor();
                 if i < 0.0 || i as usize >= n {
                     return;
                 }
@@ -1662,13 +2389,13 @@ mod appkit {
             if n == 0 || vis.size.height <= 0.0 {
                 return Vec::new();
             }
-            let first = (vis.origin.y / ROW_H).floor().max(0.0) as usize;
-            let last = (((vis.origin.y + vis.size.height) / ROW_H).floor() as usize).min(n - 1);
+            let first = (vis.origin.y / row_h()).floor().max(0.0) as usize;
+            let last = (((vis.origin.y + vis.size.height) / row_h()).floor() as usize).min(n - 1);
             if first > last {
                 return Vec::new();
             }
             let w = self.bounds().size.width;
-            (first..=last).map(|i| (i, Rect::new(0.0, i as f64 * ROW_H, w, ROW_H))).collect()
+            (first..=last).map(|i| (i, Rect::new(0.0, i as f64 * row_h(), w, row_h()))).collect()
         }
 
         fn draw(&self, dirty: NSRect) {
@@ -1680,16 +2407,16 @@ mod appkit {
                 style::draw_text_centered(&snap.empty, Rect::new(0.0, 24.0, w, 24.0), &f, c.dim);
                 return;
             }
-            let first = (dirty.origin.y / ROW_H).floor().max(0.0) as usize;
-            let last = (((dirty.origin.y + dirty.size.height) / ROW_H).ceil() as usize).min(snap.rows.len());
+            let first = (dirty.origin.y / row_h()).floor().max(0.0) as usize;
+            let last = (((dirty.origin.y + dirty.size.height) / row_h()).ceil() as usize).min(snap.rows.len());
             let frames = column_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0));
-            let font = style::system_font(12.0, Weight::Regular);
-            let bold = style::system_font(12.0, Weight::Bold);
+            let font = style::system_font(12.0 * zoom(), Weight::Regular);
+            let bold = style::system_font(12.0 * zoom(), Weight::Bold);
             let rules = snap.rules.clone().unwrap_or_else(|| style_rules(&Value::Null));
             let hover = self.ivars().hover.get();
             for i in first..last {
                 let r = &snap.rows[i];
-                let band = Rect::new(0.0, i as f64 * ROW_H, w, ROW_H);
+                let band = Rect::new(0.0, i as f64 * row_h(), w, row_h());
                 let pill = Rect::new(4.0, band.y + 1.0, w - 8.0 - 6.0, band.height - 2.0);
                 if i == snap.selection {
                     style::fill_rounded(pill, 5.0, c.highlight);
@@ -1699,6 +2426,24 @@ mod appkit {
                     NSGraphicsContext::restoreGraphicsState_class();
                 } else if hover == Some(i) {
                     style::fill_rounded(pill, 5.0, style::button_fill(ButtonState::Hover, &c));
+                }
+                if let Some(g) = r.get("__group") {
+                    // `groupedRows` header: ▸/▾, the name, its row count.
+                    let shut = r.contains_key("__collapsed");
+                    let tri = Rect::new(PADDING + 4.0, band.mid_y() - 5.0, 10.0, 10.0);
+                    style::draw_text_centered(if shut { "▸" } else { "▾" }, tri.inset_by(-3.0, -3.0), &bold, c.dim);
+                    let name = if g.is_empty() { "(none)" } else { g.as_str() };
+                    let (nw, nh) = style::text_size(name, &bold);
+                    style::draw_text(name, PADDING + 22.0, band.mid_y() - nh / 2.0, &bold, c.text);
+                    let n = r.get("__count").cloned().unwrap_or_default();
+                    style::draw_text(&n, PADDING + 22.0 + nw + 8.0, band.mid_y() - nh / 2.0, &font, c.dim);
+                    style::hline(PADDING, w - PADDING - 6.0, band.y + band.height - 0.5, c.hairline());
+                    continue;
+                }
+                if let Some(t) = r.get("__loadmore") {
+                    let (_, th) = style::text_size(t, &font);
+                    style::draw_text(t, LEAD + 3.0, band.mid_y() - th / 2.0, &font, c.accent);
+                    continue;
                 }
                 let key = r.get("key").cloned().unwrap_or_default();
                 draw_check(check_rect(band), snap.checked.contains(&key), &c);
@@ -1825,6 +2570,48 @@ mod appkit {
         snap: Rc<RefCell<JiraSnapshot>>,
         colors: Cell<PopupColors>,
         sink: RefCell<Option<Sink>>,
+        /// Divider drag: (divider, start x, start percentages).
+        drag: RefCell<Option<(usize, f64, Vec<f64>)>>,
+        /// A column press that may become a reorder; the live reorder.
+        press_col: Cell<Option<usize>>,
+        reorder: RefCell<Option<(usize, f64)>>,
+        down_x: Cell<f64>,
+        moved: Cell<bool>,
+    }
+
+    fn divider_rect((fx, fw): (f64, f64), h: f64) -> Rect {
+        Rect::new(fx + fw - 4.0, 0.0, 8.0, h)
+    }
+
+    fn filter_rect(fx: f64, fw: f64, h: f64) -> Rect {
+        Rect::new(fx + fw - 16.0 - 5.0, h / 2.0 - 8.0, 16.0, 16.0)
+    }
+
+    fn fit_rect(h: f64) -> Rect {
+        Rect::new(LEAD / 2.0 + 6.0 - 1.0, h / 2.0 - 9.0, 18.0, 18.0)
+    }
+
+    /// `dividerPercents`: move one divider, both neighbours keep ≥ 3 %.
+    fn divider_percents(d: &(usize, f64, Vec<f64>), x: f64, usable: f64) -> Vec<f64> {
+        let (i, start_x, start) = d;
+        let mut p = start.clone();
+        if *i + 1 >= p.len() {
+            return p;
+        }
+        let min = 3.0;
+        let delta = ((x - start_x) / usable.max(1.0) * 100.0).max(min - p[*i]).min(p[*i + 1] - min);
+        p[*i] += delta;
+        p[*i + 1] -= delta;
+        p.iter().map(|v| (v * 10.0).round() / 10.0).collect()
+    }
+
+    /// `reorderTarget`: the slot the dragged column lands in.
+    fn reorder_target(frames: &[(f64, f64)], from: usize, x: f64) -> usize {
+        let mut slot = frames.iter().filter(|(fx, fw)| fx + fw / 2.0 < x).count();
+        if slot > from {
+            slot -= 1;
+        }
+        slot.min(frames.len().saturating_sub(1))
     }
 
     define_class!(
@@ -1843,14 +2630,116 @@ mod appkit {
 
             #[unsafe(method(mouseDown:))]
             fn mouse_down(&self, e: &NSEvent) {
+                // `PopupTableHeaderView.mouseDown`: a divider starts a resize,
+                // a column press may become a reorder drag; sort / filter /
+                // fit wait for mouse-up.
                 let p = self.convertPoint_fromView(e.locationInWindow(), None);
-                let w = self.bounds().size.width;
+                let iv = self.ivars();
+                iv.down_x.set(p.x);
+                iv.moved.set(false);
+                *iv.reorder.borrow_mut() = None;
+                iv.press_col.set(None);
+                let (frames, usable) = self.frames();
+                let n = frames.len();
+                if n > 1 {
+                    if let Some(i) = (0..n - 1).find(|&i| divider_rect(frames[i], self.bounds().size.height).contains(p.x, p.y)) {
+                        *iv.drag.borrow_mut() = Some((i, p.x, frames.iter().map(|(_, w)| w / usable * 100.0).collect()));
+                        return;
+                    }
+                }
+                *iv.drag.borrow_mut() = None;
+                if n > 1 && self.filter_hit(p.x, p.y).is_none() {
+                    iv.press_col.set(frames.iter().position(|(x, w)| p.x >= *x && p.x < x + w));
+                }
+            }
+
+            #[unsafe(method(mouseDragged:))]
+            fn mouse_dragged(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let iv = self.ivars();
+                if let (Some(from), true) = (iv.press_col.get(), iv.drag.borrow().is_none()) {
+                    if iv.reorder.borrow().is_none() && (p.x - iv.down_x.get()).abs() < 6.0 {
+                        return;
+                    }
+                    *iv.reorder.borrow_mut() = Some((from, p.x));
+                    objc2_app_kit::NSCursor::closedHandCursor().set();
+                    self.setNeedsDisplay(true);
+                    return;
+                }
+                let d = iv.drag.borrow().clone();
+                let Some(d) = d else { return };
+                iv.moved.set(true);
+                let (_, usable) = self.frames();
+                self.emit(JiraEvent::ColumnsResized { pcts: divider_percents(&d, p.x, usable), done: false });
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, e: &NSEvent) {
+                let p = self.convertPoint_fromView(e.locationInWindow(), None);
+                let iv = self.ivars();
+                iv.press_col.set(None);
+                let r = iv.reorder.borrow_mut().take();
+                if let Some((from, _)) = r {
+                    objc2_app_kit::NSCursor::arrowCursor().set();
+                    self.setNeedsDisplay(true);
+                    let to = reorder_target(&self.frames().0, from, p.x);
+                    if to != from {
+                        self.emit(JiraEvent::ColumnsReordered { from, to });
+                    }
+                    if let Some(w) = self.window() {
+                        w.invalidateCursorRectsForView(self);
+                    }
+                    return;
+                }
+                let d = iv.drag.borrow_mut().take();
+                if let Some(d) = d {
+                    // A release away from the press commits even when no
+                    // drag event arrived in between.
+                    if iv.moved.get() || (p.x - iv.down_x.get()).abs() >= 2.0 {
+                        let (_, usable) = self.frames();
+                        self.emit(JiraEvent::ColumnsResized { pcts: divider_percents(&d, p.x, usable), done: true });
+                        if let Some(w) = self.window() {
+                            w.invalidateCursorRectsForView(self);
+                        }
+                    }
+                    return;
+                }
+                if (p.x - iv.down_x.get()).abs() >= 5.0 {
+                    return;
+                }
+                if fit_rect(self.bounds().size.height).inset_by(-3.0, -3.0).contains(p.x, p.y) {
+                    self.emit(JiraEvent::FitColumns);
+                    return;
+                }
+                if let Some(i) = self.filter_hit(p.x, p.y) {
+                    let (frames, _) = self.frames();
+                    let (fx, fw) = frames[i];
+                    let h = self.bounds().size.height;
+                    let at = self.convertPoint_toView(NSPoint::new(fx + fw - 21.0, h), None);
+                    let screen = self.window().map(|w| w.convertPointToScreen(at)).unwrap_or(at);
+                    self.emit(JiraEvent::Filter { col: i, x: screen.x, y: screen.y });
+                    return;
+                }
+                let (frames, _) = self.frames();
+                if let Some(i) = frames.iter().position(|(x, w)| p.x >= *x && p.x < x + w) {
+                    self.emit(JiraEvent::Sort(i));
+                }
+            }
+
+            #[unsafe(method(resetCursorRects))]
+            fn reset_cursor_rects(&self) {
+                let (frames, _) = self.frames();
+                let h = self.bounds().size.height;
                 let cols = self.ivars().snap.borrow().columns.clone();
-                let frames = column_frames(&cols, LEAD, w - LEAD - (PADDING + 10.0));
-                if let Some(i) = frames.iter().position(|(x, fw)| p.x >= *x && p.x < x + fw) {
-                    let s = self.ivars().sink.borrow().clone();
-                    if let Some(s) = s {
-                        s(JiraEvent::Sort(i));
+                for (i, &(fx, fw)) in frames.iter().enumerate() {
+                    if cols.get(i).is_some_and(|c| c.filterable) && fw > 30.0 {
+                        self.addCursorRect_cursor(ns(filter_rect(fx, fw, h)), &objc2_app_kit::NSCursor::pointingHandCursor());
+                    }
+                }
+                self.addCursorRect_cursor(ns(fit_rect(h)), &objc2_app_kit::NSCursor::pointingHandCursor());
+                if frames.len() > 1 {
+                    for &f in &frames[..frames.len() - 1] {
+                        self.addCursorRect_cursor(ns(divider_rect(f, h)), &objc2_app_kit::NSCursor::resizeLeftRightCursor());
                     }
                 }
             }
@@ -1875,8 +2764,43 @@ mod appkit {
 
     impl JiraHeaderView {
         fn new(mtm: MainThreadMarker, snap: Rc<RefCell<JiraSnapshot>>, colors: PopupColors) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(HeaderIvars { snap, colors: Cell::new(colors), sink: RefCell::new(None) });
+            let this = Self::alloc(mtm).set_ivars(HeaderIvars {
+                snap,
+                colors: Cell::new(colors),
+                sink: RefCell::new(None),
+                drag: RefCell::new(None),
+                press_col: Cell::new(None),
+                reorder: RefCell::new(None),
+                down_x: Cell::new(0.0),
+                moved: Cell::new(false),
+            });
             unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+
+        /// The column frames and the usable width they share.
+        fn frames(&self) -> (Vec<(f64, f64)>, f64) {
+            let w = self.bounds().size.width;
+            let usable = w - LEAD - (PADDING + 10.0);
+            (column_frames(&self.ivars().snap.borrow().columns, LEAD, usable), usable)
+        }
+
+        /// The filterable column whose chevron (padded) holds the point.
+        fn filter_hit(&self, x: f64, y: f64) -> Option<usize> {
+            let (frames, _) = self.frames();
+            let h = self.bounds().size.height;
+            let cols = self.ivars().snap.borrow().columns.clone();
+            frames.iter().enumerate().position(|(i, &(fx, fw))| {
+                cols.get(i).is_some_and(|c| c.filterable)
+                    && fw > 30.0
+                    && (filter_rect(fx, fw, h).inset_by(-5.0, -4.0).contains(x, y))
+            })
+        }
+
+        fn emit(&self, ev: JiraEvent) {
+            let s = self.ivars().sink.borrow().clone();
+            if let Some(s) = s {
+                s(ev);
+            }
         }
 
         fn draw(&self) {
@@ -1886,7 +2810,7 @@ mod appkit {
             style::fill_rect(Rect::new(0.0, 0.0, w, h), c.mantle());
             let snap = self.ivars().snap.borrow();
             let frames = column_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0));
-            let font = style::system_font(12.0 * 0.86, Weight::Bold);
+            let font = style::system_font(12.0 * 0.86 * zoom(), Weight::Bold);
             // The "fit columns" glyph in the lead gutter.
             style::draw_symbol("arrow.left.and.right", Rect::new(LEAD / 2.0 + 6.0, 0.0, 16.0, h), c.dim.with_alpha(0.9), 9.0);
             for (i, col) in snap.columns.iter().enumerate() {
@@ -1908,10 +2832,26 @@ mod appkit {
                     style::draw_text_left(&spaced, r, &font, color);
                 }
                 if filter {
-                    style::chevron(fr.inset_by(4.0, 4.0), c.dim.with_alpha(0.9));
+                    if snap.filter_active.contains(&i) {
+                        style::fill_rounded(fr, 4.0, c.accent_on().with_alpha(0.22));
+                        style::chevron(fr.inset_by(4.0, 4.0), c.accent_on());
+                    } else {
+                        style::chevron(fr.inset_by(4.0, 4.0), c.dim.with_alpha(0.9));
+                    }
                 }
                 if i + 1 < snap.columns.len() {
                     style::vline(fx + fw - 0.5, 6.0, h - 6.0, c.hairline());
+                }
+            }
+            // A live reorder: tint the dragged column, mark the drop slot.
+            if let Some((from, x)) = *self.ivars().reorder.borrow() {
+                if let Some(&(fx, fw)) = frames.get(from) {
+                    style::fill_rect(Rect::new(fx, 0.0, fw, h), c.accent_on().with_alpha(0.15));
+                }
+                let to = reorder_target(&frames, from, x);
+                if let Some(&(tx, tw)) = frames.get(to) {
+                    let edge = if to > from { tx + tw } else { tx };
+                    style::fill_rect(Rect::new(edge - 1.0, 4.0, 2.0, h - 8.0), c.accent_on());
                 }
             }
             style::hline(0.0, w, h - 1.0, c.hairline());
@@ -2145,9 +3085,9 @@ mod appkit {
         /// `fitTableColumns(sample:)`: measure each column's header and up to
         /// `sample` rows' cells, and solve percentages for the header width.
         pub fn fit_columns(&self, cols: &[ListColumn], rows: &[Record], sample: usize) -> Vec<f64> {
-            let font = style::system_font(12.0, Weight::Regular);
-            let bold = style::system_font(12.0, Weight::Bold);
-            let hfont = style::system_font(12.0 * 0.86, Weight::Bold);
+            let font = style::system_font(12.0 * zoom(), Weight::Regular);
+            let bold = style::system_font(12.0 * zoom(), Weight::Bold);
+            let hfont = style::system_font(12.0 * 0.86 * zoom(), Weight::Bold);
             let need: Vec<f64> = cols
                 .iter()
                 .enumerate()
@@ -2297,7 +3237,7 @@ mod appkit {
             let ty = 50.0 + HEADER_H + 2.0;
             iv.scroll.setFrame(ns(Rect::new(x0, ty, mw, (h - ty).max(0.0))));
             let n = iv.snap.borrow().rows.len();
-            let doc_h = (n as f64 * ROW_H).max(h - ty);
+            let doc_h = (n as f64 * row_h()).max(h - ty);
             iv.table.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(mw, doc_h)));
             iv.inspector.setHidden(!show_insp);
             iv.inspector.setFrame(ns(Rect::new(w - insp, 0.0, insp, h)));
@@ -2308,10 +3248,10 @@ mod appkit {
             let sel = iv.snap.borrow().selection;
             let clip = iv.scroll.contentView();
             let vis = clip.bounds();
-            if vis.size.height < ROW_H {
+            if vis.size.height < row_h() {
                 return;
             }
-            let (top, bot) = (sel as f64 * ROW_H, (sel + 1) as f64 * ROW_H);
+            let (top, bot) = (sel as f64 * row_h(), (sel + 1) as f64 * row_h());
             let mut t = vis.origin.y;
             if bot > vis.origin.y + vis.size.height {
                 t = bot - vis.size.height;
@@ -2405,6 +3345,190 @@ mod tests {
         l.query = "alp".into();
         l.refilter();
         assert_eq!(l.rows.len(), 1);
+    }
+
+    fn filter_list() -> JiraList {
+        let mut l = JiraList::default();
+        l.columns = vec![col("key", 20.0), col("assignee", 20.0), col("status", 20.0), col("labels", 20.0)];
+        for (k, a, s, lb) in [
+            ("A-1", "ann", "To Do", "ui, bug"),
+            ("A-2", "bob", "Done", "bug"),
+            ("A-3", "ann", "In Progress", ""),
+            ("A-4", "", "To Do", "ui"),
+            ("A-5", "cy", "Done", ""),
+        ] {
+            let mut r = Record::new();
+            r.insert("key".into(), k.into());
+            r.insert("assignee".into(), a.into());
+            r.insert("status".into(), s.into());
+            r.insert("labels".into(), lb.into());
+            l.all.push(r);
+        }
+        l.refilter();
+        l
+    }
+
+    fn shown_keys(l: &JiraList) -> Vec<String> {
+        (0..l.rows.len()).map(|i| l.row(i).unwrap()["key"].clone()).collect()
+    }
+
+    #[test]
+    fn filter_options_count_rows_blank_last() {
+        let l = filter_list();
+        let a = l.filter_options("assignee");
+        let got: Vec<(&str, usize)> = a.iter().map(|o| (o.title.as_str(), o.count)).collect();
+        assert_eq!(got, vec![("ann", 2), ("bob", 1), ("cy", 1), ("(unassigned)", 1)]);
+        assert_eq!(a[3].id, EMPTY_VALUE);
+        // Multi-valued cells count once per value.
+        let lb: Vec<(String, usize)> = l.filter_options("labels").into_iter().map(|o| (o.title, o.count)).collect();
+        assert_eq!(lb, vec![("bug".into(), 2), ("ui".into(), 2), ("(empty)".into(), 2)]);
+    }
+
+    #[test]
+    fn column_filters_are_in_per_column_and_across_columns() {
+        let mut l = filter_list();
+        l.toggle_filter("assignee", "ann");
+        l.toggle_filter("assignee", EMPTY_VALUE);
+        // assignee IN (ann, unassigned)
+        assert_eq!(shown_keys(&l), vec!["A-1", "A-3", "A-4"]);
+        l.toggle_filter("status", "To Do");
+        // … AND status IN (To Do)
+        assert_eq!(shown_keys(&l), vec!["A-1", "A-4"]);
+        assert_eq!(l.snapshot().filter_active, BTreeSet::from([1, 2]));
+        // A multi-valued cell matches when any of its values is picked.
+        l.clear_filter("status");
+        l.clear_filter("assignee");
+        l.toggle_filter("labels", "ui");
+        assert_eq!(shown_keys(&l), vec!["A-1", "A-4"]);
+        // Unticking the last value drops the filter.
+        l.toggle_filter("labels", "ui");
+        assert!(l.col_filters.is_empty());
+        assert_eq!(l.rows.len(), 5);
+    }
+
+    #[test]
+    fn column_filter_drops_when_the_column_goes() {
+        let mut l = filter_list();
+        l.toggle_filter("status", "Done");
+        assert_eq!(l.rows.len(), 2);
+        l.columns.retain(|c| c.field != "status");
+        l.refilter();
+        assert!(l.col_filters.is_empty());
+        assert_eq!(l.rows.len(), 5);
+    }
+
+    #[test]
+    fn group_by_builds_headers_and_collapses() {
+        let mut l = filter_list();
+        l.group_by = Some("assignee".into());
+        l.refilter();
+        let heads: Vec<(String, String)> = (0..l.rows.len())
+            .filter_map(|i| l.row(i).unwrap().get("__group").map(|g| (g.clone(), l.row(i).unwrap()["__count"].clone())))
+            .collect();
+        // Most rows first; "Unassigned" sorts last.
+        assert_eq!(heads, vec![("ann".into(), "2".into()), ("bob".into(), "1".into()), ("cy".into(), "1".into()), ("Unassigned".into(), "1".into())]);
+        assert_eq!(l.rows.len(), 4 + 5);
+        // Clicking a header collapses it.
+        assert!(l.activate_synthetic(0));
+        assert_eq!(l.rows.len(), 4 + 3);
+        assert!(l.row(0).unwrap().contains_key("__collapsed"));
+        l.toggle_all_groups(true);
+        assert_eq!(l.rows.len(), 4);
+        l.toggle_all_groups(false);
+        assert_eq!(l.rows.len(), 9);
+        // A real row is not synthetic.
+        assert!(!l.activate_synthetic(1));
+        assert_eq!(l.shown_records().len(), 5);
+    }
+
+    #[test]
+    fn status_category_grouping_uses_fixed_order() {
+        let mut l = filter_list();
+        l.directory = json!({"statusCategories": {"To Do": "new", "In Progress": "indeterminate", "Done": "done"}});
+        l.group_by = Some("statusCategory".into());
+        l.refilter();
+        let heads: Vec<String> = (0..l.rows.len()).filter_map(|i| l.row(i).unwrap().get("__group").cloned()).collect();
+        assert_eq!(heads, vec!["To Do", "In Progress", "Done"]);
+    }
+
+    #[test]
+    fn page_size_adds_a_load_more_row() {
+        let mut l = filter_list();
+        l.page_size = 2;
+        l.refilter();
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.row(2).unwrap()["__loadmore"], "load 3 more…");
+        assert!(l.activate_synthetic(2));
+        assert_eq!(l.rows.len(), 5);
+        assert_eq!(l.row(4).unwrap()["__loadmore"], "load 1 more…");
+        assert!(l.activate_synthetic(4));
+        assert_eq!(l.rows.len(), 5);
+        assert!(l.rows.iter().all(|&i| i < l.all.len()));
+        // A query shows every match.
+        l.visible_offset = 0;
+        l.handle(JiraEvent::Query("A-".into()));
+        assert_eq!(l.rows.len(), 5);
+    }
+
+    #[test]
+    fn escape_steps_back_out() {
+        let mut l = filter_list();
+        l.tabs = vec![JiraTab { path: "/x/a.json".into(), file: "a.json".into(), title: "A".into(), columns: l.columns.clone(), badge: None }];
+        l.place = Some(JiraPlace::Pin("label:x".into()));
+        l.query = "zzz".into();
+        assert!(l.escape_step());
+        assert!(l.query.is_empty());
+        assert!(l.escape_step());
+        assert_eq!(l.place, Some(JiraPlace::Tab(0)));
+        assert!(!l.escape_step());
+    }
+
+    #[test]
+    fn stars_and_pins_queue_poller_writes() {
+        let mut l = filter_list();
+        l.toggle_star(0);
+        assert!(l.favs.contains("A-1"));
+        let w = l.pending_writes.pop().unwrap();
+        assert_eq!(w.args[..3], ["--favorite".to_string(), "add".into(), "A-1".into()]);
+        assert!(w.stdin.as_deref().unwrap().contains("\"key\":\"A-1\""));
+        l.toggle_star(0);
+        assert!(!l.favs.contains("A-1"));
+        assert_eq!(l.pending_writes.pop().unwrap().args[1], "remove");
+        l.set_pinned_labels(&["ui".into()], true);
+        assert_eq!(l.pinned_labels(), vec!["ui"]);
+        assert_eq!(l.pending_writes.pop().unwrap().args, vec!["--pin-label", "add", "ui"]);
+        l.toggle_pin_board("9");
+        assert_eq!(l.pending_writes.pop().unwrap().args, vec!["--pin-board", "add", "9"]);
+    }
+
+    #[test]
+    fn release_rows_and_urls() {
+        let mut r = Record::new();
+        r.insert("key".into(), "P-1.2".into());
+        r.insert("project".into(), "P".into());
+        r.insert("release".into(), "1.2".into());
+        r.insert("title".into(), "1.2".into());
+        assert!(is_release_row(&r));
+        assert_eq!(browse_url(&r, "https://j").unwrap(), "https://j/issues/?jql=project%20%3D%20%22P%22%20AND%20fixVersion%20%3D%20%221.2%22");
+        r.insert("versionId".into(), "77".into());
+        assert_eq!(browse_url(&r, "https://x.atlassian.net").unwrap(), "https://x.atlassian.net/projects/P/versions/77/tab/release-report-all-issues");
+        let mut i = Record::new();
+        i.insert("key".into(), "P-9".into());
+        assert!(!is_release_row(&i));
+        assert_eq!(browse_url(&i, "https://j").unwrap(), "https://j/browse/P-9");
+    }
+
+    #[test]
+    fn reorder_and_column_save_spec() {
+        let mut l = filter_list();
+        l.move_column(0, 2);
+        let f: Vec<&str> = l.columns.iter().map(|c| c.field.as_str()).collect();
+        assert_eq!(f, vec!["assignee", "status", "key", "labels"]);
+        l.set_column_widths(&[10.0, 20.0, 30.0, 40.0]);
+        // No config.json job owns it: commands.toml's spec comes back.
+        let spec = l.save_columns().unwrap();
+        assert!(spec.starts_with("assignee:"), "{spec}");
+        assert!(spec.contains(":10:"), "{spec}");
     }
 
     #[test]

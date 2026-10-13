@@ -2455,7 +2455,7 @@ pub fn helper_serialize_columns(cols: &[ListColumn], titles: bool) -> Result<Str
     Ok(str_field(&out, "spec"))
 }
 
-fn jira_script() -> String {
+pub fn jira_script() -> String {
     // repo checkout: rust/ws-rs/src/views/jira.rs -> ../../../jira/jira_poll.py
     let dir = env!("CARGO_MANIFEST_DIR");
     format!("{dir}/../../jira/jira_poll.py")
@@ -2474,7 +2474,7 @@ fn python3_candidates() -> Vec<String> {
     c
 }
 
-fn find_python3() -> Option<String> {
+pub fn find_python3() -> Option<String> {
     for cand in python3_candidates() {
         let ok = crate::app::process_run::run_process(
             &cand,
