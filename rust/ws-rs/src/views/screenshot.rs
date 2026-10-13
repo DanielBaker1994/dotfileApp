@@ -1484,6 +1484,32 @@ impl WheelState {
 pub struct SaveCardState {
     pub display: usize,
     pub field: String,
+    /// Selected `[start, end)` char range of `field` (Swift `ShotSaveCard.focus`
+    /// selects the file-name stem so typing replaces it); typing, paste and
+    /// Delete replace it, ⌘A selects everything.
+    pub sel: Option<(usize, usize)>,
+}
+
+impl SaveCardState {
+    /// Replace the selection (or append) with `text`.
+    pub fn insert(&mut self, text: &str) {
+        let n = self.field.chars().count();
+        let (a, b) = self.sel.take().map(|(a, b)| (a.min(n), b.min(n))).unwrap_or((n, n));
+        let head: String = self.field.chars().take(a).collect();
+        let tail: String = self.field.chars().skip(b).collect();
+        self.field = format!("{head}{text}{tail}");
+    }
+    /// Delete the selection, or the last char.
+    pub fn backspace(&mut self) {
+        if self.sel.is_some() {
+            self.insert("");
+        } else {
+            self.field.pop();
+        }
+    }
+    pub fn select_all(&mut self) {
+        self.sel = Some((0, self.field.chars().count()));
+    }
 }
 
 #[derive(Debug)]
@@ -2440,7 +2466,35 @@ impl ShotSession {
             if self.save_card.is_some() {
                 if code == KEY_DELETE || code == KEY_FORWARD_DELETE {
                     if let Some(card) = self.save_card.as_mut() {
-                        card.field.pop();
+                        card.backspace();
+                    }
+                    return true;
+                }
+                // Rule 1: edit shortcuts work in every text input.
+                if (k.cmd || k.ctrl) && ch == Some('v') {
+                    if let Some(t) = crate::platform::get_text() {
+                        let t: String = t.chars().filter(|c| !c.is_control()).collect();
+                        if let Some(card) = self.save_card.as_mut() {
+                            card.insert(&t);
+                        }
+                    }
+                    return true;
+                }
+                if k.cmd && ch == Some('a') {
+                    if let Some(card) = self.save_card.as_mut() {
+                        card.select_all();
+                    }
+                    return true;
+                }
+                if (k.cmd || k.ctrl) && matches!(ch, Some('c') | Some('x')) {
+                    if let Some(card) = self.save_card.as_mut() {
+                        let n = card.field.chars().count();
+                        let (a, b) = card.sel.unwrap_or((0, n));
+                        let t: String = card.field.chars().skip(a).take(b.saturating_sub(a)).collect();
+                        crate::platform::set_text(&t);
+                        if ch == Some('x') {
+                            card.insert("");
+                        }
                     }
                     return true;
                 }
@@ -2452,7 +2506,7 @@ impl ShotSession {
                 if !k.cmd && !k.ctrl && !k.opt {
                     if let Some(c) = k.chars.filter(|c| !c.is_control()) {
                         if let Some(card) = self.save_card.as_mut() {
-                            card.field.push(c);
+                            card.insert(c.encode_utf8(&mut [0; 4]));
                         }
                         return true;
                     }
@@ -2772,9 +2826,14 @@ impl ShotSession {
             &ShotFiles::expand(&self.cfg.filename_pattern),
             &self.cfg.save_format,
         );
+        let field = abbreviate_tilde(&path);
+        let (loc, len) = ShotSaveCard::focus_range(&field);
+        // `focus_range` counts UTF-16 units; paths here are BMP in practice, so
+        // chars line up.
         self.save_card = Some(SaveCardState {
             display: d,
-            field: abbreviate_tilde(&path),
+            field,
+            sel: Some((loc, loc + len)),
         });
     }
 
@@ -5234,7 +5293,7 @@ mod overlay {
             // an AppKit field, and the card + value paint here).
             if let Some(card) = &session.save_card {
                 if card.display == d {
-                    draw_save_card(ctx, session, full, &card.field);
+                    draw_save_card(ctx, session, full, &card.field, card.sel);
                 }
             }
         }
@@ -5836,7 +5895,7 @@ mod overlay {
     }
 
     /// `ShotSaveCard`: the save-as card frame, title, value and hint.
-    fn draw_save_card(ctx: &CGContext, session: &ShotSession, full: Rect, path: &str) {
+    fn draw_save_card(ctx: &CGContext, session: &ShotSession, full: Rect, path: &str, sel: Option<(usize, usize)>) {
         let cfg = &session.cfg;
         let size = super::Size::new(ShotSaveCard::WIDTH, ShotSaveCard::HEIGHT);
         let o = ShotHelpCard::centered_origin(full, size);
@@ -5860,6 +5919,14 @@ mod overlay {
         set_stroke(ctx, ShotColor::WHITE.with_alpha(0.7));
         CGContext::set_line_width(Some(ctx), 1.0);
         CGContext::stroke_rect(Some(ctx), cg_rect(field));
+        if let Some((a, b)) = sel.filter(|(a, b)| b > a) {
+            let pre: String = path.chars().take(a).collect();
+            let mid: String = path.chars().skip(a).take(b - a).collect();
+            let x0 = field.x + 4.0 + super::shot_cg::measure_text_width(&pre, 12.0, false);
+            let w = super::shot_cg::measure_text_width(&mid, 12.0, false);
+            set_fill(ctx, cfg.ui_color.with_alpha(0.45));
+            CGContext::fill_rect(Some(ctx), cg_rect(Rect::new(x0, field.y + 2.0, w, field.h - 4.0)));
+        }
         draw_text_at(
             ctx,
             path,
@@ -9154,6 +9221,7 @@ mod tests {
         s.save_card = Some(SaveCardState {
             display: 0,
             field: "/tmp/x.png".to_string(),
+            sel: None,
         });
 
         s.escape();
@@ -9763,12 +9831,28 @@ mod tests {
     }
 
     #[test]
+    fn save_card_selection_replaces_stem_and_select_all() {
+        let mut c = SaveCardState { display: 0, field: "~/Shots/a.png".into(), sel: None };
+        let (loc, len) = ShotSaveCard::focus_range(&c.field);
+        c.sel = Some((loc, loc + len));
+        c.insert("new");
+        assert_eq!(c.field, "~/Shots/new.png");
+        c.select_all();
+        c.insert("/tmp/x.png");
+        assert_eq!(c.field, "/tmp/x.png");
+        c.select_all();
+        c.backspace();
+        assert_eq!(c.field, "");
+    }
+
+    #[test]
     fn save_card_field_is_typed_here() {
         let mut s = session();
         s.test_select(Rect::new(0.0, 0.0, 100.0, 100.0), Some(0));
         s.save_card = Some(SaveCardState {
             display: 0,
             field: "/tmp/x.png".to_string(),
+            sel: None,
         });
         assert!(s.handle_key(&shot_key_event("a").unwrap()));
         assert_eq!(s.save_card.as_ref().unwrap().field, "/tmp/x.pnga");

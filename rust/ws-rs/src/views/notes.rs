@@ -572,6 +572,29 @@ impl NotesTabs {
     pub fn is_dismissed(&self, path: &str) -> bool {
         self.dismissed.contains(path)
     }
+    /// The dismissed set, sorted (what [`save_dismissed`] persists).
+    pub fn dismissed_paths(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.dismissed.iter().cloned().collect();
+        v.sort();
+        v
+    }
+    pub fn set_dismissed(&mut self, paths: impl IntoIterator<Item = String>) {
+        self.dismissed = paths.into_iter().collect();
+    }
+}
+
+const DISMISSED_KEY: &str = "notes.dismissed";
+
+/// The persisted dismissed-notes set (Swift `DismissedNotes`): closing a tab
+/// must survive a restart, since the tabs are rebuilt from `[notes] paths`.
+pub fn load_dismissed() -> Vec<String> {
+    crate::platform::get_string(DISMISSED_KEY)
+        .map(|s| s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+pub fn save_dismissed(paths: &[String]) {
+    crate::platform::set_string(DISMISSED_KEY, &paths.join("\n"));
 }
 
 /// `lastWrite` from the file's modification time (unix seconds).
@@ -3140,7 +3163,12 @@ mod macos {
         let raw = setting("notes", "paths").unwrap_or_default();
         // Directories in `[notes] paths` become pinned tree roots; files stay tabs.
         let (roots, paths) = crate::views::notes_tree::split_roots(&raw, &|p| Path::new(p).is_dir(), &|p| Path::new(p).exists());
-        for p in &paths {
+        model.tabs.set_dismissed(load_dismissed());
+        // A tab the user closed stays closed across restarts, unless that would
+        // leave the window with no note at all.
+        let live: Vec<&String> = paths.iter().filter(|p| !model.tabs.is_dismissed(p)).collect();
+        let keep: Vec<&String> = if live.is_empty() { paths.iter().collect() } else { live };
+        for p in keep {
             model.tabs.append(p);
         }
         let show_hidden = matches!(setting("notes", "tree-show-hidden").as_deref(), Some("true") | Some("yes") | Some("on") | Some("1"));
@@ -3744,15 +3772,18 @@ mod macos {
             // no change and never load it: the editor (and prose page) kept the
             // previous note and typing / paste went into (and saved) that file.
             self.model.tabs.append(&plan.path);
+            save_dismissed(&self.model.tabs.dismissed_paths());
             self.repaint_rows();
             self.open_note(&plan.path);
         }
 
         /// The sidebar ✕ on tab `i` (`onCloseTab`).
         pub fn close_tab(&mut self, i: usize) {
-            if self.model.tabs.close(i).is_none() {
+            let Some(closed) = self.model.tabs.close(i) else {
                 return;
-            }
+            };
+            self.model.tabs.dismiss(&closed);
+            save_dismissed(&self.model.tabs.dismissed_paths());
             let n = self.model.tabs.tabs.len();
             if n > 0 {
                 let sel = self.model.tabs.selected.min(n - 1);
@@ -4308,6 +4339,7 @@ mod macos {
                 }
                 None => {
                     self.model.tabs.append(path);
+                    save_dismissed(&self.model.tabs.dismissed_paths());
                     self.model.refresh_sidebar(now_secs());
                     self.rebuild_sidebar_rows();
                 }

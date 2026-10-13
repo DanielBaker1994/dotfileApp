@@ -8,8 +8,8 @@
 //! highlighting) and the preview/info pane, and [`QuickLook`] ports the
 //! `QLPreviewPanelDataSource`/`QLPreviewPanelDelegate` pair
 //! ([`FileBrowser::toggle_quick_look`], [`FileBrowser::refresh_quick_look`]).
-//! Not yet ported: drag-and-drop ([`FileList`] carries no drop state) and the
-//! per-row `NSWorkspace` file icons.
+//! Drag-and-drop lives in the view (`files_view`: drag out and drop in); the
+//! per-row `NSWorkspace` file icons are not modelled here.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -1431,6 +1431,9 @@ impl FileBrowser {
                     self.list.selection = row;
                 }
             }
+            E::BlankMenu { .. } => self.list.marked.clear(),
+            // The transfer itself is the frontend's (`FileOps`).
+            E::Drop { .. } => {}
             E::PreviewOpen(i) => {
                 let target = match self.preview().1 {
                     Preview::Folder(rows) => rows.get(i).cloned(),
@@ -1615,6 +1618,18 @@ impl FileBrowser {
             .filter(|&i| !self.list.rows[i].is_parent())
             .map(|i| self.list.rows[i].path.clone())
             .collect()
+    }
+
+    /// Swift `select(path:)`: move the selection to `path` when it is listed.
+    pub fn select_path(&mut self, path: &str) -> bool {
+        match self.list.rows.iter().position(|e| e.path == path) {
+            Some(i) => {
+                self.list.marked.clear();
+                self.list.selection = i;
+                true
+            }
+            None => false,
+        }
     }
 
     /// `opsDirectory`.

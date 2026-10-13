@@ -53,6 +53,11 @@ pub struct FilesSnapshot {
 pub enum FilesEvent {
     Click { row: usize, cmd: bool, shift: bool, double: bool },
     RowMenu { row: usize, x: f64, y: f64 },
+    /// Right-click on the empty part of the list (New Folder / Paste …).
+    BlankMenu { x: f64, y: f64 },
+    /// Files dropped on the list: onto folder row `row`, or (`None`) the
+    /// whole listing. `copy` = Option held, `force_move` = Command held.
+    Drop { row: Option<usize>, paths: Vec<String>, copy: bool, force_move: bool },
     PreviewOpen(usize),
     Parent,
     TogglePin,
@@ -115,6 +120,7 @@ mod appkit {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+    use objc2_app_kit::NSDraggingInfo;
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSControlTextEditingDelegate, NSEvent,
         NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource,
@@ -194,6 +200,9 @@ mod appkit {
         /// A plain click on an already-marked row is held back until mouse-up
         /// so dragging a multi-selection does not collapse it first.
         pending_click: Cell<Option<(usize, bool)>>,
+        /// The drop target while a drag hovers: -2 none, -1 the whole list,
+        /// otherwise the folder row index.
+        drop_row: Cell<i64>,
     }
 
     define_class!(
@@ -322,6 +331,8 @@ mod appkit {
                 let i = (p.y / self.row_h()).floor();
                 let n = self.ivars().rows.borrow().len();
                 if i < 0.0 || i as usize >= n {
+                    let s = NSEvent::mouseLocation();
+                    self.emit(FilesEvent::BlankMenu { x: s.x, y: s.y });
                     return;
                 }
                 let s = NSEvent::mouseLocation();
@@ -331,6 +342,42 @@ mod appkit {
             #[unsafe(method(drawRect:))]
             fn draw_rect(&self, dirty: NSRect) {
                 self.draw(dirty);
+                self.draw_drop_ring();
+            }
+
+            #[unsafe(method(draggingEntered:))]
+            fn dragging_entered(&self, info: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> NSDragOperation {
+                self.drag_update(info)
+            }
+
+            #[unsafe(method(draggingUpdated:))]
+            fn dragging_updated(&self, info: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> NSDragOperation {
+                self.drag_update(info)
+            }
+
+            #[unsafe(method(draggingExited:))]
+            fn dragging_exited(&self, _info: Option<&ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>>) {
+                self.ivars().drop_row.set(-2);
+                self.setNeedsDisplay(true);
+            }
+
+            #[unsafe(method(performDragOperation:))]
+            fn perform_drag(&self, info: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> objc2::runtime::Bool {
+                let target = self.drop_target(info);
+                self.ivars().drop_row.set(-2);
+                self.setNeedsDisplay(true);
+                let paths = dragged_paths(info);
+                if paths.is_empty() {
+                    return objc2::runtime::Bool::NO;
+                }
+                let mods = NSEvent::modifierFlags_class();
+                self.emit(FilesEvent::Drop {
+                    row: target,
+                    paths,
+                    copy: mods.contains(NSEventModifierFlags::Option),
+                    force_move: mods.contains(NSEventModifierFlags::Command),
+                });
+                objc2::runtime::Bool::YES
             }
         }
 
@@ -355,7 +402,73 @@ mod appkit {
         }
     );
 
+    /// The file paths on a dragging pasteboard.
+    fn dragged_paths(info: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> Vec<String> {
+        let pb = info.draggingPasteboard();
+        let ty = NSString::from_str("public.file-url");
+        pb.pasteboardItems()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|it| it.stringForType(&ty))
+                    .filter_map(|s| NSURL::URLWithString(&s))
+                    .filter_map(|u| u.path().map(|p| p.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     impl FileListView {
+        /// The folder row under the pointer (not `..`, not one of the dragged
+        /// paths), else `None` = drop into the listing itself.
+        fn drop_target(&self, info: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> Option<usize> {
+            let p = self.convertPoint_fromView(info.draggingLocation(), None);
+            let i = (p.y / self.row_h()).floor();
+            let rows = self.ivars().rows.borrow();
+            if i < 0.0 || i as usize >= rows.len() {
+                return None;
+            }
+            let e = &rows[i as usize];
+            if !e.is_dir || e.is_parent() {
+                return None;
+            }
+            let dragged = dragged_paths(info);
+            (!dragged.contains(&e.path)).then_some(i as usize)
+        }
+
+        fn drag_update(&self, info: &ProtocolObject<dyn objc2_app_kit::NSDraggingInfo>) -> NSDragOperation {
+            let t = self.drop_target(info).map(|r| r as i64).unwrap_or(-1);
+            if self.ivars().drop_row.get() != t {
+                self.ivars().drop_row.set(t);
+                self.setNeedsDisplay(true);
+            }
+            let allowed = info.draggingSourceOperationMask();
+            let mods = NSEvent::modifierFlags_class();
+            if mods.contains(NSEventModifierFlags::Option) && allowed.contains(NSDragOperation::Copy) {
+                NSDragOperation::Copy
+            } else if allowed.contains(NSDragOperation::Move) {
+                NSDragOperation::Move
+            } else {
+                NSDragOperation::Copy
+            }
+        }
+
+        /// The ring around the drop target (a folder row or the whole list).
+        fn draw_drop_ring(&self) {
+            let t = self.ivars().drop_row.get();
+            if t == -2 {
+                return;
+            }
+            let c = self.ivars().colors.get();
+            let r = if t < 0 {
+                let b = self.bounds();
+                Rect::new(b.origin.x + 1.0, b.origin.y + 1.0, b.size.width - 2.0, b.size.height - 2.0)
+            } else {
+                self.row_rect(t as usize).inset_by(4.0, 1.0)
+            };
+            style::stroke_rounded(r, 4.0, 2.0, c.accent_on());
+        }
+
         pub fn new(mtm: MainThreadMarker, colors: PopupColors, preview: bool) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(FileListIvars {
                 rows: RefCell::new(Vec::new()),
@@ -369,8 +482,14 @@ mod appkit {
                 tracking: RefCell::new(None),
                 drag_origin: Cell::new(None),
                 pending_click: Cell::new(None),
+                drop_row: Cell::new(-2),
             });
-            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+            let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            if !preview {
+                let ty = unsafe { objc2_app_kit::NSPasteboardTypeFileURL };
+                v.registerForDraggedTypes(&NSArray::from_slice(&[ty]));
+            }
+            v
         }
 
         /// Start a real file drag (`NSURL` writers) so the rows can be dropped
