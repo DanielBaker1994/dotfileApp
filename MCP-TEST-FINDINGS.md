@@ -232,3 +232,22 @@ finish_reason", `runs/L8/events.jsonl:104`); the run itself completed.
 AGENTS.md said headless screenshot verbs capture and that unknown `do:` echoes state: both were
 wrong after d21d2b1 and are now corrected. The "§5 Then re-run" plan above has been carried out
 except L9; see `PLAN-mcp-wave3.md` for what comes next.
+
+## 8. Wave 3 (2026-10-13): owner decisions, ks_help, first GUI run
+
+Owner decisions: `PLAN-mcp-wave3.md` §6.1. Landed: `7de045a` (headless refuses window-only verbs;
+`do:back` walks a 32-deep view history; `do:show[:<view>]`; `board:*` reports "not implemented in the
+Rust port yet"), `1e96003` (first description lines ≤110 chars, offline `ks_help`). The Jira board feature
+itself (list, columns, sprint/mode, pin — 8 Swift sub-verbs at `608d07d`) is unported; a DeepSeek attempt
+built a fake model disconnected from the real view and was rejected.
+
+**First GUI run** (`.build/mcp-hammer/wave3/gui-run.sh`, DeepSeek v4-pro, 12 min): tests a copy of the
+bundle holding the fresh release binary, re-signed with "kitchen-sink codesign" (same designated
+requirement, so TCC applies; `KS_MCP_SANDBOX_APP` selects it). Live app pid unchanged and AeroSpace
+restored. Phase A 13/13 pass: GUI mode does not hit the headless refusal; 7 views open with real frames
+and windows; back/back/hide/show correct in the real app; `compare --wait` returned 0.06 s after `do:hide`.
+`screenshot -g` is **not** capture-free (still runs the overlay), so geometry cross-checks were skipped.
+Phase B produced no view captures: `pane-shot` renders **herdr terminal panes** (and `--file` renders),
+not shared-window views, and the sandbox HOME has no herdr. Pixel testing of views needs a non-interactive
+window capture verb (or symlinking herdr into the sandbox HOME for terminal panes). Raw results:
+`.build/mcp-hammer/wave3/gui/`.

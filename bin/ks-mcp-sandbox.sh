@@ -30,7 +30,10 @@ SANDBOX="${KS_MCP_SANDBOX:-$ROOT/.build/mcp-sandbox}"
 BIN="$ROOT/.build/rust-target/release/kitchen-sink"
 SOCK="$SANDBOX/tmp/ws-notes.sock"
 PIDFILE="$SANDBOX/pid"
-APP="$ROOT/kitchen-sink.app"
+# `--gui` launches this bundle; point it at a copy holding the fresh release
+# binary (signed with the same identity, so TCC grants apply) to GUI-test code
+# newer than the live app's last `./ws build`.
+APP="${KS_MCP_SANDBOX_APP:-$ROOT/kitchen-sink.app}"
 AERO_MARK="$SANDBOX/aerospace-disabled"
 LOG="$SANDBOX/daemon.log"
 
