@@ -1002,6 +1002,32 @@ impl JiraList {
         })
     }
 
+    /// `showReleasePin` — `--release-view KEY` writes one file per release
+    /// from the issue cache (local, no request); show the pinned release's.
+    pub fn open_release(&mut self, key: &str) -> Result<(), String> {
+        let out = crate::views::jira::run_jira_poll(&["--release-view", key], None)?;
+        let dir = out.get("dir").and_then(Value::as_str).ok_or("release: no dir")?;
+        let file = out
+            .get("releases")
+            .and_then(Value::as_array)
+            .and_then(|a| a.iter().find(|r| r.get("key").and_then(Value::as_str) == Some(key)))
+            .and_then(|r| r.get("file").and_then(Value::as_str))
+            .ok_or_else(|| format!("release {key}: not in the synced releases"))?;
+        let cols = self.default_columns();
+        self.show_pin_file(key, &format!("{dir}/{file}"), cols);
+        Ok(())
+    }
+
+    /// `showLabelPin` — `--label-view NAME` -> the issues carrying the label.
+    pub fn open_label(&mut self, name: &str) -> Result<(), String> {
+        let out = crate::views::jira::run_jira_poll(&["--label-view", name], None)?;
+        let dir = out.get("dir").and_then(Value::as_str).ok_or("label: no dir")?;
+        let file = out.get("file").and_then(Value::as_str).ok_or("label: no file")?;
+        let cols = self.default_columns();
+        self.show_pin_file(&format!("{LABEL_PREFIX}{name}"), &format!("{dir}/{file}"), cols);
+        Ok(())
+    }
+
     /// `showMyWorkPin` — `jira_poll.py --my-work` → `<dir>/<id>.json`.
     pub fn open_my_work(&mut self, id: &str) -> Result<(), String> {
         let out = crate::views::jira::run_jira_poll(&["--my-work"], None)?;
@@ -1186,7 +1212,7 @@ impl JiraList {
             .collect();
         let (selected, pinned_selected) = match &self.place {
             Some(JiraPlace::Tab(i)) => (Some(*i), None),
-            Some(JiraPlace::Pin(k)) => (None, Some(k.clone())),
+            Some(JiraPlace::Pin(_)) => (None, Some(self.sidebar_selected())),
             None => (None, None),
         };
         SidebarModel {
@@ -1424,6 +1450,10 @@ impl JiraList {
                     let _ = self.open_board(id);
                 } else if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
                     let _ = self.open_view(spec);
+                } else if let Some(name) = key.strip_prefix(LABEL_PREFIX) {
+                    let _ = self.open_label(name);
+                } else {
+                    let _ = self.open_release(&key);
                 }
             }
             JiraEvent::Sidebar(_) => {}

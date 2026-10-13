@@ -8089,7 +8089,7 @@ mod daemon_ui {
 
         fn jira_event(&self, ev: crate::views::jira_view::JiraEvent) {
             use crate::ui::sidebar::SidebarEvent;
-            use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
+            use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, LABEL_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
             match ev {
                 E::Click { row, double } => {
                     self.jira_surface(|l| l.selection = row);
@@ -8212,7 +8212,10 @@ mod daemon_ui {
                         if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
                             return (!l.open_view(spec)).then(|| format!("board view {spec} not synced yet"));
                         }
-                        Some(format!("{key}: not available in the Rust port yet"))
+                        if let Some(name) = key.strip_prefix(LABEL_PREFIX) {
+                            return l.open_label(name).err();
+                        }
+                        l.open_release(&key).err()
                     });
                     if let Some(Some(e)) = err {
                         self.ivars().controller.log(&format!("jira: {e}"));
