@@ -555,6 +555,7 @@ impl ControllerInner {
             "activations": self.activations,
             "frontmostPid": self.frontmost_pid,
             "tools": Value::Object(self.tools.clone()),
+            "lastKey": self.last_key.clone(),
             "headerStyle": self.settings.header_style.raw(),
             "terminalPanel": self
                 .terminal_panel_state
@@ -1253,7 +1254,16 @@ impl SwitcherController {
             }
             return;
         }
-        let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else { return };
+        // `jira-poll-on` with the poller off: the network checks and the UI
+        // push need the daemon UI; a headless daemon re-enables directly (and
+        // updates state) so `jira-poll-off` can be undone without a window.
+        let Some(queue) = self.inner.lock().unwrap().ui_queue.clone() else {
+            jp::set_enabled(true, false);
+            let _ = self.reload_config();
+            self.log("jira: [jira] enabled = true (jira-poll on)");
+            self.open(SlotView::Jira);
+            return;
+        };
         std::thread::spawn(move || {
             // `enableJiraChecked`: a missing / incomplete config opens the
             // setup window with the reason instead of refusing.
@@ -1612,12 +1622,10 @@ impl SwitcherController {
         }
         if let Some(rest) = action.strip_prefix("compare:") {
             if let Some(arg) = rest.strip_prefix("open-sub:") {
-                self.compare_open(arg, true);
-                return None;
+                return self.compare_open(arg, true);
             }
             if let Some(arg) = rest.strip_prefix("open:") {
-                self.compare_open(arg, false);
-                return None;
+                return self.compare_open(arg, false);
             }
             if rest == "back" {
                 self.back(true);
@@ -1675,6 +1683,9 @@ impl SwitcherController {
             return Some(json!({ "error": "pane:h|j|k|l|focus:ID" }));
         }
         if let Some(spec) = action.strip_prefix("key:") {
+            if spec.is_empty() {
+                return Some(json!({ "error": "key:<spec>" }));
+            }
             self.inner.lock().unwrap().last_key = spec.to_string();
             return None;
         }
@@ -1781,6 +1792,14 @@ impl SwitcherController {
             // `tools.<name>` entry in state (F3).
             return Some(json!({ "error": format!("not a tool panel: {name}") }));
         } else if let Some(name) = action.strip_prefix("tool-close:") {
+            // Same set `tool:` accepts (incl. `paths`); a bogus name is an
+            // error instead of a silent no-op.
+            if name == "paths" {
+                return self.do_host_action("paths:hide");
+            }
+            if ToolKind::from_name(name).is_none() {
+                return Some(json!({ "error": format!("not a tool panel: {name}") }));
+            }
             {
                 let mut inner = self.inner.lock().unwrap();
                 if let Some(entry) = inner.tools.get_mut(name) {
@@ -1788,13 +1807,7 @@ impl SwitcherController {
                         o.insert("shown".into(), json!(false));
                     }
                 }
-                if ToolKind::is_panel(name) {
-                    inner.ui_push(UiCommand::ToolClose(name.to_string()));
-                    return None;
-                }
-            }
-            if name == "paths" {
-                return self.do_host_action("paths:hide");
+                inner.ui_push(UiCommand::ToolClose(name.to_string()));
             }
             return None;
         }
@@ -2115,9 +2128,9 @@ impl SwitcherController {
     /// `do:compare:open[:sub]:LEFT|RIGHT` — `showCompare` + `openPair` (Swift
     /// `compareTestDo`): present the compare view (pushing the compareText
     /// sub-view for `open-sub`) and load the pair into the shared model.
-    fn compare_open(&self, arg: &str, sub: bool) {
+    fn compare_open(&self, arg: &str, sub: bool) -> Option<Value> {
         let Some(model) = &self.compare_model else {
-            return;
+            return None;
         };
         let mut parts = arg.splitn(2, '|');
         let l = parts
@@ -2130,6 +2143,13 @@ impl SwitcherController {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // A path that does not exist must refuse (and open nothing) instead of
+        // opening a session for a phantom file.
+        for p in [l.as_deref(), r.as_deref()].into_iter().flatten() {
+            if !std::path::Path::new(p).exists() {
+                return Some(json!({ "error": format!("compare: no such path: {p}") }));
+            }
+        }
         {
             let mut m = model.lock().unwrap();
             if sub {
@@ -2144,6 +2164,7 @@ impl SwitcherController {
         if sub {
             self.inner.lock().unwrap().push(SlotView::CompareText);
         }
+        None
     }
 }
 
