@@ -1948,6 +1948,11 @@ impl SwitcherController {
         };
         std::thread::spawn(move || {
             while model.lock().unwrap().is_waiting(id) {
+                // An abandoned `compare --wait` (client gone) must not pin an
+                // fd and this thread until the window closes.
+                if reply.peer_closed() {
+                    return;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             reply.send("done");

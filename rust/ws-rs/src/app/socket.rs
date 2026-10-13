@@ -74,6 +74,25 @@ impl Reply {
     pub fn send_bytes(self, data: &[u8]) {
         write_all(self.fd, data);
     }
+
+    /// True once the client has hung up (EOF / hangup). Lets a deferred
+    /// handler stop waiting for an abandoned `compare --wait` instead of
+    /// holding an fd and a thread until the window closes.
+    pub fn peer_closed(&self) -> bool {
+        let mut p = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
+        if unsafe { libc::poll(&mut p, 1, 0) } <= 0 {
+            return false;
+        }
+        if p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return true;
+        }
+        // Readable: EOF (peer closed) reads 0; unread request bytes read > 0.
+        let mut b = [0u8; 1];
+        let n = unsafe {
+            libc::recv(self.fd, b.as_mut_ptr() as *mut libc::c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT)
+        };
+        n == 0
+    }
 }
 
 #[cfg(unix)]
@@ -107,6 +126,11 @@ impl Reply {
     /// Write raw bytes (screenshot `--raw` PNG / geometry), then close.
     pub fn send_bytes(self, data: &[u8]) {
         write_all(self.stream.as_ref(), data);
+    }
+
+    /// Not detected on named pipes: waiters keep waiting for their event.
+    pub fn peer_closed(&self) -> bool {
+        false
     }
 }
 
@@ -775,6 +799,18 @@ mod tests {
         let line = request(&path, "do:nonexistent").unwrap().unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v, json!({"view": "files", "n": 7}));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reply_reports_a_hung_up_peer() {
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let (a, b) = UnixStream::pair().unwrap();
+        let reply = Reply::dup(a.as_raw_fd()).unwrap();
+        assert!(!reply.peer_closed());
+        drop(b);
+        assert!(reply.peer_closed());
     }
 
     #[test]
