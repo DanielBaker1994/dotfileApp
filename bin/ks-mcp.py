@@ -85,6 +85,10 @@ def read_only_env() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+# Mirrors READ_MAX in rust/ws-rs/src/app/socket.rs.
+DAEMON_READ_MAX = 2048
+
+
 def daemon_down_message(path: str) -> str:
     return (
         f"kitchen-sink daemon not answering at {path} "
@@ -98,12 +102,15 @@ def send_and_read(path: str, payload: str, timeout: float, mode: str):
     mode: "line" stops at the first newline, "eof" reads to close, "none"
     writes and returns immediately (verbs that answer later or never).
     """
+    body = payload.encode("utf-8") + b"\n"
+    if len(body) > DAEMON_READ_MAX:  # the daemon refuses (and closes early) past this
+        raise ToolError(f"request too long ({len(body)} bytes; the daemon accepts {DAEMON_READ_MAX})")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
         try:
             sock.connect(path)
-            sock.sendall(payload.encode("utf-8") + b"\n")
+            sock.sendall(body)
         except OSError as exc:  # FileNotFoundError / ConnectionRefused / EPIPE
             raise DaemonDown(path) from exc
         if mode == "none":
@@ -419,7 +426,7 @@ def serve(server: Server):
             continue
         try:
             req = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):  # deeply nested input raises RecursionError
             write_message(
                 {
                     "jsonrpc": "2.0",
@@ -444,6 +451,8 @@ def serve(server: Server):
         if "id" not in req or req.get("id") is None:
             continue  # notification (notifications/initialized, …): no reply
         rid = req["id"]
+        if isinstance(rid, float) and (rid != rid or rid in (float("inf"), float("-inf"))):
+            rid = None  # 1e400 parses to inf, which json.dumps would emit as invalid `Infinity`
         try:
             result = server.handle_request(req)
         except RpcError as exc:

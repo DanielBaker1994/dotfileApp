@@ -356,6 +356,29 @@ class Protocol(McpTestCase):
         # EOF is a clean exit
         self.assertEqual(c.finish(), 0)
 
+    def test_deeply_nested_json_is_parse_error_and_server_survives(self):
+        self.start_daemon()
+        c = self.start_server(self.daemon.path)
+        deep = b'{"jsonrpc":"2.0","id":1,"method":"ping","params":' + b"[" * 200000 + b"]" * 200000 + b"}\n"
+        c.send_raw(deep)
+        self.assertEqual(c.recv()["error"]["code"], -32700)
+        self.assertTrue(c.alive())
+        self.assertIn("result", self.rpc(2, "tools/list"))
+
+    def test_non_finite_id_is_never_echoed_as_infinity(self):
+        self.start_daemon()
+        c = self.start_server(self.daemon.path)
+        c.send_raw(b'{"jsonrpc":"2.0","id":1e400,"method":"ping"}\n')
+        # json.loads accepts `Infinity`, so check the decoded id, not the text.
+        self.assertIsNone(c.recv()["id"])
+
+    def test_over_long_ks_do_action_reports_request_too_long(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        r = self.rpc(1, "tools/call", {"name": "ks_do", "arguments": {"action": "open:files" + "A" * 8000}})
+        self.assertTrue(r["result"]["isError"])
+        self.assertIn("request too long", r["result"]["content"][0]["text"])
+
     def test_params_wrong_type_is_invalid_params(self):
         self.start_daemon()
         self.start_server(self.daemon.path)
