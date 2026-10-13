@@ -251,3 +251,13 @@ Phase B produced no view captures: `pane-shot` renders **herdr terminal panes** 
 not shared-window views, and the sandbox HOME has no herdr. Pixel testing of views needs a non-interactive
 window capture verb (or symlinking herdr into the sandbox HOME for terminal panes). Raw results:
 `.build/mcp-hammer/wave3/gui/`.
+
+**Verb table** (`Tests/mcp_verbs.json`, `Tests/test_mcp_verbs.py`, `./ws test mcp-verbs`; also run by
+`./ws test mcp`): 38 rows (26 work headless, 10 refused, 2 error), every row with a happy path, and a
+coverage check that fails when `do_host_action` gains an arm without a row (proven against a scratch
+copy). New leads it surfaced, observed on a real headless daemon, not yet decided:
+- `cycle-back` is identical to `cycle` (the direction is ignored: `Files -> Notes`, else `Files`).
+- `jira-poll-off` persists `enabled=false` to `commands.toml`, and headless `jira-poll-on` cannot undo it.
+- `compare:open:a|b` opens a session for paths that do not exist.
+- `tool-close:<bogus>` and `key:<anything>` never error; `key:` has no state field to check.
+- `notes:state` replies `{"available":true}`, not the state document.

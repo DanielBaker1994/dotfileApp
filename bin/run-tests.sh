@@ -171,7 +171,11 @@ case "${1:-all}" in
         ;;
     mcp)
         py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
-        "$py" -B "$TESTS/test_ks_mcp.py"
+        "$py" -B "$TESTS/test_ks_mcp.py" && "$py" -B "$TESTS/test_mcp_verbs.py"
+        ;;
+    mcp-verbs)
+        py=/opt/homebrew/bin/python3; [ -x "$py" ] || py=python3
+        "$py" -B "$TESTS/test_mcp_verbs.py"
         ;;
     linux)
         # Linux compile gate in Docker (Wave 0); run-tests.sh has no other
