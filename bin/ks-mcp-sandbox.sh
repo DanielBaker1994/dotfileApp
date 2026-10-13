@@ -113,7 +113,8 @@ cmd_start() {
         return 0
     fi
 
-    mkdir -p "$SANDBOX/tmp" "$SANDBOX/home"
+    mkdir -p "$SANDBOX/tmp" "$SANDBOX/home" \
+        "$SANDBOX/home/.cache" "$SANDBOX/home/.config" "$SANDBOX/home/.local/share"
     if [ ! -f "$SANDBOX/home/commands.toml" ]; then
         cp "$ROOT/commands.toml" "$SANDBOX/home/commands.toml"
     fi
@@ -131,6 +132,10 @@ cmd_start() {
 
     local envs=(
         "TMPDIR=$SANDBOX/tmp"
+        "HOME=$SANDBOX/home"
+        "XDG_CACHE_HOME=$SANDBOX/home/.cache"
+        "XDG_CONFIG_HOME=$SANDBOX/home/.config"
+        "XDG_DATA_HOME=$SANDBOX/home/.local/share"
         "WS_HOME=$SANDBOX/home"
         "WS_COMMANDS_CONF=$SANDBOX/home/commands.toml"
         "WS_RS_ASSET_DIR=$ROOT"

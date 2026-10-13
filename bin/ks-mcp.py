@@ -262,7 +262,24 @@ class Server:
                         "Run a kitchen-sink `do:<action>` verb on the daemon this "
                         "server points at and return the full state JSON. Mutating "
                         "(toggle views, terminal, panes, screenshot verbs, …). "
-                        "Unknown actions echo state unchanged."
+                        "Valid actions — pass one of these: `open:<view>` "
+                        "(`notes`, `files`, `jira`, `detail`, `releases`, `config`, "
+                        "`output`, `confluence`, `ai`, `compare`, `compareText`), "
+                        "`rebuild-card:<view>`, `cycle`, `cycle-back`, `hide`, "
+                        "`back`, `home`, `toggle`, `toggle-terminal`, "
+                        "`toggle-browser`, `term`, `switcher`, `switcher-hide`, "
+                        "`notes-find`, `notes-grep`, `jira-jump`, `jira-poll-on`, "
+                        "`jira-poll-off`, `jira-setup`, `reset-size`, "
+                        "`pane:h|j|k|l`, `pane:focus:<id>`, `key:<spec>`, "
+                        "`paths:show|hide|return|select:<n>`, "
+                        "`header-style:<quiet|flat|edge|stripe|tinted|glow|aurora>`, "
+                        "`esc-hides:<view>:on|off`, `hide-on-focus-loss:on|off`, "
+                        "`tool:<paths|prettyprint|filefast|health-checks|health|"
+                        "text-table>`, `tool-close:<name>`, `compare:<sub>` "
+                        "(e.g. `next`, `prev`, `swap`, `reload`, `select:<n>`, "
+                        "`filter:<all|diffs|same|context>`, `folder-open`), "
+                        "`board:<sub>`, `screenshot:<sub>`. Pass one of these; a "
+                        "typo is not always distinguishable from success."
                     ),
                     "inputSchema": {
                         "type": "object",
@@ -299,7 +316,9 @@ class Server:
             "for geometry or `-r` for a raw PNG; interactive forms come up in the "
             "app), `screenshot-permission` (granted/denied), `compare` (args "
             "`--wait`, `--title1 T`, `--title2 T`, then 1-2 paths), `pane-shot` "
-            "(args per `kitchen-sink pane-shot --help`)."
+            "(args per `kitchen-sink pane-shot --help`). WARNING: `screenshot` "
+            "and `pane-shot` capture the real screen; they are refused in "
+            "headless sandbox mode — never point them at one."
         )
         if self.read_only:
             raw_desc += " Read-only mode: only `screenshot-permission` is allowed."
@@ -345,7 +364,11 @@ class Server:
 
     def handle_request(self, req: dict):
         method = req.get("method")
-        params = req.get("params") or {}
+        params = req.get("params")
+        if not params:  # absent / null / {} / [] keep the lenient default
+            params = {}
+        elif not isinstance(params, dict):
+            raise RpcError(JSONRPC_ERRORS["invalid_params"], "'params' must be an object")
         if method == "initialize":
             requested = params.get("protocolVersion")
             protocol = requested if requested in SUPPORTED_PROTOCOLS else LATEST_PROTOCOL
@@ -387,8 +410,11 @@ def write_message(message: dict):
 
 
 def serve(server: Server):
-    for line in sys.stdin:
-        line = line.strip()
+    # Decode stdin as UTF-8 with errors="replace": invalid bytes on the wire
+    # must not take the server down. They surface as a JSON-RPC parse error
+    # (-32700) and the loop keeps serving.
+    for raw in sys.stdin.buffer:
+        line = raw.decode("utf-8", "replace").strip()
         if not line:
             continue
         try:

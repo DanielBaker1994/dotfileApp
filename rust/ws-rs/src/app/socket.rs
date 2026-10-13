@@ -35,10 +35,10 @@ use std::sync::atomic::AtomicBool;
 #[cfg(windows)]
 use crate::platform::ipc;
 
-const RECV_TIMEOUT_SECS: i64 = 2;
+const RECV_TIMEOUT_MS: i64 = 250;
 const SEND_TIMEOUT_SECS: i64 = 5;
 const READ_MAX: usize = 2048;
-const LISTEN_BACKLOG: i32 = 4;
+const LISTEN_BACKLOG: i32 = 64;
 
 const RAW_VERBS: [&str; 6] = [
     "reload",
@@ -317,8 +317,10 @@ fn configure_conn(fd: RawFd) {
         };
     }
     let tv = libc::timeval {
-        tv_sec: RECV_TIMEOUT_SECS as libc::time_t,
-        tv_usec: 0,
+        // Short first-read budget: the protocol is one request per connection,
+        // so a connected-but-idle client must not stall the accept loop (F0-6).
+        tv_sec: (RECV_TIMEOUT_MS / 1000) as libc::time_t,
+        tv_usec: ((RECV_TIMEOUT_MS % 1000) * 1000) as libc::suseconds_t,
     };
     unsafe {
         libc::setsockopt(
@@ -333,8 +335,14 @@ fn configure_conn(fd: RawFd) {
 
 #[cfg(unix)]
 fn handle_conn(fd: RawFd, handler: &dyn CommandHandler) {
-    let mut buf = [0u8; READ_MAX];
+    // One byte over the cap so an over-length request is detected, not
+    // silently truncated (F0-4).
+    let mut buf = [0u8; READ_MAX + 1];
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    if n > 0 && n as usize > READ_MAX {
+        write_line(fd, "{\"error\":\"request too long\"}");
+        return;
+    }
     let had_bytes = n > 0;
     let query = if had_bytes {
         String::from_utf8_lossy(&buf[..n as usize])
@@ -451,8 +459,12 @@ fn handle_conn(shared: &Arc<ipc::Stream>, handler: &dyn CommandHandler) {
     // `&Stream: Read`/`&Stream: Write` (interprocess concurrent I/O) so the
     // shared handle can be read/written through an immutable `&Stream`.
     let mut stream = shared.as_ref();
-    let mut buf = [0u8; READ_MAX];
+    let mut buf = [0u8; READ_MAX + 1];
     let n = stream.read(&mut buf).unwrap_or(0);
+    if n > READ_MAX {
+        write_line(stream, "{\"error\":\"request too long\"}");
+        return;
+    }
     let had_bytes = n > 0;
     let query = if had_bytes {
         String::from_utf8_lossy(&buf[..n])
@@ -763,6 +775,29 @@ mod tests {
         let line = request(&path, "do:nonexistent").unwrap().unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v, json!({"view": "files", "n": 7}));
+    }
+
+    #[test]
+    fn over_length_request_is_refused() {
+        // Past READ_MAX: refuse instead of acting on a truncated request (F0-4).
+        let h = Arc::new(FakeHandler::default());
+        let (_s, path) = start(h, "over-length");
+        let action = "x".repeat(4096);
+        let line = request(&path, &format!("do:{action}")).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v, json!({"error": "request too long"}));
+    }
+
+    #[test]
+    fn request_within_limit_is_accepted() {
+        let h = Arc::new(FakeHandler {
+            state: json!({"view": "notes"}),
+            ..Default::default()
+        });
+        let (_s, path) = start(h, "at-limit");
+        let action = "a".repeat(2000);
+        let line = request(&path, &format!("do:{action}")).unwrap().unwrap();
+        assert_eq!(line, "{\"view\":\"notes\"}");
     }
 
     #[test]

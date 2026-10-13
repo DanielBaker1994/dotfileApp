@@ -1650,7 +1650,17 @@ impl SwitcherController {
                     return None;
                 }
                 sel if sel.starts_with("select:") => {
-                    let n = sel[7..].parse::<usize>().unwrap_or(0);
+                    let Ok(n) = sel[7..].parse::<usize>() else {
+                        return Some(json!({ "error": "paths:select:N" }));
+                    };
+                    let rows = inner
+                        .paths_state
+                        .get("rows")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len);
+                    if n >= rows {
+                        return Some(json!({ "error": "paths:select: out of range" }));
+                    }
                     if let Some(o) = inner.paths_state.as_object_mut() {
                         o.insert("selection".into(), json!(n));
                     }
@@ -1714,11 +1724,9 @@ impl SwitcherController {
                 inner.ui_push(UiCommand::Tool(kind));
                 return None;
             }
-            let mut inner = self.inner.lock().unwrap();
-            inner
-                .tools
-                .insert(name.to_string(), json!({ "shown": true }));
-            return None;
+            // Empty or unknown names are rejected instead of fabricating a
+            // `tools.<name>` entry in state (F3).
+            return Some(json!({ "error": format!("not a tool panel: {name}") }));
         } else if let Some(name) = action.strip_prefix("tool-close:") {
             {
                 let mut inner = self.inner.lock().unwrap();
@@ -1828,7 +1836,13 @@ impl SwitcherController {
                     }
                     return result;
                 }
-                self.registry.dispatch_test_do(action)
+                // A verb that no registry hook claims is a typo, not a
+                // success: report it so callers (ks-mcp → isError) can see it
+                // (F4).
+                match self.registry.dispatch_test_do(action) {
+                    Some(v) => Some(v),
+                    None => Some(json!({ "error": format!("unknown action {action}") })),
+                }
             }
         }
     }
@@ -2464,6 +2478,13 @@ impl SwitcherController {
     fn live_focus(&self) -> Option<LiveFocus> {
         None
     }
+
+    /// No daemon UI was installed (`install_ui` / `install_main_queue` never
+    /// ran): the `headless` server. Screen-capture verbs must refuse rather
+    /// than grab the real screen (F0-3).
+    fn is_headless(&self) -> bool {
+        self.inner.lock().unwrap().main_queue.is_none()
+    }
 }
 
 impl CommandHandler for SwitcherController {
@@ -2530,6 +2551,12 @@ impl CommandHandler for SwitcherController {
     }
 
     fn raw_deferred(&self, verb: &str, rest: &str, reply: Reply) -> Option<Reply> {
+        // A headless daemon has no window to capture; refuse instead of
+        // reading the real screen (F0-3).
+        if matches!(verb, "screenshot" | "pane-shot") && self.is_headless() {
+            reply.send(&format!("error: {verb} unavailable in headless mode"));
+            return None;
+        }
         match verb {
             "screenshot-permission" => {
                 #[cfg(target_os = "macos")]
@@ -10139,7 +10166,34 @@ mod tests {
         c.registry_mut()
             .register_test_do(|a| (a == "compare:open").then(|| json!({ "ok": true })));
         assert_eq!(c.do_action("compare:open"), Some(json!({ "ok": true })));
-        assert_eq!(c.do_action("totally-unknown"), None);
+        assert_eq!(
+            c.do_action("totally-unknown").unwrap()["error"],
+            json!("unknown action totally-unknown")
+        );
+    }
+
+    #[test]
+    fn unknown_verbs_report_an_error() {
+        // A typo must be visible: unknown `do:` verbs answer `{"error": …}`
+        // instead of the state that a success returns (F4).
+        let c = controller();
+        for action in ["bogus-xyz", "file:/etc/hosts", "notes:bogus", "show", "select:0"] {
+            let err = c.do_action(action).unwrap_or_else(|| panic!("{action} must error"));
+            assert_eq!(err["error"], json!(format!("unknown action {action}")));
+        }
+    }
+
+    #[test]
+    fn unknown_tool_name_is_rejected() {
+        // `tool:` fabricates a `tools.<name>` entry only for a real panel (F3).
+        let c = controller();
+        let err = c.do_action("tool:nope").unwrap();
+        assert_eq!(err["error"], json!("not a tool panel: nope"));
+        assert!(c.state_json()["tools"].get("nope").is_none());
+        let err = c.do_action("tool:").unwrap();
+        assert_eq!(err["error"], json!("not a tool panel: "));
+        assert_eq!(c.do_action("tool:prettyprint"), None);
+        assert_eq!(c.state_json()["tools"]["prettyprint"]["shown"], json!(true));
     }
 
     #[test]
@@ -10214,8 +10268,16 @@ mod tests {
         c.set_paths_enabled(true);
         assert_eq!(c.do_action("paths:show"), None);
         assert_eq!(c.state_json()["paths"]["shown"], json!(true));
+        // Selection is bounds-checked against the reported rows (F3).
+        c.set_paths_state(json!({ "shown": true, "rows": [{}, {}, {}] }));
         assert_eq!(c.do_action("paths:select:2"), None);
         assert_eq!(c.state_json()["paths"]["selection"], json!(2));
+        assert_eq!(c.do_action("paths:select:x").unwrap()["error"], json!("paths:select:N"));
+        assert_eq!(c.do_action("paths:select:-1").unwrap()["error"], json!("paths:select:N"));
+        assert_eq!(
+            c.do_action("paths:select:9").unwrap()["error"],
+            json!("paths:select: out of range")
+        );
         assert_eq!(c.do_action("paths:hide"), None);
         assert_eq!(c.state_json()["paths"]["shown"], json!(false));
         let err = c.do_action("paths:bogus").unwrap();
