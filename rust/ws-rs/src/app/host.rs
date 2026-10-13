@@ -1795,6 +1795,15 @@ impl SwitcherController {
             // Same set `tool:` accepts (incl. `paths`); a bogus name is an
             // error instead of a silent no-op.
             if name == "paths" {
+                // `paths` is its own panel: clear its `tools` entry too, then
+                // run the `paths:hide` hook.
+                let mut inner = self.inner.lock().unwrap();
+                if let Some(entry) = inner.tools.get_mut(name) {
+                    if let Some(o) = entry.as_object_mut() {
+                        o.insert("shown".into(), json!(false));
+                    }
+                }
+                drop(inner);
                 return self.do_host_action("paths:hide");
             }
             if ToolKind::from_name(name).is_none() {
@@ -10169,7 +10178,7 @@ mod tests {
     use super::*;
     use crate::app::registry::PaletteCommand;
 
-    const REQUIRED: [&str; 18] = [
+    const REQUIRED: [&str; 19] = [
         "view",
         "visible",
         "active",
@@ -10188,6 +10197,7 @@ mod tests {
         "activations",
         "frontmostPid",
         "tools",
+        "lastKey",
     ];
 
     fn controller() -> SwitcherController {
@@ -10291,6 +10301,22 @@ mod tests {
     }
 
     #[test]
+    fn cycle_and_cycle_back_are_a_two_view_toggle() {
+        // Swift's `SharedWindow.cycle(_:)` ignores `dir` too (`current == .files
+        // ? navNotes : navFiles`), so `cycle-back` is identical by design.
+        let c = controller();
+        assert_eq!(c.do_action("cycle-back"), None);
+        assert_eq!(c.current(), Some(SlotView::Files));
+        assert_eq!(c.do_action("cycle-back"), None);
+        assert_eq!(c.current(), Some(SlotView::Notes));
+        // Same sequence for the forward verb: Files <-> Notes.
+        assert_eq!(c.do_action("cycle"), None);
+        assert_eq!(c.current(), Some(SlotView::Files));
+        assert_eq!(c.do_action("cycle"), None);
+        assert_eq!(c.current(), Some(SlotView::Notes));
+    }
+
+    #[test]
     fn dispatch_open_view_and_error() {
         let c = controller();
         assert_eq!(c.do_action("open:notes"), None);
@@ -10373,6 +10399,19 @@ mod tests {
         assert_eq!(c.do_action("tool-close:paths"), None);
         assert_eq!(c.state_json()["tools"]["paths"]["shown"], json!(false));
         assert_eq!(c.state_json()["paths"]["shown"], json!(false));
+    }
+
+    #[test]
+    fn tool_close_rejects_an_unknown_panel() {
+        // `tool-close:` accepts exactly the set `tool:` accepts; a bogus (or
+        // empty) name is an error instead of a silent no-op.
+        let c = controller();
+        install_gui(&c);
+        let err = c.do_action("tool-close:bogus").unwrap();
+        assert_eq!(err["error"], json!("not a tool panel: bogus"));
+        let err = c.do_action("tool-close:").unwrap();
+        assert_eq!(err["error"], json!("not a tool panel: "));
+        assert_eq!(c.do_action("tool-close:health"), None);
     }
 
     #[test]
@@ -10695,6 +10734,19 @@ mod tests {
     }
 
     #[test]
+    fn key_records_last_key_and_rejects_an_empty_spec() {
+        // `key:<spec>` is record-only; the spec is now visible in state as
+        // top-level `lastKey`, and an empty spec is a visible error.
+        let c = controller();
+        assert_eq!(c.do_action("key:cmd+k"), None);
+        assert_eq!(c.state_json()["lastKey"], json!("cmd+k"));
+        let err = c.do_action("key:").unwrap();
+        assert_eq!(err["error"], json!("key:<spec>"));
+        // The rejected call leaves the recorded spec untouched.
+        assert_eq!(c.state_json()["lastKey"], json!("cmd+k"));
+    }
+
+    #[test]
     fn key_while_inactive_self_activates_unless_clicked_away_or_ours() {
         let mut w = FocusWatch::default();
         w.tick(sample(0.0, false), true, 0.3);
@@ -10856,6 +10908,76 @@ enabled = true
         let s = c.state_json();
         assert_eq!(s["view"], json!("compare"));
         assert_eq!(s["compare"]["sub"], json!(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_open_rejects_a_missing_path() {
+        // `compare:open:[sub]:LEFT|RIGHT` must refuse a path that does not exist
+        // and open nothing, for both the pair and the sub-view form.
+        let mut c = controller();
+        c.register_views_from_text("[compare]\nenabled = true\n");
+        if c.compare_model().is_none() {
+            return;
+        }
+        let missing = "/nonexistent/kitchen-sink-wave3/no-such-file";
+        for verb in ["compare:open", "compare:open-sub"] {
+            let action = format!("{verb}:{missing}|/etc/hosts");
+            let err = c.do_action(&action).unwrap();
+            assert_eq!(
+                err["error"],
+                json!(format!("compare: no such path: {missing}")),
+                "{action}"
+            );
+            assert_eq!(c.current(), None, "{action} must open nothing");
+        }
+        // A missing right-hand path is refused the same way.
+        let action = format!("compare:open:/etc/hosts|{missing}");
+        let err = c.do_action(&action).unwrap();
+        assert_eq!(err["error"], json!(format!("compare: no such path: {missing}")));
+        assert_eq!(c.current(), None);
+    }
+
+    #[test]
+    fn jira_poll_on_headless_reenables_config() {
+        // `jira-poll-off` persists `enabled = false`; a headless `jira-poll-on`
+        // (no UI queue) must re-enable directly, so off-then-on round-trips.
+        // Point the config at a throwaway file and keep launchd untouched.
+        let dir = std::env::temp_dir().join(format!("ws-host-jira-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("commands.toml");
+        std::fs::write(&conf, "[jira]\nenabled = true\n").unwrap();
+
+        let old_conf = std::env::var_os("WS_COMMANDS_CONF");
+        let old_skip = std::env::var_os("WS_SKIP_LAUNCH_AGENT");
+        std::env::set_var("WS_COMMANDS_CONF", &conf);
+        std::env::set_var("WS_SKIP_LAUNCH_AGENT", "1");
+
+        let c = controller(); // headless: install_ui never ran, so ui_queue is None
+        assert_eq!(c.do_action("jira-poll-off"), None);
+        assert!(
+            !crate::app::jira_poll::enabled_in_config(),
+            "off must persist enabled=false"
+        );
+        assert_eq!(c.state_json()["view"], json!(""));
+
+        assert_eq!(c.do_action("jira-poll-on"), None);
+        assert!(
+            crate::app::jira_poll::enabled_in_config(),
+            "headless on must re-enable enabled=true"
+        );
+        let s = c.state_json();
+        assert_eq!(s["view"], json!("jira"));
+        assert_eq!(s["visible"], json!(true));
+
+        match old_conf {
+            Some(v) => std::env::set_var("WS_COMMANDS_CONF", v),
+            None => std::env::remove_var("WS_COMMANDS_CONF"),
+        }
+        match old_skip {
+            Some(v) => std::env::set_var("WS_SKIP_LAUNCH_AGENT", v),
+            None => std::env::remove_var("WS_SKIP_LAUNCH_AGENT"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

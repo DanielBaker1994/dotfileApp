@@ -69,12 +69,13 @@
     },
     {
       "verb": "key:",
-      "grammar": "key:<spec> (any spec; record-only)",
+      "grammar": "key:<spec> (any non-empty spec; record-only)",
       "happy": ["key:x"],
-      "bad": [],
-      "bad_note": "record-only: any spec is accepted and stored in the internal last_key, which is not exposed in the state JSON, so there is no bad argument and no observable state field",
+      "bad": ["key:"],
+      "bad_error": "key:<spec>",
       "headless": "ok",
-      "expect": {}
+      "expect": {"lastKey": "x"},
+      "note": "record-only: the spec is stored in last_key and exposed in state as top-level `lastKey`; an empty spec is an error instead of a silent no-op."
     },
     {
       "verb": "paths:",
@@ -125,12 +126,13 @@
     },
     {
       "verb": "tool-close:",
-      "grammar": "tool-close:<panel>",
+      "grammar": "tool-close:<panel> (same set tool: accepts, incl. paths)",
       "happy": ["tool-close:health"],
-      "bad": [],
-      "bad_note": "never errors: it silently no-ops for unknown/empty panel names (see AGENTS.md limits), so there is no bad argument",
+      "bad": ["tool-close:bogus"],
+      "bad_error": "not a tool panel",
       "headless": "ok",
-      "expect": {}
+      "expect": {},
+      "note": "a bogus or empty panel name is an error ({\"error\": \"not a tool panel: <name>\"}) instead of a silent no-op; tool-close:paths maps to paths:hide."
     },
     {
       "verb": "board:",
@@ -144,23 +146,23 @@
     },
     {
       "verb": "cycle",
-      "grammar": "cycle (no argument)",
+      "grammar": "cycle (no argument; two-view toggle Notes <-> Files)",
       "happy": ["cycle"],
       "bad": [],
       "bad_note": "no argument to be malformed",
       "headless": "ok",
       "expect": {"view": "files"},
-      "note": "from jira (home) cycle opens files. Surprise: the dir argument is ignored — cycle and cycle-back behave identically (Files <-> Notes)."
+      "note": "from jira (home) cycle opens files, then notes. It is a two-view toggle: the direction argument is ignored. cycle-back is identical by design — Swift's SharedWindow.cycle(_:) ignores dir too (current == .files ? navNotes : navFiles)."
     },
     {
       "verb": "cycle-back",
-      "grammar": "cycle-back (no argument)",
+      "grammar": "cycle-back (no argument; two-view toggle Notes <-> Files)",
       "happy": ["cycle-back"],
       "bad": [],
       "bad_note": "no argument to be malformed",
       "headless": "ok",
       "expect": {"view": "files"},
-      "note": "same as cycle: the -1 direction is ignored in the Rust port."
+      "note": "identical to cycle by design (the -1 direction is ignored in Swift and the Rust port); the two views are Files <-> Notes."
     },
     {
       "verb": "hide",
@@ -291,7 +293,7 @@
       "bad_note": "no argument to be malformed",
       "headless": "ok",
       "expect": {"view": "jira"},
-      "note": "with [jira] already enabled it logs and opens jira. Keep before jira-poll-off: once disabled, headless cannot re-enable it (no ui queue)."
+      "note": "with [jira] already enabled it logs and opens jira. With [jira] disabled, a headless daemon re-enables directly (persists enabled=true and updates state), so it undoes jira-poll-off even without a UI queue."
     },
     {
       "verb": "jira-poll-off",
@@ -354,21 +356,23 @@
     },
     {
       "verb": "compare:open:",
-      "grammar": "compare:open:<left>|<right> (host-level; opens a compare session)",
-      "happy": ["compare:open:a|b"],
-      "bad": [],
-      "bad_note": "no bad form: an empty or missing path still opens a (start-page) session, so it never errors",
+      "grammar": "compare:open:<left>|<right> (host-level; opens a compare session; both paths must exist)",
+      "happy": ["compare:open:/etc/hosts|/etc/passwd"],
+      "bad": ["compare:open:/nonexistent/kitchen-sink-wave3/no-such-file|/etc/hosts"],
+      "bad_error": "compare: no such path",
       "headless": "ok",
-      "expect": {"view": "compare", "compare.selected": 0, "compare.startPage": false}
+      "expect": {"view": "compare", "compare.selected": 0, "compare.startPage": false},
+      "note": "a path that does not exist errors ({\"error\": \"compare: no such path: <p>\"}) and opens nothing; an empty/missing side still opens a (start-page) session."
     },
     {
       "verb": "compare:open-sub:",
-      "grammar": "compare:open-sub:<left>|<right> (host-level; opens the compareText sub-view)",
-      "happy": ["compare:open-sub:a|b"],
-      "bad": [],
-      "bad_note": "no bad form: same open_pair path, never errors",
+      "grammar": "compare:open-sub:<left>|<right> (host-level; opens the compareText sub-view; both paths must exist)",
+      "happy": ["compare:open-sub:/etc/hosts|/etc/passwd"],
+      "bad": ["compare:open-sub:/nonexistent/kitchen-sink-wave3/no-such-file|/etc/hosts"],
+      "bad_error": "compare: no such path",
       "headless": "ok",
-      "expect": {"view": "compareText", "compare.sub": true}
+      "expect": {"view": "compareText", "compare.sub": true},
+      "note": "same existence check as compare:open:; a missing path errors and opens nothing."
     }
   ]
 }
