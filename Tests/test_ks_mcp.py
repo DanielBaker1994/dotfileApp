@@ -269,12 +269,22 @@ class Handshake(McpTestCase):
         tools = self.rpc(2, "tools/list")
         self.assertEqual(tools["id"], 2, "notification must not emit a reply line")
         names = [t["name"] for t in tools["result"]["tools"]]
-        self.assertEqual(names, ["ks_state", "ks_do", "ks_raw"])
+        self.assertEqual(names, ["ks_state", "ks_do", "ks_raw", "ks_help"])
 
     def test_tool_descriptions_guide_agents(self):
         self.start_daemon()
         self.start_server(self.daemon.path)
         tools = {t["name"]: t for t in self.rpc(1, "tools/list")["result"]["tools"]}
+
+        # Clients that show only the first description line (opencode 2.0.26
+        # truncates to 117 chars + "...") must still see the key fact.
+        for name, tool in tools.items():
+            first = tool["description"].split("\n", 1)[0]
+            self.assertTrue(first, name)
+            self.assertLessEqual(len(first), 117, f"{name}: {first!r}")
+        self.assertIn("ks_help", tools["ks_do"]["description"].split("\n", 1)[0])
+        self.assertIn("WARNING", tools["ks_raw"]["description"].split("\n", 1)[0])
+        self.assertIn("ks_help", tools["ks_state"]["description"].split("\n", 1)[0])
 
         do_desc = tools["ks_do"]["description"]
         self.assertIn("Valid actions", do_desc)
@@ -348,6 +358,31 @@ class Tools(McpTestCase):
             res = self.call_tool(1, "ks_raw", {"verb": "screenshot", "args": args})["result"]
             self.assertTrue(res["isError"], args)
             self.assertIn("headless", res["content"][0]["text"])
+
+    def test_ks_help_returns_the_guide(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        res = self.call_tool(1, "ks_help")["result"]
+        self.assertNotIn("isError", res)
+        text = res["content"][0]["text"]
+        for needle in ("show", "back", "paths:show", "WARNING", "state"):
+            self.assertIn(needle, text, needle)
+
+    def test_ks_help_topic_actions(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        res = self.call_tool(1, "ks_help", {"topic": "actions"})["result"]
+        text = res["content"][0]["text"]
+        self.assertIn("Valid actions", text)
+        self.assertIn("open:<view>", text)
+        self.assertNotIn("WARNING", text)  # the raw warnings are their own section
+
+    def test_ks_help_unknown_topic_is_iserror(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        res = self.call_tool(1, "ks_help", {"topic": "nope"})["result"]
+        self.assertTrue(res["isError"])
+        self.assertIn("topic", res["content"][0]["text"])
 
 
 class Protocol(McpTestCase):
@@ -442,10 +477,18 @@ class ReadOnly(McpTestCase):
     def test_ks_do_is_hidden_and_rejected(self):
         self._ro()
         names = [t["name"] for t in self.rpc(1, "tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["ks_state", "ks_raw"])
+        self.assertEqual(names, ["ks_state", "ks_raw", "ks_help"])
         r = self.call_tool(2, "ks_do", {"action": "hide"})
         self.assertEqual(r["error"]["code"], -32602)
         self.assertIn("read-only mode", r["error"]["message"])
+
+    def test_ks_help_is_listed_and_works_read_only(self):
+        self._ro()
+        names = [t["name"] for t in self.rpc(1, "tools/list")["result"]["tools"]]
+        self.assertIn("ks_help", names)
+        res = self.call_tool(2, "ks_help", {"topic": "actions"})["result"]
+        self.assertNotIn("isError", res)
+        self.assertIn("Valid actions", res["content"][0]["text"])
 
     def test_mutating_raw_verbs_are_blocked(self):
         self._ro()
@@ -465,7 +508,7 @@ class ReadOnly(McpTestCase):
         self.start_daemon()
         self.start_server(self.daemon.path, flag=True)
         names = [t["name"] for t in self.rpc(1, "tools/list")["result"]["tools"]]
-        self.assertEqual(names, ["ks_state", "ks_raw"])
+        self.assertEqual(names, ["ks_state", "ks_raw", "ks_help"])
 
 
 class SocketResolution(McpTestCase):
@@ -502,6 +545,15 @@ class DaemonDown(McpTestCase):
         res = self.call_tool(2, "ks_do", {"action": "hide"})["result"]
         self.assertTrue(res["isError"])
         self.assertTrue(self.client.alive())
+
+    def test_ks_help_works_with_the_daemon_down(self):
+        missing = self._missing_socket()
+        self.start_server(missing)
+        res = self.call_tool(1, "ks_help")["result"]
+        self.assertNotIn("isError", res, "ks_help must not need the daemon")
+        text = res["content"][0]["text"]
+        for needle in ("show", "back", "paths:show"):
+            self.assertIn(needle, text, needle)
 
 
 if __name__ == "__main__":

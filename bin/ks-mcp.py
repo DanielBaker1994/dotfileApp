@@ -8,6 +8,7 @@ Thin v1 surface (deliberately small; the Python cold path stays out):
     ks_do      run a `do:<action>` verb (mutating; hidden in read-only mode)
     ks_raw     allow-listed raw verbs:
                screenshot | screenshot-permission | compare | pane-shot
+    ks_help    offline guide (do: actions, raw verbs, state fields); no daemon
 
 Point it at the live app (read-only recommended) or at an isolated headless
 sandbox started with `bin/ks-mcp-sandbox.sh start` (then `--socket "$(bin/ks-mcp-sandbox.sh sock)"`
@@ -43,6 +44,78 @@ LATEST_PROTOCOL = "2025-11-25"
 
 RAW_VERBS = ("screenshot", "screenshot-permission", "compare", "pane-shot")
 READ_ONLY_RAW_VERBS = ("screenshot-permission",)
+
+# The `do:` action grammar. It lives in one constant because clients that render
+# only the first description line never see the list:
+#   - the ks_do description carries it after the first newline, and
+#   - the ks_help tool returns it in full.
+DO_ACTIONS = (
+    "Valid actions — pass one of these: `open:<view>` or `show[:<view>]` "
+    "(`notes`, `files`, `jira`, `detail`, `releases`, `config`, `output`, "
+    "`confluence`, `ai`, `compare`, `compareText`; bare `show` re-presents the "
+    "last view, or `jira` if none), `rebuild-card:<view>`, `cycle`, "
+    "`cycle-back`, `hide`, `back` (returns to the previous view), `home`, "
+    "`toggle`, `toggle-terminal`, `toggle-browser`, `term`, `switcher`, "
+    "`switcher-hide`, `notes-find`, `notes-grep`, `jira-jump`, "
+    "`jira-poll-on`, `jira-poll-off`, `jira-setup`, `reset-size`, "
+    "`pane:h|j|k|l`, `pane:focus:<id>`, `key:<spec>`, "
+    "`paths:show|hide|return|select:<n>`, "
+    "`header-style:<quiet|flat|edge|stripe|tinted|glow|aurora>`, "
+    "`esc-hides:<view>:on|off`, `hide-on-focus-loss:on|off`, "
+    "`tool:<paths|prettyprint|filefast|health-checks|health|text-table>`, "
+    "`tool-close:<name>`, `compare:<sub>` (e.g. `next`, `prev`, `swap`, "
+    "`reload`, `select:<n>`, `filter:<all|diffs|same|context>`, `folder-open`), "
+    "`screenshot:<sub>`. `board:*` is not implemented in the Rust port yet. "
+    "Window-only verbs (`paths:show`, `tool:<name>`, `switcher`, "
+    "`toggle-terminal`, `toggle-browser`, `term`, `notes-find`, `notes-grep`, "
+    "`jira-jump`, `reset-size`) are refused in headless mode. Pass one of "
+    "these; a typo is not always distinguishable from success."
+)
+
+# The ks_help body for `topic=raw`: the raw verbs and why they are dangerous.
+RAW_HELP = (
+    "Raw socket verbs (`ks_raw` → `verb`, optional `args` list of strings, joined "
+    "with tabs):\n"
+    "- `screenshot` — capture the real screen; args `-g`/`--print-geometry` for "
+    "geometry, `-r`/`--raw` for a raw PNG; interactive forms come up in the app.\n"
+    "- `pane-shot` — capture a live window/pane to a PNG on disk (args per "
+    "`kitchen-sink pane-shot --help`).\n"
+    "- `compare` — the compare tool; args `--wait`, `--title1 T`, `--title2 T`, "
+    "then 1-2 paths.\n"
+    "- `screenshot-permission` — reports `granted`/`denied`.\n"
+    "WARNING: `screenshot` and `pane-shot` capture the real screen. A headless "
+    "sandbox refuses them (`error: <verb> unavailable in headless mode`) — never "
+    "point them at the owner's machine. In read-only mode only "
+    "`screenshot-permission` is allowed."
+)
+
+# The ks_help body for `topic=state`: the main `state` fields and the headless
+# caveat (window-only verbs are refused; see `needs_window` in host.rs).
+STATE_HELP = (
+    "Main `state` fields (`ks_state` returns the whole JSON document):\n"
+    "- `view` — the active SlotView name (\"\" when none is presented).\n"
+    "- `visible` — true while the shared window is up.\n"
+    "- `views.<name>.shown` — per-view visibility; also `key` (has key focus), "
+    "`wid`, `frame [x,y,w,h]`; notes/files/jira add `terminal`, `drawerInset`, "
+    "`query`, `rowCount`, `tabs`, `board`, `header`, ….\n"
+    "- `windows` — the live window count.\n"
+    "- `tools` — open tool panels by name (`paths`, `prettyprint`, `filefast`, …).\n"
+    "- `paths` — the paths shelf (`shown`, `rows`).\n"
+    "- `palette` — command palette visibility (`paletteCommands` lists its rows).\n"
+    "Other keys: `active`, `keyWindow`, `escHides`, `hideOnFocusLoss`, `pane`, "
+    "`screenshot`, `compare`, `paneShot`, `terminalPanel`, `viewSwitcher`, "
+    "`activations`, `frontmostPid`, `pid`."
+)
+
+# The headless caveat, shared by ks_help's state section and its own note.
+HEADLESS_HELP = (
+    "Headless mode runs no AppKit: window-only verbs are refused (see "
+    "`needs_window` in host.rs): `paths:show`, `switcher`, `toggle-terminal`, "
+    "`toggle-browser`, `term`, `notes-find`, `notes-grep`, `jira-jump`, "
+    "`reset-size`, `tool:<name>`. `screenshot`/`pane-shot` are refused too. "
+    "`state` still reports `shown: true` for panels that cannot exist without a "
+    "window."
+)
 
 SOCKET_TIMEOUT = 5.0
 SCREENSHOT_RAW_TIMEOUT = 60.0
@@ -164,6 +237,27 @@ class Server:
             return text_result(text)
         return text_result(json.dumps(parsed, separators=(",", ":")))
 
+    def tool_ks_help(self, args):
+        """Offline guide: never touches the socket (works with the daemon down)."""
+        topic = args.get("topic")
+        if topic is None:
+            topic = "all"
+        if not isinstance(topic, str) or topic not in ("actions", "state", "raw", "all"):
+            raise ToolError(
+                "ks_help 'topic' must be one of: actions, state, raw (default: all)"
+            )
+        sections = []
+        if topic in ("all", "actions"):
+            sections.append(
+                "do: actions (pass one as `ks_do`'s `action`, without the `do:` "
+                "prefix):\n" + DO_ACTIONS
+            )
+        if topic in ("all", "raw"):
+            sections.append(RAW_HELP)
+        if topic in ("all", "state"):
+            sections.append(STATE_HELP + "\n" + HEADLESS_HELP)
+        return text_result("\n\n".join(sections))
+
     def tool_ks_do(self, args):
         action = args.get("action")
         if not isinstance(action, str) or not action:
@@ -273,34 +367,9 @@ class Server:
                 {
                     "name": "ks_do",
                     "description": (
-                        "Run a kitchen-sink `do:<action>` verb on the daemon this "
-                        "server points at and return the full state JSON. Mutating "
-                        "(toggle views, terminal, panes, screenshot verbs, …). "
-                        "Valid actions — pass one of these: `open:<view>` or "
-                        "`show[:<view>]` "
-                        "(`notes`, `files`, `jira`, `detail`, `releases`, `config`, "
-                        "`output`, `confluence`, `ai`, `compare`, `compareText`; "
-                        "bare `show` re-presents the last view, or `jira` if none), "
-                        "`rebuild-card:<view>`, `cycle`, `cycle-back`, `hide`, "
-                        "`back` (returns to the previous view), `home`, `toggle`, "
-                        "`toggle-terminal`, `toggle-browser`, `term`, `switcher`, "
-                        "`switcher-hide`, `notes-find`, `notes-grep`, `jira-jump`, "
-                        "`jira-poll-on`, `jira-poll-off`, `jira-setup`, "
-                        "`reset-size`, `pane:h|j|k|l`, `pane:focus:<id>`, "
-                        "`key:<spec>`, `paths:show|hide|return|select:<n>`, "
-                        "`header-style:<quiet|flat|edge|stripe|tinted|glow|aurora>`, "
-                        "`esc-hides:<view>:on|off`, `hide-on-focus-loss:on|off`, "
-                        "`tool:<paths|prettyprint|filefast|health-checks|health|"
-                        "text-table>`, `tool-close:<name>`, `compare:<sub>` "
-                        "(e.g. `next`, `prev`, `swap`, `reload`, `select:<n>`, "
-                        "`filter:<all|diffs|same|context>`, `folder-open`), "
-                        "`screenshot:<sub>`. `board:*` is not implemented in the "
-                        "Rust port yet. Window-only verbs (`paths:show`, "
-                        "`tool:<name>`, `switcher`, `toggle-terminal`, "
-                        "`toggle-browser`, `term`, `notes-find`, `notes-grep`, "
-                        "`jira-jump`, `reset-size`) are refused in headless mode. "
-                        "Pass one of these; a typo is not always distinguishable "
-                        "from success."
+                        "Run a do:<action> verb; returns state JSON. Call ks_help for the valid actions.\n"
+                        "Mutating (toggle views, terminal, panes, screenshot verbs, …). "
+                        + DO_ACTIONS
                     ),
                     "inputSchema": {
                         "type": "object",
@@ -325,7 +394,7 @@ class Server:
             {
                 "name": "ks_state",
                 "description": (
-                    "Read the kitchen-sink daemon's full state JSON "
+                    "Read the kitchen-sink daemon's full state JSON. Call ks_help for the field guide.\n"
                     "(view, visible, views.<view>.shown/key/terminal, panes, palette, …)."
                 ),
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -333,6 +402,7 @@ class Server:
             },
         )
         raw_desc = (
+            "Raw socket verb (screenshot, pane-shot, compare...). WARNING: captures the real screen.\n"
             "Send an allow-listed raw socket verb: `screenshot` (args like `-g` "
             "for geometry or `-r` for a raw PNG; interactive forms come up in the "
             "app), `screenshot-permission` (granted/denied), `compare` (args "
@@ -367,11 +437,38 @@ class Server:
                 },
             }
         )
+        tools.append(
+            {
+                "name": "ks_help",
+                "description": (
+                    "Offline guide to the ks_* tools (no daemon contact). Covers do: actions, raw verbs, state fields.\n"
+                    "Optional `topic`: `actions` (the full `do:` action list and "
+                    "argument grammar), `state` (the main `state` fields and the "
+                    "headless window-only caveat), `raw` (the raw verbs and their "
+                    "screen-capture warnings); default all. Works in read-only "
+                    "mode and with the daemon down."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "enum": ["actions", "state", "raw"],
+                            "description": "Which section to return; default all.",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+                "annotations": {"readOnlyHint": True, "idempotentHint": True},
+            }
+        )
         return {"tools": tools}
 
     def call_tool(self, name: str, args):
         if name == "ks_state":
             return self.tool_ks_state(args)
+        if name == "ks_help":
+            return self.tool_ks_help(args)
         if name == "ks_do":
             if self.read_only:
                 raise RpcError(
@@ -401,8 +498,10 @@ class Server:
                 "instructions": (
                     f"kitchen-sink socket bridge at {self.sock} ({mode}). "
                     "ks_state reads state; ks_do runs `do:` verbs; ks_raw sends "
-                    "allow-listed raw verbs. Point the socket at "
-                    "bin/ks-mcp-sandbox.sh for a disposable headless daemon."
+                    "allow-listed raw verbs; ks_help is an offline guide (do: "
+                    "actions, raw verbs, state fields) that needs no daemon. Point "
+                    "the socket at bin/ks-mcp-sandbox.sh for a disposable headless "
+                    "daemon."
                 ),
             }
         if method == "ping":
