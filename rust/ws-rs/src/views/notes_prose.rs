@@ -10,8 +10,9 @@ pub const COPY_BUTTON_JS: &str = include_str!("prose_js/copy_buttons.js");
 pub const OUTLINE_JS: &str = include_str!("prose_js/outline.js");
 pub const FIND_JS: &str = include_str!("prose_js/find.js");
 
-/// `ProseView.init`'s document-start script: double-click an image → open it.
-pub const IMAGE_DBLCLICK_JS: &str = "document.addEventListener('dblclick', function (e) {\n  var t = e.target;\n  if (t && t.tagName === 'IMG') window.webkit.messageHandlers.wsImage.postMessage(t.src);\n});";
+/// `ProseView.init`'s document-start script: one click on an image opens it
+/// in the FilePopup preview.
+pub const IMAGE_CLICK_JS: &str = "document.addEventListener('click', function (e) {\n  var t = e.target;\n  if (t && t.tagName === 'IMG') window.webkit.messageHandlers.wsImage.postMessage(t.src);\n});";
 
 /// `scrollToSourceLine(_:)`: the last `[data-pos]` block at or above line `n`.
 pub fn scroll_to_line_js(n: i64) -> String {
@@ -191,7 +192,7 @@ mod appkit {
             let handler = ProseMsgHandler::alloc(mtm).set_ivars(HandlerIvars { sink: sink.clone() });
             let handler: Retained<ProseMsgHandler> = unsafe { msg_send![super(handler), init] };
             for (src, at) in [
-                (IMAGE_DBLCLICK_JS, WKUserScriptInjectionTime::AtDocumentStart),
+                (IMAGE_CLICK_JS, WKUserScriptInjectionTime::AtDocumentStart),
                 (COPY_BUTTON_JS, WKUserScriptInjectionTime::AtDocumentEnd),
                 (OUTLINE_JS, WKUserScriptInjectionTime::AtDocumentEnd),
                 (FIND_JS, WKUserScriptInjectionTime::AtDocumentEnd),

@@ -208,6 +208,8 @@ pub struct PanelLabels {
     pub grid: String,
     pub no_tool: String,
     pub tab: String,
+    pub text: String,
+    pub layers: String,
 }
 
 impl Default for PanelLabels {
@@ -219,6 +221,8 @@ impl Default for PanelLabels {
             grid: "Display grid".to_string(),
             no_tool: "Pick a tool".to_string(),
             tab: "Tool Settings".to_string(),
+            text: "Text:".to_string(),
+            layers: "Layers".to_string(),
         }
     }
 }
@@ -420,6 +424,8 @@ impl ScreenshotConfig {
             grid: s("side-panel-grid-label", &d.panel_labels.grid),
             no_tool: s("side-panel-no-tool", &d.panel_labels.no_tool),
             tab: s("side-panel-tab-label", &d.panel_labels.tab),
+            text: s("side-panel-text-label", &d.panel_labels.text),
+            layers: s("side-panel-layers-label", &d.panel_labels.layers),
         };
         c.draw_thickness = i("draw-thickness", 0, 0, 100);
         c.draw_font_size = i("draw-font-size", 0, 0, 100);
@@ -1939,10 +1945,81 @@ impl ShotSession {
             PanelHit::GridUp => {
                 self.set_grid_size(ShotSidePanel::grid_step(self.state.grid_size, 1))
             }
+            PanelHit::Style(i) => {
+                if self.text_section_shown() {
+                    let on = !Self::style_flag(&self.panel_text_style(), i);
+                    self.set_text_style(|st| match i {
+                        0 => st.bold = on,
+                        1 => st.italic = on,
+                        2 => st.underline = on,
+                        _ => st.strike = on,
+                    });
+                }
+            }
+            PanelHit::Align(i) => {
+                if self.text_section_shown() {
+                    self.set_text_style(|st| st.align = i as i64);
+                }
+            }
+            PanelHit::LayerRow(r) => {
+                self.commit_text();
+                let n = self.doc.objects.len();
+                self.doc.selected = (r < n).then(|| n - 1 - r);
+            }
+            PanelHit::LayerDelete => {
+                if let Some(i) = self.doc.selected {
+                    self.doc.remove(i);
+                }
+            }
+            PanelHit::LayerUp => self.move_layer(1),
+            PanelHit::LayerDown => self.move_layer(-1),
             PanelHit::Swatch | PanelHit::Body => {}
         }
         self.chrome_press = Some(ChromePress::Panel(hit));
         true
+    }
+
+    /// The panel's Text section applies: the text tool is active, or a text
+    /// object is selected / being edited (`textBox.isHidden` in Swift).
+    pub fn text_section_shown(&self) -> bool {
+        self.tool == Some(ShotTool::Text)
+            || self.editing.is_some()
+            || self
+                .doc
+                .selected
+                .and_then(|i| self.doc.objects.get(i))
+                .is_some_and(|o| o.tool == ShotTool::Text)
+    }
+
+    /// The style the Text section shows: the edited / selected text's, else
+    /// the remembered one new text uses.
+    pub fn panel_text_style(&self) -> ShotTextStyle {
+        if let Some(e) = &self.editing {
+            return e.object.style.clone();
+        }
+        match self.doc.selected.and_then(|i| self.doc.objects.get(i)) {
+            Some(o) if o.tool == ShotTool::Text => o.style.clone(),
+            _ => self.state.style.clone(),
+        }
+    }
+
+    pub fn style_flag(st: &ShotTextStyle, i: usize) -> bool {
+        match i {
+            0 => st.bold,
+            1 => st.italic,
+            2 => st.underline,
+            _ => st.strike,
+        }
+    }
+
+    /// Layers ▲/▼: move the selected object one step toward the front (+1)
+    /// or back (−1), keeping it selected.
+    pub fn move_layer(&mut self, d: i64) {
+        let Some(i) = self.doc.selected else { return };
+        let to = i as i64 + d;
+        if to >= 0 && (to as usize) < self.doc.objects.len() {
+            self.doc.reorder(i, to as usize);
+        }
     }
 
     /// A drag that started on the panel's slider or wheel.
@@ -2738,7 +2815,9 @@ impl ShotSession {
         if let Some(t) = self.tool {
             if in_active && self.selection.is_some() {
                 if t == ShotTool::Text {
-                    self.begin_text(d, p, None);
+                    // Swift: the first line is centred on the click.
+                    let lh = (self.new_object(ShotTool::Text, p).font_size() * 1.2).ceil();
+                    self.begin_text(d, Point::new(p.x, p.y - lh / 2.0 - crate::engines::screenshot_annotations::ShotText::PADDING), None);
                     return;
                 }
                 self.drag = Drag::Drawing(self.new_object(t, p));
@@ -3391,6 +3470,15 @@ pub enum PanelHit {
     Grid,
     GridDown,
     GridUp,
+    /// Text: bold / italic / underline / strike (0…3).
+    Style(usize),
+    /// Text: align left / centre / right (0…2).
+    Align(usize),
+    /// Layers: list row (0 = the topmost object).
+    LayerRow(usize),
+    LayerDelete,
+    LayerUp,
+    LayerDown,
     /// Panel background: swallowed so it never reaches the selection.
     Body,
 }
@@ -3413,6 +3501,16 @@ pub struct PanelLayout {
     pub grid_down: Rect,
     pub grid_value: Rect,
     pub grid_up: Rect,
+    /// Text section (shown for the text tool / a selected or edited text).
+    pub text_label: Rect,
+    pub styles: [Rect; 4],
+    pub aligns: [Rect; 3],
+    /// Layers section: the list (rows of `LAYER_ROW` points) + its buttons.
+    pub layers_label: Rect,
+    pub layers: Rect,
+    pub layer_delete: Rect,
+    pub layer_up: Rect,
+    pub layer_down: Rect,
 }
 
 impl PanelLayout {
@@ -3424,8 +3522,28 @@ impl PanelLayout {
             "slider": r(self.slider), "swatch": r(self.swatch), "grab": r(self.grab),
             "wheel": r(self.wheel), "hex": r(self.hex), "grid": r(self.grid_box),
             "gridDown": r(self.grid_down), "gridUp": r(self.grid_up),
+            "styles": self.styles.iter().map(|x| r(*x)).collect::<Vec<_>>(),
+            "aligns": self.aligns.iter().map(|x| r(*x)).collect::<Vec<_>>(),
+            "layers": r(self.layers), "layerDelete": r(self.layer_delete),
+            "layerUp": r(self.layer_up), "layerDown": r(self.layer_down),
         })
     }
+}
+
+/// A Layers row title (`tableView(_:viewFor:row:)`): "3. Arrow",
+/// "5. Text: hello", "2. Counter 1".
+pub fn layer_title(i: usize, o: &ShotObject) -> String {
+    let title = match o.tool {
+        ShotTool::Text => format!("Text: {}", o.text.replace('\n', " ")),
+        ShotTool::Counter => format!("Counter {}", o.number),
+        t => format!("{t:?}"),
+    };
+    let title: String = if title.chars().count() > 26 {
+        title.chars().take(25).chain(['\u{2026}']).collect()
+    } else {
+        title
+    };
+    format!("{}. {title}", i + 1)
 }
 
 /// `ShotSidePanel` — the tool-settings drawer (Space / the Tool Settings tab).
@@ -3440,6 +3558,8 @@ impl ShotSidePanel {
     pub const GRID_STEP: i64 = 5;
     /// The tool-tab height on the left edge.
     pub const TAB_HEIGHT: f64 = 130.0;
+    /// One Layers list row.
+    pub const LAYER_ROW: f64 = 22.0;
 
     /// `build`'s layer list height: `max(80, bounds.height - y - 50)`.
     pub fn list_height(bounds_height: f64, y: f64) -> f64 {
@@ -3477,6 +3597,26 @@ impl ShotSidePanel {
         let grid_down = at(p, y, 28.0, 26.0);
         let grid_value = at(p + 32.0, y, iw - 64.0, 26.0);
         let grid_up = at(width - p - 28.0, y, 28.0, 26.0);
+        y += 40.0;
+        // Text: B I U S, then the three alignments (`textBox` in Swift).
+        let text_label = at(p, y, iw, 18.0);
+        y += 22.0;
+        let bw = 30.0;
+        let styles = [0.0, 1.0, 2.0, 3.0].map(|i| at(p + i * (bw + 4.0), y, bw, 26.0));
+        let ax = p + 4.0 * (bw + 4.0) + 8.0;
+        let aw = ((width - p - ax) / 3.0).floor();
+        let aligns = [0.0, 1.0, 2.0].map(|i| at(ax + i * aw, y, aw - 2.0, 26.0));
+        y += 40.0;
+        // Layers: the list fills the rest, buttons at the foot.
+        let layers_label = at(p, y, iw, 18.0);
+        y += 22.0;
+        let bottom = bounds.y + bounds.h - 16.0;
+        let list_h = (bottom - 34.0 - y).max(Self::LAYER_ROW * 3.0);
+        let layers = at(p, y, iw, list_h);
+        y += list_h + 8.0;
+        let layer_delete = at(p, y, 40.0, 26.0);
+        let layer_up = at(p + 44.0, y, 40.0, 26.0);
+        let layer_down = at(p + 88.0, y, 40.0, 26.0);
         PanelLayout {
             panel: Rect::new(x0, bounds.y, width, bounds.h),
             size_label,
@@ -3493,6 +3633,14 @@ impl ShotSidePanel {
             grid_down,
             grid_value,
             grid_up,
+            text_label,
+            styles,
+            aligns,
+            layers_label,
+            layers,
+            layer_delete,
+            layer_up,
+            layer_down,
         }
     }
 
@@ -3511,9 +3659,21 @@ impl ShotSidePanel {
             (l.grid_box, PanelHit::Grid),
             (l.grid_down, PanelHit::GridDown),
             (l.grid_up, PanelHit::GridUp),
+            (l.layer_delete, PanelHit::LayerDelete),
+            (l.layer_up, PanelHit::LayerUp),
+            (l.layer_down, PanelHit::LayerDown),
         ];
         if let Some((_, h)) = controls.iter().find(|(r, _)| r.contains_point(p)) {
             return Some(*h);
+        }
+        if let Some(i) = l.styles.iter().position(|r| r.contains_point(p)) {
+            return Some(PanelHit::Style(i));
+        }
+        if let Some(i) = l.aligns.iter().position(|r| r.contains_point(p)) {
+            return Some(PanelHit::Align(i));
+        }
+        if l.layers.contains_point(p) {
+            return Some(PanelHit::LayerRow(((p.y - l.layers.y) / Self::LAYER_ROW).floor().max(0.0) as usize));
         }
         if Self::wheel_color(l.wheel, p).is_some() {
             return Some(PanelHit::Wheel);
@@ -4179,6 +4339,27 @@ mod shot_cg {
         CGContext::restore_g_state(Some(ctx));
     }
 
+    /// The pixel buffer secure pixelation reads, for the live overlay (the
+    /// caller caches it per frozen image; rasterizing is a full-screen copy).
+    pub(super) fn pixels_for(base: &CGImage) -> Option<ShotPixels> {
+        rasterize(base)
+    }
+
+    /// `ShotRenderer.draw(_:canvas:ctx:)` — the objects over the frozen
+    /// capture in the context's top-left point space (the live overlay and
+    /// the final render share this pass, so what you see is what you get).
+    pub(super) fn draw_objects(
+        ctx: &CGContext,
+        base: &CGImage,
+        scale: f64,
+        pixels: &Option<ShotPixels>,
+        objects: &[&ShotObject],
+    ) {
+        for o in objects {
+            draw_object(ctx, base, scale, pixels, o);
+        }
+    }
+
     /// `ShotRenderer.render(_:crop:objects:)`, then PNG-encode the result via
     /// AppKit (the only non-CG step; ImageIO is not a dependency).
     pub fn render_shot(
@@ -4377,6 +4558,9 @@ mod overlay {
         session: Cell<*mut ShotSession>,
         display: Cell<usize>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+        /// Secure-pixelate pixels of the frozen capture, keyed by the image
+        /// pointer (rasterized once per capture, not per frame).
+        pixels: RefCell<Option<(usize, Option<crate::engines::screenshot_annotations::ShotPixels>)>>,
     }
 
     define_class!(
@@ -4469,6 +4653,7 @@ mod overlay {
                 session: Cell::new(session),
                 display: Cell::new(display),
                 tracking: RefCell::new(None),
+                pixels: RefCell::new(None),
             });
             let view: Retained<ShotOverlayView> = unsafe {
                 msg_send![
@@ -4651,6 +4836,54 @@ mod overlay {
                     Some(&ctx),
                     cg_rect(Rect::new(4.0, 4.0, full.w - 8.0, full.h - 8.0)),
                 );
+            }
+
+            // 2b. The annotations, live (`ShotOverlayView.draw`): every object,
+            //     the one being drawn, clipped to the selection; the object
+            //     under a text edit is hidden while its draft draws (step 4).
+            if let Some(sel) = mine.filter(|s| s.w > 0.0 && s.h > 0.0) {
+                if let Some(base) = session.base_images.get(d).and_then(|b| b.as_deref()) {
+                    let fw = session.displays.get(d).map(|x| x.frame.w).unwrap_or(w);
+                    let scale = super::canvas_scale(objc2_core_graphics::CGImage::width(Some(base)) as i64, fw);
+                    let hidden = session.editing.as_ref().and_then(|e| e.index);
+                    let drawing = session.drawing();
+                    let mut objs: Vec<&ShotObject> = session
+                        .doc
+                        .objects
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| Some(*i) != hidden)
+                        .map(|(_, o)| o)
+                        .collect();
+                    if let Some(o) = &drawing {
+                        objs.push(o);
+                    }
+                    if objs.iter().any(|o| o.tool == ShotTool::Pixelate && o.secure) {
+                        let key = base as *const _ as usize;
+                        let stale = self.ivars().pixels.borrow().as_ref().map(|(k, _)| *k) != Some(key);
+                        if stale {
+                            *self.ivars().pixels.borrow_mut() = Some((key, shot_cg::pixels_for(base)));
+                        }
+                    }
+                    let cache = self.ivars().pixels.borrow();
+                    let none = None;
+                    let pixels = cache.as_ref().map(|(_, p)| p).unwrap_or(&none);
+                    CGContext::save_g_state(Some(&ctx));
+                    CGContext::clip_to_rect(Some(&ctx), cg_rect(sel));
+                    shot_cg::draw_objects(&ctx, base, scale, pixels, &objs);
+                    CGContext::restore_g_state(Some(&ctx));
+                }
+                // The selected object: a dashed box 4pt outside its bounds.
+                if let Some(o) = session.doc.selected.and_then(|i| session.doc.objects.get(i)) {
+                    CGContext::save_g_state(Some(&ctx));
+                    set_stroke(&ctx, cfg.ui_color);
+                    CGContext::set_line_width(Some(&ctx), 1.0);
+                    let dashes: [f64; 2] = [4.0, 3.0];
+                    unsafe { CGContext::set_line_dash(Some(&ctx), 0.0, dashes.as_ptr(), dashes.len()) };
+                    let b = o.bbox();
+                    CGContext::stroke_rect(Some(&ctx), cg_rect(Rect::new(b.x - 4.0, b.y - 4.0, b.w + 8.0, b.h + 8.0)));
+                    CGContext::restore_g_state(Some(&ctx));
+                }
             }
 
             // 3. Selection border: text mode is a 2pt dashed border with no
@@ -5321,6 +5554,50 @@ mod overlay {
         draw_text_at(ctx, &labels.grid, bx.max_x() + 8.0, l.grid_box.y + 1.0, 13.0, fg, true);
         let gs = session.state.grid_size.to_string();
         draw_spinner(ctx, session, l.grid_down, l.grid_value, l.grid_up, &gs, on);
+
+        // Text: B I U S toggles + alignment, live only for text.
+        let text_on = session.text_section_shown();
+        let dim = |c: ShotColor| if text_on { c } else { c.with_alpha(0.35) };
+        draw_text_at(ctx, &labels.text, l.text_label.x, l.text_label.y, 13.0, dim(fg), true);
+        let st = session.panel_text_style();
+        let toggle = |r: Rect, on: bool| {
+            fill_round(ctx, r, 6.0, if on && text_on { ui } else { ShotColor::WHITE.with_alpha(if text_on { 0.12 } else { 0.06 }) });
+            stroke_round(ctx, r, 6.0, ShotColor::WHITE.with_alpha(if text_on { 0.3 } else { 0.12 }), 1.0);
+        };
+        for (i, r) in l.styles.iter().enumerate() {
+            toggle(*r, ShotSession::style_flag(&st, i));
+            draw_text_centered(ctx, ["B", "I", "U", "S"][i], *r, 13.0, dim(fg), i == 0);
+        }
+        for (i, r) in l.aligns.iter().enumerate() {
+            toggle(*r, st.align == i as i64);
+            draw_symbol(["text.alignleft", "text.aligncenter", "text.alignright"][i], *r, 13.0, false, dim(fg));
+        }
+
+        // Layers: topmost first, the selected row highlighted.
+        draw_text_at(ctx, &labels.layers, l.layers_label.x, l.layers_label.y, 13.0, fg, true);
+        fill_round(ctx, l.layers, 6.0, ShotColor::BLACK.with_alpha(0.35));
+        stroke_round(ctx, l.layers, 6.0, ShotColor::WHITE.with_alpha(0.2), 1.0);
+        let n = session.doc.objects.len();
+        let rows = (l.layers.h / ShotSidePanel::LAYER_ROW).floor() as usize;
+        for r in 0..n.min(rows) {
+            let i = n - 1 - r;
+            let row = Rect::new(l.layers.x + 2.0, l.layers.y + r as f64 * ShotSidePanel::LAYER_ROW + 1.0, l.layers.w - 4.0, ShotSidePanel::LAYER_ROW - 2.0);
+            if session.doc.selected == Some(i) {
+                fill_round(ctx, row, 4.0, ui);
+            }
+            let o = &session.doc.objects[i];
+            let swatch = Rect::new(row.x + 6.0, row.mid_y() - 5.0, 10.0, 10.0);
+            fill_round(ctx, swatch, 2.0, o.color);
+            draw_text_at(ctx, &super::layer_title(i, o), swatch.max_x() + 8.0, row.y + 1.0, 12.0, fg, false);
+        }
+        if n == 0 {
+            draw_text_at(ctx, "No annotations yet", l.layers.x + 10.0, l.layers.y + 6.0, 12.0, fg.with_alpha(0.5), false);
+        }
+        let has_sel = session.doc.selected.is_some_and(|i| i < n);
+        for (r, sym) in [(l.layer_delete, "trash"), (l.layer_up, "arrow.up"), (l.layer_down, "arrow.down")] {
+            fill_round(ctx, r, 6.0, ShotColor::WHITE.with_alpha(if has_sel { 0.14 } else { 0.06 }));
+            draw_symbol(sym, r, 13.0, false, fg.with_alpha(if has_sel { 1.0 } else { 0.35 }));
+        }
     }
 
     /// `ShotSaveCard`: the save-as card frame, title, value and hint.

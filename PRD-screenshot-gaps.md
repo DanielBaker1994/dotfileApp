@@ -68,9 +68,9 @@ this pass (check before building); **Have** = present per config/code.
 |---|---|---|---|
 | G1 | **Side panel rendering + all six controls above** | **Done** (Oct 12; + Tool Settings tab) | P0 |
 | G2 | Per-tool size memory (`drawThickness`, `drawFontSize`, counter, pixelate, rectangle, marker sizes) shown by the size control | **Done** (`draw-thickness` / `draw-font-size` seed sizes; per-tool memory in `ShotState`) | P0 (part of G1) |
-| G3 | Text tool options in the panel: font family, B / I / U / S, align (in the original PRD §7.2.3) | Missing | P1 |
+| G3 | Text tool options in the panel: font family, B / I / U / S, align (in the original PRD §7.2.3) | **Done** except font family (B/I/U/S + align; live on the draft / selected text) | P1 |
 | G4 | Grid overlay (`Display grid`, size 5…50) | **Done** (overlay-only, not in the output image) | P1 |
-| G5 | Layers list: select/delete/reorder objects (PRD extension) | Missing | P2 |
+| G5 | Layers list: select/delete/reorder objects (PRD extension) | **Done** (rows select + dashed box, 🗑 / ▲ / ▼) | P2 |
 | G6 | Grab Color flow wired to the panel (model `start_grab` exists, panel button does not) | **Done** (live preview, Esc restores, panel returns) | P1 |
 | G7 | Selection geometry readout options: `showSelectionGeometry`, `…HideTime` | Missing (only `show-size-badge`) | P2 |
 | G8 | `useJpgForClipboard`, `predefinedColorPaletteLarge`, `antialiasingPinZoom`, `showAbortNotification`, `showQuitPrompt` | Missing | P3 |
@@ -131,6 +131,18 @@ Known limits: the wheel is hue/saturation at full brightness (dark colours via
 the hex field); the hex field has no caret movement (select-all / append /
 backspace only); `grid-size` is not a config key (the grid size persists in the
 screenshot state file). Open: G3 text options, G5 layers, G7–G11.
+
+## 6b. Live annotations (Oct 12 2026, evening)
+
+The overlay never painted annotation objects: `ShotOverlayView::render` drew only
+the text draft, so arrows, counters, shapes and committed text appeared only in the
+output image after Enter. It now draws every object, the one being drawn, and a
+dashed box around the selected object (`shot_cg::draw_objects`, shared with the final
+render). Verified with real CGEvent mouse drags/clicks and System Events keys (not
+`do:` hooks, which only touch the model): arrow mid-drag and after release, counters
+1-2-3, text typing + commit, object move, scroll resize, selection handle resize,
+undo/redo, Cmd+C copy (clipboard PNG matches the screen), paste into a note, and a
+single click on the pasted image opening the preview in nvim and Prose modes.
 
 ## 7. Acceptance checks
 
