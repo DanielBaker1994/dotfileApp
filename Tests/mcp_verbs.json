@@ -136,13 +136,14 @@
     },
     {
       "verb": "board:",
-      "grammar": "board:<sub> (any sub — the Swift jira board verbs are not ported)",
-      "happy": ["board:team"],
-      "bad": [],
-      "bad_note": "every board:* form returns the same not-implemented error, so a distinct bad argument adds nothing",
-      "bad_error": "not implemented in the Rust port yet",
-      "headless": "error",
-      "expect": {}
+      "grammar": "board:<sub> where <sub> is open:<id>|list|list-open:<id>|list-star:<id>|view:<board|sprint|mode>|sprint:<id>|mode:<columns|table>|pin",
+      "happy": ["board:list", "board:open:42"],
+      "bad": ["board:bogus", "board:open"],
+      "bad_note": "an unknown or empty sub-verb answers {\"error\": \"board:open|list|list-open|list-star|view|sprint|mode|pin\"} in a window; headless every form is refused by needs_window before the parse",
+      "bad_error": "board:open|list|list-open|list-star|view|sprint|mode|pin",
+      "headless": "refused",
+      "expect": {},
+      "note": "The Jira board model lives in the jira window's JiraList (views/jira_view.rs); UiCommand::Board applies each sub to the same model the view draws, and state.views.jira.board is read back from it. Persistent --pin-board / --pin-view writes are not ported (pins are in-memory)."
     },
     {
       "verb": "cycle",

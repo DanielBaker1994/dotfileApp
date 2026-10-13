@@ -141,6 +141,8 @@ pub enum UiCommand {
     NoteFind(bool),
     /// `do:jira-jump` — `SidebarJumpWindow` over the Jira rail.
     JiraJump,
+    /// `do:board:*` — the Jira board verbs, applied to the real list model.
+    Board(BoardCmd),
     /// `jira-poll on`'s checks finished: (ok, message).
     JiraEnable(bool, String),
     /// `JiraSetupWindow.show(controller:reason:)`.
@@ -161,6 +163,27 @@ pub enum PathsCmd {
     Hide,
     Return,
     Select(usize),
+}
+
+/// The `do:board:*` sub-verbs, dispatched to the real Jira list model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoardCmd {
+    /// `board:open:<id>` — open a board (pins it, loads columns).
+    Open(String),
+    /// `board:list` — show the board list.
+    List,
+    /// `board:list-open:<id>` — open a board from the list.
+    ListOpen(String),
+    /// `board:list-star:<id>` — pin/unpin a board.
+    ListStar(String),
+    /// `board:view:<board|sprint|mode>` — open a pinned view spec.
+    View(String),
+    /// `board:sprint:<id>` — pick a sprint on the open board.
+    Sprint(String),
+    /// `board:mode:<columns|table>` — switch the open board's mode.
+    Mode(String),
+    /// `board:pin` — pin/unpin the current view.
+    Pin,
 }
 
 /// The command queue the controller pushes onto; the main thread drains it.
@@ -597,6 +620,37 @@ fn needs_window(action: &str) -> bool {
         || action == "jira-jump"
         || action == "reset-size"
         || action.starts_with("tool:")
+        || action.starts_with("board:")
+}
+
+/// Parse `board:<sub>` into a [`BoardCmd`], mirroring Swift's `onTestAction`
+/// `board:` cases. Unknown/empty sub-verbs return the grammar string that
+/// becomes the `{"error": …}` reply.
+fn parse_board(action: &str) -> Result<BoardCmd, String> {
+    const GRAMMAR: &str = "board:open|list|list-open|list-star|view|sprint|mode|pin";
+    let rest = action.strip_prefix("board:").unwrap_or(action);
+    if rest == "list" {
+        return Ok(BoardCmd::List);
+    }
+    if rest == "pin" {
+        return Ok(BoardCmd::Pin);
+    }
+    for (prefix, make) in [
+        ("open:", BoardCmd::Open as fn(String) -> BoardCmd),
+        ("list-open:", BoardCmd::ListOpen),
+        ("list-star:", BoardCmd::ListStar),
+        ("view:", BoardCmd::View),
+        ("sprint:", BoardCmd::Sprint),
+        ("mode:", BoardCmd::Mode),
+    ] {
+        if let Some(arg) = rest.strip_prefix(prefix) {
+            if arg.is_empty() {
+                return Err(GRAMMAR.to_string());
+            }
+            return Ok(make(arg.to_string()));
+        }
+    }
+    Err(GRAMMAR.to_string())
 }
 
 impl SwitcherController {
@@ -1922,9 +1976,13 @@ impl SwitcherController {
                 None
             }
             a if a.starts_with("board:") => {
-                // The Swift jira window's board verbs are not ported yet; report
-                // a clear error instead of the generic `unhandled action`.
-                Some(json!({ "error": format!("{a} not implemented in the Rust port yet") }))
+                match parse_board(a) {
+                    Ok(cmd) => {
+                        self.inner.lock().unwrap().ui_push(UiCommand::Board(cmd));
+                        None
+                    }
+                    Err(grammar) => Some(json!({ "error": grammar })),
+                }
             }
             _ => {
                 let rest = action
@@ -3506,6 +3564,7 @@ mod daemon_ui {
                         UiCommand::Toast(text, symbol) => crate::ui::toast::show(&text, symbol),
                         UiCommand::NoteFind(grep) => self.show_note_find(grep),
                         UiCommand::JiraJump => self.show_sidebar_jump(),
+                        UiCommand::Board(cmd) => self.board_cmd(cmd),
                         UiCommand::JiraEnable(ok, msg) => self.ivars().controller.jira_enable_result(ok, &msg),
                         UiCommand::JiraSetup(reason) => {
                             let ctrl = self.ivars().controller.clone();
@@ -7903,6 +7962,80 @@ mod daemon_ui {
             Some(r)
         }
 
+        /// Apply one `do:board:<sub>` to the real [`JiraList`] the Jira window
+        /// draws from. Dispatched here (on main) by [`UiCommand::Board`], so
+        /// `state.views.jira.board` and the visible rows come from one model.
+        fn board_cmd(&self, cmd: super::BoardCmd) {
+            use super::BoardCmd as B;
+            // The board is the Jira window's model. Build and present that
+            // window the first time a board verb arrives (a `do:board:*` before
+            // `do:open:jira`), so the board is visible and its state real.
+            let have = self
+                .ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .is_some_and(|st| st.jira.is_some());
+            if !have {
+                self.present(SlotView::Jira);
+            }
+            let out = self.jira_surface(|l| -> Result<(), String> {
+                match cmd {
+                    B::List => {
+                        l.show_board_list();
+                        Ok(())
+                    }
+                    B::Open(id) | B::ListOpen(id) => {
+                        if l.open_board(&id) {
+                            Ok(())
+                        } else {
+                            Err(format!("board {id}: no cached board-{id}.json"))
+                        }
+                    }
+                    B::ListStar(id) => {
+                        l.toggle_pin_board(&id);
+                        Ok(())
+                    }
+                    B::View(v) => {
+                        if l.open_view(&v) {
+                            Ok(())
+                        } else {
+                            Err(format!("board:view:{v}: need BOARD|SPRINT|MODE"))
+                        }
+                    }
+                    B::Sprint(s) => {
+                        if l.pick_sprint(&s) {
+                            Ok(())
+                        } else {
+                            Err(format!("board:sprint:{s}: no board open"))
+                        }
+                    }
+                    B::Mode(m) => {
+                        if l.set_mode(&m) {
+                            Ok(())
+                        } else {
+                            Err(format!("board:mode:{m}: no board open"))
+                        }
+                    }
+                    B::Pin => match l.current_view_spec() {
+                        Some(spec) => {
+                            l.toggle_pin_view(&spec);
+                            Ok(())
+                        }
+                        None => Err("board:pin: no board open".into()),
+                    },
+                }
+            });
+            match out {
+                Some(Err(e)) => self.ivars().controller.log(&format!("do:board: {e}")),
+                None => self
+                    .ivars()
+                    .controller
+                    .log("do:board: jira view not built (open the jira window first)"),
+                Some(Ok(())) => {}
+            }
+        }
+
         /// Build the Jira list (`openListWindow` for `[jira]`).
         fn build_jira(
             &self,
@@ -7956,7 +8089,7 @@ mod daemon_ui {
 
         fn jira_event(&self, ev: crate::views::jira_view::JiraEvent) {
             use crate::ui::sidebar::SidebarEvent;
-            use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, MY_WORK_PREFIX};
+            use crate::views::jira_view::{JiraEvent as E, BOARD_LIST_KEY, BOARD_PREFIX, MY_WORK_PREFIX, VIEW_PREFIX};
             match ev {
                 E::Click { row, double } => {
                     self.jira_surface(|l| l.selection = row);
@@ -8075,6 +8208,9 @@ mod daemon_ui {
                         }
                         if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
                             return (!l.open_board(id)).then(|| format!("board {id} not synced yet"));
+                        }
+                        if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
+                            return (!l.open_view(spec)).then(|| format!("board view {spec} not synced yet"));
                         }
                         Some(format!("{key}: not available in the Rust port yet"))
                     });
@@ -9334,6 +9470,7 @@ mod daemon_ui {
             }
             let mut notes_state = None;
             let mut files_state = None;
+            let mut jira_state = None;
             let mut responder = String::new();
             {
                 let state = self.ivars().state.borrow();
@@ -9346,6 +9483,9 @@ mod daemon_ui {
                     }
                     if let Some(b) = st.files.as_ref() {
                         files_state = Some(b.test_state());
+                    }
+                    if let Some((list, _)) = st.jira.as_ref() {
+                        jira_state = Some(list.view_state());
                     }
                 }
             }
@@ -9370,6 +9510,11 @@ mod daemon_ui {
                 self.ivars()
                     .controller
                     .set_view_state(SlotView::Files, v);
+            }
+            if let Some(v) = jira_state {
+                self.ivars()
+                    .controller
+                    .set_view_state(SlotView::Jira, v);
             }
         }
 
@@ -11259,20 +11404,42 @@ label = \"Health Checks\"
     }
 
     #[test]
-    fn board_verbs_report_not_implemented() {
-        // The Swift jira window's board verbs are not ported: `board:*` must
-        // answer a clear error, not the generic `unhandled action`.
+    fn board_verbs_are_window_only_and_report_the_grammar() {
+        // The board model is the jira window's `JiraList`; with no window
+        // (`needs_window`) every `board:*` is refused, like the other
+        // window-only verbs — never the old "not implemented" stub.
         let c = controller();
         for action in ["board:open:ABC", "board:list", "board:list-star:ABC", "board:bogus"] {
             let err = c.do_action(action).unwrap_or_else(|| panic!("{action} must error"));
             assert_eq!(
                 err["error"],
-                json!(format!("{action} not implemented in the Rust port yet")),
+                json!(format!("{action} unavailable in headless mode")),
                 "{action}"
             );
         }
-        // `state.views.jira.board` stays the host placeholder `{}` (no fake
-        // board model is installed).
+        // With no window the board model does not exist, so the host
+        // placeholder stays `{}` (no fake board state is installed).
         assert_eq!(c.state_json()["views"]["jira"]["board"], json!({}));
+    }
+
+    #[test]
+    fn parse_board_covers_the_eight_swift_subverbs() {
+        use super::{parse_board, BoardCmd};
+        assert_eq!(parse_board("board:list"), Ok(BoardCmd::List));
+        assert_eq!(parse_board("board:pin"), Ok(BoardCmd::Pin));
+        assert_eq!(parse_board("board:open:42"), Ok(BoardCmd::Open("42".into())));
+        assert_eq!(parse_board("board:list-open:42"), Ok(BoardCmd::ListOpen("42".into())));
+        assert_eq!(parse_board("board:list-star:42"), Ok(BoardCmd::ListStar("42".into())));
+        assert_eq!(parse_board("board:view:42|current|columns"), Ok(BoardCmd::View("42|current|columns".into())));
+        assert_eq!(parse_board("board:sprint:7"), Ok(BoardCmd::Sprint("7".into())));
+        assert_eq!(parse_board("board:mode:table"), Ok(BoardCmd::Mode("table".into())));
+        // Unknown / empty sub-verbs answer the grammar string.
+        for bad in ["board:bogus", "board:open", "board:list-open", "board:", "board:sprint"] {
+            assert_eq!(
+                parse_board(bad),
+                Err("board:open|list|list-open|list-star|view|sprint|mode|pin".to_string()),
+                "{bad}"
+            );
+        }
     }
 }

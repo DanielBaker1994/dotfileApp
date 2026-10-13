@@ -69,11 +69,13 @@ DO_ACTIONS = (
     "`next`, `prev`, `swap`, `reload`, `select:<n>`, "
     "`filter:<all|diffs|same|context>`, `folder-open`), "
     "`compare:open[:sub]:<left>|<right>` (both paths must exist), "
-    "`screenshot:<sub>`. `board:*` is not implemented in the Rust port yet. "
+    "`screenshot:<sub>`, `board:<sub>` (Jira board: `open:<id>`, `list`, "
+    "`list-open:<id>`, `list-star:<id>`, `view:<board|sprint|mode>`, "
+    "`sprint:<id>`, `mode:<columns|table>`, `pin`). "
     "Window-only verbs (`paths:show`, `tool:<name>`, `switcher`, "
     "`toggle-terminal`, `toggle-browser`, `term`, `notes-find`, `notes-grep`, "
-    "`jira-jump`, `reset-size`) are refused in headless mode. Pass one of "
-    "these; a typo is not always distinguishable from success."
+    "`jira-jump`, `reset-size`, `board:*`) are refused in headless mode. Pass "
+    "one of these; a typo is not always distinguishable from success."
 )
 
 # The ks_help body for `topic=raw`: the raw verbs and why they are dangerous.

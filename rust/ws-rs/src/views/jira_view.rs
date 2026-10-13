@@ -13,7 +13,7 @@ use crate::app::paths::JiraPaths;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel, SidebarPin, SidebarRow};
 use crate::ui::theme::PopupTone;
 use crate::app::config::ListColumn;
-use crate::views::jira::{base_field_label, parse_columns, style_rules, CellStyle, StyleRules};
+use crate::views::jira::{base_field_label, board_columns, parse_columns, style_rules, BoardColumn, CellStyle, StyleRules};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -55,6 +55,14 @@ pub const BOARD_PREFIX: &str = "board:";
 pub const VIEW_PREFIX: &str = "view:";
 pub const LABEL_PREFIX: &str = "label:";
 pub const BOARD_LIST_KEY: &str = "boards:all";
+
+/// One sprint in the cached `boardCatalog.json` (`CatalogSprint`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardSprint {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+}
 
 /// `PopupTableColumn.frames(x0:usable:)` — percent widths, autos share the
 /// leftover, scaled down when they sum past 100.
@@ -311,6 +319,19 @@ pub struct JiraList {
     pub rules: Option<StyleRules>,
     pub catalog: Vec<(String, String, String)>,
     pub boards: Vec<(String, String)>,
+    /// `pinnedBoardViews` (`board|sprint|mode` specs), the sidebar "Pinned" rows.
+    pub pinned_views: Vec<String>,
+    /// `boardSprint`: board id -> the picked sprint (`current`, `all` or an id).
+    pub board_sprint: HashMap<String, String>,
+    /// `boardMode`: board id -> `columns` | `table`.
+    pub board_mode: HashMap<String, String>,
+    /// The columns of the open board (computed from `all` + the board spec).
+    pub board_cols: Vec<BoardColumn>,
+    /// `true` once `board:list-star` / `board:pin` changed `boards` /
+    /// `pinned_views` in memory: the 10 s `refresh()` must not clobber the
+    /// user's fresh pins with the on-disk config (the port pins in memory;
+    /// persisting through `jira_poll.py --pin-*` is not ported).
+    pub pins_dirty: bool,
     pub status_line: Option<(String, PopupTone)>,
     pub note: Option<String>,
     pub inspector: bool,
@@ -452,13 +473,19 @@ impl JiraList {
                 }
             }
         }
-        self.boards = str_list(&self.config, "pinnedBoards")
-            .into_iter()
-            .map(|id| {
-                let name = self.catalog.iter().find(|c| c.0 == id).map(|c| c.1.clone()).unwrap_or(format!("Board {id}"));
-                (id, name)
-            })
-            .collect();
+        // `boards` / `pinned_views` are the pin lists. The port keeps pins in
+        // memory (`pins_dirty`); once the user toggled one, a periodic
+        // `refresh()` must not restore the on-disk config over it.
+        if !self.pins_dirty {
+            self.boards = str_list(&self.config, "pinnedBoards")
+                .into_iter()
+                .map(|id| {
+                    let name = self.catalog.iter().find(|c| c.0 == id).map(|c| c.1.clone()).unwrap_or(format!("Board {id}"));
+                    (id, name)
+                })
+                .collect();
+            self.pinned_views = str_list(&self.config, "pinnedBoardViews");
+        }
     }
 
     /// `JiraPoll.tabBadge` → `(text, tone)`; success badges stay quiet in
@@ -612,20 +639,32 @@ impl JiraList {
     pub fn show_board_list(&mut self) {
         self.place = Some(JiraPlace::Pin(BOARD_LIST_KEY.into()));
         self.columns = parse_columns("name:Board:40:left:filter+sort, project:Project:20:left:filter+sort, boardId:ID:10:left:sort");
-        self.all = self
-            .catalog
+        let mut ids: Vec<String> = self.catalog.iter().map(|c| c.0.clone()).collect();
+        for (id, _) in &self.boards {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        self.all = ids
             .iter()
-            .map(|(id, name, proj)| {
+            .map(|id| {
+                let (name, proj) = self
+                    .catalog
+                    .iter()
+                    .find(|c| c.0 == *id)
+                    .map(|c| (c.1.clone(), c.2.clone()))
+                    .unwrap_or_else(|| (self.board_name(id), String::new()));
                 let mut r = Record::new();
                 r.insert("key".into(), format!("{BOARD_PREFIX}{id}"));
                 r.insert("name".into(), name.clone());
-                r.insert("title".into(), name.clone());
-                r.insert("project".into(), proj.clone());
+                r.insert("title".into(), name);
+                r.insert("project".into(), proj);
                 r.insert("boardId".into(), id.clone());
                 r
             })
             .collect();
         self.selection = 0;
+        self.board_cols = Vec::new();
         self.refilter();
     }
 
@@ -652,9 +691,315 @@ impl JiraList {
         if !Path::new(&path).exists() {
             return false;
         }
+        // `openBoard` pins a board that is not pinned yet (the sidebar's
+        // "Boards" rows), then shows its cached issues.
+        self.pin_board(id);
         let cols = self.default_columns();
         self.show_pin_file(&format!("{BOARD_PREFIX}{id}"), &path, cols);
+        let default_sprint = self.default_sprint(id);
+        self.board_sprint.entry(id.to_string()).or_insert(default_sprint);
+        self.board_mode.entry(id.to_string()).or_insert_with(|| "columns".to_string());
+        self.compute_board_columns();
         true
+    }
+
+    /// The board shown when the list place is a `board:<id>` pin.
+    pub fn on_board(&self) -> Option<String> {
+        match &self.place {
+            Some(JiraPlace::Pin(k)) => k.strip_prefix(BOARD_PREFIX).map(str::to_string),
+            _ => None,
+        }
+    }
+
+    /// `true` while the "All boards" list is the shown pin.
+    pub fn on_board_list(&self) -> bool {
+        matches!(&self.place, Some(JiraPlace::Pin(k)) if k == BOARD_LIST_KEY)
+    }
+
+    /// `boardName(_:)` — the catalog / pinned name, else `Board <id>`.
+    pub fn board_name(&self, id: &str) -> String {
+        self.catalog
+            .iter()
+            .find(|c| c.0 == id)
+            .map(|c| c.1.clone())
+            .or_else(|| self.boards.iter().find(|(bid, _)| bid == id).map(|(_, n)| n.clone()))
+            .unwrap_or_else(|| format!("Board {id}"))
+    }
+
+    /// The sprints of one board (from the cached `boardCatalog.json`).
+    pub fn board_sprints(&self, id: &str) -> Vec<BoardSprint> {
+        let Some(p) = &self.paths else { return Vec::new() };
+        let cat = read_json(&p.cache_file("boardCatalog"));
+        for proj in cat.get("projects").and_then(Value::as_array).cloned().unwrap_or_default() {
+            for b in proj.get("boards").and_then(Value::as_array).cloned().unwrap_or_default() {
+                if b.get("id").and_then(Value::as_str) != Some(id) {
+                    continue;
+                }
+                return b
+                    .get("sprints")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|s| {
+                        let sid = s.get("id").and_then(Value::as_str)?;
+                        Some(BoardSprint {
+                            id: sid.to_string(),
+                            name: s.get("name").and_then(Value::as_str).unwrap_or(sid).to_string(),
+                            state: s.get("state").and_then(Value::as_str).unwrap_or("").to_string(),
+                        })
+                    })
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
+    /// `defaultSprint(_:)` — `current` while any sprint is active, else `all`.
+    pub fn default_sprint(&self, id: &str) -> String {
+        if self.board_sprints(id).iter().any(|s| s.state == "active") {
+            "current".to_string()
+        } else {
+            "all".to_string()
+        }
+    }
+
+    /// The board's `columns` spec from the cached `boards.json`.
+    fn board_column_spec(&self, id: &str) -> Vec<Value> {
+        let Some(p) = &self.paths else { return Vec::new() };
+        let boards = read_json(&p.cache_file("boards"));
+        boards
+            .get(id)
+            .and_then(|b| b.get("columns"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Recompute the open board's columns from its loaded rows (`renderBoardColumns`).
+    pub fn compute_board_columns(&mut self) {
+        let Some(id) = self.on_board() else {
+            self.board_cols = Vec::new();
+            return;
+        };
+        let rows: Vec<Value> = self
+            .all
+            .iter()
+            .map(|r| {
+                let f = |k: &str| r.get(k).cloned().unwrap_or_default();
+                serde_json::json!({
+                    "key": f("key"),
+                    "title": f("title"),
+                    "rowTitle": r.get("title").cloned().unwrap_or_default(),
+                    "type": f("type"),
+                    "priority": f("priority"),
+                    "assignee": f("assignee"),
+                    "status": f("status"),
+                })
+            })
+            .collect();
+        let spec = self.board_column_spec(&id);
+        let words = self
+            .rules
+            .as_ref()
+            .map(|r| serde_json::to_value(&r.words).unwrap_or_else(|_| serde_json::json!({})))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let params = serde_json::json!({
+            "rows": rows,
+            "columns": spec,
+            "categories": {},
+            "words": words,
+            "people": {},
+            "categoryNames": ["To Do", "In Progress", "Done"],
+        });
+        // The Swift board called `jira.board_columns` through the Python
+        // helper; use it when the helper is up (same code the Python tests
+        // cover) and fall back to the identical pure port in unit tests.
+        self.board_cols = crate::views::jira::helper_board_columns(&params).unwrap_or_else(|_| board_columns(&params));
+    }
+
+    /// `openView(_:)` — parse `board|sprint|mode` and open that board.
+    pub fn open_view(&mut self, v: &str) -> bool {
+        let parts: Vec<&str> = v.split('|').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let (board, sprint, mode) = (parts[0], parts[1], parts[2]);
+        self.board_sprint.insert(board.to_string(), sprint.to_string());
+        self.board_mode.insert(board.to_string(), mode.to_string());
+        self.open_board(board)
+    }
+
+    /// `pickSprint(_:)` — the open board's sprint picker.
+    pub fn pick_sprint(&mut self, sprint: &str) -> bool {
+        let Some(id) = self.on_board() else { return false };
+        self.board_sprint.insert(id, sprint.to_string());
+        self.compute_board_columns();
+        true
+    }
+
+    /// `boardBar.onMode` — `columns` | `table` for the open board.
+    pub fn set_mode(&mut self, mode: &str) -> bool {
+        let Some(id) = self.on_board() else { return false };
+        self.board_mode.insert(id, mode.to_string());
+        true
+    }
+
+    /// `list-star` — pin/unpin a board (the sidebar "Boards" rows).
+    pub fn toggle_pin_board(&mut self, id: &str) -> bool {
+        if let Some(i) = self.boards.iter().position(|(bid, _)| bid == id) {
+            self.boards.remove(i);
+        } else {
+            self.boards.push((id.to_string(), self.board_name(id)));
+        }
+        self.pins_dirty = true;
+        true
+    }
+
+    /// `openBoard`'s first step: a board that is not pinned yet joins the
+    /// sidebar "Boards" section (in-memory — `--pin-board` is not ported).
+    pub fn pin_board(&mut self, id: &str) {
+        if !self.boards.iter().any(|(bid, _)| bid == id) {
+            self.boards.push((id.to_string(), self.board_name(id)));
+            self.pins_dirty = true;
+        }
+    }
+
+    /// `boardBar.onPin` — pin/unpin the current `board|sprint|mode` view.
+    pub fn toggle_pin_view(&mut self, spec: &str) -> bool {
+        if let Some(i) = self.pinned_views.iter().position(|v| v == spec) {
+            self.pinned_views.remove(i);
+        } else {
+            self.pinned_views.push(spec.to_string());
+        }
+        self.pins_dirty = true;
+        true
+    }
+
+    /// `currentViewSpec` — `board|sprint|mode` for the open board.
+    pub fn current_view_spec(&self) -> Option<String> {
+        let id = self.on_board()?;
+        let sprint = self
+            .board_sprint
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| self.default_sprint(&id));
+        let mode = self
+            .board_mode
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "columns".to_string());
+        Some(format!("{id}|{sprint}|{mode}"))
+    }
+
+    /// `sidebarSelection` — the pinned view key when the current view is pinned,
+    /// else the shown pin key.
+    fn sidebar_selected(&self) -> String {
+        if let Some(spec) = self.current_view_spec() {
+            if self.pinned_views.iter().any(|v| v == &spec) {
+                return format!("{VIEW_PREFIX}{spec}");
+            }
+        }
+        match &self.place {
+            Some(JiraPlace::Pin(k)) => k.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// `testExtra` for the board list / board forms (`state.views.jira.board`).
+    pub fn board_state(&self) -> Value {
+        if self.on_board_list() {
+            return serde_json::json!({
+                "list": true,
+                "rows": self.all.len(),
+                "pinned": self.boards.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                "selected": self.sidebar_selected(),
+            });
+        }
+        match self.on_board() {
+            Some(id) => serde_json::json!({
+                "id": id,
+                "sprint": self.board_sprint.get(&id).cloned().unwrap_or_else(|| self.default_sprint(&id)),
+                "mode": self.board_mode.get(&id).cloned().unwrap_or_else(|| "columns".to_string()),
+                "columns": self.board_mode.get(&id).map(|m| m == "columns").unwrap_or(true),
+                "bar": true,
+                "sprintKeys": -1,
+                "views": self.pinned_views,
+                "selected": self.sidebar_selected(),
+                "catalog": self.catalog.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>(),
+            }),
+            None => serde_json::json!({}),
+        }
+    }
+
+    /// The `views.jira` extras the daemon UI pushes each drain tick, so
+    /// `state.views.jira.board` is read from this same model the view draws.
+    pub fn view_state(&self) -> Value {
+        let selected_tab = match &self.place {
+            Some(JiraPlace::Tab(i)) => *i as i64,
+            _ => -1,
+        };
+        serde_json::json!({
+            "board": self.board_state(),
+            "tabs": self.tabs.len(),
+            "selectedTab": selected_tab,
+            "rowCount": self.rows.len(),
+            "selection": self.selection,
+            "query": self.query,
+        })
+    }
+
+    /// When a board is open in `columns` mode the table shows the board's
+    /// columns and cards (Swift's board overlay), built from `board_cols` — the
+    /// real model, not a separate one. `table` mode keeps the issue table.
+    fn board_snapshot(&self) -> Option<JiraSnapshot> {
+        let id = self.on_board()?;
+        if self.board_mode.get(&id).map(String::as_str).unwrap_or("columns") != "columns" {
+            return None;
+        }
+        if self.board_cols.is_empty() {
+            return None;
+        }
+        let columns = parse_columns(
+            "column:Column:18:left, key:Key:12:left, title:Title:44:left, status:Status:16:left, assignee:Assignee:10:left",
+        );
+        let mut rows: Vec<Record> = Vec::new();
+        for col in &self.board_cols {
+            let mut head = Record::new();
+            head.insert("column".into(), col.name.clone());
+            head.insert("title".into(), format!("{} ({})", col.name, col.cards.len() + col.more));
+            rows.push(head);
+            for card in &col.cards {
+                let mut r = Record::new();
+                r.insert("column".into(), col.name.clone());
+                r.insert("key".into(), card.key.clone());
+                r.insert("title".into(), card.title.clone());
+                r.insert("status".into(), card.status.clone());
+                r.insert("assignee".into(), card.assignee.clone());
+                rows.push(r);
+            }
+            if col.more > 0 {
+                let mut more = Record::new();
+                more.insert("column".into(), col.name.clone());
+                more.insert("title".into(), format!("… {} more", col.more));
+                rows.push(more);
+            }
+        }
+        let selection = self.selection.min(rows.len().saturating_sub(1));
+        Some(JiraSnapshot {
+            columns,
+            rows,
+            selection,
+            checked: self.checked.clone(),
+            favs: self.favs.clone(),
+            sort: None,
+            sidebar: self.sidebar_model(),
+            inspector: None,
+            show_inspector: false,
+            query: self.query.clone(),
+            empty: "No board columns.".into(),
+            rules: self.rules.clone(),
+        })
     }
 
     /// `showMyWorkPin` — `jira_poll.py --my-work` → `<dir>/<id>.json`.
@@ -757,7 +1102,7 @@ impl JiraList {
                 });
             }
         }
-        for v in str_list(&self.config, "pinnedBoardViews") {
+        for v in &self.pinned_views {
             let board = v.split('|').next().unwrap_or("").to_string();
             let name = self.catalog.iter().find(|c| c.0 == board).map(|c| c.1.clone()).unwrap_or(format!("Board {board}"));
             let sprint = self.sprint_name(&board);
@@ -982,6 +1327,9 @@ pub struct JiraSnapshot {
 
 impl JiraList {
     pub fn snapshot(&self) -> JiraSnapshot {
+        if let Some(board) = self.board_snapshot() {
+            return board;
+        }
         let rows: Vec<Record> = self.rows.iter().filter_map(|&i| self.all.get(i).cloned()).collect();
         let sort = self
             .sort
@@ -1074,6 +1422,8 @@ impl JiraList {
                     self.show_board_list();
                 } else if let Some(id) = key.strip_prefix(BOARD_PREFIX) {
                     let _ = self.open_board(id);
+                } else if let Some(spec) = key.strip_prefix(VIEW_PREFIX) {
+                    let _ = self.open_view(spec);
                 }
             }
             JiraEvent::Sidebar(_) => {}
@@ -1953,6 +2303,7 @@ mod appkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn fit_column_pcts_fits_and_shrinks_the_widest() {
@@ -2090,5 +2441,141 @@ mod tests {
         assert!(parse_stamp_local("2026-10-10 23:35:09").is_some());
         assert!(parse_stamp_local("").is_none());
         assert!(parse_stamp_local("nope").is_none());
+    }
+
+    /// The board flow end to end against fixture files (never Jira): the
+    /// catalog, the board columns spec, the board's issues and config.json.
+    #[test]
+    fn board_list_open_columns_and_pins_from_fixtures() {
+        let base = std::env::temp_dir().join(format!("ws-jira-board-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cache = base.join("cache");
+        let boards_dir = base.join("jira_boards");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&boards_dir).unwrap();
+
+        // board_catalog.json: one project -> board 42, one active sprint.
+        std::fs::write(
+            cache.join("board_catalog.json"),
+            json!({
+                "projects": [{"key": "DEMO", "boards": [{
+                    "id": "42", "name": "Demo board", "type": "scrum",
+                    "sprints": [{"id": "7", "name": "Sprint 7", "state": "active"}]
+                }]}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // boards.json: board 42's column spec (statuses -> columns).
+        std::fs::write(
+            cache.join("boards.json"),
+            json!({
+                "42": {"name": "Demo board", "type": "scrum", "columns": [
+                    {"name": "Ready", "statuses": ["To Do"]},
+                    {"name": "Doing", "statuses": ["In Progress"]}
+                ]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // board-42.json: the board's issues (the poller's output).
+        std::fs::write(
+            boards_dir.join("board-42.json"),
+            json!([
+                {"key": "DEMO-1", "title": "One", "status": "To Do", "type": "Bug",
+                 "priority": "High", "assignee": ""},
+                {"key": "DEMO-2", "title": "Two", "status": "In Progress", "type": "Task",
+                 "priority": "Low", "assignee": ""}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let config_json = base.join("config.json");
+        std::fs::write(&config_json, json!({"pinnedBoards": ["42"], "pinnedBoardViews": []}).to_string()).unwrap();
+
+        let paths = JiraPaths {
+            config_json: config_json.to_string_lossy().into_owned(),
+            team_json: String::new(),
+            legacy_config: String::new(),
+            cache_dir: cache.to_string_lossy().into_owned(),
+            out_dir: base.join("jira_json").to_string_lossy().into_owned(),
+            cache: [
+                ("boardCatalog".to_string(), "board_catalog.json".to_string()),
+                ("boards".to_string(), "boards.json".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            tabs: BTreeMap::new(),
+            side_dirs: [("boards".to_string(), "jira_boards".to_string())].into_iter().collect(),
+        };
+        let section: HashMap<String, String> = [(
+            "columns".to_string(),
+            "key:Key:20:left, title:Title:60:left, status:Status:20:left".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let mut l = JiraList::new(section, Some(paths));
+
+        // The catalog populated from board_catalog.json.
+        assert_eq!(l.catalog.len(), 1);
+        assert_eq!(l.catalog[0], ("42".to_string(), "Demo board".to_string(), "DEMO".to_string()));
+        assert_eq!(l.board_sprints("42").len(), 1);
+        assert_eq!(l.default_sprint("42"), "current");
+
+        // list -> the board list rows.
+        l.show_board_list();
+        assert!(l.on_board_list());
+        let st = l.board_state();
+        assert_eq!(st["list"], json!(true));
+        assert_eq!(st["rows"], json!(1));
+        assert_eq!(st["pinned"], json!(["42"]));
+        assert_eq!(l.snapshot().rows.len(), 1);
+
+        // open -> the board's columns + cards, sprint/mode pinned.
+        assert!(l.open_board("42"));
+        assert_eq!(l.on_board().as_deref(), Some("42"));
+        assert_eq!(l.board_cols.len(), 2);
+        assert_eq!(l.board_cols[0].name, "Ready");
+        assert_eq!(l.board_cols[0].cards[0].key, "DEMO-1");
+        let st = l.board_state();
+        assert_eq!(st["id"], json!("42"));
+        assert_eq!(st["sprint"], json!("current"));
+        assert_eq!(st["mode"], json!("columns"));
+        assert_eq!(st["columns"], json!(true));
+        assert_eq!(st["bar"], json!(true));
+        assert_eq!(st["sprintKeys"], json!(-1));
+        assert_eq!(st["catalog"], json!(["42"]));
+
+        // columns mode draws the board table (column + key fields).
+        let snap = l.snapshot();
+        assert!(snap.columns.iter().any(|c| c.field == "column"));
+        assert!(snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+
+        // table mode draws the issue rows instead.
+        assert!(l.set_mode("table"));
+        assert_eq!(l.board_state()["mode"], json!("table"));
+        assert!(!l.snapshot().columns.iter().any(|c| c.field == "column"));
+        assert!(l.snapshot().rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+
+        // sprint pick + pinned view (in-memory; survives a refresh).
+        assert!(l.pick_sprint("7"));
+        assert_eq!(l.board_state()["sprint"], json!("7"));
+        assert!(l.toggle_pin_view("42|7|table"));
+        assert!(l.pinned_views.contains(&"42|7|table".to_string()));
+        l.refresh();
+        assert!(l.pinned_views.contains(&"42|7|table".to_string()));
+
+        // list-star unpins the board; pin re-adds it.
+        assert!(l.toggle_pin_board("42"));
+        assert!(l.boards.iter().all(|(b, _)| b != "42"));
+        l.pin_board("42");
+        assert!(l.boards.iter().any(|(b, _)| b == "42"));
+
+        // open-view spec parses BOARD|SPRINT|MODE.
+        assert!(l.open_view("42|current|columns"));
+        assert_eq!(l.board_state()["sprint"], json!("current"));
+        assert_eq!(l.board_state()["mode"], json!("columns"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

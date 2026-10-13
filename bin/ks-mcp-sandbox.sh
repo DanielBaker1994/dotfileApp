@@ -121,6 +121,10 @@ cmd_start() {
     if [ ! -f "$SANDBOX/home/commands.toml" ]; then
         cp "$ROOT/commands.toml" "$SANDBOX/home/commands.toml"
     fi
+    # No Jira credentials in the sandbox: seed a fake board (catalog, columns
+    # spec, one board's issues) so `do:board:*` has something to open. Only
+    # writes files that are absent, so a live home is never touched.
+    python3 -B "$ROOT/bin/ks-jira-board-fixture.py" "$SANDBOX/home" >/dev/null 2>&1 || true
     rm -f "$SOCK" "$SOCK.lock" "$LOG" "$PIDFILE"
 
     # `headless` exists from the current build; the grep probe keeps an older
