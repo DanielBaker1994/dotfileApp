@@ -341,6 +341,29 @@ mod appkit {
             self.ivars().key_focused.get()
         }
 
+        /// The row under the keyboard cursor: (path, is_dir, is_root).
+        pub fn cursor_row(&self) -> Option<(String, bool, bool)> {
+            let rows = self.ivars().rows.borrow();
+            rows.get(self.ivars().cursor.get()).map(|r| (r.path.clone(), r.is_dir, r.is_root))
+        }
+
+        /// Scroll `path`'s row into view and return the rect its name is drawn
+        /// in (view coordinates) — where an inline rename field goes.
+        pub fn name_rect(&self, path: &str) -> Option<NSRect> {
+            if self.collapsed() {
+                return None;
+            }
+            let (i, depth) = {
+                let rows = self.ivars().rows.borrow();
+                let i = rows.iter().position(|r| r.path == path)?;
+                (i, rows[i].depth)
+            };
+            self.reveal_row(i);
+            let r = self.geometry().row_rect(i, self.ivars().scroll.get());
+            let tx = r.x + 4.0 + depth as f64 * self.ivars().indent.get() + 34.0;
+            Some(NSRect::new(NSPoint::new(tx, r.y), NSSize::new((r.max_x() - 6.0 - tx).max(80.0), r.height)))
+        }
+
         /// Keys while the tree has the keyboard: the rail keys (↑↓ / Ctrl+N/P /
         /// Home / End / Page / Return / Space / Esc) plus ← → to collapse or
         /// expand a folder. Return on a file opens it and moves focus right.

@@ -935,6 +935,24 @@ impl QuickLook {
     }
 }
 
+/// Order out the shared Quick Look panel if it is on screen (whoever opened
+/// it). Returns whether it was up. The host calls this on Esc / Space: a panel
+/// opened from a menu may never become key, so its own `handleEvent` never
+/// sees those keys.
+#[cfg(target_os = "macos")]
+pub fn close_shared_quick_look(mtm: objc2::MainThreadMarker) -> bool {
+    if !unsafe { QLPreviewPanel::sharedPreviewPanelExists(mtm) } {
+        return false;
+    }
+    match unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) } {
+        Some(panel) if panel.isVisible() => {
+            panel.orderOut(None);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Cast any Objective-C object to `&AnyObject` (the identity cast used for the
 /// panel's unretained `delegate`).
 #[cfg(target_os = "macos")]

@@ -3037,6 +3037,13 @@ mod daemon_ui {
         static COMPARE_QUICK_LOOK: RefCell<crate::views::files::QuickLook> = RefCell::new(crate::views::files::QuickLook::new());
     }
 
+    /// A terminal selection as an existing absolute path (drawer shells
+    /// start in `$HOME`, so relative paths resolve there).
+    fn terminal_selection_path(sel: &str) -> Option<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        crate::views::notes::terminal_path(sel, &home, &|p| std::path::Path::new(p).exists())
+    }
+
     /// `~`-abbreviated path for prompts and toasts.
     fn tilde_path(p: &str) -> String {
         crate::views::notes::tilde_path(p, &std::env::var("HOME").unwrap_or_default())
@@ -3243,6 +3250,9 @@ mod daemon_ui {
         /// `(cwd, row)` of the last plain click in the file list: a second
         /// click on the same row arms the inline rename.
         static FILES_LAST_CLICK: std::cell::RefCell<Option<(String, usize)>> = const { std::cell::RefCell::new(None) };
+        /// `(path, time)` of the last plain click on a notes sidebar / tree
+        /// row: a second single click on the same row soon after renames it.
+        static NOTES_LAST_CLICK: std::cell::RefCell<Option<(String, f64)>> = const { std::cell::RefCell::new(None) };
     }
 
     /// Last `gather_workspaces()` result, so the palette opens instantly.
@@ -3266,7 +3276,7 @@ mod daemon_ui {
 
     /// Run `f` after the system double-click interval unless a double-click
     /// (or another click) arrived first — single click renames, double opens.
-    fn schedule_click_rename(f: fn(&DaemonUi)) {
+    fn schedule_click_rename(f: impl FnOnce(&DaemonUi) + Send + 'static) {
         cancel_click_rename();
         let gen = CLICK_RENAME_GEN.with(|g| g.get());
         let secs = unsafe { objc2_app_kit::NSEvent::doubleClickInterval() }.max(0.2) + 0.05;
@@ -3333,6 +3343,12 @@ mod daemon_ui {
         last_esc_at: Cell<f64>,
         /// The local keyDown guard (`PopupWindow.installMonitors`).
         key_monitor: RefCell<Option<MonitorHandle>>,
+        /// Right-clicks on the notes drawer terminal (its context menu).
+        menu_monitor: RefCell<Option<MonitorHandle>>,
+        /// Trackpad pinches over the note editor (font zoom).
+        pinch_monitor: RefCell<Option<MonitorHandle>>,
+        /// The pinch built up since the last font step.
+        pinch_acc: Cell<f64>,
         /// Last `checktime` poll of the notes vim pane (Swift's note watcher).
         last_vim_check: Cell<f64>,
         /// When the notes vim pane last relaunched (`:q`) — the
@@ -3435,6 +3451,9 @@ mod daemon_ui {
             esc_streak: Cell::new(0),
             last_esc_at: Cell::new(0.0),
             key_monitor: RefCell::new(None),
+            menu_monitor: RefCell::new(None),
+            pinch_monitor: RefCell::new(None),
+            pinch_acc: Cell::new(0.0),
             last_vim_check: Cell::new(0.0),
             last_vim_relaunch: Cell::new(0.0),
             focus_watch: RefCell::new(super::FocusWatch::default()),
@@ -3491,6 +3510,20 @@ mod daemon_ui {
                 .unwrap_or(false)
         });
         *ui.ivars().key_monitor.borrow_mut() = Some(monitor);
+        // SwiftTerm has no menu of its own: right-clicks on the notes drawer
+        // terminal get ours (rule 2: copy file / path, open in notes, reveal).
+        let weak = Weak::new(&*ui);
+        let menu_monitor = popup::install_local_monitor_mask(mtm, objc2_app_kit::NSEventMask::RightMouseDown, move |event| {
+            weak.load().map(|ui| ui.terminal_right_click(event)).unwrap_or(false)
+        });
+        *ui.ivars().menu_monitor.borrow_mut() = Some(menu_monitor);
+        // A trackpad pinch over the note editor steps its font like Cmd+± (the
+        // reading view magnifies natively).
+        let weak = Weak::new(&*ui);
+        let pinch_monitor = popup::install_local_monitor_mask(mtm, objc2_app_kit::NSEventMask::Magnify, move |event| {
+            weak.load().map(|ui| ui.notes_pinch(event)).unwrap_or(false)
+        });
+        *ui.ivars().pinch_monitor.borrow_mut() = Some(pinch_monitor);
         // `startFocusBridge`'s global click monitor: a click outside our
         // windows marks `lastOtherAppClick` (the user left on purpose, so an
         // AeroSpace focus echo must not pull the app back).
@@ -4602,6 +4635,23 @@ mod daemon_ui {
             if crate::ui::inline_rename::active() {
                 return false;
             }
+            // Esc / Space close Quick Look even when the panel is not key.
+            {
+                use objc2_app_kit::NSEventModifierFlags as F;
+                let plain = !event.modifierFlags().intersects(F::Command | F::Control | F::Option | F::Shift);
+                if plain && matches!(event.keyCode(), 49 | 53) && !event.isARepeat() {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        if crate::views::files::close_shared_quick_look(mtm) {
+                            if let Some(st) = self.ivars().state.borrow().as_ref() {
+                                if st.window.isVisible() {
+                                    st.window.makeKeyAndOrderFront(None);
+                                }
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
             if self.route_overlay_key(event) {
                 return true;
             }
@@ -4708,6 +4758,27 @@ mod daemon_ui {
             // `if !armed, VimKeys.shared.handle(e, in: w)`.
             if self.vim_key(event) {
                 return true;
+            }
+
+            // F2 on the notes rail / tree cursor row: rename that file in place.
+            if event.keyCode() == 120 && self.ivars().controller.current() == Some(SlotView::Notes) {
+                let target = self
+                    .notes_surface(|s| {
+                        let (bar, tree) = (s.sidebar_view(), s.tree_view());
+                        if bar.key_focused() {
+                            let i = bar.cursor_list_row()?;
+                            s.tab_path(i).map(|p| (p, Some(i)))
+                        } else if tree.key_focused() {
+                            tree.cursor_row().filter(|(_, _, root)| !root).map(|(p, _, _)| (p, None))
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten();
+                if let Some((path, tab)) = target {
+                    self.notes_begin_rename(path, tab);
+                    return true;
+                }
             }
 
             // `(w.firstResponder as? PopupTabsBar)?.handleNavKey(e)`: a rail
@@ -6170,7 +6241,13 @@ mod daemon_ui {
                     self.notes_surface(|s| s.tree_toggle_section());
                 }
                 E::Click { path, is_dir } => {
+                    // Finder's slow second click on the open file renames it.
+                    let was_open = !is_dir && self.notes_surface(|s| s.tree_selected()).flatten().as_deref() == Some(path.as_str());
+                    let arm = Self::notes_click_arms_rename(&path) && was_open;
                     self.notes_surface(|s| s.tree_click(&path, is_dir));
+                    if arm {
+                        schedule_click_rename(move |ui| ui.notes_begin_rename(path, None));
+                    }
                 }
                 E::Menu { path, is_dir, is_root, x, y } => {
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
@@ -6220,6 +6297,12 @@ mod daemon_ui {
                     entries.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])));
                     if !is_root {
                         entries.push(MenuEntry::Separator);
+                        let (w, pr) = (weak.clone(), path.clone());
+                        entries.push(MenuEntry::item("Rename\u{2026}  F2", move || {
+                            if let Some(ui) = w.load() {
+                                ui.notes_begin_rename(pr.clone(), None);
+                            }
+                        }));
                         let (w, pt) = (weak.clone(), path.clone());
                         entries.push(MenuEntry::item("Delete…", move || {
                             let Some(ui) = w.load() else { return };
@@ -6255,11 +6338,123 @@ mod daemon_ui {
             }
         }
 
+        /// Finder's slow second click: a plain single click on the same row
+        /// as the previous one (within a few seconds) arms an inline rename;
+        /// a double-click cancels any pending one.
+        fn notes_click_arms_rename(path: &str) -> bool {
+            use objc2_app_kit::NSEventModifierFlags as F;
+            let Some(mtm) = MainThreadMarker::new() else { return false };
+            let single = NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|e| {
+                let m = e.modifierFlags();
+                e.clickCount() <= 1 && !m.intersects(F::Command | F::Shift | F::Control | F::Option)
+            });
+            if !single {
+                cancel_click_rename();
+                NOTES_LAST_CLICK.with(|c| *c.borrow_mut() = None);
+                return false;
+            }
+            let now = now_secs();
+            let armed = NOTES_LAST_CLICK.with(|c| c.borrow().as_ref().is_some_and(|(p, t)| p == path && now - t < 4.0));
+            NOTES_LAST_CLICK.with(|c| *c.borrow_mut() = if armed { None } else { Some((path.to_string(), now)) });
+            if !armed {
+                cancel_click_rename();
+            }
+            armed
+        }
+
+        /// Rename a note file / folder in place: an edit field over its row
+        /// in the Open list (`tab = Some(i)`) or the pinned tree. A collapsed
+        /// rail (no row to edit over) asks in a sheet instead.
+        fn notes_begin_rename(&self, path: String, tab: Option<usize>) {
+            let name = std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.is_empty() {
+                return;
+            }
+            let is_dir = std::path::Path::new(&path).is_dir();
+            let spot = self
+                .notes_surface(|s| -> Option<(Retained<NSView>, NSRect)> {
+                    match tab {
+                        Some(i) => {
+                            let v = s.sidebar_view();
+                            let r = v.title_rect(i)?;
+                            Some((Retained::into_super(v), r))
+                        }
+                        None => {
+                            let v = s.tree_view();
+                            let r = v.name_rect(&path)?;
+                            Some((Retained::into_super(v), r))
+                        }
+                    }
+                })
+                .flatten();
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let Some((parent, rect)) = spot else {
+                let Some(window) = self.ivars().state.borrow().as_ref().map(|st| st.window.clone()) else { return };
+                crate::ui::sheet::form_sheet(
+                    &window,
+                    "Rename",
+                    &tilde_path(&path),
+                    vec![crate::ui::sheet::FormRow::new("Name", &name, "")],
+                    "Rename",
+                    move |answer| {
+                        let Some(text) = answer.and_then(|v| v.into_iter().next()) else { return };
+                        if let Some(ui) = weak.load() {
+                            ui.notes_rename_commit(&path, &text);
+                        }
+                    },
+                );
+                return;
+            };
+            let wp = objc2::rc::Weak::from_retained(&parent);
+            crate::ui::inline_rename::begin(
+                &parent,
+                rect,
+                &name,
+                is_dir,
+                crate::ui::theme::section_colors("notes"),
+                12.5,
+                Box::new(move |text| {
+                    let Some(ui) = weak.load() else { return };
+                    if let Some(t) = text {
+                        ui.notes_rename_commit(&path, &t);
+                    }
+                    // Give the keyboard back to the editor unless the click
+                    // that ended the rename went into another text input.
+                    let typing = wp
+                        .load()
+                        .and_then(|p| p.window())
+                        .and_then(|w| w.firstResponder())
+                        .is_some_and(|r| r.isKindOfClass(<objc2_app_kit::NSTextView as objc2::ClassType>::class()));
+                    if !typing {
+                        ui.notes_surface(|s| s.focus_editor());
+                    }
+                }),
+            );
+        }
+
+        fn notes_rename_commit(&self, path: &str, name: &str) {
+            match self.notes_surface(|s| s.rename_path(path, name)) {
+                Some(Err(msg)) => crate::ui::toast::show(&msg, "exclamationmark.triangle.fill"),
+                Some(Ok(Some(dst))) => {
+                    let n = std::path::Path::new(&dst).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    crate::ui::toast::show(&format!("Renamed to {n}"), "pencil");
+                }
+                _ => {}
+            }
+        }
+
         fn notes_sidebar_event(&self, ev: crate::ui::sidebar::SidebarEvent) {
             use crate::ui::sidebar::SidebarEvent as E;
             match ev {
                 E::Select(i) => {
+                    // Click the open note's row again (Finder's slow second
+                    // click) to rename it in place.
+                    let path = self.notes_surface(|s| s.tab_path(i)).flatten();
+                    let arm = path.as_deref().is_some_and(Self::notes_click_arms_rename);
                     self.notes_surface(|s| s.click_row(i));
+                    if let (true, Some(p)) = (arm, path) {
+                        schedule_click_rename(move |ui| ui.notes_begin_rename(p, Some(i)));
+                    }
                 }
                 E::Close(i) => {
                     self.notes_surface(|s| s.close_tab(i));
@@ -6274,9 +6469,15 @@ mod daemon_ui {
                     use crate::ui::menu_kit::{popup, MenuEntry};
                     let Some(Some(path)) = self.notes_surface(|s| s.tab_path(i)) else { return };
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
-                    let (p1, p3) = (path.clone(), path.clone());
+                    let (p1, p3, pr, w) = (path.clone(), path.clone(), path.clone(), weak.clone());
                     popup(
                         vec![
+                            MenuEntry::item("Rename\u{2026}  F2", move || {
+                                if let Some(ui) = w.load() {
+                                    ui.notes_begin_rename(pr.clone(), Some(i));
+                                }
+                            }),
+                            MenuEntry::Separator,
                             MenuEntry::item("Copy Absolute Path", move || copy_text_to_pasteboard(&p1)),
                             MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p3])),
                             MenuEntry::Separator,
@@ -6981,7 +7182,13 @@ mod daemon_ui {
                     ui.ai_event(ev);
                 }
             }));
-            self.ai_refresh_command_for(a.model.rule().cloned());
+            // build_ai runs inside the state borrow (content_for), so the
+            // no-rules text is set here, not through ai_surface (which
+            // re-borrows and panicked on a fresh home with no rules).
+            match a.model.rule().cloned() {
+                Some(r) => self.ai_refresh_command_for(Some(r)),
+                None => a.command = format!("no rules in {} — press + to make one", a.model.rules_dir()),
+            }
             // `checkAvailable()`.
             let bin = a.model.config.fm_bin();
             std::thread::spawn(move || {
@@ -9018,7 +9225,8 @@ mod daemon_ui {
         fn rename_rect(list: &crate::views::files_view::FileListView, i: usize) -> NSRect {
             let r = list.row_rect(i);
             let x = r.x + 30.0;
-            NSRect::new(NSPoint::new(x, r.y), NSSize::new((r.width * 0.55 - x).max(120.0), r.height))
+            // A 22pt field centred on the row (rows grow with the list zoom).
+            NSRect::new(NSPoint::new(x, (r.y + (r.height - 22.0) / 2.0).round()), NSSize::new((r.width * 0.55 - x).max(120.0), 22.0))
         }
 
         /// `setTextZoom(_:)` for the file browser: 0.6–3, 0.1 a step, kept
@@ -9306,12 +9514,102 @@ mod daemon_ui {
             popup_context(e, &view);
         }
 
+        /// One font step per ~12% of pinch over the note editor.
+        fn notes_pinch(&self, event: &NSEvent) -> bool {
+            if self.ivars().controller.current() != Some(SlotView::Notes) {
+                return false;
+            }
+            if self.notes_surface(|s| s.editor_contains(event)) != Some(true) {
+                return false;
+            }
+            if event.phase().contains(objc2_app_kit::NSEventPhase::Began) {
+                self.ivars().pinch_acc.set(0.0);
+            }
+            let acc = self.ivars().pinch_acc.get() + event.magnification();
+            if acc.abs() >= 0.12 {
+                let sign = if acc > 0.0 { 1 } else { -1 };
+                self.notes_surface(|s| s.step_font(sign));
+                self.ivars().pinch_acc.set(0.0);
+            } else {
+                self.ivars().pinch_acc.set(acc);
+            }
+            true
+        }
+
+        /// The notes drawer terminal's right-click menu (Swift
+        /// `terminalMenu(for:)` plus rule 2's file items, which act on the
+        /// selected text as a path). `false` = not on the terminal.
+        fn terminal_right_click(&self, event: &NSEvent) -> bool {
+            if self.ivars().controller.current() != Some(SlotView::Notes) {
+                return false;
+            }
+            if self.notes_surface(|s| s.terminal_contains(event)) != Some(true) {
+                return false;
+            }
+            let at = NSEvent::mouseLocation();
+            // Pop the menu after this event returns (not inside the monitor).
+            let (x, y) = (at.x, at.y);
+            on_ui(move |ui| ui.terminal_menu(x, y));
+            true
+        }
+
+        fn terminal_menu(&self, x: f64, y: f64) {
+            use crate::ui::menu_kit::MenuEntry;
+            let selection = self.notes_surface(|s| s.terminal_selection()).flatten();
+            let path = selection.as_deref().and_then(terminal_selection_path);
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            let edit = |title: &str, action: objc2::runtime::Sel| {
+                let w = weak.clone();
+                MenuEntry::item(title, move || {
+                    if let Some(ui) = w.load() {
+                        ui.notes_surface(|s| s.terminal_edit(action));
+                    }
+                })
+            };
+            let mut e = vec![
+                if selection.is_some() { edit("Copy", sel!(copy:)) } else { MenuEntry::disabled("Copy") },
+                edit("Paste", sel!(paste:)),
+                MenuEntry::Separator,
+            ];
+            match path {
+                Some(p) => {
+                    let (p1, p2, p3, p4, w) = (p.clone(), p.clone(), p.clone(), p.clone(), weak.clone());
+                    if !std::path::Path::new(&p).is_dir() {
+                        e.push(MenuEntry::item("Open in Notes", move || {
+                            if let Some(ui) = w.load() {
+                                ui.open_in_notes(&p1);
+                            }
+                        }));
+                    }
+                    e.push(MenuEntry::item("Copy File", move || {
+                        copy_files_toast(&[p2]);
+                    }));
+                    e.push(MenuEntry::item("Copy Absolute Path", move || {
+                        copy_text_to_pasteboard(&p3);
+                        crate::ui::toast::show(&format!("Copied {}", tilde_path(&p3)), "doc.on.clipboard");
+                    }));
+                    e.push(MenuEntry::item("Reveal in Files", move || reveal_in_files(&[p4])));
+                }
+                None => {
+                    for t in ["Open in Notes", "Copy File", "Copy Absolute Path", "Reveal in Files"] {
+                        e.push(MenuEntry::disabled(t));
+                    }
+                    e.push(MenuEntry::disabled("Select a file path to use these"));
+                }
+            }
+            e.push(MenuEntry::Separator);
+            e.push(edit("Select All", sel!(selectAll:)));
+            crate::ui::menu_kit::popup_at(e, x, y);
+        }
+
         /// `openNoteFile(_:)` from a file browser: show notes on `path`.
         fn open_in_notes(&self, path: &str) {
             self.ivars().controller.open(SlotView::Notes);
             self.present(SlotView::Notes);
             let p = path.to_string();
-            self.notes_surface(|s| s.open_note(&p));
+            // `open_external_path` adds (or selects) the tab so the sidebar
+            // lists the file; `open_note` alone only swapped the editor.
+            self.notes_surface(|s| s.open_external_path(&p));
         }
 
         /// Show `paths` in the app's **own** file browser (`SlotView::Files`)
@@ -9769,6 +10067,20 @@ mod daemon_ui {
                 return;
             };
             let controller = self.ivars().controller.clone();
+            // A view coming up (a pick, a hotkey, a socket open) replaces the
+            // palette: left over the window it kept the keyboard in a panel
+            // nobody was using, and its Esc then left no key window at all.
+            let palette_up = self
+                .ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .and_then(|st| st.palette.as_ref())
+                .is_some_and(|p| p.is_visible());
+            if palette_up {
+                self.hide_palette_panel();
+                controller.set_palette_visible(false);
+            }
             let (rect, title, wid, front_pid) = {
                 let mut state = self.ivars().state.borrow_mut();
                 let st = state.get_or_insert_with(|| self.build_window(mtm));

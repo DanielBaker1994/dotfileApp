@@ -293,6 +293,9 @@ mod appkit {
             this.setWantsLayer(true);
             if let Some(l) = this.layer() {
                 l.setBackgroundColor(Some(&Rgba::new(0.0, 0.0, 0.0, 0.25).to_nscolor().CGColor()));
+                // Above the panes' focus-ring / border layers, which otherwise
+                // drew through the sheet.
+                l.setZPosition(1000.0);
             }
 
             let w = 640f64.min(rb.size.width - 40.0);
@@ -313,7 +316,7 @@ mod appkit {
             );
             card.setWantsLayer(true);
             if let Some(l) = card.layer() {
-                let fill = colors.background.opaque().blended(0.25, Rgba::BLACK).with_alpha(0.98);
+                let fill = colors.background.opaque().blended(0.25, Rgba::BLACK).with_alpha(1.0);
                 l.setBackgroundColor(Some(&fill.to_nscolor().CGColor()));
                 l.setCornerRadius(12.0);
                 l.setBorderColor(Some(&colors.text.with_alpha(0.15).to_nscolor().CGColor()));

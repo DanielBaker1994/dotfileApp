@@ -654,6 +654,32 @@ mod appkit {
             (t, self.ivars().cursor.get(), page.max(1))
         }
 
+        /// The list row under the keyboard cursor (pinned chips excluded).
+        pub fn cursor_list_row(&self) -> Option<usize> {
+            let m = self.ivars().model.borrow();
+            let cur = self.ivars().cursor.get();
+            (cur >= m.pinned.len() && cur - m.pinned.len() < m.rows.len()).then(|| cur - m.pinned.len())
+        }
+
+        /// Scroll list row `i` into view and return the rect its title is
+        /// drawn in (view coordinates) — where an inline rename field goes.
+        /// `None` while the rail is collapsed to icons.
+        pub fn title_rect(&self, i: usize) -> Option<NSRect> {
+            if self.collapsed() {
+                return None;
+            }
+            let n = self.ivars().model.borrow().rows.len();
+            if i >= n {
+                return None;
+            }
+            let g = self.geometry();
+            self.ivars().scroll.set(g.reveal(i, self.ivars().scroll.get(), n));
+            self.setNeedsDisplay(true);
+            let r = g.row_rect(i, self.ivars().scroll.get());
+            let tx = r.x + 30.0;
+            Some(NSRect::new(NSPoint::new(tx, (r.mid_y() - 11.0).round()), NSSize::new((r.max_x() - 8.0 - tx).max(80.0), 22.0)))
+        }
+
         /// `vimMove(to:)`: move the keyboard cursor.
         pub fn vim_move(&self, row: usize) {
             self.ivars().cursor.set(row);

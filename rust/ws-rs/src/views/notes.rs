@@ -453,6 +453,11 @@ pub fn plan_new_note(
         cfg.new_note_name.clone()
     };
     let path = new_note_path(dir, &base, open, &|p| Path::new(p).exists());
+    // Cmd+N / the sidebar "+" make an empty note; only Ctrl+N (a document)
+    // starts from the `new-doc-template` snippet — what `[shortcuts]` lists.
+    if !is_doc {
+        return NewNotePlan { path, body: String::new(), snippet_missing: false };
+    }
     let snippet = snippet_text(all_snippets, &cfg.new_doc_template);
     NewNotePlan {
         path,
@@ -581,6 +586,118 @@ impl NotesTabs {
     pub fn set_dismissed(&mut self, paths: impl IntoIterator<Item = String>) {
         self.dismissed = paths.into_iter().collect();
     }
+
+    /// A file or folder moved from `old` to `new` (an inline rename): every
+    /// tab at or under `old` follows it, titles included. Returns whether
+    /// any tab changed.
+    pub fn retarget(&mut self, old: &str, new: &str) -> bool {
+        let mut hit = false;
+        for t in &mut self.tabs {
+            if let Some(p) = retarget_path(&t.path, old, new) {
+                t.title = Path::new(&p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
+                t.path = p;
+                hit = true;
+            }
+        }
+        self.dismissed = self
+            .dismissed
+            .drain()
+            .map(|p| retarget_path(&p, old, new).unwrap_or(p))
+            .collect();
+        hit
+    }
+}
+
+/// `path` re-rooted after `old` moved to `new`: `Some` when `path` is `old`
+/// or lies under it, else `None`.
+pub fn retarget_path(path: &str, old: &str, new: &str) -> Option<String> {
+    if path == old {
+        return Some(new.to_string());
+    }
+    path.strip_prefix(old).filter(|rest| rest.starts_with('/')).map(|rest| format!("{new}{rest}"))
+}
+
+/// Save the zoomed editor / drawer-terminal sizes to commands.toml off the
+/// main thread, once the key repeats settle (only the newest step writes).
+pub fn persist_font_sizes(editor: Option<f64>, terminal: Option<f64>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        if GEN.load(Ordering::SeqCst) != gen {
+            return;
+        }
+        if let Some(n) = editor {
+            crate::app::config::save_config_value("notes", "font-size", &format!("{}", n.round() as i64));
+        }
+        if let Some(n) = terminal {
+            crate::app::config::save_config_value("app", "terminal-font-size", &format!("{}", n.round() as i64));
+        }
+    });
+}
+
+/// The drawer terminal's selected text as an existing absolute path: one
+/// line, quotes / a trailing `:line[:col]` stripped, `~` expanded, relative
+/// paths taken from `home` (where the drawer shell starts).
+pub fn terminal_path(sel: &str, home: &str, exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    let line = sel.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let t = line.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    let t = t.replace("\\ ", " ");
+    let abs = |t: &str| -> String {
+        if let Some(rest) = t.strip_prefix("~/") {
+            format!("{home}/{rest}")
+        } else if t == "~" {
+            home.to_string()
+        } else if t.starts_with('/') {
+            t.to_string()
+        } else {
+            format!("{home}/{}", t.trim_start_matches("./"))
+        }
+    };
+    let p = abs(&t);
+    if exists(&p) {
+        return Some(p);
+    }
+    // `file.rs:12` / `file.rs:12:5` (grep / compiler output).
+    let mut base = t.as_str();
+    for _ in 0..2 {
+        match base.rsplit_once(':') {
+            Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => base = head,
+            _ => break,
+        }
+    }
+    let p = abs(base);
+    exists(&p).then_some(p)
+}
+
+/// `[notes] paths` after `old` moved to `new`: entries at or under `old`
+/// are rewritten (keeping a `~/` spelling); `None` when nothing matched.
+pub fn rename_in_note_paths(raw: &str, old: &str, new: &str, home: &str) -> Option<String> {
+    let mut changed = false;
+    let parts: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|entry| {
+            let full = match entry.strip_prefix("~/") {
+                Some(rest) if !home.is_empty() => format!("{home}/{rest}"),
+                _ => entry.to_string(),
+            };
+            let full = full.trim_end_matches('/');
+            match retarget_path(full, old, new) {
+                Some(p) => {
+                    changed = true;
+                    match p.strip_prefix(home).filter(|r| !home.is_empty() && r.starts_with('/')) {
+                        Some(rest) if entry.starts_with('~') => format!("~{rest}"),
+                        _ => p,
+                    }
+                }
+                None => entry.to_string(),
+            }
+        })
+        .collect();
+    changed.then(|| parts.join(", "))
 }
 
 const DISMISSED_KEY: &str = "notes.dismissed";
@@ -2975,6 +3092,21 @@ mod macos {
             let eval = |js: &str| unsafe {
                 key_web.evaluateJavaScript_completionHandler(&NSString::from_str(js), None)
             };
+            // Cmd+= / Cmd+- / Cmd+0 zoom the page, like the in-place view
+            // (a trackpad pinch magnifies natively).
+            {
+                use crate::ui::popup::{KEY_KEYPAD_MINUS, KEY_KEYPAD_PLUS, KEY_MINUS, KEY_PLUS, KEY_ZERO};
+                let c = k.key_code;
+                if k.cmd && !k.opt && !k.ctrl && matches!(c, KEY_PLUS | KEY_KEYPAD_PLUS | KEY_MINUS | KEY_KEYPAD_MINUS | KEY_ZERO) {
+                    let z = match c {
+                        KEY_ZERO => st.reset_zoom(),
+                        KEY_PLUS | KEY_KEYPAD_PLUS => st.zoom_by(1.1),
+                        _ => st.zoom_by(1.0 / 1.1),
+                    };
+                    unsafe { key_web.setPageZoom(z) };
+                    return true;
+                }
+            }
             if let Some(sk) = st.search_key(k.key_code, m, event.timestamp()) {
                 if let Some(js) = sk.js() {
                     eval(&js);
@@ -3709,6 +3841,62 @@ mod macos {
             self.repaint_tree(false);
         }
 
+        /// The tree row highlighted as the open file.
+        pub fn tree_selected(&self) -> Option<String> {
+            self.tree_model.selected.clone()
+        }
+
+        /// Rename a note file or folder in place (the sidebar / tree inline
+        /// rename): pending edits are saved first, then the file moves and
+        /// the tabs, the tree, the editor buffer and `[notes] paths` follow
+        /// it. `Ok(None)` = the name did not change; `Err` = a message.
+        pub fn rename_path(&mut self, old: &str, new_name: &str) -> Result<Option<String>, String> {
+            let sel = self.selected_path();
+            let sel_moves = sel.as_deref().is_some_and(|p| retarget_path(p, old, old).is_some());
+            // Write what the editor holds to the old path before it moves.
+            let mut old_buf = None;
+            if let Some(pane) = &self.vim {
+                pane.flush();
+                if sel_moves {
+                    old_buf = pane.eval("bufnr('%')").filter(|n| n.trim().parse::<i64>().is_ok_and(|n| n > 0));
+                }
+            } else if sel_moves {
+                self.commit();
+            }
+            let Some(dst) = crate::views::files::rename_into(old, new_name)? else {
+                return Ok(None);
+            };
+            self.model.tabs.retarget(old, &dst);
+            save_dismissed(&self.model.tabs.dismissed_paths());
+            if let Some(s) = self.tree_model.selected.take() {
+                self.tree_model.selected = Some(retarget_path(&s, old, &dst).unwrap_or(s));
+            }
+            let expanded = std::mem::take(&mut self.tree_model.expanded);
+            self.tree_model.expanded = expanded.into_iter().map(|p| retarget_path(&p, old, &dst).unwrap_or(p)).collect();
+            crate::views::notes_tree::save_expanded(&self.tree_model.expanded);
+            // `[notes] paths` names pinned files: keep them pointing at the file
+            // (the config write is a helper round trip, so off the main thread).
+            let home = std::env::var("HOME").unwrap_or_default();
+            if let Some(raw) = setting("notes", "paths") {
+                if let Some(next) = rename_in_note_paths(&raw, old, &dst, &home) {
+                    std::thread::spawn(move || crate::app::config::save_config_values("notes", &[("paths".into(), Some(next))]));
+                }
+            }
+            self.model.refresh_sidebar(now_secs());
+            self.repaint_rows();
+            self.repaint_tree(false);
+            if let Some(p) = sel.filter(|_| sel_moves) {
+                let to = retarget_path(&p, old, &dst).unwrap_or(p);
+                self.open_note(&to);
+                // The old buffer was written above; drop it so nvim does not
+                // warn that its file vanished.
+                if let (Some(n), Some(pane)) = (old_buf, &self.vim) {
+                    pane.command(&format!("silent! bwipeout {}", n.trim()));
+                }
+            }
+            Ok(Some(dst))
+        }
+
         /// A new note goes into the selected folder (or the open file's
         /// folder); used by the tree's "New Note Here".
         pub fn tree_new_note_in(&mut self, dir: &str) {
@@ -4175,30 +4363,47 @@ mod macos {
         /// terminal font sizes ±1, saved as `[notes] font-size` /
         /// `[app] terminal-font-size`.
         pub fn step_font(&mut self, delta: i32) {
+            // Step from what is on screen, not from commands.toml: the config
+            // write lands later (off the main thread), so re-reading it made
+            // quick repeated steps stall on the same size.
             let d = delta as f64;
-            let editor = setting("notes", "font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(14.0);
-            let next = (editor + d).clamp(8.0, 40.0);
-            if let Some((name, _)) = self.vim.as_ref().and_then(|v| v.font()) {
-                if let Some(vim) = self.vim.as_mut() {
-                    vim.set_font(&name, next);
+            let step = |cur: f64| (cur + d).clamp(8.0, 40.0);
+            let mut next = None;
+            if let Some(pane) = self.vim.as_mut() {
+                let live = pane
+                    .view()
+                    .and_then(|v| v.downcast::<swiftterm_shim::WSShim>().ok())
+                    .map(|shim| swiftterm_shim::font_point_size(&shim))
+                    .filter(|s| *s > 0.0);
+                if let Some((name, size)) = pane.font() {
+                    let n = step(live.unwrap_or(size));
+                    pane.set_font(&name, n);
+                    next = Some(n);
                 }
+            }
+            if next.is_some() {
                 // `refreshVimImageRows`: SwiftTerm recomputes its grid from the
                 // new font; re-sync the overlay + `g:ws_cell_h` to the real cell.
+                self.vim_font_reapplied.set(true);
                 self.refresh_vim_cell();
             }
             if let Some(f) = self.editor.font() {
-                let nf = NSFont::fontWithName_size(&f.fontName(), next);
+                let n = next.unwrap_or_else(|| step(f.pointSize()));
+                let nf = NSFont::fontWithName_size(&f.fontName(), n);
                 self.editor.setFont(nf.as_deref());
                 restyle_editor(&self.editor, self.colors);
+                next = Some(n);
             }
-            crate::app::config::save_config_value("notes", "font-size", &format!("{}", next as i64));
-            let term = setting("app", "terminal-font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(12.0);
-            let tnext = (term + d).clamp(8.0, 40.0);
+            let mut tnext = None;
             if let Ok(shim) = self.terminal.clone().downcast::<swiftterm_shim::WSShim>() {
+                let cur = swiftterm_shim::font_point_size(&shim);
+                let cur = if cur > 0.0 { cur } else { setting("app", "terminal-font-size").and_then(|v| v.parse::<f64>().ok()).unwrap_or(12.0) };
                 let tf = setting("app", "terminal-font").unwrap_or_else(|| "Menlo".to_string());
-                swiftterm_shim::set_font(&shim, &tf, tnext);
+                let n = step(cur);
+                swiftterm_shim::set_font(&shim, &tf, n);
+                tnext = Some(n);
             }
-            crate::app::config::save_config_value("app", "terminal-font-size", &format!("{}", tnext as i64));
+            persist_font_sizes(next, tnext);
         }
 
         /// Give the reading view the keyboard (search keys land in the page).
@@ -4411,6 +4616,70 @@ mod macos {
             if let Some(window) = self.editor.window() {
                 window.makeFirstResponder(Some(&self.editor));
             }
+        }
+
+        /// Whether a gesture lands on the note editor (the nvim pane or the
+        /// plain editor) while the reading view is not covering it.
+        pub fn editor_contains(&self, e: &objc2_app_kit::NSEvent) -> bool {
+            if self.prose_shown {
+                return false;
+            }
+            let target: Retained<NSView> = match self.vim.as_ref().and_then(|p| p.view()) {
+                Some(v) => v,
+                None => Retained::into_super(self.editor_scroll.clone()),
+            };
+            if target.isHiddenOrHasHiddenAncestor() {
+                return false;
+            }
+            let Some(w) = target.window() else { return false };
+            if e.windowNumber() != w.windowNumber() {
+                return false;
+            }
+            let p = target.convertPoint_fromView(e.locationInWindow(), None);
+            let b = target.bounds();
+            p.x >= b.origin.x && p.y >= b.origin.y && p.x < b.origin.x + b.size.width && p.y < b.origin.y + b.size.height
+        }
+
+        /// Whether a mouse event lands on the visible drawer terminal.
+        pub fn terminal_contains(&self, e: &objc2_app_kit::NSEvent) -> bool {
+            if self.terminal.isHidden() || !self.drawers.terminal_shown() {
+                return false;
+            }
+            let Some(w) = self.terminal.window() else { return false };
+            if e.windowNumber() != w.windowNumber() {
+                return false;
+            }
+            let p = self.terminal.convertPoint_fromView(e.locationInWindow(), None);
+            let b = self.terminal.bounds();
+            p.x >= b.origin.x && p.y >= b.origin.y && p.x < b.origin.x + b.size.width && p.y < b.origin.y + b.size.height
+        }
+
+        /// Send a standard edit action (`copy:` / `paste:` / `selectAll:`) to
+        /// the drawer's SwiftTerm view.
+        pub fn terminal_edit(&self, action: objc2::runtime::Sel) {
+            let Ok(shim) = self.terminal.clone().downcast::<swiftterm_shim::WSShim>() else { return };
+            let term = unsafe { shim.terminal_view() };
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            if let Some(w) = term.window() {
+                w.makeFirstResponder(Some(&term));
+            }
+            let target: &AnyObject = unsafe { &*(Retained::as_ptr(&term) as *const AnyObject) };
+            unsafe { objc2_app_kit::NSApplication::sharedApplication(mtm).sendAction_to_from(action, Some(target), None) };
+        }
+
+        /// The drawer terminal's selected text (copied through the
+        /// pasteboard, as the Swift menu did), trimmed; `None` when nothing
+        /// is selected.
+        pub fn terminal_selection(&self) -> Option<String> {
+            let pb = NSPasteboard::generalPasteboard();
+            let before = pb.changeCount();
+            self.terminal_edit(objc2::sel!(copy:));
+            if pb.changeCount() == before {
+                return None;
+            }
+            let s = pb.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString })?.to_string();
+            let s = s.trim().to_string();
+            (!s.is_empty()).then_some(s)
         }
 
         /// Whether the drawer terminal holds the keyboard (`focusedTerm()`).
@@ -5315,9 +5584,14 @@ mod tests {
         assert!(plan.body.contains("data-foot=\"Confidential\""));
         assert!(!plan.snippet_missing);
 
-        cfg.new_doc_template = "missing".to_string();
+        // A plain note (Cmd+N / "+") is empty, template or not.
         let plan = plan_new_note("/n", false, &all, &cfg, &[]);
         assert_eq!(plan.path, "/n/Untitled-1.md");
+        assert!(!plan.snippet_missing);
+        assert!(plan.body.is_empty());
+
+        cfg.new_doc_template = "missing".to_string();
+        let plan = plan_new_note("/n", true, &all, &cfg, &[]);
         assert!(plan.snippet_missing);
         assert!(plan.body.is_empty());
     }
@@ -5347,6 +5621,47 @@ mod tests {
         let removed = t.close(0).unwrap();
         assert_eq!(removed, "/n/A.md");
         assert_eq!(t.titles(), vec!["B.md", "C.md", "D.md"]);
+    }
+
+    #[test]
+    fn retarget_follows_renamed_file_and_folder() {
+        let mut t = NotesTabs::new();
+        t.append("/n/a.md");
+        t.append("/n/sub/b.md");
+        t.append("/n/subway.md");
+        t.dismiss("/n/sub/c.md");
+        assert!(t.retarget("/n/a.md", "/n/alpha.md"));
+        assert_eq!(t.titles(), vec!["alpha.md", "b.md", "subway.md"]);
+        assert!(t.retarget("/n/sub", "/n/folder"));
+        assert_eq!(t.paths(), vec!["/n/alpha.md", "/n/folder/b.md", "/n/subway.md"]);
+        assert!(t.is_dismissed("/n/folder/c.md"));
+        assert!(!t.retarget("/n/zzz.md", "/n/y.md"));
+    }
+
+    #[test]
+    fn terminal_selection_resolves_to_a_path() {
+        let ex = |p: &str| ["/h/notes/a.md", "/h/src/main.rs", "/tmp/x y.txt", "/h"].contains(&p);
+        assert_eq!(terminal_path("~/notes/a.md\n", "/h", &ex).as_deref(), Some("/h/notes/a.md"));
+        assert_eq!(terminal_path("notes/a.md", "/h", &ex).as_deref(), Some("/h/notes/a.md"));
+        assert_eq!(terminal_path("'/tmp/x y.txt'", "/h", &ex).as_deref(), Some("/tmp/x y.txt"));
+        assert_eq!(terminal_path("/tmp/x\\ y.txt", "/h", &ex).as_deref(), Some("/tmp/x y.txt"));
+        assert_eq!(terminal_path("src/main.rs:12:5", "/h", &ex).as_deref(), Some("/h/src/main.rs"));
+        assert_eq!(terminal_path("no such thing", "/h", &ex), None);
+        assert_eq!(terminal_path("   ", "/h", &ex), None);
+    }
+
+    #[test]
+    fn rename_rewrites_note_paths_config() {
+        let raw = "~/notes, ~/notes/a.md, /abs/b.md, ~/notesy.md";
+        assert_eq!(
+            rename_in_note_paths(raw, "/h/notes/a.md", "/h/notes/z.md", "/h").as_deref(),
+            Some("~/notes, ~/notes/z.md, /abs/b.md, ~/notesy.md")
+        );
+        assert_eq!(
+            rename_in_note_paths(raw, "/abs/b.md", "/abs/c.md", "/h").as_deref(),
+            Some("~/notes, ~/notes/a.md, /abs/c.md, ~/notesy.md")
+        );
+        assert_eq!(rename_in_note_paths(raw, "/h/other.md", "/h/x.md", "/h"), None);
     }
 
     #[test]

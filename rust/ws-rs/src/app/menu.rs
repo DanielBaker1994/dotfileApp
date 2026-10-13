@@ -603,10 +603,11 @@ mod appkit {
 
         let app_item = NSMenuItem::new(mtm);
         let app_menu = NSMenu::new(mtm);
-        add_leaf(mtm, &app_menu, "About kitchen-sink", None, "");
+        add_leaf(mtm, &app_menu, "About kitchen-sink", Some(sel!(orderFrontStandardAboutPanel:)), "");
         app_menu.addItem(&NSMenuItem::separatorItem(mtm));
         add_leaf(mtm, &app_menu, "Hide", Some(sel!(hide:)), "h");
-        add_leaf(mtm, &app_menu, "Hide Others", Some(sel!(hideOtherApplications:)), "h");
+        add_leaf(mtm, &app_menu, "Hide Others", Some(sel!(hideOtherApplications:)), "h")
+            .setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Option);
         add_leaf(mtm, &app_menu, "Show All", Some(sel!(unhideAllApplications:)), "");
         app_menu.addItem(&NSMenuItem::separatorItem(mtm));
         add_leaf(mtm, &app_menu, "Quit", Some(sel!(terminate:)), "q");
@@ -639,10 +640,15 @@ mod appkit {
         let window_menu = NSMenu::new(mtm);
         window_menu.setTitle(ns_string!("Window"));
         add_leaf(mtm, &window_menu, "Minimize", Some(sel!(performMiniaturize:)), "m");
+        add_leaf(mtm, &window_menu, "Zoom", Some(sel!(performZoom:)), "");
+        window_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add_leaf(mtm, &window_menu, "Bring All to Front", Some(sel!(arrangeInFront:)), "");
         window_item.setSubmenu(Some(&window_menu));
         main_menu.addItem(&window_item);
 
         app.setMainMenu(Some(&main_menu));
+        // The Window menu proper: AppKit lists the open windows under it.
+        app.setWindowsMenu(Some(&window_menu));
     }
 }
 

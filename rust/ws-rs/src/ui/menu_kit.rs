@@ -277,8 +277,32 @@ mod appkit {
     /// Pop `entries` at `(x, y)` in `view` coordinates (or screen coordinates
     /// when `view` is `None`), then run the chosen closure.
     pub fn popup(entries: Vec<MenuEntry>, view: Option<&NSView>, x: f64, y: f64) {
+        // Opened from the right-click itself: show it as a native context
+        // menu. Positioned at the point instead, its first item sat under the
+        // pointer, so the next click (or a second right-click) chose "Open".
+        if view.is_none() {
+            if let Some(mtm) = MainThreadMarker::new() {
+                let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+                if let Some(event) = app.currentEvent() {
+                    let uptime = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+                    let right = event.r#type() == objc2_app_kit::NSEventType::RightMouseDown && uptime - event.timestamp() < 0.5;
+                    if let (true, Some(cv)) = (right, event.window(mtm).and_then(|w| w.contentView())) {
+                        run(entries, |menu| NSMenu::popUpContextMenu_withEvent_forView(menu, &event, &cv));
+                        return;
+                    }
+                }
+            }
+        }
         run(entries, |menu| {
             menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), view);
+        });
+    }
+
+    /// [`popup`] at a screen point, never as a context menu — for menus
+    /// opened after the click was consumed (the current event is stale).
+    pub fn popup_at(entries: Vec<MenuEntry>, x: f64, y: f64) {
+        run(entries, |menu| {
+            menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(x, y), None);
         });
     }
 
