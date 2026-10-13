@@ -1890,6 +1890,9 @@ impl ToolPanel {
                     let name_field = self.name_field.clone();
                     let status = self.ff_status_label.clone();
                     let save_dir = self.spec.save_dir.clone();
+                    let ff_script = self.spec.script.clone();
+                    let ff_out = self.ff_out.clone();
+                    let ff_pending = self.ff_pending.clone();
                     let monitor = crate::ui::popup::install_local_monitor_mask(
                         mtm,
                         objc2_app_kit::NSEventMask::LeftMouseDown,
@@ -1903,15 +1906,31 @@ impl ToolPanel {
                                 let bb = btn.bounds();
                                 if bp.x >= 0.0 && bp.y >= 0.0 && bp.x <= bb.size.width && bp.y <= bb.size.height {
                                     let name = nf.stringValue().to_string().trim().to_string();
-                                    if name.is_empty() || name.contains('/') {
+                                    let contents = field_paste.string().to_string();
+                                    if name.is_empty() || name.contains('/') || contents.is_empty() {
                                         crate::platform::bell();
-                                    } else {
-                                        let path = format!("{}/{}", filefast_dir_for(&save_dir), name);
-                                        copy_text(&path);
                                         if let Some(l) = &status {
-                                            set_status_label(l, &format!("Copied {path}"), false);
+                                            set_status_label(l, "Enter a name and paste text first", true);
+                                        }
+                                    } else if !spawn_filefast(
+                                        ff_script.clone(),
+                                        filefast_dir_for(&save_dir),
+                                        name,
+                                        contents,
+                                        ff_out.clone(),
+                                        ff_pending.clone(),
+                                    ) {
+                                        // Nothing written, so nothing copied.
+                                        crate::platform::bell();
+                                        if let Some(l) = &status {
+                                            set_status_label(l, "Could not create file", true);
                                         }
                                     }
+                                    // Same write path as Return: the script
+                                    // writes the file (overwriting the same
+                                    // path, so a second click never makes a
+                                    // duplicate); `poll` copies the path only
+                                    // on success and shows the error otherwise.
                                     return true;
                                 }
                             }
@@ -2146,6 +2165,38 @@ mod tests {
         assert_eq!(vars.get("save-dir").map(String::as_str), Some("/tmp/"));
         assert_eq!(vars.get("width").map(String::as_str), Some("1000"));
         assert!(section_vars(text, "filefast").is_empty());
+    }
+
+    /// The Create File script (shared by Return and the "Copy file path"
+    /// button) writes the pasted text to the path it prints, and a repeat run
+    /// reuses that path rather than making a second file.
+    #[test]
+    fn filefast_script_writes_file_at_printed_path_idempotently() {
+        let toml = include_str!("../../../../commands.toml");
+        let script = section_vars(toml, "filefast")["script"].replace("| pbcopy", "> /dev/null");
+        let dir = std::env::temp_dir().join(format!("ks-ff-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let run = |body: &str| {
+            use std::io::Write;
+            let mut child = std::process::Command::new("/bin/bash")
+                .args(["-c", &script])
+                .env("FF_DIR", dir.to_str().unwrap())
+                .env("FF_NAME", "note.txt")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+            let o = child.wait_with_output().unwrap();
+            assert!(o.status.success());
+            String::from_utf8(o.stdout).unwrap()
+        };
+        let path = run("hello");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        assert_eq!(run("hello2"), path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello2");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
