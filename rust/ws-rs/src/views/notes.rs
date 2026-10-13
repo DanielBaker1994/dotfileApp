@@ -2795,6 +2795,8 @@ mod macos {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
+        // Trackpad pinch-to-zoom, same as the embedded reading view.
+        unsafe { web.setAllowsMagnification(true) };
         web
     }
 

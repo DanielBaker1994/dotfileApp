@@ -221,6 +221,8 @@ mod appkit {
             web.setAutoresizingMask(
                 NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
             );
+            // Trackpad pinch-to-zoom (native magnification, anchored at the pinch).
+            unsafe { web.setAllowsMagnification(true) };
             web.setHidden(true);
             let z = crate::platform::get_f64(ZOOM_KEY);
             let mut state = ProseViewState::new();
