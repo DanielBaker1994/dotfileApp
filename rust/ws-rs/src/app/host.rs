@@ -8372,6 +8372,17 @@ mod daemon_ui {
             self.files_begin_rename();
         }
 
+        /// Toggle Quick Look on the selection. The panel runs the run loop while
+        /// it opens (a menu's tracking loop re-enters `apply_pending`), so it
+        /// must not be called with the state `RefCell` borrowed.
+        fn files_quick_look(&self, mtm: MainThreadMarker) {
+            let Some((mut ql, paths)) = self.files_surface(|b| (b.quick_look.clone(), b.selected_paths())) else {
+                return;
+            };
+            ql.toggle(mtm, &paths);
+            self.files_surface(|b| b.quick_look = ql);
+        }
+
         fn files_trash(&self) {
             use crate::engines::file_ops::FileOps;
             let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
@@ -8458,7 +8469,7 @@ mod daemon_ui {
                 }
                 49 if plain && in_list => {
                     if let Some(mtm) = MainThreadMarker::new() {
-                        self.files_surface(|b| b.toggle_quick_look(mtm));
+                        self.files_quick_look(mtm);
                     }
                 }
                 15 if cmd && !shift => self.files_begin_rename(),
@@ -8796,7 +8807,7 @@ mod daemon_ui {
                 let w = weak.clone();
                 entries.push(MenuEntry::item("Quick Look", move || {
                     if let (Some(ui), Some(mtm)) = (w.load(), MainThreadMarker::new()) {
-                        ui.files_surface(|b| b.toggle_quick_look(mtm));
+                        ui.files_quick_look(mtm);
                     }
                 }));
             }
