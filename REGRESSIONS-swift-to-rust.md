@@ -2167,6 +2167,8 @@ doubted the Swift reading).
 
 ### J-08 — Per-view header icon menus (AI, Confluence) (window chrome, panes, terminal, misc views)
 
+- **Status (2026-10-13): fixed — Confluence: Setup, Import Saved, Refresh Contributors, Open config.json / debug.log; AI: New Rule, Edit rule in Notes, Open Rules Folder, Reload Rules, Copy for Outlook/Webex, Copy as Markdown, Copy Command (Jira gained its own items too).**
+
 - **Swift did:** Clicking the header app icon opens a view-specific menu: Confluence adds 'Confluence Setup…', 'Import My Saved Pages as Favorites', 'Refresh Contributor List', 'Open config.json', 'Open debug.log'; AI adds 'New Rule…', 'Edit <rule> in Notes', 'Open Rules Folder', 'Reload Rules', 'Copy for Outlook/Webex', 'Copy as Markdown', 'Copy Command'.
 - **Reader says Rust:** `missing` — header_icon_menu builds one generic menu (Theme, Reset Default Size, Reset Default Colors, Open Config, Keyboard Shortcuts, App Menu) with no per-view branch. Searches for 'Reload Rules|Open Rules Folder|Import My Saved|Refresh Contributor|Open debug|Confluence Setup' in rust/ws-rs/src find only the Confluence setup sheet title and unrelated strings.
 - **User impact:** There is no menu route to reload rules, import saved pages, refresh contributors, or open the Confluence config/debug log.
@@ -2177,6 +2179,8 @@ doubted the Swift reading).
   - Rust search: app/host.rs:5702-5819 header_icon_menu builds one generic menu (Theme▸, Reset Default Size, Reset Default Colors, Open Config, Keyboard Shortcuts, App Menu…) with no view branch. grep 'Reload Rules|Open Rules Folder|Import My Saved|Refresh Contributor|Confluence Setup' finds only the Confluence setup sheet title (host.rs:7642).
 
 ### J-09 — Confluence contributor list is fetched (window chrome, panes, terminal, misc views)
+
+- **Status (2026-10-13): fixed — `--users` fills the Contributor picker after `--check` (Me + people); Refresh Contributor List re-fetches with `--refresh`.**
 
 - **Swift did:** loadPeople() runs confluence_api.py --users to populate the Contributor picker (with 'Me' plus each fetched user).
 - **Reader says Rust:** `missing` — Search '--users' across rust/ws-rs/src returns no matches; the contributors picker (model.contributors) is never populated from the API. Only the default 'Me' option is defined.
@@ -2189,6 +2193,8 @@ doubted the Swift reading).
 
 ### J-10 — Import saved Confluence pages as favorites (window chrome, panes, terminal, misc views)
 
+- **Status (2026-10-13): fixed — `--import-saved` from the icon menu, status 'Imported N of M', favorites reload.**
+
 - **Swift did:** 'Import My Saved Pages as Favorites' runs confluence_api.py --import-saved and reports how many pages were imported, then reloads favorites.
 - **Reader says Rust:** `missing` — Search '--import-saved|import_saved|Import My Saved' in rust/ws-rs/src returns nothing; handle_do for confluence has no import action and the icon menu has no entry.
 - **User impact:** Saved Confluence pages can no longer be imported into the Favorites list.
@@ -2199,6 +2205,8 @@ doubted the Swift reading).
   - Rust search: grep '--import-saved|import_saved|Import My Saved' in rust/ws-rs/src -> nothing. confluence_api.py:562 supports --import-saved but no Rust caller; handle_do/conf_event has no import action (ConfEvent enum confluence_view.rs:84-107).
 
 ### J-11 — Confluence result right-click menu + row selection (window chrome, panes, terminal, misc views)
+
+- **Status (2026-10-13): fixed — right-click selects/previews the row; Copy Title + Link, Copy as Markdown Link, Open Space KEY added.**
 
 - **Swift did:** Right-clicking a result selects that row first and offers Open in Browser, Copy Link, Copy Title + Link, Copy as Markdown Link, separator, Add/Remove from Favorites, and (when in a space) Open Space <key> in Browser.
 - **Reader says Rust:** `differs` — The Rust RowMenu popup has only Open in Browser, Copy Link, separator and Add/Remove from Favorites. It omits 'Copy Title + Link', 'Copy as Markdown Link' and 'Open Space <key> in Browser', and it does not select/refresh the preview for the right-clicked row (the Swift menu also ran selectRowIndexes first).
@@ -2211,6 +2219,8 @@ doubted the Swift reading).
 
 ### J-12 — Confluence auto load-more near the end of the list (window chrome, panes, terminal, misc views)
 
+- **Status (2026-10-13): fixed — within two rows of the end the next page loads (not while searching / on Favorites); the list now also scrolls to keep the selection visible.**
+
 - **Swift did:** When the selected row is within two of the end, the list automatically calls loadMore() to fetch the next page of results (if nextLink exists and it is not searching/favorites).
 - **Reader says Rust:** `missing` — E::Select only calls conf_load_preview then focuses the results; the only LoadMore path is the button / E::LoadMore. Search for 'len() - 2|saturating_sub(2)' finds no near-end trigger in the Confluence code.
 - **User impact:** Long result lists no longer page in automatically as you arrow to the bottom; you must press Load more.
@@ -2222,6 +2232,8 @@ doubted the Swift reading).
 
 ### J-13 — Confluence preview debounce on selection (window chrome, panes, terminal, misc views)
 
+- **Status (2026-10-13): fixed — the page fetch waits 0.25 s and only runs for the row the selection settles on (cached pages still render at once).**
+
 - **Swift did:** Selecting a result sets a 0.25 s timer before loading the page preview, so arrowing quickly through rows does not fire a fetch for every row.
 - **Reader says Rust:** `differs` — E::Select calls conf_load_preview(row) immediately (synchronously updating selection and header, then dispatching --page). There is no timer/debounce in the model or view.
 - **User impact:** Skimming the results fires a page fetch per row, which is slower and burns the Confluence rate limit faster.
@@ -2232,6 +2244,8 @@ doubted the Swift reading).
   - Rust search: app/host.rs:7865-7866 calls self.conf_load_preview(row) immediately on E::Select; grep '0.25|debounce|previewTimer|scheduledTimer' in the confluence code finds no preview debounce (only unrelated reclaim timers at host.rs:4465/4484).
 
 ### J-14 — QuietWebView context-menu filtering in AI/Confluence previews (window chrome, panes, terminal, misc views)
+
+- **Status (2026-10-13): fixed — `ui::quiet_web::QuietWebView` (willOpenMenu keeps Copy / Copy Link / Open Link / Copy Image, else Select All) backs both previews.**
 
 - **Swift did:** The preview WKWebViews are QuietWebView subclasses: willOpenMenu removes every item except Copy, Copy Link, Open Link and Copy Image, and falls back to a single 'Select All' if nothing remains.
 - **Reader says Rust:** `missing` — AI's AIPreview and Confluence's preview build a plain WKWebView with no willOpenMenu override. Search 'willOpenMenu|QuietWebView|removeMenu' finds the filtering only on notes_prose ProseWebView, not on the AI or Confluence web views.

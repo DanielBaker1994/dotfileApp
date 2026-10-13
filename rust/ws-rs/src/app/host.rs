@@ -7716,6 +7716,9 @@ mod daemon_ui {
                     }
                 }
             });
+            if configured {
+                self.conf_load_people(false);
+            }
         }
 
         fn conf_run_search(&self, more: bool) {
@@ -7803,6 +7806,19 @@ mod daemon_ui {
                 self.conf_render(page, row);
                 return;
             }
+            // `previewTimer` (0.25 s): arrowing through rows fetches only
+            // the row the selection settles on.
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                on_ui(move |ui| {
+                    if ui.conf_surface(|cs| cs.preview_gen) == Some(gen) {
+                        ui.conf_fetch_page(row, gen);
+                    }
+                });
+            });
+        }
+
+        fn conf_fetch_page(&self, row: crate::views::confluence::ConfluenceRow, gen: u64) {
             let id = row.id.clone();
             conf_api(vec!["--page".into(), id.clone()], None, move |ui, j| {
                 let ok = j.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
@@ -8034,6 +8050,95 @@ mod daemon_ui {
             });
         }
 
+        /// `tableViewSelectionDidChange`: within two rows of the end, page in
+        /// the next results (not while searching or on Favorites).
+        fn conf_maybe_load_more(&self, i: usize) {
+            use crate::views::confluence::Scope;
+            let go = self
+                .conf_surface(|cs| {
+                    i + 2 >= cs.model.rows.len()
+                        && !cs.model.next_link.is_empty()
+                        && !cs.model.searching
+                        && cs.model.scope != Scope::Favorites
+                })
+                .unwrap_or(false);
+            if go {
+                self.conf_run_search(true);
+            }
+        }
+
+        /// `loadPeople(refresh:)`: the Contributor picker's people (`--users`).
+        fn conf_load_people(&self, refresh: bool) {
+            use crate::views::confluence::{PickerOption, StatusTone};
+            let mut args = vec!["--users".to_string()];
+            if refresh {
+                args.push("--refresh".into());
+                self.conf_surface(|cs| cs.model.set_status("Refreshing people…", StatusTone::Dim));
+            }
+            conf_api(args, None, move |ui, j| {
+                ui.conf_surface(|cs| {
+                    if cs.model.handle_rate_limited(&j, now_secs()) {
+                        return;
+                    }
+                    let users = j.get("users").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+                    let mut opts = vec![PickerOption { id: "me".into(), title: "Me".into(), detail: "pages you created or edited".into() }];
+                    opts.extend(users.iter().filter_map(|u| {
+                        let id = u.get("id")?.as_str()?.to_string();
+                        if id.is_empty() {
+                            return None;
+                        }
+                        let g = |k: &str| u.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                        let name = g("name");
+                        Some(PickerOption { title: if name.is_empty() { id.clone() } else { name }, detail: g("username"), id })
+                    }));
+                    let n = opts.len() - 1;
+                    cs.model.contributors.set_options(opts);
+                    if refresh {
+                        let ok = j.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
+                        if ok {
+                            let partial = if j.get("partial").and_then(serde_json::Value::as_bool) == Some(true) {
+                                " (partial — some pages were skipped)"
+                            } else {
+                                ""
+                            };
+                            cs.model.set_status(format!("{n} people{partial}"), StatusTone::Success);
+                        } else {
+                            cs.model.set_status(
+                                j.get("error").and_then(serde_json::Value::as_str).unwrap_or("people list failed").to_string(),
+                                StatusTone::Danger,
+                            );
+                        }
+                    }
+                });
+            });
+        }
+
+        /// `importSaved()`: the user's saved pages become favorites.
+        fn conf_import_saved(&self) {
+            use crate::views::confluence::{Scope, StatusTone};
+            self.conf_surface(|cs| cs.model.set_status("Importing your saved pages…", StatusTone::Dim));
+            conf_api(vec!["--import-saved".into()], None, move |ui, j| {
+                let ok = j.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
+                let show = ui
+                    .conf_surface(|cs| {
+                        if ok {
+                            let n = |k: &str| j.get(k).map(|v| v.to_string()).unwrap_or_else(|| "0".into());
+                            cs.model.set_status(format!("Imported {} of {} saved pages", n("added"), n("found")), StatusTone::Success);
+                        } else {
+                            cs.model.set_status(
+                                j.get("error").and_then(serde_json::Value::as_str).unwrap_or("import failed").to_string(),
+                                StatusTone::Danger,
+                            );
+                        }
+                        cs.model.scope == Scope::Favorites
+                    })
+                    .unwrap_or(false);
+                if ok {
+                    ui.conf_load_favorites(show);
+                }
+            });
+        }
+
         fn conf_event(&self, ev: crate::views::confluence_view::ConfEvent) {
             use crate::ui::menu_kit::{popup, MenuEntry};
             use crate::ui::sidebar::SidebarEvent;
@@ -8072,6 +8177,7 @@ mod daemon_ui {
                     });
                     if let Some(Some(i)) = next {
                         self.conf_load_preview(i);
+                        self.conf_maybe_load_more(i);
                     }
                 }
                 E::Escape => {
@@ -8183,6 +8289,7 @@ mod daemon_ui {
                 }
                 E::Select { row, double } => {
                     self.conf_load_preview(row);
+                    self.conf_maybe_load_more(row);
                     if double {
                         self.conf_event(E::Open);
                     }
@@ -8198,25 +8305,40 @@ mod daemon_ui {
                     }
                 }
                 E::RowMenu { row, x, y } => {
-                    let Some(Some(r)) = self.conf_surface(|cs| cs.model.rows.get(row).cloned()) else { return };
+                    let Some(Some((r, site))) = self.conf_surface(|cs| cs.model.rows.get(row).cloned().map(|r| (r, cs.model.site.clone())))
+                    else {
+                        return;
+                    };
+                    // The right-clicked row becomes the selection (and preview) first.
+                    self.conf_load_preview(row);
                     let weak = objc2::rc::Weak::from_retained(&self.retain());
                     let (u1, u2) = (r.url.clone(), r.url.clone());
+                    let both = format!("{}\n{}", r.title, r.url);
+                    let md = format!("[{}]({})", r.title, r.url);
                     let w = weak.clone();
-                    popup(
-                        vec![
-                            MenuEntry::item("Open in Browser", move || open_url(&u1)),
-                            MenuEntry::item("Copy Link", move || copy_text_to_pasteboard(&u2)),
-                            MenuEntry::Separator,
-                            MenuEntry::item(if r.favorite { "Remove from Favorites" } else { "Add to Favorites" }, move || {
-                                if let Some(ui) = w.load() {
-                                    ui.conf_toggle_favorite(row);
-                                }
-                            }),
-                        ],
-                        None,
-                        x,
-                        y,
-                    );
+                    let copy = |text: String, what: &'static str| {
+                        move || {
+                            copy_text_to_pasteboard(&text);
+                            crate::ui::toast::show(&format!("Copied {what}"), "doc.on.clipboard");
+                        }
+                    };
+                    let mut entries = vec![
+                        MenuEntry::item("Open in Browser", move || open_url(&u1)),
+                        MenuEntry::item("Copy Link", copy(u2, "link")),
+                        MenuEntry::item("Copy Title + Link", copy(both, "title + link")),
+                        MenuEntry::item("Copy as Markdown Link", copy(md, "markdown link")),
+                        MenuEntry::Separator,
+                        MenuEntry::item(if r.favorite { "Remove from Favorites" } else { "Add to Favorites" }, move || {
+                            if let Some(ui) = w.load() {
+                                ui.conf_toggle_favorite(row);
+                            }
+                        }),
+                    ];
+                    if !r.space.is_empty() && !site.is_empty() {
+                        let u = format!("{}/spaces/{}", site.trim_end_matches('/'), r.space);
+                        entries.push(MenuEntry::item(&format!("Open Space {} in Browser", r.space), move || open_url(&u)));
+                    }
+                    popup(entries, None, x, y);
                 }
                 E::LoadMore => self.conf_run_search(true),
                 E::CopyCql => {
@@ -8604,6 +8726,105 @@ mod daemon_ui {
                 out.push(MenuEntry::item("Open Jira Config Window", move || {
                     let c2 = ctrl.clone();
                     crate::ui::jira_setup::show(None, Box::new(move || c2.jira_enable_result(true, "")));
+                }));
+            }
+            if v == SlotView::Ai {
+                use crate::engines::ai_format::PaneMode;
+                use crate::views::ai_view::AIEvent;
+                let wk = || objc2::rc::Weak::from_retained(&self.retain());
+                let w = wk();
+                out.push(MenuEntry::item("New Rule…", move || {
+                    if let Some(ui) = w.load() {
+                        ui.ai_new_rule(None);
+                    }
+                }));
+                if let Some(Some(r)) = self.ai_surface(|a| a.model.rule().cloned()) {
+                    let c = self.ivars().controller.clone();
+                    let path = r.path.clone();
+                    out.push(MenuEntry::item(&format!("Edit “{}” in Notes", r.name), move || {
+                        c.set_pending_note_external(path.clone());
+                        c.open(SlotView::Notes);
+                    }));
+                }
+                if let Some(dir) = self.ai_surface(|a| a.model.rules_dir()) {
+                    out.push(MenuEntry::item("Open Rules Folder", move || {
+                        crate::platform::open_path(std::path::Path::new(&dir));
+                    }));
+                }
+                let w = wk();
+                out.push(MenuEntry::item("Reload Rules", move || {
+                    if let Some(ui) = w.load() {
+                        ui.ai_surface(|a| {
+                            let d = a.model.rules_dir();
+                            a.model.reload_rules(&d);
+                            a.model.set_status(format!("{} rules", a.model.rules.len()), crate::views::ai::AITone::Success);
+                        });
+                    }
+                }));
+                out.push(MenuEntry::Separator);
+                for (t, m) in [("Copy for Outlook", PaneMode::Outlook), ("Copy for Webex", PaneMode::Webex)] {
+                    let w = wk();
+                    out.push(MenuEntry::item(t, move || {
+                        if let Some(ui) = w.load() {
+                            ui.ai_surface(|a| a.model.set_mode(m));
+                            ui.ai_event(AIEvent::Copy);
+                        }
+                    }));
+                }
+                let w = wk();
+                out.push(MenuEntry::item("Copy as Markdown", move || {
+                    if let Some(ui) = w.load() {
+                        ui.ai_surface(|a| {
+                            if let crate::views::ai::CopyPlan::Markdown(md) = a.model.copy_plan(true) {
+                                copy_text_to_pasteboard(&md);
+                                a.model.set_status("Copied the Markdown", crate::views::ai::AITone::Success);
+                            }
+                        });
+                    }
+                }));
+                let w = wk();
+                out.push(MenuEntry::item("Copy Command", move || {
+                    if let Some(ui) = w.load() {
+                        ui.ai_event(AIEvent::CopyCommand);
+                    }
+                }));
+            }
+            if v == SlotView::Confluence {
+                let w1 = objc2::rc::Weak::from_retained(&self.retain());
+                out.push(MenuEntry::item("Confluence Setup…", move || {
+                    if let Some(ui) = w1.load() {
+                        ui.conf_setup();
+                    }
+                }));
+                let w2 = objc2::rc::Weak::from_retained(&self.retain());
+                out.push(MenuEntry::item("Import My Saved Pages as Favorites", move || {
+                    if let Some(ui) = w2.load() {
+                        ui.conf_import_saved();
+                    }
+                }));
+                let w3 = objc2::rc::Weak::from_retained(&self.retain());
+                out.push(MenuEntry::item("Refresh Contributor List", move || {
+                    if let Some(ui) = w3.load() {
+                        ui.conf_load_people(true);
+                    }
+                }));
+                out.push(MenuEntry::Separator);
+                out.push(MenuEntry::item("Open config.json", || {
+                    conf_api(vec!["--check".into()], None, |_ui, j| {
+                        if let Some(p) = j.get("configPath").and_then(serde_json::Value::as_str) {
+                            if std::path::Path::new(p).exists() {
+                                crate::platform::open_path(std::path::Path::new(p));
+                            }
+                        }
+                    });
+                }));
+                out.push(MenuEntry::item("Open debug.log", || {
+                    let p = format!("{}/.cache/confluence/debug.log", std::env::var("HOME").unwrap_or_default());
+                    if std::path::Path::new(&p).exists() {
+                        crate::platform::open_path(std::path::Path::new(&p));
+                    } else {
+                        crate::ui::toast::show("No Confluence debug.log yet", "doc.text");
+                    }
                 }));
             }
             if !out.is_empty() {

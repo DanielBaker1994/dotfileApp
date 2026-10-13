@@ -610,8 +610,16 @@ mod appkit {
                 unsafe { iv.spinner.stopAnimation(None) };
             }
             iv.web.setHidden(!s.preview.web);
+            let moved = iv.snap.borrow().selection != s.selection;
+            let sel = s.selection;
             *iv.snap.borrow_mut() = s;
             self.layout_all();
+            // Keep a newly selected row on screen (arrowing past the fold).
+            if let (true, Some(i)) = (moved, sel) {
+                let row_h = RESULT_H + RESULT_GAP;
+                let w = iv.results.bounds().size.width;
+                iv.results.scrollRectToVisible(ns(Rect::new(0.0, i as f64 * row_h, w, row_h)));
+            }
             iv.results.setNeedsDisplay(true);
             self.setNeedsDisplay(true);
         }

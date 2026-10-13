@@ -18,6 +18,8 @@ pub mod sheet;
 pub mod shared_window;
 pub mod shortcuts;
 pub mod prose_switch;
+#[cfg(target_os = "macos")]
+pub mod quiet_web;
 pub mod sidebar;
 pub mod style;
 pub mod theme;

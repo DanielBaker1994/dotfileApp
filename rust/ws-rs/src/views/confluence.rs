@@ -1876,9 +1876,7 @@ pub mod macos {
             unsafe { ucc.addUserScript(&user_script) };
 
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 240.0));
-            let web = unsafe {
-                WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config)
-            };
+            let web = crate::ui::quiet_web::new(mtm, frame, &config);
             let no = NSNumber::numberWithBool(false);
             let _: () = unsafe {
                 msg_send![&*web, setValue: &*no, forKey: ns_string!("drawsBackground")]
