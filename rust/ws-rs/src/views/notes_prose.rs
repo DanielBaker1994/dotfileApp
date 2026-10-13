@@ -82,14 +82,14 @@ pub enum ProseMsg {
 }
 
 #[cfg(target_os = "macos")]
-pub use appkit::ProsePane;
+pub use appkit::{add_find, show_context_menu, ProsePane, ProseWebView};
 
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
     use crate::ui::theme::PopupColors;
     use crate::views::notes::{
-        Mods, NotesConfig, ProseRender, ProseSearchKey, ProseSource, ProseViewState,
+        Mods, NotesConfig, ProseRender, ProseSource, ProseViewState,
     };
     use block2::RcBlock;
     use objc2::rc::Retained;
@@ -180,6 +180,7 @@ mod appkit {
         page_file: std::path::PathBuf,
         /// The source line to land on at the next show (vim `line('w0')`).
         pub sync_line: Option<i64>,
+        menu_ctx: Rc<RefCell<(String, PopupColors)>>,
     }
 
     const ZOOM_KEY: &str = "proseZoom";
@@ -215,7 +216,16 @@ mod appkit {
                     )
                 };
             }
-            let web = unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config) };
+            let menu_ctx: Rc<RefCell<(String, PopupColors)>> = Rc::new(RefCell::new((String::new(), PopupColors::default())));
+            let pweb = ProseWebView::new(mtm, frame, &config);
+            {
+                let ctx = menu_ctx.clone();
+                pweb.set_on_menu(Rc::new(move |v: &NSView| {
+                    let (note, colors) = ctx.borrow().clone();
+                    show_context_menu(&note, colors, v);
+                }));
+            }
+            let web: Retained<WKWebView> = Retained::into_super(pweb);
             let no = NSNumber::numberWithBool(false);
             let _: () = unsafe { msg_send![&*web, setValue: &*no, forKey: ns_string!("drawsBackground")] };
             web.setAutoresizingMask(
@@ -247,6 +257,7 @@ mod appkit {
                 loaded: Rc::new(RefCell::new(Loaded::default())),
                 page_file,
                 sync_line: None,
+                menu_ctx,
             }
         }
 
@@ -301,6 +312,7 @@ mod appkit {
         /// thread, then patch the body in place (same head) or load the page.
         pub fn show(&mut self, src: ProseSource, colors: PopupColors, font: &str, size: f64, width: f64, cfg: &NotesConfig) {
             self.colors = colors;
+            *self.menu_ctx.borrow_mut() = (src.path.clone(), colors);
             let sig = format!(
                 "{:?}{:?}{:?}",
                 colors.base(),
@@ -405,21 +417,8 @@ mod appkit {
         /// `searchKey(code:mods:)` → the web view action; `None` = not handled.
         pub fn search_key(&mut self, code: u16, m: Mods, now: f64) -> Option<bool> {
             let k = self.state.search_key(code, m, now)?;
-            match k {
-                ProseSearchKey::CloseFind => self.eval("window.__wsFindEsc&&window.__wsFindEsc()"),
-                ProseSearchKey::OpenFind => self.eval("window.__wsFindOpen&&window.__wsFindOpen()"),
-                ProseSearchKey::ScrollHalf { down } => self.eval(&format!(
-                    "window.scrollBy({{top:{}window.innerHeight/2}})",
-                    if down { "" } else { "-" }
-                )),
-                ProseSearchKey::GoTop => self.eval("window.scrollTo(0, 0)"),
-                ProseSearchKey::GoBottom => {
-                    self.eval("window.scrollTo(0, document.documentElement.scrollHeight)")
-                }
-                ProseSearchKey::FindStep { back } => {
-                    self.eval(&format!("window.__wsFindStep&&window.__wsFindStep({back})"))
-                }
-                ProseSearchKey::PassThrough => {}
+            if let Some(js) = k.js() {
+                self.eval(&js);
             }
             // `g` (first tap) is swallowed too: Swift returns true for it.
             Some(k.consumed() || code == 5)
@@ -428,37 +427,125 @@ mod appkit {
         /// `exportPDF()` — `prose.pdf_export` off the main thread, then copy
         /// the PDF path and toast it.
         pub fn export_pdf(&self, cfg: &NotesConfig, copy_toast: &str) {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static EXPORTING: AtomicBool = AtomicBool::new(false);
-            let note = self.last_path.clone();
-            if note.is_empty() || EXPORTING.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let cfg = cfg.clone();
-            let colors = self.colors;
-            let fmt = if copy_toast.is_empty() { "Copied {} to clipboard".to_string() } else { copy_toast.to_string() };
-            std::thread::spawn(move || {
-                let r = ProseRender::export_pdf(&note, &cfg, &colors);
-                crate::platform::run_on_main(move || {
-                    EXPORTING.store(false, Ordering::SeqCst);
-                    match (r.ok, r.out) {
-                        (true, Some(out)) => {
-                            let _ = crate::platform::set_text(&out);
-                            let home = std::env::var("HOME").unwrap_or_default();
-                            let tilde = match out.strip_prefix(&home) {
-                                Some(rest) if !home.is_empty() => format!("~{rest}"),
-                                _ => out.clone(),
-                            };
-                            crate::ui::toast::show(&fmt.replace("{}", &tilde), "doc.richtext");
-                        }
-                        _ => crate::ui::toast::show(
-                            r.error.as_deref().unwrap_or("pdf export failed"),
-                            "exclamationmark.triangle.fill",
-                        ),
-                    }
-                });
-            });
+            export_pdf_and_copy(self.last_path.clone(), cfg.clone(), self.colors, copy_toast);
         }
+    }
+
+    /// Export `note` to PDF off the main thread, copy the PDF's absolute path
+    /// and toast it. Shared by Cmd+P and the right-click "Copy PDF Path".
+    pub fn export_pdf_and_copy(note: String, cfg: NotesConfig, colors: PopupColors, copy_toast: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static EXPORTING: AtomicBool = AtomicBool::new(false);
+        if note.is_empty() || EXPORTING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let fmt = if copy_toast.is_empty() { "Copied {} to clipboard".to_string() } else { copy_toast.to_string() };
+        crate::ui::toast::show("Generating PDF…", "doc.richtext");
+        std::thread::spawn(move || {
+            let r = ProseRender::export_pdf(&note, &cfg, &colors);
+            crate::platform::run_on_main(move || {
+                EXPORTING.store(false, Ordering::SeqCst);
+                match (r.ok, r.out) {
+                    (true, Some(out)) => {
+                        let _ = crate::platform::set_text(&out);
+                        crate::ui::toast::show(&fmt.replace("{}", &tilde(&out)), "doc.richtext");
+                    }
+                    _ => crate::ui::toast::show(
+                        r.error.as_deref().unwrap_or("pdf export failed"),
+                        "exclamationmark.triangle.fill",
+                    ),
+                }
+            });
+        });
+    }
+
+    fn tilde(path: &str) -> String {
+        let home = std::env::var("HOME").unwrap_or_default();
+        match path.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => path.to_string(),
+        }
+    }
+
+    /// The right-click menu of both prose views: copy the note's absolute
+    /// path, or build its PDF and copy that path.
+    pub fn show_context_menu(note: &str, colors: PopupColors, view: &NSView) {
+        use crate::ui::menu_kit::{popup_context, MenuEntry};
+        if note.is_empty() {
+            return;
+        }
+        let (n1, n2) = (note.to_string(), note.to_string());
+        popup_context(
+            vec![
+                MenuEntry::item("Copy File Path", move || {
+                    let _ = crate::platform::set_text(&n1);
+                    crate::ui::toast::show(&format!("Copied {}", tilde(&n1)), "doc.on.clipboard");
+                }),
+                MenuEntry::item("Copy PDF Path", move || {
+                    export_pdf_and_copy(n2, NotesConfig::load(), colors, "");
+                }),
+            ],
+            view,
+        );
+    }
+
+    pub struct WebIvars {
+        on_menu: RefCell<Option<Rc<dyn Fn(&NSView)>>>,
+    }
+
+    define_class!(
+        /// The prose `WKWebView`: right-click shows our menu, not WebKit's.
+        #[unsafe(super(WKWebView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSProseWebView"]
+        #[ivars = WebIvars]
+        pub struct ProseWebView;
+
+        impl ProseWebView {
+            #[unsafe(method(rightMouseDown:))]
+            fn right_mouse_down(&self, e: &objc2_app_kit::NSEvent) {
+                let cb = self.ivars().on_menu.borrow().clone();
+                match cb {
+                    Some(cb) => cb(self),
+                    None => {
+                        let _: () = unsafe { msg_send![super(self), rightMouseDown: e] };
+                    }
+                }
+            }
+        }
+    );
+
+    impl ProseWebView {
+        pub fn new(mtm: MainThreadMarker, frame: NSRect, config: &WKWebViewConfiguration) -> Retained<ProseWebView> {
+            let this = ProseWebView::alloc(mtm).set_ivars(WebIvars { on_menu: RefCell::new(None) });
+            unsafe { msg_send![super(this), initWithFrame: frame, configuration: config] }
+        }
+
+        pub fn set_on_menu(&self, cb: Rc<dyn Fn(&NSView)>) {
+            *self.ivars().on_menu.borrow_mut() = Some(cb);
+        }
+    }
+
+    /// Give a pop-out's configuration the `/` find bar: the page script plus
+    /// the `wsSearch` channel the key state machine listens to.
+    pub fn add_find(mtm: MainThreadMarker, config: &WKWebViewConfiguration, on_msg: Box<dyn Fn(ProseMsg)>) -> Retained<ProseMsgHandler> {
+        let ucc = unsafe { config.userContentController() };
+        let sink: Sink = Rc::new(RefCell::new(Some(on_msg)));
+        let handler = ProseMsgHandler::alloc(mtm).set_ivars(HandlerIvars { sink });
+        let handler: Retained<ProseMsgHandler> = unsafe { msg_send![super(handler), init] };
+        let s = unsafe {
+            WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &NSString::from_str(FIND_JS),
+                WKUserScriptInjectionTime::AtDocumentEnd,
+                true,
+            )
+        };
+        unsafe {
+            ucc.addUserScript(&s);
+            ucc.addScriptMessageHandler_name(ProtocolObject::from_ref(&*handler), &NSString::from_str("wsSearch"));
+        }
+        handler
     }
 }
 

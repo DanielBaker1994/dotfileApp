@@ -1429,6 +1429,27 @@ impl ProseSearchKey {
     pub fn consumed(self) -> bool {
         self != ProseSearchKey::PassThrough
     }
+
+    /// The page script that performs this key (`None` for `PassThrough`).
+    /// Shared by the in-place view and the pop-out window.
+    pub fn js(self) -> Option<String> {
+        Some(match self {
+            ProseSearchKey::CloseFind => "window.__wsFindEsc&&window.__wsFindEsc()".to_string(),
+            ProseSearchKey::OpenFind => "window.__wsFindOpen&&window.__wsFindOpen()".to_string(),
+            ProseSearchKey::ScrollHalf { down } => format!(
+                "window.scrollBy({{top:{}window.innerHeight/2}})",
+                if down { "" } else { "-" }
+            ),
+            ProseSearchKey::GoTop => "window.scrollTo(0, 0)".to_string(),
+            ProseSearchKey::GoBottom => {
+                "window.scrollTo(0, document.documentElement.scrollHeight)".to_string()
+            }
+            ProseSearchKey::FindStep { back } => {
+                format!("window.__wsFindStep&&window.__wsFindStep({back})")
+            }
+            ProseSearchKey::PassThrough => return None,
+        })
+    }
 }
 
 /// `ProseView` search + zoom state, AppKit-free.
@@ -2783,12 +2804,15 @@ mod macos {
         NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h))
     }
 
-    fn make_web(mtm: MainThreadMarker) -> Retained<WKWebView> {
+    fn make_web(
+        mtm: MainThreadMarker,
+        on_search: Box<dyn Fn(crate::views::notes_prose::ProseMsg)>,
+    ) -> Retained<crate::views::notes_prose::ProseWebView> {
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 240.0));
-        let web = unsafe {
-            WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config)
-        };
+        // The content controller retains the handler for the web view's life.
+        let _ = crate::views::notes_prose::add_find(mtm, &config, on_search);
+        let web = crate::views::notes_prose::ProseWebView::new(mtm, frame, &config);
         let no = NSNumber::numberWithBool(false);
         let _: () = unsafe { msg_send![&*web, setValue: &*no, forKey: ns_string!("drawsBackground")] };
         web.setAutoresizingMask(
@@ -2882,7 +2906,22 @@ mod macos {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        let web = make_web(mtm);
+        let nav = Rc::new(RefCell::new(ProseViewState::new()));
+        let nav_msg = nav.clone();
+        let web = make_web(
+            mtm,
+            Box::new(move |m| {
+                if let crate::views::notes_prose::ProseMsg::Search(st) = m {
+                    nav_msg.borrow_mut().set_search_state(&st);
+                }
+            }),
+        );
+        {
+            let (path, colors) = (opts.path.clone(), opts.colors);
+            web.set_on_menu(Rc::new(move |v: &NSView| {
+                crate::views::notes_prose::show_context_menu(&path, colors, v);
+            }));
+        }
         web.setFrame(content.bounds());
         load_html(&web, &html);
         content.addSubview(&web);
@@ -2900,9 +2939,8 @@ mod macos {
         content.addSubview(&strip);
         window.setContentView(Some(&content));
         window.makeKeyAndOrderFront(None);
-        // The same vim motions as the in-place reading view. A page with no
-        // find bar, so the shared `scroll_key` is the whole key handler.
-        let nav = Rc::new(RefCell::new(ProseViewState::new()));
+        window.makeFirstResponder(Some(&web));
+        // The same vim motions and `/` find as the in-place reading view.
         let (key_web, key_win) = (web.clone(), window.clone());
         let keys = crate::ui::popup::install_local_monitor(mtm, move |event| {
             if !key_win.isKeyWindow() {
@@ -2910,23 +2948,32 @@ mod macos {
             }
             let k = crate::ui::popup::key_input_from_event(event);
             let m = Mods { command: k.cmd, control: k.ctrl, option: k.opt, shift: k.shift };
-            match nav.borrow_mut().scroll_key(k.key_code, m, event.timestamp()) {
-                Some(scroll) => {
-                    if let Some(js) = scroll.js() {
-                        unsafe {
-                            key_web.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None)
-                        };
-                    }
-                    true
+            let mut st = nav.borrow_mut();
+            let eval = |js: &str| unsafe {
+                key_web.evaluateJavaScript_completionHandler(&NSString::from_str(js), None)
+            };
+            if let Some(sk) = st.search_key(k.key_code, m, event.timestamp()) {
+                if let Some(js) = sk.js() {
+                    eval(&js);
                 }
-                None => false,
+                // The first `g` is swallowed unless it is being typed in the bar.
+                return sk.consumed() || (k.key_code == 5 && st.search_state != SearchState::Typing);
             }
+            if m.is_empty() && st.search_state != SearchState::Typing {
+                if let Some(scroll) = st.scroll_key(k.key_code, m, event.timestamp()) {
+                    if let Some(js) = scroll.js() {
+                        eval(&js);
+                    }
+                    return true;
+                }
+            }
+            false
         });
         LIVE_WINDOWS.with(|v| {
             v.borrow_mut().push(ProseLive {
                 path: opts.path.clone(),
                 window,
-                _web: web,
+                _web: Retained::into_super(web),
                 _keys: keys,
             })
         });
