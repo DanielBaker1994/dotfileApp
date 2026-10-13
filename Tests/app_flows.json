@@ -1,0 +1,1075 @@
+{
+  "schema": {
+    "note": "Feature-flow oracle table for driving the REAL kitchen-sink GUI app (Rust port) with real keyboard/mouse input via bin/ks-input. Every `sources` entry is file:line in this repo. Placeholders: `$HOME` expands to the sandbox HOME ($SANDBOX/home), so `~/notes` etc. resolve inside the sandbox. See Tests/app_flows.md for the runner contract (fixtures, input kinds, oracle kinds).",
+    "input_kinds": [
+      "key SPEC  — one key chord/sequence, e.g. `cmd+k`, `ctrl+b w`, `ctrl+tab`, `cmd+shift+.`",
+      "type TEXT — type literal text into the focused field/editor (KS-Input must not interpret it)",
+      "click-rel FX FY — a click at fractions (0..1) of the window's content rect",
+      "wait MS — wait, then optionally take a checkpoint screenshot",
+      "do:VERB — a socket `do:` verb used as a step for features that have no keybinding",
+      "raw VERB — a raw socket verb (e.g. `reload`)"
+    ],
+    "oracle_kinds": [
+      "state   {path, after?, equals?, not_equals?, min?, contains?, contains_name?, length?, every_name_contains?} — read the daemon `state` JSON",
+      "disk    {path, glob?, contains?, exists?, is_dir?, count_min?} — a path (or glob) relative to the sandbox HOME",
+      "independent {describe} — a non-state recomputation the runner performs (ls / Python difflib / do: reply body)",
+      "visual  {after, expect} — a screenshot at `after`; a vision model decides (use only when no state/disk oracle exists)",
+      "log     {none_of:[...]} — the sandbox daemon.log must not contain any of these"
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "f-notes-dir",
+      "kind": "dir",
+      "path": "notes",
+      "why": "The notes folder (`[notes] paths` points inside it; commands.toml:223)."
+    },
+    {
+      "id": "f-note-alpha",
+      "kind": "file",
+      "path": "notes/Alpha.md",
+      "content": "# Alpha\n\nfirst note\nline two\n"
+    },
+    {
+      "id": "f-note-beta",
+      "kind": "file",
+      "path": "notes/Beta.md",
+      "content": "# Beta\n\nsecond note\n"
+    },
+    {
+      "id": "f-note-quill",
+      "kind": "file",
+      "path": "notes/Quill.md",
+      "content": "# Quill\n\nunicode: café → ✓ 日本語\n"
+    },
+    {
+      "id": "f-files-dir",
+      "kind": "dir",
+      "path": "files",
+      "why": "Deterministic Files root (`[files] root = \"~/files\"`, commands.toml:237)."
+    },
+    {
+      "id": "f-files-docs",
+      "kind": "dir",
+      "path": "files/docs"
+    },
+    {
+      "id": "f-files-docs-reading",
+      "kind": "file",
+      "path": "files/docs/reading.md",
+      "content": "# Reading\n\ndocs folder fixture\n"
+    },
+    {
+      "id": "f-files-notes-dir",
+      "kind": "dir",
+      "path": "files/notes"
+    },
+    {
+      "id": "f-files-nested",
+      "kind": "file",
+      "path": "files/notes/deep.txt",
+      "content": "recursive needle\n",
+      "why": "Lives one folder below the Files root so a recursive `**` search should find it (commands.toml:477)."
+    },
+    {
+      "id": "f-files-readme",
+      "kind": "file",
+      "path": "files/README.txt",
+      "content": "top level readme\n"
+    },
+    {
+      "id": "f-files-spaced",
+      "kind": "file",
+      "path": "files/spaced name.txt",
+      "content": "spaces in the name\n"
+    },
+    {
+      "id": "f-files-hidden",
+      "kind": "file",
+      "path": "files/.hidden.txt",
+      "content": "hidden\n"
+    },
+    {
+      "id": "f-files-empty",
+      "kind": "dir",
+      "path": "files/empty"
+    },
+    {
+      "id": "f-cmp-dir",
+      "kind": "dir",
+      "path": "compare"
+    },
+    {
+      "id": "f-cmp-left",
+      "kind": "dir",
+      "path": "compare/left"
+    },
+    {
+      "id": "f-cmp-right",
+      "kind": "dir",
+      "path": "compare/right"
+    },
+    {
+      "id": "f-cmp-left-a",
+      "kind": "file",
+      "path": "compare/left/a.txt",
+      "content": "alpha\nbeta\ngamma\n"
+    },
+    {
+      "id": "f-cmp-right-a",
+      "kind": "file",
+      "path": "compare/right/a.txt",
+      "content": "alpha\nBETA\ngamma\ndelta\n"
+    },
+    {
+      "id": "f-cmp-common-l",
+      "kind": "file",
+      "path": "compare/left/common.txt",
+      "content": "same\n"
+    },
+    {
+      "id": "f-cmp-common-r",
+      "kind": "file",
+      "path": "compare/right/common.txt",
+      "content": "same\n"
+    },
+    {
+      "id": "f-cmp-only-left",
+      "kind": "file",
+      "path": "compare/left/only_left.txt",
+      "content": "left only\n"
+    },
+    {
+      "id": "f-cmp-text-l",
+      "kind": "file",
+      "path": "compare/textL.txt",
+      "content": "one\ntwo\nthree\nfour\n"
+    },
+    {
+      "id": "f-cmp-text-r",
+      "kind": "file",
+      "path": "compare/textR.txt",
+      "content": "one\nTWO\nthree\nfour\nfive\n"
+    },
+    {
+      "id": "f-cmp-identical-l",
+      "kind": "file",
+      "path": "compare/identicalL.txt",
+      "content": "same\nsame two\n"
+    },
+    {
+      "id": "f-cmp-identical-r",
+      "kind": "file",
+      "path": "compare/identicalR.txt",
+      "content": "same\nsame two\n"
+    },
+    {
+      "id": "f-jira-cache",
+      "kind": "dir",
+      "path": ".cache/kitchen-sink/jira_json",
+      "why": "`[jira] sources` (commands.toml:273); the offline Jira list reads every *.json/*.tsv here."
+    },
+    {
+      "id": "cfg-sandbox",
+      "kind": "config",
+      "path": "commands.toml",
+      "applies_to": "all",
+      "why": "One deterministic config for the whole table, applied to the sandbox copy of commands.toml ($SANDBOX/home/commands.toml) before the run: three known open notes, a fixed Files root, and a plain (non-nvim) notes editor so typing/save/find are deterministic without an external nvim process. Set `[notes] vim-mode = false`; without the tweak, notes edit/save would require nvim and the `[notes] paths` tabs would not exist.",
+      "set": {
+        "[notes]": {
+          "vim-mode": "false",
+          "paths": "~/notes/Alpha.md, ~/notes/Beta.md, ~/notes/Quill.md"
+        },
+        "[files]": {
+          "root": "~/files",
+          "start": "root"
+        }
+      }
+    }
+  ],
+  "flows": [
+    {
+      "id": "notes-open-tabs",
+      "feature": "notes",
+      "why": "Opening Notes shows the configured open notes as sidebar tabs.",
+      "sources": ["commands.toml:223", "rust/ws-rs/src/views/notes.rs:167-176", "rust/ws-rs/src/views/notes.rs:3507-3523", "rust/ws-rs/src/app/host.rs:486-508"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "wait 400", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "notes", "after": "open"},
+        {"kind": "state", "path": "views.notes.shown", "equals": true, "after": "open"},
+        {"kind": "state", "path": "views.notes.rowCount", "equals": 3, "after": "open"},
+        {"kind": "state", "path": "views.notes.tabs", "contains": "Alpha", "after": "open"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "notes-new-note-file",
+      "feature": "notes",
+      "why": "Cmd+N creates a new empty note file on disk in the notes folder.",
+      "sources": ["commands.toml:449", "rust/ws-rs/src/views/notes.rs:443-480", "rust/ws-rs/src/app/host.rs:5072-5075"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key cmd+n"},
+        {"input": "wait 400", "checkpoint": "created"}
+      ],
+      "oracles": [
+        {"kind": "disk", "path": "notes/", "glob": "Untitled-*.md", "count_min": 1, "after": "created"},
+        {"kind": "state", "path": "views.notes.rowCount", "min": 4, "after": "created"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "notes-rapid-new-notes",
+      "feature": "notes",
+      "why": "Repeated Cmd+N makes a fresh note each time and never reuses a name (no data corruption).",
+      "sources": ["commands.toml:449", "rust/ws-rs/src/views/notes.rs:465-480", "rust/ws-rs/src/views/notes.rs:3743-3748", "UI-TEST-FINDINGS.md:12"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key cmd+n"},
+        {"input": "key cmd+n"},
+        {"input": "key cmd+n"},
+        {"input": "wait 600", "checkpoint": "three"}
+      ],
+      "oracles": [
+        {"kind": "disk", "path": "notes/", "glob": "Untitled-*.md", "count_min": 3, "after": "three"},
+        {"kind": "independent", "describe": "The three files are distinct names (Untitled-1.md, Untitled-2.md, Untitled-3.md) — no name is reused and none overwrites another; the click-selected tab, the editor and autosave all point at the newest note (UI-TEST-FINDINGS.md S1 fixed)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "notes-type-save",
+      "feature": "notes",
+      "why": "Text typed into a new note is saved to disk on Cmd+S.",
+      "sources": ["rule.md:6-21", "commands.toml:447", "rust/ws-rs/src/views/notes.rs:4287-4297", "rust/ws-rs/src/app/host.rs:9150-9152"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key cmd+n"},
+        {"input": "wait 300"},
+        {"input": "type hello from the test"},
+        {"input": "key cmd+s"},
+        {"input": "wait 400", "checkpoint": "saved"}
+      ],
+      "oracles": [
+        {"kind": "disk", "path": "notes/", "glob": "Untitled-*.md", "contains": "hello from the test", "after": "saved"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "notes-unicode-save",
+      "feature": "notes",
+      "why": "Unicode text in a note survives the round-trip to disk (UTF-16 range math, not byte indices).",
+      "sources": ["rust/ws-rs/src/views/notes.rs:2179-2206", "rust/ws-rs/src/views/notes.rs:4287-4297", "commands.toml:447"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key cmd+n"},
+        {"input": "wait 300"},
+        {"input": "type café → 日本語 ✓ Ω"},
+        {"input": "key cmd+s"},
+        {"input": "wait 400", "checkpoint": "saved"}
+      ],
+      "oracles": [
+        {"kind": "disk", "path": "notes/", "glob": "Untitled-*.md", "contains": "日本語 ✓", "after": "saved"},
+        {"kind": "independent", "describe": "The saved file is valid UTF-8 and byte-for-byte contains the exact unicode string typed (no mojibake / dropped surrogate pairs)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "notes-find-toggle",
+      "feature": "notes",
+      "why": "Cmd+F opens the note find bar; Esc closes it before the window's own Esc policy runs.",
+      "sources": ["commands.toml:448", "rust/ws-rs/src/app/host.rs:4740", "rust/ws-rs/src/app/host.rs:4679-4683", "rust/ws-rs/src/views/notes.rs:4322-4329"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key cmd+f"},
+        {"input": "wait 300", "checkpoint": "openfind"},
+        {"input": "type Alpha"},
+        {"input": "key esc"},
+        {"input": "wait 300", "checkpoint": "closed"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.notes.findBar", "equals": true, "after": "openfind"},
+        {"kind": "state", "path": "views.notes.findBar", "equals": false, "after": "closed"},
+        {"kind": "visual", "after": "openfind", "expect": "a find bar with a text field is visible at the top of the notes editor"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "files-open-listing",
+      "feature": "files",
+      "why": "The Files view lists the folder named by [files] root.",
+      "sources": ["commands.toml:237", "commands.toml:245", "rust/ws-rs/src/app/host.rs:5291-5321", "rust/ws-rs/src/views/files.rs:1820-1832"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "wait 500", "checkpoint": "listed"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "files", "after": "listed"},
+        {"kind": "state", "path": "views.files.cwd", "equals": "$HOME/files", "after": "listed"},
+        {"kind": "state", "path": "views.files.rows", "contains_name": "README.txt", "after": "listed"},
+        {"kind": "state", "path": "views.files.rows", "contains_name": "docs", "after": "listed"},
+        {"kind": "independent", "describe": "Every name in state.views.files.rows exists on disk under $HOME/files (a direct listing) and no on-disk entry is missing from the list."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "files-filter-local",
+      "feature": "files",
+      "why": "Typing in the Files filter narrows the list to names that match.",
+      "sources": ["commands.toml:460", "rust/ws-rs/src/views/files.rs:391-479", "rust/ws-rs/src/views/files.rs:1571-1595"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "key cmd+l"},
+        {"input": "type README"},
+        {"input": "wait 400", "checkpoint": "filtered"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.files.query", "equals": "README", "after": "filtered"},
+        {"kind": "independent", "describe": "After typing README, every row name in state.views.files.rows contains README (case-insensitive) and README.txt is present; the other entries (docs, spaced name.txt, .hidden.txt) are gone."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "files-recursive-search",
+      "feature": "files",
+      "why": "In the Files filter, ** searches every folder below the current one and lists the matches.",
+      "sources": ["commands.toml:477", "rust/ws-rs/src/views/files.rs:420-424", "rust/ws-rs/src/views/files.rs:1571-1595"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "key cmd+l"},
+        {"input": "type **deep**"},
+        {"input": "wait 500", "checkpoint": "searched"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.files.rows", "contains_name": "deep.txt", "after": "searched"},
+        {"kind": "independent", "describe": "$HOME/files/notes/deep.txt exists on disk under the current root, so the recursive `**` search must list a row for it (commands.toml:477 promises `**` searches every folder below). NOTE: the Rust model currently maps QueryMode::Recursive to an empty list (files.rs:1592) — this flow is expected to FAIL and record that bug."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "files-open-dir",
+      "feature": "files",
+      "why": "Return opens the selected folder and the view re-roots there.",
+      "sources": ["commands.toml:457", "rust/ws-rs/src/app/host.rs:8972-8982", "rust/ws-rs/src/views/files.rs:680-686"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "key cmd+l"},
+        {"input": "type docs"},
+        {"input": "wait 300"},
+        {"input": "key return"},
+        {"input": "wait 500", "checkpoint": "entered"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.files.cwd", "equals": "$HOME/files/docs", "after": "entered"},
+        {"kind": "state", "path": "views.files.rows", "contains_name": "reading.md", "after": "entered"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "files-rename",
+      "feature": "files",
+      "why": "Cmd+R renames the selected file, and a name with a space and an accent is accepted.",
+      "sources": ["commands.toml:462", "rust/ws-rs/src/app/host.rs:8099", "rust/ws-rs/src/app/host.rs:8567-8606"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "key cmd+l"},
+        {"input": "type README"},
+        {"input": "wait 300"},
+        {"input": "key cmd+r"},
+        {"input": "wait 250"},
+        {"input": "type Rénamed file.txt"},
+        {"input": "key return"},
+        {"input": "wait 400", "checkpoint": "renamed"}
+      ],
+      "oracles": [
+        {"kind": "disk", "path": "files/Rénamed file.txt", "exists": true, "after": "renamed"},
+        {"kind": "disk", "path": "files/README.txt", "exists": false, "after": "renamed"},
+        {"kind": "state", "path": "views.files.rows", "contains_name": "Rénamed file.txt", "after": "renamed"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "files-new-folder",
+      "feature": "files",
+      "why": "Cmd+Shift+N creates a new folder in the current folder.",
+      "sources": ["commands.toml:469", "rust/ws-rs/src/app/host.rs:8063-8067"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "key cmd+shift+n"},
+        {"input": "wait 400", "checkpoint": "made"}
+      ],
+      "oracles": [
+        {"kind": "disk", "path": "files/", "glob": "untitled*", "is_dir": true, "count_min": 1, "after": "made"},
+        {"kind": "state", "path": "views.files.rows", "contains_name": "untitled folder", "after": "made"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "files-hidden-toggle",
+      "feature": "files",
+      "why": "Cmd+Shift+. shows hidden (dot) files in the list.",
+      "sources": ["commands.toml:476", "rust/ws-rs/src/app/host.rs:8057-8059", "rust/ws-rs/src/views/files.rs:1719-1725"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "key cmd+shift+."},
+        {"input": "wait 400", "checkpoint": "shown"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.files.rows", "contains_name": ".hidden.txt", "after": "shown"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "compare-text-open",
+      "feature": "compare",
+      "why": "Opening two text files shows a text compare with their differences.",
+      "sources": ["rust/ws-rs/src/app/host.rs:1623-1628", "rust/ws-rs/src/app/host.rs:2135-2166", "rust/ws-rs/src/views/compare.rs:3983-4060", "commands.toml:507"],
+      "needs": ["gui"],
+      "setup": ["do:compare:open:$HOME/compare/textL.txt|$HOME/compare/textR.txt"],
+      "steps": [
+        {"input": "wait 600", "checkpoint": "shown"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "compare", "after": "shown"},
+        {"kind": "state", "path": "compare.sessions", "length": 1, "after": "shown"},
+        {"kind": "state", "path": "compare.sessions[0].kind", "equals": "text", "after": "shown"},
+        {"kind": "state", "path": "compare.current.sections", "min": 1, "after": "shown"},
+        {"kind": "state", "path": "compare.current.filter", "equals": "all", "after": "shown"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:compare:back"]
+    },
+    {
+      "id": "compare-text-diff-count",
+      "feature": "compare",
+      "why": "The differences the app shows match an independent line diff of the two files.",
+      "sources": ["rust/ws-rs/src/views/compare.rs:4030-4057", "rust/ws-rs/src/views/compare.rs:887-892", "rust/ws-rs/src/views/compare.rs:3983-3996"],
+      "needs": ["gui"],
+      "setup": ["do:compare:open:$HOME/compare/textL.txt|$HOME/compare/textR.txt"],
+      "steps": [
+        {"input": "wait 600", "checkpoint": "shown"}
+      ],
+      "oracles": [
+        {"kind": "independent", "describe": "Python difflib.SequenceMatcher over compare/textL.txt vs compare/textR.txt: the changed-line count equals the number of state.compare.current.rows with kind != \"same\", and the number of differing regions equals state.compare.current.sections. (textL = one/two/three/four, textR = one/TWO/three/four/five.)"},
+        {"kind": "state", "path": "compare.current.sections", "min": 1, "after": "shown"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:compare:back"]
+    },
+    {
+      "id": "compare-next-diff",
+      "feature": "compare",
+      "why": "Ctrl+N jumps to the next difference and Ctrl+P back to the previous one.",
+      "sources": ["commands.toml:497", "rust/ws-rs/src/views/compare.rs:4084-4085", "rust/ws-rs/src/views/compare.rs:3775-3783"],
+      "needs": ["gui"],
+      "setup": ["do:compare:open:$HOME/compare/textL.txt|$HOME/compare/textR.txt"],
+      "steps": [
+        {"input": "wait 600"},
+        {"input": "key ctrl+n"},
+        {"input": "wait 300", "checkpoint": "next"},
+        {"input": "key ctrl+p"},
+        {"input": "wait 300", "checkpoint": "prev"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "compare.current.cursorRow", "min": 1, "after": "next"},
+        {"kind": "state", "path": "compare.current.cursorRow", "equals": 0, "after": "prev"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:compare:back"]
+    },
+    {
+      "id": "compare-filter-switch",
+      "feature": "compare",
+      "why": "Cmd+2 shows only differences; Cmd+1 shows all rows.",
+      "sources": ["commands.toml:510", "rust/ws-rs/src/views/compare.rs:4080", "rust/ws-rs/src/views/compare.rs:4100"],
+      "needs": ["gui"],
+      "setup": ["do:compare:open:$HOME/compare/textL.txt|$HOME/compare/textR.txt"],
+      "steps": [
+        {"input": "wait 600"},
+        {"input": "key cmd+2"},
+        {"input": "wait 300", "checkpoint": "diffs"},
+        {"input": "key cmd+1"},
+        {"input": "wait 300", "checkpoint": "all"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "compare.current.filter", "equals": "diffs", "after": "diffs"},
+        {"kind": "state", "path": "compare.current.filter", "equals": "all", "after": "all"},
+        {"kind": "independent", "describe": "In the diffs filter every row in state.compare.current.rows has kind != \"same\"; in the all filter at least one row has kind == \"same\"."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:compare:back"]
+    },
+    {
+      "id": "compare-swap-sides",
+      "feature": "compare",
+      "why": "Cmd+Opt+X swaps the left and right sides.",
+      "sources": ["commands.toml:513", "rust/ws-rs/src/views/compare.rs:4101", "rust/ws-rs/src/views/compare.rs:3800-3810"],
+      "needs": ["gui"],
+      "setup": ["do:compare:open:$HOME/compare/textL.txt|$HOME/compare/textR.txt"],
+      "steps": [
+        {"input": "wait 600"},
+        {"input": "key cmd+opt+x"},
+        {"input": "wait 300", "checkpoint": "swapped"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "compare.sessions[0].left", "equals": "$HOME/compare/textR.txt", "after": "swapped"},
+        {"kind": "state", "path": "compare.sessions[0].right", "equals": "$HOME/compare/textL.txt", "after": "swapped"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:compare:back"]
+    },
+    {
+      "id": "compare-folder-open",
+      "feature": "compare",
+      "why": "Two folders open as a folder compare with per-status counts.",
+      "sources": ["commands.toml:515", "rust/ws-rs/src/views/compare.rs:2419-2482", "rust/ws-rs/src/views/compare.rs:3465-3471"],
+      "needs": ["gui"],
+      "setup": ["do:compare:open:$HOME/compare/left|$HOME/compare/right"],
+      "steps": [
+        {"input": "wait 900", "checkpoint": "scanned"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "compare.sessions[0].kind", "equals": "folder", "after": "scanned"},
+        {"kind": "state", "path": "compare.folder.counts.different", "equals": 1, "after": "scanned"},
+        {"kind": "state", "path": "compare.folder.counts.leftOnly", "equals": 1, "after": "scanned"},
+        {"kind": "state", "path": "compare.folder.counts.same", "equals": 1, "after": "scanned"},
+        {"kind": "independent", "describe": "Recompute the two fixture trees: compare/left/a.txt differs from compare/right/a.txt, only_left.txt is left-only, common.txt is identical → different==1, leftOnly==1, same==1. These must equal state.compare.folder.counts."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:compare:back"]
+    },
+    {
+      "id": "switcher-open",
+      "feature": "view-switcher",
+      "why": "Ctrl+B W opens the view switcher listing the open windows.",
+      "sources": ["commands.toml:411", "rust/ws-rs/src/app/host.rs:5175-5182", "rust/ws-rs/src/app/host.rs:564-568"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key ctrl+b w"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "viewSwitcher.shown", "equals": true, "after": "open"},
+        {"kind": "state", "path": "viewSwitcher.rows", "min": 1, "after": "open"},
+        {"kind": "independent", "describe": "Each row string is \"Name|location\" (host.rs:3962) and the names are drawn from Files/Notes/Confluence/Jira only (host.rs:3919-3945)."},
+        {"kind": "visual", "after": "open", "expect": "the view switcher panel is visible with a search box and a list of window/workspace rows"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:switcher-hide"]
+    },
+    {
+      "id": "switcher-close-esc",
+      "feature": "view-switcher",
+      "why": "Esc closes only the switcher overlay, leaving the window under it visible (rule 6).",
+      "sources": ["rule.md:67-77", "rust/ws-rs/src/app/host.rs:4849-4851", "rust/ws-rs/src/app/host.rs:4921-4923"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key ctrl+b w"},
+        {"input": "wait 500", "checkpoint": "open"},
+        {"input": "key esc"},
+        {"input": "wait 400", "checkpoint": "closed"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "viewSwitcher.shown", "equals": true, "after": "open"},
+        {"kind": "state", "path": "viewSwitcher.shown", "equals": false, "after": "closed"},
+        {"kind": "state", "path": "view", "equals": "notes", "after": "closed"},
+        {"kind": "state", "path": "visible", "equals": true, "after": "closed"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "cycle-views",
+      "feature": "view-cycling",
+      "why": "Ctrl+Tab cycles the shared window's views and back.",
+      "sources": ["PRD-keyboard.md:37-43", "PRODUCT.md:34-42", "rust/ws-rs/src/ui/popup.rs:477-488", "rust/ws-rs/src/app/host.rs:4718-4721"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key ctrl+tab"},
+        {"input": "wait 400", "checkpoint": "cycled"},
+        {"input": "key ctrl+tab"},
+        {"input": "wait 400", "checkpoint": "back"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "files", "after": "cycled"},
+        {"kind": "state", "path": "view", "equals": "notes", "after": "back"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "header-style-set",
+      "feature": "header-styles",
+      "why": "Header styles change live; an unknown style is refused.",
+      "sources": ["rust/ws-rs/src/app/host.rs:1737-1744", "rust/ws-rs/src/ui/theme.rs:602-633", "commands.toml:5", "DESIGN.md:315-321"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "do:header-style:aurora"},
+        {"input": "wait 300", "checkpoint": "set"},
+        {"input": "do:header-style:bogus"},
+        {"input": "wait 200", "checkpoint": "afterbad"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "headerStyle", "equals": "aurora", "after": "set"},
+        {"kind": "state", "path": "headerStyle", "equals": "aurora", "after": "afterbad"},
+        {"kind": "independent", "describe": "do:header-style:bogus is refused with {\"error\":\"unknown header style\"} (host.rs:1743) and does not change headerStyle; valid values are quiet|flat|edge|stripe|tinted|glow|aurora (theme.rs:623-633)."},
+        {"kind": "visual", "after": "set", "expect": "the window header is drawn in the aurora style (an accent→accent2 left-to-right band), not the flat default"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:header-style:quiet"]
+    },
+    {
+      "id": "shortcuts-sheet-visual",
+      "feature": "shortcuts-sheet",
+      "why": "Cmd+/ shows the shortcuts card for the current view.",
+      "sources": ["commands.toml:438", "rust/ws-rs/src/app/host.rs:4757-4760", "DESIGN.md:329-333", "rust/ws-rs/src/app/host.rs:4489-4502"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "key cmd+/"},
+        {"input": "wait 400", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "visual", "after": "open", "expect": "a shortcuts overlay card is visible listing this view's keys (key caps + descriptions)"},
+        {"kind": "independent", "describe": "The Cmd+/ sheet is not exposed in `state` (BACKLOG.md:87-90), so a visual oracle is required; after Esc the notes window must still be visible (the sheet owns the keyboard, rule 6)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "action-picker-visual",
+      "feature": "action-picker",
+      "why": "Cmd+K opens the action menu in Jira (it is wired only for Jira and Compare).",
+      "sources": ["commands.toml:483", "rust/ws-rs/src/app/host.rs:4745-4756", "rust/ws-rs/src/ui/action_picker.rs:20-40"],
+      "needs": ["gui"],
+      "setup": ["do:open:jira"],
+      "steps": [
+        {"input": "key cmd+k"},
+        {"input": "wait 400", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "visual", "after": "open", "expect": "an action menu is visible over the Jira list offering at least copy, copy URL + title and open in browser"},
+        {"kind": "independent", "describe": "The Cmd+K picker has no `state` representation (host.rs:539-570 has no actionPicker key; BACKLOG.md:87-90), so only a visual oracle can see it; Return/Esc/↑↓/1-9 must drive it (ui/action_picker.rs:20-40)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "esc-hides-on",
+      "feature": "esc-hides",
+      "why": "With Esc Hides on for notes, one Esc hides the window.",
+      "sources": ["rust/ws-rs/src/app/host.rs:1745-1762", "rust/ws-rs/src/app/host.rs:518-521", "rust/ws-rs/src/ui/popup.rs:382-384", "rust/ws-rs/src/app/host.rs:4702-4705"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes", "do:esc-hides:notes:on"],
+      "steps": [
+        {"input": "wait 300", "checkpoint": "armed"},
+        {"input": "key esc"},
+        {"input": "wait 400", "checkpoint": "hidden"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "escHides.notes", "equals": true, "after": "armed"},
+        {"kind": "state", "path": "visible", "equals": false, "after": "hidden"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:esc-hides:notes:off"]
+    },
+    {
+      "id": "hide-on-focus-loss-state",
+      "feature": "hide-on-focus-loss",
+      "why": "Hide On Focus Loss reflects the setting and can be flipped at runtime.",
+      "sources": ["commands.toml:43", "rust/ws-rs/src/app/host.rs:1763-1771", "rust/ws-rs/src/app/host.rs:547", "AGENTS.md:470-471"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "do:hide-on-focus-loss:on"},
+        {"input": "wait 250", "checkpoint": "on"},
+        {"input": "do:hide-on-focus-loss:off"},
+        {"input": "wait 250", "checkpoint": "off"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "hideOnFocusLoss", "equals": true, "after": "on"},
+        {"kind": "state", "path": "hideOnFocusLoss", "equals": false, "after": "off"},
+        {"kind": "independent", "describe": "Default is false (commands.toml:43); the live focus-loss behaviour itself is not asserted because the focus bridge is listed as an unported known gap (AGENTS.md:470-471)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "terminal-drawer",
+      "feature": "terminal-drawer",
+      "why": "The notes terminal drawer toggles open and closed.",
+      "sources": ["commands.toml:412", "rust/ws-rs/src/app/host.rs:1873-1877", "rust/ws-rs/src/app/host.rs:490-495", "BACKLOG.md:13-24"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "do:toggle-terminal"},
+        {"input": "wait 500", "checkpoint": "open"},
+        {"input": "do:toggle-terminal"},
+        {"input": "wait 400", "checkpoint": "closed"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.notes.terminal", "equals": true, "after": "open"},
+        {"kind": "state", "path": "views.notes.drawerInset", "equals": 200, "after": "open"},
+        {"kind": "state", "path": "views.notes.terminal", "equals": false, "after": "closed"},
+        {"kind": "visual", "after": "open", "expect": "a terminal drawer is visible at the bottom of the notes window, its first text row fully visible (BACKLOG.md:21-24 records the top-border clipping bug)"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "browser-drawer",
+      "feature": "browser-drawer",
+      "why": "The notes file-browser drawer toggles open and closed.",
+      "sources": ["rust/ws-rs/src/app/host.rs:1879-1883", "rust/ws-rs/src/app/host.rs:491"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "do:toggle-browser"},
+        {"input": "wait 500", "checkpoint": "open"},
+        {"input": "do:toggle-browser"},
+        {"input": "wait 400", "checkpoint": "closed"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.notes.browser", "equals": true, "after": "open"},
+        {"kind": "state", "path": "views.notes.browser", "equals": false, "after": "closed"},
+        {"kind": "visual", "after": "open", "expect": "a file-browser drawer is visible on the notes window listing files in the notes folder"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "pane-focus",
+      "feature": "pane-navigation",
+      "why": "A pane can be focused by id and the state reports which pane has the keys.",
+      "sources": ["PRD-keyboard.md:74-79", "rust/ws-rs/src/app/host.rs:1651-1684", "rust/ws-rs/src/app/live_panes.rs:218-240"],
+      "needs": ["gui"],
+      "setup": ["do:open:files"],
+      "steps": [
+        {"input": "do:pane:focus:files-sidebar"},
+        {"input": "wait 400", "checkpoint": "focused"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "pane.focused", "equals": "files-sidebar", "after": "focused"},
+        {"kind": "visual", "after": "focused", "expect": "a 1pt silver focus ring outlines the files sidebar pane (PRD-keyboard.md:104-109)"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "pane-move",
+      "feature": "pane-navigation",
+      "why": "Ctrl+H/J/K/L moves the focus ring between panes and the opposite key returns.",
+      "sources": ["PRD-keyboard.md:88-100", "rust/ws-rs/src/app/host.rs:4518-4554", "rust/ws-rs/src/app/host.rs:1651-1684", "commands.toml:415"],
+      "needs": ["gui"],
+      "setup": ["do:open:files", "do:pane:focus:files-list"],
+      "steps": [
+        {"input": "do:pane:h"},
+        {"input": "wait 350", "checkpoint": "left"},
+        {"input": "do:pane:l"},
+        {"input": "wait 350", "checkpoint": "right"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "pane.focused", "equals": "files-sidebar", "after": "left"},
+        {"kind": "state", "path": "pane.focused", "equals": "files-list", "after": "right"},
+        {"kind": "visual", "after": "left", "expect": "the focus ring has moved from the list to the sidebar pane"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "vim-list-keys",
+      "feature": "vim-keys",
+      "why": "In normal mode j/k move the list selection and gg/G jump to the ends.",
+      "sources": ["commands.toml:51", "commands.toml:427-429", "PRD-keyboard.md:111-122", "rust/ws-rs/src/app/host.rs:4557"],
+      "needs": ["gui"],
+      "setup": ["do:open:files", "do:pane:focus:files-list"],
+      "steps": [
+        {"input": "key j"},
+        {"input": "key j"},
+        {"input": "wait 350", "checkpoint": "moved"},
+        {"input": "key G"},
+        {"input": "wait 350", "checkpoint": "last"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "views.files.selection", "min": 2, "after": "moved"},
+        {"kind": "state", "path": "views.files.selection", "min": 0, "after": "last"},
+        {"kind": "independent", "describe": "After j j the files selection index increased by 2 from its start; after G it is the last row index (rowCount-1) (commands.toml:427-429)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "tool-prettyprint",
+      "feature": "tools",
+      "why": "The Pretty Print tool panel opens and reports itself shown.",
+      "sources": ["commands.toml:579-586", "rust/ws-rs/src/app/host.rs:1772-1793", "rust/ws-rs/src/views/tools.rs:55-63", "rust/ws-rs/src/views/tools.rs:868-900"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:tool:prettyprint"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "tools.prettyprint.shown", "equals": true, "after": "open"},
+        {"kind": "visual", "after": "open", "expect": "a Pretty Print panel window is visible next to the shared window"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:tool-close:prettyprint"]
+    },
+    {
+      "id": "tool-text-table",
+      "feature": "tools",
+      "why": "The Text to Table panel opens and reports itself shown.",
+      "sources": ["commands.toml:96-105", "rust/ws-rs/src/app/host.rs:1772-1793", "rust/ws-rs/src/views/tools.rs:55-63"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:tool:text-table"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "tools.text-table.shown", "equals": true, "after": "open"},
+        {"kind": "visual", "after": "open", "expect": "a Text to Table panel is visible with an input text area"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:tool-close:text-table"]
+    },
+    {
+      "id": "tool-filefast",
+      "feature": "tools",
+      "why": "The Create File (filefast) panel opens and reports itself shown.",
+      "sources": ["commands.toml:72-81", "rust/ws-rs/src/app/host.rs:1772-1793", "rust/ws-rs/src/views/tools.rs:55-63"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:tool:filefast"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "tools.filefast.shown", "equals": true, "after": "open"},
+        {"kind": "visual", "after": "open", "expect": "a Create File panel is visible"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:tool-close:filefast"]
+    },
+    {
+      "id": "tool-health",
+      "feature": "tools",
+      "why": "The Health Checks output panel opens and reports itself shown.",
+      "sources": ["commands.toml:595-605", "rust/ws-rs/src/app/host.rs:1772-1793", "rust/ws-rs/src/views/tools.rs:55-63"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:tool:health-checks"},
+        {"input": "wait 800", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "tools.health-checks.shown", "equals": true, "after": "open"},
+        {"kind": "visual", "after": "open", "expect": "a Health Checks panel is visible (it may still be running ~/.config/kitchen-sink/jira/jira-doctor.sh)"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:tool-close:health-checks"]
+    },
+    {
+      "id": "paths-show",
+      "feature": "paths-shelf",
+      "why": "The paths shelf opens and reports itself shown.",
+      "sources": ["commands.toml:83-94", "rust/ws-rs/src/app/host.rs:1692-1736", "rust/ws-rs/src/views/paths.rs:691-705"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "do:paths:show"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "paths.shown", "equals": true, "after": "open"},
+        {"kind": "visual", "after": "open", "expect": "the Recent Files shelf is visible with a list of recent paths"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:paths:hide"]
+    },
+    {
+      "id": "paths-select-out-of-range",
+      "feature": "paths-shelf",
+      "why": "Selecting a paths row past the end is refused, not silently accepted (an edge case of the shelf's selection).",
+      "sources": ["rust/ws-rs/src/app/host.rs:1716-1727", "BACKLOG.md:62"],
+      "needs": ["gui"],
+      "setup": ["do:paths:show"],
+      "steps": [
+        {"input": "wait 300"},
+        {"input": "do:paths:select:9999"}
+      ],
+      "oracles": [
+        {"kind": "independent", "describe": "do:paths:select:9999 returns {\"error\":\"paths:select: out of range\"} (host.rs:1725-1727) rather than succeeding; a valid in-range select:N (N < rows) succeeds and sets paths.selection == N."},
+        {"kind": "state", "path": "paths.shown", "equals": true},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:paths:hide"]
+    },
+    {
+      "id": "config-open",
+      "feature": "config-view",
+      "why": "The config view can be opened and the state reports it as the current view.",
+      "sources": ["rust/ws-rs/src/app/registry.rs:44-75", "rust/ws-rs/src/app/host.rs:1592-1608", "rust/ws-rs/src/app/host.rs:10125-10136"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:open:config"},
+        {"input": "wait 400", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "config", "after": "open"},
+        {"kind": "state", "path": "views.config.shown", "equals": true, "after": "open"},
+        {"kind": "independent", "describe": "The config view currently has no content surface — content_for falls through to a placeholder titled \"Rust port — view surface pending\" (host.rs:10125-10136); only `view`/`shown` can be asserted."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "config-reload",
+      "feature": "config-view",
+      "why": "Reload re-reads commands.toml and resets a runtime-only change.",
+      "sources": ["rust/ws-rs/src/app/host.rs:1378-1400", "rust/ws-rs/src/app/host.rs:2701", "commands.toml:5"],
+      "needs": ["gui"],
+      "setup": ["do:open:notes"],
+      "steps": [
+        {"input": "do:header-style:aurora"},
+        {"input": "wait 300", "checkpoint": "changed"},
+        {"input": "raw reload"},
+        {"input": "wait 700", "checkpoint": "reloaded"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "headerStyle", "equals": "aurora", "after": "changed"},
+        {"kind": "state", "path": "headerStyle", "equals": "quiet", "after": "reloaded"},
+        {"kind": "independent", "describe": "After the raw `reload` verb re-reads [app] header-style (commands.toml:5 = \"quiet\"), the runtime-only aurora override is gone; headerStyle is the file value again (host.rs:1378-1400)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": []
+    },
+    {
+      "id": "output-open",
+      "feature": "output-view",
+      "why": "The output view can be opened and the state reports it as the current view.",
+      "sources": ["rust/ws-rs/src/app/registry.rs:44-75", "rust/ws-rs/src/app/host.rs:1592-1608", "rust/ws-rs/src/app/host.rs:10138-10164"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:open:output"},
+        {"input": "wait 400", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "output", "after": "open"},
+        {"kind": "state", "path": "views.output.shown", "equals": true, "after": "open"},
+        {"kind": "independent", "describe": "Like config, the output view has no content surface in the Rust port yet (host.rs:10138-10164); only `view`/`shown` are assertable."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "jira-open",
+      "feature": "jira",
+      "why": "The Jira view opens with a list surface, without any network access.",
+      "sources": ["commands.toml:258-273", "rust/ws-rs/src/app/registry.rs:44-75", "rust/ws-rs/src/app/host.rs:1592-1608"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:open:jira"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "jira", "after": "open"},
+        {"kind": "state", "path": "views.jira.shown", "equals": true, "after": "open"},
+        {"kind": "independent", "describe": "No network touched: the list reads local files from [jira] sources (~/.cache/kitchen-sink/jira_json, commands.toml:273). The live Jira row state is NOT exposed over the socket (views.jira is placeholder-only), so row contents need a visual check."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "jira-board-error",
+      "feature": "jira",
+      "why": "Board verbs are advertised but must not silently succeed (known open bug).",
+      "sources": ["BACKLOG.md:72-75", "rust/ws-rs/src/app/host.rs:1915-1918"],
+      "needs": ["gui"],
+      "setup": ["do:open:jira"],
+      "steps": [
+        {"input": "do:board:mywork"}
+      ],
+      "oracles": [
+        {"kind": "independent", "describe": "do:board:mywork returns {\"error\":\"board:mywork not implemented in the Rust port yet\"} (host.rs:1915-1918), matching BACKLOG.md:72-75; it must NOT return ok/null. (This flow locks the known gap.)"},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    },
+    {
+      "id": "screenshot-show-state",
+      "feature": "screenshot",
+      "why": "The screenshot overlay opens with the documented toolbar buttons.",
+      "sources": ["commands.toml:111-177", "rust/ws-rs/src/app/host.rs:1636-1650", "rust/ws-rs/src/views/screenshot.rs:8059-8214"],
+      "needs": ["gui", "screen-capture"],
+      "setup": [],
+      "steps": [
+        {"input": "do:screenshot:show"},
+        {"input": "wait 900", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "screenshot.shown", "equals": true, "after": "open"},
+        {"kind": "state", "path": "screenshot.buttons", "min": 1, "after": "open"},
+        {"kind": "visual", "after": "open", "expect": "a screenshot selection overlay with a toolbar of annotation buttons is visible"},
+        {"kind": "independent", "describe": "This flow captures the REAL screen (do:screenshot:show triggers a real capture when Screen Recording is granted), hence needs \"screen-capture\"; the runner must skip it when capture is unavailable. The non-capturing alternative is the raw `screenshot-permission` verb (replies granted|denied)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:screenshot:close"]
+    },
+    {
+      "id": "ai-open",
+      "feature": "ai",
+      "why": "The AI view opens even when the on-device model is unavailable.",
+      "sources": ["commands.toml:321-343", "rust/ws-rs/src/app/host.rs:1494-1495", "README.md:84"],
+      "needs": ["gui"],
+      "setup": [],
+      "steps": [
+        {"input": "do:open:ai"},
+        {"input": "wait 500", "checkpoint": "open"}
+      ],
+      "oracles": [
+        {"kind": "state", "path": "view", "equals": "ai", "after": "open"},
+        {"kind": "state", "path": "views.ai.shown", "equals": true, "after": "open"},
+        {"kind": "independent", "describe": "Running a rule needs Apple's on-device model (`[ai] fm-bin` = /usr/bin/fm, commands.toml:324) — running it is out of scope here; when the model is absent the view reports itself off and everything else still works (README.md:30-32,84)."},
+        {"kind": "log", "none_of": ["panic", "ERROR"]}
+      ],
+      "teardown": ["do:hide"]
+    }
+  ]
+}
