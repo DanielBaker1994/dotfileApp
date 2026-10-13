@@ -1439,6 +1439,43 @@ pub struct ProseViewState {
     last_g: Option<f64>,
 }
 
+/// Pixels one `j` / `k` scrolls in a reading page.
+pub const PROSE_LINE_STEP: i64 = 60;
+
+/// A vim-style scroll the reading page should perform. Shared by the in-place
+/// reading view and the pop-out window so both take the same motions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProseScroll {
+    /// `j` / `k`: scroll by this many pixels (positive = down).
+    By(i64),
+    /// `Ctrl+D` / `Ctrl+U`: half a window.
+    HalfPage { down: bool },
+    /// `gg`.
+    Top,
+    /// `G`.
+    Bottom,
+    /// The first `g` of a possible `gg`: swallowed, nothing to scroll yet.
+    Pending,
+}
+
+impl ProseScroll {
+    /// The JavaScript that performs the scroll (`None` for [`Self::Pending`]).
+    pub fn js(self) -> Option<String> {
+        match self {
+            ProseScroll::By(dy) => Some(format!("window.scrollBy(0, {dy})")),
+            ProseScroll::HalfPage { down } => Some(format!(
+                "window.scrollBy({{top:{}window.innerHeight/2}})",
+                if down { "" } else { "-" }
+            )),
+            ProseScroll::Top => Some("window.scrollTo(0, 0)".to_string()),
+            ProseScroll::Bottom => {
+                Some("window.scrollTo(0, document.documentElement.scrollHeight)".to_string())
+            }
+            ProseScroll::Pending => None,
+        }
+    }
+}
+
 impl Default for ProseViewState {
     fn default() -> Self {
         ProseViewState {
@@ -1501,6 +1538,27 @@ impl ProseViewState {
             });
         }
         None
+    }
+
+    /// The vim motions a reading page takes with no find bar involved: `j` /
+    /// `k`, `gg` / `G`, `Ctrl+D` / `Ctrl+U`. `None` = not a scroll key. The
+    /// pop-out window (no find bar, no host router) is driven by this alone;
+    /// `gg` uses the same 0.6 s double-tap window as the in-place view.
+    pub fn scroll_key(&mut self, code: u16, m: Mods, now: f64) -> Option<ProseScroll> {
+        use crate::ui::popup::{KEY_J, KEY_K};
+        if m.is_empty() && (code == KEY_J || code == KEY_K) {
+            self.last_g = None;
+            return Some(ProseScroll::By(if code == KEY_J { PROSE_LINE_STEP } else { -PROSE_LINE_STEP }));
+        }
+        // Only the scroll arms of `search_key`; its find / `/` / `n` keys do
+        // not exist in a page without the find bar.
+        match self.search_key(code, m, now)? {
+            ProseSearchKey::ScrollHalf { down } => Some(ProseScroll::HalfPage { down }),
+            ProseSearchKey::GoTop => Some(ProseScroll::Top),
+            ProseSearchKey::GoBottom => Some(ProseScroll::Bottom),
+            ProseSearchKey::PassThrough if code == 5 => Some(ProseScroll::Pending),
+            _ => None,
+        }
     }
 
     pub fn apply_zoom(&mut self, z: f64) -> f64 {
@@ -2564,6 +2622,8 @@ mod macos {
         path: String,
         window: Retained<NSWindow>,
         _web: Retained<WKWebView>,
+        /// The vim-motion key monitor (`j k gg G Ctrl+D Ctrl+U`).
+        _keys: crate::ui::popup::MonitorHandle,
     }
 
     thread_local! {
@@ -2663,11 +2723,34 @@ mod macos {
         load_html(&web, &html);
         window.setContentView(Some(&web));
         window.makeKeyAndOrderFront(None);
+        // The same vim motions as the in-place reading view. A page with no
+        // find bar, so the shared `scroll_key` is the whole key handler.
+        let nav = Rc::new(RefCell::new(ProseViewState::new()));
+        let (key_web, key_win) = (web.clone(), window.clone());
+        let keys = crate::ui::popup::install_local_monitor(mtm, move |event| {
+            if !key_win.isKeyWindow() {
+                return false;
+            }
+            let k = crate::ui::popup::key_input_from_event(event);
+            let m = Mods { command: k.cmd, control: k.ctrl, option: k.opt, shift: k.shift };
+            match nav.borrow_mut().scroll_key(k.key_code, m, event.timestamp()) {
+                Some(scroll) => {
+                    if let Some(js) = scroll.js() {
+                        unsafe {
+                            key_web.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None)
+                        };
+                    }
+                    true
+                }
+                None => false,
+            }
+        });
         LIVE_WINDOWS.with(|v| {
             v.borrow_mut().push(ProseLive {
                 path: opts.path.clone(),
                 window,
                 _web: web,
+                _keys: keys,
             })
         });
     }
@@ -5144,6 +5227,44 @@ mod tests {
             v.search_key(2, Mods::CTRL, 0.0),
             Some(ProseSearchKey::ScrollHalf { down: true })
         );
+    }
+
+    #[test]
+    fn scroll_key_covers_every_vim_motion() {
+        let mut v = ProseViewState::new();
+        assert_eq!(v.scroll_key(crate::ui::popup::KEY_J, Mods::NONE, 0.0), Some(ProseScroll::By(PROSE_LINE_STEP)));
+        assert_eq!(v.scroll_key(crate::ui::popup::KEY_K, Mods::NONE, 0.0), Some(ProseScroll::By(-PROSE_LINE_STEP)));
+        assert_eq!(v.scroll_key(2, Mods::CTRL, 0.0), Some(ProseScroll::HalfPage { down: true }));
+        assert_eq!(v.scroll_key(32, Mods::CTRL, 0.0), Some(ProseScroll::HalfPage { down: false }));
+        assert_eq!(v.scroll_key(5, Mods::SHIFT, 0.0), Some(ProseScroll::Bottom));
+        // gg: the first g is swallowed, the second within 0.6 s goes to the top.
+        assert_eq!(v.scroll_key(5, Mods::NONE, 10.0), Some(ProseScroll::Pending));
+        assert_eq!(v.scroll_key(5, Mods::NONE, 10.4), Some(ProseScroll::Top));
+        // ...but a slow second g starts over.
+        assert_eq!(v.scroll_key(5, Mods::NONE, 20.0), Some(ProseScroll::Pending));
+        assert_eq!(v.scroll_key(5, Mods::NONE, 21.0), Some(ProseScroll::Pending));
+    }
+
+    #[test]
+    fn scroll_key_ignores_find_and_modified_keys() {
+        let mut v = ProseViewState::new();
+        // No find bar in the pop-out: `/`, Cmd+F, `n`, Esc and Cmd/Ctrl+j are not scrolls.
+        assert_eq!(v.scroll_key(KEY_SLASH, Mods::NONE, 0.0), None);
+        assert_eq!(v.scroll_key(KEY_F, Mods::CMD, 0.0), None);
+        assert_eq!(v.scroll_key(KEY_N, Mods::NONE, 0.0), None);
+        assert_eq!(v.scroll_key(KEY_ESC, Mods::NONE, 0.0), None);
+        assert_eq!(v.scroll_key(crate::ui::popup::KEY_J, Mods::CMD, 0.0), None);
+        assert_eq!(v.scroll_key(crate::ui::popup::KEY_J, Mods::CTRL, 0.0), None);
+    }
+
+    #[test]
+    fn prose_scroll_js() {
+        assert_eq!(ProseScroll::By(60).js().as_deref(), Some("window.scrollBy(0, 60)"));
+        assert_eq!(ProseScroll::By(-60).js().as_deref(), Some("window.scrollBy(0, -60)"));
+        assert_eq!(ProseScroll::Top.js().as_deref(), Some("window.scrollTo(0, 0)"));
+        assert!(ProseScroll::Bottom.js().unwrap().contains("scrollHeight"));
+        assert!(ProseScroll::HalfPage { down: false }.js().unwrap().contains("-window.innerHeight/2"));
+        assert_eq!(ProseScroll::Pending.js(), None);
     }
 
     #[test]

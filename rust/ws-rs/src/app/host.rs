@@ -4965,7 +4965,11 @@ mod daemon_ui {
                 }
             }
             if prose && m.is_empty() && (code == popup::KEY_J || code == popup::KEY_K) {
-                let dy = if code == popup::KEY_J { 60 } else { -60 };
+                let dy = if code == popup::KEY_J {
+                    crate::views::notes::PROSE_LINE_STEP
+                } else {
+                    -crate::views::notes::PROSE_LINE_STEP
+                };
                 self.notes_surface(|s| s.prose_pane().map(|p| p.scroll_by(dy)));
                 return Some(true);
             }
