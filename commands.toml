@@ -295,7 +295,7 @@ font = "SF Mono"
 body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
-sidebar-width = 245
+sidebar-width = 168
 
 # Jira status / priority names -> look (lowercased substrings, comma lists)
 status-cancelled-words = "cancel, won't, wont, reject, duplicate"
@@ -306,7 +306,7 @@ status-waiting-words = "hold, wait, pending, paused"
 status-new-words = "backlog, open, to do, todo, new, selected, triage, funnel"
 priority-urgent-words = "highest, blocker, critical, urgent, p0, p1"
 
-inspector-width = 340
+inspector-width = 264
 table-sort = "project:desc"
 
 [confluence]

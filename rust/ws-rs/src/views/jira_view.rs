@@ -66,6 +66,130 @@ pub struct BoardSprint {
 
 /// `PopupTableColumn.frames(x0:usable:)` — percent widths, autos share the
 /// leftover, scaled down when they sum past 100.
+/// Compact cells (`[jira] compact-cells`, on by default): these fields draw
+/// as a glyph / initials / short value in a fixed narrow column, so the
+/// title keeps the room. `None` = a normal percentage column.
+pub fn compact_width(field: &str) -> Option<f64> {
+    match field {
+        "status" | "assignee" | "reporter" | "creator" => Some(50.0),
+        "priority" => Some(46.0),
+        "updated" | "created" | "resolved" => Some(44.0),
+        "project" => Some(70.0),
+        "key" => Some(76.0),
+        _ => None,
+    }
+}
+
+/// [`column_frames`], with compact columns at their fixed width and the
+/// rest sharing what is left by their percentages.
+pub fn frames_for(cols: &[ListColumn], x0: f64, usable: f64, compact: bool) -> Vec<(f64, f64)> {
+    if !compact {
+        return column_frames(cols, x0, usable);
+    }
+    let fixed: f64 = cols.iter().filter_map(|c| compact_width(&c.field)).sum();
+    let mut flex: Vec<ListColumn> = cols.iter().filter(|c| compact_width(&c.field).is_none()).cloned().collect();
+    // The percentages were set with the compact columns in them: stretch
+    // the rest so they fill the room those columns gave up.
+    let sum: f64 = flex.iter().map(|c| c.width.max(0.0)).sum();
+    if sum > 0.0 && flex.iter().all(|c| c.width > 0.0) {
+        for c in flex.iter_mut() {
+            c.width = c.width / sum * 100.0;
+        }
+    }
+    let flex_frames = column_frames(&flex, 0.0, (usable - fixed).max(40.0));
+    let mut x = x0;
+    let mut fi = 0;
+    cols.iter()
+        .map(|c| {
+            let w = match compact_width(&c.field) {
+                Some(w) => w,
+                None => {
+                    fi += 1;
+                    flex_frames.get(fi - 1).map_or(0.0, |f| f.1)
+                }
+            };
+            let f = (x, w);
+            x += w;
+            f
+        })
+        .collect()
+}
+
+/// Two-letter initials for a person cell ("Ada Lovelace" / "ada.lovelace" → AL).
+pub fn initials(name: &str) -> String {
+    let base = name.split(" (").next().unwrap_or(name);
+    let parts: Vec<&str> = base.split(|c: char| c.is_whitespace() || c == '.' || c == '_' || c == '-').filter(|p| !p.is_empty()).collect();
+    let mut out: String = parts.iter().take(2).filter_map(|p| p.chars().next()).collect();
+    if out.chars().count() < 2 {
+        out = base.chars().filter(|c| c.is_alphanumeric()).take(2).collect();
+    }
+    out.to_uppercase()
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Epoch seconds of a Jira timestamp (`2026-10-08T20:14:20.595-0400`).
+pub fn parse_jira_time(v: &str) -> Option<i64> {
+    let b = v.as_bytes();
+    if b.len() < 16 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
+        return None;
+    }
+    let n = |a: usize, z: usize| v.get(a..z)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi) = (n(0, 4)?, n(5, 7)?, n(8, 10)?, n(11, 13)?, n(14, 16)?);
+    let sec = if b.len() >= 19 && b[16] == b':' { n(17, 19).unwrap_or(0) } else { 0 };
+    let mut t = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec;
+    // A trailing ±HHMM / ±HH:MM offset; Z or none = UTC.
+    let tail: String = v.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail = tail.replace(':', "");
+    if let Some(pos) = tail.rfind(['+', '-']) {
+        let off = &tail[pos..];
+        if off.len() == 5 {
+            if let (Ok(oh), Ok(om)) = (off[1..3].parse::<i64>(), off[3..5].parse::<i64>()) {
+                let secs = oh * 3600 + om * 60;
+                t -= if off.starts_with('-') { -secs } else { secs };
+            }
+        }
+    }
+    Some(t)
+}
+
+/// "5m" / "3h" / "2d" / "6w" / "4mo" / "1y" since `then` (compact Updated).
+pub fn relative_age(then: i64, now: i64) -> String {
+    let s = (now - then).max(0);
+    match s {
+        s if s < 3600 => format!("{}m", (s / 60).max(1)),
+        s if s < 86400 => format!("{}h", s / 3600),
+        s if s < 86400 * 14 => format!("{}d", s / 86400),
+        s if s < 86400 * 60 => format!("{}w", s / (86400 * 7)),
+        s if s < 86400 * 365 => format!("{}mo", s / (86400 * 30)),
+        s => format!("{}y", s / (86400 * 365)),
+    }
+}
+
+/// Priority → (glyph, tone): ⇈ ↑ = ↓ ⇊ by the usual Jira names.
+pub fn priority_glyph(v: &str) -> (&'static str, PopupTone) {
+    let l = v.to_lowercase();
+    if l.contains("highest") || l.contains("blocker") || l.contains("critical") || l.contains("urgent") || l == "p0" {
+        ("⇈", PopupTone::Danger)
+    } else if l.contains("high") || l == "p1" {
+        ("↑", PopupTone::Warning)
+    } else if l.contains("lowest") || l.contains("trivial") || l == "p4" {
+        ("⇊", PopupTone::Accent)
+    } else if l.contains("low") || l.contains("minor") || l == "p3" {
+        ("↓", PopupTone::Accent)
+    } else {
+        ("=", PopupTone::Dim)
+    }
+}
+
 pub fn column_frames(cols: &[ListColumn], x0: f64, usable: f64) -> Vec<(f64, f64)> {
     if cols.is_empty() || usable <= 0.0 {
         return cols.iter().map(|_| (x0, 0.0)).collect();
@@ -1202,6 +1326,7 @@ impl JiraList {
             favs: self.favs.clone(),
             sort: None,
             filter_active: BTreeSet::new(),
+            compact: false,
             sidebar: self.sidebar_model(),
             inspector: None,
             show_inspector: false,
@@ -1501,6 +1626,13 @@ impl JiraList {
 
     pub fn row(&self, i: usize) -> Option<&Record> {
         self.rows.get(i).and_then(|&j| self.rec(j))
+    }
+
+    /// `[jira] compact-cells` (default on).
+    pub fn compact_cells(&self) -> bool {
+        self.section
+            .get("compact-cells")
+            .map_or(true, |v| !matches!(v.trim().to_lowercase().as_str(), "false" | "no" | "0" | "off"))
     }
 
     /// The real (non-synthetic) shown rows.
@@ -2045,6 +2177,8 @@ pub struct JiraSnapshot {
     pub sort: Option<(usize, bool)>,
     /// Columns with a filter set (`tableFilterActive`): their chevron tints.
     pub filter_active: BTreeSet<usize>,
+    /// Compact cells (status dot, priority glyph, initials, short dates).
+    pub compact: bool,
     pub sidebar: SidebarModel,
     pub inspector: Option<InspectorContent>,
     pub show_inspector: bool,
@@ -2077,6 +2211,7 @@ impl JiraList {
                 .filter(|(_, c)| self.col_filters.contains_key(&c.field))
                 .map(|(i, _)| i)
                 .collect(),
+            compact: self.compact_cells(),
             sidebar: self.sidebar_model(),
             inspector: self.inspector_content(),
             show_inspector: self.inspector,
@@ -2303,6 +2438,7 @@ mod appkit {
                     self.ivars().hover.set(h);
                     self.setNeedsDisplay(true);
                 }
+                self.update_cell_tip(h, p.x);
             }
 
             #[unsafe(method(mouseExited:))]
@@ -2382,6 +2518,28 @@ mod appkit {
             }
         }
 
+        /// A compact cell under the pointer shows its full value as the tooltip.
+        fn update_cell_tip(&self, row: Option<usize>, x: f64) {
+            let tip = (|| {
+                let snap = self.ivars().snap.borrow();
+                if !snap.compact {
+                    return None;
+                }
+                let r = snap.rows.get(row?)?;
+                let w = self.bounds().size.width;
+                let frames = frames_for(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), true);
+                let k = frames.iter().position(|(fx, fw)| x >= *fx && x < fx + fw)?;
+                let col = snap.columns.get(k)?;
+                compact_width(&col.field)?;
+                let v = r.get(&col.field).map(|v| display_cell(&col.field, v)).filter(|v| !v.trim().is_empty())?;
+                Some(format!("{}: {v}", col.title))
+            })();
+            let cur = self.toolTip().map(|t| t.to_string());
+            if cur != tip {
+                self.setToolTip(tip.as_deref().map(NSString::from_str).as_deref());
+            }
+        }
+
         /// The visible rows' rects (for the vim search highlight overlay).
         pub fn vim_shown_rects(&self) -> Vec<(usize, Rect)> {
             let n = self.ivars().snap.borrow().rows.len();
@@ -2409,11 +2567,12 @@ mod appkit {
             }
             let first = (dirty.origin.y / row_h()).floor().max(0.0) as usize;
             let last = (((dirty.origin.y + dirty.size.height) / row_h()).ceil() as usize).min(snap.rows.len());
-            let frames = column_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0));
+            let frames = frames_for(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), snap.compact);
             let font = style::system_font(12.0 * zoom(), Weight::Regular);
             let bold = style::system_font(12.0 * zoom(), Weight::Bold);
             let rules = snap.rules.clone().unwrap_or_else(|| style_rules(&Value::Null));
             let hover = self.ivars().hover.get();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
             for i in first..last {
                 let r = &snap.rows[i];
                 let band = Rect::new(0.0, i as f64 * row_h(), w, row_h());
@@ -2468,6 +2627,11 @@ mod appkit {
                     if flat.is_empty() {
                         continue;
                     }
+                    if snap.compact && compact_width(&col.field).is_some() {
+                        let raw = r.get(&col.field).map(String::as_str).unwrap_or("");
+                        draw_compact_cell(&col.field, raw, st.as_ref(), Rect::new(fx, band.y, fw, band.height), &c, alpha, &font, now);
+                        continue;
+                    }
                     let hue = st.as_ref().map(|s| c.tone(tone_of(s.tone.as_deref())));
                     let tinted = st.as_ref().is_some_and(|s| s.tinted == Some(true) || s.tone.as_deref() == Some("dim"));
                     let color = if tinted { hue.unwrap_or(c.text) } else { c.text };
@@ -2495,6 +2659,49 @@ mod appkit {
                     }
                 }
                 style::hline(LEAD - 6.0, w - PADDING - 10.0, band.max_y() - 1.0, c.hairline());
+            }
+        }
+    }
+
+    /// One compact cell: a status mark, a priority glyph, initials in a
+    /// disc, a short age, or the plain (short) value.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_compact_cell(field: &str, raw: &str, st: Option<&CellStyle>, cell: Rect, c: &PopupColors, alpha: f64, font: &Retained<NSFont>, now: i64) {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return;
+        }
+        let z = zoom();
+        match field {
+            "status" => {
+                let hue = st.map(|s| c.tone(tone_of(s.tone.as_deref()))).unwrap_or(c.dim);
+                let mark = st.and_then(|s| s.mark.clone()).unwrap_or_else(|| "filled".into());
+                let side = (11.0 * z).round();
+                let r = Rect::new((cell.x + 8.0).round(), (cell.mid_y() - side / 2.0).round(), side, side);
+                draw_mark(r, &mark, hue.with_alpha(hue.a * alpha));
+            }
+            "priority" => {
+                let (g, tone) = priority_glyph(raw);
+                let f = style::system_font(13.0 * z, Weight::Bold);
+                style::draw_text_left(g, Rect::new(cell.x + 8.0, cell.y, cell.width - 8.0, cell.height), &f, c.tone(tone).with_alpha(alpha));
+            }
+            "assignee" | "reporter" | "creator" => {
+                let d = (22.0 * z).round();
+                let r = Rect::new((cell.x + 6.0).round(), (cell.mid_y() - d / 2.0).round(), d, d);
+                // A stable colour per person from the palette.
+                let h = raw.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+                let tones = [PopupTone::Accent, PopupTone::Accent2, PopupTone::Success, PopupTone::Warning, PopupTone::Info];
+                let fill = c.tone(tones[(h as usize) % tones.len()]);
+                style::fill_rounded(r, d / 2.0, fill.with_alpha(0.85 * alpha));
+                let f = style::system_font(9.5 * z, Weight::Bold);
+                style::draw_text_centered(&initials(raw), r, &f, c.base().with_alpha(alpha));
+            }
+            "updated" | "created" | "resolved" => {
+                let t = parse_jira_time(raw).map(|t| relative_age(t, now)).unwrap_or_else(|| display_cell(field, raw));
+                style::draw_text_right(&t, Rect::new(cell.x, cell.y, cell.width - 6.0, cell.height), font, c.dim.with_alpha(alpha));
+            }
+            _ => {
+                style::draw_text_left(&display_cell(field, raw), Rect::new(cell.x + 3.0, cell.y, cell.width - 6.0, cell.height), font, c.dim.with_alpha(alpha));
             }
         }
     }
@@ -2781,7 +2988,8 @@ mod appkit {
         fn frames(&self) -> (Vec<(f64, f64)>, f64) {
             let w = self.bounds().size.width;
             let usable = w - LEAD - (PADDING + 10.0);
-            (column_frames(&self.ivars().snap.borrow().columns, LEAD, usable), usable)
+            let snap = self.ivars().snap.borrow();
+            (frames_for(&snap.columns, LEAD, usable, snap.compact), usable)
         }
 
         /// The filterable column whose chevron (padded) holds the point.
@@ -2809,13 +3017,28 @@ mod appkit {
             let (w, h) = (b.size.width, b.size.height);
             style::fill_rect(Rect::new(0.0, 0.0, w, h), c.mantle());
             let snap = self.ivars().snap.borrow();
-            let frames = column_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0));
+            let frames = frames_for(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), snap.compact);
             let font = style::system_font(12.0 * 0.86 * zoom(), Weight::Bold);
             // The "fit columns" glyph in the lead gutter.
             style::draw_symbol("arrow.left.and.right", Rect::new(LEAD / 2.0 + 6.0, 0.0, 16.0, h), c.dim.with_alpha(0.9), 9.0);
             for (i, col) in snap.columns.iter().enumerate() {
                 let Some(&(fx, fw)) = frames.get(i) else { continue };
                 let mut title = col.title.to_uppercase();
+                if snap.compact && compact_width(&col.field).is_some() {
+                    // A narrow column keeps a short label; the tooltip names it.
+                    title = match col.field.as_str() {
+                        "status" => "ST".into(),
+                        "assignee" => "AS".into(),
+                        "reporter" => "RE".into(),
+                        "creator" => "CR".into(),
+                        "priority" => "PR".into(),
+                        "project" => "PROJ".into(),
+                        "key" => "KEY".into(),
+                        "updated" => "UPD".into(),
+                        "created" => "NEW".into(),
+                        _ => title.chars().take(3).collect(),
+                    };
+                }
                 let sorted = snap.sort.map(|(si, _)| si) == Some(i);
                 if sorted {
                     title.push_str(if snap.sort.unwrap().1 { " ↑" } else { " ↓" });
@@ -3288,6 +3511,35 @@ mod tests {
 
     fn col(field: &str, w: f64) -> ListColumn {
         ListColumn { field: field.into(), title: field.into(), width: w, align: "left".into(), sortable: true, filterable: true }
+    }
+
+    #[test]
+    fn compact_frames_fix_narrow_columns_and_fill_the_rest() {
+        let cols = vec![col("key", 8.0), col("title", 33.0), col("status", 10.0), col("priority", 8.0), col("release", 11.0)];
+        let f = frames_for(&cols, 0.0, 600.0, true);
+        assert_eq!(f[0].1, 76.0);
+        assert_eq!(f[2].1, 50.0);
+        assert_eq!(f[3].1, 46.0);
+        let total: f64 = f.iter().map(|x| x.1).sum();
+        assert!((total - 600.0).abs() < 0.01, "{total}");
+        assert!((f[1].1 / f[4].1 - 33.0 / 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compact_helpers() {
+        assert_eq!(initials("Ada Lovelace"), "AL");
+        assert_eq!(initials("grace.hopper"), "GH");
+        assert_eq!(initials("Ada Lovelace (alove)"), "AL");
+        assert_eq!(initials("zed"), "ZE");
+        let t = parse_jira_time("2026-10-08T20:14:20.595-0400").unwrap();
+        assert_eq!(t, parse_jira_time("2026-10-09T00:14:20Z").unwrap());
+        assert_eq!(relative_age(t, t + 3 * 86400), "3d");
+        assert_eq!(relative_age(t, t + 90), "1m");
+        assert_eq!(relative_age(t, t + 5 * 3600), "5h");
+        assert_eq!(priority_glyph("Highest").0, "⇈");
+        assert_eq!(priority_glyph("High").0, "↑");
+        assert_eq!(priority_glyph("Medium").0, "=");
+        assert_eq!(priority_glyph("Lowest").0, "⇊");
     }
 
     #[test]

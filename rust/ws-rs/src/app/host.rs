@@ -8376,8 +8376,8 @@ mod daemon_ui {
                     None
                 }
             };
-            let sidebar_w = section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(245.0);
-            let insp_w = section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(340.0);
+            let sidebar_w = section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(168.0);
+            let insp_w = section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(264.0);
             let mut list = JiraList::new(section, paths);
             list.start(None);
             let colors = crate::ui::theme::section_colors("jira");
