@@ -73,6 +73,8 @@ class FakeDaemon:
             return json.dumps(STATE, separators=(",", ":"))
         if line.split("\t", 1)[0] == "screenshot-permission":
             return "granted"
+        if line.split("\t", 1)[0] == "screenshot":
+            return "error: screenshot unavailable in headless mode"
         return json.dumps(STATE, separators=(",", ":"))
 
     def _serve(self):
@@ -338,6 +340,14 @@ class Tools(McpTestCase):
         res = self.call_tool(1, "ks_raw", {"verb": "screenshot-permission"})["result"]
         self.assertNotIn("isError", res)
         self.assertEqual(res["content"][0]["text"], "granted")
+
+    def test_ks_raw_screenshot_daemon_error_is_an_error_result(self):
+        self.start_daemon()
+        self.start_server(self.daemon.path)
+        for args in (["-g"], []):
+            res = self.call_tool(1, "ks_raw", {"verb": "screenshot", "args": args})["result"]
+            self.assertTrue(res["isError"], args)
+            self.assertIn("headless", res["content"][0]["text"])
 
 
 class Protocol(McpTestCase):

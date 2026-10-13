@@ -213,7 +213,7 @@ class Server:
             text = data.decode("utf-8", "replace").strip()
             if wait and not text:
                 return error_result(f"compare --wait: no reply within {timeout:.0f} s")
-            return text_result(text or "ok")
+            return self.raw_text_result(text or "ok")
         # pane-shot
         data, timed_out = send_and_read(self.sock, payload, PANE_SHOT_TIMEOUT, "line")
         text = data.decode("utf-8", "replace").strip()
@@ -244,18 +244,25 @@ class Server:
                         }
                     ]
                 }
-            return text_result(data.decode("utf-8", "replace").strip())
+            return self.raw_text_result(data.decode("utf-8", "replace").strip())
         if "-g" in raw_args or "--print-geometry" in raw_args:
             data, _ = send_and_read(self.sock, payload, SOCKET_TIMEOUT, "line")
             text = data.decode("utf-8", "replace").strip()
             if not text:
                 return error_result("screenshot --print-geometry: no answer")
-            return text_result(text)
+            return self.raw_text_result(text)
         # Interactive forms may defer the reply until the overlay closes; a
         # clean close / no reply means the overlay is up (or the verb is quiet).
         data, _ = send_and_read(self.sock, payload, SOCKET_TIMEOUT, "line")
         text = data.decode("utf-8", "replace").strip()
-        return text_result(text or "ok")
+        return self.raw_text_result(text or "ok")
+
+    @staticmethod
+    def raw_text_result(text: str):
+        """Daemon `error: …` replies are failures, not successes."""
+        if text.startswith("error: "):
+            return error_result(text[7:])
+        return text_result(text)
 
     # -- MCP plumbing --------------------------------------------------------
 
