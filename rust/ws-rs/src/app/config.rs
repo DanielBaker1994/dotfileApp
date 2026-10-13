@@ -345,7 +345,7 @@ impl Default for AppSettings {
             copy_toast: "Copied {} to clipboard".to_string(),
             terminal_app: String::new(),
             header_style: HeaderStyle::Flat,
-            preview_border: Rgba::new(0.867, 0.882, 0.91, 1.0),
+            preview_border: Rgba::new(0.753, 0.753, 0.753, 1.0),
             preview_border_width: 2.0,
             pane_focus_color: Rgba::new(0xC8 as f64 / 255.0, 0xCE as f64 / 255.0, 0xD8 as f64 / 255.0, 0.55),
             pane_focus_width: 1.0,
@@ -578,7 +578,7 @@ pub fn parse_app_config(settings: &mut AppSettings, vars: &HashMap<String, Strin
     }
     settings.preview_border = strv("preview-border")
         .and_then(|v| hex_color(&v))
-        .unwrap_or_else(|| Rgba::new(0.867, 0.882, 0.91, 1.0));
+        .unwrap_or_else(|| Rgba::new(0.753, 0.753, 0.753, 1.0));
     settings.preview_border_width = strv("preview-border-width")
         .and_then(|v| v.parse::<f64>().ok())
         .map(|n| n.max(0.0).min(8.0))
@@ -1687,7 +1687,7 @@ mod tests {
         assert_eq!(s.preview_border_width, 2.0);
         assert_eq!(s.pane_focus_width, 1.0);
         assert!(s.vim_keys && s.vim_mode_badge);
-        assert_eq!(s.preview_border, Rgba::new(0.867, 0.882, 0.91, 1.0));
+        assert_eq!(s.preview_border, Rgba::new(0.753, 0.753, 0.753, 1.0));
     }
 
     #[test]

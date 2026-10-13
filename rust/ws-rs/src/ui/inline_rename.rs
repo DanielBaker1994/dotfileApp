@@ -1,5 +1,6 @@
 //! `InlineRename.swift`: an edit field laid over a row's name. Return / Tab
-//! commit, Esc cancels; the stem (name without extension) starts selected.
+//! commit, Esc cancels, clicking elsewhere commits (as Finder does); the stem
+//! (name without extension) starts selected.
 
 /// The selection a rename starts with: the stem for files, all of a folder
 /// name (UTF-16 length, as `NSString` counts).
@@ -115,6 +116,23 @@ mod appkit {
                 _ => false,
             }),
         );
+        // Click-off: focus left the field without Return/Esc — commit and
+        // drop the field (else its edit box lingers). Only for this field:
+        // a newer rename may already have replaced it.
+        let addr = Retained::as_ptr(&f) as usize;
+        delegate.set_on_end(Box::new(move || {
+            crate::platform::run_on_main(move || {
+                let text = LIVE.with(|l| {
+                    l.borrow()
+                        .as_ref()
+                        .filter(|(lf, _, _)| Retained::as_ptr(lf) as usize == addr)
+                        .map(|(lf, _, _)| lf.stringValue().to_string())
+                });
+                if let Some(text) = text {
+                    finish(Some(Some(text)));
+                }
+            });
+        }));
         if let Some(w) = parent.window() {
             w.makeFirstResponder(Some(&f));
         }

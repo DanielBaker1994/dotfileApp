@@ -71,6 +71,7 @@ mod appkit {
     pub struct FieldDelegateIvars {
         on_change: std::cell::RefCell<Option<Box<dyn Fn(String)>>>,
         on_command: std::cell::RefCell<Option<Box<dyn Fn(&str) -> bool>>>,
+        on_end: std::cell::RefCell<Option<Box<dyn Fn()>>>,
     }
 
     objc2::define_class!(
@@ -90,6 +91,15 @@ mod appkit {
                     .unwrap_or_default();
                 if let Some(cb) = self.ivars().on_change.borrow().as_ref() {
                     cb(text);
+                }
+            }
+
+            /// Editing ended without a command (focus moved elsewhere, e.g.
+            /// a click outside the field).
+            #[unsafe(method(controlTextDidEndEditing:))]
+            fn did_end(&self, _n: &objc2_foundation::NSNotification) {
+                if let Some(cb) = self.ivars().on_end.borrow().as_ref() {
+                    cb();
                 }
             }
 
@@ -124,10 +134,17 @@ mod appkit {
             let this = Self::alloc(mtm).set_ivars(FieldDelegateIvars {
                 on_change: std::cell::RefCell::new(Some(on_change)),
                 on_command: std::cell::RefCell::new(Some(on_command)),
+                on_end: std::cell::RefCell::new(None),
             });
             let d: Retained<FieldDelegate> = unsafe { objc2::msg_send![super(this), init] };
             unsafe { field.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*d))) };
             d
+        }
+
+        /// Run `cb` when editing ends (the field lost focus).
+        pub fn set_on_end(&self, cb: Box<dyn Fn()>) {
+            use objc2::DefinedClass;
+            *self.ivars().on_end.borrow_mut() = Some(cb);
         }
     }
 

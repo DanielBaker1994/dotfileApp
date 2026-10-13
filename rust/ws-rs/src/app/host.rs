@@ -8435,8 +8435,13 @@ mod daemon_ui {
                     if let Some(Some(m)) = msg {
                         crate::ui::toast::show(&m, "exclamationmark.triangle.fill");
                     }
+                    // Back to the list — unless the rename ended by clicking
+                    // into another text field, which keeps its focus.
                     if let (Some(l), Some(w)) = (wl.load(), wl.load().and_then(|l| l.window())) {
-                        w.makeFirstResponder(Some(&l));
+                        let typing = w.firstResponder().is_some_and(|r| r.isKindOfClass(<objc2_app_kit::NSTextView as objc2::ClassType>::class()));
+                        if !typing {
+                            w.makeFirstResponder(Some(&l));
+                        }
                     }
                 }),
             );

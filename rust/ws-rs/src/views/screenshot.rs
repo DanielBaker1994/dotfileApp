@@ -5689,6 +5689,8 @@ mod pin_window {
             let view = WSPinView::create(mtm, image, rect.size);
             let base: &NSView = &view;
             panel.setContentView(Some(base));
+            // The silver preview border around the pinned image.
+            crate::ui::preview_ring::attach(base, m, 0.0);
             *panel.ivars().view.borrow_mut() = Some(view);
             panel
         }

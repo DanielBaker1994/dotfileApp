@@ -327,27 +327,8 @@ mod appkit {
         );
         box_view.addSubview(&scroll);
 
-        let mut settings = crate::app::config::AppSettings::default();
-        crate::app::config::apply_app_config_from_disk(&mut settings);
-        if settings.preview_border_width > 0.0 {
-            let border = crate::ui::theme::Rgba::new(
-                settings.preview_border.r,
-                settings.preview_border.g,
-                settings.preview_border.b,
-                settings.preview_border.a,
-            );
-            let ring = FilePopupRing::create(
-                mtm,
-                NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
-                border,
-                settings.preview_border_width,
-            );
-            ring.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            box_view.addSubview(&ring);
-        }
+        // The silver preview border (`[app] preview-border`).
+        crate::ui::preview_ring::attach(&box_view, 0.0, 8.0);
 
         let g = GRIP_SIZE;
         let e = GRIP_EDGE;
@@ -820,48 +801,5 @@ mod appkit {
             return None;
         }
         unsafe { Retained::retain(ptr) }.map(|o| unsafe { Retained::cast_unchecked::<NSCursor>(o) })
-    }
-
-    // -- ring ---------------------------------------------------------------
-
-    pub struct FilePopupRingIvars;
-
-    define_class!(
-        /// `FilePopupRing` — the themed border; click-through.
-        #[unsafe(super(NSView))]
-        #[thread_kind = MainThreadOnly]
-        #[name = "WSFilePopupRing"]
-        #[ivars = FilePopupRingIvars]
-        pub struct FilePopupRing;
-
-        impl FilePopupRing {
-            #[unsafe(method(hitTest:))]
-            fn hit_test(&self, _point: NSPoint) -> *mut NSView {
-                std::ptr::null_mut()
-            }
-        }
-
-        unsafe impl NSObjectProtocol for FilePopupRing {}
-    );
-
-    impl FilePopupRing {
-        fn create(
-            mtm: MainThreadMarker,
-            frame: NSRect,
-            color: crate::ui::theme::Rgba,
-            width: f64,
-        ) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(FilePopupRingIvars);
-            let ring: Retained<Self> = unsafe {
-                msg_send![super(this), initWithFrame: frame]
-            };
-            ring.setWantsLayer(true);
-            if let Some(layer) = ring.layer() {
-                layer.setCornerRadius(8.0);
-                layer.setBorderWidth(width);
-                layer.setBorderColor(Some(&color.to_nscolor().CGColor()));
-            }
-            ring
-        }
     }
 }

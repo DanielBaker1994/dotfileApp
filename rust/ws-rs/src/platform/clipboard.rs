@@ -26,19 +26,70 @@ pub fn set_text(text: &str) -> bool {
     unsafe { pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString) }
 }
 
-/// Replace the general pasteboard with a rich `html` flavor (`public.html`,
-/// what Outlook / Teams / Word paste as a real table) plus its plain `text`
-/// twin for plain-text targets. Returns whether both writes were accepted.
+/// Replace the general pasteboard with a rich `html` flavor (`public.html`),
+/// the same content as RTF (`public.rtf`, converted from the HTML on the main
+/// thread — what Outlook pastes most reliably) and its plain `text` twin for
+/// plain-text targets. Returns whether the HTML and text writes were accepted
+/// (RTF is best effort).
 #[cfg(target_os = "macos")]
 pub fn set_html(html: &str, text: &str) -> bool {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypeString};
     use objc2_foundation::NSString;
+    let rtf = html_to_rtf(html);
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
     unsafe {
-        pb.setString_forType(&NSString::from_str(html), NSPasteboardTypeHTML)
-            & pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString)
+        let ok = pb.setString_forType(&NSString::from_str(html), NSPasteboardTypeHTML)
+            & pb.setString_forType(&NSString::from_str(text), NSPasteboardTypeString);
+        if let Some(rtf) = rtf {
+            let _ = pb.setData_forType(Some(&rtf), NSPasteboardTypeRTF);
+        }
+        ok
     }
+}
+
+/// `html` rendered to RTF data through AppKit's HTML importer (main thread
+/// only; `None` elsewhere or when the import fails).
+#[cfg(target_os = "macos")]
+fn html_to_rtf(html: &str) -> Option<objc2::rc::Retained<objc2_foundation::NSData>> {
+    use objc2::AnyThread;
+    use objc2_app_kit::NSAttributedStringAppKitDocumentFormats;
+    use objc2_foundation::{NSAttributedString, NSData, NSDictionary, NSRange};
+    objc2::MainThreadMarker::new()?;
+    let data = NSData::with_bytes(html.as_bytes());
+    let attr = unsafe {
+        NSAttributedString::initWithHTML_documentAttributes(NSAttributedString::alloc(), &data, None)
+    }?;
+    let range = NSRange::new(0, attr.length());
+    unsafe { attr.RTFFromRange_documentAttributes(range, &NSDictionary::new()) }
+}
+
+/// Replace the general pasteboard with one item carrying the file at `path`
+/// (`public.file-url`: Finder / mail / chat paste the file) and `text`
+/// (`public.utf8-plain-text`: editors and terminals paste the text).
+#[cfg(target_os = "macos")]
+pub fn set_file_and_text(path: &str, text: &str) -> bool {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let item = NSPasteboardItem::new();
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    let mut ok = true;
+    if let Some(abs) = url.absoluteString() {
+        ok &= item.setString_forType(&abs, unsafe { NSPasteboardTypeFileURL });
+    }
+    ok &= item.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+    let objects: Vec<objc2::rc::Retained<ProtocolObject<dyn NSPasteboardWriting>>> =
+        vec![ProtocolObject::from_retained(item)];
+    ok && pb.writeObjects(&NSArray::from_retained_slice(&objects))
+}
+
+/// No file flavor off macOS: the text alone.
+#[cfg(not(target_os = "macos"))]
+pub fn set_file_and_text(_path: &str, text: &str) -> bool {
+    set_text(text)
 }
 
 /// Rich + plain clipboard write (`arboard`'s HTML flavor with a text twin).

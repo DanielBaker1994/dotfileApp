@@ -42,7 +42,7 @@ voice-locale = "en-US"
 screenshot-apps = "org.flameshot, pl.maketheweb.cleanshotx, cc.ffitch.shottr, com.skitch.skitch"
 hide-on-focus-loss = false
 
-preview-border = "#dde1e8"
+preview-border = "#c0c0c0"
 preview-border-width = 2
 
 pane-focus-color = "8cc8ced8"
@@ -99,7 +99,7 @@ type = "shell"
 label = "Text to Table"
 icon = "notes"
 aliases = "table, ocr table, outlook table"
-formats = "outlook, markdown, tsv, grid, jira, csv, html"
+save-dir = "/tmp/text-table"
 close-on-copy = true
 width = 900
 height = 600
@@ -552,8 +552,8 @@ kitchen-sink = "*:app"
 "paths: Cmd+Shift+R" = "reveal in Finder"
 "paths: Cmd+Delete" = "forget the row"
 "paths: Esc / Cmd+W" = "close"
-"text-table: Cmd+Return" = "copy the table ([text-table] formats: Outlook pastes as a real table)"
-"text-table: Cmd+1 … 9" = "pick a format (the order of [text-table] formats)"
+"text-table: Cmd+Return" = "copy the table for Outlook (pastes as a real table)"
+"text-table: Cmd+Shift+Return" = "save the Markdown table as a .md file and copy it"
 "text-table: Esc" = "close and go back to the app you came from"
 "screenshot: Mouse drag" = "select an area (Shift = square); drag inside = move it"
 "screenshot: P D A S R C M T B I" = "pencil, line, arrow, rectangle, filled rectangle, circle, marker, text, pixelate, invert (again = off)"

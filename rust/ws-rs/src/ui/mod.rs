@@ -13,6 +13,7 @@ pub mod menu_kit;
 #[cfg(target_os = "macos")]
 pub mod panel_frame;
 pub mod popup;
+pub mod preview_ring;
 pub mod sheet;
 pub mod shared_window;
 pub mod shortcuts;

@@ -11,7 +11,7 @@
 use crate::app::config::AppSettings;
 use crate::ui::theme::{PopupColors, PopupTone};
 use crate::views::setup::{setup_row_layouts, SetupEvent, SetupRowKind, SetupWindow};
-use crate::views::tools::{ToolKind, ToolPanel, ToolsEvent};
+use crate::views::tools::{TableTarget, ToolKind, ToolPanel, ToolsEvent};
 
 use super::app::Pane;
 use super::theme::c;
@@ -204,12 +204,11 @@ impl ToolsPane {
 }
 
 impl ToolsPane {
-    /// The text-table body: input, format picker + copy, the preview and the
+    /// The text-table body: input, the two copy targets, the preview and the
     /// status line (`show_macos`'s split; the model debounces and runs).
     fn text_table(&mut self, ui: &mut egui::Ui, colors: &PopupColors) {
         let i = Self::index(ToolKind::TextTable);
         let snap = self.panels[i].snapshot();
-        let formats = self.panels[i].spec().formats.clone();
         let mut events: Vec<ToolsEvent> = Vec::new();
 
         ui.horizontal(|ui| {
@@ -219,18 +218,11 @@ impl ToolsPane {
                     events.push(ToolsEvent::Edit(self.tt_text.clone()));
                 }
             }
-            egui::ComboBox::from_id_salt("tools-tt-format")
-                .selected_text(crate::views::tools::table_format_label(&snap.format))
-                .show_ui(ui, |ui| {
-                    for (n, f) in formats.iter().enumerate() {
-                        let label = crate::views::tools::table_format_label(f);
-                        if ui.selectable_label(*f == snap.format, label).clicked() {
-                            events.push(ToolsEvent::TableFormat(n));
-                        }
-                    }
-                });
-            if ui.button("copy table").clicked() {
-                events.push(ToolsEvent::TableCopy);
+            if ui.button("Copy table for Outlook").clicked() {
+                events.push(ToolsEvent::TableCopy(TableTarget::Outlook));
+            }
+            if ui.button("Copy Markdown file").clicked() {
+                events.push(ToolsEvent::TableCopy(TableTarget::MarkdownFile));
             }
         });
         let half = ((ui.available_height() - 30.0) / 2.0).max(60.0);

@@ -76,9 +76,6 @@ pub struct ToolSpec {
     pub width: f64,
     pub height: f64,
     pub font: String,
-    /// Text-table: the output formats the format button cycles through
-    /// (`[text-table] formats`; the first is the default).
-    pub formats: Vec<String>,
     /// Text-table: close the panel (and return focus) after a copy.
     pub close_on_copy: bool,
 }
@@ -92,7 +89,6 @@ impl ToolSpec {
                 width: 1000.0,
                 height: 600.0,
                 font: String::new(),
-                formats: Vec::new(),
                 close_on_copy: false,
             },
             ToolKind::Filefast => ToolSpec {
@@ -101,7 +97,6 @@ impl ToolSpec {
                 width: 620.0,
                 height: 180.0,
                 font: String::new(),
-                formats: Vec::new(),
                 close_on_copy: false,
             },
             ToolKind::HealthChecks => ToolSpec {
@@ -110,16 +105,14 @@ impl ToolSpec {
                 width: 800.0,
                 height: 640.0,
                 font: "SF Mono".to_string(),
-                formats: Vec::new(),
                 close_on_copy: false,
             },
             ToolKind::TextTable => ToolSpec {
                 script: String::new(),
-                save_dir: String::new(),
+                save_dir: "/tmp/text-table".to_string(),
                 width: 900.0,
                 height: 600.0,
                 font: String::new(),
-                formats: DEFAULT_TABLE_FORMATS.iter().map(|f| f.to_string()).collect(),
                 close_on_copy: true,
             },
         }
@@ -211,16 +204,6 @@ impl ToolSpec {
                 spec.font = f.clone();
             }
         }
-        if let Some(v) = vars.get("formats") {
-            let list: Vec<String> = v
-                .split(',')
-                .map(|f| f.trim().to_lowercase())
-                .filter(|f| !f.is_empty())
-                .collect();
-            if !list.is_empty() {
-                spec.formats = list;
-            }
-        }
         if let Some(on) = tri(vars.get("close-on-copy")) {
             spec.close_on_copy = on;
         }
@@ -231,23 +214,26 @@ impl ToolSpec {
 
 // -- text-table engine (`python3 -m text_table`, file in / file out) ---------
 
-/// `[text-table] formats` when the section doesn't set it (`pylib/text_table`
-/// `FORMATS` names; Outlook first = the default).
-pub const DEFAULT_TABLE_FORMATS: [&str; 7] = ["outlook", "markdown", "tsv", "grid", "jira", "csv", "html"];
+/// The engine format the panel runs: `outlook` yields both outputs the panel
+/// offers — the styled HTML table (`output`) and its Markdown twin
+/// (`fallback`) — in one pass.
+pub const TABLE_ENGINE_FORMAT: &str = "outlook";
 
-/// A format's button label (`OutputFormat.label`; an unknown name shows as is).
-pub fn table_format_label(name: &str) -> String {
-    match name {
-        "outlook" => "Outlook",
-        "markdown" => "Markdown",
-        "tsv" => "TSV",
-        "csv" => "CSV",
-        "grid" => "Text grid",
-        "jira" => "Jira wiki",
-        "html" => "HTML",
-        other => other,
-    }
-    .to_string()
+/// Where a text-table copy goes (the panel's only two actions).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableTarget {
+    /// A real table for Outlook / Teams / Word: HTML + RTF + Markdown text.
+    Outlook,
+    /// The Markdown table saved as a `.md` file; the clipboard carries the
+    /// file (Finder / chat / mail paste it) and the Markdown text (editors).
+    MarkdownFile,
+}
+
+/// `<save-dir>/table-<stamp>.md` (the text-table Markdown file).
+pub fn table_md_path(dir: &str, secs: i64) -> String {
+    let abs = crate::app::config::expand_tilde(dir);
+    let base = abs.trim_end_matches('/');
+    format!("{}/table-{}.md", if base.is_empty() { "/tmp" } else { base }, pretty_stamp(secs))
 }
 
 /// One transform: the output, its plain twin and the `--meta` summary.
@@ -292,14 +278,19 @@ impl TableResult {
         s
     }
 
-    /// Put the result on the clipboard: a rich format as HTML + its plain
-    /// twin, a plain one as text.
+    /// Put the result on the clipboard: a rich format as HTML (+ RTF) + its
+    /// plain twin, a plain one as text.
     pub fn copy(&self) -> bool {
         if self.is_html() {
             crate::platform::set_html(&self.output, &self.fallback)
         } else {
             crate::platform::set_text(&self.output)
         }
+    }
+
+    /// The Markdown table: the plain twin of a rich run, else the output.
+    pub fn markdown(&self) -> &str {
+        if self.is_html() { &self.fallback } else { &self.output }
     }
 }
 
@@ -360,9 +351,6 @@ pub fn run_text_table(input: &str, format: &str) -> Result<TableResult, String> 
             .unwrap_or_default(),
     })
 }
-
-/// The text-table key monitor's Cmd+1…9 click ids (`poll` drains them).
-const TABLE_FORMAT_KEY_BASE: i32 = 100;
 
 /// The text-table run latch (`None` = idle).
 type TtOut = std::sync::Arc<std::sync::Mutex<Option<Result<TableResult, String>>>>;
@@ -586,6 +574,22 @@ fn filefast_dir_for(save_dir: &str) -> String {
     format!("{root}/{y:04}_{m:02}_{d:02}")
 }
 
+/// The Create File panel's height and its input row's y (the pasted-count
+/// line sits under the row, the status line at the foot).
+#[cfg(target_os = "macos")]
+const FF_PANEL_H: f64 = 82.0;
+#[cfg(target_os = "macos")]
+const FF_ROW_Y: f64 = 40.0;
+
+/// `"3 lines, 120 chars pasted"` (empty for no text).
+pub fn pasted_count(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let lines = s.split('\n').count();
+    format!("{lines} line{}, {} chars pasted", if lines == 1 { "" } else { "s" }, s.chars().count())
+}
+
 /// Everything a tool panel draws, pulled by the owner each frame (the pure
 /// half of `test_state` plus the panel's text and status line).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -599,8 +603,7 @@ pub struct ToolsSnapshot {
     /// Health-checks: a run is in flight.
     pub running: bool,
     pub frame: [f64; 4],
-    /// Text-table: the selected format and the preview (the plain twin).
-    pub format: String,
+    /// Text-table: the preview (the Markdown twin).
     pub preview: String,
 }
 
@@ -620,10 +623,8 @@ pub enum ToolsEvent {
     HealthRun,
     /// Filefast: the Return / Cmd+Return save.
     FilefastSave,
-    /// Text-table: pick the format at this index of `spec.formats`.
-    TableFormat(usize),
-    /// Text-table: copy the current result (the header's "copy table").
-    TableCopy,
+    /// Text-table: copy the current result to one of the two targets.
+    TableCopy(TableTarget),
 }
 
 /// One live tool panel (model + window handle; the window only exists on
@@ -651,8 +652,8 @@ pub struct ToolPanel {
     ff_hide_at: Option<std::time::Instant>,
     /// Text-table: the run latch + run-in-flight flag, the debounce (last
     /// input + when it settled), the (input, format) of the last run started,
-    /// its result, the status line, the selected format, the clipboard text
-    /// last pre-filled, and the close-after-copy deadline.
+    /// its result, the status line, the clipboard text last pre-filled, and
+    /// the close-after-copy deadline.
     tt_out: TtOut,
     tt_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tt_last_seen: String,
@@ -660,7 +661,6 @@ pub struct ToolPanel {
     tt_ran: Option<(String, String)>,
     tt_result: Option<TableResult>,
     tt_status: Option<(String, bool)>,
-    tt_format: usize,
     tt_clip_loaded: String,
     tt_hide_at: Option<std::time::Instant>,
     /// The app to hand focus back to when the panel closes itself (the app
@@ -697,6 +697,9 @@ pub struct ToolPanel {
     chrome: Option<Retained<crate::ui::chrome::PopupChrome>>,
     #[cfg(target_os = "macos")]
     ff_hint: Option<Retained<objc2_app_kit::NSTextField>>,
+    /// Filefast: the "N lines, M chars pasted" line under the paste box.
+    #[cfg(target_os = "macos")]
+    ff_count: Option<Retained<objc2_app_kit::NSTextField>>,
     #[cfg(target_os = "macos")]
     colors: Option<crate::ui::theme::PopupColors>,
     /// The health text last rendered (ANSI → attributed).
@@ -733,7 +736,6 @@ impl ToolPanel {
             tt_ran: None,
             tt_result: None,
             tt_status: None,
-            tt_format: 0,
             tt_clip_loaded: String::new(),
             tt_hide_at: None,
             return_pid: None,
@@ -765,6 +767,8 @@ impl ToolPanel {
             chrome: None,
             #[cfg(target_os = "macos")]
             ff_hint: None,
+            #[cfg(target_os = "macos")]
+            ff_count: None,
             #[cfg(target_os = "macos")]
             colors: None,
             health_shown: String::new(),
@@ -878,7 +882,6 @@ impl ToolPanel {
         if self.kind == ToolKind::TextTable {
             if let Some(o) = st.as_object_mut() {
                 let r = self.tt_result.clone().unwrap_or_default();
-                o.insert("format".into(), json!(self.table_format()));
                 o.insert("ok".into(), json!(r.ok));
                 o.insert("columns".into(), json!(r.columns));
                 o.insert("rows".into(), json!(r.rows));
@@ -890,16 +893,6 @@ impl ToolPanel {
     }
 
     // -- text-table ----------------------------------------------------------
-
-    /// The format the next run / copy uses.
-    pub fn table_format(&self) -> &str {
-        self.spec
-            .formats
-            .get(self.tt_format)
-            .or_else(|| self.spec.formats.first())
-            .map(String::as_str)
-            .unwrap_or("outlook")
-    }
 
     /// Hand focus back to `pid` when the panel closes itself (`None` = stay).
     pub fn set_return_pid(&mut self, pid: Option<i32>) {
@@ -913,15 +906,6 @@ impl ToolPanel {
             return editor.string().to_string();
         }
         self.tt_last_seen.clone()
-    }
-
-    /// Select format `i` (wrapping) and re-run right away.
-    pub fn set_table_format(&mut self, i: usize) {
-        let n = self.spec.formats.len().max(1);
-        self.tt_format = i % n;
-        self.tt_last_change = None;
-        #[cfg(target_os = "macos")]
-        self.refresh_table_buttons();
     }
 
     fn spawn_table_run(&mut self, input: String, format: String) {
@@ -939,14 +923,14 @@ impl ToolPanel {
     }
 
     /// The debounce + run loop (0.25 s after the input settles, at once after
-    /// a format pick), applying finished runs and the close-after-copy.
+    /// opening), applying finished runs and the close-after-copy.
     fn poll_table(&mut self) {
         let input = self.table_input();
         if input != self.tt_last_seen {
             self.tt_last_seen = input.clone();
             self.tt_last_change = Some(std::time::Instant::now());
         }
-        let want = (input.clone(), self.table_format().to_string());
+        let want = (input.clone(), TABLE_ENGINE_FORMAT.to_string());
         let settled = self
             .tt_last_change
             .map(|t| t.elapsed() >= std::time::Duration::from_millis(250))
@@ -985,11 +969,11 @@ impl ToolPanel {
         }
     }
 
-    /// Copy the result for the current input + format (running the engine
-    /// inline when the last run is stale) and, with `close-on-copy`, close
-    /// shortly after so the status is readable.
-    pub fn copy_table(&mut self) -> bool {
-        let want = (self.table_input(), self.table_format().to_string());
+    /// Copy the result for the current input to `target` (running the
+    /// engine inline when the last run is stale) and, with `close-on-copy`,
+    /// close shortly after so the status is readable.
+    pub fn copy_table(&mut self, target: TableTarget) -> bool {
+        let want = (self.table_input(), TABLE_ENGINE_FORMAT.to_string());
         let fresh = self.tt_ran.as_ref() == Some(&want)
             && !self.tt_pending.load(std::sync::atomic::Ordering::Relaxed)
             && self.tt_result.is_some();
@@ -1011,19 +995,32 @@ impl ToolPanel {
             self.set_tt_status(Some(("nothing to copy — no table found".to_string(), true)));
             return false;
         };
-        if !r.copy() {
-            self.set_tt_status(Some(("clipboard write failed".to_string(), true)));
-            return false;
-        }
-        self.set_tt_status(Some((
-            format!(
-                "Copied {} table ({} × {}) — paste with ⌘V",
-                table_format_label(&r.format),
-                r.columns,
-                r.rows
-            ),
-            false,
-        )));
+        let msg = match target {
+            TableTarget::Outlook => {
+                if !r.copy() {
+                    self.set_tt_status(Some(("clipboard write failed".to_string(), true)));
+                    return false;
+                }
+                format!("Copied table for Outlook ({} × {}) — paste with ⌘V", r.columns, r.rows)
+            }
+            TableTarget::MarkdownFile => {
+                let path = table_md_path(&self.spec.save_dir, now_secs());
+                let written = std::path::Path::new(&path)
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|_| std::fs::write(&path, r.markdown()));
+                if let Err(e) = written {
+                    self.set_tt_status(Some((format!("could not write {path}: {e}"), true)));
+                    return false;
+                }
+                if !crate::platform::set_file_and_text(&path, r.markdown()) {
+                    self.set_tt_status(Some(("clipboard write failed".to_string(), true)));
+                    return false;
+                }
+                format!("Saved {path} — file + Markdown copied, paste with ⌘V")
+            }
+        };
+        self.set_tt_status(Some((msg, false)));
         if self.spec.close_on_copy {
             self.tt_hide_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(700));
         }
@@ -1061,20 +1058,10 @@ impl ToolPanel {
         }
     }
 
-    /// The header buttons: "format: <label>" + "copy table".
+    /// The header buttons: the panel's two copy targets.
     #[cfg(target_os = "macos")]
     fn table_buttons(&self) -> Vec<(String, i32)> {
-        vec![
-            (format!("format: {}", table_format_label(self.table_format())), 10),
-            ("copy table".into(), 11),
-        ]
-    }
-
-    #[cfg(target_os = "macos")]
-    fn refresh_table_buttons(&self) {
-        if let Some(ch) = &self.chrome {
-            ch.set_extra_buttons(self.table_buttons());
-        }
+        vec![("Copy table for Outlook".into(), 10), ("Copy Markdown file".into(), 11)]
     }
 
     /// `openFileFastWindow`'s save: run `cmd.script` with the paste contents
@@ -1314,18 +1301,11 @@ impl ToolPanel {
         if self.kind == ToolKind::TextTable {
             match id {
                 HEADER_CLOSE_ID => self.hand_back(),
-                10 => self.set_table_format(self.tt_format + 1),
-                11 => {
-                    self.copy_table();
+                10 => {
+                    self.copy_table(TableTarget::Outlook);
                 }
-                // Cmd+1…9 from the key monitor.
-                n if (TABLE_FORMAT_KEY_BASE..TABLE_FORMAT_KEY_BASE + 9).contains(&n) => {
-                    let i = (n - TABLE_FORMAT_KEY_BASE) as usize;
-                    if i < self.spec.formats.len() {
-                        self.set_table_format(i);
-                    } else {
-                        crate::platform::bell();
-                    }
+                11 => {
+                    self.copy_table(TableTarget::MarkdownFile);
                 }
                 HEADER_ICON_ID => {
                     if let Some(ch) = &self.chrome {
@@ -1423,7 +1403,6 @@ impl ToolPanel {
             status,
             running,
             frame: self.frame,
-            format: if self.kind == ToolKind::TextTable { self.table_format().to_string() } else { String::new() },
             preview: self.tt_result.as_ref().map(|r| r.fallback.clone()).unwrap_or_default(),
         }
     }
@@ -1444,9 +1423,8 @@ impl ToolPanel {
                     self.tt_last_change = Some(std::time::Instant::now());
                 }
             }
-            ToolsEvent::TableFormat(i) => self.set_table_format(i),
-            ToolsEvent::TableCopy => {
-                self.copy_table();
+            ToolsEvent::TableCopy(target) => {
+                self.copy_table(target);
             }
             ToolsEvent::Format => self.format_prettyprint(),
             // `pp_handler::save_clicked`, but the contents come from the model
@@ -1499,7 +1477,9 @@ impl ToolPanel {
             let colors = crate::ui::theme::section_colors(self.kind.name());
             let filefast = self.kind == ToolKind::Filefast;
             let w = self.spec.width.max(420.0);
-            let h = if filefast { 60.0 } else { self.spec.height.max(220.0) };
+            // Filefast: the input row, the pasted-count line under the
+            // paste box, and the status line at the foot.
+            let h = if filefast { FF_PANEL_H } else { self.spec.height.max(220.0) };
             let cfg = PopupConfig {
                 name: self.kind.name().to_string(),
                 frame: CardFrame { x: 0.0, y: 0.0, width: w, height: h },
@@ -1511,7 +1491,7 @@ impl ToolPanel {
             let panel = PopupPanel::create(mtm, &cfg);
             panel.setTitle(&NSString::from_str(self.kind.name()));
             if filefast {
-                panel.setContentMinSize(NSSize::new(320.0, 60.0));
+                panel.setContentMinSize(NSSize::new(320.0, FF_PANEL_H));
             }
             let assets = crate::app::paths::Paths::from_env().asset_dir().to_string();
             let icon = match self.kind {
@@ -1531,7 +1511,7 @@ impl ToolPanel {
                 ToolKind::HealthChecks => ("", vec![("copy output".into(), 10), ("copy config path".into(), 11)]),
                 ToolKind::Filefast => ("", Vec::new()),
                 ToolKind::TextTable => (
-                    "rows from OCR or paste · first row = header · ⌘↩ copy · ⌘1–9 format",
+                    "rows from OCR or paste · first row = header · ⌘↩ Outlook · ⌘⇧↩ Markdown file",
                     self.table_buttons(),
                 ),
             };
@@ -1565,7 +1545,7 @@ impl ToolPanel {
             if filefast {
                 let fw = (w * 0.42).round();
                 let (name_box, field) = crate::ui::field::search_box(mtm, &colors, 13.0, "file name", 6.0, 28.0);
-                name_box.setFrame(NSRect::new(NSPoint::new(10.0, 20.0), NSSize::new(fw - 10.0, 28.0)));
+                name_box.setFrame(NSRect::new(NSPoint::new(10.0, FF_ROW_Y), NSSize::new(fw - 10.0, 28.0)));
                 content.addSubview(&name_box);
                 self.name_field = Some(field);
                 let px = fw + 8.0;
@@ -1575,7 +1555,7 @@ impl ToolPanel {
                 // does); layer props set on the NSScrollView itself never drew.
                 let cell = NSView::initWithFrame(
                     NSView::alloc(mtm),
-                    NSRect::new(NSPoint::new(px, 20.0), NSSize::new(pw, 28.0)),
+                    NSRect::new(NSPoint::new(px, FF_ROW_Y), NSSize::new(pw, 28.0)),
                 );
                 cell.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
                 cell.setWantsLayer(true);
@@ -1622,7 +1602,7 @@ impl ToolPanel {
                 // Tiny "copy file path" button right of the paste box.
                 let btn = NSView::initWithFrame(
                     NSView::alloc(mtm),
-                    NSRect::new(NSPoint::new(px + pw + 6.0, 20.0), NSSize::new(btn_w, 28.0)),
+                    NSRect::new(NSPoint::new(px + pw + 6.0, FF_ROW_Y), NSSize::new(btn_w, 28.0)),
                 );
                 btn.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
                 btn.setWantsLayer(true);
@@ -1636,16 +1616,25 @@ impl ToolPanel {
                 let iv = objc2_app_kit::NSImageView::imageViewWithImage(&glyph, mtm);
                 iv.setFrame(NSRect::new(NSPoint::new(3.0, 3.0), NSSize::new(22.0, 22.0)));
                 btn.addSubview(&iv);
-                btn.setToolTip(Some(&NSString::from_str("Copy file path")));
+                btn.setToolTip(Some(&NSString::from_str("Save the pasted text to the file and copy its path (same as Return)")));
                 content.addSubview(&btn);
                 self.ff_copy_btn = Some(btn);
                 self.paste = Some(text.clone());
                 self.ff_hint = Some(hint.clone());
-                // Status: a centered toast-like label over the row.
+                // The pasted count, right under the paste box.
+                let count = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+                count.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                count.setTextColor(Some(&colors.dim.to_nscolor()));
+                count.setFrame(NSRect::new(NSPoint::new(px + 6.0, FF_ROW_Y - 17.0), NSSize::new(pw - 6.0, 15.0)));
+                count.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+                content.addSubview(&count);
+                self.ff_count = Some(count);
+                // Status: what the save did (written path / error).
                 let status = NSTextField::labelWithString(&NSString::from_str(""), mtm);
                 status.setFont(Some(&NSFont::systemFontOfSize(11.0)));
                 status.setTextColor(Some(&colors.dim.to_nscolor()));
-                status.setFrame(NSRect::new(NSPoint::new(10.0, 2.0), NSSize::new(w - 20.0, 15.0)));
+                status.setFrame(NSRect::new(NSPoint::new(10.0, 4.0), NSSize::new(w - 20.0, 15.0)));
+                status.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
                 content.addSubview(&status);
                 self.ff_status_label = Some(status);
             } else if self.kind == ToolKind::TextTable {
@@ -1739,8 +1728,9 @@ impl ToolPanel {
                 content.addSubview(&status);
                 self.pp_status_label = Some(status);
 
-                // Esc closes (rule 6), Cmd+Return copies, Cmd+1…9 pick a
-                // format; everything else (edit shortcuts) passes through.
+                // Esc closes (rule 6), Cmd+Return copies the Outlook table,
+                // Cmd+Shift+Return the Markdown file; everything else (edit
+                // shortcuts) passes through.
                 let panel_ref = panel.clone();
                 let click = self.click.clone();
                 let monitor = crate::ui::popup::install_local_monitor(mtm, move |event| {
@@ -1753,16 +1743,8 @@ impl ToolPanel {
                         return true;
                     }
                     if key.cmd && (key.key_code == crate::ui::popup::KEY_RETURN || key.key_code == 76) {
-                        click.set(11);
+                        click.set(if key.shift { 11 } else { 10 });
                         return true;
-                    }
-                    if key.cmd && !key.shift && !key.ctrl && !key.opt {
-                        // kVK_ANSI_1 … kVK_ANSI_9
-                        const DIGITS: [u16; 9] = [18, 19, 20, 21, 23, 22, 26, 28, 25];
-                        if let Some(i) = DIGITS.iter().position(|c| *c == key.key_code) {
-                            click.set(TABLE_FORMAT_KEY_BASE + i as i32);
-                            return true;
-                        }
                     }
                     false
                 });
@@ -2083,7 +2065,9 @@ impl ToolPanel {
             ToolKind::TextTable => {}
             ToolKind::Filefast => {
                 // `FileFastPasteView.refreshIndicator`.
-                if let (Some(paste), Some(hint), Some(c)) = (&self.paste, &self.ff_hint, self.colors) {
+                if let (Some(paste), Some(hint), Some(count), Some(c)) =
+                    (&self.paste, &self.ff_hint, &self.ff_count, self.colors)
+                {
                     let s = paste.string().to_string();
                     // The pasted text is invisible, so the caret trails it (off
                     // the bottom / out of the box on a big paste): park the
@@ -2096,16 +2080,11 @@ impl ToolPanel {
                         }
                     }
                     paste.setInsertionPointColor(Some(&(if s.is_empty() { c.dim } else { crate::ui::theme::Rgba::new(0.0, 0.0, 0.0, 0.0) }).to_nscolor()));
-                    let want = if s.is_empty() {
-                        "paste output".to_string()
-                    } else {
-                        let lines = s.split('\n').count();
-                        format!(
-                            "************************  {lines} line{}, {} chars pasted",
-                            if lines == 1 { "" } else { "s" },
-                            s.chars().count()
-                        )
-                    };
+                    let want = if s.is_empty() { "paste output".to_string() } else { "************************".to_string() };
+                    let counted = pasted_count(&s);
+                    if count.stringValue().to_string() != counted {
+                        count.setStringValue(&objc2_foundation::NSString::from_str(&counted));
+                    }
                     if hint.stringValue().to_string() != want {
                         hint.setStringValue(&objc2_foundation::NSString::from_str(&want));
                         hint.setTextColor(Some(
@@ -2115,19 +2094,19 @@ impl ToolPanel {
                 }
                 let done = self.ff_out.lock().unwrap().take();
                 if let Some((ok, last)) = done {
-                    if ok {
-                        let path = last.trim().to_string();
-                        if !path.is_empty() {
-                            copy_text(&path);
-                        }
-                        let msg = if path.is_empty() {
-                            "saved".to_string()
-                        } else {
-                            format!("Copied {path} to clipboard")
-                        };
+                    // Confirm from the file on disk, not the script's word.
+                    let path = last.trim().to_string();
+                    let on_disk = if ok && !path.is_empty() { std::fs::read_to_string(&path).ok() } else { None };
+                    if let Some(written) = on_disk {
+                        copy_text(&path);
+                        let msg = format!("Saved {} → {path} · path copied", pasted_count(&written).trim_end_matches(" pasted"));
                         self.set_ff_status(Some((msg, false)));
                         self.ff_hide_at =
-                            Some(std::time::Instant::now() + std::time::Duration::from_millis(1300));
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
+                    } else if ok {
+                        crate::platform::bell();
+                        let msg = if path.is_empty() { "file was not created".to_string() } else { format!("file was not created: {path}") };
+                        self.set_ff_status(Some((msg, true)));
                     } else {
                         crate::platform::bell();
                         self.set_ff_status(Some((last, true)));
@@ -2306,16 +2285,12 @@ mod tests {
     }
 
     #[test]
-    fn text_table_formats_default_and_cycle() {
-        let mut p = ToolPanel::new(ToolKind::TextTable, &AppSettings::default());
-        p.spec.formats = DEFAULT_TABLE_FORMATS.iter().map(|f| f.to_string()).collect();
-        assert_eq!(p.table_format(), "outlook");
-        p.handle(ToolsEvent::TableFormat(1));
-        assert_eq!(p.table_format(), "markdown");
-        p.set_table_format(DEFAULT_TABLE_FORMATS.len());
-        assert_eq!(p.table_format(), "outlook", "wraps");
-        assert_eq!(table_format_label("grid"), "Text grid");
-        assert_eq!(table_format_label("custom"), "custom");
+    fn text_table_markdown_path_and_twin() {
+        assert_eq!(table_md_path("/tmp/text-table/", 0), "/tmp/text-table/table-19700101-000000.md");
+        let rich = TableResult { mime: "text/html".into(), output: "<table/>".into(), fallback: "| a |".into(), ..TableResult::default() };
+        assert_eq!(rich.markdown(), "| a |");
+        let plain = TableResult { mime: "text/plain".into(), output: "| b |".into(), ..TableResult::default() };
+        assert_eq!(plain.markdown(), "| b |");
     }
 
     #[test]

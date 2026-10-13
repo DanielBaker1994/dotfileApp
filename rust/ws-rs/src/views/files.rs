@@ -895,6 +895,10 @@ impl QuickLook {
             panel.setCurrentPreviewItemIndex(0);
             panel.makeKeyAndOrderFront(None);
         }
+        // The silver preview border, like every other preview window.
+        if let Some(content) = panel.contentView() {
+            crate::ui::preview_ring::attach(&content, 0.0, 16.0);
+        }
         self.up = true;
     }
 
