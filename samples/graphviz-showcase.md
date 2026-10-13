@@ -1,9 +1,8 @@
-div class="d c executive"></div>
+<div class="doc executive"></div>
 
 # Graphviz showcase
 
 Themed `dot` fences: **no colors, fonts or sizes** — the style marker on line 1
-te.txt
 does that. For a fully styled standalone version (colors, HTML tables, records,
 pots, clusters, legend) see `graphviz-showcase.dot` next to this file.
 
