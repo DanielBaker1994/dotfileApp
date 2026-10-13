@@ -217,6 +217,16 @@ unproven: "no action list", "no capture warning" (rated S2). Other L8 observatio
 state has no schema (`visible` vs `windows` ambiguous); 6 of 7 header styles are not discoverable;
 MCP has no file-write tool so L8-08 could not run.
 
+**Resolved (wave 3, 2026-10-13):** descriptions are **truncated at 120 chars** before the model sees them.
+opencode 2.0.26 drives MCP tools through its Code Mode catalog, which renders each tool as
+`first line of description, slice(0,117)+"..."` (constant `y9=120` in the binary). So the worker saw
+the `ks_do` opening sentence and nothing of the verb list, and `ks_raw` cut at "interactive fo..." before
+the WARNING. Not a stale server (`d21d2b1` landed 47 min before the run). Both L8 complaints share this one
+cause, and are real for any client that shows only the first line. Fix: put the key fact in the first
+line, under 117 chars, and move the verb list into a `ks_help` tool. The relay's `failed`/exit 1 is
+opencode's own non-zero exit after a transient `provider.invalid-output` ("stream ended without
+finish_reason", `runs/L8/events.jsonl:104`); the run itself completed.
+
 ### 7.5 Corrections to statements elsewhere
 
 AGENTS.md said headless screenshot verbs capture and that unknown `do:` echoes state: both were

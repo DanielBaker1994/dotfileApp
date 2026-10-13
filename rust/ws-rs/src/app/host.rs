@@ -182,6 +182,14 @@ struct ControllerInner {
     last: SlotView,
     last_jira: SlotView,
     stack: Vec<SlotView>,
+    /// Bounded navigation history for the socket `do:back`, recorded in
+    /// `present()` whenever the current view changes to a different view.
+    /// Independent of `stack` (which keeps Swift parity for Esc / in-window
+    /// navigation through `push`/`back(true)`).
+    history: Vec<SlotView>,
+    /// True once any view has been presented; distinguishes a fresh controller
+    /// from one that has shown then hidden a view (for `do:show`).
+    ever_presented: bool,
     visible: bool,
     palette_visible: bool,
     target_screen: Option<i32>,
@@ -262,11 +270,22 @@ impl ControllerInner {
         self.members.entry(v).or_default();
     }
 
+    /// Append `v` to the bounded `do:back` navigation history (cap 32, the
+    /// oldest entries drop off).
+    fn record_history(&mut self, v: SlotView) {
+        const CAP: usize = 32;
+        self.history.push(v);
+        if self.history.len() > CAP {
+            self.history.drain(0..self.history.len() - CAP);
+        }
+    }
+
     fn present(&mut self, v: SlotView) {
         self.ensure_member(v);
         if let Some(old) = self.current {
             if old != v {
                 self.previous = Some(old);
+                self.record_history(old);
                 if let Some(m) = self.members.get_mut(&old) {
                     m.shown = false;
                 }
@@ -277,6 +296,7 @@ impl ControllerInner {
         }
         self.current = Some(v);
         self.last = v;
+        self.ever_presented = true;
         if v.is_jira() {
             self.last_jira = v;
         }
@@ -561,6 +581,23 @@ pub struct SwitcherController {
     screenshot_controller: Option<Arc<Mutex<ScreenshotController>>>,
 }
 
+/// `do:` verbs whose only effect is a `UiCommand` to a window that cannot
+/// exist headless (they would otherwise write a `shown`/visible flag into
+/// state with no window to back it). Refused in headless mode; hide/close
+/// verbs stay accepted (no-ops are fine).
+fn needs_window(action: &str) -> bool {
+    action == "paths:show"
+        || action == "switcher"
+        || action == "toggle-terminal"
+        || action == "toggle-browser"
+        || action == "term"
+        || action == "notes-find"
+        || action == "notes-grep"
+        || action == "jira-jump"
+        || action == "reset-size"
+        || action.starts_with("tool:")
+}
+
 impl SwitcherController {
     pub fn new(settings: AppSettings) -> Self {
         let esc_app = settings.esc_close;
@@ -570,6 +607,8 @@ impl SwitcherController {
             last: SlotView::Notes,
             last_jira: SlotView::Jira,
             stack: Vec::new(),
+            history: Vec::new(),
+            ever_presented: false,
             visible: false,
             palette_visible: false,
             target_screen: None,
@@ -1535,7 +1574,21 @@ impl SwitcherController {
     }
 
     fn do_host_action(&self, action: &str) -> Option<Value> {
+        // Window-only verbs have no effect without a window; refuse rather than
+        // write a `shown`/visible flag into state with nothing behind it.
+        if self.is_headless() && needs_window(action) {
+            return Some(json!({ "error": format!("{action} unavailable in headless mode") }));
+        }
         if let Some(v) = action.strip_prefix("open:") {
+            return match SlotView::from_raw(v) {
+                Some(view) => {
+                    self.open(view);
+                    None
+                }
+                None => Some(json!({ "error": "unknown view" })),
+            };
+        }
+        if let Some(v) = action.strip_prefix("show:") {
             return match SlotView::from_raw(v) {
                 Some(view) => {
                     self.open(view);
@@ -1760,7 +1813,40 @@ impl SwitcherController {
                 None
             }
             "back" => {
-                self.back(false);
+                // `do:back` returns to the previous view (the bounded history),
+                // falling back to today's sub-view/`hide` behaviour when empty.
+                let target = {
+                    let mut inner = self.inner.lock().unwrap();
+                    let cur = inner.current;
+                    let mut target = None;
+                    while let Some(v) = inner.history.pop() {
+                        if cur != Some(v) {
+                            target = Some(v);
+                            break;
+                        }
+                    }
+                    target
+                };
+                match target {
+                    Some(v) => {
+                        let len = self.inner.lock().unwrap().history.len();
+                        self.open(v);
+                        // A stack, not a toggle: drop the view we just left,
+                        // which `present()` recorded, so a second `back` keeps
+                        // going back instead of returning here.
+                        self.inner.lock().unwrap().history.truncate(len);
+                    }
+                    None => self.back(false),
+                }
+                None
+            }
+            "show" => {
+                let (ever, last) = {
+                    let inner = self.inner.lock().unwrap();
+                    (inner.ever_presented, inner.last)
+                };
+                // A fresh controller has no last view: default to jira.
+                self.open(if ever { last } else { SlotView::Jira });
                 None
             }
             "home" => {
@@ -1813,15 +1899,17 @@ impl SwitcherController {
                 inner.ui_push(UiCommand::ResetSize);
                 None
             }
+            a if a.starts_with("board:") => {
+                // The Swift jira window's board verbs are not ported yet; report
+                // a clear error instead of the generic `unhandled action`.
+                Some(json!({ "error": format!("{a} not implemented in the Rust port yet") }))
+            }
             _ => {
                 let rest = action
                     .split_once(':')
                     .map(|(_, r)| r)
                     .unwrap_or_default();
-                if action.starts_with("board:")
-                    || action.starts_with("compare:")
-                    || action.starts_with("screenshot:")
-                {
+                if action.starts_with("compare:") || action.starts_with("screenshot:") {
                     let result = self.registry.dispatch_test_do(action).or_else(|| {
                         Some(json!({ "error": format!("unhandled action {rest}") }))
                     });
@@ -10085,6 +10173,31 @@ mod tests {
         SwitcherController::new_default()
     }
 
+    /// Install both queues so `is_headless()` is false (GUI mode), plus a
+    /// drainer for the `MainQueue` (the only jobs it sees in tests are the
+    /// `do:` flush's no-op `|| {}`). Returns the `UiQueue` for assertions.
+    fn install_gui(c: &SwitcherController) -> UiQueue {
+        let q: UiQueue = Arc::new(Mutex::new(Vec::new()));
+        c.install_ui(q.clone());
+        let mq: MainQueue = Arc::new(Mutex::new(Vec::new()));
+        c.install_main_queue(mq.clone());
+        std::thread::spawn(move || loop {
+            let job = mq.lock().unwrap().pop();
+            match job {
+                Some(j) => j(),
+                None => {
+                    // The controller drops its `main_queue` clone at the end of
+                    // the test; the last clone is ours, so exit cleanly then.
+                    if Arc::strong_count(&mq) <= 1 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
+        q
+    }
+
     #[test]
     fn state_has_every_required_key() {
         let c = controller();
@@ -10182,7 +10295,7 @@ mod tests {
         // A typo must be visible: unknown `do:` verbs answer `{"error": …}`
         // instead of the state that a success returns (F4).
         let c = controller();
-        for action in ["bogus-xyz", "file:/etc/hosts", "notes:bogus", "show", "select:0"] {
+        for action in ["bogus-xyz", "file:/etc/hosts", "notes:bogus", "select:0"] {
             let err = c.do_action(action).unwrap_or_else(|| panic!("{action} must error"));
             assert_eq!(err["error"], json!(format!("unknown action {action}")));
         }
@@ -10192,6 +10305,7 @@ mod tests {
     fn unknown_tool_name_is_rejected() {
         // `tool:` fabricates a `tools.<name>` entry only for a real panel (F3).
         let c = controller();
+        install_gui(&c);
         let err = c.do_action("tool:nope").unwrap();
         assert_eq!(err["error"], json!("not a tool panel: nope"));
         assert!(c.state_json()["tools"].get("nope").is_none());
@@ -10227,6 +10341,7 @@ mod tests {
     #[test]
     fn dispatch_tool_open_and_close() {
         let c = controller();
+        install_gui(&c);
         // Without an enabled [paths] command, `tool:paths` is not a tool panel.
         let err = c.do_action("tool:paths").unwrap();
         assert_eq!(err["error"], json!("not a tool panel: paths"));
@@ -10242,8 +10357,7 @@ mod tests {
     #[test]
     fn drawer_toggles_update_state_and_queue() {
         let c = controller();
-        let q: UiQueue = Arc::new(Mutex::new(Vec::new()));
-        c.install_ui(q.clone());
+        let q = install_gui(&c);
         assert_eq!(c.do_action("toggle-terminal"), None);
         assert_eq!(c.state_json()["views"]["notes"]["terminal"], json!(true));
         assert_eq!(c.state_json()["views"]["notes"]["drawerInset"], json!(200));
@@ -10266,8 +10380,7 @@ mod tests {
     #[test]
     fn paths_grammar_gates_on_enabled_and_queues() {
         let c = controller();
-        let q: UiQueue = Arc::new(Mutex::new(Vec::new()));
-        c.install_ui(q.clone());
+        let q = install_gui(&c);
         let err = c.do_action("paths:show").unwrap();
         assert_eq!(err["error"], json!("[paths] not enabled"));
         c.set_paths_enabled(true);
@@ -10301,8 +10414,7 @@ mod tests {
     #[test]
     fn palette_toggle_flips_state_and_queue() {
         let c = controller();
-        let q: UiQueue = Arc::new(Mutex::new(Vec::new()));
-        c.install_ui(q.clone());
+        let q = install_gui(&c);
         c.palette_toggle();
         assert_eq!(c.state_json()["palette"], json!(true));
         assert_eq!(c.state_json()["viewSwitcher"]["shown"], json!(false));
@@ -10806,5 +10918,111 @@ label = \"Health Checks\"
                 "Kitchen Sink",
             ]
         );
+    }
+
+    #[test]
+    fn headless_refuses_window_only_verbs() {
+        // A headless daemon has no window: window-only verbs must error and
+        // leave state untouched (no `shown: true` with nothing behind it).
+        let c = controller();
+        for action in [
+            "paths:show",
+            "tool:jira",
+            "switcher",
+            "toggle-terminal",
+            "toggle-browser",
+            "term",
+            "notes-find",
+            "notes-grep",
+            "jira-jump",
+            "reset-size",
+        ] {
+            let err = c
+                .do_action(action)
+                .unwrap_or_else(|| panic!("{action} must error headless"));
+            assert_eq!(
+                err["error"],
+                json!(format!("{action} unavailable in headless mode")),
+                "{action}"
+            );
+        }
+        let s = c.state_json();
+        assert_eq!(s["paths"]["shown"], json!(false));
+        assert_eq!(s["views"]["notes"]["terminal"], json!(false));
+        assert_eq!(s["views"]["notes"]["browser"], json!(false));
+        assert_eq!(s["terminalPanel"]["shown"], json!(false));
+        assert_eq!(s["viewSwitcher"]["shown"], json!(false));
+        assert!(s["tools"].as_object().map_or(true, |o| o.is_empty()));
+    }
+
+    #[test]
+    fn back_returns_to_previous_view() {
+        let c = controller();
+        assert_eq!(c.do_action("open:notes"), None);
+        assert_eq!(c.do_action("open:files"), None);
+        assert_eq!(c.current(), Some(SlotView::Files));
+        assert_eq!(c.do_action("back"), None);
+        assert_eq!(c.current(), Some(SlotView::Notes));
+    }
+
+    #[test]
+    fn back_twice_walks_the_history_stack() {
+        let c = controller();
+        for v in ["open:jira", "open:notes", "open:files"] {
+            assert_eq!(c.do_action(v), None);
+        }
+        assert_eq!(c.do_action("back"), None);
+        assert_eq!(c.current(), Some(SlotView::Notes));
+        assert_eq!(c.do_action("back"), None);
+        assert_eq!(c.current(), Some(SlotView::Jira));
+    }
+
+    #[test]
+    fn back_with_no_history_keeps_old_behaviour() {
+        let c = controller();
+        // Nothing shown yet: back hides (today's `self.back(false)` behaviour).
+        assert_eq!(c.do_action("back"), None);
+        assert_eq!(c.current(), None);
+    }
+
+    #[test]
+    fn show_reopens_last_view_and_defaults() {
+        // Bare `show` on a fresh controller has no last view -> jira.
+        let c = controller();
+        assert_eq!(c.do_action("show"), None);
+        assert_eq!(c.current(), Some(SlotView::Jira));
+
+        // `hide` then `show` re-presents the same view.
+        let c = controller();
+        assert_eq!(c.do_action("open:files"), None);
+        assert_eq!(c.do_action("hide"), None);
+        assert_eq!(c.current(), None);
+        assert_eq!(c.do_action("show"), None);
+        assert_eq!(c.current(), Some(SlotView::Files));
+        assert_eq!(c.state_json()["visible"], json!(true));
+
+        // `show:<view>` opens the named view; unknown views error.
+        assert_eq!(c.do_action("show:notes"), None);
+        assert_eq!(c.current(), Some(SlotView::Notes));
+        let err = c.do_action("show:bogus").unwrap();
+        assert_eq!(err["error"], json!("unknown view"));
+    }
+
+    #[test]
+    fn board_verbs_report_not_implemented() {
+        // The Swift jira window's board verbs are not ported: `board:*` must
+        // answer a clear error, not the generic `unhandled action`.
+        let c = controller();
+        for action in ["board:open:ABC", "board:list", "board:list-star:ABC", "board:bogus"] {
+            let err = c.do_action(action).unwrap_or_else(|| panic!("{action} must error"));
+            assert_eq!(
+                err["error"],
+                json!(format!("{action} not implemented in the Rust port yet")),
+                "{action}"
+            );
+        }
+        // `state.views.jira.board` stays the host placeholder `{}` (no fake
+        // board model is installed).
+        assert_eq!(c.state_json()["views"]["jira"]["board"], json!({}));
     }
 }
