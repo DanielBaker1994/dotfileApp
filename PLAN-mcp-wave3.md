@@ -144,6 +144,16 @@ Proposed split, to be refined by the planner:
    the duration.
 5. Is the cost ceiling still "a dollar a wave"? (Current waves are about $0.5.)
 
+### 6.1 Owner answers (2026-10-13)
+
+1. **Refuse.** A headless daemon refuses `paths:show`, `tool:<panel>`, switcher and anything else that
+   cannot exist without a window, with an `error: ... (headless)` reply, instead of claiming `shown: true`.
+2. **`back` = previous view** (a view history, not home). Add a `show:<view>` verb to pair with `hide`.
+3. **Implement `board:<sub>`.**
+4. **GUI budget: about 60 minutes**, run in the background. Keep Anthropic interactive time minimal;
+   DeepSeek does the running, Claude only briefs, reviews diffs and reads flagged PNGs.
+5. **Cost ceiling unchanged**; DeepSeek cost is not a concern. Anthropic token use is the constraint.
+
 ## 7. Constraints that stay in force
 
 - Never `./ws build`, never `pkill`; the sandbox is stopped only by its pidfile or the pid holding its own
