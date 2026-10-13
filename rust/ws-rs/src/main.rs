@@ -70,6 +70,28 @@ fn main() {
                 app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
                 app::menu::install_main_menu(mtm, None);
                 app.activate();
+                // Closing the floating window ends this child, so the next
+                // pop-out click launches a fresh one (`launch` no-ops while a
+                // child for the note is still alive).
+                {
+                    use block2::RcBlock;
+                    use objc2_app_kit::NSWindowWillCloseNotification;
+                    use objc2_foundation::{NSNotification, NSNotificationCenter};
+                    use std::ptr::NonNull;
+                    let block = RcBlock::new(move |_n: NonNull<NSNotification>| {
+                        std::process::exit(0);
+                    });
+                    let center = NSNotificationCenter::defaultCenter();
+                    let obs = unsafe {
+                        center.addObserverForName_object_queue_usingBlock(
+                            Some(NSWindowWillCloseNotification),
+                            None,
+                            None,
+                            &block,
+                        )
+                    };
+                    std::mem::forget(obs);
+                }
                 app.run();
                 return;
             }

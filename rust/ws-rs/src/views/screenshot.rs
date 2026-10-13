@@ -290,7 +290,7 @@ impl Default for ScreenshotConfig {
             contrast_opacity: 190,
             draw_color: hex("#ff0000"),
             user_colors: vec![None],
-            buttons: ShotTool::ring("", true),
+            buttons: ShotTool::ring("", false),
             button_size: 34.0,
             show_help: true,
             show_side_panel_button: true,
@@ -407,7 +407,7 @@ impl ScreenshotConfig {
             })
             .collect();
 
-        c.buttons = ShotTool::ring(&s("buttons", ""), b("show-size-badge", true));
+        c.buttons = ShotTool::ring(&s("buttons", ""), b("show-size-badge", false));
         let bs = i("button-size", 0, 0, 80);
         c.button_size = if bs >= 20 {
             bs as f64
@@ -1374,6 +1374,19 @@ enum Drag {
         start: Point,
         moved: bool,
     },
+    /// Scaling the text draft by a box handle: the opposite handle stays put.
+    ScalingText {
+        anchor: Point,
+        /// Anchor position as fractions of the box (0..1).
+        frac: (f64, f64),
+        d0: f64,
+        size0: i64,
+    },
+    /// Dragging the text draft by its box.
+    MovingText {
+        from: Point,
+        start: Point,
+    },
 }
 
 /// The side panel's hex field buffer. `replace` = the whole text is
@@ -1782,6 +1795,23 @@ impl ShotSession {
         }
     }
 
+    /// The text-draft box handle under `p` as `(hx, hy)` fractions in
+    /// `{0, .5, 1}` of the (outset) box: corners and mid-edges.
+    fn text_handle_at(b: Rect, p: Point) -> Option<(f64, f64)> {
+        for hy in [0.0, 0.5, 1.0] {
+            for hx in [0.0, 0.5, 1.0] {
+                if hx == 0.5 && hy == 0.5 {
+                    continue;
+                }
+                let c = Point::new(b.x + hx * b.w, b.y + hy * b.h);
+                if (p.x - c.x).abs() <= 7.0 && (p.y - c.y).abs() <= 7.0 {
+                    return Some((hx, hy));
+                }
+            }
+        }
+        None
+    }
+
     pub fn commit_text(&mut self) {
         let Some(e) = self.editing.take() else { return };
         let text = e.text.trim_matches(|c| c == '\n' || c == '\r').to_string();
@@ -1965,9 +1995,22 @@ impl ShotSession {
                 self.commit_text();
                 let n = self.doc.objects.len();
                 self.doc.selected = (r < n).then(|| n - 1 - r);
+                // A text layer re-opens for editing, with its resize handles.
+                if let Some(i) = self.doc.selected {
+                    if self.doc.objects[i].tool == ShotTool::Text {
+                        let d = self.active.unwrap_or(0);
+                        let at = self.doc.objects[i].start();
+                        self.begin_text(d, at, Some(i));
+                    }
+                }
             }
             PanelHit::LayerDelete => {
-                if let Some(i) = self.doc.selected {
+                if let Some(e) = self.editing.take() {
+                    if let Some(i) = e.index {
+                        self.doc.remove(i);
+                    }
+                    self.doc.selected = None;
+                } else if let Some(i) = self.doc.selected {
                     self.doc.remove(i);
                 }
             }
@@ -2509,7 +2552,7 @@ impl ShotSession {
     }
 
     /// The Esc chain (Swift `ShotSession.escape`): save card → text → shortcuts
-    /// → color wheel → grab → side panel → selected object → tool → close.
+    /// → color wheel → grab → side panel → close.
     pub fn escape(&mut self) {
         if self.save_card.is_some() {
             self.close_save_card();
@@ -2539,15 +2582,8 @@ impl ShotSession {
             self.toggle_side_panel(Some(false));
             return;
         }
-        if self.doc.selected.is_some() {
-            self.doc.selected = None;
-            return;
-        }
-        if self.tool.is_some() || self.move_mode {
-            self.tool = None;
-            self.move_mode = false;
-            return;
-        }
+        // Nothing transient is open: Esc cancels the capture (an armed tool or
+        // a selected object no longer eats extra presses).
         self.finish(ShotOutcome::Abort);
     }
 
@@ -2752,7 +2788,24 @@ impl ShotSession {
             self.end_grab();
             return;
         }
-        if self.editing.is_some() {
+        if let Some(e) = &self.editing {
+            let b = e.object.bbox();
+            let outer = Rect::new(b.x - 4.0, b.y - 4.0, b.w + 8.0, b.h + 8.0);
+            if let Some((hx, hy)) = Self::text_handle_at(outer, p) {
+                let anchor = Point::new(outer.x + (1.0 - hx) * outer.w, outer.y + (1.0 - hy) * outer.h);
+                let hp = Point::new(outer.x + hx * outer.w, outer.y + hy * outer.h);
+                self.drag = Drag::ScalingText {
+                    anchor,
+                    frac: (1.0 - hx, 1.0 - hy),
+                    d0: ShotGeom::dist(hp, anchor).max(1.0),
+                    size0: e.object.size,
+                };
+                return;
+            }
+            if outer.contains_point(p) {
+                self.drag = Drag::MovingText { from: e.object.start(), start: p };
+                return;
+            }
             self.commit_text();
             return;
         }
@@ -2900,6 +2953,28 @@ impl ShotSession {
                 }
                 self.drag = Drag::Drawing(o);
             }
+            Drag::ScalingText { anchor, frac, d0, size0 } => {
+                if let Some(e) = self.editing.as_mut() {
+                    let f = ShotGeom::dist(p, anchor) / d0;
+                    let (lo, hi) = ShotTool::Text.size_range();
+                    e.object.size = (((size0 as f64 + 8.0) * f).round() as i64 - 8).clamp(lo, hi);
+                    let nb = e.object.bbox();
+                    let pad = 4.0;
+                    let nw = nb.w + 2.0 * pad;
+                    let nh = nb.h + 2.0 * pad;
+                    e.object.points = vec![Point::new(
+                        anchor.x - frac.0 * nw + pad,
+                        anchor.y - frac.1 * nh + pad,
+                    )];
+                }
+                self.drag = Drag::ScalingText { anchor, frac, d0, size0 };
+            }
+            Drag::MovingText { from, start } => {
+                if let Some(e) = self.editing.as_mut() {
+                    e.object.points = vec![Point::new(from.x + p.x - start.x, from.y + p.y - start.y)];
+                }
+                self.drag = Drag::MovingText { from, start };
+            }
             Drag::MovingObject {
                 index,
                 from,
@@ -2974,7 +3049,10 @@ impl ShotSession {
                     return;
                 }
             }
-            Drag::Resizing { .. } | Drag::MovingSelection { .. } => {}
+            Drag::Resizing { .. }
+            | Drag::MovingSelection { .. }
+            | Drag::ScalingText { .. }
+            | Drag::MovingText { .. } => {}
             Drag::Drawing(mut o) => {
                 let r = o.rect();
                 match o.tool {
@@ -4935,6 +5013,29 @@ mod overlay {
             if let Some(e) = &session.editing {
                 if e.display == d {
                     shot_cg::draw_text(&ctx, &e.object);
+                    // A dashed box so the text field is visible while typing.
+                    CGContext::save_g_state(Some(&ctx));
+                    set_stroke(&ctx, session.cfg.ui_color);
+                    CGContext::set_line_width(Some(&ctx), 1.0);
+                    let dashes: [f64; 2] = [4.0, 3.0];
+                    unsafe { CGContext::set_line_dash(Some(&ctx), 0.0, dashes.as_ptr(), dashes.len()) };
+                    let b = e.object.bbox();
+                    let o = Rect::new(b.x - 4.0, b.y - 4.0, b.w + 8.0, b.h + 8.0);
+                    CGContext::stroke_rect(Some(&ctx), cg_rect(o));
+                    unsafe { CGContext::set_line_dash(Some(&ctx), 0.0, std::ptr::null(), 0) };
+                    // Resize handles: corners + mid-edges.
+                    for hy in [0.0, 0.5, 1.0] {
+                        for hx in [0.0, 0.5, 1.0] {
+                            if hx == 0.5 && hy == 0.5 {
+                                continue;
+                            }
+                            let h = Rect::new(o.x + hx * o.w - 3.5, o.y + hy * o.h - 3.5, 7.0, 7.0);
+                            set_fill(&ctx, ShotColor::WHITE);
+                            CGContext::fill_rect(Some(&ctx), cg_rect(h));
+                            CGContext::stroke_rect(Some(&ctx), cg_rect(h));
+                        }
+                    }
+                    CGContext::restore_g_state(Some(&ctx));
                 }
             }
 
@@ -7714,6 +7815,10 @@ impl ScreenshotController {
                 if cfg.save_after_copy {
                     self.save(&img, &cfg, screen, None);
                 }
+                // The dismissable preview popup (Esc / Cmd+W closes it).
+                if cfg.preview {
+                    self.pin(&img, global_frame, screen);
+                }
             }
             ShotOutcome::Save => {
                 let to = forced_save_path
@@ -8468,7 +8573,7 @@ mod tests {
         let d = ScreenshotConfig::default();
         assert!(d.enabled);
         assert_eq!(d.button_size, 34.0);
-        assert_eq!(d.buttons.len(), 21, "default ring = 20 + size badge");
+        assert_eq!(d.buttons.len(), 20, "default ring has no inert size badge");
         assert_eq!(d.save_path, "~/Desktop");
         assert_eq!(d.user_colors.first(), Some(&None), "picker swatch first");
 
@@ -8874,13 +8979,9 @@ mod tests {
         assert!(s.grabbing.is_none(), "5: grab cancelled");
         s.escape();
         assert!(!s.side_panel_open, "6: side panel closed");
-        s.escape();
-        assert!(s.doc.selected.is_none(), "7: selection cleared");
-        s.escape();
-        assert!(s.tool.is_none(), "8: tool cleared");
         assert!(!s.finished);
         s.escape();
-        assert!(s.finished, "9: overlay finishes (abort)");
+        assert!(s.finished, "7: overlay finishes (abort) despite tool/selection");
         assert_eq!(s.outcome, Some(ShotOutcome::Abort));
     }
 
@@ -8892,10 +8993,11 @@ mod tests {
         // Tool letter.
         assert!(s.handle_key(&shot_key_event("p").unwrap()));
         assert_eq!(s.tool, Some(ShotTool::Pencil));
-        // Esc clears the tool (does not close yet).
+        // Esc with a tool armed cancels the capture.
         assert!(s.handle_key(&shot_key_event("esc").unwrap()));
-        assert_eq!(s.tool, None);
-        assert!(!s.finished);
+        assert!(s.finished);
+        let mut s = session();
+        s.test_select(Rect::new(10.0, 10.0, 100.0, 100.0), Some(0));
 
         // Tab cycles the pill stops (Screenshot → Recent); it no longer toggles
         // text mode (the audit's "changed by design"). `O` toggles Copy Text.
@@ -8973,7 +9075,7 @@ mod tests {
         assert_eq!(st["selection"]["w"], 300.0);
         assert_eq!(
             st["buttons"].as_array().unwrap().len(),
-            21,
+            20,
             "one button per ring tool"
         );
         assert_eq!(st["buttons"][0]["name"], "pencil");

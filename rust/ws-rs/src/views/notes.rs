@@ -1766,6 +1766,35 @@ pub fn prose_launch_target(
     }
 }
 
+/// The height (pt) of the draggable title strip at a prose pop-out's top. The
+/// page covers the transparent titlebar, so this band carries the drag and the
+/// double-click-to-zoom gesture (Swift `ProseWindow.sendEvent`'s
+/// `frame.height - 28`).
+pub const PROSE_TITLE_STRIP: f64 = 28.0;
+
+/// Whether a point (AppKit window coordinates, y up) lies in a prose pop-out's
+/// title strip.
+pub fn prose_in_title_strip(location_y: f64, frame_height: f64) -> bool {
+    location_y > frame_height - PROSE_TITLE_STRIP
+}
+
+/// `ProseWindow.sendEvent`'s double-click arm, as pure frame math: with no
+/// saved frame, remember `current` and fill `visible`; with one, restore it and
+/// clear the save. Returns the frame to apply and the new saved frame.
+pub fn prose_zoom_toggle(
+    current: crate::platform::screens::Rect,
+    saved: Option<crate::platform::screens::Rect>,
+    visible: crate::platform::screens::Rect,
+) -> (
+    crate::platform::screens::Rect,
+    Option<crate::platform::screens::Rect>,
+) {
+    match saved {
+        Some(restored) => (restored, None),
+        None => (visible, Some(current)),
+    }
+}
+
 fn now_secs() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1804,8 +1833,8 @@ mod macos {
     use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
     use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
-        NSAutoresizingMaskOptions, NSBackingStoreType, NSDraggingInfo, NSFont, NSImage,
-        NSImageScaling, NSImageView, NSNormalWindowLevel, NSPasteboard, NSScrollView,
+        NSAccessibility, NSAutoresizingMaskOptions, NSBackingStoreType, NSDraggingInfo, NSFont,
+        NSImage, NSImageScaling, NSImageView, NSNormalWindowLevel, NSPasteboard, NSScrollView,
         NSTextAttachment, NSTextField, NSTextView, NSView, NSWindow, NSWindowButton,
         NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
     };
@@ -2620,7 +2649,7 @@ mod macos {
     /// AppKit never releases it out from under us.
     struct ProseLive {
         path: String,
-        window: Retained<NSWindow>,
+        window: Retained<ProseWindow>,
         _web: Retained<WKWebView>,
         /// The vim-motion key monitor (`j k gg G Ctrl+D Ctrl+U`).
         _keys: crate::ui::popup::MonitorHandle,
@@ -2630,6 +2659,128 @@ mod macos {
         static LIVE_WINDOWS: RefCell<Vec<ProseLive>> = const { RefCell::new(Vec::new()) };
         static PROSE_CHILDREN: RefCell<HashMap<String, std::process::Child>>
             = RefCell::new(HashMap::new());
+    }
+
+    pub struct ProseTitleStripIvars {}
+
+    define_class!(
+        /// The transparent drag strip across a prose pop-out's top: the page's
+        /// `WKWebView` covers the hidden titlebar and swallows mouse drags, so
+        /// this thin band (the Swift "thin draggable title strip") is what moves
+        /// the window. A double-click here is caught by [`ProseWindow`]'s
+        /// `sendEvent:`.
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSProseTitleStrip"]
+        #[ivars = ProseTitleStripIvars]
+        pub struct ProseTitleStrip;
+
+        impl ProseTitleStrip {
+            #[unsafe(method(mouseDownCanMoveWindow))]
+            fn mouse_down_can_move_window(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _e: Option<&objc2_app_kit::NSEvent>) -> bool {
+                true
+            }
+        }
+
+        unsafe impl NSObjectProtocol for ProseTitleStrip {}
+    );
+
+    impl ProseTitleStrip {
+        fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(ProseTitleStripIvars {});
+            unsafe { msg_send![super(this), initWithFrame: frame] }
+        }
+    }
+
+    pub struct ProseWindowIvars {
+        /// The frame saved on the first double-click of the title strip, put
+        /// back on the second (Swift `ProseWindow.restoreFrame`).
+        restore_frame: Cell<Option<NSRect>>,
+    }
+
+    define_class!(
+        /// `NotesProse.swift`'s `ProseWindow`: a plain titled document window
+        /// whose hidden titlebar is covered by the page, so the
+        /// double-click-to-zoom titlebar gesture is caught in `sendEvent:`.
+        #[unsafe(super(NSWindow))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSProseWindow"]
+        #[ivars = ProseWindowIvars]
+        pub struct ProseWindow;
+
+        impl ProseWindow {
+            #[unsafe(method(canBecomeKeyWindow))]
+            fn can_become_key(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(canBecomeMainWindow))]
+            fn can_become_main(&self) -> bool {
+                true
+            }
+
+            /// `ProseWindow.sendEvent`: a double-click in the top strip toggles
+            /// fill/restore (the stock titlebar gesture never reaches the
+            /// hidden titlebar — the page is on top of it).
+            #[unsafe(method(sendEvent:))]
+            fn send_event(&self, event: &objc2_app_kit::NSEvent) {
+                if event.r#type() == objc2_app_kit::NSEventType::LeftMouseDown
+                    && event.clickCount() == 2
+                    && prose_in_title_strip(event.locationInWindow().y, self.frame().size.height)
+                {
+                    self.toggle_zoom();
+                    return;
+                }
+                unsafe { msg_send![super(self), sendEvent: event] }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for ProseWindow {}
+    );
+
+    impl ProseWindow {
+        fn new(mtm: MainThreadMarker, frame: NSRect, mask: NSWindowStyleMask) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(ProseWindowIvars {
+                restore_frame: Cell::new(None),
+            });
+            unsafe {
+                msg_send![
+                    super(this),
+                    initWithContentRect: frame,
+                    styleMask: mask,
+                    backing: NSBackingStoreType::Buffered,
+                    defer: false
+                ]
+            }
+        }
+
+        /// Fill the window to its screen, or put back the frame saved by the
+        /// previous double-click (Swift's `restoreFrame` flip).
+        fn toggle_zoom(&self) {
+            let current = nsrect_to_rect(self.frame());
+            let visible = self
+                .screen()
+                .map(|s| nsrect_to_rect(s.visibleFrame()))
+                .or_else(|| crate::platform::main_screen().map(|s| s.visible));
+            let Some(visible) = visible else { return };
+            let saved = self.ivars().restore_frame.get().map(nsrect_to_rect);
+            let (frame, next) = prose_zoom_toggle(current, saved, visible);
+            self.ivars().restore_frame.set(next.map(rect_to_nsrect));
+            self.setFrame_display_animate(rect_to_nsrect(frame), true, true);
+        }
+    }
+
+    fn nsrect_to_rect(r: NSRect) -> crate::platform::screens::Rect {
+        crate::platform::screens::Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
+    }
+
+    fn rect_to_nsrect(r: crate::platform::screens::Rect) -> NSRect {
+        NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h))
     }
 
     fn make_web(mtm: MainThreadMarker) -> Retained<WKWebView> {
@@ -2687,15 +2838,7 @@ mod macos {
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Resizable
             | NSWindowStyleMask::FullSizeContentView;
-        let window: Retained<NSWindow> = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                frame,
-                mask,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
+        let window = ProseWindow::new(mtm, frame, mask);
         let title = Path::new(&opts.path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -2707,7 +2850,14 @@ mod macos {
         window.setLevel(NSNormalWindowLevel);
         unsafe { window.setReleasedWhenClosed(false) };
         window.setBackgroundColor(Some(&opts.colors.base().to_nscolor()));
+        window.setMinSize(NSSize::new(320.0, 240.0));
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenAuxiliary);
+        // A dialog-like accessibility subrole: a tiling WM that floats the
+        // windows it is told are dialogs (AeroSpace) leaves the pop-out alone,
+        // so it keeps its own frame instead of being tiled onto a workspace.
+        unsafe {
+            window.setAccessibilitySubrole(Some(objc2_app_kit::NSAccessibilityDialogSubrole));
+        }
         for b in [
             NSWindowButton::CloseButton,
             NSWindowButton::MiniaturizeButton,
@@ -2718,10 +2868,35 @@ mod macos {
             }
         }
 
+        // The page fills a container; a thin strip on top is the drag handle
+        // the page would otherwise cover (the hidden titlebar). Letting the
+        // `WKWebView` be the content view directly leaves no background to
+        // drag, so the window could not be moved by its top.
+        let content = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)),
+        );
+        content.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
         let web = make_web(mtm);
-        web.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)));
+        web.setFrame(content.bounds());
         load_html(&web, &html);
-        window.setContentView(Some(&web));
+        content.addSubview(&web);
+        let strip = ProseTitleStrip::new(
+            mtm,
+            NSRect::new(
+                NSPoint::new(0.0, h - PROSE_TITLE_STRIP),
+                NSSize::new(w, PROSE_TITLE_STRIP),
+            ),
+        );
+        strip.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewMinYMargin,
+        );
+        content.addSubview(&strip);
+        window.setContentView(Some(&content));
         window.makeKeyAndOrderFront(None);
         // The same vim motions as the in-place reading view. A page with no
         // find bar, so the shared `scroll_key` is the whole key handler.
@@ -3804,11 +3979,14 @@ mod macos {
             }
             let target = path.map(str::to_string).or_else(|| self.selected_path());
             let Some(path) = target.filter(|p| Path::new(p).exists()) else {
-                self.prose_switch.set_prose(false);
+                // Nothing to render: leave the switch showing what is actually
+                // up (`prose_shown`) instead of a stale value, so a later click
+                // is not swallowed by the control's cached mode.
+                self.prose_switch.set_prose(self.prose_shown);
                 return;
             };
             let Ok(markdown) = std::fs::read_to_string(&path) else {
-                self.prose_switch.set_prose(false);
+                self.prose_switch.set_prose(self.prose_shown);
                 return;
             };
             if self.prose.is_none() {
@@ -3846,7 +4024,9 @@ mod macos {
         /// Re-render the reading view after the note changed (doc style).
         pub fn refresh_prose(&mut self) {
             if self.prose_shown {
-                self.prose_shown = false;
+                // Keep `prose_shown` set: a re-render must not flip the flag
+                // off first, or a failed render would leave the view up while
+                // the capsule (and later clicks) think it is hidden.
                 self.set_prose(true);
             }
         }
@@ -3855,7 +4035,6 @@ mod macos {
         /// `open_note`, where the path may not be the selected tab yet).
         fn refresh_prose_to(&mut self, path: &str) {
             if self.prose_shown {
-                self.prose_shown = false;
                 self.set_prose_to(true, Some(path));
             }
         }
@@ -5373,6 +5552,31 @@ mod tests {
             prose_launch_target(Some("/n/note.md"), |p| p == "/n/note.md"),
             Some("/n/note.md".to_string())
         );
+    }
+
+    #[test]
+    fn prose_title_strip_hit_test() {
+        // The top 28 pt of the window (y up) is the drag/zoom strip.
+        assert!(prose_in_title_strip(600.0 - 1.0, 600.0));
+        assert!(prose_in_title_strip(600.0 - PROSE_TITLE_STRIP + 0.5, 600.0));
+        // Just below it, and the very bottom, are the page.
+        assert!(!prose_in_title_strip(600.0 - PROSE_TITLE_STRIP, 600.0));
+        assert!(!prose_in_title_strip(0.0, 600.0));
+    }
+
+    #[test]
+    fn prose_zoom_toggle_fills_then_restores() {
+        use crate::platform::screens::Rect;
+        let cur = Rect::new(100.0, 100.0, 400.0, 300.0);
+        let visible = Rect::new(0.0, 0.0, 1440.0, 900.0);
+        // First double-click: remember the frame and fill the screen.
+        let (frame, saved) = prose_zoom_toggle(cur, None, visible);
+        assert_eq!(frame, visible);
+        assert_eq!(saved, Some(cur));
+        // Second double-click: put the saved frame back and clear the save.
+        let (frame, saved) = prose_zoom_toggle(visible, saved, visible);
+        assert_eq!(frame, cur);
+        assert_eq!(saved, None);
     }
 
     #[test]

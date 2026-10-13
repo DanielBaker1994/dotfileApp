@@ -26,7 +26,7 @@ mod appkit {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
-    use objc2_app_kit::{NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView};
+    use objc2_app_kit::{NSCursor, NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView};
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
 
@@ -59,6 +59,15 @@ mod appkit {
 
             #[unsafe(method(acceptsFirstMouse:))]
             fn afm(&self, _e: Option<&NSEvent>) -> bool { true }
+
+            /// Every segment is clickable, so the whole capsule is a
+            /// pointing-hand target (Swift `PopupWindow.resetCursorRects`
+            /// gives its clickable controls `.pointingHand` the same way).
+            #[allow(deprecated)]
+            #[unsafe(method(resetCursorRects))]
+            fn reset_cursor_rects(&self) {
+                self.addCursorRect_cursor(self.bounds(), &NSCursor::pointingHandCursor());
+            }
 
             #[unsafe(method(updateTrackingAreas))]
             fn uta(&self) {
@@ -102,9 +111,10 @@ mod appkit {
                     3 => ProseSwitchEvent::Style,
                     i => {
                         let want = i == 0;
-                        if want == self.ivars().prose.get() {
-                            return;
-                        }
+                        // Always report the click: the notes surface owns the
+                        // reading-view state, so a cached copy here must never
+                        // swallow the event (it goes stale after the view is
+                        // re-rendered / toggled outside this control).
                         self.ivars().prose.set(want);
                         self.setNeedsDisplay(true);
                         ProseSwitchEvent::Mode(want)
