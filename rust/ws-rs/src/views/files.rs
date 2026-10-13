@@ -713,6 +713,62 @@ pub fn rename_into(old_path: &str, new_name: &str) -> Result<Option<String>, Str
     Ok(Some(dst))
 }
 
+/// Finder's "Compress": the archive path for `paths` — `<name>.zip` for one
+/// item, `Archive.zip` for several — beside the first item, with ` 2`, ` 3`…
+/// added while the name is taken. `None` for an empty selection.
+pub fn compress_target(paths: &[String], exists: &dyn Fn(&str) -> bool) -> Option<String> {
+    let first = Path::new(paths.first()?);
+    let dir = first.parent()?.to_string_lossy().into_owned();
+    let base = if paths.len() == 1 {
+        first.file_name()?.to_string_lossy().into_owned()
+    } else {
+        "Archive".to_string()
+    };
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { format!("{base}.zip") } else { format!("{base} {n}.zip") };
+        let p = format!("{}/{name}", dir.trim_end_matches('/'));
+        if !exists(&p) {
+            return Some(p);
+        }
+        n += 1;
+    }
+}
+
+/// Zip `paths` into [`compress_target`] like Finder: one item through
+/// `ditto -c -k --sequesterRsrc --keepParent`, several through `zip -r -y`
+/// run in their folder (relative names, symlinks kept). Blocking — call it
+/// off the main thread. `Ok(archive path)` or `Err(message)`.
+pub fn compress_paths(paths: &[String]) -> Result<String, String> {
+    let dst = compress_target(paths, &|p| Path::new(p).exists()).ok_or("nothing selected")?;
+    let out = if paths.len() == 1 {
+        std::process::Command::new("/usr/bin/ditto")
+            .args(["-c", "-k", "--sequesterRsrc", "--keepParent", &paths[0], &dst])
+            .output()
+    } else {
+        let dir = Path::new(&paths[0]).parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| match Path::new(p).strip_prefix(&dir) {
+                Ok(rel) => rel.to_string_lossy().into_owned(),
+                Err(_) => p.clone(),
+            })
+            .collect();
+        std::process::Command::new("/usr/bin/zip")
+            .current_dir(&dir)
+            .args(["-q", "-r", "-y", &dst])
+            .args(&names)
+            .output()
+    }
+    .map_err(|e| format!("couldn't compress: {e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&dst);
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("couldn't compress: {}", if err.is_empty() { "the zip tool failed".into() } else { err }));
+    }
+    Ok(dst)
+}
+
 pub fn duplicate_paths(paths: &[String], undo: &UndoStack) -> Outcome {
     FileOps::duplicate(paths, undo)
 }
@@ -2228,6 +2284,38 @@ mod macos {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compress_names_like_finder() {
+        let none = |_: &str| false;
+        assert_eq!(compress_target(&["/d/notes.md".into()], &none).as_deref(), Some("/d/notes.md.zip"));
+        assert_eq!(compress_target(&["/d/proj".into()], &none).as_deref(), Some("/d/proj.zip"));
+        let two = vec!["/d/a.txt".to_string(), "/d/b".to_string()];
+        assert_eq!(compress_target(&two, &none).as_deref(), Some("/d/Archive.zip"));
+        let taken = |p: &str| p == "/d/Archive.zip" || p == "/d/Archive 2.zip";
+        assert_eq!(compress_target(&two, &taken).as_deref(), Some("/d/Archive 3.zip"));
+        assert_eq!(compress_target(&[], &none), None);
+    }
+
+    #[test]
+    fn compress_paths_zips_a_folder_and_a_selection() {
+        let dir = std::env::temp_dir().join(format!("ks-zip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("proj/sub")).unwrap();
+        std::fs::write(dir.join("proj/sub/x.txt"), "x").unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let one = compress_paths(&[format!("{d}/proj")]).unwrap();
+        assert_eq!(one, format!("{d}/proj.zip"));
+        assert!(std::fs::metadata(&one).unwrap().len() > 0);
+        let many = compress_paths(&[format!("{d}/a.txt"), format!("{d}/proj")]).unwrap();
+        assert_eq!(many, format!("{d}/Archive.zip"));
+        let list = std::process::Command::new("/usr/bin/unzip").args(["-Z1", &many]).output().unwrap();
+        let names = String::from_utf8_lossy(&list.stdout);
+        assert!(names.lines().any(|l| l == "a.txt"), "{names}");
+        assert!(names.lines().any(|l| l == "proj/sub/x.txt"), "{names}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn rows() -> Vec<Entry> {

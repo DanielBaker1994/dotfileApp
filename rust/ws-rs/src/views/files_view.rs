@@ -1091,9 +1091,9 @@ mod appkit {
                 }
                 (w + 18.0).ceil()
             };
-            let parent = Rect::new(x0, TOOLBAR_Y, TOOLBAR_H + 4.0, TOOLBAR_H);
+            // No toolbar "up" button: the list's `..` row does that job.
             let pin_w = fit("Pin", true, false).max(fit("Pinned", true, false));
-            let pin = Rect::new(parent.max_x() + 10.0, TOOLBAR_Y, pin_w, TOOLBAR_H);
+            let pin = Rect::new(x0, TOOLBAR_Y, pin_w, TOOLBAR_H);
             let sort_w = super::super::files::SortKey::ALL
                 .iter()
                 .map(|k| fit(k.short(), true, true))
@@ -1102,7 +1102,7 @@ mod appkit {
             let order_w = fit("Asc", true, false).max(fit("Desc", true, false));
             let order = Rect::new(sort.max_x(), TOOLBAR_Y, order_w, TOOLBAR_H);
             let _ = &snap;
-            vec![(TB_PARENT, parent), (TB_PIN, pin), (TB_SORT, sort), (TB_ORDER, order)]
+            vec![(TB_PIN, pin), (TB_SORT, sort), (TB_ORDER, order)]
         }
 
         fn toolbar_hit(&self, x: f64, y: f64) -> Option<i32> {

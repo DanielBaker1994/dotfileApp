@@ -8600,6 +8600,30 @@ mod daemon_ui {
             self.files_op_done(format!("Moved {} item(s) to the Trash \u{b7} \u{2318}Z undoes", paths.len()), o.failed);
         }
 
+        /// Finder's "Compress": zip the selection beside it (off the main
+        /// thread — a big folder takes a while), then select the archive.
+        fn files_compress(&self) {
+            let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
+            if paths.is_empty() {
+                return;
+            }
+            crate::ui::toast::show(&format!("Compressing {}\u{2026}", copied_what(&paths)), "doc.zipper");
+            std::thread::spawn(move || {
+                let res = crate::views::files::compress_paths(&paths);
+                on_ui(move |ui| match res {
+                    Ok(zip) => {
+                        ui.files_surface(|b| {
+                            b.reload();
+                            b.select_path(&zip);
+                        });
+                        let name = std::path::Path::new(&zip).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        crate::ui::toast::show(&format!("Created {name}"), "checkmark.circle.fill");
+                    }
+                    Err(msg) => crate::ui::toast::show(&msg, "exclamationmark.triangle.fill"),
+                });
+            });
+        }
+
         fn files_duplicate(&self) {
             use crate::engines::file_ops::FileOps;
             let paths = self.files_surface(|b| b.selected_paths()).unwrap_or_default();
@@ -9040,6 +9064,13 @@ mod daemon_ui {
             }
             if can_perform(Action::Duplicate, &ctx) {
                 entries.push(MenuEntry::item("Duplicate", call(Self::files_duplicate)));
+                let title = if many {
+                    format!("Compress {} Items", paths.len())
+                } else {
+                    let name = std::path::Path::new(&first).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    format!("Compress \u{201c}{name}\u{201d}")
+                };
+                entries.push(MenuEntry::item(&title, call(Self::files_compress)));
             }
             entries.push(MenuEntry::Separator);
             {
