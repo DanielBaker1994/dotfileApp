@@ -461,9 +461,12 @@ mod appkit {
             }
             // One pane with the Open list below: the fill runs past the view so
             // the clipped bottom corners are square, then a hairline divides them.
+            let bounds = self.bounds();
+            NSGraphicsContext::saveGraphicsState_class();
+            NSBezierPath::clipRect(bounds);
             style::fill_rounded(Rect::new(g.card.x, g.card.y, g.card.width, g.card.height + 20.0), 12.0, c.mantle());
-            let bottom = self.bounds().size.height;
-            style::fill_rect(Rect::new(g.card.x + 8.0, bottom - 1.0, (g.card.width - 16.0).max(0.0), 1.0), c.surface0());
+            style::fill_rect(Rect::new(g.card.x + 8.0, bounds.size.height - 1.0, (g.card.width - 16.0).max(0.0), 1.0), c.surface0());
+            NSGraphicsContext::restoreGraphicsState_class();
             let hf = style::system_font(10.0, Weight::Semibold);
             let collapsed = self.ivars().collapsed.get();
             style::draw_symbol(

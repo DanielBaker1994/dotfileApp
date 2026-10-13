@@ -855,7 +855,10 @@ mod appkit {
             // Joined to a card above: draw it taller than the view so the
             // clipped top corners are square and the two read as one pane.
             let fill = if m.join_top { Rect::new(card.x, card.y - 20.0, card.width, card.height + 20.0) } else { card };
+            NSGraphicsContext::saveGraphicsState_class();
+            NSBezierPath::clipRect(self.bounds());
             style::fill_rounded(fill, 12.0, c.mantle());
+            NSGraphicsContext::restoreGraphicsState_class();
             let radius = 4.0;
             let hover = self.ivars().hover.get();
             for (r, title) in &g.pinned_heads {
