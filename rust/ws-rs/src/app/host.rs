@@ -9586,6 +9586,28 @@ mod daemon_ui {
                         );
                     }
                 }
+                E::BoardSprint(sprint) => {
+                    self.jira_surface(|l| l.pick_sprint(&sprint));
+                }
+                E::BoardMode(mode) => {
+                    self.jira_surface(|l| l.set_mode(&mode));
+                }
+                E::BoardPin => {
+                    self.jira_surface(|l| {
+                        if let Some(spec) = l.current_view_spec() {
+                            l.toggle_pin_view(&spec);
+                        }
+                    });
+                }
+                E::OpenKey(key) => {
+                    let url = self.jira_surface(|l| {
+                        let site = l.site();
+                        (!site.is_empty()).then(|| format!("{site}/browse/{key}"))
+                    });
+                    if let Some(Some(url)) = url {
+                        open_url(&url);
+                    }
+                }
                 E::Sidebar(SidebarEvent::Select(i)) => {
                     self.jira_surface(|l| l.select_tab(i));
                 }

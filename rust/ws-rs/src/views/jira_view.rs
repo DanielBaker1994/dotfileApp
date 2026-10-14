@@ -13,7 +13,10 @@ use crate::app::paths::JiraPaths;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel, SidebarPin, SidebarRow};
 use crate::ui::theme::PopupTone;
 use crate::app::config::ListColumn;
-use crate::views::jira::{base_field_label, board_columns, parse_columns, parse_columns_value, style_rules, BoardColumn, CellStyle, StyleRules};
+use crate::views::jira::{
+    base_field_label, board_columns, parse_columns_value, style_rules, BoardColumn, CellStyle,
+    JiraBoardBarModel, SprintChoice, StyleRules,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -62,6 +65,10 @@ pub struct BoardSprint {
     pub id: String,
     pub name: String,
     pub state: String,
+    /// `start` / `end` / `complete` (ISO dates) for the bar's summary.
+    pub start: String,
+    pub end: String,
+    pub complete: String,
 }
 
 /// `PopupTableColumn.frames(x0:usable:)` — percent widths, autos share the
@@ -1020,6 +1027,9 @@ impl JiraList {
                             id: sid.to_string(),
                             name: s.get("name").and_then(Value::as_str).unwrap_or(sid).to_string(),
                             state: s.get("state").and_then(Value::as_str).unwrap_or("").to_string(),
+                            start: s.get("startDate").and_then(Value::as_str).unwrap_or("").to_string(),
+                            end: s.get("endDate").and_then(Value::as_str).unwrap_or("").to_string(),
+                            complete: s.get("completeDate").and_then(Value::as_str).unwrap_or("").to_string(),
                         })
                     })
                     .collect();
@@ -1049,15 +1059,14 @@ impl JiraList {
             .unwrap_or_default()
     }
 
-    /// Recompute the open board's columns from its loaded rows (`renderBoardColumns`).
-    pub fn compute_board_columns(&mut self) {
-        let Some(id) = self.on_board() else {
-            self.board_cols = Vec::new();
-            return;
-        };
+    /// The `jira.board_columns` params for the open board, from its shown rows
+    /// (so the search narrows the lanes, as `renderBoardColumns` did in Swift).
+    fn board_columns_params(&self) -> Option<Value> {
+        let id = self.on_board()?;
         let rows: Vec<Value> = self
-            .all
+            .rows
             .iter()
+            .filter_map(|&i| self.all.get(i))
             .map(|r| {
                 let f = |k: &str| r.get(k).cloned().unwrap_or_default();
                 serde_json::json!({
@@ -1077,18 +1086,36 @@ impl JiraList {
             .as_ref()
             .map(|r| serde_json::to_value(&r.words).unwrap_or_else(|_| serde_json::json!({})))
             .unwrap_or_else(|| serde_json::json!({}));
-        let params = serde_json::json!({
+        Some(serde_json::json!({
             "rows": rows,
             "columns": spec,
             "categories": {},
             "words": words,
             "people": {},
             "categoryNames": ["To Do", "In Progress", "Done"],
-        });
+        }))
+    }
+
+    /// Recompute the open board's columns from its loaded rows (`renderBoardColumns`).
+    pub fn compute_board_columns(&mut self) {
+        let Some(params) = self.board_columns_params() else {
+            self.board_cols = Vec::new();
+            return;
+        };
         // The Swift board called `jira.board_columns` through the Python
         // helper; use it when the helper is up (same code the Python tests
         // cover) and fall back to the identical pure port in unit tests.
         self.board_cols = crate::views::jira::helper_board_columns(&params).unwrap_or_else(|_| board_columns(&params));
+    }
+
+    /// [`compute_board_columns`] without the helper IPC — the per-keystroke
+    /// search path, where a blocking helper call would stutter the list.
+    fn refresh_board_columns(&mut self) {
+        let Some(params) = self.board_columns_params() else {
+            self.board_cols = Vec::new();
+            return;
+        };
+        self.board_cols = board_columns(&params);
     }
 
     /// `openView(_:)` — parse `board|sprint|mode` and open that board.
@@ -1301,6 +1328,117 @@ impl JiraList {
         Some(format!("{id}|{sprint}|{mode}"))
     }
 
+    /// `sprintTitle(_:_:)` — the sprint's display name for the bar.
+    pub fn sprint_title(&self, board: &str, sp: &str) -> String {
+        match sp {
+            "all" => "All issues".to_string(),
+            "current" => self
+                .board_sprints(board)
+                .into_iter()
+                .find(|s| s.state == "active")
+                .map(|s| format!("{} (current)", s.name))
+                .unwrap_or_else(|| "Current sprint".to_string()),
+            _ => self
+                .board_sprints(board)
+                .into_iter()
+                .find(|s| s.id == sp)
+                .map(|s| s.name)
+                .unwrap_or_else(|| format!("Sprint {sp}")),
+        }
+    }
+
+    /// `updateBoardChrome`'s sprint choices: the active sprint as `current`,
+    /// future sprints as `(next)`, a `Past sprints` section, then `All issues`.
+    pub fn board_sprint_choices(&self, id: &str) -> Vec<SprintChoice> {
+        let mut choices: Vec<SprintChoice> = Vec::new();
+        let sprints = self.board_sprints(id);
+        if sprints.is_empty() {
+            return choices;
+        }
+        if sprints.iter().any(|s| s.state == "active") {
+            choices.push(SprintChoice {
+                id: "current".into(),
+                title: self.sprint_title(id, "current"),
+                header: false,
+            });
+        }
+        for s in sprints.iter().filter(|s| s.state == "future") {
+            choices.push(SprintChoice {
+                id: s.id.clone(),
+                title: format!("{} (next)", s.name),
+                header: false,
+            });
+        }
+        let past: Vec<&BoardSprint> = sprints.iter().filter(|s| s.state == "closed").collect();
+        if !past.is_empty() {
+            choices.push(SprintChoice { id: String::new(), title: String::new(), header: true });
+            choices.push(SprintChoice { id: String::new(), title: "Past sprints".into(), header: true });
+            for s in past {
+                choices.push(SprintChoice { id: s.id.clone(), title: s.name.clone(), header: false });
+            }
+        }
+        choices.push(SprintChoice { id: String::new(), title: String::new(), header: true });
+        choices.push(SprintChoice { id: "all".into(), title: "All issues".into(), header: false });
+        choices
+    }
+
+    /// `sprintSummary(_:_:count:)` — `N issues · Oct 1 – Oct 14` (or
+    /// `ended Oct 14` for a closed sprint). The first ten ISO chars are the
+    /// date; a bad value is dropped.
+    pub fn board_summary(&self, board: &str, sp: &str) -> String {
+        let count = self
+            .rows
+            .iter()
+            .filter(|&&i| self.rec(i).is_some_and(|r| !is_synthetic(r)))
+            .count();
+        let mut parts = vec![format!("{count} issue{}", if count == 1 { "" } else { "s" })];
+        let s = if sp == "current" {
+            self.board_sprints(board).into_iter().find(|s| s.state == "active")
+        } else {
+            self.board_sprints(board).into_iter().find(|s| s.id == sp)
+        };
+        if let Some(s) = s {
+            if s.state == "closed" {
+                if let Some(e) = sprint_day(&s.complete).or_else(|| sprint_day(&s.end)) {
+                    parts.push(format!("ended {e}"));
+                }
+            } else if let Some(a) = sprint_day(&s.start) {
+                let b = sprint_day(&s.end).unwrap_or_else(|| "?".to_string());
+                parts.push(format!("{a} – {b}"));
+            }
+        }
+        parts.join(" · ")
+    }
+
+    /// `updateBoardChrome` — the board bar model when a board is open, else
+    /// `None` (the "All boards" list has no bar).
+    pub fn board_bar(&self) -> Option<JiraBoardBarModel> {
+        let id = self.on_board()?;
+        let sp = self
+            .board_sprint
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| self.default_sprint(&id));
+        let mode = self
+            .board_mode
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "columns".to_string());
+        let pinned = self
+            .current_view_spec()
+            .is_some_and(|v| self.pinned_views.iter().any(|p| p == &v));
+        let mut bar = JiraBoardBarModel::default();
+        bar.show(
+            &self.board_name(&id),
+            self.board_sprint_choices(&id),
+            &sp,
+            &mode,
+            pinned,
+            &self.board_summary(&id, &sp),
+        );
+        Some(bar)
+    }
+
     /// `sidebarSelection` — the pinned view key when the current view is pinned,
     /// else the shown pin key.
     fn sidebar_selected(&self) -> String {
@@ -1421,6 +1559,8 @@ impl JiraList {
             filter_active,
             compact: false,
             reserve_label: false,
+            board_bar: None,
+            board_columns: None,
             sidebar: self.sidebar_model(),
             inspector: None,
             show_inspector: false,
@@ -2157,6 +2297,28 @@ pub struct InspectorContent {
     pub body: String,
 }
 
+/// `sprintSummary`'s `day(_:)`: the first ten chars `yyyy-MM-dd` -> `MMM d`
+/// (US month names). A short / non-date value is `None`.
+pub fn sprint_day(v: &str) -> Option<String> {
+    let d = v.get(..10)?;
+    let mut parts = d.split('-');
+    let (Some(y), Some(m), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    if y.len() != 4 {
+        return None;
+    }
+    let month: usize = m.parse().ok()?;
+    let day: u32 = day.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    Some(format!("{} {}", MONTHS[month - 1], day))
+}
+
 /// A group header or the "load N more…" row (not an issue).
 pub fn is_synthetic(r: &Record) -> bool {
     r.contains_key("__group") || r.contains_key("__loadmore")
@@ -2255,6 +2417,14 @@ pub enum JiraEvent {
     ColumnsReordered { from: usize, to: usize },
     /// The lead gutter's ↔ glyph (`onFit`).
     FitColumns,
+    /// The board bar's sprint picker (`boardBar.onSprint`).
+    BoardSprint(String),
+    /// The board bar's Columns / Table switch (`boardBar.onMode`).
+    BoardMode(String),
+    /// The board bar's Pin button (`boardBar.onPin`).
+    BoardPin,
+    /// A kanban card was clicked (`open:KEY` from the board page).
+    OpenKey(String),
     Sidebar(crate::ui::sidebar::SidebarEvent),
 }
 
@@ -2297,6 +2467,12 @@ pub struct JiraSnapshot {
     /// Every column reserves its full header label's width (`[jira]
     /// reserve-label-width`).
     pub reserve_label: bool,
+    /// The board bar (`updateBoardChrome`) when a board is open, else `None`.
+    pub board_bar: Option<JiraBoardBarModel>,
+    /// The kanban columns when a board is open in `columns` mode — the web
+    /// overlay's data. `None` shows the normal table (or the board's table
+    /// mode).
+    pub board_columns: Option<Vec<BoardColumn>>,
     pub sidebar: SidebarModel,
     pub inspector: Option<InspectorContent>,
     pub show_inspector: bool,
@@ -2307,7 +2483,15 @@ pub struct JiraSnapshot {
 
 impl JiraList {
     pub fn snapshot(&self) -> JiraSnapshot {
-        if let Some(board) = self.board_snapshot() {
+        let bar = self.board_bar();
+        let columns = if self.on_board_columns() && !self.board_cols.is_empty() {
+            Some(self.board_cols.clone())
+        } else {
+            None
+        };
+        if let Some(mut board) = self.board_snapshot() {
+            board.board_bar = bar;
+            board.board_columns = columns;
             return board;
         }
         let rows: Vec<Record> = self.rows.iter().filter_map(|&i| self.rec(i).cloned()).collect();
@@ -2331,6 +2515,8 @@ impl JiraList {
                 .collect(),
             compact: self.compact_cells(),
             reserve_label: self.reserve_label_width(),
+            board_bar: bar,
+            board_columns: columns,
             sidebar: self.sidebar_model(),
             inspector: self.inspector_content(),
             show_inspector: self.inspector,
@@ -2376,6 +2562,11 @@ impl JiraList {
                 self.selection = 0;
                 self.visible_offset = 0;
                 self.refilter();
+                // The kanban's lanes follow the search (`renderBoardColumns`
+                // ran on every query change in Swift).
+                if self.on_board().is_some() {
+                    self.refresh_board_columns();
+                }
             }
             JiraEvent::Move(d) => {
                 let n = self.rows.len() as i64;
@@ -2399,6 +2590,19 @@ impl JiraList {
             }
             // The context menu is a UI action; selecting the row is model state.
             JiraEvent::RowMenu { row, .. } => self.selection = row,
+            JiraEvent::BoardSprint(s) => {
+                self.pick_sprint(&s);
+            }
+            JiraEvent::BoardMode(m) => {
+                self.set_mode(&m);
+            }
+            JiraEvent::BoardPin => {
+                if let Some(spec) = self.current_view_spec() {
+                    self.toggle_pin_view(&spec);
+                }
+            }
+            // Opening a card is a UI action (browser URL).
+            JiraEvent::OpenKey(_) => {}
             JiraEvent::Sidebar(SidebarEvent::Select(i)) => self.select_tab(i),
             JiraEvent::Sidebar(SidebarEvent::Pinned(key)) => {
                 if let Some(id) = key.strip_prefix(MY_WORK_PREFIX) {
@@ -2434,9 +2638,10 @@ mod appkit {
     use objc2::runtime::{AnyObject, ProtocolObject, Sel};
     use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
     use objc2_app_kit::{
-        NSStringDrawingDeprecated, NSBezierPath, NSControlTextEditingDelegate, NSEvent, NSFocusRingType, NSFont,
-        NSGraphicsContext, NSScrollView, NSStringDrawingOptions, NSTextField, NSTextFieldDelegate,
-        NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView,
+        NSStringDrawingDeprecated, NSBezierPath, NSButton, NSButtonType, NSControlSize, NSControlTextEditingDelegate,
+        NSEvent, NSFont, NSGraphicsContext, NSLineBreakMode, NSMenuItem, NSPopUpButton,
+        NSScrollView, NSSegmentStyle, NSSegmentSwitchTracking, NSSegmentedControl, NSStringDrawingOptions,
+        NSTextField, NSTextFieldDelegate, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView,
     };
     use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::cell::{Cell, RefCell};
@@ -3384,6 +3589,262 @@ mod appkit {
         }
     }
 
+    // -------------------------------------------------------- board bar
+
+    /// `JiraBoardBar` — the open board's top bar: title, sprint popup,
+    /// Columns / Table switch, issue summary, Pin.
+    pub struct BoardBarIvars {
+        title: Retained<NSTextField>,
+        sprint: Retained<NSPopUpButton>,
+        mode: Retained<NSSegmentedControl>,
+        summary: Retained<NSTextField>,
+        pin: Retained<NSButton>,
+        /// The sprint menu structure (one entry per choice; the popup's
+        /// `indexOfSelectedItem` indexes this).
+        choices: RefCell<Vec<SprintChoice>>,
+        colors: Cell<PopupColors>,
+        sink: RefCell<Option<Sink>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "WSJiraBoardBar"]
+        #[ivars = BoardBarIvars]
+        pub struct JiraBoardBarView;
+
+        impl JiraBoardBarView {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool { true }
+
+            #[unsafe(method(sprintPicked:))]
+            fn sprint_picked(&self, _sender: &AnyObject) {
+                let i = self.ivars().sprint.indexOfSelectedItem();
+                let choice = self.ivars().choices.borrow().get(i.max(0) as usize).cloned();
+                if let Some(c) = choice {
+                    if !c.header && !c.id.is_empty() {
+                        self.emit(JiraEvent::BoardSprint(c.id));
+                    }
+                }
+            }
+
+            #[unsafe(method(modePicked:))]
+            fn mode_picked(&self, _sender: &AnyObject) {
+                let m = if self.ivars().mode.selectedSegment() == 1 { "table" } else { "columns" };
+                self.emit(JiraEvent::BoardMode(m.to_string()));
+            }
+
+            #[unsafe(method(pinClicked:))]
+            fn pin_clicked(&self, _sender: &AnyObject) {
+                self.emit(JiraEvent::BoardPin);
+            }
+
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _r: NSRect) {
+                let iv = self.ivars();
+                let b = self.bounds();
+                style::fill_rect(
+                    Rect::new(0.0, b.size.height - 1.0, b.size.width, 1.0),
+                    iv.colors.get().hairline(),
+                );
+            }
+        }
+
+        unsafe impl NSObjectProtocol for JiraBoardBarView {}
+    );
+
+    impl JiraBoardBarView {
+        fn emit(&self, ev: JiraEvent) {
+            if let Some(s) = self.ivars().sink.borrow().as_ref() {
+                s(ev);
+            }
+        }
+
+        pub fn set_on_event(&self, cb: Box<dyn Fn(JiraEvent)>) {
+            *self.ivars().sink.borrow_mut() = Some(Rc::from(cb));
+        }
+
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors) -> Retained<Self> {
+            let title = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            title.setFont(Some(&style::system_font(14.0, Weight::Semibold)));
+            title.setTextColor(Some(&colors.text.to_nscolor()));
+            title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            title.setDrawsBackground(false);
+            title.setBezeled(false);
+            title.setEditable(false);
+            title.setSelectable(false);
+
+            let sprint = NSPopUpButton::new(mtm);
+            sprint.setControlSize(NSControlSize::Small);
+            sprint.setHidden(true);
+
+            let mode = NSSegmentedControl::new(mtm);
+            mode.setSegmentCount(2);
+            mode.setLabel_forSegment(&NSString::from_str("Columns"), 0);
+            mode.setLabel_forSegment(&NSString::from_str("Table"), 1);
+            mode.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
+            mode.setSegmentStyle(NSSegmentStyle::Rounded);
+            mode.setSelectedSegment(0);
+            mode.setControlSize(NSControlSize::Small);
+
+            let summary = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            summary.setFont(Some(&style::system_font(11.5, Weight::Regular)));
+            summary.setTextColor(Some(&colors.dim.to_nscolor()));
+            summary.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            summary.setDrawsBackground(false);
+            summary.setBezeled(false);
+            summary.setEditable(false);
+            summary.setSelectable(false);
+
+            let pin = unsafe {
+                NSButton::buttonWithTitle_target_action(
+                    &NSString::from_str("Pin to Sidebar"),
+                    None,
+                    None,
+                    mtm,
+                )
+            };
+            pin.setButtonType(NSButtonType::MomentaryPushIn);
+            pin.setControlSize(NSControlSize::Small);
+            pin.setFont(Some(&style::system_font(11.0, Weight::Regular)));
+
+            let this = Self::alloc(mtm).set_ivars(BoardBarIvars {
+                title,
+                sprint,
+                mode,
+                summary,
+                pin,
+                choices: RefCell::new(Vec::new()),
+                colors: Cell::new(colors),
+                sink: RefCell::new(None),
+            });
+            let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+            let iv = v.ivars();
+            unsafe {
+                iv.sprint.setTarget(Some(as_any(&*v)));
+                iv.sprint.setAction(Some(sel!(sprintPicked:)));
+                iv.mode.setTarget(Some(as_any(&*v)));
+                iv.mode.setAction(Some(sel!(modePicked:)));
+                iv.pin.setTarget(Some(as_any(&*v)));
+                iv.pin.setAction(Some(sel!(pinClicked:)));
+            }
+            for sub in [&*iv.title as &NSView, &iv.sprint, &iv.mode, &iv.summary, &iv.pin] {
+                v.addSubview(sub);
+            }
+            v
+        }
+
+        pub fn set_model(&self, m: &JiraBoardBarModel, colors: PopupColors) {
+            let iv = self.ivars();
+            iv.colors.set(colors);
+            iv.title.setStringValue(&NSString::from_str(&m.board));
+            iv.title.setTextColor(Some(&colors.text.to_nscolor()));
+            iv.summary.setStringValue(&NSString::from_str(&m.summary));
+            iv.summary.setTextColor(Some(&colors.dim.to_nscolor()));
+            iv.pin.setTitle(&NSString::from_str(m.pin_title()));
+            iv.pin.setToolTip(Some(&NSString::from_str(if m.pinned {
+                "Unpin this view from the sidebar"
+            } else {
+                "Keep this exact view (board + sprint) as a row in the sidebar"
+            })));
+            // Rebuild the sprint menu: one entry per choice, headers become a
+            // separator (or a disabled item when they carry a title).
+            iv.sprint.removeAllItems();
+            iv.sprint.setHidden(m.choices.is_empty());
+            let mtm = MainThreadMarker::new();
+            for c in &m.choices {
+                if c.header {
+                    let Some(mtm) = mtm else { continue };
+                    let Some(menu) = iv.sprint.menu() else { continue };
+                    let item = if c.title.is_empty() {
+                        NSMenuItem::separatorItem(mtm)
+                    } else {
+                        let it = unsafe {
+                            NSMenuItem::initWithTitle_action_keyEquivalent(
+                                NSMenuItem::alloc(mtm),
+                                &NSString::from_str(&c.title),
+                                None,
+                                &NSString::from_str(""),
+                            )
+                        };
+                        it.setEnabled(false);
+                        it
+                    };
+                    menu.addItem(&item);
+                } else {
+                    iv.sprint.addItemWithTitle(&NSString::from_str(&c.title));
+                }
+            }
+            iv.sprint.setAutoenablesItems(false);
+            if let Some(i) = m.choices.iter().position(|c| !c.header && c.id == m.picked) {
+                iv.sprint.selectItemAtIndex(i as isize);
+            }
+            iv.mode.setSelectedSegment(if m.mode == "table" { 1 } else { 0 });
+            *iv.choices.borrow_mut() = m.choices.clone();
+            self.layout_controls();
+            self.setNeedsDisplay(true);
+        }
+
+        pub fn layout_controls(&self) {
+            let iv = self.ivars();
+            let b = self.bounds();
+            let (w, h) = (b.size.width, b.size.height);
+            // Natural widths from AppKit's own metrics (accurate for the font).
+            iv.title.sizeToFit();
+            iv.pin.sizeToFit();
+            let title_w = iv.title.frame().size.width.min((w * 0.4).max(60.0));
+            let pin_w = iv.pin.frame().size.width.max(80.0);
+            let mut x = 16.0;
+            let th = iv.title.frame().size.height;
+            iv.title
+                .setFrame(NSRect::new(NSPoint::new(x, (h - th) / 2.0), NSSize::new(title_w, th)));
+            x += title_w + 10.0;
+            if !iv.sprint.isHidden() {
+                let pw = 150.0_f64.min((w * 0.22).max(90.0));
+                iv.sprint.setFrame(ns(Rect::new(x, (h - 22.0) / 2.0, pw, 22.0)));
+                x += pw + 10.0;
+            }
+            iv.mode.setFrame(ns(Rect::new(x, (h - 24.0) / 2.0, 150.0, 24.0)));
+            x += 158.0;
+            let pin_x = (w - pin_w - 14.0).max(x);
+            iv.pin.setFrame(ns(Rect::new(pin_x, (h - 22.0) / 2.0, pin_w, 22.0)));
+            let sum_x = x;
+            let sum_w = (pin_x - 10.0 - sum_x).max(0.0);
+            let (_, sh) = style::text_size("Ag", &style::system_font(11.5, Weight::Regular));
+            iv.summary.setFrame(ns(Rect::new(sum_x, (h - sh) / 2.0, sum_w, sh)));
+        }
+    }
+
+    /// `JiraBoardColumnsView.pageColors(_:)` — the `@key` values the board page
+    /// substitutes (hex for solid colors, `rgba()` for the translucent fills).
+    pub fn board_page_colors(c: &PopupColors) -> HashMap<String, String> {
+        fn css(x: Rgba) -> String {
+            format!("#{}", crate::ui::theme::HexColor::format_rgb(&x))
+        }
+        fn rgba(x: Rgba, a: f64) -> String {
+            let c = x.opaque();
+            format!(
+                "rgba({},{},{},{:.3})",
+                (c.r * 255.0).round() as i64,
+                (c.g * 255.0).round() as i64,
+                (c.b * 255.0).round() as i64,
+                a
+            )
+        }
+        let mut m: HashMap<String, String> = HashMap::new();
+        m.insert("bg".into(), css(c.background));
+        m.insert("text".into(), css(c.text));
+        m.insert("dim".into(), css(c.dim));
+        m.insert("accent".into(), css(c.accent));
+        m.insert("done".into(), css(c.palette.success));
+        m.insert("hot".into(), css(c.palette.danger));
+        m.insert("col".into(), rgba(c.text, 0.045));
+        m.insert("card".into(), rgba(c.text, 0.07));
+        m.insert("cardHover".into(), rgba(c.text, 0.11));
+        m.insert("line".into(), rgba(c.text, 0.10));
+        m
+    }
+
     // ---------------------------------------------------------- container
 
     pub struct JiraIvars {
@@ -3396,11 +3857,23 @@ mod appkit {
         scroll: Retained<NSScrollView>,
         table: Retained<JiraTableView>,
         inspector: Retained<JiraInspectorView>,
-        sink: RefCell<Option<Sink>>,
+        /// The event sink. Shared (`Rc`) so the board web view's message
+        /// handler can emit through it too.
+        sink: Rc<RefCell<Option<Sink>>>,
         sidebar_w: Cell<f64>,
         inspector_w: Cell<f64>,
         /// The Cmd+F live-search bar, attached above the list when open.
         search_bar: RefCell<Option<Retained<crate::views::jira_search_bar::JiraSearchBar>>>,
+        /// The open board's top bar (`JiraBoardBar`).
+        bar: Retained<JiraBoardBarView>,
+        /// The board kanban `WKWebView` (created lazily; `JiraBoardColumnsView`).
+        board_web: RefCell<Option<crate::ui::web_pane::WebPane>>,
+        /// `true` once the board page posted `ready` (its `render` can run).
+        board_loaded: Cell<bool>,
+        /// The last `render(...)` awaiting the page's `ready`.
+        board_pending: RefCell<Option<String>>,
+        /// The board page's theme key — a change reloads the HTML.
+        board_theme: RefCell<String>,
     }
 
     define_class!(
@@ -3545,6 +4018,8 @@ mod appkit {
             let table = JiraTableView::new(mtm, snap.clone(), colors);
             scroll.setDocumentView(Some(&table));
             let inspector = JiraInspectorView::new(mtm, snap.clone(), colors);
+            let bar = JiraBoardBarView::new(mtm, colors);
+            bar.setHidden(true);
             let this = Self::alloc(mtm).set_ivars(JiraIvars {
                 snap,
                 colors: Cell::new(colors),
@@ -3555,16 +4030,40 @@ mod appkit {
                 scroll,
                 table,
                 inspector,
-                sink: RefCell::new(None),
+                sink: Rc::new(RefCell::new(None)),
                 sidebar_w: Cell::new(sidebar_w),
                 inspector_w: Cell::new(inspector_w),
                 search_bar: RefCell::new(None),
+                bar,
+                board_web: RefCell::new(None),
+                board_loaded: Cell::new(false),
+                board_pending: RefCell::new(None),
+                board_theme: RefCell::new(String::new()),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
-            for sub in [&*iv.sidebar as &NSView, &iv.search_box, &iv.header, &iv.scroll, &iv.inspector] {
+            for sub in
+                [&*iv.sidebar as &NSView, &iv.search_box, &iv.header, &iv.scroll, &iv.inspector, &*iv.bar as &NSView]
+            {
                 v.addSubview(sub);
             }
+            // The board kanban `WKWebView` (`JiraBoardColumnsView`): created
+            // once, hidden until a board is open in `columns` mode. It posts
+            // `ready` / `open:KEY` back through `board_message`.
+            let weak = objc2::rc::Weak::from_retained(&v);
+            let web = crate::ui::web_pane::WebPane::new(
+                mtm,
+                "board",
+                Box::new(move |msg| {
+                    if let Some(ui) = weak.load() {
+                        ui.board_message(msg);
+                    }
+                }),
+            );
+            let web_view: Retained<NSView> = Retained::into_super(web.web.clone());
+            web_view.setHidden(true);
+            v.addSubview(&web_view);
+            *iv.board_web.borrow_mut() = Some(web);
             unsafe { iv.search.setDelegate(Some(ProtocolObject::from_ref(&*v))) };
             v
         }
@@ -3575,6 +4074,8 @@ mod appkit {
             *self.ivars().table.ivars().sink.borrow_mut() = Some(rc.clone());
             *self.ivars().header.ivars().sink.borrow_mut() = Some(rc.clone());
             *self.ivars().inspector.ivars().sink.borrow_mut() = Some(rc.clone());
+            let bar_rc = rc.clone();
+            self.ivars().bar.set_on_event(Box::new(move |e| bar_rc(e)));
             self.ivars().sidebar.set_on_event(Box::new(move |e| rc(JiraEvent::Sidebar(e))));
         }
 
@@ -3593,6 +4094,84 @@ mod appkit {
             self.ivars().search.clone()
         }
 
+        /// `updateBoardChrome` — show / refresh the board bar and the kanban
+        /// web overlay from the snapshot.
+        fn update_board_chrome(&self) {
+            let iv = self.ivars();
+            let colors = iv.colors.get();
+            let (bar, columns) = {
+                let s = iv.snap.borrow();
+                (s.board_bar.clone(), s.board_columns.clone())
+            };
+            match bar {
+                Some(b) => {
+                    iv.bar.set_model(&b, colors);
+                    iv.bar.setHidden(false);
+                }
+                None => iv.bar.setHidden(true),
+            }
+            match columns {
+                Some(cols) if !cols.is_empty() => self.show_board_columns(&cols),
+                _ => self.hide_board_columns(),
+            }
+        }
+
+        /// Load the board page if the theme changed, then push the columns
+        /// (`JiraBoardColumnsView.show`).
+        fn show_board_columns(&self, cols: &[BoardColumn]) {
+            let iv = self.ivars();
+            let colors = iv.colors.get();
+            if let Some(web) = iv.board_web.borrow().as_ref() {
+                web.web.setHidden(false);
+            }
+            let theme_key = format!(
+                "{:?}|{:?}|{:?}|{:?}|{:?}",
+                colors.background, colors.text, colors.dim, colors.accent, colors.highlight
+            );
+            let json = serde_json::to_string(cols).unwrap_or_else(|_| "[]".into());
+            let render = format!("render({json})");
+            let reload = *iv.board_theme.borrow() != theme_key;
+            if reload {
+                *iv.board_theme.borrow_mut() = theme_key;
+                iv.board_loaded.set(false);
+                let html = crate::views::jira::board_page(&board_page_colors(&colors));
+                if let Some(web) = iv.board_web.borrow().as_ref() {
+                    web.load_html(&html);
+                }
+                *iv.board_pending.borrow_mut() = Some(render);
+            } else if iv.board_loaded.get() {
+                if let Some(web) = iv.board_web.borrow().as_ref() {
+                    web.eval(&render);
+                }
+            } else {
+                *iv.board_pending.borrow_mut() = Some(render);
+            }
+        }
+
+        fn hide_board_columns(&self) {
+            let iv = self.ivars();
+            if let Some(web) = iv.board_web.borrow().as_ref() {
+                web.web.setHidden(true);
+            }
+        }
+
+        /// The board page's `WKScriptMessageHandler`: `ready` flushes the
+        /// pending `render`, `open:KEY` opens that issue.
+        fn board_message(&self, msg: String) {
+            if let Some(key) = msg.strip_prefix("open:") {
+                self.emit(JiraEvent::OpenKey(key.to_string()));
+            } else if msg == "ready" {
+                let iv = self.ivars();
+                iv.board_loaded.set(true);
+                let pending = iv.board_pending.borrow_mut().take();
+                if let Some(js) = pending {
+                    if let Some(web) = iv.board_web.borrow().as_ref() {
+                        web.eval(&js);
+                    }
+                }
+            }
+        }
+
         pub fn apply(&self, s: JiraSnapshot) {
             let iv = self.ivars();
             iv.sidebar.set_model(s.sidebar.clone());
@@ -3607,6 +4186,7 @@ mod appkit {
                     || old.columns != s.columns
             };
             *iv.snap.borrow_mut() = s;
+            self.update_board_chrome();
             self.layout_panes();
             if rows_changed {
                 iv.scroll.contentView().scrollToPoint(NSPoint::new(0.0, 0.0));
@@ -3623,7 +4203,15 @@ mod appkit {
             let b = self.bounds();
             let (w, h) = (b.size.width, b.size.height);
             let sw = iv.sidebar.width(iv.sidebar_w.get());
-            let show_insp = iv.snap.borrow().show_inspector;
+            let (show_inspector, board_bar, board_cols) = {
+                let s = iv.snap.borrow();
+                (s.show_inspector, s.board_bar.clone(), s.board_columns.clone())
+            };
+            let board = board_bar.is_some();
+            // The kanban covers the list area (Swift's list overlay): the table
+            // header, rows and inspector are hidden while it is up.
+            let kanban = board && board_cols.is_some();
+            let show_insp = show_inspector && !kanban;
             let insp = if show_insp { iv.inspector_w.get().min(w * 0.4) } else { 0.0 };
             iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, h)));
             let x0 = sw + 4.0;
@@ -3637,15 +4225,30 @@ mod appkit {
                 }
                 None => 0.0,
             };
-            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, bar_h + 9.0, (mw * 0.9 - 22.0).max(80.0), 28.0)));
-            iv.header.setFrame(ns(Rect::new(x0, bar_h + 50.0, mw, HEADER_H)));
-            let ty = bar_h + 50.0 + HEADER_H + 2.0;
+            // The board bar (`JiraBoardBar`) sits above the list.
+            let board_bar_h = if board { crate::views::jira::BOARD_BAR_HEIGHT } else { 0.0 };
+            iv.bar.setFrame(ns(Rect::new(x0, bar_h, mw, board_bar_h)));
+            iv.bar.layout_controls();
+            let top = bar_h + board_bar_h;
+            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, top + 9.0, (mw * 0.9 - 22.0).max(80.0), 28.0)));
+            iv.header.setFrame(ns(Rect::new(x0, top + 50.0, mw, HEADER_H)));
+            let ty = top + 50.0 + HEADER_H + 2.0;
             iv.scroll.setFrame(ns(Rect::new(x0, ty, mw, (h - ty).max(0.0))));
             let n = iv.snap.borrow().rows.len();
             let doc_h = (n as f64 * row_h()).max(h - ty);
             iv.table.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(mw, doc_h)));
-            iv.inspector.setHidden(!show_insp);
+            iv.header.setHidden(kanban);
+            iv.scroll.setHidden(kanban);
+            iv.inspector.setHidden(!show_insp || kanban);
             iv.inspector.setFrame(ns(Rect::new(w - insp, 0.0, insp, h)));
+            // The kanban fills the list area (below the search field).
+            if let Some(web) = iv.board_web.borrow().as_ref() {
+                let list_top = top + 50.0;
+                web.web.setFrame(NSRect::new(
+                    NSPoint::new(x0, list_top),
+                    NSSize::new((w - x0).max(1.0), (h - list_top).max(0.0)),
+                ));
+            }
         }
 
         fn scroll_selection_visible(&self) {
@@ -4165,6 +4768,11 @@ mod tests {
         let snap = l.snapshot();
         assert!(snap.columns.iter().any(|c| c.field == "column"));
         assert!(snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+        // The bar and the kanban overlay data come from the same snapshot.
+        assert_eq!(snap.board_bar.as_ref().map(|b| b.board.as_str()), Some("Demo board"));
+        assert_eq!(snap.board_bar.as_ref().map(|b| b.mode.as_str()), Some("columns"));
+        assert_eq!(snap.board_columns.as_ref().map(Vec::len), Some(2));
+        assert_eq!(snap.board_bar.as_ref().map(|b| b.summary.as_str()), Some("2 issues"));
 
         // Column/status filters apply to the board overlay's cards (lanes stay).
         l.toggle_filter("column", "Doing");
@@ -4182,11 +4790,26 @@ mod tests {
         l.clear_filter("status");
         assert!(l.col_filters.is_empty());
 
+        // The search box narrows the kanban lanes (`renderBoardColumns`).
+        l.handle(JiraEvent::Query("DEMO-1".into()));
+        let cards: Vec<&str> = l
+            .board_cols
+            .iter()
+            .flat_map(|c| c.cards.iter())
+            .map(|k| k.key.as_str())
+            .filter(|k| !k.is_empty())
+            .collect();
+        assert_eq!(cards, vec!["DEMO-1"]);
+        l.handle(JiraEvent::Query(String::new()));
+        assert!(l.board_cols.iter().flat_map(|c| c.cards.iter()).any(|k| k.key == "DEMO-2"));
+
         // table mode draws the issue rows instead.
         assert!(l.set_mode("table"));
         assert_eq!(l.board_state()["mode"], json!("table"));
         assert!(!l.snapshot().columns.iter().any(|c| c.field == "column"));
         assert!(l.snapshot().rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+        assert!(l.snapshot().board_bar.is_some(), "the bar stays in table mode");
+        assert!(l.snapshot().board_columns.is_none(), "no kanban in table mode");
 
         // sprint pick + pinned view (in-memory; survives a refresh).
         assert!(l.pick_sprint("7"));
@@ -4206,6 +4829,80 @@ mod tests {
         assert!(l.open_view("42|current|columns"));
         assert_eq!(l.board_state()["sprint"], json!("current"));
         assert_eq!(l.board_state()["mode"], json!("columns"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sprint_day_formats_iso_and_rejects_junk() {
+        assert_eq!(sprint_day("2026-10-01T00:00:00.000Z"), Some("Oct 1".into()));
+        assert_eq!(sprint_day("2026-10-14"), Some("Oct 14".into()));
+        assert_eq!(sprint_day("2026-1-2"), None);
+        assert_eq!(sprint_day("2026-13-01"), None);
+        assert_eq!(sprint_day("nope"), None);
+    }
+
+    #[test]
+    fn board_bar_choices_and_summary() {
+        let base = std::env::temp_dir().join(format!("ws-jira-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cache = base.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("board_catalog.json"),
+            json!({"projects": [{"key": "DEMO", "boards": [{
+                "id": "42", "name": "Demo board", "type": "scrum",
+                "sprints": [
+                    {"id": "7", "name": "Sprint 7", "state": "active",
+                     "startDate": "2026-10-01", "endDate": "2026-10-14"},
+                    {"id": "8", "name": "Sprint 8", "state": "future"},
+                    {"id": "6", "name": "Sprint 6", "state": "closed", "completeDate": "2026-09-30"}
+                ]
+            }]}]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(cache.join("boards.json"), json!({}).to_string()).unwrap();
+        std::fs::write(
+            base.join("config.json"),
+            json!({"pinnedBoards": [], "pinnedBoardViews": []}).to_string(),
+        )
+        .unwrap();
+        let paths = JiraPaths {
+            config_json: base.join("config.json").to_string_lossy().into_owned(),
+            team_json: String::new(),
+            legacy_config: String::new(),
+            cache_dir: cache.to_string_lossy().into_owned(),
+            out_dir: base.join("jira_json").to_string_lossy().into_owned(),
+            cache: [
+                ("boardCatalog".to_string(), "board_catalog.json".to_string()),
+                ("boards".to_string(), "boards.json".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            tabs: BTreeMap::new(),
+            side_dirs: BTreeMap::new(),
+        };
+        let l = JiraList::new(HashMap::new(), Some(paths));
+
+        // The catalog sprints carry their start / end / complete dates.
+        let sprints = l.board_sprints("42");
+        assert_eq!(sprints[0].start, "2026-10-01");
+        assert_eq!(sprints[2].complete, "2026-09-30");
+
+        // current, next, [sep, Past sprints, closed], [sep, All issues].
+        let choices = l.board_sprint_choices("42");
+        let ids: Vec<&str> =
+            choices.iter().filter(|c| !c.header).map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["current", "8", "6", "all"]);
+        assert_eq!(choices[0].title, "Sprint 7 (current)");
+        assert_eq!(choices[1].title, "Sprint 8 (next)");
+        assert_eq!(l.sprint_title("42", "8"), "Sprint 8");
+        assert_eq!(l.sprint_title("42", "all"), "All issues");
+
+        // The summary counts shown issues and dates the sprint.
+        assert_eq!(l.board_summary("42", "current"), "0 issues · Oct 1 – Oct 14");
+        assert_eq!(l.board_summary("42", "6"), "0 issues · ended Sep 30");
 
         let _ = std::fs::remove_dir_all(&base);
     }
