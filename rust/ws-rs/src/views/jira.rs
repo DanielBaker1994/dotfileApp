@@ -231,6 +231,7 @@ pub fn parse_columns(spec: &str) -> Vec<ListColumn> {
             field: field.to_string(),
             title,
             width: width.max(0.0),
+            width_px: None,
             align,
             sortable: flags.iter().any(|f| f == "sort"),
             filterable: flags.iter().any(|f| f == "filter"),
@@ -262,6 +263,7 @@ fn column_from_obj(o: &Value) -> Option<ListColumn> {
         field,
         title,
         width,
+        width_px: o.get("width_px").and_then(Value::as_f64),
         align,
         sortable: o.get("sort").map(truthy).unwrap_or(false),
         filterable: o.get("filter").map(truthy).unwrap_or(false),
@@ -305,6 +307,14 @@ pub fn serialize_columns(cols: &[ListColumn], titles: bool) -> String {
                     serde_json::Number::from_f64(c.width).unwrap_or_else(|| serde_json::Number::from(0))
                 };
                 o.insert("width".into(), Value::Number(n));
+            }
+            if let Some(px) = c.width_px {
+                let n = if px.fract() == 0.0 {
+                    serde_json::Number::from(px as i64)
+                } else {
+                    serde_json::Number::from_f64(px).unwrap_or_else(|| serde_json::Number::from(0))
+                };
+                o.insert("width_px".into(), Value::Number(n));
             }
             if c.align != "left" {
                 o.insert("align".into(), Value::String(c.align.clone()));
@@ -1877,6 +1887,7 @@ pub struct DescribeColumn {
     pub field: String,
     pub title: String,
     pub width: f64,
+    pub width_px: Option<f64>,
     pub align: String,
     pub sortable: bool,
     pub filterable: bool,
@@ -1890,6 +1901,7 @@ impl DescribeColumn {
             field: str_field(v, "field"),
             title: str_field(v, "title"),
             width: v.get("width").and_then(Value::as_f64).unwrap_or(0.0),
+            width_px: v.get("width_px").and_then(Value::as_f64),
             align: {
                 let a = str_field(v, "align");
                 if a.is_empty() {
@@ -1909,6 +1921,7 @@ impl DescribeColumn {
             field: self.field.clone(),
             title: self.title.clone(),
             width: self.width,
+            width_px: self.width_px,
             align: self.align.clone(),
             sortable: self.sortable,
             filterable: self.filterable,
@@ -2523,6 +2536,7 @@ pub fn helper_parse_columns(spec: &str) -> Result<Vec<ListColumn>, String> {
             field: str_field(c, "field"),
             title: str_field(c, "title"),
             width: c.get("width").and_then(Value::as_f64).unwrap_or(0.0),
+            width_px: c.get("width_px").and_then(Value::as_f64),
             align: {
                 let a = str_field(c, "align");
                 if a.is_empty() {
@@ -3589,6 +3603,7 @@ mod tests {
             field: "a".into(),
             title: "T".into(),
             width: 120.0,
+            width_px: None,
             align: "left".into(),
             sortable: false,
             filterable: false,

@@ -80,16 +80,17 @@ pub fn compact_width(field: &str) -> Option<f64> {
     }
 }
 
-/// [`column_frames`], with compact columns at their fixed width and the
-/// rest sharing what is left by their percentages.
-pub fn frames_for(cols: &[ListColumn], x0: f64, usable: f64, compact: bool) -> Vec<(f64, f64)> {
-    if !compact {
-        return column_frames(cols, x0, usable);
+/// The raw width of each column: fixed columns (an explicit `width_px`, or a
+/// compact field) at their px, the rest sharing the leftover by percentage.
+fn column_widths(cols: &[ListColumn], usable: f64, compact: bool) -> Vec<f64> {
+    let fixed_of = |c: &ListColumn| c.width_px.or_else(|| if compact { compact_width(&c.field) } else { None });
+    if !cols.iter().any(|c| fixed_of(c).is_some()) {
+        return column_frames(cols, 0.0, usable).into_iter().map(|(_, w)| w).collect();
     }
-    let fixed: f64 = cols.iter().filter_map(|c| compact_width(&c.field)).sum();
-    let mut flex: Vec<ListColumn> = cols.iter().filter(|c| compact_width(&c.field).is_none()).cloned().collect();
-    // The percentages were set with the compact columns in them: stretch
-    // the rest so they fill the room those columns gave up.
+    let fixed: f64 = cols.iter().filter_map(&fixed_of).sum();
+    let mut flex: Vec<ListColumn> = cols.iter().filter(|c| fixed_of(c).is_none()).cloned().collect();
+    // The percentages were set with the fixed columns in them: stretch the
+    // rest so they fill the room those columns gave up.
     let sum: f64 = flex.iter().map(|c| c.width.max(0.0)).sum();
     if sum > 0.0 && flex.iter().all(|c| c.width > 0.0) {
         for c in flex.iter_mut() {
@@ -97,22 +98,77 @@ pub fn frames_for(cols: &[ListColumn], x0: f64, usable: f64, compact: bool) -> V
         }
     }
     let flex_frames = column_frames(&flex, 0.0, (usable - fixed).max(40.0));
-    let mut x = x0;
     let mut fi = 0;
     cols.iter()
-        .map(|c| {
-            let w = match compact_width(&c.field) {
-                Some(w) => w,
-                None => {
-                    fi += 1;
-                    flex_frames.get(fi - 1).map_or(0.0, |f| f.1)
-                }
-            };
-            let f = (x, w);
-            x += w;
+        .map(|c| match fixed_of(c) {
+            Some(w) => w,
+            None => {
+                let w = flex_frames.get(fi).map_or(0.0, |f| f.1);
+                fi += 1;
+                w
+            }
+        })
+        .collect()
+}
+
+fn lay_out(widths: &[f64], x0: f64) -> Vec<(f64, f64)> {
+    let mut x = x0;
+    widths
+        .iter()
+        .map(|w| {
+            let f = (x, *w);
+            x += *w;
             f
         })
         .collect()
+}
+
+/// [`column_frames`], with compact columns at their fixed width and the
+/// rest sharing what is left by their percentages.
+pub fn frames_for(cols: &[ListColumn], x0: f64, usable: f64, compact: bool) -> Vec<(f64, f64)> {
+    if cols.is_empty() || usable <= 0.0 {
+        return cols.iter().map(|_| (x0, 0.0)).collect();
+    }
+    lay_out(&column_widths(cols, usable, compact), x0)
+}
+
+/// [`frames_for`], but every column reserves at least `mins[i]` px (its full
+/// header label) — the extra space is taken from the columns that have room,
+/// so no header is clipped. `mins` shorter than `cols` leaves the tail alone.
+pub fn frames_for_reserved(
+    cols: &[ListColumn],
+    x0: f64,
+    usable: f64,
+    compact: bool,
+    mins: &[f64],
+) -> Vec<(f64, f64)> {
+    if cols.is_empty() || usable <= 0.0 {
+        return cols.iter().map(|_| (x0, 0.0)).collect();
+    }
+    let mut w = column_widths(cols, usable, compact);
+    let floor: Vec<f64> = (0..w.len()).map(|i| mins.get(i).copied().unwrap_or(0.0)).collect();
+    for (wi, m) in w.iter_mut().zip(&floor) {
+        *wi = wi.max(*m);
+    }
+    let total: f64 = w.iter().sum();
+    if total > usable {
+        let slack: f64 = w.iter().zip(&floor).map(|(wi, m)| (wi - m).max(0.0)).sum();
+        if slack > 0.0 {
+            let factor = ((slack - (total - usable)) / slack).max(0.0);
+            for i in 0..w.len() {
+                w[i] = floor[i] + (w[i] - floor[i]).max(0.0) * factor;
+            }
+        }
+        // The floors alone exceed the width: scale everything down to fit.
+        let total2: f64 = w.iter().sum();
+        if total2 > usable {
+            let s = usable / total2;
+            for wi in w.iter_mut() {
+                *wi *= s;
+            }
+        }
+    }
+    lay_out(&w, x0)
 }
 
 /// Two-letter initials for a person cell ("Ada Lovelace" / "ada.lovelace" → AL).
@@ -1280,7 +1336,10 @@ impl JiraList {
             "rowCount": self.rows.len(),
             "selection": self.selection,
             "query": self.query,
-            "columns": self.columns.iter().map(|c| format!("{}:{}", c.field, c.width)).collect::<Vec<_>>(),
+            "columns": self.columns.iter().map(|c| match c.width_px {
+                Some(px) => format!("{}:{}px", c.field, px),
+                None => format!("{}:{}", c.field, c.width),
+            }).collect::<Vec<_>>(),
             "groupBy": self.effective_group_by(),
             "filters": self.col_filters.iter().map(|(k, v)| (k.clone(), v.iter().cloned().collect::<Vec<_>>())).collect::<BTreeMap<_, _>>(),
         })
@@ -1330,6 +1389,7 @@ impl JiraList {
             sort: None,
             filter_active: BTreeSet::new(),
             compact: false,
+            reserve_label: false,
             sidebar: self.sidebar_model(),
             inspector: None,
             show_inspector: false,
@@ -1635,6 +1695,15 @@ impl JiraList {
     pub fn compact_cells(&self) -> bool {
         self.section
             .get("compact-cells")
+            .map_or(true, |v| !matches!(v.trim().to_lowercase().as_str(), "false" | "no" | "0" | "off"))
+    }
+
+    /// `[jira] reserve-label-width` (default on): every column reserves at
+    /// least its full header label's width, so no header is ever clipped —
+    /// even in compact mode.
+    pub fn reserve_label_width(&self) -> bool {
+        self.section
+            .get("reserve-label-width")
             .map_or(true, |v| !matches!(v.trim().to_lowercase().as_str(), "false" | "no" | "0" | "off"))
     }
 
@@ -2182,6 +2251,9 @@ pub struct JiraSnapshot {
     pub filter_active: BTreeSet<usize>,
     /// Compact cells (status dot, priority glyph, initials, short dates).
     pub compact: bool,
+    /// Every column reserves its full header label's width (`[jira]
+    /// reserve-label-width`).
+    pub reserve_label: bool,
     pub sidebar: SidebarModel,
     pub inspector: Option<InspectorContent>,
     pub show_inspector: bool,
@@ -2215,6 +2287,7 @@ impl JiraList {
                 .map(|(i, _)| i)
                 .collect(),
             compact: self.compact_cells(),
+            reserve_label: self.reserve_label_width(),
             sidebar: self.sidebar_model(),
             inspector: self.inspector_content(),
             show_inspector: self.inspector,
@@ -2530,7 +2603,7 @@ mod appkit {
                 }
                 let r = snap.rows.get(row?)?;
                 let w = self.bounds().size.width;
-                let frames = frames_for(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), true);
+                let frames = list_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), true, snap.reserve_label);
                 let k = frames.iter().position(|(fx, fw)| x >= *fx && x < fx + fw)?;
                 let col = snap.columns.get(k)?;
                 compact_width(&col.field)?;
@@ -2570,7 +2643,7 @@ mod appkit {
             }
             let first = (dirty.origin.y / row_h()).floor().max(0.0) as usize;
             let last = (((dirty.origin.y + dirty.size.height) / row_h()).ceil() as usize).min(snap.rows.len());
-            let frames = frames_for(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), snap.compact);
+            let frames = list_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), snap.compact, snap.reserve_label);
             let font = style::system_font(12.0 * zoom(), Weight::Regular);
             let bold = style::system_font(12.0 * zoom(), Weight::Bold);
             let rules = snap.rules.clone().unwrap_or_else(|| style_rules(&Value::Null));
@@ -2992,7 +3065,7 @@ mod appkit {
             let w = self.bounds().size.width;
             let usable = w - LEAD - (PADDING + 10.0);
             let snap = self.ivars().snap.borrow();
-            (frames_for(&snap.columns, LEAD, usable, snap.compact), usable)
+            (list_frames(&snap.columns, LEAD, usable, snap.compact, snap.reserve_label), usable)
         }
 
         /// The filterable column whose chevron (padded) holds the point.
@@ -3020,14 +3093,14 @@ mod appkit {
             let (w, h) = (b.size.width, b.size.height);
             style::fill_rect(Rect::new(0.0, 0.0, w, h), c.mantle());
             let snap = self.ivars().snap.borrow();
-            let frames = frames_for(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), snap.compact);
+            let frames = list_frames(&snap.columns, LEAD, w - LEAD - (PADDING + 10.0), snap.compact, snap.reserve_label);
             let font = style::system_font(12.0 * 0.86 * zoom(), Weight::Bold);
             // The "fit columns" glyph in the lead gutter.
             style::draw_symbol("arrow.left.and.right", Rect::new(LEAD / 2.0 + 6.0, 0.0, 16.0, h), c.dim.with_alpha(0.9), 9.0);
             for (i, col) in snap.columns.iter().enumerate() {
                 let Some(&(fx, fw)) = frames.get(i) else { continue };
                 let mut title = col.title.to_uppercase();
-                if snap.compact && compact_width(&col.field).is_some() {
+                if snap.compact && !snap.reserve_label && compact_width(&col.field).is_some() {
                     // A narrow column keeps a short label; the tooltip names it.
                     title = match col.field.as_str() {
                         "status" => "ST".into(),
@@ -3094,6 +3167,31 @@ mod appkit {
             out.push(ch);
         }
         out
+    }
+
+    /// The px each column needs so its full header label fits: the uppercase
+    /// label + the sort arrow + the filter chevron (`[jira] reserve-label-width`).
+    fn header_min_widths(cols: &[ListColumn]) -> Vec<f64> {
+        let hfont = style::system_font(12.0 * 0.86 * zoom(), Weight::Bold);
+        cols.iter()
+            .map(|c| {
+                let mut w = style::text_size(&kerned(&format!("{} ↑", c.title.to_uppercase())), &hfont).0 + 12.0;
+                if c.filterable {
+                    w += 22.0;
+                }
+                w.ceil()
+            })
+            .collect()
+    }
+
+    /// The column frames; with `reserve` each column keeps at least its full
+    /// header label's width (so no header is clipped).
+    fn list_frames(cols: &[ListColumn], x0: f64, usable: f64, compact: bool, reserve: bool) -> Vec<(f64, f64)> {
+        if reserve {
+            frames_for_reserved(cols, x0, usable, compact, &header_min_widths(cols))
+        } else {
+            frames_for(cols, x0, usable, compact)
+        }
     }
 
     // ---------------------------------------------------------- inspector
@@ -3551,7 +3649,7 @@ mod tests {
     }
 
     fn col(field: &str, w: f64) -> ListColumn {
-        ListColumn { field: field.into(), title: field.into(), width: w, align: "left".into(), sortable: true, filterable: true }
+        ListColumn { field: field.into(), title: field.into(), width: w, width_px: None, align: "left".into(), sortable: true, filterable: true }
     }
 
     #[test]
@@ -3600,6 +3698,33 @@ mod tests {
         let f = column_frames(&[col("a", 50.0), col("b", 0.0), col("c", 0.0)], 0.0, 100.0);
         assert_eq!(f[1].1, 25.0);
         assert_eq!(f[2].1, 25.0);
+    }
+
+    #[test]
+    fn reserved_frames_keep_the_label_floor() {
+        // key is 5% of 400 = 20px, but its header label needs 60px.
+        let cols = [col("key", 5.0), col("title", 95.0)];
+        let plain = frames_for(&cols, 0.0, 400.0, false);
+        assert!((plain[0].1 - 20.0).abs() < 0.5, "{plain:?}");
+        let reserved = frames_for_reserved(&cols, 0.0, 400.0, false, &[60.0, 0.0]);
+        assert!((reserved[0].1 - 60.0).abs() < 0.5, "{reserved:?}");
+        assert!((reserved[0].1 + reserved[1].1 - 400.0).abs() < 1.0, "{reserved:?}");
+        // a floor larger than the whole width never overflows it
+        let tight = frames_for_reserved(&cols, 0.0, 400.0, false, &[500.0, 0.0]);
+        assert!(tight[0].1 <= 401.0, "{tight:?}");
+    }
+
+    #[test]
+    fn fixed_px_columns_do_not_scale() {
+        let mut updated = col("updated", 7.0);
+        updated.width_px = Some(111.0);
+        let cols = [col("title", 100.0), updated];
+        let wide = frames_for(&cols, 0.0, 1000.0, false);
+        let narrow = frames_for(&cols, 0.0, 500.0, false);
+        assert_eq!(wide[1].1, 111.0, "{wide:?}");
+        assert_eq!(narrow[1].1, 111.0, "{narrow:?}");   // fixed: same px at any width
+        assert!((wide[0].1 - 889.0).abs() < 0.5, "{wide:?}");
+        assert!((narrow[0].1 - 389.0).abs() < 0.5, "{narrow:?}");
     }
 
     #[test]

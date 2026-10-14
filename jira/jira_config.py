@@ -507,6 +507,14 @@ def columns_problem(spec) -> str:
                 return f"'{o.get('field')}' width '{w}' is not a number (percent)"
             if not 0 <= wf <= 100:
                 return f"'{o.get('field')}' width {w} must be 0-100"
+        px = o.get("width_px")
+        if px not in (None, ""):
+            try:
+                pf = float(px)
+            except (TypeError, ValueError):
+                return f"'{o.get('field')}' width_px '{px}' is not a number (px)"
+            if pf < 0:
+                return f"'{o.get('field')}' width_px {px} must be >= 0"
         a = o.get("align")
         if a and str(a).lower() not in ("left", "right", "center"):
             return f"'{o.get('field')}' align '{a}' is not left | right | center"

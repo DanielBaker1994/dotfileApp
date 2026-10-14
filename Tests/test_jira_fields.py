@@ -18,12 +18,12 @@ import jira_fields as jf
 class Parse(unittest.TestCase):
     def test_defaults(self):
         self.assertEqual(jf.parse_columns("key"),
-                         [{"field": "key", "title": "key", "width": 0.0, "align": "left",
+                         [{"field": "key", "title": "key", "width": 0.0, "width_px": None, "align": "left",
                            "sortable": False, "filterable": False}])
 
     def test_full_segments(self):
         cols = jf.parse_columns(" status : Status : 120 : RIGHT : filter+sort , title")
-        self.assertEqual(cols[0], {"field": "status", "title": "Status", "width": 120.0,
+        self.assertEqual(cols[0], {"field": "status", "title": "Status", "width": 120.0, "width_px": None,
                                    "align": "right", "sortable": True, "filterable": True})
         self.assertEqual(cols[1]["field"], "title")
 
@@ -82,10 +82,16 @@ class Serialize(unittest.TestCase):
 
 class Structured(unittest.TestCase):
     def test_json_text_and_list_agree(self):
-        want = [{"field": "key", "title": "key", "width": 8.0, "align": "left",
+        want = [{"field": "key", "title": "key", "width": 8.0, "width_px": None, "align": "left",
                  "sortable": True, "filterable": True}]
         self.assertEqual(jf.parse_columns('[{"field":"key","width":8,"filter":true,"sort":true}]'), want)
         self.assertEqual(jf.parse_columns([{"field": "key", "width": 8, "filter": True, "sort": True}]), want)
+
+    def test_fixed_pixel_width_round_trips(self):
+        cols = jf.parse_columns([{"field": "updated", "width_px": 112, "align": "right", "sort": True}])
+        self.assertEqual(cols[0]["width_px"], 112.0)
+        self.assertEqual(jf.serialize_columns(cols),
+                         '[{"field":"updated","width_px":112,"align":"right","sort":true}]')
 
     def test_bad_json_is_empty(self):
         self.assertEqual(jf.parse_columns("[not json"), [])

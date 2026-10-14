@@ -275,6 +275,8 @@ sources = "~/.cache/kitchen-sink/jira_json"
 my-work = true
 
 table = true
+compact-cells = false
+reserve-label-width = true
 primary = "key"
 content = "title"
 detail = "assignee,reporter,releaseLabel"

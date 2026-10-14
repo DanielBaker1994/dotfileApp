@@ -59,19 +59,19 @@
   "board_table_columns": [
     {"field": "column", "title": "Column", "width": 18},
     {"field": "key", "width": 12},
-    {"field": "title", "width": 44},
+    {"field": "title", "width": 27},
     {"field": "status", "width": 16},
     {"field": "assignee", "width": 10}
   ],
   "columns": [
-    {"field": "key", "width": 8, "filter": true, "sort": true},
-    {"field": "title", "width": 33, "filter": true, "sort": true},
-    {"field": "status", "width": 10, "filter": true, "sort": true},
-    {"field": "assignee", "width": 12, "filter": true, "sort": true},
-    {"field": "priority", "width": 8, "filter": true, "sort": true},
-    {"field": "releaseLabel", "width": 12, "filter": true, "sort": true},
-    {"field": "updated", "width": 10, "align": "right", "sort": true},
-    {"field": "project", "width": 7, "filter": true, "sort": true}
+    {"field": "key", "width": 4, "filter": true, "sort": true},
+    {"field": "title", "width": 62, "filter": true, "sort": true},
+    {"field": "status", "width": 5, "filter": true, "sort": true},
+    {"field": "assignee", "width": 6, "filter": true, "sort": true},
+    {"field": "priority", "width": 6, "filter": true, "sort": true},
+    {"field": "releaseLabel", "width": 5, "filter": true, "sort": true},
+    {"field": "updated", "width": 7, "align": "right", "sort": true},
+    {"field": "project", "width": 5, "filter": true, "sort": true}
   ],
   "endpoints": [
     {

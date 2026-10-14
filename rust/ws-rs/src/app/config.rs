@@ -638,6 +638,8 @@ pub struct ListColumn {
     pub field: String,
     pub title: String,
     pub width: f64,
+    /// A fixed pixel width (the column does not scale with the window).
+    pub width_px: Option<f64>,
     pub align: String,
     pub sortable: bool,
     pub filterable: bool,
@@ -664,6 +666,7 @@ impl ListColumn {
                         field: o.get("field").and_then(Value::as_str).unwrap_or("").to_string(),
                         title: o.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
                         width: o.get("width").and_then(Value::as_f64).unwrap_or(0.0),
+                        width_px: o.get("width_px").and_then(Value::as_f64),
                         align: o
                             .get("align")
                             .and_then(Value::as_str)
@@ -1459,6 +1462,12 @@ fn columns_json_problem(value: &str) -> Option<String> {
             match w.as_f64() {
                 Some(n) if (0.0..=100.0).contains(&n) => {}
                 _ => return Some(format!("'{field}' width must be 0-100")),
+            }
+        }
+        if let Some(px) = o.get("width_px") {
+            match px.as_f64() {
+                Some(n) if n >= 0.0 => {}
+                _ => return Some(format!("'{field}' width_px must be >= 0")),
             }
         }
         if let Some(a) = o.get("align").and_then(|v| v.as_str()) {

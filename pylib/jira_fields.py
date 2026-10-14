@@ -44,9 +44,15 @@ def _col_obj(o: dict):
         width = float(o.get("width") or 0)
     except (TypeError, ValueError):
         width = 0.0
+    raw_px = o.get("width_px")
+    try:
+        width_px = float(raw_px) if raw_px not in (None, "") else None
+    except (TypeError, ValueError):
+        width_px = None
     align = str(o.get("align") or "left").strip().lower()
     return {"field": field, "title": str(o.get("title") or "") or field,
-            "width": max(0.0, width), "align": align if align in _ALIGNS else "left",
+            "width": max(0.0, width), "width_px": width_px,
+            "align": align if align in _ALIGNS else "left",
             "sortable": _truthy(o.get("sort")), "filterable": _truthy(o.get("filter"))}
 
 
@@ -74,8 +80,8 @@ def _parse_legacy(spec: str) -> list:
         flags = set()
         for s in seg[4:]:
             flags.update(f.strip().lower() for f in re.split(r"[+/|]", s) if f.strip())
-        cols.append({"field": field, "title": title, "width": max(0.0, width), "align": align,
-                     "sortable": "sort" in flags, "filterable": "filter" in flags})
+        cols.append({"field": field, "title": title, "width": max(0.0, width), "width_px": None,
+                     "align": align, "sortable": "sort" in flags, "filterable": "filter" in flags})
     return cols
 
 
@@ -110,6 +116,10 @@ def columns_json(cols, titles: bool = True) -> list:
         width = float(c.get("width") or 0)
         if width > 0:
             obj["width"] = int(width) if width == round(width) else round(width, 1)
+        px = c.get("width_px")
+        if px:
+            px = float(px)
+            obj["width_px"] = int(px) if px == round(px) else round(px, 1)
         if (c.get("align") or "left") != "left":
             obj["align"] = c.get("align")
         if c.get("filterable"):
