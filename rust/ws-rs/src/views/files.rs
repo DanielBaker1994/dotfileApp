@@ -710,6 +710,10 @@ pub fn rename_into(old_path: &str, new_name: &str) -> Result<Option<String>, Str
     }
     std::fs::rename(old_path, &dst).map_err(|e| format!("rename failed: {e}"))?;
     FileOps::record_rename(old_path, &dst, FileOps::shared());
+    // Our own rename is not reported by the Recent/Arrived FSEvents stream
+    // (created with `IgnoreSelf`), so notify the engine directly; otherwise it
+    // keeps the old path and `recent_entries` drops the row (files.rs:1283).
+    with_recent(|r| r.own_change(Some(old_path), &dst));
     Ok(Some(dst))
 }
 
@@ -2688,6 +2692,51 @@ mod tests {
         b.begin_rename(Some(parent));
         assert!(b.rename.is_none(), "`..` is never renameable");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Renaming on the Recent/Arrived page must re-key the engine so the row
+    /// survives: our own move is not reported by the FSEvents stream.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn file_browser_rename_recent_scope_rekeys() {
+        use crate::engines::recent_files::{RecentFiles, FSEVENT_ITEM_CREATED, FSEVENT_ITEM_IS_FILE};
+
+        let home = std::env::temp_dir().join(format!("ws-rs-fbrecent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.to_string_lossy().into_owned();
+        let old = format!("{home}/a.txt");
+        std::fs::write(&old, "x").unwrap();
+
+        // Install a real Recent engine into the module's RECENT thread-local
+        // (the one `with_recent` / `recent_snapshot` use). Leaked on this
+        // thread; no other test in this module touches RECENT.
+        let mut engine = Box::new(RecentFiles::new(&home, &format!("{home}/store/recent.json")));
+        engine.configure(true, 7, 200, &[], false);
+        engine.handle(
+            &[old.clone()],
+            &[FSEVENT_ITEM_CREATED | FSEVENT_ITEM_IS_FILE],
+            &[Some(1)],
+        );
+        assert!(engine.entries(false).iter().any(|e| e.path == old), "engine seeded with the old path");
+        RECENT.with(|r| r.set(Box::into_raw(engine)));
+
+        // The browser on its default Recent/Arrived page.
+        let mut b = FileBrowser::new(&home);
+        b.show_virtual(0);
+        let idx = b.list.rows.iter().position(|e| e.path == old).unwrap();
+        b.list.selection = idx;
+
+        b.begin_rename(Some(idx));
+        b.rename = Some((old.clone(), "b.txt".to_string()));
+        let dst = format!("{home}/b.txt");
+        let msg = b.commit_rename().unwrap();
+        assert_eq!(msg, "renamed “a.txt” to “b.txt”");
+        assert!(Path::new(&dst).exists(), "the file moved on disk");
+        let row = b.list.rows.iter().find(|e| e.path == dst);
+        assert!(row.is_some(), "the renamed row stays on the Recent page");
+        assert_eq!(row.unwrap().name, "b.txt");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -214,6 +214,10 @@ pub fn rename_path(old_path: &str, new_name: &str) -> Result<Option<String>, Str
     }
     std::fs::rename(old_path, &dst).map_err(|e| format!("rename failed: {e}"))?;
     FileOps::record_rename(old_path, &dst, FileOps::shared());
+    // Our own rename is not reported by the Recent/Arrived FSEvents stream
+    // (created with `IgnoreSelf`), so notify the engine directly; otherwise it
+    // keeps the old path and `recent_entries` drops the row.
+    crate::views::files::with_recent(|r| r.own_change(Some(old_path), &dst));
     Ok(Some(dst))
 }
 

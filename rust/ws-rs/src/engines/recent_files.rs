@@ -1492,6 +1492,23 @@ mod tests {
         check(paths(&r).iter().position(|p| p == &b) == Some(at), "the row keeps its place");
     }
 
+    #[test]
+    fn own_change_case_only_keeps_the_row() {
+        let (mut r, home) = new_unit("own-case");
+        let a = format!("{home}/a.txt");
+        let b = format!("{home}/A.txt");
+        write_file(&a, "x");
+        r.handle(&[a.clone()], &[CREATED], &[Some(1)]);
+        r.configure(true, 7, 200, &[], false);
+        let before = paths(&r);
+        let at = before.iter().position(|p| p == &a).unwrap();
+        mv(&a, &b);
+        r.own_change(Some(&a), &b);
+        check(paths(&r).contains(&b), "the new case is there at once");
+        check(!paths(&r).contains(&a), "the old case is gone at once");
+        check(paths(&r).iter().position(|p| p == &b) == Some(at), "the row keeps its place");
+    }
+
     #[cfg(unix)]
     #[test]
     #[cfg_attr(
