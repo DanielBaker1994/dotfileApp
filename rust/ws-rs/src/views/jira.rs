@@ -2077,6 +2077,14 @@ pub struct Describe {
     pub endpoints: Vec<DescribeJob>,
     pub login_curl: String,
     pub setup_state: String,
+    /// `statusPath` — the JSON cache `jira_status.py` writes (the window's
+    /// status file row).
+    pub status_path: String,
+    /// `pollLog` / `debugLog` — the two poll logs the window lists.
+    pub poll_log: String,
+    pub debug_log: String,
+    /// `problems` — the config/scope warnings the payload carries.
+    pub problems: Vec<String>,
 }
 
 impl Describe {
@@ -2158,6 +2166,10 @@ impl Describe {
                 .unwrap_or_default(),
             login_curl: str_field(v, "loginCurl"),
             setup_state: str_field(v.get("setup").unwrap_or(&Value::Null), "state"),
+            status_path: str_field(v, "statusPath"),
+            poll_log: str_field(v, "pollLog"),
+            debug_log: str_field(v, "debugLog"),
+            problems: strings(v.get("problems").unwrap_or(&Value::Null)),
         }
     }
 

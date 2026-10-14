@@ -1130,6 +1130,8 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("dashboard-width", 600.0, 8000.0),
     ("dashboard-height", 400.0, 8000.0),
     ("dashboard-refresh", 2.0, 3600.0),
+    ("dashboard-min-width", 400.0, 8000.0),
+    ("dashboard-min-height", 200.0, 8000.0),
     ("split", 0.2, 0.8),
     ("context-tokens", 512.0, 1_000_000.0),
     ("focus-loss-delay", 0.0, 5.0),

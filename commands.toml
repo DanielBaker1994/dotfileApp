@@ -609,9 +609,21 @@ font = "SF Mono"
 
 [jira-config]
 enabled = true
-in-palette = false
+in-palette = true
 type = "shell"
 label = "Jira Config Window"
+title = "Jira Config"
+dashboard-width = 1080
+dashboard-height = 720
+dashboard-min-width = 860
+dashboard-min-height = 520
+dashboard-refresh = 5
+enable-label = "Enable Jira"
+disable-label = "Disable Jira"
+force-poll-label = "Force Poll"
+stop-poll-label = "Stop Poll"
+setup-button-label = "Setup…"
+refresh-button-label = "Refresh"
 
 [notifications]
 enabled = true

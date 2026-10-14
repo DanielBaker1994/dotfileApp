@@ -147,6 +147,9 @@ pub enum UiCommand {
     JiraEnable(bool, String),
     /// `JiraSetupWindow.show(controller:reason:)`.
     JiraSetup(Option<String>),
+    /// `do:jira-dashboard` / the palette "Jira Config Window" — the
+    /// poll-jobs dashboard (`JiraDashboardWindow`).
+    JiraConfig,
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -251,6 +254,9 @@ struct ControllerInner {
     /// The notes drawers' shown flags (`views.notes.terminal` / `.browser`).
     notes_terminal: bool,
     notes_browser: bool,
+    /// `views.jira.configWindow.shown` — the Jira Config window
+    /// (`JiraDashboardWindow.live`); cleared when it closes.
+    jira_config_shown: bool,
     /// Visible `NSWindow` count (daemon UI pushes it; `state.windows`).
     window_count: i64,
     /// Per-view window titles (`cmd.windowName`, used by `present`).
@@ -538,6 +544,11 @@ impl ControllerInner {
             views.insert(v.raw().to_string(), entry);
         }
 
+        // The Jira Config window (`do:jira-dashboard`): a separate card window.
+        if let Some(jira) = views.get_mut("jira").and_then(Value::as_object_mut) {
+            jira.insert("configWindow".into(), json!({ "shown": self.jira_config_shown }));
+        }
+
         let mut esc_hides = Map::new();
         for v in ESC_VIEWS {
             esc_hides.insert(v.raw().to_string(), json!(self.esc_hide_count(v) > 0));
@@ -692,6 +703,7 @@ impl SwitcherController {
             paths_enabled: false,
             notes_terminal: false,
             notes_browser: false,
+            jira_config_shown: false,
             window_count: 0,
             window_titles: HashMap::new(),
             pending_note_open: None,
@@ -1176,6 +1188,7 @@ impl SwitcherController {
             "screenshot" => {
                 let _ = self.do_host_action("screenshot:show");
             }
+            "jira-config" => self.open_jira_config(),
             "terminal" => self.toggle_terminal_panel(),
             "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
             | "compare" | "prettyprint" | "filefast" | "health" | "health-checks"
@@ -1284,7 +1297,7 @@ impl SwitcherController {
     /// `kitchen-sink jira-poll on|off|toggle` (`enableJiraChecked` /
     /// `setJiraEnabled`). The checks hit the network, so they run off-thread;
     /// `toggle` from the CLI stops polling outright (Swift asks in an alert).
-    fn jira_poll(&self, name: &str) {
+    pub fn jira_poll(&self, name: &str) {
         use crate::app::jira_poll::{self as jp, EnableCheck};
         let on = jp::enabled_in_config();
         let want_on = match name {
@@ -1350,6 +1363,20 @@ impl SwitcherController {
     /// `slot.previousNav` — the nav id of the view shown before `current`.
     pub fn previous_nav(&self) -> Option<i64> {
         self.inner.lock().unwrap().previous.map(|v| v.nav_id())
+    }
+
+    /// `JiraDashboardWindow.show(controller:)`: flag the window shown
+    /// (reported headless too) and enqueue the AppKit build on main.
+    pub fn open_jira_config(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.jira_config_shown = true;
+        inner.ui_push(UiCommand::JiraConfig);
+    }
+
+    /// The Jira Config window's own shown flag (`views.jira.configWindow`),
+    /// set false when it closes.
+    pub fn set_jira_config_shown(&self, on: bool) {
+        self.inner.lock().unwrap().jira_config_shown = on;
     }
 
     /// Mirrors `controller.log(_:)`.
@@ -1531,7 +1558,7 @@ impl SwitcherController {
             "jira" => {
                 self.hotkey(SlotView::Jira);
             }
-            "jira-dashboard" => self.open(SlotView::Jira),
+            "jira-dashboard" => self.open_jira_config(),
             "jira-poll-on" | "jira-poll-off" | "jira-poll-toggle" => self.jira_poll(name),
             "jira-setup" => {
                 self.inner.lock().unwrap().ui_push(UiCommand::JiraSetup(None));
@@ -1968,6 +1995,10 @@ impl SwitcherController {
             }
             "jira-poll-on" | "jira-poll-off" | "jira-setup" => {
                 self.toggle_command(action);
+                None
+            }
+            "jira-dashboard" | "jira-config" => {
+                self.open_jira_config();
                 None
             }
             "reset-size" => {
@@ -2963,6 +2994,7 @@ mod daemon_ui {
             PaletteAction::Command(name) => matches!(
                 name.as_str(),
                 "window" | "notes" | "files" | "jira" | "confluence" | "ai" | "compare"
+                    | "jira-config"
             ),
             PaletteAction::Workspace(_) => false,
         }
@@ -3725,6 +3757,10 @@ mod daemon_ui {
                                 reason.as_deref(),
                                 Box::new(move || ctrl.jira_enable_result(true, "")),
                             );
+                        }
+                        UiCommand::JiraConfig => {
+                            let ctrl = self.ivars().controller.clone();
+                            crate::ui::jira_config::show(ctrl);
                         }
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
@@ -9343,8 +9379,7 @@ mod daemon_ui {
                 }));
                 let ctrl = self.ivars().controller.clone();
                 out.push(MenuEntry::item("Open Jira Config Window", move || {
-                    let c2 = ctrl.clone();
-                    crate::ui::jira_setup::show(None, Box::new(move || c2.jira_enable_result(true, "")));
+                    ctrl.open_jira_config();
                 }));
             }
             if v == SlotView::Ai {
@@ -12612,6 +12647,28 @@ mod tests {
         );
         c.run_palette_command("definitely-not-a-command");
         assert!(c.logs().iter().any(|l| l.contains("no Rust handler")));
+    }
+
+    #[test]
+    fn jira_config_hook_opens_the_window_and_reports_state() {
+        let c = controller();
+        // Unknown verbs still return `{"error": …}`.
+        assert!(c.do_action("jira-nope").unwrap()["error"].is_string());
+        assert_eq!(c.state_json()["views"]["jira"]["configWindow"]["shown"], json!(false));
+        // The hook is handled (no error) and flips the state field, so it is
+        // verifiable headless.
+        assert_eq!(c.do_action("jira-dashboard"), None);
+        assert_eq!(c.state_json()["views"]["jira"]["configWindow"]["shown"], json!(true));
+        // The palette name is an alias for the same hook.
+        assert_eq!(c.do_action("jira-config"), None);
+        c.run_palette_command("jira-config");
+        assert!(
+            !c.logs().iter().any(|l| l.contains("no Rust handler")),
+            "palette 'jira-config' must dispatch"
+        );
+        // Closing the window clears it.
+        c.set_jira_config_shown(false);
+        assert_eq!(c.state_json()["views"]["jira"]["configWindow"]["shown"], json!(false));
     }
 
     #[test]

@@ -443,6 +443,8 @@ impl KsApp {
             UiCommand::JiraJump => "JiraJump",
             UiCommand::JiraEnable(..) => "JiraEnable",
             UiCommand::JiraSetup(_) => "JiraSetup",
+            UiCommand::Board(_) => "Board",
+            UiCommand::JiraConfig => "JiraConfig",
         };
         self.log_once(name);
     }
