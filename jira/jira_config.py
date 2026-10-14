@@ -226,18 +226,10 @@ def field_label(team: dict, field: str, aliases: dict | None = None) -> str:
     return BASE_FIELD_LABELS.get(field, field)
 
 
-def strip_titles(spec: str) -> str:
-    """`field:Title:w:align:flags` -> `field::w:align:flags` (the header comes
-    from the field's label)."""
-    out = []
-    for part in (spec or "").split(","):
-        seg = [x.strip() for x in part.split(":")]
-        if not seg[0]:
-            continue
-        if len(seg) > 1:
-            seg[1] = ""
-        out.append(":".join(seg).rstrip(":") if len(seg) == 2 else ":".join(seg))
-    return ", ".join(out)
+def strip_titles(spec) -> list:
+    """The structured columns with titles dropped (the header comes from the
+    field's label). Accepts any columns value (list / JSON text / legacy)."""
+    return columns_json(parse_columns(spec), titles=False)
 
 
 def team_problems(team: dict) -> list:
@@ -358,7 +350,7 @@ def resolve_path(team: dict, name: str, site: str = "", **params) -> str:
 # settings_hub); re-exported here for older callers
 sys.path.insert(0, os.path.join(WS_ROOT, "pylib"))
 from config_text import config_entry, config_line  # noqa: E402,F401
-from jira_fields import BASE_FIELD_LABELS, parse_columns  # noqa: E402,F401
+from jira_fields import BASE_FIELD_LABELS, columns_json, parse_columns, serialize_columns  # noqa: E402,F401
 
 
 def read_section(name: str, path: str | None = None) -> dict:
@@ -400,10 +392,17 @@ def poll_active(path: str | None = None) -> bool:
     return truthy(sec.get("enabled", "false")) or truthy(sec.get("poll-when-disabled", "false"))
 
 
-def window_fields(section: dict | None = None, columns: str | None = None) -> list:
+def default_columns() -> list:
+    """The starter columns (jira/defaults.json `columns`), structured. Used
+    for a job with no columns of its own (and when [jira] columns is unset)."""
+    cols = _D.get("columns")
+    return [dict(c) for c in cols] if isinstance(cols, list) else []
+
+
+def window_fields(section: dict | None = None, columns=None) -> list:
     """Every window-json field the [jira] section references, columns first
     (ordered, de-duplicated). Empty section -> the legacy base keys.
-    `columns` = one job's own columns spec (replaces [jira] columns)."""
+    `columns` = one job's own columns (replaces [jira] columns)."""
     sec = dict(read_section("jira") if section is None else section)
     if columns is not None:
         sec["columns"] = columns
@@ -414,7 +413,7 @@ def window_fields(section: dict | None = None, columns: str | None = None) -> li
         if f and f not in seen:
             seen.append(f)
 
-    for c in parse_columns(sec.get("columns", "")):
+    for c in parse_columns(sec.get("columns") or ""):
         add(c["field"])
     for k in FIELD_KEYS:
         for f in (sec.get(k) or "").split(","):
@@ -423,7 +422,7 @@ def window_fields(section: dict | None = None, columns: str | None = None) -> li
 
 
 def api_fields(section: dict | None = None, team: dict | None = None,
-               columns: str | None = None) -> list:
+               columns=None) -> list:
     """The Jira fields= list: sources of every referenced window field plus
     the always-needed ones. THE coupling between [jira] columns and the API.
     A team.json custom_fields alias (e.g. package_info) maps to its id."""
@@ -467,22 +466,54 @@ def publish_keys(section: dict | None = None, columns: str | None = None) -> lis
     return keys
 
 
-def job_columns(job: dict, section: dict | None = None) -> str:
-    """A poll job's / search's own columns spec; [jira] columns when unset."""
+def job_columns(job: dict, section: dict | None = None):
+    """A poll job's / search's own columns; the [jira] override, else the
+    jira/defaults.json starter. A list of objects (or a legacy string)."""
     spec = (job or {}).get("columns")
-    if isinstance(spec, str) and spec.strip():
-        return spec.strip()
+    if spec:
+        return spec
     sec = read_section("jira") if section is None else section
-    return sec.get("columns", "")
+    return sec.get("columns") or default_columns()
 
 
-def columns_problem(spec: str) -> str:
-    """'' when a columns spec is valid (same rules as the app's
-    configValueProblem for `columns`), else the reason."""
-    if "\n" in spec:
-        return "columns must stay on one line"
-    if not spec.strip():
+def columns_problem(spec) -> str:
+    """'' when a columns value is valid, else the reason. Accepts the
+    structured list (or its JSON text) and the legacy string."""
+    if isinstance(spec, str):
+        if "\n" in spec:
+            return "columns must stay on one line"
+        text = spec.strip()
+        if not text:
+            return "at least one column is required"
+        if text.startswith("["):
+            try:
+                spec = json.loads(text)
+            except ValueError:
+                return "columns JSON is invalid"
+        else:
+            return _legacy_columns_problem(text)
+    if not isinstance(spec, (list, tuple)):
+        return "columns must be a list of {field, width, align, filter, sort}"
+    if not spec:
         return "at least one column is required"
+    for o in spec:
+        if not isinstance(o, dict) or not str(o.get("field") or "").strip():
+            return "a column has no field name"
+        w = o.get("width")
+        if w not in (None, ""):
+            try:
+                wf = float(w)
+            except (TypeError, ValueError):
+                return f"'{o.get('field')}' width '{w}' is not a number (percent)"
+            if not 0 <= wf <= 100:
+                return f"'{o.get('field')}' width {w} must be 0-100"
+        a = o.get("align")
+        if a and str(a).lower() not in ("left", "right", "center"):
+            return f"'{o.get('field')}' align '{a}' is not left | right | center"
+    return ""
+
+
+def _legacy_columns_problem(spec: str) -> str:
     for part in spec.split(","):
         seg = [x.strip() for x in part.split(":")]
         if not seg[0]:
@@ -841,14 +872,14 @@ class Config:
                 p.append(f"endpoint '{n}': file {LIVE_SEARCH_FILE} is the live search's tab")
             if e.get("file") == BLACKLIST_RELEASE_FILE:
                 p.append(f"endpoint '{n}': file {BLACKLIST_RELEASE_FILE} holds the hidden releases")
-            if isinstance(e.get("columns"), str) and columns_problem(e["columns"]):
+            if e.get("columns") is not None and columns_problem(e["columns"]):
                 p.append(f"endpoint '{n}': {columns_problem(e['columns'])}")
             for k, lo in (("maxResults", 1), ("maxTotal", 0)):
                 bad = limit_problem(e.get(k), lo)
                 if bad:
                     p.append(f"endpoint '{n}': {k} {bad}")
         ls = self.live_search
-        if isinstance(ls.get("columns"), str) and columns_problem(ls["columns"]):
+        if ls.get("columns") is not None and columns_problem(ls["columns"]):
             p.append(f"live search: {columns_problem(ls['columns'])}")
         bad = limit_problem(ls.get("maxResults"), 1)
         if bad:
@@ -896,12 +927,13 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
     if migrate and source == "config.json":
         migrate_v3(data, notes)
         migrate_setup(data, notes)
+        migrate_columns_v2(data, notes)
         if not data.get("fieldLabels"):
             migrate_field_labels(data, notes)
-    # per-job columns: jobs from before get their own copy of [jira] columns
-    # once (written back; env / flag credentials are applied AFTER this so
-    # they never leak into the file)
-    template = read_section("jira").get("columns", "")
+    # per-job columns: jobs from before get their own copy of the default
+    # columns once (written back; env / flag credentials are applied AFTER
+    # this so they never leak into the file)
+    template = read_section("jira").get("columns") or default_columns()
     if migrate and source == "config.json" and template:
         missing = [e for e in data["endpoints"]
                    if isinstance(e, dict) and not e.get("columns")
@@ -913,11 +945,11 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
                 for e in raw.get("endpoints") or []:
                     if isinstance(e, dict) and not e.get("columns") \
                             and e.get("type", "issues") != "directory":
-                        e["columns"] = template
+                        e["columns"] = _to_structured_columns(template)
                 write_json_600(CONFIG_JSON, raw)
                 for e in missing:
-                    e["columns"] = template
-                notes.append(f"gave {len(missing)} job(s) their own copy of [jira] columns")
+                    e["columns"] = _to_structured_columns(template)
+                notes.append(f"gave {len(missing)} job(s) their own copy of the columns")
             except (OSError, ValueError) as err:
                 notes.append(f"per-job columns migration skipped: {err}")
     for k in ("site", "email", "token"):
@@ -931,6 +963,50 @@ def load(site=None, email=None, token=None, migrate=True) -> Config:
     return Config(data, CONFIG_JSON, notes, source)
 
 
+def _to_structured_columns(spec):
+    """A legacy one-line string -> the structured list; anything else as-is."""
+    if isinstance(spec, str) and spec.strip() and not spec.strip().startswith("["):
+        return columns_json(parse_columns(spec), titles=True)
+    return spec
+
+
+def migrate_columns_v2(data: dict, notes: list) -> None:
+    """One-time (flag `columnsV2`): per-job / live-search columns move from the
+    legacy `field:Title:width:align:flags` string to the structured list."""
+    if data.get("columnsV2"):
+        return
+    changed = False
+    for e in data.get("endpoints") or []:
+        if isinstance(e, dict) and _is_legacy_spec(e.get("columns")):
+            e["columns"] = _to_structured_columns(e["columns"])
+            changed = True
+    ls = data.get("liveSearch")
+    if isinstance(ls, dict) and _is_legacy_spec(ls.get("columns")):
+        ls["columns"] = _to_structured_columns(ls["columns"])
+        changed = True
+    data["columnsV2"] = True
+    try:
+        with open(CONFIG_JSON, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        for e in raw.get("endpoints") or []:
+            if isinstance(e, dict) and _is_legacy_spec(e.get("columns")):
+                e["columns"] = _to_structured_columns(e["columns"])
+        rls = raw.get("liveSearch")
+        if isinstance(rls, dict) and _is_legacy_spec(rls.get("columns")):
+            rls["columns"] = _to_structured_columns(rls["columns"])
+        raw["columnsV2"] = True
+        write_json_600(CONFIG_JSON, raw)
+        if changed:
+            notes.append("columns -> structured JSON")
+    except (OSError, ValueError) as err:
+        notes.append(f"columns migration not saved: {err}")
+
+
+def _is_legacy_spec(spec) -> bool:
+    """A non-empty columns string that is not JSON (the legacy form)."""
+    return isinstance(spec, str) and bool(spec.strip()) and not spec.strip().startswith("[")
+
+
 def migrate_field_labels(data: dict, notes: list) -> None:
     """One-time (flag `fieldLabels`): a field's header text moves out of every
     columns spec into ONE team.json field_labels entry - the most used title
@@ -940,7 +1016,7 @@ def migrate_field_labels(data: dict, notes: list) -> None:
     live = data.get("liveSearch") if isinstance(data.get("liveSearch"), dict) else {}
     counts: dict = {}
     for spec in [e.get("columns") for e in eps] + [live.get("columns")]:
-        for col in parse_columns(spec if isinstance(spec, str) else ""):
+        for col in parse_columns(spec):
             if col["title"] != col["field"]:
                 t = counts.setdefault(col["field"], {})
                 t[col["title"]] = t.get(col["title"], 0) + 1
@@ -979,9 +1055,9 @@ def migrate_field_labels(data: dict, notes: list) -> None:
         with open(CONFIG_JSON, encoding="utf-8") as fh:
             raw = json.load(fh)
         for e in raw.get("endpoints") or []:
-            if isinstance(e, dict) and isinstance(e.get("columns"), str):
+            if isinstance(e, dict) and e.get("columns"):
                 e["columns"] = strip_titles(e["columns"])
-        if isinstance(raw.get("liveSearch"), dict) and isinstance(raw["liveSearch"].get("columns"), str):
+        if isinstance(raw.get("liveSearch"), dict) and raw["liveSearch"].get("columns"):
             raw["liveSearch"]["columns"] = strip_titles(raw["liveSearch"]["columns"])
         raw["fieldLabels"] = True
         write_json_600(CONFIG_JSON, raw)
@@ -989,9 +1065,9 @@ def migrate_field_labels(data: dict, notes: list) -> None:
         notes.append(f"field labels migration skipped: {err}")
         return
     for e in eps:
-        if isinstance(e.get("columns"), str):
+        if e.get("columns"):
             e["columns"] = strip_titles(e["columns"])
-    if isinstance(live.get("columns"), str):
+    if live.get("columns"):
         live["columns"] = strip_titles(live["columns"])
     data["fieldLabels"] = True
     if add:
@@ -1118,7 +1194,7 @@ def edit_jobs(cmd: str, args: list) -> int:
         else:
             new.setdefault("file", f"{name}.json")
             if not new.get("columns"):
-                new["columns"] = read_section("jira").get("columns", "")
+                new["columns"] = read_section("jira").get("columns") or default_columns()
         new.setdefault("window", "30m")
         new.setdefault("projects", "*")
         new.setdefault("enabled", True)
@@ -1167,18 +1243,22 @@ def edit_jobs(cmd: str, args: list) -> int:
     if len(args) != 3 or args[0] not in ("endpoint", "live"):
         return result(False, ["--set-columns endpoint|live NAME SPEC"])
     kind, name, spec = args
-    bad = columns_problem(spec)
+    try:
+        cols = json.loads(spec) if spec.strip().startswith("[") else columns_json(parse_columns(spec), titles=True)
+    except ValueError:
+        return result(False, ["columns JSON is invalid"])
+    bad = columns_problem(cols)
     if bad:
         return result(False, [bad])
     if kind == "live":
         ls = dict(cfg.live_search)
-        ls["columns"] = spec.strip()
+        ls["columns"] = cols
         save({"liveSearch": ls})
         return result(True, name=name)
     hit = next((x for x in eps if x.get("name") == name), None)
     if hit is None:
         return result(False, [f"unknown {kind} '{name}'"])
-    hit["columns"] = spec.strip()
+    hit["columns"] = cols
     save({"endpoints": eps})
     return result(True, name=name)
 

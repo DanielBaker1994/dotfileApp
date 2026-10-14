@@ -88,42 +88,107 @@ fn scalar_str(v: &Value) -> String {
 // jira_fields.py — column codec + field labels
 // ===========================================================================
 
-const BASE_FIELD_LABELS: &[(&str, &str)] = &[
-    ("key", "Key"),
-    ("title", "Title"),
-    ("status", "Status"),
-    ("assignee", "Assignee"),
-    ("reporter", "Reporter"),
-    ("priority", "Priority"),
-    ("labels", "Labels"),
-    ("description", "Description"),
-    ("project", "Project"),
-    ("updated", "Updated"),
-    ("release", "Fix versions"),
-    ("releaseLabel", "Release"),
-    ("releaseDate", "Release date"),
-    ("releaseStatus", "Released"),
-    ("comments", "Comments"),
-    ("components", "Components"),
-    ("epic", "Epic / parent"),
-];
+/// The shipped `jira/defaults.json` — the SAME file `pylib/jira_search.py`,
+/// `pylib/jira_fields.py` and `jira/jira_config.py` read (base_field_labels,
+/// search_ui.kinds / skip_fields, board_list_columns, ...). Read once; no
+/// table is hand-mirrored in Rust. `asset_dir` carries `jira/` in both the
+/// repo build and the dist bundle (install.conf RESOURCE_LINK_DIRS); the
+/// manifest dir covers `cargo test`.
+fn jira_defaults() -> &'static Value {
+    static DEFAULTS: OnceLock<Value> = OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        let asset = crate::app::paths::Paths::from_env().asset_dir().to_string();
+        let candidates = [
+            format!("{asset}/jira/defaults.json"),
+            format!("{}/../../jira/defaults.json", env!("CARGO_MANIFEST_DIR")),
+        ];
+        for path in candidates {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    return v;
+                }
+            }
+        }
+        Value::Null
+    })
+}
 
-pub fn base_field_labels() -> &'static [(&'static str, &'static str)] {
-    BASE_FIELD_LABELS
+/// `base_field_labels` (field -> built-in display name), read once.
+fn base_field_label_map() -> &'static HashMap<String, String> {
+    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        jira_defaults()
+            .get("base_field_labels")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
 }
 
 pub fn base_field_label(field: &str) -> Option<&'static str> {
-    BASE_FIELD_LABELS
-        .iter()
-        .find(|(k, _)| *k == field)
-        .map(|(_, v)| *v)
+    base_field_label_map().get(field).map(String::as_str)
 }
 
-/// `field:Title:width:align:flags, ...` -> columns. Title defaults to the
-/// field; width 0 shares the leftover width; negative widths clamp to 0;
-/// flags (`filter` / `sort`, joined by `+` or split by `:`/`|`/`/`) set the
-/// sortable / filterable bits.
+/// A path into `jira/defaults.json` (`None` when absent).
+fn defaults_at(path: &[&str]) -> Option<&'static Value> {
+    let mut cur = jira_defaults();
+    for key in path {
+        cur = cur.get(*key)?;
+    }
+    Some(cur)
+}
+
+/// A string array at `path` (empty when absent).
+fn defaults_strs(path: &[&str]) -> Vec<String> {
+    defaults_at(path)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// A string at `path` (`""` when absent).
+fn defaults_str(path: &[&str]) -> String {
+    defaults_at(path).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+/// A usize at `path` (0 when absent).
+fn defaults_usize(path: &[&str]) -> usize {
+    defaults_at(path).and_then(Value::as_u64).map(|n| n as usize).unwrap_or(0)
+}
+
+/// The "All boards" pin's columns (`board_list_columns` in `jira/defaults.json`).
+pub fn board_list_columns() -> Value {
+    jira_defaults()
+        .get("board_list_columns")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+/// The open board's columns-mode table (`board_table_columns` in the file).
+pub fn board_table_columns() -> Value {
+    jira_defaults()
+        .get("board_table_columns")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+/// `columns` -> the columns. Accepts the structured JSON array of
+/// `{field,title,width,align,filter,sort}` objects and the legacy one-line
+/// string `field:Title:width:align:flags, ...`. Title defaults to the field;
+/// width 0 shares the leftover width; negative widths clamp to 0; flags set
+/// the sortable / filterable bits.
 pub fn parse_columns(spec: &str) -> Vec<ListColumn> {
+    let text = spec.trim();
+    if text.starts_with('[') {
+        return match serde_json::from_str::<Value>(text) {
+            Ok(Value::Array(a)) => a.iter().filter_map(column_from_obj).collect(),
+            _ => Vec::new(),
+        };
+    }
     let mut cols = Vec::new();
     for part in spec.split(',') {
         let part = part.trim();
@@ -174,34 +239,86 @@ pub fn parse_columns(spec: &str) -> Vec<ListColumn> {
     cols
 }
 
-/// The inverse; integral widths stay integers, fractional keep one decimal;
-/// flags come back as `filter+sort` (filter first).
-pub fn serialize_columns(cols: &[ListColumn], titles: bool) -> String {
-    let mut out = Vec::new();
-    for c in cols {
-        let width = c.width;
-        let w = if width.fract() == 0.0 {
-            format!("{}", width as i64)
-        } else {
-            format!("{width:.1}")
-        };
-        let mut flags: Vec<&str> = Vec::new();
-        if c.filterable {
-            flags.push("filter");
-        }
-        if c.sortable {
-            flags.push("sort");
-        }
-        let flags = flags.join("+");
-        let title = if titles { c.title.clone() } else { String::new() };
-        let seg = format!("{}:{}:{}:{}", c.field, title, w, c.align);
-        out.push(if flags.is_empty() {
-            seg
-        } else {
-            format!("{seg}:{flags}")
-        });
+/// One structured column object -> a `ListColumn` (`None` without a field).
+fn column_from_obj(o: &Value) -> Option<ListColumn> {
+    let field = o.get("field").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if field.is_empty() {
+        return None;
     }
-    out.join(", ")
+    let title = o
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&field)
+        .to_string();
+    let width = o.get("width").and_then(Value::as_f64).unwrap_or(0.0).max(0.0);
+    let raw_align = o.get("align").and_then(Value::as_str).unwrap_or("left").to_lowercase();
+    let align = if matches!(raw_align.as_str(), "left" | "right" | "center") {
+        raw_align
+    } else {
+        "left".to_string()
+    };
+    Some(ListColumn {
+        field,
+        title,
+        width,
+        align,
+        sortable: o.get("sort").map(truthy).unwrap_or(false),
+        filterable: o.get("filter").map(truthy).unwrap_or(false),
+    })
+}
+
+/// A `columns` config value: the structured array, or a legacy / JSON string.
+pub fn parse_columns_value(v: &Value) -> Vec<ListColumn> {
+    match v {
+        Value::Array(a) => a.iter().filter_map(column_from_obj).collect(),
+        Value::String(s) => parse_columns(s),
+        _ => Vec::new(),
+    }
+}
+
+/// The starter columns (`columns` in `jira/defaults.json`) as a JSON array.
+pub fn default_columns() -> Value {
+    jira_defaults()
+        .get("columns")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+/// The structured JSON text of the columns — the `--set-columns` transport and
+/// the helper reply (config.json stores the array itself). Defaults are
+/// omitted: width 0 = auto, align left, no flags; `titles=false` drops the
+/// title (the field label supplies it).
+pub fn serialize_columns(cols: &[ListColumn], titles: bool) -> String {
+    let arr: Vec<Value> = cols
+        .iter()
+        .map(|c| {
+            let mut o = Map::new();
+            o.insert("field".into(), Value::String(c.field.clone()));
+            if titles && !c.title.is_empty() && c.title != c.field {
+                o.insert("title".into(), Value::String(c.title.clone()));
+            }
+            if c.width > 0.0 {
+                let n = if c.width.fract() == 0.0 {
+                    serde_json::Number::from(c.width as i64)
+                } else {
+                    serde_json::Number::from_f64(c.width).unwrap_or_else(|| serde_json::Number::from(0))
+                };
+                o.insert("width".into(), Value::Number(n));
+            }
+            if c.align != "left" {
+                o.insert("align".into(), Value::String(c.align.clone()));
+            }
+            if c.filterable {
+                o.insert("filter".into(), Value::Bool(true));
+            }
+            if c.sortable {
+                o.insert("sort".into(), Value::Bool(true));
+            }
+            Value::Object(o)
+        })
+        .collect();
+    serde_json::to_string(&Value::Array(arr)).unwrap_or_default()
 }
 
 /// Python `re.sub(r"[\s-]+", "_", k.strip()).lower()`.
@@ -225,9 +342,9 @@ pub fn norm_key(k: &str) -> String {
 /// The base labels + team.json custom_fields aliases + field_labels renames
 /// (field_labels wins; section keys matched loosely).
 pub fn merged_labels(team: Option<&Value>) -> BTreeMap<String, String> {
-    let mut out: BTreeMap<String, String> = BASE_FIELD_LABELS
+    let mut out: BTreeMap<String, String> = base_field_label_map()
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let Some(team) = team.and_then(Value::as_object) else {
         return out;
@@ -275,70 +392,53 @@ pub fn merged_labels(team: Option<&Value>) -> BTreeMap<String, String> {
 // jira_data.py — words, categories, workflow, style rules, comments
 // ===========================================================================
 
-const WORD_KEYS: &[(&str, &str)] = &[
-    ("cancelled", "status-cancelled-words"),
-    ("done", "status-done-words"),
-    ("blocked", "status-blocked-words"),
-    ("active", "status-active-words"),
-    ("waiting", "status-waiting-words"),
-    ("new", "status-new-words"),
-    ("urgent", "priority-urgent-words"),
-];
+/// `words_keys` (category -> the `[jira]` config key), read once.
+fn word_keys() -> &'static Vec<(String, String)> {
+    static KEYS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    KEYS.get_or_init(|| {
+        defaults_at(&["words_keys"])
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
 
-const WORD_DEFAULTS: &[(&str, &str)] = &[
-    ("status-cancelled-words", "cancel, won't, wont, reject, duplicate"),
-    (
-        "status-done-words",
-        "done, closed, resolved, released, complete, fixed, shipped",
-    ),
-    ("status-blocked-words", "block, fail, impediment"),
-    (
-        "status-active-words",
-        "progress, review, test, qa, develop, doing, verif",
-    ),
-    ("status-waiting-words", "hold, wait, pending, paused"),
-    (
-        "status-new-words",
-        "backlog, open, to do, todo, new, selected, triage, funnel",
-    ),
-    ("priority-urgent-words", "highest, blocker, critical, urgent, p0, p1"),
-];
-
-const DIM_FIELDS: &[&str] = &[
-    "key",
-    "updated",
-    "created",
-    "duedate",
-    "releasedate",
-    "project",
-    "releaselabel",
-    "release",
-];
-
-fn word_default(key: &str) -> &'static str {
-    WORD_DEFAULTS
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| *v)
+/// The default list for one `words` key (from `jira/defaults.json`).
+fn word_default(key: &str) -> String {
+    defaults_at(&["words"])
+        .and_then(|w| w.get(key))
+        .and_then(Value::as_str)
         .unwrap_or("")
+        .to_string()
+}
+
+/// `dim_fields`, read once.
+fn dim_fields() -> &'static [String] {
+    static FIELDS: OnceLock<Vec<String>> = OnceLock::new();
+    FIELDS.get_or_init(|| defaults_strs(&["dim_fields"])).as_slice()
 }
 
 /// `[jira]` config values -> the seven lowercased word lists (an explicit
 /// non-empty value replaces only that list; an empty value falls back).
 pub fn words(values: &Value) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
-    for (name, key) in WORD_KEYS {
+    for (name, key) in word_keys() {
+        let fallback = word_default(key);
         let raw = values
             .get(key)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| word_default(key));
+            .unwrap_or(&fallback);
         let list = raw
             .split(',')
             .map(|p| p.trim().to_lowercase())
             .filter(|p| !p.is_empty())
             .collect();
-        out.insert((*name).to_string(), list);
+        out.insert(name.clone(), list);
     }
     out
 }
@@ -457,7 +557,7 @@ pub fn style_rules(values: &Value) -> StyleRules {
     let list = |name: &str| w.get(name).cloned().unwrap_or_default();
     StyleRules {
         words: w.clone(),
-        dim_fields: DIM_FIELDS.iter().map(|s| s.to_string()).collect(),
+        dim_fields: dim_fields().to_vec(),
         status: vec![
             StatusRule {
                 words: list("cancelled"),
@@ -650,42 +750,6 @@ pub struct FilterKind {
     pub kind: ValueKind,
 }
 
-// jira/defaults.json `search_ui.kinds` (key, title, labelField, kind, suffix)
-const SEARCH_KINDS: &[(&str, &str, Option<&str>, &str, &str)] = &[
-    ("assignee", "Assignee", Some("assignee"), "users", ""),
-    ("reporter", "Reporter", Some("reporter"), "users", ""),
-    ("status", "Status", Some("status"), "list", ""),
-    ("statusCategory", "Status category", None, "list", ""),
-    ("issuetype", "Issue type", None, "list", ""),
-    ("priority", "Priority", Some("priority"), "list", ""),
-    ("fixVersion", "Release", Some("release"), "list", ""),
-    ("labels", "Labels", Some("labels"), "list", ""),
-    ("updated", "Updated", Some("updated"), "date", " within"),
-    ("created", "Created", None, "date", " within"),
-    ("resolved", "Resolved", None, "date", " within"),
-    ("field:title", "Summary", Some("title"), "text", " contains"),
-    ("field:description", "Description", Some("description"), "text", " contains"),
-];
-
-// jira/defaults.json `search_ui.skip_fields`
-const SKIP_CATALOG_FIELDS: &[&str] = &[
-    "key",
-    "title",
-    "status",
-    "assignee",
-    "release",
-    "releaseLabel",
-    "releaseDate",
-    "releaseStatus",
-    "priority",
-    "labels",
-    "description",
-    "reporter",
-    "project",
-    "updated",
-    "comments",
-];
-
 fn label_for(catalog: &[Value], field: &str, fallback: &str) -> String {
     for c in catalog {
         if c.get("field").and_then(Value::as_str) == Some(field) {
@@ -699,27 +763,38 @@ fn label_for(catalog: &[Value], field: &str, fallback: &str) -> String {
     fallback.to_string()
 }
 
-/// The base kinds plus the describe catalog with its skip list.
+/// The base kinds plus the describe catalog with its skip list — both read
+/// from `jira/defaults.json` (`search_ui.kinds` / `search_ui.skip_fields`).
 pub fn filter_kinds(catalog: &[Value]) -> Vec<FilterKind> {
+    let ui = jira_defaults().get("search_ui");
+    let skip: Vec<&str> = ui
+        .and_then(|u| u.get("skip_fields"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     let mut kinds = Vec::new();
-    for (key, base_title, label_field, kind, suffix) in SEARCH_KINDS {
-        let mut title = if let Some(field) = label_field {
-            label_for(catalog, field, base_title)
-        } else {
-            (*base_title).to_string()
+    let base = ui.and_then(|u| u.get("kinds")).and_then(Value::as_array);
+    for row in base.into_iter().flatten() {
+        let key = get_str(row, "key");
+        if key.is_empty() {
+            continue;
+        }
+        let mut title = match row.get("labelField").and_then(Value::as_str) {
+            Some(field) => label_for(catalog, field, get_str(row, "title")),
+            None => get_str(row, "title").to_string(),
         };
-        title.push_str(suffix);
+        title.push_str(get_str(row, "suffix"));
         kinds.push(FilterKind {
-            key: (*key).to_string(),
+            key: key.to_string(),
             title,
-            kind: ValueKind::from_str(kind),
+            kind: ValueKind::from_str(get_str(row, "kind")),
         });
     }
     for c in catalog {
         let Some(field) = c.get("field").and_then(Value::as_str) else {
             continue;
         };
-        if SKIP_CATALOG_FIELDS.contains(&field) {
+        if skip.contains(&field) {
             continue;
         }
         let label = c
@@ -1366,13 +1441,27 @@ pub fn header_state(params: &Value) -> Value {
 // jira_boards.py — column/card mapping + the board page template
 // ===========================================================================
 
-pub const DONE_LIMIT: usize = 30;
-pub const OTHER_COLUMN: &str = "Not on the board";
-pub const HOT_WORDS: &[&str] = &["highest", "high", "critical", "blocker"];
-pub const COLOR_KEYS: &[&str] = &[
-    "bg", "col", "card", "cardHover", "line", "text", "dim", "accent", "done", "hot",
-];
-pub const CATEGORY_NAMES: &[&str] = &["To Do", "In Progress", "Done"];
+/// `boards.done_limit` — a fully-done column clamps to this many cards.
+pub fn done_limit() -> usize {
+    defaults_usize(&["boards", "done_limit"])
+}
+/// `boards.other_column` — where a board's unmapped statuses land.
+pub fn other_column() -> String {
+    defaults_str(&["boards", "other_column"])
+}
+/// `boards.hot_words` — priorities drawn "hot" on the board page.
+pub fn hot_words() -> Vec<String> {
+    defaults_strs(&["boards", "hot_words"])
+}
+/// `boards.color_keys` — the board page's `@key` colors.
+pub fn color_keys() -> Vec<String> {
+    defaults_strs(&["boards", "color_keys"])
+}
+/// `category_names` — To Do / In Progress / Done.
+pub fn category_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| defaults_strs(&["category_names"])).as_slice()
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoardCard {
@@ -1407,7 +1496,7 @@ fn words_value(w: &Value) -> BTreeMap<String, Vec<String>> {
 /// Rows -> the board's columns. With a board spec statuses map to their
 /// column and the rest land in "Not on the board"; without one the three
 /// status categories are the columns. A fully-done column clamps to
-/// `DONE_LIMIT` cards.
+/// `done_limit()` cards.
 pub fn board_columns(params: &Value) -> Vec<BoardColumn> {
     let rows = params
         .get("rows")
@@ -1435,7 +1524,7 @@ pub fn board_columns(params: &Value) -> Vec<BoardColumn> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| CATEGORY_NAMES.iter().map(|s| s.to_string()).collect());
+        .unwrap_or_else(|| category_names().iter().map(|s| s.to_string()).collect());
 
     struct Col {
         name: String,
@@ -1514,7 +1603,7 @@ pub fn board_columns(params: &Value) -> Vec<BoardColumn> {
         .map(|c| {
             let done = !c.cards.is_empty() && c.cards.iter().all(|k| k.cat == 2);
             let cards = if done {
-                c.cards[..DONE_LIMIT.min(c.cards.len())].to_vec()
+                c.cards[..done_limit().min(c.cards.len())].to_vec()
             } else {
                 c.cards.clone()
             };
@@ -1528,7 +1617,7 @@ pub fn board_columns(params: &Value) -> Vec<BoardColumn> {
         .collect();
     if !other.is_empty() {
         out.push(BoardColumn {
-            name: OTHER_COLUMN.to_string(),
+            name: other_column(),
             cards: other,
             more: 0,
         });
@@ -1592,11 +1681,11 @@ window.webkit.messageHandlers.board.postMessage('ready');
 /// The board page HTML with `@key` substitution (longest-first, so `@cardHover`
 /// is never corrupted by `@card`).
 pub fn board_page(colors: &HashMap<String, String>) -> String {
-    let mut subst: Vec<(String, String)> = COLOR_KEYS
+    let mut subst: Vec<(String, String)> = color_keys()
         .iter()
-        .map(|k| (k.to_string(), colors.get(*k).cloned().unwrap_or_default()))
+        .map(|k| (k.clone(), colors.get(k.as_str()).cloned().unwrap_or_default()))
         .collect();
-    subst.push(("hotPattern".to_string(), HOT_WORDS.join("|")));
+    subst.push(("hotPattern".to_string(), hot_words().join("|")));
     subst.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
     let mut html = BOARD_PAGE_TEMPLATE.to_string();
     for (k, v) in &subst {
@@ -1665,7 +1754,7 @@ pub fn lifecycle_steps(
         return Vec::new();
     }
     let cur = category(status, categories, w);
-    CATEGORY_NAMES
+    category_names()
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -2676,13 +2765,13 @@ pub fn rows_total_height(lines: &[JiraRowLine]) -> f64 {
 /// `true` when a priority matches one of the board's hot words.
 pub fn priority_is_hot(priority: &str) -> bool {
     let p = priority.to_lowercase();
-    HOT_WORDS.iter().any(|w| p.contains(w))
+    hot_words().iter().any(|w| p.contains(w.as_str()))
 }
 
 fn category_name(cat: i32) -> String {
-    CATEGORY_NAMES
+    category_names()
         .get(cat.clamp(0, 2) as usize)
-        .map(|s| (*s).to_string())
+        .map(|s| s.clone())
         .unwrap_or_default()
 }
 
@@ -2881,7 +2970,7 @@ pub fn ticket_step_lines(ticket: &TicketPageModel) -> Vec<String> {
     if ticket.status.is_empty() {
         return Vec::new();
     }
-    CATEGORY_NAMES
+    category_names()
         .iter()
         .enumerate()
         .map(|(i, name)| {
@@ -3581,20 +3670,35 @@ mod tests {
 
     #[test]
     fn serialize_columns_widths_and_flags() {
-        assert_eq!(serialize_columns(&[col()], true), "a:T:120:left");
+        let v = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        assert_eq!(v(&serialize_columns(&[col()], true)), json!([{"field":"a","title":"T","width":120}]));
         let mut c = col();
         c.width = 120.5;
-        assert_eq!(serialize_columns(&[c.clone()], true), "a:T:120.5:left");
+        assert_eq!(v(&serialize_columns(&[c.clone()], true)), json!([{"field":"a","title":"T","width":120.5}]));
         c.width = 0.0;
-        assert_eq!(serialize_columns(&[c], true), "a:T:0:left");
-        assert_eq!(serialize_columns(&[col()], false), "a::120:left");
+        assert_eq!(v(&serialize_columns(&[c], true)), json!([{"field":"a","title":"T"}]));
+        assert_eq!(v(&serialize_columns(&[col()], false)), json!([{"field":"a","width":120}]));
         let mut c = col();
         c.sortable = true;
         c.filterable = true;
-        assert_eq!(serialize_columns(&[c], true), "a:T:120:left:filter+sort");
+        assert_eq!(v(&serialize_columns(&[c], true)), json!([{"field":"a","title":"T","width":120,"filter":true,"sort":true}]));
         let mut c = col();
         c.sortable = true;
-        assert_eq!(serialize_columns(&[c], true), "a:T:120:left:sort");
+        assert_eq!(v(&serialize_columns(&[c], true)), json!([{"field":"a","title":"T","width":120,"sort":true}]));
+    }
+
+    #[test]
+    fn parse_columns_structured_value() {
+        let arr = json!([
+            {"field": "key", "width": 8, "filter": true, "sort": true},
+            {"field": "updated", "width": 10, "align": "right", "sort": true},
+        ]);
+        let cols = parse_columns_value(&arr);
+        assert_eq!(cols.len(), 2);
+        assert_eq!((cols[0].field.as_str(), cols[0].width, cols[0].filterable, cols[0].sortable), ("key", 8.0, true, true));
+        assert_eq!((cols[1].field.as_str(), cols[1].width, cols[1].align.as_str()), ("updated", 10.0, "right"));
+        // a JSON string parses the same way
+        assert_eq!(parse_columns_value(&Value::String(arr.to_string())), cols);
     }
 
     #[test]
@@ -4239,7 +4343,7 @@ mod tests {
         ));
         assert_eq!(
             out.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
-            vec!["Ready", "Doing", OTHER_COLUMN]
+            vec!["Ready".to_string(), "Doing".to_string(), other_column()]
         );
         assert_eq!(out[2].cards[0].key, "A-3");
     }
@@ -4248,7 +4352,7 @@ mod tests {
     fn board_columns_done_clamp() {
         let rows: Vec<Value> = (0..31).map(|i| board_row(&format!("D-{i:02}"), "Done")).collect();
         let out = board_columns(&board_params(json!(rows), json!({})));
-        assert_eq!(out[2].cards.len(), DONE_LIMIT);
+        assert_eq!(out[2].cards.len(), done_limit());
         assert_eq!(out[2].more, 1);
 
         let out = board_columns(&board_params(
@@ -4474,10 +4578,9 @@ mod tests {
 
         let spec = "key:Key:80:left:filter, status:Status:120:right:filter+sort, epic";
         assert_eq!(helper_parse_columns(spec).unwrap(), parse_columns(spec));
-        assert_eq!(
-            helper_serialize_columns(&parse_columns(spec), true).unwrap(),
-            serialize_columns(&parse_columns(spec), true)
-        );
+        let py: Value = serde_json::from_str(&helper_serialize_columns(&parse_columns(spec), true).unwrap()).unwrap();
+        let rs: Value = serde_json::from_str(&serialize_columns(&parse_columns(spec), true)).unwrap();
+        assert_eq!(py, rs);
 
         let kinds = filter_kinds(&[json!({"field": "customfield_100", "label": "Story Points"})]);
         assert_eq!(helper_filter_kinds(&[json!({"field": "customfield_100", "label": "Story Points"})]).unwrap(), kinds);

@@ -8631,7 +8631,7 @@ mod daemon_ui {
                     .map(|o| {
                         let rows = format!("{} row{}", o.count, if o.count == 1 { "" } else { "s" });
                         let group = if c.field == "status" && o.id != EMPTY_VALUE {
-                            crate::views::jira::CATEGORY_NAMES[l.status_category(&o.id)].to_string()
+                            crate::views::jira::category_names()[l.status_category(&o.id)].to_string()
                         } else {
                             String::new()
                         };
@@ -8644,7 +8644,7 @@ mod daemon_ui {
             };
             let mut m = MultiPickerModel::new(&c.title.to_lowercase(), None);
             if c.field == "status" {
-                m.group_order = crate::views::jira::CATEGORY_NAMES.iter().map(|s| s.to_string()).collect();
+                m.group_order = crate::views::jira::category_names().iter().map(|s| s.to_string()).collect();
                 let mut rows: HashMap<String, usize> = HashMap::new();
                 for o in &opts {
                     let n: usize = o.detail.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -8933,7 +8933,7 @@ mod daemon_ui {
             }) else {
                 return;
             };
-            let cats: Vec<String> = crate::views::jira::CATEGORY_NAMES.iter().map(|s| s.to_string()).collect();
+            let cats: Vec<String> = crate::views::jira::category_names().iter().map(|s| s.to_string()).collect();
             let words = self
                 .jira_surface(|l| l.rules.as_ref().map(|r| serde_json::to_value(&r.words).unwrap_or_default()))
                 .flatten()

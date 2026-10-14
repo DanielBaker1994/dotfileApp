@@ -1382,6 +1382,9 @@ pub fn config_value_problem(section: &str, key: &str, value: &str) -> Option<Str
         }
     }
     if key == "columns" {
+        if value.trim().starts_with('[') {
+            return columns_json_problem(value);
+        }
         for part in value.split(',') {
             let seg: Vec<String> = part
                 .split(':')
@@ -1439,6 +1442,42 @@ fn first_chars(s: &str, n: usize) -> String {
 }
 
 /// `validateConfig(_:)`.
+/// `config_value_problem` for a structured (JSON array) `columns` value.
+fn columns_json_problem(value: &str) -> Option<String> {
+    let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(value) else {
+        return Some("columns must be a JSON list of {field, width, align, filter, sort}".to_string());
+    };
+    if arr.is_empty() {
+        return Some("at least one column is required".to_string());
+    }
+    for o in &arr {
+        let field = o.get("field").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if field.is_empty() {
+            return Some("a column has no field name".to_string());
+        }
+        if let Some(w) = o.get("width") {
+            match w.as_f64() {
+                Some(n) if (0.0..=100.0).contains(&n) => {}
+                _ => return Some(format!("'{field}' width must be 0-100")),
+            }
+        }
+        if let Some(a) = o.get("align").and_then(|v| v.as_str()) {
+            if !["left", "right", "center"].contains(&a.to_lowercase().as_str()) {
+                return Some(format!("'{field}' align '{a}' is not left | right | center"));
+            }
+        }
+    }
+    let total: f64 = crate::views::jira::parse_columns(value).iter().map(|c| c.width).sum();
+    if total > 100.5 {
+        return Some(format!(
+            "column widths add up to {}% (> 100 — they are scaled to fit)",
+            total as i64
+        ));
+    }
+    None
+}
+
+
 pub fn validate_config(text: &str) -> Vec<ConfigIssue> {
     validate_config_lines(&config_text::config_decoded_lines(text))
 }

@@ -436,8 +436,10 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             env = self.env(tmp)
             p = self.run_py(env, "jira_config.py", "--check")
             # all + the favorites job the upgrade adds
-            self.assertIn("gave 2 job(s) their own copy of [jira] columns", p.stdout)
-            self.assertEqual(self.cfgjson(env)["endpoints"][0]["columns"], self.COLS)
+            self.assertIn("gave 2 job(s) their own copy of the columns", p.stdout)
+            self.assertEqual(self.cfgjson(env)["endpoints"][0]["columns"],
+                             [{"field": "key", "title": "Key", "width": 10, "filter": True, "sort": True},
+                              {"field": "title", "title": "Title", "filter": True}])
             p = self.run_py(env, "jira_config.py", "--check")
             self.assertNotIn("own copy", p.stdout)   # once only
 
@@ -552,7 +554,7 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             r = json.loads(self.run_py(env, "jira_config.py", "--set-columns", "live", "search",
                                        "key:K").stdout)
             self.assertTrue(r["ok"])
-            self.assertEqual(self.cfgjson(env)["liveSearch"]["columns"], "key:K")
+            self.assertEqual(self.cfgjson(env)["liveSearch"]["columns"], [{"field": "key", "title": "K"}])
 
     def test_field_labels_one_per_field(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -569,8 +571,11 @@ class JobsAndLiveSearchTests(unittest.TestCase):
             # most used title wins; titles equal to the default are not pinned
             self.assertEqual(labels, {"title": "Summary", "status": "State"})
             cfg = self.cfgjson(env)
-            self.assertEqual(cfg["endpoints"][0]["columns"], "key::8, title::40:left:sort, status")
-            self.assertEqual(cfg["liveSearch"]["columns"], "key, status::10")
+            self.assertEqual(cfg["endpoints"][0]["columns"],
+                             [{"field": "key", "width": 8},
+                              {"field": "title", "width": 40, "sort": True},
+                              {"field": "status"}])
+            self.assertEqual(cfg["liveSearch"]["columns"], [{"field": "key"}, {"field": "status", "width": 10}])
             self.assertTrue(cfg["fieldLabels"])
             p = self.run_py(env, "jira_config.py", "--check")
             self.assertNotIn("field_labels", p.stdout)             # once only

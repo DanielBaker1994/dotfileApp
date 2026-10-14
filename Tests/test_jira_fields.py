@@ -55,22 +55,44 @@ class Serialize(unittest.TestCase):
         return c
 
     def test_integral_and_fractional_widths(self):
-        self.assertEqual(jf.serialize_columns([self.col()]), "a:T:120:left")
-        self.assertEqual(jf.serialize_columns([self.col(width=120.5)]), "a:T:120.5:left")
-        self.assertEqual(jf.serialize_columns([self.col(width=0)]), "a:T:0:left")
+        self.assertEqual(jf.serialize_columns([self.col()]),
+                         '[{"field":"a","title":"T","width":120}]')
+        self.assertEqual(jf.serialize_columns([self.col(width=120.5)]),
+                         '[{"field":"a","title":"T","width":120.5}]')
+        self.assertEqual(jf.serialize_columns([self.col(width=0)]),
+                         '[{"field":"a","title":"T"}]')
 
     def test_titles_off(self):
-        self.assertEqual(jf.serialize_columns([self.col()], titles=False), "a::120:left")
+        self.assertEqual(jf.serialize_columns([self.col()], titles=False),
+                         '[{"field":"a","width":120}]')
 
-    def test_flags_filter_first(self):
+    def test_flags_and_align(self):
         self.assertEqual(jf.serialize_columns([self.col(sortable=True, filterable=True)]),
-                         "a:T:120:left:filter+sort")
-        self.assertEqual(jf.serialize_columns([self.col(sortable=True)]), "a:T:120:left:sort")
+                         '[{"field":"a","title":"T","width":120,"filter":true,"sort":true}]')
+        self.assertEqual(jf.serialize_columns([self.col(sortable=True)]),
+                         '[{"field":"a","title":"T","width":120,"sort":true}]')
+        self.assertEqual(jf.serialize_columns([self.col(align="right")]),
+                         '[{"field":"a","title":"T","width":120,"align":"right"}]')
 
     def test_round_trip(self):
         spec = "key:Key:80:left:filter, status:Status:120:right:filter+sort, epic"
         self.assertEqual(jf.parse_columns(jf.serialize_columns(jf.parse_columns(spec))),
                          jf.parse_columns(spec))
+
+
+class Structured(unittest.TestCase):
+    def test_json_text_and_list_agree(self):
+        want = [{"field": "key", "title": "key", "width": 8.0, "align": "left",
+                 "sortable": True, "filterable": True}]
+        self.assertEqual(jf.parse_columns('[{"field":"key","width":8,"filter":true,"sort":true}]'), want)
+        self.assertEqual(jf.parse_columns([{"field": "key", "width": 8, "filter": True, "sort": True}]), want)
+
+    def test_bad_json_is_empty(self):
+        self.assertEqual(jf.parse_columns("[not json"), [])
+
+    def test_columns_json_omits_defaults(self):
+        self.assertEqual(jf.columns_json(jf.parse_columns("a::8:left:filter+sort")),
+                         [{"field": "a", "width": 8, "filter": True, "sort": True}])
 
 
 class Labels(unittest.TestCase):

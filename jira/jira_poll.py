@@ -964,7 +964,7 @@ def describe(cfg, team: dict) -> dict:
     aliases = jira_config.custom_field_aliases(team)
     margin = int(cfg["pollMarginMinutes"] or 5)
     known_projects = jira_config.scope_projects(team)
-    template = jira_config.read_section("jira").get("columns", "")
+    template = jira_config.read_section("jira").get("columns") or jira_config.default_columns()
 
     scope = jira_config.scope_projects(team)
     ctx = Ctx({"init": False, "window": ""}, cfg, team, c)
@@ -1065,7 +1065,7 @@ def describe(cfg, team: dict) -> dict:
             "projects": projects, "extraJql": ep.get("userJql", ep.get("jql", "")),
             "job": ep.get("job") or ep.get("template") or "", "args": ep.get("args") or {},
             "nextWindow": window, "jql": jql, "requests": reqs, "notes": notes,
-            "columnsSpec": spec, "columns": columns_meta(spec, aliases), "apiFields": fields,
+            "columnsSpec": jira_config.serialize_columns(jira_config.parse_columns(spec)), "columns": columns_meta(spec, aliases), "apiFields": fields,
             "status": entry.get("status", "never run"), "lastRun": entry.get("lastRun", ""),
             "lastSuccess": entry.get("lastSuccess", ""), "lastWindow": entry.get("lastWindow", ""),
             "nextRun": jira_status.now_str(nx) if nx else "due",
@@ -1076,7 +1076,7 @@ def describe(cfg, team: dict) -> dict:
 
     # the live search tab (Cmd+F in the Jira window)
     ls_spec = jira_config.live_search_columns(cfg)
-    live = {"file": jira_config.LIVE_SEARCH_FILE, "columnsSpec": ls_spec,
+    live = {"file": jira_config.LIVE_SEARCH_FILE, "columnsSpec": jira_config.serialize_columns(jira_config.parse_columns(ls_spec)),
             "columns": columns_meta(ls_spec, aliases),
             "maxResults": cfg.live_search.get("maxResults") or jira_config.LIVE_SEARCH_MAX,
             "path": os.path.join(os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT),
@@ -1163,7 +1163,7 @@ def describe(cfg, team: dict) -> dict:
                        "checkpoint": {k: ck.get(k) for k in ("hwmText", "fetched", "total", "mode",
                                                              "savedAt")} if ck else None},
         "projectKeys": team.get("project_keys") or [],
-        "columnsTemplate": template,
+        "columnsTemplate": jira_config.serialize_columns(jira_config.parse_columns(template)),
         "searchDefaults": {k: c.sd(k) for k in jira_config.DEFAULT_SEARCH},
         "liveSearch": live,
         "directory": {"path": jira_api.DIRECTORY_FILE, "fetchedAt": dirdata.get("fetchedAt", ""),
@@ -1814,10 +1814,10 @@ def boards_cache_path() -> str:
     return os.path.join(jira_api.CACHE_DIR, jira_config.BOARDS_FILE)
 
 
-def main_columns(cfg) -> str:
+def main_columns(cfg):
     ep = next((e for e in cfg.endpoints if plain_issue_job(e) and e.get("name") == "all"),
               next((e for e in cfg.endpoints if plain_issue_job(e)), {}))
-    return ep.get("columns") or ""
+    return ep.get("columns") or jira_config.default_columns()
 
 
 def edit_pinned_boards(op: str, ids: list) -> int:

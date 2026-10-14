@@ -13,7 +13,7 @@ use crate::app::paths::JiraPaths;
 use crate::ui::sidebar::{SidebarEvent, SidebarModel, SidebarPin, SidebarRow};
 use crate::ui::theme::PopupTone;
 use crate::app::config::ListColumn;
-use crate::views::jira::{base_field_label, board_columns, parse_columns, style_rules, BoardColumn, CellStyle, StyleRules};
+use crate::views::jira::{base_field_label, board_columns, parse_columns, parse_columns_value, style_rules, BoardColumn, CellStyle, StyleRules};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -566,7 +566,7 @@ impl JiraList {
         file.trim_end_matches(".json").to_string()
     }
 
-    /// `ListSession.tabColumns(cmd, path)` — the endpoint's spec, labeled.
+    /// `ListSession.tabColumns(cmd, path)` — the endpoint's columns, labeled.
     pub fn tab_columns(&self, file: &str) -> Vec<ListColumn> {
         let spec = self
             .endpoints()
@@ -575,10 +575,10 @@ impl JiraList {
                 let name = ep.get("name").and_then(Value::as_str).unwrap_or("");
                 ep.get("file").and_then(Value::as_str).map(str::to_string).unwrap_or(format!("{name}.json")) == file
             })
-            .and_then(|ep| ep.get("columns").and_then(Value::as_str).map(str::to_string))
-            .or_else(|| self.section.get("columns").cloned())
-            .unwrap_or_default();
-        let mut cols = parse_columns(&spec);
+            .and_then(|ep| ep.get("columns").cloned())
+            .or_else(|| self.section.get("columns").map(|s| Value::String(s.clone())))
+            .unwrap_or_else(crate::views::jira::default_columns);
+        let mut cols = parse_columns_value(&spec);
         for c in cols.iter_mut() {
             if c.title == c.field || c.title.is_empty() {
                 c.title = base_field_label(&c.field).map(str::to_string).unwrap_or_else(|| c.field.clone());
@@ -807,7 +807,7 @@ impl JiraList {
     /// `boardListRows()` as records (the "All boards" pin).
     pub fn show_board_list(&mut self) {
         self.place = Some(JiraPlace::Pin(BOARD_LIST_KEY.into()));
-        self.columns = parse_columns("name:Board:40:left:filter+sort, project:Project:20:left:filter+sort, boardId:ID:10:left:sort");
+        self.columns = parse_columns_value(&crate::views::jira::board_list_columns());
         let mut ids: Vec<String> = self.catalog.iter().map(|c| c.0.clone()).collect();
         for (id, _) in &self.boards {
             if !ids.contains(id) {
@@ -838,7 +838,12 @@ impl JiraList {
     }
 
     fn default_columns(&self) -> Vec<ListColumn> {
-        let mut cols = parse_columns(self.section.get("columns").map(String::as_str).unwrap_or(""));
+        let spec = self
+            .section
+            .get("columns")
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or_else(crate::views::jira::default_columns);
+        let mut cols = parse_columns_value(&spec);
         for c in cols.iter_mut() {
             if c.title.is_empty() || c.title == c.field {
                 c.title = base_field_label(&c.field).map(str::to_string).unwrap_or_else(|| c.field.clone());
@@ -1292,9 +1297,7 @@ impl JiraList {
         if self.board_cols.is_empty() {
             return None;
         }
-        let columns = parse_columns(
-            "column:Column:18:left, key:Key:12:left, title:Title:44:left, status:Status:16:left, assignee:Assignee:10:left",
-        );
+        let columns = parse_columns_value(&crate::views::jira::board_table_columns());
         let mut rows: Vec<Record> = Vec::new();
         for col in &self.board_cols {
             let mut head = Record::new();
@@ -1771,7 +1774,7 @@ impl JiraList {
         let people = if PERSON_FIELDS.contains(&g) { self.people_by_value() } else { HashMap::new() };
         let mut board_col: HashMap<String, String> = HashMap::new();
         match g {
-            "statusCategory" => fixed = crate::views::jira::CATEGORY_NAMES.iter().map(|s| s.to_string()).collect(),
+            "statusCategory" => fixed = crate::views::jira::category_names().iter().map(|s| s.to_string()).collect(),
             "boardColumn" => {
                 if let Some(id) = self.on_board() {
                     for c in self.board_column_spec(&id) {
@@ -1794,7 +1797,7 @@ impl JiraList {
                     if st.is_empty() {
                         vec![NONE.into()]
                     } else {
-                        vec![crate::views::jira::CATEGORY_NAMES[l.status_category(st)].to_string()]
+                        vec![crate::views::jira::category_names()[l.status_category(st)].to_string()]
                     }
                 }
                 "boardColumn" => {
@@ -3817,8 +3820,8 @@ mod tests {
         l.set_column_widths(&[10.0, 20.0, 30.0, 40.0]);
         // No config.json job owns it: commands.toml's spec comes back.
         let spec = l.save_columns().unwrap();
-        assert!(spec.starts_with("assignee:"), "{spec}");
-        assert!(spec.contains(":10:"), "{spec}");
+        assert!(spec.starts_with("[{\"field\":\"assignee\""), "{spec}");
+        assert!(spec.contains("\"width\":10"), "{spec}");
     }
 
     #[test]

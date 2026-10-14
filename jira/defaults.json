@@ -51,6 +51,28 @@
     "components": "Components",
     "epic": "Epic / parent"
   },
+  "board_list_columns": [
+    {"field": "name", "title": "Board", "width": 40, "filter": true, "sort": true},
+    {"field": "project", "width": 20, "filter": true, "sort": true},
+    {"field": "boardId", "title": "ID", "width": 10, "sort": true}
+  ],
+  "board_table_columns": [
+    {"field": "column", "title": "Column", "width": 18},
+    {"field": "key", "width": 12},
+    {"field": "title", "width": 44},
+    {"field": "status", "width": 16},
+    {"field": "assignee", "width": 10}
+  ],
+  "columns": [
+    {"field": "key", "width": 8, "filter": true, "sort": true},
+    {"field": "title", "width": 33, "filter": true, "sort": true},
+    {"field": "status", "width": 10, "filter": true, "sort": true},
+    {"field": "assignee", "width": 12, "filter": true, "sort": true},
+    {"field": "priority", "width": 8, "filter": true, "sort": true},
+    {"field": "releaseLabel", "width": 12, "filter": true, "sort": true},
+    {"field": "updated", "width": 10, "align": "right", "sort": true},
+    {"field": "project", "width": 7, "filter": true, "sort": true}
+  ],
   "endpoints": [
     {
       "name": "all",

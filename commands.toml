@@ -275,7 +275,6 @@ sources = "~/.cache/kitchen-sink/jira_json"
 my-work = true
 
 table = true
-columns = "key:Key:8:left:filter+sort, title:Title:33:left:filter+sort, status:Status:10:left:filter+sort, assignee:Assignee:12:left:filter+sort, priority:Priority:8:left:filter+sort, releaseLabel:Release:12:left:filter+sort, updated:Updated:10:right:sort, project:Project:7:left:filter+sort"
 primary = "key"
 content = "title"
 detail = "assignee,reporter,releaseLabel"
