@@ -280,6 +280,15 @@ else
     [ -n "$EE" ] && bad "last menu-bar enable attempt failed ($EE) — Jira Poll ▸ Setup…"
 fi
 
+head_ "== logs =="
+# ONE inventory of every log/data file (bin/ws-logs; also standalone). Never a
+# failure: missing files are the normal case, so this only ever reports.
+if [ -x "$WS_ROOT/bin/ws-logs" ]; then
+    "$WS_ROOT/bin/ws-logs" --no-header || warn "ws-logs could not list the log files (non-fatal)"
+else
+    warn "bin/ws-logs missing — cannot list the log files (restore the repo's bin/)"
+fi
+
 head_ "== summary =="
 printf '  \033[1m%d passed\033[0m, \033[31m%d failed\033[0m, \033[33m%d warnings\033[0m\n' \
     "$PASS" "$FAIL" "$WARN"
