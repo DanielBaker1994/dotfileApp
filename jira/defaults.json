@@ -57,11 +57,11 @@
     {"field": "boardId", "title": "ID", "width": 10, "sort": true}
   ],
   "board_table_columns": [
-    {"field": "column", "title": "Column", "width": 18},
+    {"field": "column", "title": "Column", "width": 18, "filter": true},
     {"field": "key", "width": 12},
     {"field": "title", "width": 27},
-    {"field": "status", "width": 16},
-    {"field": "assignee", "width": 10}
+    {"field": "status", "width": 16, "filter": true},
+    {"field": "assignee", "width": 10, "filter": true}
   ],
   "columns": [
     {"field": "key", "width": 4, "filter": true, "sort": true},

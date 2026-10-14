@@ -970,6 +970,25 @@ impl JiraList {
         matches!(&self.place, Some(JiraPlace::Pin(k)) if k == BOARD_LIST_KEY)
     }
 
+    /// `true` while a board is open in `columns` mode (the lane overlay).
+    fn on_board_columns(&self) -> bool {
+        self.on_board().is_some_and(|id| {
+            self.board_mode.get(&id).map(String::as_str).unwrap_or("columns") == "columns"
+        })
+    }
+
+    /// The fields the currently shown table displays (the board overlay's own
+    /// columns in columns mode, else the list's).
+    fn displayed_fields(&self) -> Vec<String> {
+        if self.on_board_columns() {
+            return parse_columns_value(&crate::views::jira::board_table_columns())
+                .iter()
+                .map(|c| c.field.clone())
+                .collect();
+        }
+        self.columns.iter().map(|c| c.field.clone()).collect()
+    }
+
     /// `boardName(_:)` — the catalog / pinned name, else `Board <id>`.
     pub fn board_name(&self, id: &str) -> String {
         self.catalog
@@ -1357,12 +1376,10 @@ impl JiraList {
             return None;
         }
         let columns = parse_columns_value(&crate::views::jira::board_table_columns());
+        let filtering = !self.col_filters.is_empty();
         let mut rows: Vec<Record> = Vec::new();
         for col in &self.board_cols {
-            let mut head = Record::new();
-            head.insert("column".into(), col.name.clone());
-            head.insert("title".into(), format!("{} ({})", col.name, col.cards.len() + col.more));
-            rows.push(head);
+            let mut cards: Vec<Record> = Vec::new();
             for card in &col.cards {
                 let mut r = Record::new();
                 r.insert("column".into(), col.name.clone());
@@ -1370,15 +1387,29 @@ impl JiraList {
                 r.insert("title".into(), card.title.clone());
                 r.insert("status".into(), card.status.clone());
                 r.insert("assignee".into(), card.assignee.clone());
-                rows.push(r);
+                if self.row_matches_filters(&r) {
+                    cards.push(r);
+                }
             }
-            if col.more > 0 {
+            let mut head = Record::new();
+            head.insert("column".into(), col.name.clone());
+            let shown = cards.len() + if filtering { 0 } else { col.more };
+            head.insert("title".into(), format!("{} ({})", col.name, shown));
+            rows.push(head);
+            rows.extend(cards);
+            if col.more > 0 && !filtering {
                 let mut more = Record::new();
                 more.insert("column".into(), col.name.clone());
                 more.insert("title".into(), format!("… {} more", col.more));
                 rows.push(more);
             }
         }
+        let filter_active: BTreeSet<usize> = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.col_filters.contains_key(&c.field))
+            .map(|(i, _)| i)
+            .collect();
         let selection = self.selection.min(rows.len().saturating_sub(1));
         Some(JiraSnapshot {
             columns,
@@ -1387,7 +1418,7 @@ impl JiraList {
             checked: self.checked.clone(),
             favs: self.favs.clone(),
             sort: None,
-            filter_active: BTreeSet::new(),
+            filter_active,
             compact: false,
             reserve_label: false,
             sidebar: self.sidebar_model(),
@@ -1463,9 +1494,24 @@ impl JiraList {
         }
     }
 
+    /// `true` when `r` satisfies every active column filter (ANDed).
+    pub fn row_matches_filters(&self, r: &Record) -> bool {
+        self.col_filters
+            .iter()
+            .all(|(f, picked)| Self::cell_values(f, r).iter().any(|v| picked.contains(v)))
+    }
+
     /// `filterOptions`: every value of `field` in the shown list with its row
     /// count, most rows first (ties by name), the blank value last.
     pub fn filter_options(&self, field: &str) -> Vec<FilterOption> {
+        // The board overlay's `column` values are its lanes, not issue fields.
+        if field == "column" && self.on_board_columns() {
+            return self
+                .board_cols
+                .iter()
+                .map(|c| FilterOption { count: c.cards.len(), id: c.name.clone(), title: c.name.clone() })
+                .collect();
+        }
         let people = if PERSON_FIELDS.contains(&field) { self.people_by_value() } else { HashMap::new() };
         let mut counts: HashMap<String, usize> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -1603,17 +1649,14 @@ impl JiraList {
     pub fn refilter(&mut self) {
         // A filter on a column the shown list does not have would hide rows
         // with no visible way to clear it (Swift drops those too).
-        let cols = &self.columns;
-        self.col_filters.retain(|f, v| !v.is_empty() && cols.iter().any(|c| &c.field == f));
+        let fields_shown = self.displayed_fields();
+        self.col_filters.retain(|f, v| !v.is_empty() && fields_shown.iter().any(|c| c == f));
         let fields = self.filter_fields();
         let words: Vec<String> = self.query.to_lowercase().split_whitespace().map(str::to_string).collect();
         let mut idx: Vec<usize> = (0..self.all.len())
             .filter(|&i| {
                 let r = &self.all[i];
-                let picked_ok = self
-                    .col_filters
-                    .iter()
-                    .all(|(f, picked)| Self::cell_values(f, r).iter().any(|v| picked.contains(v)));
+                let picked_ok = self.row_matches_filters(r);
                 if !picked_ok {
                     return false;
                 }
@@ -4122,6 +4165,22 @@ mod tests {
         let snap = l.snapshot();
         assert!(snap.columns.iter().any(|c| c.field == "column"));
         assert!(snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+
+        // Column/status filters apply to the board overlay's cards (lanes stay).
+        l.toggle_filter("column", "Doing");
+        assert!(l.col_filters.contains_key("column"), "board-column filter kept");
+        let snap = l.snapshot();
+        assert!(snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-2")));
+        assert!(!snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+        assert!(snap.rows.iter().any(|r| r.get("column").map(String::as_str) == Some("Ready")), "lane header stays");
+        l.clear_filter("column");
+
+        l.toggle_filter("status", "To Do");
+        let snap = l.snapshot();
+        assert!(snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-1")));
+        assert!(!snap.rows.iter().any(|r| r.get("key").map(String::as_str) == Some("DEMO-2")));
+        l.clear_filter("status");
+        assert!(l.col_filters.is_empty());
 
         // table mode draws the issue rows instead.
         assert!(l.set_mode("table"));
