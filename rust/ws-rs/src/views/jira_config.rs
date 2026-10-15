@@ -345,11 +345,12 @@ pub fn job_detail(j: &DescribeJob) -> JobDetail {
         name: j.name.clone(),
         window: j.window.clone(),
         enabled: j.enabled,
-        jql: if j.extra_jql.trim().is_empty() {
-            j.jql.clone()
-        } else {
-            j.extra_jql.clone()
-        },
+        // The editable "extra JQL" only: a plain (shared-sync) job has an
+        // empty `extra_jql` while `j.jql` is the *generated* sync query (with
+        // ORDER BY). Falling back to `j.jql` would send that generated query
+        // through `--upsert-endpoint` and silently turn the plain job into a
+        // standalone-JQL job.
+        jql: j.extra_jql.clone(),
         args: args_text(&j.args),
         columns: j.columns_spec.clone(),
     }
@@ -497,6 +498,11 @@ mod appkit {
     /// `{name}` → value for a `[jira-config]` format string.
     fn fill(template: &str, name: &str) -> String {
         template.replace("{name}", name)
+    }
+
+    /// `{error}` → value for the `[jira-config] job-failed` template.
+    fn fill_error(template: &str, err: &str) -> String {
+        template.replace("{error}", err)
     }
 
     /// `--upsert-endpoint` / `--set-columns` / `--delete-endpoint` print JSON
@@ -1259,7 +1265,7 @@ mod appkit {
                     self.emit(JiraConfigAction::Refresh);
                 }
                 Err(e) => {
-                    let msg = fill(&self.ivars().settings.job_failed, &e);
+                    let msg = fill_error(&self.ivars().settings.job_failed, &e);
                     self.set_detail_result(&msg, Some(false));
                 }
             }
@@ -1288,13 +1294,18 @@ mod appkit {
             let name_arg = name.clone();
             background(
                 move || {
-                    let (code, out, err) = crate::app::jira_poll::run_stdin(
-                        "jira_config.py",
-                        &["--set-window", name_arg.as_str(), window.as_str()],
-                        None,
-                    );
-                    if code != 0 {
-                        return Err(writer_error(&out, &err, code));
+                    // A blank schedule field means "leave the schedule as it
+                    // is": `--set-window NAME ""` would fail (parse_window)
+                    // and abort the whole Save before enabled / JQL apply.
+                    if !window.is_empty() {
+                        let (code, out, err) = crate::app::jira_poll::run_stdin(
+                            "jira_config.py",
+                            &["--set-window", name_arg.as_str(), window.as_str()],
+                            None,
+                        );
+                        if code != 0 {
+                            return Err(writer_error(&out, &err, code));
+                        }
                     }
                     let (code, out, err) = crate::app::jira_poll::run_stdin(
                         "jira_config.py",
@@ -1604,12 +1615,21 @@ enabled = true
     #[test]
     fn detail_and_upsert_payload_carry_the_editable_fields() {
         let d = describe(json!({
-            "endpoints": [{
-                "name": "issues", "window": "10m", "enabled": true,
-                "jql": "", "extraJql": "project = KAN",
-                "args": {"a": "1", "b": 2},
-                "columnsSpec": "[{\"field\":\"key\"}]"
-            }]
+            "endpoints": [
+                {
+                    "name": "issues", "window": "10m", "enabled": true,
+                    "jql": "", "extraJql": "project = KAN",
+                    "args": {"a": "1", "b": 2},
+                    "columnsSpec": "[{\"field\":\"key\"}]"
+                },
+                {
+                    // A plain (shared-sync) job: `jql` is the *generated* sync
+                    // query (with ORDER BY), `extraJql` is empty.
+                    "name": "plain", "window": "30m", "enabled": true,
+                    "jql": "project in (\"KAN\") ORDER BY key ASC",
+                    "extraJql": ""
+                }
+            ]
         }));
         let detail = detail_for(&d, "issues").unwrap();
         assert_eq!(detail.name, "issues");
@@ -1629,6 +1649,13 @@ enabled = true
         assert!(payload.get("window").is_none());
         assert!(payload.get("enabled").is_none());
         assert!(payload.get("columns").is_none());
+
+        // A plain job's detail must NOT fall back to the generated `jql`:
+        // saving it would convert the shared-sync job into a standalone-JQL
+        // job (and nest a second ORDER BY on the next sync).
+        let plain = detail_for(&d, "plain").unwrap();
+        assert_eq!(plain.jql, "");
+        assert_eq!(upsert_payload(&plain)["jql"], json!(""));
     }
 
     #[test]

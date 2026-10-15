@@ -672,7 +672,14 @@ class Ctx:
         self.o, self.cfg, self.team, self.c = o, cfg, team, c
         self.out_dir = os.path.expanduser(cfg["outDir"] or jira_config.OUT_DIR_DEFAULT)
         self.margin = int(cfg["pollMarginMinutes"] or 5)
-        self.plain = [e for e in cfg.endpoints if plain_issue_job(e) and e.get("enabled", True)]
+        # A plain (shared-sync) job normally joins `plain` only while enabled.
+        # An endpoint named explicitly (`--job NAME` / `--projects NAME`) must
+        # run even when disabled, so include those too - otherwise `--job` on a
+        # disabled plain job reports success while its file is never written.
+        named = {n.strip() for n in
+                 f"{o.get('job') or ''},{o.get('projects') or ''}".split(",") if n.strip()}
+        self.plain = [e for e in cfg.endpoints
+                      if plain_issue_job(e) and (e.get("enabled", True) or e["name"] in named)]
 
     def sync_projects(self) -> list:
         """The shared sync's projects: every plain job's (clamped) projects,
