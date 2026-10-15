@@ -45,6 +45,73 @@ pub const TERMINAL_DRAWER_HEIGHT: f64 = 200.0;
 /// Width of the notes file-browser drawer (side).
 pub const BROWSER_DRAWER_WIDTH: f64 = 260.0;
 
+// ---------------------------------------------------------------------------
+// Note context-menu rows (one shared, pure definition)
+// ---------------------------------------------------------------------------
+
+/// The canonical rows of the note context menus, in order. One source so the
+/// editor (`app/host.rs` `notes_editor_menu`), the vim image overlay
+/// (`vim_image_menu`) and the prose reading view (`notes_prose::show_context_menu`)
+/// cannot drift in wording or order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NoteMenuRow {
+    OpenFullSize,
+    CopyAbsolutePath,
+    CopyImage,
+    RevealInFiles,
+    CopyPdfPath,
+    OpenFilePath,
+}
+
+impl NoteMenuRow {
+    /// The user-visible label (the one shared spelling per action).
+    pub fn label(self) -> &'static str {
+        match self {
+            NoteMenuRow::OpenFullSize => "Open Full Size",
+            NoteMenuRow::CopyAbsolutePath => "Copy Absolute Path",
+            NoteMenuRow::CopyImage => "Copy Image",
+            NoteMenuRow::RevealInFiles => "Reveal in Files",
+            NoteMenuRow::CopyPdfPath => "Copy PDF Path",
+            NoteMenuRow::OpenFilePath => "Open file at path…",
+        }
+    }
+
+    /// `true` for rows that need the in-process daemon UI and are therefore a
+    /// silent no-op in the prose **pop-out** (a child process — `UI_WEAK` is
+    /// only set inside a `DaemonUi`, `app/host.rs`). Such rows must be omitted
+    /// from any menu that also runs in the pop-out.
+    ///
+    /// `Open Full Size` is deliberately *not* listed: it is per-surface — the
+    /// vim overlay uses `file_popup::show` (standalone) while the editor uses
+    /// `notes_open_image` (in-process) — so it is not uniformly process-bound.
+    pub fn process_dependent(self) -> bool {
+        matches!(self, NoteMenuRow::RevealInFiles | NoteMenuRow::OpenFilePath)
+    }
+}
+
+/// The canonical order: open → copy → navigation → other.
+pub const NOTE_MENU_ORDER: &[NoteMenuRow] = &[
+    NoteMenuRow::OpenFullSize,
+    NoteMenuRow::CopyAbsolutePath,
+    NoteMenuRow::CopyImage,
+    NoteMenuRow::RevealInFiles,
+    NoteMenuRow::CopyPdfPath,
+    NoteMenuRow::OpenFilePath,
+];
+
+/// The prose reading view's rows. The prose menu is shared by the in-place
+/// reading view and the **pop-out child process**, where a reveal row is a
+/// no-op — so process-dependent rows are deliberately excluded here. Derived
+/// from [`NOTE_MENU_ORDER`] so wording and order cannot drift.
+pub fn prose_menu_rows() -> Vec<NoteMenuRow> {
+    NOTE_MENU_ORDER
+        .iter()
+        .copied()
+        .filter(|r| !r.process_dependent())
+        .filter(|r| matches!(r, NoteMenuRow::CopyAbsolutePath | NoteMenuRow::CopyPdfPath))
+        .collect()
+}
+
 /// Pure bookkeeping for the notes view's two drawers (terminal at the bottom,
 /// browser at the side). AppKit-free so it is unit-testable; [`NotesSurface`]
 /// holds one and mirrors it onto the real drawer views.
@@ -2723,6 +2790,11 @@ mod macos {
     }
 
     /// `PopupWindow.imageMenu(_:)` — the vim image's right-click menu.
+    ///
+    /// Rows follow [`NOTE_MENU_ORDER`]: `Open Full Size`, `Copy Absolute Path`,
+    /// `Copy Image`, `Reveal in Files`. This is an in-process surface (a
+    /// `DaemonUi`), so the process-dependent `Reveal in Files` row is valid
+    /// here — unlike the prose menu, see [`prose_menu_rows`].
     fn vim_image_menu(path: &str, view: &NSView) {
         use crate::ui::menu_kit::{popup_context, MenuEntry};
         let home = std::env::var("HOME").unwrap_or_default();
@@ -6392,5 +6464,41 @@ mod tests {
         }
         let menu = doc_template_menu("# T", "a, b", "");
         assert_eq!(menu, Some((None, vec!["a".to_string(), "b".to_string()])));
+    }
+
+    #[test]
+    fn prose_menu_rows_are_the_two_copy_rows() {
+        let rows = prose_menu_rows();
+        assert_eq!(
+            rows,
+            vec![NoteMenuRow::CopyAbsolutePath, NoteMenuRow::CopyPdfPath]
+        );
+        let labels: Vec<&str> = rows.iter().map(|r| r.label()).collect();
+        assert_eq!(labels, vec!["Copy Absolute Path", "Copy PDF Path"]);
+    }
+
+    #[test]
+    fn prose_menu_rows_exclude_process_dependent_rows() {
+        // The prose menu also runs in the pop-out child process, where a
+        // reveal/open-in-notes row is a silent no-op — so it must be omitted.
+        assert!(prose_menu_rows().iter().all(|r| !r.process_dependent()));
+        assert!(NoteMenuRow::RevealInFiles.process_dependent());
+        // `Open file at path…` is the editor's `route_open_path_prompt` — also
+        // in-process-only, so it is process-dependent too (and prose drops it).
+        assert!(NoteMenuRow::OpenFilePath.process_dependent());
+    }
+
+    #[test]
+    fn note_menu_order_is_copy_then_navigation_and_labels_unique() {
+        let pos = |r: NoteMenuRow| NOTE_MENU_ORDER.iter().position(|&x| x == r).unwrap();
+        // RevealInFiles (navigation) sits after the copy rows.
+        assert!(pos(NoteMenuRow::RevealInFiles) > pos(NoteMenuRow::CopyAbsolutePath));
+        assert!(pos(NoteMenuRow::RevealInFiles) > pos(NoteMenuRow::CopyImage));
+        // Every variant appears once, with a non-empty, unique label.
+        let labels: Vec<&str> = NOTE_MENU_ORDER.iter().map(|r| r.label()).collect();
+        assert_eq!(labels.len(), 6);
+        assert!(labels.iter().all(|l| !l.is_empty()));
+        let uniq: HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(uniq.len(), labels.len());
     }
 }

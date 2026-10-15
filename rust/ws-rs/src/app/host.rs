@@ -11127,6 +11127,11 @@ mod daemon_ui {
         /// `PopupTextView.menu(for:)`: the plain notes editor's right-click.
         /// On an image link: Open Full Size, then Copy Absolute Path (the
         /// image); then Copy Absolute Path (the note) and Open file at path….
+        ///
+        /// Labels and order follow the shared [`crate::views::notes::NOTE_MENU_ORDER`]
+        /// (see also [`crate::views::notes::prose_menu_rows`] and the
+        /// `NoteMenuRow::process_dependent` rule: this is an in-process surface,
+        /// so process-dependent rows are valid here; the prose pop-out omits them).
         fn notes_editor_menu(&self, idx: usize) {
             use crate::ui::menu_kit::{popup_context, MenuEntry};
             let Some((image, note, view)) = self.notes_surface(|s| {

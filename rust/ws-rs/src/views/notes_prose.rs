@@ -469,24 +469,38 @@ mod appkit {
 
     /// The right-click menu of both prose views: copy the note's absolute
     /// path, or build its PDF and copy that path.
+    ///
+    /// Rows come from the one shared definition ([`notes::prose_menu_rows`] /
+    /// [`notes::NOTE_MENU_ORDER`]) so wording and order cannot drift from the
+    /// editor and vim menus. No reveal/open-in-notes row: this menu also runs
+    /// in the pop-out child process, where those are a silent no-op
+    /// (`UI_WEAK` is only set inside a `DaemonUi`).
     pub fn show_context_menu(note: &str, colors: PopupColors, view: &NSView) {
         use crate::ui::menu_kit::{popup_context, MenuEntry};
+        use crate::views::notes::{prose_menu_rows, NoteMenuRow};
         if note.is_empty() {
             return;
         }
-        let (n1, n2) = (note.to_string(), note.to_string());
-        popup_context(
-            vec![
-                MenuEntry::item("Copy Absolute Path", move || {
-                    let _ = crate::platform::set_text(&n1);
-                    crate::ui::toast::show(&format!("Copied {}", tilde(&n1)), "doc.on.clipboard");
-                }),
-                MenuEntry::item("Copy PDF Path", move || {
-                    export_pdf_and_copy(n2, NotesConfig::load(), colors, "");
-                }),
-            ],
-            view,
-        );
+        let entries: Vec<MenuEntry> = prose_menu_rows()
+            .into_iter()
+            .map(|row| match row {
+                NoteMenuRow::CopyAbsolutePath => {
+                    let n = note.to_string();
+                    MenuEntry::item(row.label(), move || {
+                        let _ = crate::platform::set_text(&n);
+                        crate::ui::toast::show(&format!("Copied {}", tilde(&n)), "doc.on.clipboard");
+                    })
+                }
+                NoteMenuRow::CopyPdfPath => {
+                    let n = note.to_string();
+                    MenuEntry::item(row.label(), move || {
+                        export_pdf_and_copy(n, NotesConfig::load(), colors, "");
+                    })
+                }
+                _ => unreachable!("prose_menu_rows yields only copy rows"),
+            })
+            .collect();
+        popup_context(entries, view);
     }
 
     pub struct WebIvars {
