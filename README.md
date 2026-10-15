@@ -82,7 +82,7 @@ Repo: `https://github.com/DanielBaker1994/dotfileApp.git`
 | Window borders | borders (brew service) |
 | Jira window | Hyper+J (aerospace) — spreadsheet table, columns from `commands.toml [jira] columns` |
 | AI view | Hyper+S → /ai — Apple's on-device model (`fm`) driven by rule files in `rules/*.md` (Grammar Check: grammar + Markdown formatting for Outlook/Webex); right pane = Diff / Markdown / Outlook / Webex preview, ⧉ Copy = rich text (HTML + RTF + Markdown via pandoc), Ctrl+Enter runs |
-| Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window** / **Open Jira Config Window** (poll jobs, schedules, columns, Force Poll, Setup…) |
+| Jira poll on/off + options | wrench menu → **Enable Jira** / **Disable Jira** (asks whether to keep polling in the background) / **Toggle Jira Window**; the Jira view's **Tickets \| Config** pill → **Config** shows the poll jobs, schedules, Force Poll and Setup… |
 | Jira poll agent | launchd `com.jira.poll` (60s tick; `jira_poll.py` runs only due endpoints) |
 
 ## Development
