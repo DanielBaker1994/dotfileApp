@@ -46,6 +46,24 @@ pub enum JiraPlace {
     Pin(String),
 }
 
+/// The Jira view's top-level surface: the ticket list or the Config dashboard
+/// — the `Tickets | Config` pill. Reported as `views.jira.tab`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JiraSurface {
+    #[default]
+    Tickets,
+    Config,
+}
+
+impl JiraSurface {
+    pub fn raw(self) -> &'static str {
+        match self {
+            JiraSurface::Tickets => "tickets",
+            JiraSurface::Config => "config",
+        }
+    }
+}
+
 /// `ListSession.myWork`.
 pub const MY_WORK: [(&str, &str, &str); 4] = [
     ("mine", "Assigned to me", "person"),
@@ -2423,6 +2441,10 @@ pub enum JiraEvent {
     BoardMode(String),
     /// The board bar's Pin button (`boardBar.onPin`).
     BoardPin,
+    /// The Tickets / Config pill (`tabPicked:`) — the selected surface.
+    Tab(JiraSurface),
+    /// A Config-tab control press (`JiraConfigAction`).
+    Config(crate::views::jira_config::JiraConfigAction),
     /// A kanban card was clicked (`open:KEY` from the board page).
     OpenKey(String),
     Sidebar(crate::ui::sidebar::SidebarEvent),
@@ -2554,7 +2576,12 @@ impl JiraList {
             JiraEvent::Star(row) => self.toggle_star(row),
             JiraEvent::Sort(i) => self.sort_by(i),
             // The Fit Columns menu and the filter picker are UI actions.
-            JiraEvent::HeaderMenu { .. } | JiraEvent::Filter { .. } | JiraEvent::FitColumns => {}
+            JiraEvent::HeaderMenu { .. }
+            | JiraEvent::Filter { .. }
+            | JiraEvent::FitColumns
+            // The Tickets / Config pill and the Config controls are UI-only.
+            | JiraEvent::Tab(_)
+            | JiraEvent::Config(_) => {}
             JiraEvent::ColumnsResized { pcts, .. } => self.set_column_widths(&pcts),
             JiraEvent::ColumnsReordered { from, to } => self.move_column(from, to),
             JiraEvent::Query(q) => {
@@ -3854,6 +3881,12 @@ mod appkit {
         sidebar: Retained<SidebarView>,
         search: Retained<NSTextField>,
         search_box: Retained<NSView>,
+        /// The `Tickets | Config` pill on the search row.
+        tabs: Retained<NSSegmentedControl>,
+        /// The selected surface (`views.jira.tab`).
+        tab: Cell<JiraSurface>,
+        /// The Config surface, painted over the list area when selected.
+        config: Retained<crate::views::jira_config::JiraConfigBodyView>,
         header: Retained<JiraHeaderView>,
         scroll: Retained<NSScrollView>,
         table: Retained<JiraTableView>,
@@ -3895,6 +3928,18 @@ mod appkit {
             fn set_frame_size(&self, size: NSSize) {
                 let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
                 self.layout_panes();
+            }
+
+            /// The Tickets / Config pill (`NSSegmentSwitchTracking::SelectOne`).
+            #[unsafe(method(tabPicked:))]
+            fn tab_picked(&self, _sender: &AnyObject) {
+                let tab = if self.ivars().tabs.selectedSegment() == 1 {
+                    JiraSurface::Config
+                } else {
+                    JiraSurface::Tickets
+                };
+                self.set_tab(tab);
+                self.emit(JiraEvent::Tab(tab));
             }
 
             #[unsafe(method(controlTextDidChange:))]
@@ -4036,6 +4081,19 @@ mod appkit {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("jira");
             let (search_box, search) = crate::ui::field::search_box(mtm, &colors, 13.0, "search...", 6.0, 28.0);
+            // The Tickets / Config pill, mirroring the board bar's switch.
+            // Labels come from `[jira-config]` (rule 3).
+            let cfg = crate::views::jira_config::JiraConfigSettings::load();
+            let tabs = NSSegmentedControl::new(mtm);
+            tabs.setSegmentCount(2);
+            tabs.setLabel_forSegment(&NSString::from_str(&cfg.tickets_label), 0);
+            tabs.setLabel_forSegment(&NSString::from_str(&cfg.config_label), 1);
+            tabs.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
+            tabs.setSegmentStyle(NSSegmentStyle::Rounded);
+            tabs.setSelectedSegment(0);
+            tabs.setControlSize(NSControlSize::Small);
+            let config = crate::views::jira_config::JiraConfigBodyView::new(mtm, colors);
+            config.setHidden(true);
             let header = JiraHeaderView::new(mtm, snap.clone(), colors);
             let scroll = NSScrollView::new(mtm);
             scroll.setHasVerticalScroller(true);
@@ -4053,6 +4111,9 @@ mod appkit {
                 sidebar,
                 search,
                 search_box,
+                tabs,
+                tab: Cell::new(JiraSurface::Tickets),
+                config,
                 header,
                 scroll,
                 table,
@@ -4070,10 +4131,21 @@ mod appkit {
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
-            for sub in
-                [&*iv.sidebar as &NSView, &iv.search_box, &iv.header, &iv.scroll, &iv.inspector, &*iv.bar as &NSView]
-            {
+            for sub in [
+                &*iv.sidebar as &NSView,
+                &iv.search_box,
+                &iv.tabs,
+                &iv.config,
+                &iv.header,
+                &iv.scroll,
+                &iv.inspector,
+                &*iv.bar as &NSView,
+            ] {
                 v.addSubview(sub);
+            }
+            unsafe {
+                iv.tabs.setTarget(Some(as_any(&*v)));
+                iv.tabs.setAction(Some(sel!(tabPicked:)));
             }
             // The board kanban `WKWebView` (`JiraBoardColumnsView`): created
             // once, hidden until a board is open in `columns` mode. It posts
@@ -4107,7 +4179,34 @@ mod appkit {
             *self.ivars().inspector.ivars().sink.borrow_mut() = Some(rc.clone());
             let bar_rc = rc.clone();
             self.ivars().bar.set_on_event(Box::new(move |e| bar_rc(e)));
+            let cfg_rc = rc.clone();
+            self.ivars()
+                .config
+                .set_on_action(Box::new(move |a| cfg_rc(JiraEvent::Config(a))));
             self.ivars().sidebar.set_on_event(Box::new(move |e| rc(JiraEvent::Sidebar(e))));
+        }
+
+        /// Switch the `Tickets | Config` surface (also the target of
+        /// `do:jira-dashboard`'s host-side `set_tab`).
+        pub fn set_tab(&self, tab: JiraSurface) {
+            self.ivars().tab.set(tab);
+            self.ivars()
+                .tabs
+                .setSelectedSegment(if tab == JiraSurface::Config { 1 } else { 0 });
+            self.ivars().config.set_active(tab == JiraSurface::Config);
+            self.update_board_chrome();
+            self.layout_panes();
+        }
+
+        /// The selected surface (`views.jira.tab`).
+        pub fn tab(&self) -> JiraSurface {
+            self.ivars().tab.get()
+        }
+
+        /// Hand the host's `jira_poll.py --describe` result to the Config
+        /// surface (repainted immediately).
+        pub fn set_config_result(&self, res: Result<crate::views::jira::Describe, String>) {
+            self.ivars().config.set_result(res);
         }
 
         fn emit(&self, ev: JiraEvent) {
@@ -4141,8 +4240,12 @@ mod appkit {
                 }
                 None => iv.bar.setHidden(true),
             }
+            // The Config tab owns the list area, so the kanban stays down even
+            // when the open board is in columns mode.
             match columns {
-                Some(cols) if !cols.is_empty() => self.show_board_columns(&cols),
+                Some(cols) if !cols.is_empty() && iv.tab.get() == JiraSurface::Tickets => {
+                    self.show_board_columns(&cols)
+                }
                 _ => self.hide_board_columns(),
             }
         }
@@ -4242,7 +4345,9 @@ mod appkit {
             // The kanban covers the list area (Swift's list overlay): the table
             // header, rows and inspector are hidden while it is up.
             let kanban = board && board_cols.is_some();
-            let show_insp = show_inspector && !kanban;
+            // The Config surface likewise owns the list area.
+            let config = iv.tab.get() == JiraSurface::Config;
+            let show_insp = show_inspector && !kanban && !config;
             let insp = if show_insp { iv.inspector_w.get().min(w * 0.4) } else { 0.0 };
             iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, h)));
             iv.divider.place(ns(Rect::new(sw - 4.0, 0.0, 8.0, h)));
@@ -4264,17 +4369,33 @@ mod appkit {
             iv.bar.setFrame(ns(Rect::new(x0, bar_h, mw, board_bar_h)));
             iv.bar.layout_controls();
             let top = bar_h + board_bar_h;
-            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, top + 9.0, (mw * 0.9 - 22.0).max(80.0), 28.0)));
+            // The Tickets / Config pill, right-aligned on the search row. It
+            // sits in the free gutter the search box leaves on the right; only
+            // when that is too narrow does the search box give up width.
+            iv.tabs.sizeToFit();
+            let pill_w = iv.tabs.frame().size.width.max(120.0);
+            let pill_x = (x0 + mw - pill_w - 8.0).max(x0);
+            iv.tabs.setFrame(ns(Rect::new(pill_x, top + 11.0, pill_w, 24.0)));
+            let search_w = (mw * 0.9 - 22.0)
+                .max(80.0)
+                .min((pill_x - 10.0 - (x0 + 22.0)).max(80.0));
+            iv.search_box.setFrame(ns(Rect::new(x0 + 22.0, top + 9.0, search_w, 28.0)));
             iv.header.setFrame(ns(Rect::new(x0, top + 50.0, mw, HEADER_H)));
             let ty = top + 50.0 + HEADER_H + 2.0;
             iv.scroll.setFrame(ns(Rect::new(x0, ty, mw, (h - ty).max(0.0))));
             let n = iv.snap.borrow().rows.len();
             let doc_h = (n as f64 * row_h()).max(h - ty);
             iv.table.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(mw, doc_h)));
-            iv.header.setHidden(kanban);
-            iv.scroll.setHidden(kanban);
-            iv.inspector.setHidden(!show_insp || kanban);
+            // The Config surface replaces the list (header / rows / inspector).
+            iv.header.setHidden(kanban || config);
+            iv.scroll.setHidden(kanban || config);
+            iv.inspector.setHidden(!show_insp);
             iv.inspector.setFrame(ns(Rect::new(w - insp, 0.0, insp, h)));
+            iv.config.setHidden(!config);
+            if config {
+                let list_top = top + 50.0;
+                iv.config.setFrame(ns(Rect::new(x0, list_top, mw, (h - list_top).max(0.0))));
+            }
             // The kanban fills the list area (below the search field).
             if let Some(web) = iv.board_web.borrow().as_ref() {
                 let list_top = top + 50.0;

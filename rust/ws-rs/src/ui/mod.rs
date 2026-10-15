@@ -7,7 +7,6 @@ pub mod chrome;
 #[cfg(target_os = "macos")]
 pub mod field;
 pub mod inline_rename;
-pub mod jira_config;
 pub mod jira_setup;
 pub mod list_panel;
 pub mod menu_kit;

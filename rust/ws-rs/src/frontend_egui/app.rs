@@ -444,7 +444,8 @@ impl KsApp {
             UiCommand::JiraEnable(..) => "JiraEnable",
             UiCommand::JiraSetup(_) => "JiraSetup",
             UiCommand::Board(_) => "Board",
-            UiCommand::JiraConfig => "JiraConfig",
+            UiCommand::JiraTab(_) => "JiraTab",
+            UiCommand::SidebarWidth(_, _) => "SidebarWidth",
         };
         self.log_once(name);
     }

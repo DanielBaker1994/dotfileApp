@@ -147,9 +147,9 @@ pub enum UiCommand {
     JiraEnable(bool, String),
     /// `JiraSetupWindow.show(controller:reason:)`.
     JiraSetup(Option<String>),
-    /// `do:jira-dashboard` / the palette "Jira Config Window" — the
-    /// poll-jobs dashboard (`JiraDashboardWindow`).
-    JiraConfig,
+    /// `do:jira-dashboard` / the palette "Jira Config" — select the Config
+    /// surface of the Jira view (`Tickets | Config` pill).
+    JiraTab(crate::views::jira_view::JiraSurface),
     /// `do:sidebar-width:<view>:<px>` — resize a view's left pane on main.
     SidebarWidth(SlotView, f64),
 }
@@ -256,9 +256,9 @@ struct ControllerInner {
     /// The notes drawers' shown flags (`views.notes.terminal` / `.browser`).
     notes_terminal: bool,
     notes_browser: bool,
-    /// `views.jira.configWindow.shown` — the Jira Config window
-    /// (`JiraDashboardWindow.live`); cleared when it closes.
-    jira_config_shown: bool,
+    /// `views.jira.tab` — the Jira view's selected surface (the
+    /// `Tickets | Config` pill).
+    jira_tab: crate::views::jira_view::JiraSurface,
     /// Visible `NSWindow` count (daemon UI pushes it; `state.windows`).
     window_count: i64,
     /// Per-view window titles (`cmd.windowName`, used by `present`).
@@ -555,9 +555,10 @@ impl ControllerInner {
             views.insert(v.raw().to_string(), entry);
         }
 
-        // The Jira Config window (`do:jira-dashboard`): a separate card window.
+        // The Jira view's selected surface (`do:jira-dashboard`): "tickets"
+        // (the list) or "config" (the poll-jobs dashboard).
         if let Some(jira) = views.get_mut("jira").and_then(Value::as_object_mut) {
-            jira.insert("configWindow".into(), json!({ "shown": self.jira_config_shown }));
+            jira.insert("tab".into(), json!(self.jira_tab.raw()));
         }
 
         let mut esc_hides = Map::new();
@@ -714,7 +715,7 @@ impl SwitcherController {
             paths_enabled: false,
             notes_terminal: false,
             notes_browser: false,
-            jira_config_shown: false,
+            jira_tab: crate::views::jira_view::JiraSurface::Tickets,
             window_count: 0,
             window_titles: HashMap::new(),
             pending_note_open: None,
@@ -1199,7 +1200,9 @@ impl SwitcherController {
             "screenshot" => {
                 let _ = self.do_host_action("screenshot:show");
             }
-            "jira-config" => self.open_jira_config(),
+            "jira-config" => {
+                self.show_jira_tab(crate::views::jira_view::JiraSurface::Config)
+            }
             "terminal" => self.toggle_terminal_panel(),
             "window" | "show" | "notes" | "files" | "jira" | "confluence" | "ai"
             | "compare" | "prettyprint" | "filefast" | "health" | "health-checks"
@@ -1376,18 +1379,24 @@ impl SwitcherController {
         self.inner.lock().unwrap().previous.map(|v| v.nav_id())
     }
 
-    /// `JiraDashboardWindow.show(controller:)`: flag the window shown
-    /// (reported headless too) and enqueue the AppKit build on main.
-    pub fn open_jira_config(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.jira_config_shown = true;
-        inner.ui_push(UiCommand::JiraConfig);
+    /// `views.jira.tab` — the Jira view's selected surface.
+    pub fn jira_tab(&self) -> crate::views::jira_view::JiraSurface {
+        self.inner.lock().unwrap().jira_tab
     }
 
-    /// The Jira Config window's own shown flag (`views.jira.configWindow`),
-    /// set false when it closes.
-    pub fn set_jira_config_shown(&self, on: bool) {
-        self.inner.lock().unwrap().jira_config_shown = on;
+    /// Record the pill's own selection (`JiraEvent::Tab`); the live view has
+    /// already switched itself, so only the reported state changes.
+    pub fn set_jira_tab(&self, tab: crate::views::jira_view::JiraSurface) {
+        self.inner.lock().unwrap().jira_tab = tab;
+    }
+
+    /// `do:jira-dashboard` / the palette "Jira Config": open the Jira view
+    /// with the Config surface selected (there is no separate window any more).
+    pub fn show_jira_tab(&self, tab: crate::views::jira_view::JiraSurface) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.jira_tab = tab;
+        inner.open(SlotView::Jira);
+        inner.ui_push(UiCommand::JiraTab(tab));
     }
 
     /// Mirrors `controller.log(_:)`.
@@ -1569,7 +1578,9 @@ impl SwitcherController {
             "jira" => {
                 self.hotkey(SlotView::Jira);
             }
-            "jira-dashboard" => self.open_jira_config(),
+            "jira-dashboard" => {
+                self.show_jira_tab(crate::views::jira_view::JiraSurface::Config)
+            }
             "jira-poll-on" | "jira-poll-off" | "jira-poll-toggle" => self.jira_poll(name),
             "jira-setup" => {
                 self.inner.lock().unwrap().ui_push(UiCommand::JiraSetup(None));
@@ -2039,7 +2050,7 @@ impl SwitcherController {
                 None
             }
             "jira-dashboard" | "jira-config" => {
-                self.open_jira_config();
+                self.show_jira_tab(crate::views::jira_view::JiraSurface::Config);
                 None
             }
             "reset-size" => {
@@ -3646,6 +3657,9 @@ mod daemon_ui {
         action_picker: RefCell<Option<Retained<crate::ui::action_picker::ActionPicker>>>,
         /// The Jira live-search bar's state (Cmd+F).
         jira_search: RefCell<Option<JiraSearchState>>,
+        /// One in-flight `jira_poll.py` request for the Jira Config surface
+        /// (`--describe` / `--force` / `--cancel`).
+        jira_config_busy: Cell<bool>,
     }
 
     define_class!(
@@ -3734,6 +3748,7 @@ mod daemon_ui {
             pane_find: RefCell::new(None),
             action_picker: RefCell::new(None),
             jira_search: RefCell::new(None),
+            jira_config_busy: Cell::new(false),
         });
         let ui: Retained<DaemonUi> = unsafe { msg_send![super(this), init] };
         UI_WEAK.with(|w| *w.borrow_mut() = Some(objc2::rc::Weak::from_retained(&ui)));
@@ -3874,10 +3889,7 @@ mod daemon_ui {
                                 Box::new(move || ctrl.jira_enable_result(true, "")),
                             );
                         }
-                        UiCommand::JiraConfig => {
-                            let ctrl = self.ivars().controller.clone();
-                            crate::ui::jira_config::show(ctrl);
-                        }
+                        UiCommand::JiraTab(tab) => self.apply_jira_tab(tab),
                         UiCommand::PaneMove(dir) => {
                             self.live_pane_move(dir);
                         }
@@ -8623,6 +8635,70 @@ mod daemon_ui {
             Some(r)
         }
 
+        /// The live Jira view, if the slot has been built.
+        fn jira_view(&self) -> Option<Retained<crate::views::jira_view::JiraView>> {
+            self.ivars()
+                .state
+                .borrow()
+                .as_ref()
+                .and_then(|st| st.jira.as_ref().map(|(_, v)| v.clone()))
+        }
+
+        /// `UiCommand::JiraTab`: switch the live Jira view's surface and, on
+        /// Config, read `jira_poll.py --describe`.
+        fn apply_jira_tab(&self, tab: crate::views::jira_view::JiraSurface) {
+            if let Some(view) = self.jira_view() {
+                view.set_tab(tab);
+            }
+            if tab == crate::views::jira_view::JiraSurface::Config {
+                self.jira_config_refresh();
+            }
+        }
+
+        /// Read `jira_poll.py --describe` off-main and hand it to the live Jira
+        /// view's Config surface (one request in flight at a time).
+        fn jira_config_refresh(&self) {
+            if self.ivars().jira_config_busy.replace(true) {
+                return;
+            }
+            std::thread::spawn(|| {
+                let res = crate::views::jira::run_jira_poll(&["--describe"], None)
+                    .map(|v| crate::views::jira::Describe::from_value(&v));
+                on_ui(move |ui| {
+                    ui.ivars().jira_config_busy.set(false);
+                    if let Some(view) = ui.jira_view() {
+                        view.set_config_result(res);
+                    }
+                });
+            });
+        }
+
+        /// Run one `jira_poll.py ARGS` from the Config surface (Force Poll /
+        /// Stop Poll) off-main, then re-read the describe payload.
+        fn jira_config_run(&self, args: Vec<String>, label: &str) {
+            if self.ivars().jira_config_busy.replace(true) {
+                return;
+            }
+            let label = label.to_string();
+            std::thread::spawn(move || {
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let (code, _out, err) = crate::app::jira_poll::run("jira_poll.py", &refs);
+                on_ui(move |ui| {
+                    ui.ivars().jira_config_busy.set(false);
+                    if code != 0 {
+                        let msg = crate::app::jira_poll::error_line(&err, &format!("exit {code}"));
+                        ui.ivars().controller.log(&format!("jira-config: {label}: {msg}"));
+                        if let Some(view) = ui.jira_view() {
+                            view.set_config_result(Err(msg));
+                        }
+                    } else {
+                        ui.ivars().controller.log(&format!("jira-config: {label} ok"));
+                        ui.jira_config_refresh();
+                    }
+                });
+            });
+        }
+
         /// Apply one `do:board:<sub>` to the real [`JiraList`] the Jira window
         /// draws from. Dispatched here (on main) by [`UiCommand::Board`], so
         /// `state.views.jira.board` and the visible rows come from one model.
@@ -8721,6 +8797,12 @@ mod daemon_ui {
             let colors = crate::ui::theme::section_colors("jira");
             let view = JiraView::new(mtm, colors, sidebar_w, range, insp_w);
             view.apply(list.snapshot());
+            // Restore the surface the controller last selected (`views.jira.tab`).
+            let tab = self.ivars().controller.jira_tab();
+            view.set_tab(tab);
+            if tab == crate::views::jira_view::JiraSurface::Config {
+                self.jira_config_refresh();
+            }
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             view.set_on_event(Box::new(move |ev| {
                 if let Some(ui) = weak.load() {
@@ -9485,10 +9567,6 @@ mod daemon_ui {
                         ui.jira_import_filters();
                     }
                 }));
-                let ctrl = self.ivars().controller.clone();
-                out.push(MenuEntry::item("Open Jira Config Window", move || {
-                    ctrl.open_jira_config();
-                }));
             }
             if v == SlotView::Ai {
                 use crate::engines::ai_format::PaneMode;
@@ -9741,6 +9819,38 @@ mod daemon_ui {
                             l.toggle_pin_view(&spec);
                         }
                     });
+                }
+                E::Tab(tab) => {
+                    // The pill already switched the live view; record the
+                    // surface and load the Config dashboard the first time.
+                    self.ivars().controller.set_jira_tab(tab);
+                    if tab == crate::views::jira_view::JiraSurface::Config {
+                        self.jira_config_refresh();
+                    }
+                }
+                E::Config(action) => {
+                    use crate::views::jira_config::JiraConfigAction as A;
+                    match action {
+                        A::Enable => {
+                            let on = crate::app::jira_poll::enabled_in_config();
+                            self.ivars()
+                                .controller
+                                .jira_poll(if on { "jira-poll-off" } else { "jira-poll-on" });
+                        }
+                        A::Force => self.jira_config_run(
+                            vec!["--force".into(), "--quiet".into()],
+                            "force poll",
+                        ),
+                        A::Stop => self.jira_config_run(vec!["--cancel".into()], "stop poll"),
+                        A::Setup => {
+                            let ctrl = self.ivars().controller.clone();
+                            crate::ui::jira_setup::show(
+                                None,
+                                Box::new(move || ctrl.jira_enable_result(true, "")),
+                            );
+                        }
+                        A::Refresh => self.jira_config_refresh(),
+                    }
                 }
                 E::OpenKey(key) => {
                     let url = self.jira_surface(|l| {
@@ -12889,15 +12999,15 @@ mod tests {
     }
 
     #[test]
-    fn jira_config_hook_opens_the_window_and_reports_state() {
+    fn jira_config_hook_selects_the_config_tab_and_reports_state() {
         let c = controller();
         // Unknown verbs still return `{"error": …}`.
         assert!(c.do_action("jira-nope").unwrap()["error"].is_string());
-        assert_eq!(c.state_json()["views"]["jira"]["configWindow"]["shown"], json!(false));
-        // The hook is handled (no error) and flips the state field, so it is
+        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("tickets"));
+        // The hook is handled (no error) and switches the surface, so it is
         // verifiable headless.
         assert_eq!(c.do_action("jira-dashboard"), None);
-        assert_eq!(c.state_json()["views"]["jira"]["configWindow"]["shown"], json!(true));
+        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("config"));
         // The palette name is an alias for the same hook.
         assert_eq!(c.do_action("jira-config"), None);
         c.run_palette_command("jira-config");
@@ -12905,9 +13015,9 @@ mod tests {
             !c.logs().iter().any(|l| l.contains("no Rust handler")),
             "palette 'jira-config' must dispatch"
         );
-        // Closing the window clears it.
-        c.set_jira_config_shown(false);
-        assert_eq!(c.state_json()["views"]["jira"]["configWindow"]["shown"], json!(false));
+        // The pill's own selection is recorded the same way.
+        c.set_jira_tab(crate::views::jira_view::JiraSurface::Tickets);
+        assert_eq!(c.state_json()["views"]["jira"]["tab"], json!("tickets"));
     }
 
     #[test]
