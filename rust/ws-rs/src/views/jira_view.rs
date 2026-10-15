@@ -2631,6 +2631,7 @@ pub use appkit::{draw_wrapped, set_zoom, zoom, JiraView};
 mod appkit {
     use super::*;
     use crate::ui::chrome::Rect;
+    use crate::ui::pane_divider::{DividerRange, PaneDividerView};
     use crate::ui::sidebar::SidebarView;
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, Rgba};
@@ -3862,6 +3863,8 @@ mod appkit {
         sink: Rc<RefCell<Option<Sink>>>,
         sidebar_w: Cell<f64>,
         inspector_w: Cell<f64>,
+        /// The draggable divider on the sidebar's right edge.
+        divider: Retained<PaneDividerView>,
         /// The Cmd+F live-search bar, attached above the list when open.
         search_bar: RefCell<Option<Retained<crate::views::jira_search_bar::JiraSearchBar>>>,
         /// The open board's top bar (`JiraBoardBar`).
@@ -3986,6 +3989,23 @@ mod appkit {
             self.ivars().sidebar.clone()
         }
 
+        /// The draggable divider on the sidebar's right edge.
+        pub fn divider(&self) -> Retained<PaneDividerView> {
+            self.ivars().divider.clone()
+        }
+
+        /// The expanded sidebar width (`[jira] sidebar-width`).
+        pub fn sidebar_width(&self) -> f64 {
+            self.ivars().sidebar_w.get()
+        }
+
+        /// Apply a divider drag / `do:sidebar-width:jira`: clamp and re-lay-out.
+        pub fn set_sidebar_width(&self, width: f64) {
+            let w = self.ivars().divider.clamp(width);
+            self.ivars().sidebar_w.set(w);
+            self.layout_panes();
+        }
+
         /// The issue list's document view plus each visible row's rect (the vim
         /// search highlight draws the overlay into it).
         pub fn vim_shown_rows(&self) -> (Retained<NSView>, Vec<(usize, Rect)>) {
@@ -4005,7 +4025,13 @@ mod appkit {
                 LivePane::new("issue", &iv.inspector),
             ]
         }
-        pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64, inspector_w: f64) -> Retained<Self> {
+        pub fn new(
+            mtm: MainThreadMarker,
+            colors: PopupColors,
+            sidebar_w: f64,
+            sidebar_range: DividerRange,
+            inspector_w: f64,
+        ) -> Retained<Self> {
             let snap = Rc::new(RefCell::new(JiraSnapshot::default()));
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("jira");
@@ -4020,6 +4046,7 @@ mod appkit {
             let inspector = JiraInspectorView::new(mtm, snap.clone(), colors);
             let bar = JiraBoardBarView::new(mtm, colors);
             bar.setHidden(true);
+            let divider = PaneDividerView::new(mtm, sidebar_range);
             let this = Self::alloc(mtm).set_ivars(JiraIvars {
                 snap,
                 colors: Cell::new(colors),
@@ -4033,6 +4060,7 @@ mod appkit {
                 sink: Rc::new(RefCell::new(None)),
                 sidebar_w: Cell::new(sidebar_w),
                 inspector_w: Cell::new(inspector_w),
+                divider: divider.clone(),
                 search_bar: RefCell::new(None),
                 bar,
                 board_web: RefCell::new(None),
@@ -4064,6 +4092,9 @@ mod appkit {
             web_view.setHidden(true);
             v.addSubview(&web_view);
             *iv.board_web.borrow_mut() = Some(web);
+            // The sidebar divider rides above every pane so it always takes
+            // the drag (and never a row click) inside its few-point strip.
+            v.addSubview(&divider);
             unsafe { iv.search.setDelegate(Some(ProtocolObject::from_ref(&*v))) };
             v
         }
@@ -4214,6 +4245,9 @@ mod appkit {
             let show_insp = show_inspector && !kanban;
             let insp = if show_insp { iv.inspector_w.get().min(w * 0.4) } else { 0.0 };
             iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, h)));
+            iv.divider.place(ns(Rect::new(sw - 4.0, 0.0, 8.0, h)));
+            iv.divider.set_width(sw);
+            iv.divider.setHidden(iv.sidebar.collapsed());
             let x0 = sw + 4.0;
             let mw = (w - insp - x0).max(100.0);
             // The live-search bar (Cmd+F) sits on top and pushes the list down.

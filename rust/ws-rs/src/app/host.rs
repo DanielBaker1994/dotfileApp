@@ -106,7 +106,7 @@ pub struct PaneSpec {
 /// A cross-thread command from the socket thread to the daemon's main thread.
 /// AppKit is main-thread-only, so the controller only enqueues these; the
 /// daemon's UI bridge drains the queue on the main run loop.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UiCommand {
     /// Show the shared host window on `v` (built on first use).
     Present(SlotView),
@@ -150,6 +150,8 @@ pub enum UiCommand {
     /// `do:jira-dashboard` / the palette "Jira Config Window" — the
     /// poll-jobs dashboard (`JiraDashboardWindow`).
     JiraConfig,
+    /// `do:sidebar-width:<view>:<px>` — resize a view's left pane on main.
+    SidebarWidth(SlotView, f64),
 }
 
 /// Which notes drawer a [`UiCommand::ToggleDrawer`] flips.
@@ -534,6 +536,15 @@ impl ControllerInner {
                     obj.insert("sidebarCursor".into(), json!(0));
                     obj.insert("pane".into(), json!(""));
                     obj.insert("header".into(), json!({}));
+                }
+            }
+            // The resizable left-pane width (`do:sidebar-width:*`). The live
+            // sync overwrites this with the real width when the view is up;
+            // headless (no AppKit) reports the configured value.
+            if SIDEBAR_VIEWS.contains(&v.raw()) {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.entry("sidebarWidth".to_string())
+                        .or_insert_with(|| json!(pane_sidebar_width(v.raw())));
                 }
             }
             if let (Some(dst), Some(src)) = (entry.as_object_mut(), m.state.as_object()) {
@@ -1763,6 +1774,36 @@ impl SwitcherController {
             }
             return Some(json!({ "error": "pane:h|j|k|l|focus:ID" }));
         }
+        if let Some(rest) = action.strip_prefix("sidebar-width:") {
+            let (view, val) = match rest.split_once(':') {
+                Some((v, x)) => (v, Some(x)),
+                None => (rest, None),
+            };
+            if !SIDEBAR_VIEWS.contains(&view) {
+                return Some(json!({ "error": format!("no resizable sidebar on '{view}'") }));
+            }
+            let (min, max) = pane_sidebar_bounds(view);
+            let width = match val {
+                None => pane_sidebar_width(view),
+                Some(x) => {
+                    let Ok(raw) = x.parse::<f64>() else {
+                        return Some(json!({ "error": format!("'{x}' is not a number") }));
+                    };
+                    let w = crate::ui::pane_divider::clamp_width(raw, min, max);
+                    crate::app::config::save_config_value(view, "sidebar-width", &fmt_width(w));
+                    if let Some(sv) = SlotView::from_raw(view) {
+                        self.inner.lock().unwrap().ui_push(UiCommand::SidebarWidth(sv, w));
+                    }
+                    w
+                }
+            };
+            return Some(json!({
+                "view": view,
+                "sidebarWidth": width,
+                "min": min,
+                "max": max,
+            }));
+        }
         if let Some(spec) = action.strip_prefix("key:") {
             if spec.is_empty() {
                 return Some(json!({ "error": "key:<spec>" }));
@@ -2461,6 +2502,81 @@ fn strip_comment(v: &str) -> &str {
         }
     }
     v
+}
+
+/// The four views whose left pane is resizable (`do:sidebar-width:*`).
+const SIDEBAR_VIEWS: [&str; 4] = ["notes", "jira", "confluence", "compare"];
+
+/// The `[view] sidebar-width` fallback when unset.
+fn pane_sidebar_default(view: &str) -> f64 {
+    match view {
+        "jira" => 168.0,
+        _ => 210.0,
+    }
+}
+
+/// A `DividerRange` from an already-parsed `[section]` map.
+#[cfg(target_os = "macos")]
+fn divider_range_from(
+    vars: &HashMap<String, String>,
+    min_default: f64,
+    max_default: f64,
+) -> crate::ui::pane_divider::DividerRange {
+    let min = vars
+        .get("sidebar-min-width")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(min_default);
+    let max = vars
+        .get("sidebar-max-width")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(max_default);
+    crate::ui::pane_divider::DividerRange::new(min, max)
+}
+
+/// The `[view] sidebar-min-width` / `-max-width` range, from config.
+fn pane_sidebar_bounds(view: &str) -> (f64, f64) {
+    let text = crate::app::config::read_config_text().unwrap_or_default();
+    let sections = parse_sections(&text);
+    let vars = sections.get(view);
+    let min = vars
+        .and_then(|m| m.get("sidebar-min-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(140.0);
+    let max = vars
+        .and_then(|m| m.get("sidebar-max-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(480.0);
+    let r = crate::ui::pane_divider::DividerRange::new(min, max);
+    (r.min, r.max)
+}
+
+/// The `[view] sidebar-width` value, from config (clamped to its range).
+fn pane_sidebar_width(view: &str) -> f64 {
+    let text = crate::app::config::read_config_text().unwrap_or_default();
+    let sections = parse_sections(&text);
+    let vars = sections.get(view);
+    let w = vars
+        .and_then(|m| m.get("sidebar-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or_else(|| pane_sidebar_default(view));
+    let min = vars
+        .and_then(|m| m.get("sidebar-min-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(140.0);
+    let max = vars
+        .and_then(|m| m.get("sidebar-max-width"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(480.0);
+    crate::ui::pane_divider::clamp_width(w, min, max)
+}
+
+/// Format a width for `commands.toml` (`200`, `200.5`).
+fn fmt_width(w: f64) -> String {
+    if w == w.round() {
+        format!("{}", w as i64)
+    } else {
+        format!("{w:.1}")
+    }
 }
 
 fn section_flag(
@@ -3770,6 +3886,7 @@ mod daemon_ui {
                                 self.ivars().controller.log(&format!("pane:focus:{id}: no such pane"));
                             }
                         }
+                        UiCommand::SidebarWidth(v, w) => self.apply_sidebar_width(v, w),
                     }
                 }
             }
@@ -7735,8 +7852,9 @@ mod daemon_ui {
             let text = crate::app::config::read_config_text().unwrap_or_default();
             let sections = super::parse_sections(&text);
             let entries: HashMap<String, String> = sections.get("confluence").cloned().unwrap_or_default();
+            let range = super::divider_range_from(&entries, 140.0, 480.0);
             let config = ConfluenceConfig::from_entries(entries);
-            let sidebar_w = config.sidebar_width();
+            let sidebar_w = range.clamp(config.sidebar_width());
             let split = config.split_clamped();
             let mut model = ConfluenceModel::new(config);
             model.show_search_empty();
@@ -7746,7 +7864,7 @@ mod daemon_ui {
             std::mem::forget(loader);
             let colors = crate::ui::theme::section_colors("confluence");
             let web: Retained<NSView> = Retained::into_super(preview.web.clone());
-            let view = crate::views::confluence_view::ConfluenceView::new(mtm, colors, web, sidebar_w.max(0.0).max(160.0), split);
+            let view = crate::views::confluence_view::ConfluenceView::new(mtm, colors, web, sidebar_w, range, split);
             let cs = ConfState {
                 model,
                 view,
@@ -8595,12 +8713,13 @@ mod daemon_ui {
                     None
                 }
             };
-            let sidebar_w = section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(168.0);
+            let range = super::divider_range_from(&section, 140.0, 480.0);
+            let sidebar_w = range.clamp(section.get("sidebar-width").and_then(|v| v.parse().ok()).unwrap_or(168.0));
             let insp_w = section.get("inspector-width").and_then(|v| v.parse().ok()).unwrap_or(264.0);
             let mut list = JiraList::new(section, paths);
             list.start(None);
             let colors = crate::ui::theme::section_colors("jira");
-            let view = JiraView::new(mtm, colors, sidebar_w, insp_w);
+            let view = JiraView::new(mtm, colors, sidebar_w, range, insp_w);
             view.apply(list.snapshot());
             let weak = objc2::rc::Weak::from_retained(&self.retain());
             view.set_on_event(Box::new(move |ev| {
@@ -11327,6 +11446,8 @@ mod daemon_ui {
             let mut notes_state = None;
             let mut files_state = None;
             let mut jira_state = None;
+            let mut conf_w = None;
+            let mut compare_w = None;
             let mut responder = String::new();
             {
                 let state = self.ivars().state.borrow();
@@ -11340,23 +11461,29 @@ mod daemon_ui {
                     if let Some(b) = st.files.as_ref() {
                         files_state = Some(b.test_state());
                     }
-                    if let Some((list, _)) = st.jira.as_ref() {
-                        jira_state = Some(list.view_state());
+                    if let Some((list, view)) = st.jira.as_ref() {
+                        let mut v = list.view_state();
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("sidebarWidth".into(), json!(view.sidebar_width()));
+                        }
+                        jira_state = Some(v);
                     }
+                    conf_w = st.confluence.as_ref().map(|cs| cs.view.sidebar_width());
+                    compare_w = st.compare.as_ref().map(|cs| cs.sidebar_width());
                 }
             }
             if let Some(mut v) = notes_state {
                 if let Some(o) = v.as_object_mut() {
                     o.insert("responder".into(), json!(responder));
-                    let vim_focus = {
+                    let (vim_focus, sidebar_w) = {
                         let state = self.ivars().state.borrow();
-                        state
-                            .as_ref()
-                            .and_then(|st| st.notes.as_ref())
-                            .map(|s| s.vim_has_focus())
-                            .unwrap_or(false)
+                        let s = state.as_ref().and_then(|st| st.notes.as_ref());
+                        (s.map(|s| s.vim_has_focus()).unwrap_or(false), s.map(|s| s.sidebar_width()))
                     };
                     o.insert("vimFocus".into(), json!(vim_focus));
+                    if let Some(w) = sidebar_w {
+                        o.insert("sidebarWidth".into(), json!(w));
+                    }
                 }
                 self.ivars()
                     .controller
@@ -11371,6 +11498,72 @@ mod daemon_ui {
                 self.ivars()
                     .controller
                     .set_view_state(SlotView::Jira, v);
+            }
+            if let Some(w) = conf_w {
+                self.ivars()
+                    .controller
+                    .set_view_state(SlotView::Confluence, json!({ "sidebarWidth": w }));
+            }
+            if let Some(w) = compare_w {
+                self.ivars()
+                    .controller
+                    .set_view_state(SlotView::Compare, json!({ "sidebarWidth": w }));
+            }
+        }
+
+        /// Wire a view's divider to resize on main (`Weak` back to this UI).
+        fn wire_sidebar_divider(
+            &self,
+            view: SlotView,
+            divider: &crate::ui::pane_divider::PaneDividerView,
+        ) {
+            let weak = objc2::rc::Weak::from_retained(&self.retain());
+            divider.set_on_drag(Box::new(move |drag| {
+                if let Some(ui) = weak.load() {
+                    ui.apply_sidebar_drag(view, drag);
+                }
+            }));
+        }
+
+        /// A divider drag: re-lay-out live, persist on release.
+        fn apply_sidebar_drag(&self, view: SlotView, drag: crate::ui::pane_divider::DividerDrag) {
+            self.apply_sidebar_width(view, drag.width);
+            if drag.done {
+                if let Some(section) = super::SIDEBAR_VIEWS.iter().find(|s| **s == view.raw()) {
+                    crate::app::config::save_config_value(
+                        section,
+                        "sidebar-width",
+                        &super::fmt_width(drag.width),
+                    );
+                }
+            }
+        }
+
+        /// Apply a pane width to the live view (`do:sidebar-width:*`).
+        fn apply_sidebar_width(&self, view: SlotView, width: f64) {
+            match view {
+                SlotView::Notes => {
+                    self.notes_surface(|s| s.set_sidebar_width(width));
+                }
+                SlotView::Jira => {
+                    let state = self.ivars().state.borrow();
+                    if let Some((_, v)) = state.as_ref().and_then(|st| st.jira.as_ref()) {
+                        v.set_sidebar_width(width);
+                    }
+                }
+                SlotView::Confluence => {
+                    let state = self.ivars().state.borrow();
+                    if let Some(cs) = state.as_ref().and_then(|st| st.confluence.as_ref()) {
+                        cs.view.set_sidebar_width(width);
+                    }
+                }
+                SlotView::Compare | SlotView::CompareText => {
+                    let state = self.ivars().state.borrow();
+                    if let Some(cs) = state.as_ref().and_then(|st| st.compare.as_ref()) {
+                        cs.set_sidebar_width(width);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -11480,6 +11673,7 @@ mod daemon_ui {
                                             ui.notes_open_image(path);
                                         }
                                     }));
+                                    self.wire_sidebar_divider(SlotView::Notes, &surface.divider());
                                     st.notes = Some(surface);
                                     view
                                 }
@@ -11507,11 +11701,13 @@ mod daemon_ui {
                         } else if v == SlotView::Confluence {
                             let cs = self.build_confluence(mtm);
                             let root: Retained<NSView> = Retained::into_super(cs.view.clone());
+                            self.wire_sidebar_divider(SlotView::Confluence, &cs.view.divider());
                             st.confluence = Some(cs);
                             root
                         } else if v == SlotView::Jira {
                             let (list, view) = self.build_jira(mtm);
                             let root: Retained<NSView> = Retained::into_super(view.clone());
+                            self.wire_sidebar_divider(SlotView::Jira, &view.divider());
                             st.jira = Some((list, view));
                             root
                         } else if matches!(v, SlotView::Compare | SlotView::CompareText) {
@@ -11524,6 +11720,7 @@ mod daemon_ui {
                                             ui.compare_event(ev);
                                         }
                                     }));
+                                    self.wire_sidebar_divider(SlotView::Compare, &surface.divider());
                                     surface
                                 })
                                 .content_view()
@@ -12299,6 +12496,19 @@ mod daemon_ui {
 mod tests {
     use super::*;
     use crate::app::registry::PaletteCommand;
+
+    /// Config *writes* go through the python codec; configure + ping the
+    /// helper (the same guard `config.rs` tests use) and report whether it
+    /// answered.
+    fn helper_ready() -> bool {
+        let lib = format!("{}/../../pylib", env!("CARGO_MANIFEST_DIR"));
+        if !crate::app::python_helper::lib_has_helper(&lib) {
+            return false;
+        }
+        let h = crate::app::python_helper::PythonHelper::shared();
+        h.configure(&lib);
+        h.call_default("ping", json!({})).is_ok()
+    }
 
     const REQUIRED: [&str; 19] = [
         "view",
@@ -13121,6 +13331,55 @@ enabled = true
         match old_skip {
             Some(v) => std::env::set_var("WS_SKIP_LAUNCH_AGENT", v),
             None => std::env::remove_var("WS_SKIP_LAUNCH_AGENT"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidebar_width_verb_reads_sets_and_clamps() {
+        // `do:sidebar-width:<view>[:<px>]` reads / persists the left-pane
+        // width. Point the config at a throwaway file.
+        let dir = std::env::temp_dir().join(format!("ws-host-sidebar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("commands.toml");
+        std::fs::write(
+            &conf,
+            "[jira]\nsidebar-width = 168\nsidebar-min-width = 140\nsidebar-max-width = 480\n",
+        )
+        .unwrap();
+
+        let old_conf = std::env::var_os("WS_COMMANDS_CONF");
+        std::env::set_var("WS_COMMANDS_CONF", &conf);
+        // Configure the codec helper before any write (its config.* methods
+        // are what `save_config_value` forwards to).
+        let codec = helper_ready();
+
+        let c = controller();
+        // Read: the configured width plus its range.
+        let v = c.do_action("sidebar-width:jira").unwrap();
+        assert_eq!(v["view"], json!("jira"));
+        assert_eq!(v["sidebarWidth"], json!(168.0));
+        assert_eq!(v["min"], json!(140.0));
+        assert_eq!(v["max"], json!(480.0));
+        // Set above the max: clamps (and persists when the codec is available).
+        let v = c.do_action("sidebar-width:jira:9999").unwrap();
+        assert_eq!(v["sidebarWidth"], json!(480.0));
+        // Set below the min: clamps up.
+        let v = c.do_action("sidebar-width:jira:10").unwrap();
+        assert_eq!(v["sidebarWidth"], json!(140.0));
+        // Unknown view / non-number are errors.
+        assert!(c.do_action("sidebar-width:nope").unwrap()["error"].is_string());
+        assert!(c.do_action("sidebar-width:jira:abc").unwrap()["error"].is_string());
+        if codec {
+            let text = std::fs::read_to_string(&conf).unwrap();
+            assert!(text.contains("sidebar-width = 140"), "persisted width: {text}");
+            // The state field reports the persisted width (headless, from config).
+            assert_eq!(c.state_json()["views"]["jira"]["sidebarWidth"], json!(140.0));
+        }
+
+        match old_conf {
+            Some(v) => std::env::set_var("WS_COMMANDS_CONF", v),
+            None => std::env::remove_var("WS_COMMANDS_CONF"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

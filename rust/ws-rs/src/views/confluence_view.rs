@@ -128,6 +128,7 @@ pub use appkit::ConfluenceView;
 mod appkit {
     use super::*;
     use crate::ui::chrome::Rect;
+    use crate::ui::pane_divider::{DividerRange, PaneDividerView};
     use crate::ui::sidebar::SidebarView;
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, PopupTone, Rgba};
@@ -375,6 +376,8 @@ mod appkit {
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
         sidebar_w: Cell<f64>,
         split: Cell<f64>,
+        /// The draggable divider on the sidebar's right edge.
+        divider: Retained<PaneDividerView>,
     }
 
     define_class!(
@@ -519,7 +522,14 @@ mod appkit {
                 LivePane::new("preview", &iv.web),
             ]
         }
-        pub fn new(mtm: MainThreadMarker, colors: PopupColors, web: Retained<NSView>, sidebar_w: f64, split: f64) -> Retained<Self> {
+        pub fn new(
+            mtm: MainThreadMarker,
+            colors: PopupColors,
+            web: Retained<NSView>,
+            sidebar_w: f64,
+            sidebar_range: DividerRange,
+            split: f64,
+        ) -> Retained<Self> {
             let snap = Rc::new(RefCell::new(ConfSnapshot::default()));
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("confluence");
@@ -541,6 +551,7 @@ mod appkit {
             spinner.setStyle(NSProgressIndicatorStyle::Spinning);
             spinner.setControlSize(NSControlSize::Small);
             spinner.setDisplayedWhenStopped(false);
+            let divider = PaneDividerView::new(mtm, sidebar_range);
             let this = Self::alloc(mtm).set_ivars(ConfIvars {
                 snap,
                 colors: Cell::new(colors),
@@ -557,12 +568,15 @@ mod appkit {
                 tracking: RefCell::new(None),
                 sidebar_w: Cell::new(sidebar_w),
                 split: Cell::new(split),
+                divider: divider.clone(),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
             let iv = v.ivars();
             for sub in [&*iv.sidebar as &NSView, &iv.search_box, &iv.scroll, &iv.spinner, &iv.web] {
                 v.addSubview(sub);
             }
+            // Above every pane so the divider's strip never reads as a click.
+            v.addSubview(&divider);
             unsafe { iv.search.setDelegate(Some(ProtocolObject::from_ref(&*v))) };
             v
         }
@@ -583,6 +597,23 @@ mod appkit {
 
         pub fn search_field(&self) -> Retained<NSTextField> {
             self.ivars().search.clone()
+        }
+
+        /// The draggable divider on the sidebar's right edge.
+        pub fn divider(&self) -> Retained<PaneDividerView> {
+            self.ivars().divider.clone()
+        }
+
+        /// The expanded sidebar width (`[confluence] sidebar-width`).
+        pub fn sidebar_width(&self) -> f64 {
+            self.ivars().sidebar_w.get()
+        }
+
+        /// Apply a divider drag / `do:sidebar-width:confluence`.
+        pub fn set_sidebar_width(&self, width: f64) {
+            let w = self.ivars().divider.clamp(width);
+            self.ivars().sidebar_w.set(w);
+            self.layout_all();
         }
 
         pub fn results_view(&self) -> Retained<NSView> {
@@ -646,7 +677,11 @@ mod appkit {
         pub fn layout_all(&self) {
             let iv = self.ivars();
             let b = self.bounds();
-            iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, iv.sidebar.width(iv.sidebar_w.get()), b.size.height)));
+            let sw = iv.sidebar.width(iv.sidebar_w.get());
+            iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, b.size.height)));
+            iv.divider.place(ns(Rect::new(sw - 4.0, 0.0, 8.0, b.size.height)));
+            iv.divider.set_width(sw);
+            iv.divider.setHidden(iv.sidebar.collapsed());
             let (strip, table, fy, preview) = self.regions();
             let seg_x = self.top_row_right_start(strip);
             iv.search_box.setFrame(ns(Rect::new(strip.x + 12.0, 8.0, (seg_x - 8.0 - strip.x - 12.0).max(80.0), STRIP_ROW_H + 4.0)));

@@ -146,6 +146,7 @@ pub use appkit::CompareView;
 #[cfg(target_os = "macos")]
 mod appkit {
     use super::*;
+    use crate::ui::pane_divider::{DividerRange, PaneDividerView};
     use crate::ui::sidebar::SidebarView;
     use crate::ui::style::{self, ButtonState, Weight};
     use crate::ui::theme::{PopupColors, PopupTone};
@@ -186,6 +187,8 @@ mod appkit {
         pressed: Cell<Option<i32>>,
         tracking: RefCell<Option<Retained<NSTrackingArea>>>,
         sidebar_w: Cell<f64>,
+        /// The draggable divider on the sidebar's right edge.
+        divider: Retained<PaneDividerView>,
         recent_scroll: Cell<f64>,
     }
 
@@ -375,12 +378,13 @@ mod appkit {
             ]
         }
 
-        pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64) -> Retained<Self> {
+        pub fn new(mtm: MainThreadMarker, colors: PopupColors, sidebar_w: f64, sidebar_range: DividerRange) -> Retained<Self> {
             let sidebar = SidebarView::new(mtm, colors);
             sidebar.set_collapse_key("compare");
             let (left_box, left) = crate::ui::field::search_box(mtm, &colors, 13.0, "Left: a file or folder path (Tab completes)", 6.0, FIELD_H);
             let (right_box, right) = crate::ui::field::search_box(mtm, &colors, 13.0, "Right: a file or folder path", 6.0, FIELD_H);
             let (filter_box, filter) = crate::ui::field::search_box(mtm, &colors, 12.0, "filter", 6.0, 26.0);
+            let divider = PaneDividerView::new(mtm, sidebar_range);
             let this = Self::alloc(mtm).set_ivars(CompareIvars {
                 snap: RefCell::new(CompareSnap::default()),
                 colors: Cell::new(colors),
@@ -397,6 +401,7 @@ mod appkit {
                 pressed: Cell::new(None),
                 tracking: RefCell::new(None),
                 sidebar_w: Cell::new(sidebar_w),
+                divider: divider.clone(),
                 recent_scroll: Cell::new(0.0),
             });
             let v: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -404,6 +409,7 @@ mod appkit {
             for sub in [&*iv.sidebar as &NSView, &iv.left_box, &iv.right_box, &iv.filter_box] {
                 v.addSubview(sub);
             }
+            v.addSubview(&divider);
             for f in [&iv.left, &iv.right, &iv.filter] {
                 unsafe { f.setDelegate(Some(ProtocolObject::from_ref(&*v))) };
             }
@@ -414,6 +420,16 @@ mod appkit {
         pub fn set_body(&self, views: Vec<Retained<NSView>>) {
             for b in &views {
                 self.addSubview(b);
+            }
+            // The divider must stay above the body panes so its strip takes the
+            // drag rather than a body click.
+            if let Some(last) = views.last() {
+                let div = self.ivars().divider.clone();
+                self.addSubview_positioned_relativeTo(
+                    &div,
+                    objc2_app_kit::NSWindowOrderingMode::Above,
+                    Some(last),
+                );
             }
             *self.ivars().body.borrow_mut() = views;
             self.layout_all();
@@ -439,6 +455,23 @@ mod appkit {
 
         pub fn left_field(&self) -> Retained<NSTextField> {
             self.ivars().left.clone()
+        }
+
+        /// The draggable divider on the sidebar's right edge.
+        pub fn divider(&self) -> Retained<PaneDividerView> {
+            self.ivars().divider.clone()
+        }
+
+        /// The expanded sidebar width (`[compare] sidebar-width`).
+        pub fn sidebar_width(&self) -> f64 {
+            self.ivars().sidebar_w.get()
+        }
+
+        /// Apply a divider drag / `do:sidebar-width:compare`.
+        pub fn set_sidebar_width(&self, width: f64) {
+            let w = self.ivars().divider.clamp(width);
+            self.ivars().sidebar_w.set(w);
+            self.layout_all();
         }
 
         pub fn apply(&self, s: CompareSnap) {
@@ -485,7 +518,11 @@ mod appkit {
             let iv = self.ivars();
             let b = self.bounds();
             let left = self.left();
-            iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, iv.sidebar.width(iv.sidebar_w.get()), b.size.height)));
+            let sw = iv.sidebar.width(iv.sidebar_w.get());
+            iv.sidebar.setFrame(ns(Rect::new(0.0, 0.0, sw, b.size.height)));
+            iv.divider.place(ns(Rect::new(sw - 4.0, 0.0, 8.0, b.size.height)));
+            iv.divider.set_width(sw);
+            iv.divider.setHidden(iv.sidebar.collapsed());
             let (x, w) = self.start_col();
             let lw = 46.0;
             let bw = 30.0;

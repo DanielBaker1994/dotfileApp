@@ -5034,8 +5034,13 @@ impl CompareSurface {
         use objc2_foundation::{NSPoint, NSRect, NSSize};
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 600.0));
         let colors = crate::ui::theme::section_colors("compare");
-        let sidebar_w = CompareConfig::load().number("sidebar-width", 210.0);
-        let chrome = crate::views::compare_view::CompareView::new(mtm, colors, sidebar_w.max(160.0));
+        let cfg = CompareConfig::load();
+        let range = crate::ui::pane_divider::DividerRange::new(
+            cfg.number("sidebar-min-width", 140.0),
+            cfg.number("sidebar-max-width", 480.0),
+        );
+        let sidebar_w = range.clamp(cfg.number("sidebar-width", 210.0));
+        let chrome = crate::views::compare_view::CompareView::new(mtm, colors, sidebar_w, range);
         chrome.setFrame(frame);
         chrome.setAutoresizingMask(M::ViewWidthSizable | M::ViewHeightSizable);
         let pane = macos::ComparePaneView::create(mtm);
@@ -5079,6 +5084,21 @@ impl CompareSurface {
 
     pub fn chrome(&self) -> objc2::rc::Retained<crate::views::compare_view::CompareView> {
         self.chrome.clone()
+    }
+
+    /// The draggable divider on the sidebar's right edge.
+    pub fn divider(&self) -> objc2::rc::Retained<crate::ui::pane_divider::PaneDividerView> {
+        self.chrome.divider()
+    }
+
+    /// Apply a divider drag / `do:sidebar-width:compare`.
+    pub fn set_sidebar_width(&self, width: f64) {
+        self.chrome.set_sidebar_width(width);
+    }
+
+    /// The expanded sidebar width (`[compare] sidebar-width`).
+    pub fn sidebar_width(&self) -> f64 {
+        self.chrome.sidebar_width()
     }
 
     /// Force the next `sync` to repaint (after an event changed the model).

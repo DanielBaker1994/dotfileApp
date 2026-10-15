@@ -219,6 +219,8 @@ image-rows = 10
 start-drawer = "none"
 font-size = 22
 sidebar-width = 234
+sidebar-min-width = 140
+sidebar-max-width = 480
 
 paths = "~/notes, ~/.config/kitchen-sink/commands.toml, ~/Desktop/ZimaSetup.rtf, ~/GlobalEnv/pyvenv.cfg, ~/.cache/jira/curl.log, ~/.config/jira/config.json, ~/Downloads/HerdrDraggable.txt, ~/notes/default.md, ~/.config/kitchen-sink/rules/grammar-check.md, ~/notes/retirement.md, ~/Library/Mobile Documents/com~apple~CloudDocs/Subtext/Design.txt, ~/.dotfiles/doc/Markdown_Examples.md, ~/notes/helloworld.md, ~/.config/kitchen-sink/samples/graphviz-showcase.md"
 
@@ -297,6 +299,8 @@ body-lines = 5
 page-size = 150
 browser-background = "4D4F596E"
 sidebar-width = 168
+sidebar-min-width = 140
+sidebar-max-width = 480
 
 # Jira status / priority names -> look (lowercased substrings, comma lists)
 status-cancelled-words = "cancel, won't, wont, reject, duplicate"
@@ -318,6 +322,9 @@ width = 1400
 height = 900
 
 split = 0.42
+sidebar-width = 210
+sidebar-min-width = 140
+sidebar-max-width = 480
 
 [ai]
 enabled = true
@@ -347,6 +354,9 @@ palette = "9D79D6, 81B29A, DBC074, C94F6D, 63CDCF"
 enabled = true
 in-palette = false
 label = "Compare"
+sidebar-width = 210
+sidebar-min-width = 140
+sidebar-max-width = 480
 esc-close = 0
 context-lines = 3
 tab-width = 4

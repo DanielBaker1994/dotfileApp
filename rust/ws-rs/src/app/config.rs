@@ -1108,6 +1108,8 @@ pub const CONFIG_NUMBER_KEYS: &[(&str, f64, f64)] = &[
     ("pane-focus-width", 0.0, 4.0),
     ("terminal-height", 40.0, 4000.0),
     ("sidebar-width", 0.0, 600.0),
+    ("sidebar-min-width", 0.0, 600.0),
+    ("sidebar-max-width", 0.0, 600.0),
     ("inspector-width", 0.0, 800.0),
     ("prose-font-size", 8.0, 48.0),
     ("prose-width", 300.0, 2000.0),

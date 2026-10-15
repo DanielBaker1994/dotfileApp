@@ -244,6 +244,8 @@ pub struct NotesConfig {
     pub new_doc_name: String,
     pub new_doc_template: String,
     pub sidebar_width: f64,
+    pub sidebar_min_width: f64,
+    pub sidebar_max_width: f64,
     pub prose_font: String,
     pub prose_font_size: f64,
     pub prose_width: f64,
@@ -263,6 +265,8 @@ impl Default for NotesConfig {
             new_doc_name: DEFAULT_NEW_DOC_NAME.to_string(),
             new_doc_template: DEFAULT_NEW_DOC_TEMPLATE.to_string(),
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            sidebar_min_width: SIDEBAR_MIN_WIDTH,
+            sidebar_max_width: SIDEBAR_MAX_WIDTH,
             prose_font: String::new(),
             prose_font_size: 19.0,
             prose_width: 900.0,
@@ -292,6 +296,8 @@ impl NotesConfig {
             c.new_doc_template = v;
         }
         c.sidebar_width = number("notes", "sidebar-width", c.sidebar_width);
+        c.sidebar_min_width = number("notes", "sidebar-min-width", c.sidebar_min_width);
+        c.sidebar_max_width = number("notes", "sidebar-max-width", c.sidebar_max_width);
         if let Some(v) = setting("notes", "font") {
             c.prose_font = v;
         }
@@ -3217,6 +3223,10 @@ mod macos {
         sidebar: Retained<crate::ui::sidebar::SidebarView>,
         /// The pinned-folder tree stacked above the sidebar in the rail.
         tree: Retained<crate::ui::tree_view::TreeView>,
+        /// The draggable divider on the rail's right edge.
+        divider: Retained<crate::ui::pane_divider::PaneDividerView>,
+        /// The rail's width range (`[notes] sidebar-min-width` / `-max-width`).
+        sidebar_range: crate::ui::pane_divider::DividerRange,
         tree_model: crate::views::notes_tree::NotesTree,
         /// The bottom-right "Prose | nvim" capsule (`ProseModeSwitch`).
         prose_switch: Retained<crate::ui::prose_switch::ProseSwitch>,
@@ -3327,6 +3337,13 @@ mod macos {
         let sidebar = crate::ui::sidebar::SidebarView::new(mtm, colors);
         sidebar.set_collapse_key("notes");
         model.sidebar.collapsed = sidebar.collapsed();
+        // Honor the configured range (the model's own clamp is the legacy
+        // constant pair).
+        model.sidebar.width = crate::ui::pane_divider::clamp_width(
+            model.sidebar.width,
+            cfg.sidebar_min_width,
+            cfg.sidebar_max_width,
+        );
         let sidebar_w = model.sidebar.visible_width();
         let tree_wanted = if crate::views::notes_tree::load_tree_collapsed() { crate::ui::tree_view::TreeGeometry::collapsed_height() } else { crate::ui::tree_view::TreeGeometry::height_for(tree_model.rows().len()) };
         let (tree_h, open_h) = crate::views::notes_tree::rail_split(600.0, has_tree && !model.sidebar.collapsed, tree_wanted);
@@ -3572,6 +3589,22 @@ mod macos {
         browser.setHidden(true);
         root.addSubview(&browser);
 
+        // The rail divider rides above every pane so its strip never reads as a
+        // row click.
+        let sidebar_range = crate::ui::pane_divider::DividerRange::new(
+            cfg.sidebar_min_width,
+            cfg.sidebar_max_width,
+        );
+        let divider = crate::ui::pane_divider::PaneDividerView::new(mtm, sidebar_range);
+        divider.place(NSRect::new(
+            NSPoint::new(sidebar_w - 4.0, 0.0),
+            NSSize::new(8.0, 600.0),
+        ));
+        divider.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+        divider.set_width(sidebar_w);
+        divider.setHidden(model.sidebar.collapsed);
+        root.addSubview(&divider);
+
         Some(NotesSurface {
             root: root.into_super(),
             editor: text.clone(),
@@ -3585,6 +3618,8 @@ mod macos {
             model,
             sidebar,
             tree,
+            divider,
+            sidebar_range,
             tree_model,
             prose_switch,
             editor_scroll: editor,
@@ -3920,6 +3955,25 @@ mod macos {
         /// The sidebar view (the host routes its clicks).
         pub fn sidebar_view(&self) -> Retained<crate::ui::sidebar::SidebarView> {
             self.sidebar.clone()
+        }
+
+        /// The draggable divider on the rail's right edge.
+        pub fn divider(&self) -> Retained<crate::ui::pane_divider::PaneDividerView> {
+            self.divider.clone()
+        }
+
+        /// The expanded rail width (`[notes] sidebar-width`).
+        pub fn sidebar_width(&self) -> f64 {
+            self.model.sidebar.width
+        }
+
+        /// Apply a divider drag / `do:sidebar-width:notes`: clamp and re-lay-out.
+        pub fn set_sidebar_width(&mut self, width: f64) {
+            // The divider already clamps to the configured range; set the model
+            // width directly so a config range wider than the old constants is
+            // honored.
+            self.model.sidebar.width = self.sidebar_range.clamp(width);
+            self.apply_sidebar_width();
         }
 
         pub fn prose_switch(&self) -> Retained<crate::ui::prose_switch::ProseSwitch> {
@@ -4477,6 +4531,12 @@ mod macos {
             self.tree.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, tree_h)));
             self.sidebar
                 .setFrame(NSRect::new(NSPoint::new(0.0, tree_h), NSSize::new(w, open_h)));
+            self.divider.place(NSRect::new(
+                NSPoint::new(w - 4.0, 0.0),
+                NSSize::new(8.0, full.height),
+            ));
+            self.divider.set_width(w);
+            self.divider.setHidden(self.model.sidebar.collapsed);
             let editor_w = (full.width - w - 4.0).max(0.0);
             // `drawerInset`: an open terminal drawer takes the editor's bottom.
             let term_h = self.terminal.frame().size.height.max(TERMINAL_DRAWER_HEIGHT);
