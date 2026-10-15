@@ -12,24 +12,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// Compute the log directory path (logs/YYYY_MM_DD/)
-fn log_dir() -> String {
-    let output = std::process::Command::new("date")
-        .arg("+%Y_%m_%d")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_else(|| "unknown_date".to_string())
-        .trim()
-        .to_string();
-    format!("logs/{}", output)
-}
-
-/// Compute log file path for a component
-fn log_path(component: &str) -> String {
-    format!("{}/{}.log", log_dir(), component)
-}
-
 // ---------------------------------------------------------------------------
 // Colors (`hexColor` / `parsePalette` from `kitchen_sink.swift`)
 // ---------------------------------------------------------------------------
@@ -347,9 +329,9 @@ impl Default for AppSettings {
             switcher_window_name: "kitchen-sink".to_string(),
             detail_window_name: "jira-detail".to_string(),
             aerospace_socket_path: format!("/tmp/bobko.aerospace-{}.sock", user_name()),
-            crash_log_path: log_path("crash"),
-            aero_debug_flag: log_path("aero-debug"),
-            aero_log: log_path("aero"),
+            crash_log_path: "logs/crash.log".to_string(),
+            aero_debug_flag: "logs/aero-debug.log".to_string(),
+            aero_log: "logs/aero.log".to_string(),
             voice_locale: "en-US".to_string(),
             screenshot_apps: vec![
                 "org.flameshot".to_string(),

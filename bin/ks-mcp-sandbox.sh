@@ -154,6 +154,7 @@ cmd_start() {
         "JIRA_CACHE_DIR=$SANDBOX/home/jira/cache"
         "NOTIFY_CACHE_DIR=$SANDBOX/home/notifications"
         "WS_SETTINGS_CACHE=$SANDBOX/home/settings-cache"
+        "WS_LOG_DIR=$SANDBOX/home/logs"
     )
     if [ "$gui" = 1 ]; then
         [ -d "$APP" ] || die "missing $APP (run ./ws build once)"

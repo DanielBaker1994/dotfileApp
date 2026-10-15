@@ -11,7 +11,8 @@ NAME-app (bundle id), NAME-count (dock = Dock badge, window = the app's own
 window via the NAME_unread AX helper — Webex draws no Dock badge), NAME-tag,
 NAME-api. @mentions = the API
 source (webex only for now), shown until the badge drops to 0 or the API says
-the space was read. State: ~/.cache/notifications/state.json, log poll.log.
+the space was read. State: ~/.cache/notifications/state.json, log
+logs/YYYY_MM_DD/notifications-poll.log.
 --json prints {"sources": [{name, app, tag, count, mentions, warn}]}: only the
 sources with something to show unless hide-when-zero = false.
 """

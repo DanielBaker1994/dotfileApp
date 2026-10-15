@@ -188,6 +188,34 @@ impl Paths {
     pub fn focus_bridge_path(&self) -> String {
         format!("{}{}", self.tmp_dir, self.focus_bridge_name)
     }
+
+    /// The date-based log directory: `<user_dir>/logs/YYYY_MM_DD`.
+    /// `WS_LOG_DIR` overrides it entirely (tests / the MCP sandbox).
+    pub fn logs_dir(&self) -> String {
+        if let Ok(dir) = std::env::var("WS_LOG_DIR") {
+            if !dir.is_empty() {
+                return dir;
+            }
+        }
+        format!("{}/logs/{}", self.user_dir, log_date_stamp())
+    }
+
+    /// A log file inside today's [`logs_dir`]: `.../logs/YYYY_MM_DD/<name>.log`.
+    pub fn log_path(&self, component: &str) -> String {
+        format!("{}/{}.log", self.logs_dir(), component)
+    }
+}
+
+/// `YYYY_MM_DD` via the `date` command (no locale/chrono dependency).
+fn log_date_stamp() -> String {
+    std::process::Command::new("date")
+        .arg("+%Y_%m_%d")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown_date".to_string())
 }
 
 /// `JiraPaths` — resolved once through the helper (`jira.paths`, the same

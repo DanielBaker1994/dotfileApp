@@ -10,7 +10,7 @@ menu bar, jira-doctor and a human with `cat` all see the same truth:
   lastSuccess, nextRun, status, items, file, lastError.
   `progress` (while a poll runs, else null): {job, stage, done, total, pct,
   etaSeconds, waitingUntil, message, updatedAt} - the Jira Config window's
-  live status line. The step-by-step history is ~/.cache/jira/poll.log.
+  live status line. The step-by-step history is logs/YYYY_MM_DD/jira-poll.log.
 
 Read-modify-write goes through a tiny flock on status.lock so a poll and a
 skipped (locked-out) invocation never clobber each other's fields.
@@ -36,12 +36,13 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pylib"))
 
 import jira_paths  # noqa: E402
+import log_hub  # noqa: E402
 
 HOME = os.path.expanduser("~")
 CACHE_DIR = jira_paths.CACHE_DIR
 STATUS_FILE = jira_paths.cache_file("status")
 STATUS_LOCK = os.path.join(CACHE_DIR, "status.lock")
-CURL_LOG = jira_paths.cache_file("curlLog")
+CURL_LOG = str(log_hub.log_path("jira-curl"))
 POLL_LOCK = os.path.join(CACHE_DIR, "poll.lock")
 POLL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jira_poll.py")
 

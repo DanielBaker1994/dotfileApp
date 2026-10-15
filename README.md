@@ -159,7 +159,7 @@ read-only, the sandbox entry is disabled until wanted.
 | Credentials + **poll jobs** (schedules) | `~/.config/jira/config.json` → `endpoints` (chmod 600; edited by the **Jira Config** window) |
 | Team schema (custom fields, JQL templates, …) | `~/.config/jira/team.json` (optional; example `jira/team.example.json`) |
 | Live state (last/next run, errors, lock) | `~/.cache/jira/status.json` · `jira/jira_status.py` · `jira-doctor.sh` |
-| Every HTTP request, copy-pasteable | `~/.cache/jira/curl.log` (chmod 600 — contains the basic-auth token) |
+| Logs (poll summary, debug, every HTTP request) | `logs/YYYY_MM_DD/jira-{poll,debug}.log` · `logs/YYYY_MM_DD/jira-curl.log` (chmod 600 — contains the basic-auth token) · `bin/ws-logs` |
 | Window data | `~/.cache/kitchen-sink/jira_json/<endpoint file>.json` |
 
 ### Where the poll jobs (and their JSON files) come from

@@ -44,11 +44,11 @@ Rate limits: 429 / 5xx / network errors (and a 401 after the token already
 worked in this run) are waited out per REQUEST (Retry-After, else backoff)
 within rateLimitMaxWaitMinutes - a job never restarts from page 1.
 
-Log: ~/.cache/jira/poll.log (always written, --quiet only silences stderr):
+Log: logs/YYYY_MM_DD/jira-poll.log (always written, --quiet only silences stderr):
 every stage, page (done / total / %, ETA), wait and error. status.json
 `progress` carries the live line the Jira Config window shows.
-~/.cache/jira/debug.log (jira_log.py): the same plus every request, retry,
-stage entry/exit and traceback, each tagged [job/stage/project];
+logs/YYYY_MM_DD/jira-debug.log (jira_log.py): the same plus every request,
+retry, stage entry/exit and traceback, each tagged [job/stage/project];
 ~/.cache/jira/raw/<run>/: every response body + headers as received.
 
 Guarded by an flock on ~/.cache/jira/poll.lock: a second invocation while a

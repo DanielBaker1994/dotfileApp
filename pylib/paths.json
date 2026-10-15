@@ -9,13 +9,11 @@
     "issues": "jiras.json",
     "status": "status.json",
     "directory": "directory.json",
-    "curlLog": "curl.log",
     "boards": "boards.json",
     "boardCatalog": "board_catalog.json",
     "sprints": "sprints.json",
     "me": "me.json",
     "fieldsSeen": "fields_seen.json",
-    "pollLog": "poll.log",
     "legacyPollState": "poll-state",
     "keysDir": "endpoints",
     "state": "state",
@@ -26,7 +24,6 @@
     "checkpoints": "checkpoints",
     "tz": "tz",
     "pageCap": "search_page_cap.json",
-    "debugLog": "debug.log",
     "raw": "raw"
   },
   "tabs": {

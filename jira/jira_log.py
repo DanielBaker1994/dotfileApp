@@ -47,6 +47,9 @@ _LOGGING_DEFAULTS = jsonmgr.load("jira/defaults")["logging"]
 
 RAW_DIR = jira_paths.cache_file("raw")
 
+# The default debug log path (jira_log.setup() switches it for Confluence).
+DEBUG_LOG = str(log_hub.log_path("jira-debug"))
+
 LOG = logging.getLogger("jira")
 LOG.addHandler(logging.NullHandler())   # library use (tests, --describe): silent
 LOG.propagate = False
@@ -81,7 +84,7 @@ class _Formatter(logging.Formatter):
 def setup(label: str, argv: list | None = None, cfg=None, cache_dir: str | None = None) -> str:
     """Open jira-debug.log (+ the raw store) for this process. Idempotent.
     cache_dir: another product's cache (confluence/) instead of ~/.cache/jira."""
-    global RUN_ID, RAW, RAW_DIR
+    global RUN_ID, RAW, RAW_DIR, DEBUG_LOG
     if RUN_ID:
         return RUN_ID
     if cache_dir:
@@ -96,9 +99,10 @@ def setup(label: str, argv: list | None = None, cfg=None, cache_dir: str | None 
         component = "confluence-debug" if cache_dir and "confluence" in cache_dir else "jira-debug"
         DEBUG_LOG = str(log_hub.log_path(component))
         os.makedirs(os.path.dirname(DEBUG_LOG), exist_ok=True)
-        # Write header with file info
-        with open(DEBUG_LOG, "a", encoding="utf-8") as fh:
-            fh.write(f"# Log file: {DEBUG_LOG} (pid {os.getpid()}, started {time.strftime('%Y-%m-%d %H:%M:%S')})\n")
+        # Header once per file (shows the absolute path + when it opened)
+        if not os.path.exists(DEBUG_LOG) or os.path.getsize(DEBUG_LOG) == 0:
+            with open(DEBUG_LOG, "a", encoding="utf-8") as fh:
+                fh.write(f"# Log file: {DEBUG_LOG} (opened {time.strftime('%Y-%m-%d %H:%M:%S')})\n")
         h = logging.FileHandler(DEBUG_LOG, encoding="utf-8")
         os.chmod(DEBUG_LOG, 0o600)
     except OSError:

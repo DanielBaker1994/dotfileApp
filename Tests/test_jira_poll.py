@@ -799,6 +799,7 @@ def isolated_env(tmp, token=""):
     env.update({"WS_COMMANDS_CONF": conf, "JIRA_CONFIG_JSON": cfgj,
                 "JIRA_CONFIG_FILE": os.path.join(tmp, "nolegacy"),
                 "JIRA_CACHE_DIR": os.path.join(tmp, "cache"),
+                "WS_LOG_DIR": os.path.join(tmp, "cache", "logs"),
                 "JIRA_TEAM_JSON": os.path.join(tmp, "team.json")})
     env.pop("JIRA_TOKEN", None)
     return env
@@ -835,7 +836,7 @@ class PollTests(unittest.TestCase):
                 st = json.load(fh)
             self.assertEqual(st["status"], "disabled")
             self.assertFalse(st["enabled"])
-            self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "curl.log")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "logs", "jira-curl.log")))
 
     def test_describe_lists_full_curl_and_jql(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -896,7 +897,7 @@ class PollTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("using env JIRA_TOKEN (config empty)", p.stderr)
             self.assertIn("displayName", p.stdout)
-            log = os.path.join(tmp, "cache", "curl.log")
+            log = os.path.join(tmp, "cache", "logs", "jira-curl.log")
             self.assertEqual(os.stat(log).st_mode & 0o777, 0o600)
             with open(log) as fh:
                 self.assertIn(" 200  curl ", fh.read())
@@ -1112,7 +1113,7 @@ class ResilientSyncTests(unittest.TestCase):
             self.assertNotIn("comment", c["P-3"])
             with open(os.path.join(tmp, "out", "all.json")) as fh:
                 self.assertEqual(len(json.load(fh)), 12)
-            with open(os.path.join(tmp, "cache", "poll.log")) as fh:
+            with open(os.path.join(tmp, "cache", "logs", "jira-poll.log")) as fh:
                 log = fh.read()
             self.assertIn("[sync] page 3: 12/12 (100%)", log)
 
@@ -1450,14 +1451,14 @@ class ResilientSyncTests(unittest.TestCase):
             self.assertIn(["X-Fake", "yes"], meta["headers"])
             self.assertIn("$JIRA_TOKEN", meta["repro"])
             self.assertEqual(oct(os.stat(run).st_mode & 0o777), "0o700")
-            with open(os.path.join(tmp, "cache", "debug.log")) as fh:
+            with open(os.path.join(tmp, "cache", "logs", "jira-debug.log")) as fh:
                 log = fh.read()
             for want in ("▶ directory", "▶ users", "◀ users done", "▶ labels", "[directory/labels/P2]",
                          "HTTP 401 on GET /rest/api/2/search", "skipped labels of P2"):
                 self.assertIn(want, log)
             for root, _, files in os.walk(os.path.join(tmp, "cache")):
                 for f in files:
-                    if f != "curl.log":                  # curl.log is the runnable one (0600)
+                    if f not in ("curl.log", "jira-curl.log"):   # the runnable curl log holds the real token (0600)
                         with open(os.path.join(root, f), errors="replace") as fh:
                             self.assertNotIn("SEKRETTOKEN42", fh.read(), f)
             # rerun: only the failed part is fetched again
@@ -1479,7 +1480,7 @@ class ResilientSyncTests(unittest.TestCase):
             p = self.poll(env, "--directory")
             self.assertEqual(p.returncode, 1, p.stderr)
             self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "directory.json")))
-            with open(os.path.join(tmp, "cache", "debug.log")) as fh:
+            with open(os.path.join(tmp, "cache", "logs", "jira-debug.log")) as fh:
                 log = fh.read()
             self.assertIn("✗ P3 failed", log)
             self.assertIn("Traceback", log)
@@ -1525,7 +1526,7 @@ class ResilientSyncTests(unittest.TestCase):
             env = self.env(tmp, endpoints=self.DIR_EP, scope=("P1",), rawCapture=False)
             self.assertEqual(self.poll(env, "--directory").returncode, 0)
             self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "raw")))
-            self.assertTrue(os.path.exists(os.path.join(tmp, "cache", "debug.log")))
+            self.assertTrue(os.path.exists(os.path.join(tmp, "cache", "logs", "jira-debug.log")))
 
     def test_a_page_that_breaks_off_is_shrunk_and_the_size_remembered(self):
         with tempfile.TemporaryDirectory() as tmp:

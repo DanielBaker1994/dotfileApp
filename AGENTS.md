@@ -132,7 +132,8 @@ Build/test gotchas:
 - `WS_PING_ONLY=1 <binary> [MODE]` is the liveness probe (exit 0/1) used by
   `bin/kitchen_sink.sh` and tests.
 - `WS_HOME` overrides the config home (tests use it); `WS_DEBUG=1` logs the
-  launch path to `$TMPDIR/ws-launch.log`; `WS_JSON_ROOT` / `WS_JSON_TRACE=1`
+  launch path to `logs/YYYY_MM_DD/launch.log`; `WS_LOG_DIR` overrides the log
+  directory (tests / the MCP sandbox); `WS_JSON_ROOT` / `WS_JSON_TRACE=1`
   redirect the JSON manager; `WS_RS_ASSET_DIR=<checkout>` points a non-repo,
   non-dist bundle (no Resources payload) at a checkout's `pylib/`/`vim/`;
   `WS_HELPERS_BIN` overrides where `notify_poll.py` finds the AX helpers.
@@ -438,8 +439,10 @@ exported for Python readers).
   it in `raw_deferred` and answer through the `Reply`.
 - **Verify UI changes fast:** the `ui-check` workflow above.
 - **Repair the stack:** `./ws doctor [--fix]`, `./ws check`, `./ws permissions
-  fix`, `./ws links fix`, `./ws home status`. Logs: `$TMPDIR/ws-launch.log`
-  (`WS_DEBUG=1`), the daemon's stderr, `~/.cache/notifications/poll.log`.
+  fix`, `./ws links fix`, `./ws home status`. Logs: every log lives in
+  `logs/YYYY_MM_DD/*.log` (date-based rolling, `pylib/log_hub.py`;
+  `bin/ws-logs` lists them) — the launch trace (`WS_DEBUG=1`) is
+  `logs/YYYY_MM_DD/launch.log`, and the daemon's stderr goes to the unified log.
 
 ## Gotchas / footguns
 

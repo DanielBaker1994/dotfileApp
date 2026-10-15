@@ -71,7 +71,7 @@ Sync (load recent changes into the local cache):
                     cache:  ~/.cache/jira/jiras.json (keyed by issue key)
                     snapshots: ~/.cache/jira/dumps/YYYY_MM_DD[_N].json
 
-Every HTTP request is appended to ~/.cache/jira/curl.log (chmod 600) as a
+Every HTTP request is appended to logs/YYYY_MM_DD/jira-curl.log (chmod 600) as a
 literal, copy-pasteable curl command line with its timestamp + HTTP code.
 The API fields= list comes from commands.toml [jira] (columns + field keys).
 """

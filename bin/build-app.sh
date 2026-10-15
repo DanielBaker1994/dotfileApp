@@ -36,6 +36,23 @@ TERM_SENTINEL="$ROOT/.build/.termbuilt"
 TERM_TARGET="$(uname -m)-apple-macosx$MACOS_MIN"
 TMP="${TMPDIR:-/tmp}"
 
+# Every app/helper log lives in the date-based logs/ dir (pylib/log_hub.py).
+# Echo its absolute path and drop any orphaned logs left in ~/.cache / /tmp.
+announce_logs() {
+    local day; day="$(date +%Y_%m_%d)"
+    for f in \
+        "$HOME/.cache/ws-crash.log" "$HOME/.cache/ws-aero.log" "$HOME/.cache/aero-debug" \
+        "$HOME/.cache/ws-auth-debug" "$HOME/.cache/ws-auth.log" "$HOME/.cache/ws-voice-debug.log" \
+        "$HOME/.cache/jira/poll.log" "$HOME/.cache/jira/debug.log" "$HOME/.cache/jira/debug.log."{1,2,3,4,5} \
+        "$HOME/.cache/jira/curl.log" "$HOME/.cache/confluence/debug.log" \
+        "$HOME/.cache/confluence/debug.log."{1,2,3,4,5} "$HOME/.cache/confluence/curl.log" \
+        "$HOME/.cache/notifications/poll.log" "$HOME/.cache/kitchen-sink/settings-hub.log" \
+        "/tmp/ws-debug.log" "$TMP/ws-launch.log" "/tmp/jira-poll.out.log" "/tmp/jira-poll.err.log"; do
+        [[ -f "$f" ]] && rm -f "$f"
+    done
+    echo "📝 Logs: $ROOT/logs/$day"
+}
+
 command -v cargo >/dev/null 2>&1 || {
     echo "build-app: cargo not found — install Rust (rustup or 'brew install rust')" >&2; exit 1; }
 
@@ -91,7 +108,7 @@ build_term_lib() {
 case "${1:-}" in
     --stale) stale; exit $? ;;
     --force|--dist) ;;
-    "") stale || exit 0 ;;
+    "") stale || { announce_logs; exit 0; } ;;
     *) echo "usage: build-app.sh [--force|--stale|--dist]" >&2; exit 2 ;;
 esac
 
@@ -211,36 +228,6 @@ clear_cstemp
 
 "$DIR/grant-permissions.sh" "$BUNDLE_ID" "$APP" >/dev/null 2>&1 || true
 
-# Clean up orphaned log files from their old ~/.cache locations
-for f in \
-    "$HOME/.cache/ws-crash.log" \
-    "$HOME/.cache/ws-aero.log" \
-    "$HOME/.cache/aero-debug" \
-    "$HOME/.cache/ws-auth-debug" \
-    "$HOME/.cache/ws-auth.log" \
-    "$HOME/.cache/ws-voice-debug.log" \
-    "$HOME/.cache/jira/poll.log" \
-    "$HOME/.cache/jira/debug.log" \
-    "$HOME/.cache/jira/debug.log.1" \
-    "$HOME/.cache/jira/debug.log.2" \
-    "$HOME/.cache/jira/debug.log.3" \
-    "$HOME/.cache/jira/debug.log.4" \
-    "$HOME/.cache/jira/debug.log.5" \
-    "$HOME/.cache/jira/curl.log" \
-    "$HOME/.cache/confluence/debug.log" \
-    "$HOME/.cache/confluence/debug.log.1" \
-    "$HOME/.cache/confluence/debug.log.2" \
-    "$HOME/.cache/confluence/curl.log" \
-    "$HOME/.cache/notifications/poll.log" \
-    "$HOME/.cache/kitchen-sink/settings-hub.log" \
-    "/tmp/ws-debug.log" \
-    "${TMPDIR:-/tmp}/ws-launch.log" \
-    "/tmp/jira-poll.out.log" \
-    "/tmp/jira-poll.err.log"; do
-    [[ -f "$f" ]] && rm -f "$f"
-done
-
-# Echo the log directory path
-echo "📝 Log directory: $ROOT/logs"
+announce_logs
 
 exit 0

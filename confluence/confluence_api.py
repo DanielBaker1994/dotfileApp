@@ -2,7 +2,8 @@
 """confluence_api.py - Confluence search for the app (one JSON object on stdout).
 
 Every request goes through jira_api.Client (the same curl, auth, retries and
-curl.log as Jira), against the Confluence site in confluence config.json -
+logs/YYYY_MM_DD/confluence-curl.log as Jira), against the Confluence site in
+confluence config.json -
 see confluence_config.py. Nothing is cached: results and pages go straight
 to stdout.
 

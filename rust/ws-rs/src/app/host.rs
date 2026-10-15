@@ -9731,7 +9731,7 @@ mod daemon_ui {
                     });
                 }));
                 out.push(MenuEntry::item("Open debug.log", || {
-                    let p = format!("{}/.cache/confluence/debug.log", std::env::var("HOME").unwrap_or_default());
+                    let p = crate::app::paths::Paths::from_env().log_path("confluence-debug");
                     if std::path::Path::new(&p).exists() {
                         crate::platform::open_path(std::path::Path::new(&p));
                     } else {

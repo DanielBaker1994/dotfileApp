@@ -12,6 +12,8 @@ WS_BIN="$WS_APP/Contents/MacOS/kitchen-sink"
 CONF_JSON="$HOME/.config/jira/config.json"
 CACHE="$HOME/.cache/jira"
 STATUS="$CACHE/status.json"
+# The curl log moved to the unified date-based logs/ directory (pylib/log_hub.py).
+CURL_LOG="$WS_ROOT/logs/$(date +%Y_%m_%d)/jira-curl.log"
 PLIST_SRC="$WS_ROOT/jira/com.jira.poll.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/com.jira.poll.plist"
 LABEL="com.jira.poll"
@@ -187,7 +189,7 @@ if [ "$JIRA_ENABLED" = "true" ]; then
     if [ -n "$ME" ]; then
         ok "login OK ($ME) — $(jf "$CHECK" '.site')"
     else
-        bad "login failed against $(jf "$CHECK" '.site') (check token / network; see $CACHE/curl.log)"
+        bad "login failed against $(jf "$CHECK" '.site') (check token / network; see $CURL_LOG)"
     fi
     if [ -f "$CACHE/jiras.json" ]; then
         ok "cache: $CACHE/jiras.json ($(jq 'length' "$CACHE/jiras.json" 2>/dev/null) issues)"
@@ -263,11 +265,11 @@ if [ "$JIRA_ENABLED" = "true" ]; then
     else
         bad "status missing: $STATUS (the poller has never run: jira_poll.py --force)"
     fi
-    if [ -f "$CACHE/curl.log" ]; then
-        ok "curl log: $CACHE/curl.log (last 3 requests, token masked here):"
-        tail -3 "$CACHE/curl.log" | sed -E 's/(-u [^ :]+:)[^ ]+/\1****/; s/^/          /'
+    if [ -f "$CURL_LOG" ]; then
+        ok "curl log: $CURL_LOG (last 3 requests, token masked here):"
+        tail -3 "$CURL_LOG" | sed -E 's/(-u [^ :]+:)[^ ]+/\1****/; s/^/          /'
     else
-        warn "curl log missing: $CACHE/curl.log (no API request made yet)"
+        warn "curl log missing: $CURL_LOG (no API request made yet)"
     fi
     if [ -f "$WS_ROOT/jira_icon.png" ]; then
         ok "jira icon asset: $WS_ROOT/jira_icon.png"
