@@ -6214,7 +6214,7 @@ mod daemon_ui {
                     }
                 }),
                 MenuEntry::Separator,
-                MenuEntry::item("Open Config", move || {
+                MenuEntry::item("Open commands.toml", move || {
                     c.set_pending_note_external(conf.to_string_lossy().into_owned());
                     c.open(SlotView::Notes);
                 }),
