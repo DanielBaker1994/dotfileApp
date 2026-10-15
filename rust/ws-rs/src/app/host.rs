@@ -846,14 +846,7 @@ impl SwitcherController {
         const SKIP: [&str; 11] = COMMAND_SECTION_SKIPS;
         let settings = self.inner.lock().unwrap().settings.clone();
         let jira = section_flag(sections, "jira", false);
-        let label_of = |section: &str, fallback: &str| -> String {
-            sections
-                .get(section)
-                .and_then(|m| m.get("label"))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| fallback.to_string())
-        };
+        let label_of = label_of(sections);
 
         let mut all: Vec<PaletteCommand> = Vec::new();
         for (name, vars) in parse_sections_ordered(text) {
@@ -927,24 +920,25 @@ impl SwitcherController {
     ) -> Vec<(SlotView, String, Option<String>)> {
         let s = self.inner.lock().unwrap().settings.clone();
         let icon = |name: &str| (!name.is_empty()).then(|| name.to_string());
+        let label_of = label_of(sections);
 
         let mut nav = vec![
-            (SlotView::Notes, "Notes".to_string(), icon(&s.notes_icon_name)),
-            (SlotView::Files, "Files".to_string(), icon(&s.files_icon_name)),
-            (SlotView::Jira, "Jira".to_string(), icon(&s.jira_icon_name)),
+            (SlotView::Notes, label_of("notes", "Notes"), icon(&s.notes_icon_name)),
+            (SlotView::Files, label_of("files", "Files"), icon(&s.files_icon_name)),
+            (SlotView::Jira, label_of("jira", "Jira"), icon(&s.jira_icon_name)),
         ];
         if section_flag(sections, "confluence", false) {
             nav.push((
                 SlotView::Confluence,
-                "Confluence search".to_string(),
+                label_of("confluence", "Confluence"),
                 icon(&s.confluence_icon_name),
             ));
         }
         if section_flag(sections, "compare", false) {
-            nav.push((SlotView::Compare, "Compare".to_string(), None));
+            nav.push((SlotView::Compare, label_of("compare", "Compare"), None));
         }
         if section_flag(sections, "ai", false) {
-            nav.push((SlotView::Ai, "AI view".to_string(), icon(&s.ai_icon_name)));
+            nav.push((SlotView::Ai, label_of("ai", "AI"), icon(&s.ai_icon_name)));
         }
         nav
     }
@@ -2587,6 +2581,23 @@ fn fmt_width(w: f64) -> String {
         format!("{}", w as i64)
     } else {
         format!("{w:.1}")
+    }
+}
+
+/// Resolve a section's configured `label` (trimmed, non-empty), else `fallback`.
+/// Bound to the section map so `build_nav` and `build_palette` share one rule:
+/// renaming a label in `commands.toml` cannot desynchronize the header nav, the
+/// pane names and the palette.
+fn label_of<'a>(
+    sections: &'a HashMap<String, HashMap<String, String>>,
+) -> impl Fn(&str, &str) -> String + 'a {
+    move |section: &str, fallback: &str| -> String {
+        sections
+            .get(section)
+            .and_then(|m| m.get("label"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
     }
 }
 
@@ -4389,18 +4400,21 @@ mod daemon_ui {
                     n.view.is_jira() || matches!(n.view, SlotView::Files | SlotView::Notes | SlotView::Confluence)
                 })
                 .map(|n| {
-                    let (name, section) = match n.view {
-                        SlotView::Files => ("Files", "files"),
-                        SlotView::Notes => ("Notes", "notes"),
-                        SlotView::Confluence => ("Confluence", "confluence"),
-                        SlotView::Compare | SlotView::CompareText => ("Compare", "compare"),
-                        SlotView::Ai => ("AI", "ai"),
-                        _ => ("Jira", "jira"),
+                    // The display name comes from the nav tip (config `label`),
+                    // so the pane list stays in step with the header nav and the
+                    // palette; only the `[section]` is needed here (for aliases).
+                    let section = match n.view {
+                        SlotView::Files => "files",
+                        SlotView::Notes => "notes",
+                        SlotView::Confluence => "confluence",
+                        SlotView::Compare | SlotView::CompareText => "compare",
+                        SlotView::Ai => "ai",
+                        _ => "jira",
                     };
                     let key = if n.view.is_jira() { SlotView::Jira } else { n.view };
                     let loc = wheres.get(&key).cloned().unwrap_or_default();
                     icons.push((n.id, nav_icon_image(n.view, n.image_key.as_deref(), &assets)));
-                    let mut v = SwitchView::new(n.id, name, loc);
+                    let mut v = SwitchView::new(n.id, &n.tip, loc);
                     v.aliases = crate::views::notes::section_value(section, "aliases")
                         .unwrap_or_default()
                         .split(',')
@@ -13598,6 +13612,54 @@ label = \"Compare\"
                 titles.iter().filter(|t| *t == title).count(),
                 1,
                 "{title} must appear exactly once"
+            );
+        }
+        // `build_nav` reads the same labels, so the header nav matches the
+        // palette (the old hard-coded, differently-cased labels are gone).
+        let nav_tips: Vec<&str> =
+            c.registry().nav_icons().iter().map(|n| n.tip.as_str()).collect();
+        assert_eq!(
+            nav_tips,
+            vec!["Notes", "Files", "Jira", "Confluence", "Compare", "AI"]
+        );
+    }
+
+    #[test]
+    fn nav_and_palette_share_commands_toml_label_overrides() {
+        // Renaming a `label` in commands.toml must move the header nav (and the
+        // pane/switch list, which reads `nav_icons().tip`) together with the
+        // palette — the three surfaces share one source of truth.
+        let fixture = "\
+[notes]
+enabled = true
+in-palette = true
+label = \"Scratchpad\"
+
+[confluence]
+enabled = true
+label = \"Wiki\"
+
+[ai]
+enabled = true
+label = \"Assistant\"
+";
+        let mut c = controller();
+        c.register_views_from_text(fixture);
+
+        let nav_tips: Vec<&str> =
+            c.registry().nav_icons().iter().map(|n| n.tip.as_str()).collect();
+        assert_eq!(
+            nav_tips,
+            vec!["Scratchpad", "Files", "Jira", "Wiki", "Assistant"],
+            "nav tips must take the config labels"
+        );
+
+        let titles: Vec<String> =
+            c.registry().palette_commands().iter().map(|p| p.title.clone()).collect();
+        for label in ["Scratchpad", "Wiki", "Assistant"] {
+            assert!(
+                titles.iter().any(|t| t == label),
+                "palette must show the overridden label {label}: {titles:?}"
             );
         }
     }
